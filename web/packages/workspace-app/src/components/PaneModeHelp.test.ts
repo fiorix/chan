@@ -1,87 +1,103 @@
-import { describe, expect, test } from "vitest";
-import paneModeHelp from "./PaneModeHelp.svelte?raw";
+// @vitest-environment jsdom
+//
+// The Hybrid Nav help lists every binding by group, under the title "Hybrid
+// Nav (Cmd+.)". Each key-cap is a button that presses its key on the
+// document, where App's Hybrid Nav handler takes it, so a click and a
+// keystroke run the same switch. The one cap that stands for a modifier
+// ("Shift + [ ] - =") is a plain label: a single click cannot hold Shift.
 
-// Every key-cap in the Hybrid NAV help overlay is a clickable button
-// that dispatches a synthetic KeyboardEvent. The onWindowKey listener
-// routes it through the same `handlePaneModeKey` dispatcher as real
-// keystrokes, so keyboard and mouse share one switch.
+import { flushSync, mount, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("PaneModeHelp key-caps are clickable buttons", () => {
-  test("dispatchKey synthesises a KeyboardEvent on the document", () => {
-    expect(paneModeHelp).toContain("function dispatchKey(key: string): void");
-    expect(paneModeHelp).toContain(
-      'document.dispatchEvent(',
-    );
-    expect(paneModeHelp).toContain('new KeyboardEvent("keydown",');
+import PaneModeHelp from "./PaneModeHelp.svelte";
+
+let view: Record<string, unknown> | null = null;
+let help: HTMLElement;
+
+beforeEach(() => {
+  const target = document.createElement("div");
+  document.body.append(target);
+  view = mount(PaneModeHelp, { target });
+  flushSync();
+  help = target.querySelector<HTMLElement>('[role="dialog"]')!;
+});
+
+afterEach(() => {
+  if (view) unmount(view);
+  view = null;
+  document.body.innerHTML = "";
+});
+
+describe("the Hybrid Nav help", () => {
+  test("is titled Hybrid Nav with its chord", () => {
+    expect(help.getAttribute("aria-label")).toBe("Hybrid Nav help");
+    expect(help.querySelector(".title")?.textContent).toBe("Hybrid Nav (Cmd+.)");
   });
 
-  test("clickable cap renders as <button> with kbd styling + dispatchKey onclick", () => {
-    expect(paneModeHelp).toContain('class="kbd kbd-button"');
-    expect(paneModeHelp).toContain("onclick={() => dispatchKey(cap.key!)}");
+  test("lists the bindings by group", () => {
+    const groups = [...help.querySelectorAll("section.group")].map((group) => ({
+      title: group.querySelector("h4")!.textContent,
+      rows: [...group.querySelectorAll("dd")].map((row) => row.textContent),
+    }));
+
+    expect(groups).toEqual([
+      { title: "Move", rows: ["Move focus", "Swap tile with neighbour"] },
+      {
+        title: "Stage (Enter to commit, Esc to discard)",
+        rows: [
+          "Stage Terminal",
+          "Stage File Browser",
+          "Stage Graph",
+          "Stage Dashboard",
+          "Stage New Draft",
+          "Stage Diagram",
+        ],
+      },
+      { title: "Split", rows: ["Split right", "Split down"] },
+      {
+        title: "Dock",
+        rows: ["Toggle right-side file browser dock", "Toggle left-side file browser dock"],
+      },
+      {
+        title: "Resize",
+        rows: ["Move divider left / right", "Move divider up / down", "Larger nudge", "Equalize siblings"],
+      },
+      { title: "Commit", rows: ["Commit draft", "Discard draft", "Toggle this help", "Flip side"] },
+    ]);
   });
 
-  test("inert (descriptive-only) cap renders as <kbd> when cap.key is undefined", () => {
-    // The Shift + [ ] - = row is the canonical inert cap - modifier
-    // semantics can't be expressed as a single click, so the spec
-    // says leave it descriptive-only.
-    expect(paneModeHelp).toContain("Shift + [ ] - =");
-    expect(paneModeHelp).toMatch(/{:else}\s*<kbd>{cap\.label}<\/kbd>\s*{\/if}/);
+  test("presses each cap's key on the document", () => {
+    const pressed: string[] = [];
+    const listen = vi.fn((event: KeyboardEvent) => pressed.push(event.key));
+    document.addEventListener("keydown", listen);
+    try {
+      for (const cap of help.querySelectorAll<HTMLButtonElement>("button.kbd-button")) cap.click();
+    } finally {
+      document.removeEventListener("keydown", listen);
+    }
+
+    expect(pressed).toEqual([
+      "ArrowUp", "ArrowLeft", "ArrowDown", "ArrowRight",
+      "w", "a", "s", "d",
+      "t", "o", "g", "b", "n", "i",
+      "/", "?",
+      "<", ">",
+      "[", "]", "-", "=", "0",
+      "Enter", "Escape", "h", "Tab",
+    ]);
   });
 
-  test("data carries the dispatch key for every clickable spawn / move / split cap", () => {
-    // The Spawn group is now Stage: T/O/G/B/N/I stage into the draft;
-    // Enter materializes; Esc discards. `v` is a keymap alias only,
-    // not shown in the cheatsheet. `p` is GONE: Team Work spawning
-    // moved to the lead-only Cmd+P dialog and the pane-mode handler
-    // lost its case, so a `p` row would be a dead control.
-    expect(paneModeHelp).toContain('key: "ArrowUp"');
-    expect(paneModeHelp).toContain('key: "ArrowLeft"');
-    expect(paneModeHelp).toContain('key: "ArrowDown"');
-    expect(paneModeHelp).toContain('key: "ArrowRight"');
-    expect(paneModeHelp).toContain('key: "t"');
-    expect(paneModeHelp).toContain('key: "o"');
-    expect(paneModeHelp).not.toContain('key: "p"');
-    expect(paneModeHelp).toContain('key: "g"');
-    expect(paneModeHelp).toContain('key: "b"');
-    expect(paneModeHelp).toContain('key: "n"');
-    expect(paneModeHelp).toContain('key: "i"');
-    expect(paneModeHelp).toContain('key: "Tab"');
-    expect(paneModeHelp).toContain('key: "Escape"');
-    expect(paneModeHelp).toContain('key: "Enter"');
-    expect(paneModeHelp).toContain('key: "h"');
-    // Numeric caps are not in the cheatsheet.
-    expect(paneModeHelp).not.toMatch(/key:\s*"1"/);
-    expect(paneModeHelp).not.toMatch(/key:\s*"2"/);
-    expect(paneModeHelp).not.toMatch(/key:\s*"3"/);
-    expect(paneModeHelp).not.toMatch(/key:\s*"4"/);
+  test("names each cap by its action for assistive tech", () => {
+    const cap = [...help.querySelectorAll<HTMLButtonElement>("button.kbd-button")].find(
+      (button) => button.textContent === "t",
+    )!;
+
+    expect(cap.getAttribute("aria-label")).toBe("t: Stage Terminal");
   });
 
-  test("spawn group renames to Stage (Enter to commit, Esc to discard)", () => {
-    // Group title surfaces the transactional model; row labels
-    // start with "Stage ...".
-    expect(paneModeHelp).toContain(
-      'title: "Stage (Enter to commit, Esc to discard)"',
-    );
-    expect(paneModeHelp).toMatch(
-      /caps:\s*\[\s*\{\s*label:\s*"t",\s*key:\s*"t"\s*\}\s*\],?\s*action:\s*"Stage Terminal"/,
-    );
-    expect(paneModeHelp).toMatch(
-      /caps:\s*\[\s*\{\s*label:\s*"o",\s*key:\s*"o"\s*\}\s*\],?\s*action:\s*"Stage File Browser"/,
-    );
-    expect(paneModeHelp).toMatch(
-      /caps:\s*\[\s*\{\s*label:\s*"g",\s*key:\s*"g"\s*\}\s*\],?\s*action:\s*"Stage Graph"/,
-    );
-    expect(paneModeHelp).toMatch(
-      /caps:\s*\[\s*\{\s*label:\s*"b",\s*key:\s*"b"\s*\}\s*\],?\s*action:\s*"Stage Dashboard"/,
-    );
-    // Team Work staging is gone entirely (lead-only Cmd+P dialog owns
-    // spawning); the cheatsheet must not resurrect the row.
-    expect(paneModeHelp).not.toContain("Stage Team Work Terminal");
-    expect(paneModeHelp).toMatch(
-      /caps:\s*\[\s*\{\s*label:\s*"n",\s*key:\s*"n"\s*\}\s*\],?\s*action:\s*"Stage New Draft"/,
-    );
-    expect(paneModeHelp).toMatch(
-      /caps:\s*\[\s*\{\s*label:\s*"i",\s*key:\s*"i"\s*\}\s*\],?\s*action:\s*"Stage Diagram"/,
-    );
+  test("shows the Shift nudge as a label, not a button", () => {
+    const shift = [...help.querySelectorAll("dt kbd")].map((kbd) => kbd.textContent);
+
+    expect(shift).toEqual(["Shift + [ ] - ="]);
   });
 });
