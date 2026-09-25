@@ -11094,6 +11094,55 @@ mod tests {
         assert_eq!(report.forgotten, vec!["Note.md"]);
     }
 
+    /// Every component of a stored path is a spelling the directory above it
+    /// has to list, not only the file name.
+    #[test]
+    fn listed_names_checks_every_component() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("a/b.md", "# B\n").unwrap();
+        let mut listed = ListedNames::new(workspace.fs.dir());
+
+        assert_eq!(
+            listed.lists("A/b.md"),
+            Some(false),
+            "the root lists `a`, not `A`, so `A/b.md` is not listed rather than unknown"
+        );
+        assert_eq!(listed.lists("a/b.md"), Some(true));
+        assert!(workspace.parent_lists_name("a/b.md"));
+        assert!(!workspace.parent_lists_name("A/b.md"));
+    }
+
+    /// The directory form of the cold-open case-only rename: `Docs` becomes
+    /// `docs` with no events. A lookup of `Docs/a.md` still succeeds, and the
+    /// directory it resolves to lists `a.md`, so only the root's listing says
+    /// the stored `Docs` is gone.
+    #[test]
+    fn reconcile_forgets_rows_under_a_directory_spelling_no_longer_listed() {
+        let Some(base) =
+            casefold_test_dir("reconcile_forgets_rows_under_a_directory_spelling_no_longer_listed")
+        else {
+            return;
+        };
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new_in(&base).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.write_text("Docs/a.md", "# A\nbody\n").unwrap();
+        workspace.reindex(None).unwrap();
+        rename_case_only(root.path(), "Docs", "docs");
+
+        let report = workspace.reconcile().unwrap();
+
+        assert_eq!(
+            workspace.graph().unwrap().files().unwrap(),
+            vec!["docs/a.md"],
+            "reconcile must keep only rows under the directory spelling the root lists: {report:?}"
+        );
+        assert_eq!(workspace.indexed_paths().unwrap(), vec!["docs/a.md"]);
+        assert_eq!(report.forgotten, vec!["Docs/a.md"]);
+    }
+
     #[test]
     fn a_closed_driver_leaves_a_pending_pass_unowned() {
         let (_cfg, _root, workspace) = fixture();
