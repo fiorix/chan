@@ -14,6 +14,7 @@
 // state/standaloneBootstrap.test.ts).
 
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { serveMeta } from "../__tests__/standalone";
 
 let host: HTMLElement | null = null;
 let app: Record<string, unknown> | null = null;
@@ -21,15 +22,6 @@ let app: Record<string, unknown> | null = null;
 /// `vi.resetModules()` hands the component a fresh Svelte runtime, and
 /// mounting it with the previous one crashes inside Svelte's internals.
 let svelte: typeof import("svelte") | null = null;
-
-function serveMeta(name: string, on: boolean): void {
-  document.head.querySelector(`meta[name="${name}"]`)?.remove();
-  if (!on) return;
-  const meta = document.createElement("meta");
-  meta.setAttribute("name", name);
-  meta.setAttribute("content", "1");
-  document.head.appendChild(meta);
-}
 
 /// Mount the cheatsheet in a window of the given shape and return every
 /// action label it renders.

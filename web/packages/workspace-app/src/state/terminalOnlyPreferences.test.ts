@@ -16,17 +16,12 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import type { GlobalConfig, Preferences } from "../api/types";
 import { ApiError } from "../api/errors";
+import { preferences as harnessPreferences } from "../__tests__/standalone";
 
+/// Terminal settings and colours that differ from every fallback, so a read
+/// that fell back instead of taking the served value shows up.
 function preferences(overrides: Partial<Preferences> = {}): Preferences {
-  return {
-    editor_theme: "github",
-    attachments_dir: "attachments",
-    theme: "dark",
-    pane_widths: { inspector: 320, graph: 320, browser: 320, search: 320, outline: 240 },
-    line_spacing: "normal",
-    date_format: "iso",
-    strip_trailing_whitespace_on_save: false,
-    search_aggression: "balanced",
+  return harnessPreferences({
     terminal: {
       idle_timeout_secs: 0,
       session_cap: 8,
@@ -47,7 +42,7 @@ function preferences(overrides: Partial<Preferences> = {}): Preferences {
       },
     },
     ...overrides,
-  } as unknown as Preferences;
+  });
 }
 
 function config(prefs: Preferences): GlobalConfig {

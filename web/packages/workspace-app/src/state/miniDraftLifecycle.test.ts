@@ -10,6 +10,7 @@
 // state/standaloneBootstrap.test.ts discipline).
 
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { serveMeta } from "../__tests__/standalone";
 
 // The per-file caret index is a localStorage store; mock it like
 // state/tabs.test.ts so the lifecycle wiring is what gets asserted.
@@ -21,15 +22,6 @@ const DRAFT_PATH = `${DRAFTS_DIR}/untitled/draft.md`;
 /// Mirror of the server's markdown draft seed, byte-for-byte: the close
 /// path silently discards a pristine seed.
 const DRAFT_SEED = "# Draft\n";
-
-function serveMeta(name: string, on: boolean): void {
-  document.head.querySelector(`meta[name="${name}"]`)?.remove();
-  if (!on) return;
-  const meta = document.createElement("meta");
-  meta.setAttribute("name", name);
-  meta.setAttribute("content", "1");
-  document.head.appendChild(meta);
-}
 
 let tabs: typeof import("./tabs.svelte");
 // Imported after the reset with the state modules, so it writes the layout

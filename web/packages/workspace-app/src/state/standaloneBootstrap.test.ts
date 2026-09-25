@@ -12,33 +12,11 @@
 // a window the user is looking at.
 
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import type { GlobalConfig, Preferences, TreeEntry } from "../api/types";
+import type { GlobalConfig, TreeEntry } from "../api/types";
 import { ApiError } from "../api/errors";
+import { preferences, serveMeta } from "../__tests__/standalone";
 
 const HOME = "home/u";
-
-function preferences(): Preferences {
-  return {
-    editor_theme: "github",
-    attachments_dir: "attachments",
-    theme: "dark",
-    pane_widths: { inspector: 320, graph: 320, browser: 320, search: 320, outline: 240 },
-    line_spacing: "normal",
-    date_format: "iso",
-    strip_trailing_whitespace_on_save: false,
-    search_aggression: "balanced",
-    terminal: {
-      idle_timeout_secs: 0,
-      session_cap: 8,
-      ring_bytes: 1024,
-      font_size: 14,
-      ghostty: false,
-      scrollback_mb: 20,
-      mouse_capture: false,
-      secret_masking: true,
-    },
-  } as unknown as Preferences;
-}
 
 function entry(path: string, isDir: boolean): TreeEntry {
   return { path, is_dir: isDir, mtime: 1, size: 0 } as TreeEntry;
@@ -83,19 +61,6 @@ function openTabs(): { kind: string; selected?: string | null }[] {
     }
   }
   return out;
-}
-
-/// Declare (or withdraw) one of the tenant's capability metas exactly the
-/// way chan-server injects them into the served shell. Must run before the
-/// state modules are imported: the capabilities are read once at module
-/// load.
-function serveMeta(name: string, on: boolean): void {
-  document.head.querySelector(`meta[name="${name}"]`)?.remove();
-  if (!on) return;
-  const meta = document.createElement("meta");
-  meta.setAttribute("name", name);
-  meta.setAttribute("content", "1");
-  document.head.appendChild(meta);
 }
 
 async function boot(withFiles: boolean, withDrafts = false): Promise<void> {
