@@ -10,11 +10,12 @@
 // the index graph and an About slide with the version, the build, the links,
 // the donation QR and the free-software line; its dots and rotation skip a
 // switched-off slide, and its index graph draws only while the carousel is
-// active. A lone pane with no tabs shows the welcome surface
+// active; a directory picked on that graph opens an inspector that offers no
+// upload. A lone pane with no tabs shows the welcome surface
 // instead, and the pane menu's Apps rows, in title order, spawn every tab
 // kind, the dashboard included.
 
-import { flushSync, mount, unmount } from "svelte";
+import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
@@ -23,11 +24,24 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 
+// The real GraphCanvas, keeping the last one mounted so a test can find where
+// the layout placed a node and click it.
+type Circle = { x: number; y: number; r: number };
+const graphCanvas = vi.hoisted(() => ({ last: null as { nodeScreenCircle(id: string): Circle | null } | null }));
+vi.mock("./GraphCanvas.svelte", async (importOriginal) => {
+  const real = (await importOriginal<typeof import("./GraphCanvas.svelte")>()).default as unknown as (
+    anchor: unknown,
+    props: unknown,
+  ) => typeof graphCanvas.last;
+  return { default: (anchor: unknown, props: unknown) => (graphCanvas.last = real(anchor, props)) };
+});
+
 import { api } from "../api/client";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { boardLoaded } from "../__tests__/excalidraw";
 import { fileTab, resetLayout } from "../__tests__/tabs";
 import { indexingCache } from "../state/indexingStatus.svelte";
+import { tree } from "../state/store.svelte";
 import { openTabMenu } from "../state/tabMenu.svelte";
 import {
   DASHBOARD_SLOT_COUNT,
@@ -290,6 +304,47 @@ describe("the carousel's slides", () => {
       expect(await framesDrawn(true)).toBeGreaterThan(0);
       expect(await framesDrawn(false)).toBe(0);
     } finally {
+      indexingCache.last = null;
+    }
+  });
+
+  test("opens a directory the index graph shows in an inspector that offers no upload", async () => {
+    vi.mocked(api.indexingState).mockResolvedValue({
+      root: "",
+      nodes: [
+        { path: "", state: "indexed", children_count: 1 },
+        { path: "docs", state: "indexed", children_count: 0 },
+      ],
+    });
+    tree.entries = [{ path: "docs", is_dir: true, size: 0, mtime: null }];
+    try {
+      show({ slide: 1, active: true });
+      await vi.waitFor(() => expect(graphCanvas.last?.nodeScreenCircle("directory:docs")).toBeTruthy());
+      const docs = graphCanvas.last!.nodeScreenCircle("directory:docs")!;
+      const canvas = target.querySelector<HTMLCanvasElement>(".indexing-graph-host canvas")!;
+      for (const type of ["mousedown", "mouseup"]) {
+        canvas.dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: docs.x, clientY: docs.y }),
+        );
+      }
+
+      const inspector = await vi.waitFor(() => {
+        const found = target.querySelector<HTMLElement>('[aria-label="directory details"]');
+        expect(found, "the directory inspector").not.toBeNull();
+        expect(found!.querySelector(".pill-main"), "its actions").not.toBeNull();
+        return found!;
+      });
+      inspector.querySelector<HTMLButtonElement>(".pill-caret")?.click();
+      await tick();
+      const actions = [
+        inspector.querySelector(".pill-main")!.textContent!.trim(),
+        ...[...inspector.querySelectorAll(".action-menu-item")].map((item) => item.textContent!.trim()),
+      ];
+
+      expect(actions).toContain("Download tarball");
+      expect(actions).not.toContain("Upload file here");
+    } finally {
+      tree.entries = [];
       indexingCache.last = null;
     }
   });
