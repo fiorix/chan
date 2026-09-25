@@ -102,6 +102,15 @@ Object.defineProperty(window, "matchMedia", {
 // The resume runs only for a document that is visible.
 Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
 
+/// The runner's own process, typed here rather than package-wide: an
+/// unhandled rejection in a jsdom test is Node's, not the window's.
+const runner = globalThis as unknown as {
+  process: {
+    on: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+    off: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+  };
+};
+
 /// App's resume debounce, which the tests wait out and look for by delay.
 const RESUME_DEBOUNCE_MS = 300;
 
@@ -196,7 +205,7 @@ describe("the app's wake path", () => {
     await mountApp();
     const unhandled: string[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(String(reason));
-    process.on("unhandledRejection", onUnhandled);
+    runner.process.on("unhandledRejection", onUnhandled);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       // The transport is down when the resume refreshes.
@@ -209,7 +218,7 @@ describe("the app's wake path", () => {
       await new Promise((r) => setTimeout(r, 20));
       await tick();
     } finally {
-      process.off("unhandledRejection", onUnhandled);
+      runner.process.off("unhandledRejection", onUnhandled);
     }
 
     const resumeWarnings = warn.mock.calls
