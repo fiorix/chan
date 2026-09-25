@@ -598,13 +598,16 @@ pub fn handoff_forced() -> bool {
 // Desktop side: listener on the well-known socket.
 // ---------------------------------------------------------------------------
 
-/// Handle owning the handoff listener. Drop = abort the accept loop
-/// and unlink the socket file, mirroring control_socket / mcp_bridge.
-/// A `kill -9` that skips Drop leaves a stale file; the next bind
-/// unlinks it first.
+/// Handle owning the handoff listener and the connections it has accepted.
+/// [`shutdown`](Self::shutdown) stops accepting and lets those connections
+/// finish their replies, within a bound; Drop aborts the accept loop, and
+/// with it every connection still in flight, and unlinks the socket file,
+/// mirroring control_socket / mcp_bridge. A `kill -9` that skips Drop leaves
+/// a stale file; the next bind unlinks it first.
 #[cfg(any(unix, windows))]
 pub struct ListenerHandle {
     socket_path: PathBuf,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
     accept_loop: Option<tokio::task::JoinHandle<()>>,
     /// Held until Drop has unlinked the socket, so another live process cannot
     /// take the stable path and then have this handle remove its node.
@@ -625,9 +628,45 @@ impl ListenerHandle {
 
 #[cfg(any(unix, windows))]
 impl ListenerHandle {
-    /// Stop the listener: abort its accept loop and unlink the socket, as
-    /// dropping the handle does.
-    pub async fn shutdown(self) {}
+    /// Stop accepting, give the connections already accepted up to 75
+    /// seconds (`CONNECTION_DRAIN_TIMEOUT`) to deliver their replies, abort
+    /// any still running, then unlink the socket.
+    pub async fn shutdown(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(accept_loop) = self.accept_loop.take() {
+            if let Err(error) = accept_loop.await {
+                tracing::warn!(%error, "handoff accept loop did not stop cleanly");
+            }
+        }
+    }
+}
+
+/// How long a stopping listener waits for accepted connections to deliver
+/// their replies: the longest reply budget a handoff client holds,
+/// [`Request::reply_budget`] for `ServeRemoteWorkspace`. A reply later than
+/// that has no reader left, and a shorter bound would abort one a client is
+/// still waiting for.
+#[cfg(any(unix, windows))]
+const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// Wait up to `bound` for a stopped listener's accepted connections to
+/// finish, then abort the rest and wait for them to unwind, so none outlives
+/// the listener that accepted it.
+#[cfg(any(unix, windows))]
+pub(crate) async fn drain_connections(mut connections: tokio::task::JoinSet<()>, bound: Duration) {
+    let drained = tokio::time::timeout(bound, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            connections = connections.len(),
+            "listener stop aborted connections still in flight"
+        );
+        connections.shutdown().await;
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -694,9 +733,17 @@ where
 
     let handler = std::sync::Arc::new(handler);
     let peer_uid = std::sync::Arc::new(peer_uid);
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
     let accept_loop = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let (stream, _) = match listener.accept().await {
+            let accepted = tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                _ = connections.join_next(), if !connections.is_empty() => continue,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, _) = match accepted {
                 Ok(pair) => pair,
                 Err(e) => {
                     tracing::warn!("handoff accept: {e}");
@@ -717,15 +764,19 @@ where
                 continue;
             }
             let handler = handler.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let (read, write) = stream.into_split();
                 serve_connection(read, write, handler.as_ref()).await;
             });
         }
+        // Closing the listener refuses new peers while accepted ones finish.
+        drop(listener);
+        drain_connections(connections, CONNECTION_DRAIN_TIMEOUT).await;
     });
 
     Ok(ListenerHandle {
         socket_path,
+        stop: Some(stop),
         accept_loop: Some(accept_loop),
         _stable_lock: stable_lock,
     })
@@ -755,9 +806,17 @@ where
         .create(&pipe_name)?;
 
     let handler = std::sync::Arc::new(handler);
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
     let accept_loop = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            if let Err(e) = next.connect().await {
+            let connected = tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                _ = connections.join_next(), if !connections.is_empty() => continue,
+                connected = next.connect() => connected,
+            };
+            if let Err(e) = connected {
                 tracing::warn!("handoff accept: {e}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
@@ -772,15 +831,20 @@ where
             };
             let connected = std::mem::replace(&mut next, fresh);
             let handler = handler.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let (read, write) = tokio::io::split(connected);
                 serve_connection(read, write, handler.as_ref()).await;
             });
         }
+        // Closing the idle instance refuses new clients while accepted ones
+        // finish.
+        drop(next);
+        drain_connections(connections, CONNECTION_DRAIN_TIMEOUT).await;
     });
 
     Ok(ListenerHandle {
         socket_path,
+        stop: Some(stop),
         accept_loop: Some(accept_loop),
     })
 }
@@ -2561,6 +2625,21 @@ mod tests {
         assert!(!stale_result);
     }
 
+    /// A stopping listener waits exactly as long as the most patient client.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn connection_drain_matches_the_longest_reply_budget() {
+        let serve = Request::ServeRemoteWorkspace {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            target: "lab".into(),
+            workspace_path: "/srv/notes".into(),
+        };
+        assert_eq!(CONNECTION_DRAIN_TIMEOUT, serve.reply_budget());
+        #[cfg(unix)]
+        assert!(CONNECTION_DRAIN_TIMEOUT >= UPGRADE_IO_TIMEOUT);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stable_listener_reclaims_a_stale_socket_node() {
@@ -2729,6 +2808,55 @@ mod tests {
             .await
             .expect("the stop outlived its last connection")
             .unwrap();
+    }
+
+    /// A connection that never finishes cannot hold a stop forever: past the
+    /// drain bound the listener aborts it, and its client reads the end of
+    /// the stream rather than a reply.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn listener_stop_aborts_a_connection_past_the_drain_bound() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("stuck.sock");
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let handle = start_listener(sock.clone(), move |_req| {
+            let entered = entered_tx.lock().unwrap().take();
+            async move {
+                if let Some(entered) = entered {
+                    let _ = entered.send(());
+                }
+                std::future::pending::<Response>().await
+            }
+        })
+        .unwrap();
+        let (read, mut write) = tokio::net::UnixStream::connect(&sock)
+            .await
+            .unwrap()
+            .into_split();
+        let mut payload = serde_json::to_vec(&Request::OpenWorkspace {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            workspace_path: "/tmp/notes".into(),
+        })
+        .unwrap();
+        payload.push(b'\n');
+        write.write_all(&payload).await.unwrap();
+        entered.await.expect("the request reached the handler");
+
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(300), handle.shutdown())
+            .await
+            .expect("a stuck connection held the stop past its drain bound");
+        assert!(
+            started.elapsed() >= CONNECTION_DRAIN_TIMEOUT,
+            "the stop aborted a connection before the drain bound"
+        );
+        let mut line = String::new();
+        let read = BufReader::new(read).read_line(&mut line).await.unwrap();
+        assert_eq!(read, 0, "the aborted connection still answered: {line:?}");
     }
 
     // End-to-end: a listener bound on a temp socket + a client request

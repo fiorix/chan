@@ -326,13 +326,16 @@ pub fn devserver_handoff_opt_out() -> bool {
 // Devserver side: listener on one stable per-instance endpoint.
 // ---------------------------------------------------------------------------
 
-/// Handle owning the registration listener. Drop aborts the accept loop and
-/// unlinks only the socket this process locked and bound. A `kill -9` that
-/// skips Drop leaves a stale file; the next owner reclaims it after taking the
-/// stable lock.
+/// Handle owning the registration listener and the connections it has
+/// accepted. [`shutdown`](Self::shutdown) stops accepting and lets those
+/// connections finish their replies, within a bound; Drop aborts the accept
+/// loop, and with it every connection still in flight, and unlinks only the
+/// socket this process locked and bound. A `kill -9` that skips Drop leaves a
+/// stale file; the next owner reclaims it after taking the stable lock.
 #[cfg(any(unix, windows))]
 pub struct ListenerHandle {
     socket_path: PathBuf,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
     accept_loop: Option<tokio::task::JoinHandle<()>>,
     #[cfg(unix)]
     _stable_lock: std::fs::File,
@@ -351,9 +354,20 @@ impl ListenerHandle {
 
 #[cfg(any(unix, windows))]
 impl ListenerHandle {
-    /// Stop the listener: abort its accept loop and unlink the socket, as
-    /// dropping the handle does.
-    pub async fn shutdown(self) {}
+    /// Stop accepting, give the connections already accepted up to 75
+    /// seconds (`REGISTER_REPLY_TIMEOUT`, the longest a registration client
+    /// waits for its reply) to deliver their replies, abort any still
+    /// running, then unlink the socket.
+    pub async fn shutdown(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(accept_loop) = self.accept_loop.take() {
+            if let Err(error) = accept_loop.await {
+                tracing::warn!(%error, "devserver registration accept loop did not stop cleanly");
+            }
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -414,9 +428,17 @@ where
     let handler = std::sync::Arc::new(handler);
     let peer_uid = std::sync::Arc::new(peer_uid);
     let owner_uid = effective_uid();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
     let accept_loop = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let (stream, _) = match listener.accept().await {
+            let accepted = tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                _ = connections.join_next(), if !connections.is_empty() => continue,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, _) = match accepted {
                 Ok(pair) => pair,
                 Err(e) => {
                     tracing::warn!("devserver registration accept: {e}");
@@ -443,15 +465,19 @@ where
                 }
             }
             let handler = handler.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let (read, write) = stream.into_split();
                 serve_connection(read, write, handler.as_ref()).await;
             });
         }
+        // Closing the listener refuses new peers while accepted ones finish.
+        drop(listener);
+        crate::handoff::drain_connections(connections, REGISTER_REPLY_TIMEOUT).await;
     });
 
     Ok(ListenerHandle {
         socket_path,
+        stop: Some(stop),
         accept_loop: Some(accept_loop),
         _stable_lock: stable_lock,
     })
@@ -477,9 +503,17 @@ where
         .create(&pipe_name)?;
 
     let handler = std::sync::Arc::new(handler);
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
     let accept_loop = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            if let Err(e) = next.connect().await {
+            let connected = tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                _ = connections.join_next(), if !connections.is_empty() => continue,
+                connected = next.connect() => connected,
+            };
+            if let Err(e) = connected {
                 tracing::warn!("devserver registration accept: {e}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
@@ -494,15 +528,20 @@ where
             };
             let connected = std::mem::replace(&mut next, fresh);
             let handler = handler.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let (read, write) = tokio::io::split(connected);
                 serve_connection(read, write, handler.as_ref()).await;
             });
         }
+        // Closing the idle instance refuses new clients while accepted ones
+        // finish.
+        drop(next);
+        crate::handoff::drain_connections(connections, REGISTER_REPLY_TIMEOUT).await;
     });
 
     Ok(ListenerHandle {
         socket_path,
+        stop: Some(stop),
         accept_loop: Some(accept_loop),
     })
 }
@@ -1480,6 +1519,55 @@ mod tests {
             .await
             .expect("the stop outlived its last connection")
             .unwrap();
+    }
+
+    /// A connection that never finishes cannot hold a stop forever: past the
+    /// drain bound the listener aborts it, and its client reads the end of
+    /// the stream rather than a reply.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn listener_stop_aborts_a_connection_past_the_drain_bound() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("stuck.sock");
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let handle = start_listener(sock.clone(), move |_req| {
+            let entered = entered_tx.lock().unwrap().take();
+            async move {
+                if let Some(entered) = entered {
+                    let _ = entered.send(());
+                }
+                std::future::pending::<Response>().await
+            }
+        })
+        .unwrap();
+        let (read, mut write) = tokio::net::UnixStream::connect(&sock)
+            .await
+            .unwrap()
+            .into_split();
+        let mut payload = serde_json::to_vec(&Request::RegisterWorkspace {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            workspace_path: "/tmp/notes".into(),
+        })
+        .unwrap();
+        payload.push(b'\n');
+        write.write_all(&payload).await.unwrap();
+        entered.await.expect("the request reached the handler");
+
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(300), handle.shutdown())
+            .await
+            .expect("a stuck connection held the stop past its drain bound");
+        assert!(
+            started.elapsed() >= REGISTER_REPLY_TIMEOUT,
+            "the stop aborted a connection before the drain bound"
+        );
+        let mut line = String::new();
+        let read = BufReader::new(read).read_line(&mut line).await.unwrap();
+        assert_eq!(read, 0, "the aborted connection still answered: {line:?}");
     }
 
     #[cfg(unix)]
