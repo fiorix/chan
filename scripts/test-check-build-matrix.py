@@ -115,6 +115,17 @@ CASES = (
     replaced("-F", "    cargo test --frozen --release -p chan -F chan-workspace/test-hooks", says="-F"),
     replaced("-FX", "    cargo test --frozen --release -p chan -Fchan-workspace/test-hooks", says="-F"),
     replaced("--all-features", "    cargo test --frozen --release -p chan --all-features", says="--all-features"),
+    # cargo reads clustered short flags, so `-rp` is `--release -p`.
+    replaced(
+        "-p inside a short-flag cluster",
+        "    cargo test --frozen -p chan -rp chan-server",
+        says="chan-server",
+    ),
+    replaced(
+        "-F inside a short-flag cluster",
+        "    cargo test --frozen -p chan -rF chan-workspace/test-hooks",
+        says="-F",
+    ),
     # Round one's red copies: the pinned call widened in place.
     replaced("--workspace", "    cargo test --frozen --release --workspace", says="--workspace"),
     replaced(

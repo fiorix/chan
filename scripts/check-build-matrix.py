@@ -1195,35 +1195,61 @@ def shell_commands(body: list[tuple[int, str]], path: str) -> list[tuple[int, li
     return commands
 
 
-def cargo_selection(arguments: list[str]) -> tuple[list[str], list[str]]:
-    """The packages ARGUMENTS select with `-p`, and any wider selection.
+def cargo_selection(arguments: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """The packages ARGUMENTS select, any wider selection, and feature flags.
 
     The second list names every flag that selects beyond `-p`: `--workspace`
     or its alias `--all` select every member, and `--manifest-path` selects
-    whatever manifest it points at. Scanning stops at `--`, after which the
-    words belong to the test binaries rather than to cargo.
+    whatever manifest it points at. The third names every feature flag.
+    Short flags are read as the clusters cargo accepts, so the `p` of `-rp X`
+    (`--release` then `-p X`) is a selection and the `F` of `-rF X` a
+    feature flag. Scanning stops at `--`, after which the words belong to
+    the test binaries rather than to cargo.
     """
     packages: list[str] = []
     wider: list[str] = []
+    features: list[str] = []
     words = iter(arguments)
     for word in words:
         if word == "--":
             break
         if word in ("--workspace", "--all"):
             wider.append(word)
-        elif word in ("-p", "--package"):
+        elif word == "--package":
             packages.append(next(words, ""))
         elif word.startswith("--package="):
             packages.append(word.removeprefix("--package="))
-        elif word.startswith("-p") and not word.startswith("--"):
-            packages.append(word.removeprefix("-p"))
         elif word == "--manifest-path" or word.startswith("--manifest-path="):
             wider.append("--manifest-path")
-    return packages, wider
+        elif word == "--features" or word.startswith("--features="):
+            features.append("--features")
+        elif word == "--all-features":
+            features.append("--all-features")
+        elif word.startswith("-") and not word.startswith("--"):
+            cluster = word[1:]
+            for index, flag in enumerate(cluster):
+                # The short options that take a value, joined or as the next
+                # word; every other letter is a switch.
+                if flag in "pFjZ":
+                    value = cluster[index + 1 :] or next(words, "")
+                    if flag == "p":
+                        packages.append(value)
+                    elif flag == "F":
+                        features.append("-F")
+                    break
+    return packages, wider, features
 
 
 def check_aur_check_selection_contract() -> None:
     """Every cargo call in an AUR recipe's check() selects only its package.
+
+    Each building cargo call selects the package with `-p` (or `$pkgname`)
+    and nothing wider, names no feature, and carries no shell expansion
+    this check cannot resolve. A command that runs cargo in a shape the
+    check does not read (behind a wrapper, inside a compound command, a
+    variable-named program, make or a shell) is refused with its line, as
+    is a check() with no building cargo call left; scripts/
+    test-check-build-matrix.py proves each refusal.
 
     makepkg runs check() between build() and package(). check()'s
     `cargo test --release` rebuilds a package's `target/release` binary
@@ -1314,7 +1340,13 @@ def check_aur_recipe(path: str, recipe: str) -> None:
                     f"check cannot resolve, so it could select anything; only "
                     f"$pkgname resolves, to {package}"
                 )
-        packages, wider = cargo_selection(arguments)
+        packages, wider, features = cargo_selection(arguments)
+        if features:
+            raise ContractError(
+                f"{where}, and {', '.join(dict.fromkeys(features))} selects features; "
+                "check() selects none, since a feature flag is how a test-only "
+                "feature would reach the binary package() installs"
+            )
         if wider:
             raise ContractError(
                 f"{where}, and {', '.join(wider)} selects beyond {package}, "
