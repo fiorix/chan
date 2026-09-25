@@ -1,44 +1,81 @@
-import { describe, expect, test } from "vitest";
-import source from "./HybridEditorConfig.svelte?raw";
-import shell from "./HybridSurfaceConfigShell.svelte?raw";
-import surfaceThemeFieldSource from "./settings/SurfaceThemeField.svelte?raw";
-import editorSource from "./settings/EditorSection.svelte?raw";
+// @vitest-environment jsdom
+//
+// The Hybrid Editor back card is the shared shell and nothing else: its title
+// and an OK that hands back to the pane. It renders no control and sends no
+// request. The editor's settings live in Settings > Editor, which writes each
+// one to the global config on its own: line spacing, date format and
+// strip-on-save here (the editor theme and the editor's body theme are driven
+// in SettingsOverlay.render.test.ts).
 
-describe("HybridEditorConfig back card", () => {
-  test("it is shell-only and routes OK through onDone", () => {
-    expect(source).toMatch(
-      /let \{ onDone \}: \{ onDone\?: \(\) => void \} = \$props\(\)/,
-    );
-    expect(source).toMatch(
-      /<HybridSurfaceConfigShell title="Hybrid Editor" \{onDone\} \/>/,
-    );
-    expect(shell).toMatch(
-      /<button type="button" class="config-ok" onclick=\{\(\) => onDone\?\.\(\)\}>OK<\/button>/,
-    );
+import { flushSync, mount, unmount } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+import { DATE_FORMATS } from "../editor/dateFormats";
+import { recordRequests, stopRecordingRequests } from "../__tests__/fetch";
+import { closeSettings, openSettings } from "../__tests__/settings";
+import HybridEditorConfig from "./HybridEditorConfig.svelte";
+
+describe("the Hybrid Editor back card", () => {
+  afterEach(() => {
+    stopRecordingRequests();
+    document.body.innerHTML = "";
   });
 
-  test("moved editor controls no longer render or save from the card", () => {
-    expect(source).not.toMatch(/name="hybrid-editor-theme"/);
-    expect(source).not.toMatch(/name="hybrid-line-spacing"/);
-    expect(source).not.toMatch(/DATE_FORMATS/);
-    expect(source).not.toMatch(/strip_trailing_whitespace_on_save/);
-    expect(source).not.toMatch(/updateGlobalConfigSerial/);
-    expect(source).not.toMatch(/api\./);
+  test("shows its title and no control, sends nothing, and hands back on OK", () => {
+    const requests = recordRequests();
+    const onDone = vi.fn();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const view = mount(HybridEditorConfig, { target, props: { onDone } });
+    try {
+      flushSync();
+      const card = target.querySelector<HTMLElement>('[aria-label="Hybrid Editor configuration"]')!;
+      expect(card.querySelector("h2")?.textContent).toBe("Hybrid Editor");
+      expect(card.querySelectorAll("input, select, textarea")).toHaveLength(0);
+
+      card.querySelector<HTMLButtonElement>(".config-ok")!.click();
+      expect(onDone).toHaveBeenCalledTimes(1);
+      expect(requests).toEqual([]);
+    } finally {
+      unmount(view);
+    }
   });
 });
 
-describe("Settings owns editor controls", () => {
-  test("Editor section owns editor theme, line spacing, and surface body theme", () => {
-    expect(editorSource).toMatch(/name="settings-editor-theme"/);
-    expect(editorSource).toMatch(/name="settings-line-spacing"/);
-    expect(editorSource).toMatch(/<SurfaceThemeField kind="editor"/);
-    expect(surfaceThemeFieldSource).toMatch(/setHybridSurfaceTheme\(/);
-    expect(surfaceThemeFieldSource).toMatch(/clearHybridSurfaceTheme\(/);
+describe("Settings > Editor", () => {
+  afterEach(closeSettings);
+
+  test("line spacing writes line_spacing alone", async () => {
+    const { target, writes } = await openSettings("Editor");
+
+    target.querySelector<HTMLInputElement>('input[name="settings-line-spacing"][value="compact"]')!.click();
+    await vi.waitFor(() => expect(writes.at(-1)).toEqual({ line_spacing: "compact" }));
   });
 
-  test("Editor section owns date format and strip-on-save", () => {
-    expect(editorSource).toMatch(/\{#each DATE_FORMATS as f \(f\.id\)\}/);
-    expect(editorSource).toMatch(/date_format: e\.currentTarget\.value/);
-    expect(editorSource).toMatch(/strip_trailing_whitespace_on_save: on/);
+  // The date format select reads its value off the change event inside the
+  // write, which runs after the event has finished and its currentTarget is
+  // null, so the write is refused and the field goes back to the stored
+  // format. This test states what the select should do and fails until that
+  // read moves out of the write.
+  test.fails("the date format writes date_format alone", async () => {
+    const { target, writes } = await openSettings("Editor");
+    const select = [...target.querySelectorAll<HTMLSelectElement>("select")].find((candidate) =>
+      [...candidate.options].some((option) => option.value === DATE_FORMATS[1]!.id),
+    )!;
+
+    select.value = DATE_FORMATS[1]!.id;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() => expect(writes.at(-1)).toEqual({ date_format: DATE_FORMATS[1]!.id }));
+  });
+
+  test("Strip on save writes strip_trailing_whitespace_on_save alone", async () => {
+    const { target, writes } = await openSettings("Editor");
+    const toggle = [...target.querySelectorAll<HTMLLabelElement>("label.pill")]
+      .find((pill) => pill.textContent?.trim() === "Strip on save")!
+      .querySelector("input")!;
+
+    toggle.click();
+    await vi.waitFor(() => expect(writes.at(-1)).toEqual({ strip_trailing_whitespace_on_save: true }));
   });
 });
