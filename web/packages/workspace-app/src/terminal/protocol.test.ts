@@ -1,16 +1,21 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 
-// The server half of the terminal protocol, read from the Rust route. The
-// client half is driven by mounted TerminalTab tests: the resume cursor in
+// The server half of the terminal protocol, read from the Rust route, only
+// where no Rust test pins it. Rust pins the rest in routes/terminal.rs:
+// reconnect_after_an_attach_raced_by_output_loses_no_bytes reads replay and
+// live output only from binary frames and needs the replay before ready, and
+// the session_frame_* tests pin the submit agent the session frame derives.
+// The client half is driven by mounted TerminalTab tests: the resume cursor in
 // TerminalTab.snapshot.test.ts, binary output in
 // TerminalTab.renderer.svelte.test.ts, the size frames in
 // TerminalTab.fit.test.ts and the generated replies in
 // TerminalTab.replies.test.ts.
+// Survivor until a Rust test pins it: the prelude sends the session frame first and the alt-screen prelude between the replay and ready, and a Resize frame resizes the PTY.
 const route = readFileSync("../../../crates/chan-server/src/routes/terminal.rs", "utf8");
 
 describe("terminal protocol invariants", () => {
-  test("server attach prelude sends control, binary replay, alt-screen prelude, then ready", () => {
+  test("the attach prelude sends the session frame first, and the alt-screen prelude after the replay and before ready", () => {
     const prelude = route.match(/async fn send_attach_prelude[\s\S]*?\n}\n\nfn terminal_cwd_payload/)?.[0];
     expect(prelude).toBeTruthy();
     const sessionFrame = prelude!.indexOf("session_frame(session)");
@@ -22,14 +27,6 @@ describe("terminal protocol invariants", () => {
     expect(replay).toBeGreaterThan(sessionFrame);
     expect(altScreen).toBeGreaterThan(replay);
     expect(ready).toBeGreaterThan(altScreen);
-    expect(route).toMatch(
-      /fn session_frame\(session: &AttachHandle\)[\s\S]*?SubmitAgent::derive\([\s\S]*?session\.spawn_command\(\)[\s\S]*?session\.spawn_env\("CHAN_AGENT"\)[\s\S]*?ServerFrame::Session/,
-    );
-  });
-
-  test("the server sends PTY output and replay as binary frames", () => {
-    expect(route).toMatch(/SessionEvent::Output\(data\)[\s\S]*?Message::binary\(data\)/);
-    expect(route).toMatch(/socket\.send\(Message::binary\(chunk\.clone\(\)\)\)/);
   });
 
   test("the server applies the client's PtySize frames", () => {
