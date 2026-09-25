@@ -3,8 +3,11 @@
 // at the mock. Call before the app mounts; the real transport is unchanged
 // until this runs. uninstallDemoWorkspace, in the test's teardown, restores
 // the real socket and XHR factories but not the real fetch: a request after
-// it is a leak, and fails as one.
+// it is a leak and rejects with DemoTransportUninstalledError. That names the
+// leak in the run only where the caller leaves the rejection unhandled; a
+// caller that catches its own failures swallows it like any other.
 
+import { ApiError } from "../api/errors";
 import { setFetchImpl, setSocketFactory, setXhrFactory } from "../api/transport";
 import type { Preferences } from "../api/types";
 import type { MockWorkspaceData } from "./data";
@@ -20,9 +23,16 @@ import { createDemoUploadXhr } from "./upload";
 /// debounce) outlived the test's teardown. Without this it would reach Node's
 /// own fetch, whose relative-URL rejection names neither the demo transport
 /// nor the leak.
-export class DemoTransportUninstalledError extends Error {
+///
+/// It is an ApiError with status 421, a request that reached a transport with
+/// no backend behind it and a status nothing in the app branches on, because
+/// isTransientApiError calls every other Error transient: a
+/// retrying caller (the store's workspace and server-instance reads, the
+/// extension catalog) then stops at its first attempt instead of arming its
+/// backoff sleeps after the teardown.
+export class DemoTransportUninstalledError extends ApiError {
   constructor(readonly url: string) {
-    super(`${url} was requested after uninstallDemoWorkspace; a timer or continuation outlived its test`);
+    super(421, `${url} was requested after uninstallDemoWorkspace; a timer or continuation outlived its test`);
     this.name = "DemoTransportUninstalledError";
   }
 }
