@@ -26,7 +26,9 @@
 # chan-devserver.service is snapshotted and restored on exit, an ACTIVE unit
 # is refused unless CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1, and the suite refuses
 # to run outside a container, because restarting that unit ends every PTY it
-# carries. Throwaway CHAN_HOME and port.
+# carries. Throwaway CHAN_HOME and port. `chan devserver restart` prints the
+# devserver token on stdout; the script masks that line, so a run's log never
+# carries a token.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -363,8 +365,17 @@ case "$TARGET_DIR" in
 esac
 CHAN="$TARGET_DIR/debug/chan"
 
+# `chan devserver restart` prints the token on stdout as a
+# CHAN_DEVSERVER_TOKEN=<token> line, and a launch URL would carry it as ?t=.
+# Mask both so the log a run leaves behind never holds a live token.
+restart_devserver() {
+    "$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT" \
+        | sed -E -e 's/^(CHAN_DEVSERVER_TOKEN=).*/\1<redacted>/' \
+            -e 's/([?&]t=)[^&[:space:]]*/\1<redacted>/g'
+}
+
 log "starting the devserver unit"
-"$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
+restart_devserver
 wait_until 60 "first readiness" ready
 
 FILE_A="$WORK/out-a"
@@ -398,7 +409,7 @@ for kind in $RESTARTS; do
     start_restart_window_writer "$phase"
     case "$kind" in
         cli)
-            "$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
+            restart_devserver
             wait_until 60 "readiness after $phase" ready
             ;;
         crash)
