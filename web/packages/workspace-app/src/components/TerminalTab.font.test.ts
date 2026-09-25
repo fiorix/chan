@@ -1,7 +1,32 @@
+// @vitest-environment jsdom
+
 import { readFileSync } from "node:fs";
-import { describe, expect, test } from "vitest";
-import tab from "./TerminalTab.svelte?raw";
+import { mount, tick, unmount } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+import TerminalTab from "./TerminalTab.svelte";
+// Build-time contract: the app entry imports fonts.css, so the bundled face starts loading at boot.
 import main from "../main.ts?raw";
+import type { Preferences } from "../api/types";
+import { __testSetStandalonePreferences } from "../state/store.svelte";
+import {
+  installTerminalDom,
+  mountTerminal,
+  resetTerminals,
+  seatTerminals,
+  terminalTab,
+  TERMINAL_PANE,
+  xterm,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
 
 // `?raw` returns an empty string for `.css` imports under the JSDOM
 // vitest setup (the CSS plugin chain consumes them); read the file
@@ -10,38 +35,56 @@ import main from "../main.ts?raw";
 const fonts = readFileSync("src/fonts.css", "utf8");
 const viteConfig = readFileSync("vite.config.ts", "utf8");
 
+afterEach(() => {
+  resetTerminals();
+  __testSetStandalonePreferences(null);
+});
+
 // TerminalTab ships Source Code Pro Regular and defaults renderers to a
 // non-blinking block cursor at 14 px. terminal/font.test.ts owns the complete
-// OS/preference chain matrix; this file pins the component integration.
+// OS/preference chain matrix; this file covers the component integration.
+
+describe("the mounted terminal", () => {
+  test("waits for the bundled face before it constructs or opens xterm", async () => {
+    let loaded!: (faces: FontFace[]) => void;
+    vi.mocked(document.fonts.load).mockImplementationOnce(() => new Promise<FontFace[]>((r) => (loaded = r)));
+    const [tab] = seatTerminals([terminalTab()]);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(TerminalTab, {
+      target,
+      props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
+    });
+    for (let i = 0; i < 4; i += 1) await tick();
+    expect(xterm.terminals, "nothing built while the face loads").toHaveLength(0);
+
+    loaded([{} as FontFace]);
+    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
+    expect(xterm.terminals[0]!.element).not.toBeNull();
+    expect(String(xterm.terminals[0]!.options.fontFamily)).toContain("Source Code Pro");
+    unmount(component);
+  });
+
+  test("takes the font size from the settings, 14px without one", async () => {
+    const [first] = seatTerminals([terminalTab()]);
+    const { term: plain } = await mountTerminal(TerminalTab, first!);
+    expect(plain.options.fontSize).toBe(14);
+    resetTerminals();
+
+    __testSetStandalonePreferences({ terminal: { font_size: 18 } } as unknown as Preferences);
+    const [second] = seatTerminals([terminalTab()]);
+    const { term: sized } = await mountTerminal(TerminalTab, second!);
+    expect(sized.options.fontSize).toBe(18);
+  });
+
+  test("uses a non-blinking block cursor", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    expect(term.options).toMatchObject({ cursorBlink: false, cursorStyle: "block" });
+  });
+});
 
 describe("TerminalTab font + cursor parity", () => {
-  test("awaits font readiness before constructing or opening either renderer", () => {
-    expect(tab).toMatch(
-      /import \{[^}]*resolveReadyTerminalFont[^}]*\} from "\.\.\/terminal\/font"/,
-    );
-    const readyAt = tab.indexOf("await resolveReadyTerminalFont(");
-    expect(readyAt).toBeGreaterThan(-1);
-    expect(readyAt).toBeLessThan(tab.indexOf("new ghosttyKit.Terminal({"));
-    expect(readyAt).toBeLessThan(tab.indexOf("term = new Terminal({"));
-    expect(readyAt).toBeLessThan(tab.indexOf("term.open(host)"));
-  });
-
-  test("fontSize is captured once for both backends and cell measurement", () => {
-    expect(tab).toMatch(
-      /const rendererFontSize = terminalPrefs\?\.font_size \?\? 14;/,
-    );
-    expect(tab.match(/fontSize:\s*rendererFontSize,/g)).toHaveLength(2);
-    expect(tab).toMatch(
-      /measureXtermCellDimensions\([\s\S]*?fontFamily,\s*rendererFontSize,\s*1\.2/,
-    );
-    expect(tab).not.toMatch(/fontSize:\s*14,/);
-  });
-
-  test("cursor is non-blinking block per iTerm defaults", () => {
-    expect(tab).toMatch(/cursorBlink:\s*false,/);
-    expect(tab).toMatch(/cursorStyle:\s*"block",/);
-  });
-
   test("@font-face src is relative so it resolves under a tenant prefix", () => {
     // WorkspaceHost mounts each tenant under a single-segment slug, and
     // vite builds with base "./" for exactly that reason. An absolute
