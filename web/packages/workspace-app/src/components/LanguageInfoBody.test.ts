@@ -3,16 +3,15 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import inspector from "./InspectorBody.svelte?raw";
-import panel from "./GraphPanel.svelte?raw";
 import type { LanguageGraphDetail } from "../api/types";
 import LanguageInfoBody from "./LanguageInfoBody.svelte";
 
-// Language-node inspector detail: COCOMO summary + complete ranked
-// directory list with five-at-a-time "Load more" paging. The api
-// client is mocked; these tests pin the fetch shape, the paging
-// behaviour, and the directory-row routing. `?raw` pins lock the
-// InspectorBody / GraphPanel wiring at source level.
+// LanguageInfoBody, the language node's inspector: its header, the COCOMO
+// summary and the complete ranked directory list with five-at-a-time "Load
+// more" paging. The api client is mocked; these tests pin the fetch shape,
+// the paging behaviour and the directory-row routing. The graph side of the
+// wiring (a language node selects this body; its rows open a directory
+// graph) is tested mounted in GraphPanel.inspector.test.ts.
 
 const languageGraph = vi.fn();
 
@@ -224,14 +223,29 @@ describe("LanguageInfoBody directory routing", () => {
   });
 });
 
-describe("language detail wiring", () => {
-  test("InspectorBody forwards onOpenDirectory to LanguageInfoBody", () => {
-    expect(inspector).toMatch(
-      /<LanguageInfoBody[\s\S]*?\{onSetAsScope\}[\s\S]*?\{onOpenDirectory\}/,
-    );
+describe("LanguageInfoBody header", () => {
+  test("names the language and shows its file and code counts", async () => {
+    const target = render(3, { label: "Rust code", files: 10, code: 5400 });
+    await settled(target);
+    expect(target.querySelector(".kind-chip.language")?.textContent).toBe("language");
+    const title = target.querySelector<HTMLElement>("h3.title")!;
+    expect(title.textContent).toBe("Rust code");
+    expect(title.title).toBe("Rust");
+    const grid = target.querySelector(".info > .meta-grid")?.textContent ?? "";
+    expect(grid).toContain("files");
+    expect(grid).toContain("10");
+    expect(grid).toContain((5400).toLocaleString());
   });
 
-  test("GraphPanel routes directory rows through the directory graph-from-here", () => {
-    expect(panel).toMatch(/onOpenDirectory=\{[\s\S]*?graphFromHere\(path, true\)/);
+  test("offers Graph from here only when the host can scope a graph", async () => {
+    const plain = render(3);
+    await settled(plain);
+    expect([...plain.querySelectorAll("button")].some((b) => b.textContent === "Graph from here")).toBe(false);
+
+    const onSetAsScope = vi.fn();
+    const scoped = render(3, { onSetAsScope });
+    await settled(scoped);
+    [...scoped.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Graph from here")!.click();
+    expect(onSetAsScope).toHaveBeenCalledTimes(1);
   });
 });
