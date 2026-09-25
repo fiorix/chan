@@ -135,11 +135,16 @@
   /// each raises `each_key_duplicate` from its own evaluation, where no
   /// per-tab boundary encloses it. So an id the layout repeats, on one side or
   /// across both Hybrid sides, is dropped here before any list is keyed on it;
-  /// the first tab with that id is the one drawn.
+  /// the first tab with that id is the one drawn. Nothing is known to produce
+  /// a repeat, so this masks one rather than repairing the layout, and says so
+  /// in the console: a dropped copy stays in the layout, undrawn.
   function uniqueTabs(tabs: Tab[]): Tab[] {
     const seen = new Set<string>();
     return tabs.filter((tab) => {
-      if (seen.has(tab.id)) return false;
+      if (seen.has(tab.id)) {
+        console.warn(`[chan] pane ${pane.id} lists tab ${tab.id} twice; drawing the first copy`);
+        return false;
+      }
       seen.add(tab.id);
       return true;
     });
