@@ -1,4 +1,5 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import RecursiveArcBloom from "./RecursiveArcBloom.svelte";
 import {
   buildRecursiveArcBloom,
   fitRecursiveArcBloom,
@@ -7,18 +8,35 @@ import {
   RECURSIVE_ARC_BLOOM_ARM_COUNT,
   RECURSIVE_ARC_BLOOM_SEGMENT_COUNT,
 } from "./recursiveArcBloom";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./recursiveArcBloom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./recursiveArcBloom")>();
+  return { ...actual, buildRecursiveArcBloom: vi.fn(actual.buildRecursiveArcBloom) };
+});
+
+afterEach(stopAnimations);
 
 describe("Recursive Arc Bloom", () => {
-  test("keeps the source timing and attribution", async () => {
-    const renderer = (await import("./RecursiveArcBloom.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./recursiveArcBloom.ts?raw"))
-      .default as string;
+  test("drifts its noise 1 / 18 per second of animation time", () => {
+    const { callbacks } = startAnimation(RecursiveArcBloom, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    const build = vi.mocked(buildRecursiveArcBloom);
+    build.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toMatch(/const NOISE_PHASE_SPEED = 1 \/ 18;/);
-    expect(geometry).toContain(
-      "https://x.com/Hau_kun/status/1931711978235683306",
-    );
+    expect(build.mock.calls.map(([phase]) => phase)).toEqual([
+      expect.closeTo(1 / 18, 9),
+      expect.closeTo(3 / 18, 9),
+    ]);
   });
 
   test("builds 16 radial chains with 19 shrinking arcs each", () => {
