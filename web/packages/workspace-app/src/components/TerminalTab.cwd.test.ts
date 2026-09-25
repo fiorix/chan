@@ -1,33 +1,88 @@
-import { describe, expect, test } from "vitest";
-import terminalTab from "./TerminalTab.svelte?raw";
+// @vitest-environment jsdom
+//
+// "Copy path to $CWD" puts the shell's working directory on the clipboard.
+// It runs from the command launcher while its overlay is dismissing, so the
+// terminal takes focus back before it writes, through the desktop-safe
+// clipboard writer. A TerminalTab is mounted over the stand-in xterm and the
+// server reports the cwd on its socket; the writer is stubbed.
 
-// "Copy path to $CWD" runs from the command launcher, whose overlay is
-// dismissing when the chan:command fires. A bare navigator.clipboard.writeText()
-// then rejects ("Document is not focused") and the caller's `void` swallows the
-// rejection, so nothing lands on the clipboard. copyTerminalCwd must put focus
-// back on the terminal before writing, and write through the desktop-native
-// writeClipboardText, which needs no gesture on WKWebView.
+import { afterEach, describe, expect, test, vi } from "vitest";
 
-describe("terminal copy-cwd clipboard write", () => {
-  test("focuses the terminal before the clipboard write", () => {
-    expect(terminalTab).toMatch(
-      /async function copyTerminalCwd[\s\S]*?focusTerminal\(\);[\s\S]*?await writeClipboardText\(cwd\)/,
-    );
+const clipboard = vi.hoisted(() => ({
+  writes: [] as Array<{ text: string; focusedBefore: number }>,
+  focusCount: (): number => 0,
+}));
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+vi.mock("../api/desktop", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/desktop")>()),
+  writeClipboardText: vi.fn(async (text: string) => {
+    clipboard.writes.push({ text, focusedBefore: clipboard.focusCount() });
+  }),
+}));
+
+import TerminalTab from "./TerminalTab.svelte";
+import { ui } from "../state/store.svelte";
+import {
+  attach,
+  installTerminalDom,
+  mountTerminal,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  terminalTab,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+afterEach(() => {
+  resetTerminals();
+  clipboard.writes = [];
+  ui.status = null;
+});
+
+async function reportingCwd(cwd: string | null, cwdRel: string | null) {
+  const [tab] = seatTerminals([terminalTab()]);
+  const { term } = await mountTerminal(TerminalTab, tab!);
+  const socket = TerminalSocket.all.at(-1)!;
+  await attach(socket);
+  await receive(socket, { type: "cwd", cwd, cwd_rel: cwdRel });
+  clipboard.focusCount = () => term.focusCount;
+  return { term };
+}
+
+async function copyCwd(): Promise<void> {
+  window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.copyCwd" } }));
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe("Copy path to $CWD", () => {
+  test("copies the absolute cwd the shell reported, after taking focus back", async () => {
+    const { term } = await reportingCwd("/home/me/ws/notes", "notes");
+    const before = term.focusCount;
+    await copyCwd();
+
+    expect(clipboard.writes.map((w) => w.text)).toEqual(["/home/me/ws/notes"]);
+    expect(clipboard.writes[0]!.focusedBefore, "focused before the write").toBeGreaterThan(before);
   });
 
-  test("writes through the desktop-safe writeClipboardText", () => {
-    expect(terminalTab).toMatch(
-      /async function copyTerminalCwd[\s\S]*?await writeClipboardText\(cwd\)/,
-    );
-    expect(terminalTab).toMatch(
-      /import \{[\s\S]*?writeClipboardText[\s\S]*?\} from "\.\.\/api\/desktop"/,
-    );
+  test("falls back to the workspace-relative cwd without an absolute one", async () => {
+    await reportingCwd(null, "notes");
+    await copyCwd();
+    expect(clipboard.writes.map((w) => w.text)).toEqual(["notes"]);
   });
 
-  test("copies the absolute cwd, preferring terminalCwdAbs", () => {
-    expect(terminalTab).toMatch(
-      /function terminalCwdForCopy\(\)[\s\S]*?if \(terminalCwdAbs\) return terminalCwdAbs;/,
-    );
-    expect(terminalTab).toMatch(/const cwd = terminalCwdForCopy\(\);/);
+  test("with no cwd reported, writes nothing and says so", async () => {
+    await reportingCwd(null, null);
+    await copyCwd();
+    expect(clipboard.writes).toEqual([]);
+    expect(ui.status).toBe("PTY did not report CWD");
   });
 });
