@@ -21,6 +21,8 @@ export const xterm = {
   fit: { calls: 0, failure: null as Error | null, size: null as { cols: number; rows: number } | null },
   /// Every WebglAddon made, with the context-loss handler it was given.
   webgl: [] as Array<{ loadedInto: FakeTerminal | null; onContextLoss: (() => void) | null; disposed: boolean }>,
+  /// When set, constructing a WebglAddon throws, as it does without WebGL.
+  webglThrows: false,
 };
 
 type CsiId = { prefix?: string; intermediates?: string; final: string };
@@ -34,6 +36,9 @@ export class FakeTerminal {
   dataHandlers: Array<(data: string) => void> = [];
   resizeHandlers: Array<(size: { cols: number; rows: number }) => void> = [];
   written: string[] = [];
+  /// What each write was handed, before decoding.
+  writtenRaw: unknown[] = [];
+  refreshCalls: Array<[number, number]> = [];
   pasted: string[] = [];
   selection = "";
   focusCount = 0;
@@ -80,6 +85,7 @@ export class FakeTerminal {
     return { dispose() {} };
   }
   write(data: string | Uint8Array, done?: () => void): void {
+    this.writtenRaw.push(data);
     this.written.push(typeof data === "string" ? data : new TextDecoder().decode(data));
     if (this.replyDuringWrite !== null) this.type(this.replyDuringWrite);
     done?.();
@@ -105,7 +111,9 @@ export class FakeTerminal {
     this.cols = cols;
     this.rows = rows;
   }
-  refresh(): void {}
+  refresh(start: number, end: number): void {
+    this.refreshCalls.push([start, end]);
+  }
   getSelection(): string {
     return this.selection;
   }
@@ -173,6 +181,7 @@ export function webglAddonModule() {
     WebglAddon: class {
       record = { loadedInto: null as FakeTerminal | null, onContextLoss: null as (() => void) | null, disposed: false };
       constructor() {
+        if (xterm.webglThrows) throw new Error("WebGL2 not supported");
         xterm.webgl.push(this.record);
       }
       activate(terminal: FakeTerminal) {
@@ -409,6 +418,7 @@ export function resetTerminals(): void {
   xterm.fit.failure = null;
   xterm.fit.size = null;
   xterm.webgl.splice(0);
+  xterm.webglThrows = false;
   resizeObservers.splice(0);
   globalThis.requestAnimationFrame = immediateFrame;
   document.body.innerHTML = "";

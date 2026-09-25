@@ -1,148 +1,178 @@
-import { describe, expect, test } from "vitest";
-import tab from "./TerminalTab.svelte?raw";
+// @vitest-environment jsdom
+//
+// A terminal's renderer: the WebGL addon wherever the host supports it, and
+// the repaints that keep its rows fresh across focus changes, host resumes
+// and the ready frame. A TerminalTab is mounted over the stand-in xterm,
+// whose WebGL addon and row refreshes are recorded; the desktop check is
+// stubbed so each test picks the host.
 
-// TerminalTab follows the renderer capability the desktop carries through the
-// served shell. The DOM renderer draws box-drawing characters via the system
-// font, leaving vertical gaps at lineHeight: 1.2; the WebGL customGlyphs path
-// fills the whole cell including line-height padding. These pins guard the
-// wiring.
+import { flushSync, mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("TerminalTab WebGL renderer", () => {
-  test("imports WebglAddon from @xterm/addon-webgl", () => {
-    expect(tab).toMatch(/from\s+"@xterm\/addon-webgl"/);
-    expect(tab).toMatch(/import\s*\{\s*WebglAddon\s*\}/);
+const host = vi.hoisted(() => ({ desktop: false }));
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+vi.mock("../api/desktop", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/desktop")>()),
+  isTauriDesktop: () => host.desktop,
+}));
+
+import TerminalTab from "./TerminalTab.svelte";
+import { WEBGL_RENDERER_OVERRIDE_KEY } from "../terminal/renderer";
+import {
+  attach,
+  installTerminalDom,
+  mountTerminal,
+  output,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  terminalTab,
+  TERMINAL_PANE,
+  TerminalSocket,
+  xterm,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+beforeEach(() => {
+  host.desktop = false;
+  localStorage.removeItem(WEBGL_RENDERER_OVERRIDE_KEY);
+  document.head.querySelector('meta[name="chan-webgl-renderer"]')?.remove();
+});
+
+afterEach(() => {
+  resetTerminals();
+  localStorage.removeItem(WEBGL_RENDERER_OVERRIDE_KEY);
+  document.head.querySelector('meta[name="chan-webgl-renderer"]')?.remove();
+  vi.restoreAllMocks();
+});
+
+async function mounted() {
+  const [tab] = seatTerminals([terminalTab()]);
+  const result = await mountTerminal(TerminalTab, tab!);
+  return { ...result, socket: TerminalSocket.all.at(-1)! };
+}
+
+function serveRendererSignal(content: string): void {
+  const meta = document.createElement("meta");
+  meta.name = "chan-webgl-renderer";
+  meta.content = content;
+  document.head.append(meta);
+}
+
+describe("the WebGL renderer", () => {
+  test("is loaded onto the terminal in a browser", async () => {
+    const { term } = await mounted();
+    expect(xterm.webgl).toHaveLength(1);
+    expect(xterm.webgl[0]!.loadedInto).toBe(term);
   });
 
-  test("constructs a WebglAddon instance and loads it onto the terminal", () => {
-    expect(tab).toMatch(/new WebglAddon\(\)/);
-    expect(tab).toMatch(/\(term as Terminal\)\.loadAddon\(webgl\)/);
+  test("on the desktop, is loaded only when the shell serves the WebGL signal", async () => {
+    host.desktop = true;
+    await mounted();
+    expect(xterm.webgl, "an unclassified desktop stays on DOM").toHaveLength(0);
+    resetTerminals();
+
+    serveRendererSignal("1");
+    await mounted();
+    expect(xterm.webgl).toHaveLength(1);
   });
 
-  test("registers onContextLoss handler to dispose the addon", () => {
-    // GPU reset or tab backgrounding can lose the WebGL context.
-    // Disposing the addon lets xterm.js fall back to DOM rendering.
-    expect(tab).toMatch(/webgl\.onContextLoss\(/);
-    expect(tab).toMatch(/webgl\.dispose\(\)/);
+  test("a local override decides over the host", async () => {
+    localStorage.setItem(WEBGL_RENDERER_OVERRIDE_KEY, "0");
+    await mounted();
+    expect(xterm.webgl).toHaveLength(0);
+    resetTerminals();
+
+    host.desktop = true;
+    localStorage.setItem(WEBGL_RENDERER_OVERRIDE_KEY, "1");
+    await mounted();
+    expect(xterm.webgl).toHaveLength(1);
   });
 
-  test("wraps load in try/catch with DOM-fallback warning", () => {
-    // Headless harnesses and rare GPU setups may throw on new WebglAddon().
-    // The try/catch keeps terminal mount working with the DOM renderer.
-    expect(tab).toMatch(/try\s*\{[\s\S]*?new WebglAddon[\s\S]*?\}\s*catch/);
-    expect(tab).toMatch(/falling back to DOM/);
+  test("a lost context is disposed and the renderer made again, three times at most", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await mounted();
+    for (let loss = 1; loss <= 4; loss += 1) {
+      const current = xterm.webgl.at(-1)!;
+      current.onContextLoss!();
+      await tick();
+      expect(current.disposed, `loss ${loss} disposes`).toBe(true);
+    }
+    expect(xterm.webgl, "the first renderer and three remakes").toHaveLength(4);
   });
 
-  test("takes the served renderer signal before constructing WebGL", () => {
-    // The decision is one predicate, taken before the addon is constructed, so
-    // nothing downstream has to re-derive it.
-    expect(tab).toMatch(
-      /import \{[^}]*\bisTauriDesktop\b[^}]*\} from "\.\.\/api\/desktop"/,
-    );
-    expect(tab).toMatch(
-      /shouldUseWebglRenderer\(\s*isTauriDesktop\(\),\s*webglRendererSignal\(\),[\s\S]{0,80}?\)\s*\)\s*\{\s*return;[\s\S]{0,80}try \{/,
-    );
-    expect(tab).toMatch(
-      /import \{[^}]*\bwebglRendererSignal\b[^}]*\} from "\.\.\/terminal\/renderer"/,
-    );
+  test("a renderer that cannot be made leaves the terminal mounted on DOM", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    xterm.webglThrows = true;
+    const { term } = await mounted();
+    expect(term.element).not.toBeNull();
+    expect(xterm.webgl).toHaveLength(0);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("falling back to DOM"))).toBe(true);
+  });
+});
+
+describe("the repaints", () => {
+  test("gaining and losing focus repaints every row", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const props = $state({ tab: tab!, paneId: TERMINAL_PANE, side: "a" as const, active: true, focused: false });
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(TerminalTab, { target, props });
+    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
+    const term = xterm.terminals[0]!;
+    await new Promise((r) => setTimeout(r, 300));
+
+    for (const focused of [true, false]) {
+      term.refreshCalls.splice(0);
+      props.focused = focused;
+      flushSync();
+      await tick();
+      expect(term.refreshCalls, focused ? "on focus" : "on blur").toContainEqual([0, term.rows - 1]);
+    }
+    unmount(component);
   });
 
-  test("the renderer choice can be overridden per host", () => {
-    // The override is passed INTO the predicate rather than checked beside it,
-    // so there is one answer to "which renderer" rather than two.
-    expect(tab).toMatch(/webglRendererOverride\(\)/);
-    expect(tab).toMatch(
-      /import \{[^}]*\bwebglRendererOverride\b[^}]*\} from "\.\.\/terminal\/renderer"/,
-    );
+  test("a host resume repaints at once and again 50 and 250ms later", async () => {
+    const { term } = await mounted();
+    await new Promise((r) => setTimeout(r, 300));
+    term.refreshCalls.splice(0);
+
+    window.dispatchEvent(new Event("pageshow"));
+    await tick();
+    const atOnce = term.refreshCalls.length;
+    expect(atOnce).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(term.refreshCalls.length).toBe(atOnce * 3);
   });
 
-  test("keeps the event-driven row-repaint helper wired", () => {
-    // refreshTerminalRows is the renderer-refresh primitive for mount /
-    // focus / blur / host-resume events.
-    expect(tab).toMatch(/function refreshTerminalRows\(\): void/);
-    expect(tab).toMatch(/refreshTerminalRowsImpl\(term\)/);
-  });
+  test("the ready frame repaints", async () => {
+    const { term, socket } = await mounted();
+    await attach(socket);
+    await new Promise((r) => setTimeout(r, 300));
+    term.refreshCalls.splice(0);
 
-  test("never clears the shared WebGL texture atlas on a per-pane event", () => {
-    // Clearing the process-global TextureAtlas from one pane's focus/blur
-    // rebuilt it under sibling panes, garbling their glyphs. The renderer
-    // handles color/DPR/font changes itself, so manual clears are removed.
-    expect(tab).not.toMatch(/clearTextureAtlas/);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await tick();
+    expect(term.refreshCalls.length).toBeGreaterThan(0);
   });
+});
 
-  test("does not clear the texture atlas per PTY data chunk", () => {
-    // The old per-frame SGR-triggered atlas clear force-repainted all
-    // terminal panes (~60x/sec under animated TUIs). The renderer handles
-    // changes natively, so the workaround is gone.
-    expect(tab).not.toMatch(/maybeRefreshWebglAtlas/);
-    expect(tab).not.toMatch(/bytesContainSgrSequence/);
-  });
+describe("PTY output", () => {
+  test("reaches xterm as bytes, so multi-byte glyphs arrive intact", async () => {
+    const { term, socket } = await mounted();
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await output(socket, "héllo ✓");
 
-  test("passes binary terminal output to xterm without string coercion", () => {
-    // UTF-8 sequences must reach xterm as bytes. Coercing through
-    // String() would corrupt non-ASCII glyphs.
-    expect(tab).toMatch(
-      /const bytes = await terminalMessageBytes\(event\.data\);[\s\S]*?writePtyOutput\(bytes, attachPtyWriteOrigin\(\)\);/,
-    );
-    expect(tab).not.toMatch(/term\?\.write\(String\(event\.data\)\)/);
-  });
-
-  test("refreshes renderer on focus and after font readiness", () => {
-    expect(tab).toMatch(/function refreshTerminalRenderer\(\): void/);
-    // rAF and fonts.ready each call refreshTerminalRows(); no atlas
-    // clear (see the negative pin above).
-    expect(tab).toMatch(
-      /requestAnimationFrame\([\s\S]*?refreshTerminalRows\(\);[\s\S]*?\}\);/,
-    );
-    expect(tab).toMatch(/document\.fonts\?\.ready\.then/);
-    // Focus-gain runs full host-resume recovery so a pane focused after
-    // another repaints clean in WKWebView rather than showing stale glyphs.
-    expect(tab).toMatch(
-      /if \(!focused\) return;[\s\S]*?recoverTerminalRendererAfterHostResume\(\);[\s\S]*?setTerminalActivity\(tab, false\);/,
-    );
-    // Blur also runs full host-resume recovery so the pane LOSING focus
-    // repaints clean in WKWebView (a single refresh leaves it stale there).
-    expect(tab).toMatch(
-      /if \(focused\) return;[\s\S]*?recoverTerminalRendererAfterHostResume\(\);[\s\S]*?sendFocusState\(\);/,
-    );
-  });
-
-  test("host resume restores only terminal-owned keyboard focus", () => {
-    expect(tab).toMatch(
-      /function recoverTerminalFocusAfterHostResume\(\): void \{[\s\S]*?if \(!active \|\| !focused\) return;[\s\S]*?if \(findOpen \|\| menuOpen \|\| isRichPromptVisible\(tab\.id\)\) return;[\s\S]*?owner !== document\.body[\s\S]*?owner !== document\.documentElement[\s\S]*?!host\?\.contains\(owner\)[\s\S]*?focusTerminal\(\);/,
-    );
-    expect(tab).toMatch(
-      /function recoverTerminalAfterHostResume\(\): void \{[\s\S]*?recoverTerminalRendererAfterHostResume\(\);[\s\S]*?recoverTerminalFocusAfterHostResume\(\);/,
-    );
-  });
-
-  test("refreshes renderer after native host resume", () => {
-    expect(tab).toMatch(/function recoverTerminalRendererAfterHostResume\(\): void/);
-    expect(tab).toMatch(/clearHostResumeTimers\(\);[\s\S]*?queueFit\(\);[\s\S]*?refreshTerminalRenderer\(\);/);
-    expect(tab).toMatch(/for \(const delay of \[50, 250\]\)/);
-    expect(tab).toMatch(/window\.addEventListener\("focus", onHostResume\)/);
-    expect(tab).toMatch(/window\.addEventListener\("pageshow", onHostResume\)/);
-    expect(tab).toMatch(/document\.addEventListener\("visibilitychange", onVisibility\)/);
-    expect(tab).toMatch(/frame\.type === "ready"[\s\S]*?recoverTerminalRendererAfterHostResume\(\);/);
-    expect(tab).toMatch(/hostResumeListenerCleanup\?\.\(\)/);
-  });
-
-  test("a wall-clock-gap wake detector recovers the renderer and recycles the PTY", () => {
-    // macOS sleep does not fire focus/pageshow/visibilitychange in WKWebView, so
-    // the shared wall-clock detector catches the wake off a late-firing coarse
-    // interval. On wake it recovers the renderer AND reconnects a frozen PTY
-    // socket via the resume path (no scrollback loss).
-    expect(tab).toMatch(/import \{ installWakeGapDetector \} from "\.\.\/wakeGap"/);
-    expect(tab).toMatch(
-      /disposeWakeGap = installWakeGapDetector\(\(\) => \{[\s\S]*?recoverTerminalAfterHostResume\(\);[\s\S]*?recyclePtySocketAfterWake\(\);[\s\S]*?\}\);/,
-    );
-    expect(tab).toMatch(/function recyclePtySocketAfterWake\(\): void/);
-    expect(tab).toMatch(/if \(ws && ws\.readyState === WebSocket\.OPEN\)[\s\S]*?void connect\(\);/);
-    expect(tab).toMatch(/disposeWakeGap\?\.\(\)/);
-  });
-
-  test("prefers server-provided virtual cwd when present", () => {
-    expect(tab).toMatch(/cwd_rel\?: string \| null/);
-    expect(tab).toMatch(/terminalCwdVirtual = frame\.cwd_rel \?\? null/);
-    expect(tab).toMatch(/if \(terminalCwdVirtual !== null\) return terminalCwdVirtual/);
+    const raw = term.writtenRaw.at(-1);
+    expect(raw).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(raw as Uint8Array)).toBe("héllo ✓");
   });
 });

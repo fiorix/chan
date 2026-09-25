@@ -27,7 +27,7 @@ vi.mock("../api/desktop", async (importOriginal) => ({
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
-import { ui } from "../state/store.svelte";
+import { pathPromptState, resolvePathPrompt, ui, workspace } from "../state/store.svelte";
 import {
   attach,
   installTerminalDom,
@@ -42,6 +42,8 @@ import {
 installTerminalDom();
 
 afterEach(() => {
+  if (pathPromptState.open) resolvePathPrompt(null);
+  workspace.info = null;
   resetTerminals();
   clipboard.writes = [];
   ui.status = null;
@@ -84,5 +86,27 @@ describe("Copy path to $CWD", () => {
     await copyCwd();
     expect(clipboard.writes).toEqual([]);
     expect(ui.status).toBe("PTY did not report CWD");
+  });
+});
+
+describe("New File or Directory here", () => {
+  async function newEntryHere(): Promise<void> {
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.newFsEntry" } }));
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  test("opens at the cwd the server reported for the workspace, when it reported one", async () => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    await reportingCwd("/home/me/ws/notes", "projects/notes");
+    await newEntryHere();
+    expect(pathPromptState.defaultValue).toBe("projects/notes/");
+  });
+
+  test("otherwise opens at the absolute cwd taken relative to the workspace root", async () => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    await reportingCwd("/home/me/ws/notes", null);
+    await newEntryHere();
+    expect(pathPromptState.defaultValue).toBe("notes/");
   });
 });
