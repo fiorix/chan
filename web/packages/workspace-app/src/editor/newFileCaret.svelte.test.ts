@@ -5,65 +5,21 @@ import { type ComponentProps, flushSync, mount, unmount } from "svelte";
 import { EditorView } from "@codemirror/view";
 import SourceComponent from "./Source.svelte";
 import WysiwygComponent from "./Wysiwyg.svelte";
-import source from "./Source.svelte?raw";
-import wysiwyg from "./Wysiwyg.svelte?raw";
+import { installEditorDom } from "../__tests__/wysiwyg";
+
+installEditorDom();
 
 // A file opened without an explicit caret (File Browser double-click,
 // `cs open <file>`) must still land with a usable, focused caret -- not
 // stay unfocused until the user clicks in. The Draft path (Cmd+N) works
-// because it passes initialSelection; plain opens omit it. The fix lives
-// in each editor's maybeRestoreCaret(): treat an absent caret as document
-// start (0,0) and re-claim focus once content lands, instead of bailing.
+// because it passes initialSelection; plain opens omit it. Each editor
+// treats an absent caret as document start (0,0) and re-claims focus once
+// content lands.
 //
 // But that re-claim must run ONLY when external content actually lands, not
 // on the keystroke echo that writes `value` back from the live doc: a new
-// empty file goes empty -> non-empty on the FIRST keystroke, and re-running
-// maybeRestoreCaret there resets the caret to 0 so "Hello" lands as "elloH".
-
-const rawEditors: Array<[string, string]> = [
-  ["Source.svelte", source],
-  ["Wysiwyg.svelte", wysiwyg],
-];
-
-describe("new-file caret + focus (no persisted caret)", () => {
-  for (const [name, src] of rawEditors) {
-    test(`${name}: maybeRestoreCaret no longer bails when no caret is supplied`, () => {
-      // The early-return guard must NOT include the !caretPending bail --
-      // that is what skipped caret placement + the focus re-claim for
-      // plain opens.
-      expect(src).not.toMatch(
-        /function maybeRestoreCaret\(\): void \{\s*if \([^)]*!caretPending[^)]*\) return;/,
-      );
-      expect(src).toMatch(
-        /function maybeRestoreCaret\(\): void \{\s*if \(caretRestored \|\| !view\) return;/,
-      );
-    });
-
-    test(`${name}: absent caret defaults to document start (0,0)`, () => {
-      expect(src).toMatch(
-        /const target = caretPending \?\? \{ from: 0, to: 0 \};/,
-      );
-    });
-
-    test(`${name}: re-claims focus after placing the caret`, () => {
-      // The dispatch + caretRestored + deferred focus must all sit inside
-      // maybeRestoreCaret so the content-land path focuses regardless of
-      // whether a caret was supplied.
-      expect(src).toMatch(
-        /function maybeRestoreCaret\(\): void \{[\s\S]*?caretRestored = true;[\s\S]*?requestAnimationFrame\(\(\) => \{[\s\S]*?view\.focus\(\);/,
-      );
-    });
-
-    test(`${name}: value $effect only restores the caret on a real content change`, () => {
-      // Gating maybeRestoreCaret on the doc actually changing across
-      // applyExternal is what stops the first-keystroke reorder: a keystroke
-      // echo is a no-op apply (doc unchanged), so the caret is left alone.
-      expect(src).toMatch(
-        /const before = view\?\.state\.doc\.toString\(\);[\s\S]*?sync\.applyExternal\(view, value\);[\s\S]*?if \(view && before !== view\.state\.doc\.toString\(\)\) maybeRestoreCaret\(\);/,
-      );
-    });
-  }
-});
+// empty file goes empty -> non-empty on the FIRST keystroke, and placing the
+// caret there would reset it to 0 so "Hello" lands as "elloH".
 
 // ---- behavioral: mount the real editors and drive the value<->doc loop ----
 
@@ -210,19 +166,62 @@ describe("resetCaret re-drives an already-mounted editor", () => {
   }
 });
 
-describe("resetCaret export shape", () => {
-  for (const [name, src] of rawEditors) {
-    test(`${name}: exports resetCaret with selection + scrollIntoView + focus`, () => {
-      expect(src).toMatch(
-        /export function resetCaret\(from: number, to: number\): void \{[\s\S]*?selection: \{ anchor: f, head: t \},[\s\S]*?EditorView\.scrollIntoView\(f, \{ y: "nearest" \}\),[\s\S]*?view\.focus\(\);/,
-      );
-    });
+/// One animation frame: the editors defer their focus re-claim past it.
+function nextFrame(): Promise<void> {
+  return new Promise((r) => requestAnimationFrame(() => r()));
+}
 
-    test(`${name}: resetCaret is NOT gated by the caretRestored latch`, () => {
-      // It is the LIVE re-drive; a caretRestored guard would defeat the fix.
-      expect(src).not.toMatch(
-        /export function resetCaret\([^)]*\): void \{\s*if \([^)]*caretRestored/,
-      );
+describe("content landing in a file opened with no caret", () => {
+  for (const [name, Comp] of components) {
+    test(`${name}: places the caret at the start and focuses the editor after a same-tick blur`, async () => {
+      const props = $state({ autoFocus: true, path: "note.md", value: "" });
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(Comp, { target, props: props as ComponentProps<typeof SourceComponent> }));
+      flushSync();
+      const view = EditorView.findFromDOM(
+        (target.querySelector<HTMLElement>(".cm-editor") ?? target.querySelector<HTMLElement>(".cm-content"))!,
+      )!;
+      await nextFrame();
+
+      props.value = "first line\nsecond line";
+      flushSync();
+      // The open path can park focus elsewhere in the same tick.
+      view.contentDOM.blur();
+      expect(view.hasFocus).toBe(false);
+      await nextFrame();
+      expect(view.state.selection.main.head).toBe(0);
+      expect(view.hasFocus, "focus re-claimed once the content landed").toBe(true);
+    });
+  }
+});
+
+describe("resetCaret on an editor that owns its focus", () => {
+  for (const [name, Comp] of components) {
+    test(`${name}: scrolls the caret into view and focuses the editor`, async () => {
+      const scroll = vi.spyOn(EditorView, "scrollIntoView");
+      const target = document.createElement("div");
+      document.body.append(target);
+      const component = mount(Comp, {
+        target,
+        props: { autoFocus: true, path: "note.md", value: "abcdef" } as ComponentProps<typeof SourceComponent>,
+      });
+      mounted.push(component);
+      flushSync();
+      await nextFrame();
+      const view = EditorView.findFromDOM(
+        (target.querySelector<HTMLElement>(".cm-editor") ?? target.querySelector<HTMLElement>(".cm-content"))!,
+      )!;
+      const focus = vi.spyOn(view, "focus");
+      scroll.mockClear();
+
+      (component as unknown as { resetCaret: (from: number, to: number) => void }).resetCaret(2, 4);
+      flushSync();
+      expect(view.state.selection.main).toMatchObject({ anchor: 2, head: 4 });
+      expect(scroll).toHaveBeenCalledWith(2, { y: "nearest" });
+      await nextFrame();
+      expect(focus).toHaveBeenCalled();
+      scroll.mockRestore();
     });
   }
 });
