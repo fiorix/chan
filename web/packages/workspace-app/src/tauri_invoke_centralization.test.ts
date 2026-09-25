@@ -46,7 +46,7 @@ function isShipped(rel: string): boolean {
 }
 
 describe("tauri invoke centralization", () => {
-  // Source-text contract: the desktop ACL parity test reads the invoke vocabulary from api/desktop.ts alone.
+  // Source-text contract: the desktop ACL parity test reads the invoke vocabulary from api/desktop.ts and editor/external_links.ts, and tauriInvoke is called only in the first.
   test("tauriInvoke call sites live only in api/desktop.ts", () => {
     const offences: string[] = [];
     const CALL = /\btauriInvoke\s*[<(]/g;
