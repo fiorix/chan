@@ -4051,6 +4051,7 @@ impl Workspace {
         }
 
         // Pass 2 also reclaims index-only entries and files excluded by policy.
+        let mut listed = ListedNames::new(self.fs.dir());
         for rel in &known_paths {
             if disk_files.contains_key(rel) {
                 continue;
@@ -4060,6 +4061,16 @@ impl Workspace {
             } else {
                 match self.fs.dir().symlink_metadata(rel) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                    // On a case-insensitive volume the lookup also succeeds
+                    // for the spelling a case-only rename replaced; only the
+                    // parent's listing says which spelling it stores.
+                    Ok(_) if listed.lists(rel) == Some(false) => {
+                        tracing::debug!(
+                            rel = %rel,
+                            "reconcile: the parent no longer lists this spelling; forgetting it",
+                        );
+                        true
+                    }
                     Ok(_) => {
                         tracing::debug!(
                             rel = %rel,
