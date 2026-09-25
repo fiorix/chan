@@ -1,34 +1,53 @@
-import { describe, expect, test } from "vitest";
-import app from "../App.svelte?raw";
-import store from "./store.svelte.ts?raw";
+// @vitest-environment jsdom
+//
+// A workspace's first boot opens one empty pane: no Files tab is spawned
+// and no Files browser is docked on either side. The docks start off before
+// any preferences arrive, the same default chan-server writes into a fresh
+// preferences file, and a user's saved choice docks them.
 
-// First-boot File Browser UX: App.svelte does NOT spawn an FB tab on an
-// empty layout, AND the docked File Browser defaults to off on both
-// sides -- a new workspace opens with just the empty pane. chan-server's
-// BrowserSidePanes::default() mirrors this so a fresh preferences.toml
-// lands with left: false; existing user preferences override it via the
-// normal load path.
+import { afterEach, describe, expect, test, vi } from "vitest";
 
-describe("App.svelte first-boot FB-tab spawn removed", () => {
-  test("App.svelte no longer calls openBrowser() in the empty-layout branch", () => {
-    expect(app).not.toMatch(/if \(!hasAnyTab\) openBrowser\(\)/);
-  });
+vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
 
-  test("App.svelte no longer imports openBrowser", () => {
-    expect(app).not.toMatch(/^\s+openBrowser,\s*$/m);
-  });
+import { demoData, mountApp, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { browserSidePanes } from "./state/store.svelte";
+import { layout } from "./state/tabs.svelte";
+
+stubAppEnvironment();
+
+afterEach(async () => {
+  await unmountApp();
+  browserSidePanes.left = false;
+  browserSidePanes.right = false;
 });
 
-describe("browserSidePanes default is undocked", () => {
-  test("SPA default is {left: false, right: false}", () => {
-    expect(store).toMatch(
-      /export const browserSidePanes = \$state[\s\S]*?left: false,[\s\S]*?right: false/,
-    );
+describe("a workspace's first boot", () => {
+  test("docks no Files browser before preferences arrive", async () => {
+    vi.resetModules();
+    const fresh = await import("./state/store.svelte");
+
+    expect({ ...fresh.browserSidePanes }).toEqual({ left: false, right: false });
   });
 
-  test("rationale comment cites the chan-server side mirror", () => {
-    expect(store).toMatch(
-      /chan-server's `BrowserSidePanes::default\(\)` matches this/i,
-    );
+  test("opens one empty pane, with no Files tab and nothing docked", async () => {
+    const target = await mountApp();
+
+    const leaves = Object.values(layout.nodes).filter((node) => node.kind === "leaf");
+    expect(leaves).toHaveLength(1);
+    expect(leaves[0]).toMatchObject({ tabs: [] });
+    expect(target.querySelector(".browser-side-pane")).toBeNull();
+  });
+
+  test("docks the Files browser where the user's saved preferences say", async () => {
+    const target = await mountApp(demoData(), {
+      preferences: { browser_side_panes: { left: true, right: false } },
+    });
+
+    expect({ ...browserSidePanes }).toEqual({ left: true, right: false });
+    expect(target.querySelectorAll(".browser-side-pane")).toHaveLength(1);
   });
 });
