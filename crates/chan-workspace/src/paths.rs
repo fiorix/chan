@@ -410,9 +410,167 @@ pub fn canonical_root_hash8(workspace_root: &Path) -> String {
 /// testable off-Windows. Falls back to the (stripped) input when the root is
 /// missing or asleep.
 pub fn canonicalize_normalized(workspace_root: &Path) -> PathBuf {
+    #[cfg(any(test, feature = "test-hooks"))]
+    root_stall::stall_point(workspace_root);
     match dunce::canonicalize(workspace_root) {
         Ok(canonical) => strip_verbatim_prefix(&canonical),
         Err(_) => strip_verbatim_prefix(workspace_root),
+    }
+}
+
+/// Test seam: hold every canonicalization of one root, and of any path under
+/// it, until the test releases it, the way a stalled network mount holds the
+/// syscall.
+///
+/// Compiled for this crate's tests and for downstream test builds that enable
+/// `test-hooks`: chan-server's tests link chan-workspace as a normal
+/// dependency, so `cfg(test)` alone would not reach them. Each held call
+/// records the chain of chan functions that made it, so a test that finds an
+/// operation stuck can name the call that waited on the stalled root. Stalls
+/// are keyed by root, so tests that stall their own temporary roots do not
+/// interfere.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod root_stall {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Gate {
+        state: Mutex<GateState>,
+        changed: Condvar,
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        released: bool,
+        entered: Vec<String>,
+    }
+
+    static STALLS: OnceLock<Mutex<HashMap<PathBuf, Arc<Gate>>>> = OnceLock::new();
+
+    fn stalls() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Arc<Gate>>> {
+        STALLS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A stalled root. Dropping it releases every call it holds.
+    pub struct RootStall {
+        root: PathBuf,
+        gate: Arc<Gate>,
+    }
+
+    /// Stall every canonicalization of `root` and of the paths under it until
+    /// the returned guard drops. Panics when `root` is already stalled.
+    pub fn stall(root: impl Into<PathBuf>) -> RootStall {
+        let root = root.into();
+        let gate = Arc::new(Gate::default());
+        let previous = stalls().insert(root.clone(), Arc::clone(&gate));
+        assert!(previous.is_none(), "{} is already stalled", root.display());
+        RootStall { root, gate }
+    }
+
+    impl RootStall {
+        /// Wait up to `timeout` for a call to reach the stall; true when one
+        /// has.
+        pub fn wait_entered(&self, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            while state.entered.is_empty() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return false;
+                }
+                state = self
+                    .gate
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            true
+        }
+
+        /// The chan call chain of every call that has reached the stall,
+        /// innermost function first.
+        pub fn entered(&self) -> Vec<String> {
+            self.gate
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entered
+                .clone()
+        }
+    }
+
+    impl Drop for RootStall {
+        fn drop(&mut self) {
+            stalls().remove(&self.root);
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.released = true;
+            self.gate.changed.notify_all();
+        }
+    }
+
+    /// Hold the calling thread while `path` is under a stalled root.
+    pub(crate) fn stall_point(path: &Path) {
+        let Some(map) = STALLS.get() else {
+            return;
+        };
+        let gate = map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(root, _)| path.starts_with(root))
+            .map(|(_, gate)| Arc::clone(gate));
+        let Some(gate) = gate else {
+            return;
+        };
+        let chain = call_chain();
+        let mut state = gate.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.entered.push(chain);
+        gate.changed.notify_all();
+        while !state.released {
+            state = gate
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// The chan functions on the current stack, innermost first, joined by
+    /// ` <- `, without this module's own frames.
+    fn call_chain() -> String {
+        let trace = std::backtrace::Backtrace::force_capture().to_string();
+        let mut frames: Vec<&str> = Vec::new();
+        for line in trace.lines() {
+            let Some((_, symbol)) = line.trim_start().split_once(": ") else {
+                continue;
+            };
+            if !symbol.starts_with("chan_") || symbol.contains("root_stall") {
+                continue;
+            }
+            let symbol = symbol.trim_end_matches("::{{closure}}");
+            if frames.last() != Some(&symbol) {
+                frames.push(symbol);
+            }
+            if frames.len() == 8 {
+                break;
+            }
+        }
+        frames.join(" <- ")
     }
 }
 
