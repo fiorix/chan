@@ -587,6 +587,21 @@ describe("recovering unsaved work from an earlier page load", () => {
   });
 });
 
+describe("the caret command", () => {
+  test("moves the live editor's caret and clears itself", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const at = view.state.doc.toString().indexOf("paragraph");
+
+    tab.caretCommand = { from: at, to: at + 4 };
+    await settle(2);
+    expect(view.state.selection.main.from).toBe(at);
+    expect(view.state.selection.main.to).toBe(at + 4);
+    expect(tab.caretCommand).toBeUndefined();
+  });
+});
+
 describe("the slide chord", () => {
   const DECK = "---\nchan:\n  kind: slides\n---\n\n# One\n\n---\n\n# Two\n";
 
