@@ -17,6 +17,8 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import { bufferKey, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
+import { allCommands } from "../state/commands";
+import "../state/commands/install";
 import type { MockWorkspaceStore } from "../demo/store";
 import { githubDarkHighlight, githubLightHighlight } from "../editor/highlight";
 import {
@@ -925,4 +927,59 @@ describe("the editor surface's theme", () => {
       }
     });
   }
+});
+
+describe("the status line after a file action", () => {
+  function setClipboard(writeText: (text: string) => Promise<void>): void {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  }
+
+  afterEach(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    ui.status = null;
+    ui.statusKind = null;
+  });
+
+  test("Copy path to file says so briefly, and a refused clipboard leaves a dismissable error", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    setClipboard(async () => {});
+    await openMenu(tab);
+    row("Copy path to file").click();
+    await settle(2);
+    expect([ui.status, ui.statusKind]).toEqual(["Copied file path", "transient"]);
+
+    setClipboard(async () => {
+      throw new Error("denied");
+    });
+    await openMenu(tab);
+    row("Copy path to file").click();
+    await settle(2);
+    expect(ui.status).toMatch(/^copy failed: /);
+    expect(ui.statusKind).toBe("persistent");
+  });
+
+  test("the launcher's Copy path to file notifies briefly", async () => {
+    const tab = seat(fileTab());
+    await render(tab, { focused: true });
+    setClipboard(async () => {});
+    await allCommands().find((c) => c.id === "app.editor.copyPath")!.run();
+    await settle(2);
+    expect([ui.status, ui.statusKind]).toEqual(["Copied file path", "transient"]);
+  });
+
+  test("re-opening a moved file asks the user to pick it in Files, until the tab goes", async () => {
+    const tab = seat(fileTab({ path: "notes/moved.md", fileMissing: { path: "notes/moved.md", fragment: null } }));
+    const { target, component } = await render(tab);
+    const reopen = [...target.querySelectorAll<HTMLButtonElement>(".missing-actions button")].find(
+      (b) => b.textContent?.trim() === "Re-open",
+    );
+    reopen!.click();
+    await settle();
+    expect(ui.status).toBe("Choose the moved file in Files to re-open this tab");
+
+    unmount(component);
+    mounted.splice(mounted.indexOf(component), 1);
+    expect(ui.status).toBeNull();
+  });
 });

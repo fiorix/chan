@@ -86,6 +86,7 @@ describe("Copy path to $CWD", () => {
     await copyCwd();
     expect(clipboard.writes).toEqual([]);
     expect(ui.status).toBe("PTY did not report CWD");
+    expect(ui.statusKind, "dismissable, not auto-cleared").toBe("persistent");
   });
 });
 
