@@ -1,167 +1,222 @@
-import { describe, expect, test } from "vitest";
-import app from "../App.svelte?raw";
-import terminalCommands from "../state/commands/terminal.ts?raw";
-import terminal from "./TerminalTab.svelte?raw";
-import pane from "./Pane.svelte?raw";
+// @vitest-environment jsdom
+//
+// How a terminal carries its Rich Prompt: the prompt sink that sends `prompt`
+// frames, the queue and delivery frames that drive the tab's badge and the
+// pending card, the draft's cleanup on close, and the doors that open the
+// composer. A TerminalTab is mounted over the stand-in xterm and socket; the
+// window's drafts capability is stubbed so a test can take it away.
 
-function frameArm(type: string, nextType: string): string {
-  const startMarker = `frame.type === "${type}") {`;
-  const endMarker = `} else if (frame.type === "${nextType}")`;
-  const start = terminal.indexOf(startMarker);
-  const end = terminal.indexOf(endMarker, start);
-  if (start < 0 || end < 0) {
-    throw new Error(`missing ${type} frame arm before ${nextType}`);
-  }
-  return terminal.slice(start, end);
+import { mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+const caps = vi.hoisted(() => ({ drafts: true }));
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+vi.mock("../state/windowCaps", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/windowCaps")>()),
+  windowCaps: {
+    workspace: true,
+    files: true,
+    get drafts() {
+      return caps.drafts;
+    },
+    terminal: true,
+  },
+}));
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      createDraft: vi.fn(async () => ({ path: ".Drafts/rp/draft.md" })),
+      read: vi.fn(async () => ({ content: "" })),
+      write: vi.fn(async () => ({})),
+      discardDraft: vi.fn(async () => {}),
+    },
+  };
+});
+
+import Pane from "./Pane.svelte";
+import TerminalTab from "./TerminalTab.svelte";
+import { api } from "../api/client";
+import { allCommands } from "../state/commands";
+import "../state/commands/install";
+import { isRichPromptVisible, richPrompt } from "../state/richPrompt.svelte";
+import { chordFor } from "../state/shortcuts";
+import {
+  beginPendingPrompt,
+  closeTab,
+  layout,
+  sendPromptToTerminal,
+  type LeafNode,
+  type TerminalTab as TerminalTabState,
+} from "../state/tabs.svelte";
+import {
+  attach,
+  installTerminalDom,
+  menuRow,
+  mountTerminal,
+  openBodyMenu,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  sentFrames,
+  terminalTab,
+  TERMINAL_PANE,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+beforeEach(() => {
+  caps.drafts = true;
+  // The composer's editor measures on animation frames; the harness's
+  // synchronous frame would run those measures inside an update.
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+    setTimeout(() => cb(0), 0) as unknown as number) as typeof requestAnimationFrame;
+});
+
+afterEach(() => {
+  resetTerminals();
+  richPrompt.byTab = {};
+  vi.clearAllMocks();
+});
+
+async function attached(over: Partial<TerminalTabState> = {}, prelude: Record<string, unknown> = {}) {
+  const [tab] = seatTerminals([terminalTab(over)]);
+  const mounted = await mountTerminal(TerminalTab, tab!);
+  const socket = TerminalSocket.all.at(-1)!;
+  await attach(socket, prelude);
+  await receive(socket, { type: "ready", cols: 80, rows: 24 });
+  socket.sent.splice(0);
+  return { ...mounted, tab: tab!, socket };
 }
 
-function expectInOrder(source: string, ...snippets: string[]): void {
-  let cursor = -1;
-  for (const snippet of snippets) {
-    const next = source.indexOf(snippet, cursor + 1);
-    expect(next, `missing or out of order: ${snippet}`).toBeGreaterThan(cursor);
-    cursor = next;
+describe("the prompt sink", () => {
+  test("sends a prompt frame, with the agent and id when given, and never raw input", async () => {
+    const { tab, socket } = await attached();
+    expect(sendPromptToTerminal(tab.id, "run it", "claude", "m-1")).toBe(true);
+    expect(sendPromptToTerminal(tab.id, "plain")).toBe(true);
+
+    expect(sentFrames(socket)).toEqual([
+      { type: "prompt", data: "run it", agent: "claude", id: "m-1" },
+      { type: "prompt", data: "plain" },
+    ]);
+  });
+});
+
+describe("the queue frames", () => {
+  test("set the tab's queue depth outright, as the server counts it", async () => {
+    const { tab, socket } = await attached();
+    await receive(socket, { type: "queue", depth: 3 });
+    expect(tab.queueDepth).toBe(3);
+    await receive(socket, { type: "queue", depth: 0 });
+    expect(tab.queueDepth ?? 0).toBe(0);
+  });
+
+  test("an ack resolves the pending message as queued or rejected, a delivery as delivered", async () => {
+    const { tab, socket } = await attached();
+    for (const [frame, phase] of [
+      [{ type: "prompt-ack", id: "m-1", queued: true, depth: 1 }, "queued"],
+      [{ type: "prompt-ack", id: "m-1", queued: false, depth: 0 }, "rejected"],
+      [{ type: "prompt-delivered", id: "m-1", depth: 0 }, "delivered"],
+    ] as const) {
+      beginPendingPrompt(tab, "m-1");
+      await receive(socket, frame);
+      expect(tab.pendingPrompt?.phase, frame.type).toBe(phase);
+    }
+  });
+
+  test("an attach takes the queue depth and the submit agent from the session prelude", async () => {
+    const { tab } = await attached({}, { queue_depth: 2, submit_agent: "codex" });
+    expect(tab.queueDepth).toBe(2);
+    expect(tab.submitAgent).toBe("codex");
+  });
+
+  test("a lost socket fails the pending message and zeroes the badge", async () => {
+    const { tab, socket } = await attached({}, { queue_depth: 2 });
+    beginPendingPrompt(tab, "m-1");
+    socket.close();
+    expect(tab.pendingPrompt?.phase).toBe("failed");
+    expect(tab.queueDepth ?? 0).toBe(0);
+  });
+
+  for (const end of [{ type: "closed" }, { type: "exit", code: 0 }]) {
+    test(`a ${end.type} frame fails the pending message, zeroes the badge and ends the session`, async () => {
+      const { tab, socket } = await attached({}, { queue_depth: 2 });
+      beginPendingPrompt(tab, "m-1");
+      await receive(socket, end);
+      expect(tab.pendingPrompt?.phase).toBe("failed");
+      expect(tab.queueDepth ?? 0).toBe(0);
+      expect(tab.terminalSessionId).toBeUndefined();
+    });
   }
-}
+});
 
-// Rich Prompt - the terminal wiring: TerminalTab registers the prompt
-// sink (WS `prompt` frame, NOT raw input), mounts the bubble over the active
-// terminal, and exposes the right-click "Show/Hide Rich Prompt" entry. The
-// bubble component + toggle + sender are covered in
-// richPromptComponent.test.ts. Real interaction is browser-smoked.
+describe("the tab strip", () => {
+  test("shows a queued-messages pill on a terminal tab with a queue, and none without", async () => {
+    const [tab] = seatTerminals([terminalTab({ queueDepth: 2 })]);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const pane = mount(Pane, { target, props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode } });
+    await tick();
+    const pill = () => target.querySelector<HTMLElement>(".queue-pill");
+    expect(pill()?.textContent).toBe("2");
+    expect(pill()?.title).toBe("queued terminal messages");
 
-describe("TerminalTab Rich Prompt wiring", () => {
-  test("registers a prompt sink that sends the `prompt` frame (not raw input)", () => {
-    expect(terminal).toMatch(/registerTerminalPromptSink\(tab\.id, sendPrompt\)/);
-    expect(terminal).toMatch(
-      /function sendPrompt\(data: string, agent\?: string, id\?: string\): boolean \{[\s\S]{1,260}return send\(\{ type: "prompt", data, \.\.\.\(agent \? \{ agent \} : \{\}\), \.\.\.\(id \? \{ id \} : \{\}\) \}\)/,
-    );
+    tab!.queueDepth = undefined;
+    await tick();
+    expect(pill()).toBeNull();
+    unmount(pane);
+  });
+});
+
+describe("closing the terminal", () => {
+  test("discards its Rich Prompt draft and forgets its composer", async () => {
+    const { tab } = await attached({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    richPrompt.byTab[tab.id] = true;
+    // Forced, as the close chord does: a live terminal otherwise asks first.
+    await closeTab(TERMINAL_PANE, tab.id, { force: true });
+    expect(api.discardDraft).toHaveBeenCalledWith(".Drafts/rp/draft.md");
+    expect(isRichPromptVisible(tab.id)).toBe(false);
+  });
+});
+
+describe("the doors to the composer", () => {
+  test("the body menu's row shows or hides it and names the chord", async () => {
+    const { tab, target } = await attached();
+    const labels = await openBodyMenu(target);
+    expect(labels).toContain("Show Rich Prompt");
+    const row = menuRow("Show Rich Prompt");
+    expect(row.querySelector(".mbtn-chord")?.textContent).toBe(chordFor("terminal.richPrompt") ?? "");
+    row.click();
+    await tick();
+    expect(isRichPromptVisible(tab.id)).toBe(true);
+
+    expect(await openBodyMenu(target)).toContain("Hide Rich Prompt");
   });
 
-  test("queue-visibility frames: queue / prompt-ack / prompt-delivered drive tab state", () => {
-    // `queue` is the absolute LOGICAL MESSAGE depth on every change, so a
-    // drained batch of N notifications arrives as one N -> 0 step. The handler
-    // must assign it, never adjust the badge relative to its previous value.
-    expect(terminal).toMatch(
-      /frame\.type === "queue"\) \{\s*setTerminalQueueDepth\(tab, frame\.depth\);/,
-    );
-    expect(terminal).not.toMatch(/setTerminalQueueDepth\(tab, \(tab\.queueDepth/);
-    // prompt-ack resolves queued-or-rejected by id (stale/foreign ids no-op
-    // in the store); prompt-delivered resolves delivered. Both carry depth.
-    expect(terminal).toMatch(
-      /frame\.type === "prompt-ack"\) \{[\s\S]{1,400}resolvePendingPrompt\(tab, frame\.id, frame\.queued \? "queued" : "rejected", frame\.depth\);/,
-    );
-    expect(terminal).toMatch(
-      /frame\.type === "prompt-delivered"\) \{[\s\S]{1,260}resolvePendingPrompt\(tab, frame\.id, "delivered", frame\.depth\);/,
-    );
+  test("a window without a drafts store offers no menu row", async () => {
+    caps.drafts = false;
+    const { target } = await attached();
+    const labels = await openBodyMenu(target);
+    expect(labels.some((l) => l.endsWith("Rich Prompt"))).toBe(false);
   });
 
-  test("session frame re-syncs queue depth on every (re)attach", () => {
-    expect(terminal).toMatch(/queue_depth\?: number;/);
-    expect(terminal).toMatch(/setTerminalQueueDepth\(tab, frame\.queue_depth \?\? 0\);/);
-  });
-
-  test("session frame replaces the transient server-reported submit identity", () => {
-    expect(terminal).toMatch(/submit_agent\?: SubmitAgent;/);
-    expectInOrder(
-      frameArm("session", "renamed"),
-      "setTerminalSession(tab, frame.id);",
-      "setTerminalSubmitAgent(tab, frame.submit_agent);",
-    );
-  });
-
-  test("Pane tab strip shows the queue-depth pill for terminal tabs", () => {
-    // Same affordance family as the activity dot: only for terminal
-    // tabs, only when something is queued (0 collapses to undefined in
-    // the store, so truthiness alone would also work -- the explicit
-    // guard documents the intent).
-    expect(pane).toMatch(
-      /\{#if t\.kind === "terminal" && \(t\.queueDepth \?\? 0\) > 0\}[\s\S]{1,220}title="queued terminal messages"[\s\S]{1,120}\{t\.queueDepth\}/,
-    );
-    // A/B sides use the same strip orientation, so there is no flipped mirror
-    // selector that would need a queue-pill exception.
-    expect(pane).not.toContain(".tabs.flipped");
-  });
-
-  test("socket loss and session end fail the pending prompt and zero the badge", () => {
-    expect(terminal).toMatch(
-      /ws\.onclose = \(\) => \{[\s\S]{1,800}failPendingPrompt\(tab\);\s*setTerminalQueueDepth\(tab, 0\);/,
-    );
-    // closed/exit arms: depth 0 + fail BEFORE clearTerminalSession (the
-    // scrollback-snapshot clear, keyed by the now-dead session id, sits between
-    // the fail and the session clear -- still before clearTerminalSession).
-    expectInOrder(
-      frameArm("closed", "exit"),
-      "setTerminalQueueDepth(tab, 0);",
-      "failPendingPrompt(tab);",
-      "clearTerminalSession(tab);",
-    );
-    expectInOrder(
-      frameArm("exit", "error"),
-      "setTerminalQueueDepth(tab, 0);",
-      "failPendingPrompt(tab);",
-      "clearTerminalSession(tab);",
-    );
-  });
-
-  test("unregisters the prompt sink on teardown", () => {
-    expect(terminal).toMatch(
-      /const unregisterPrompt = registerTerminalPromptSink[\s\S]{1,400}unregisterPrompt\(\)/,
-    );
-  });
-
-  test("keeps <RichPrompt> mounted across tab switches, passing tab + focused", () => {
-    expect(terminal).toMatch(/import RichPrompt from "\.\/RichPrompt\.svelte"/);
-    // The tab is passed so the bubble binds to THIS terminal's per-terminal
-    // Drafts-backed draft; visibility is per-terminal (keyed by tab id), not a
-    // window-global flag. The mount guard is NOT gated on `active`: the bubble
-    // stays mounted like the terminal body (hidden by the root's visibility
-    // flip) so its editor keeps caret/selection/undo across a tab switch, and
-    // `focused` gates autofocus so a hidden bubble never steals the keyboard.
-    expect(terminal).toMatch(
-      /\{#if isRichPromptVisible\(tab\.id\)\}[\s\S]{1,120}<RichPrompt \{tab\} \{focused\} \/>/,
-    );
-    expect(terminal).not.toMatch(/\{#if active && isRichPromptVisible\(tab\.id\)\}/);
-  });
-
-  test("discards the per-terminal Rich Prompt draft folder on terminal close", () => {
-    // Draft lifecycle: the draft (draft.md + pasted media) is tied to the
-    // terminal; closing the terminal deletes the whole folder so nothing leaks.
-    expect(terminal).toMatch(
-      /function closeTerminalForTab\(\): boolean \{[\s\S]{1,900}if \(tab\.richPromptDraftPath\) \{[\s\S]{1,120}api\.discardDraft\(tab\.richPromptDraftPath\)/,
-    );
-  });
-
-  test("right-click menu has a Show/Hide Rich Prompt entry with the chord", () => {
-    expect(terminal).toMatch(
-      /onclick=\{toggleRichPromptFromMenu\}[\s\S]{1,260}isRichPromptVisible\(tab\.id\) \? "Hide Rich Prompt" : "Show Rich Prompt"[\s\S]{1,120}\{richPromptChord\}/,
-    );
-    expect(terminal).toMatch(
-      /const richPromptChord = chordFor\("terminal\.richPrompt"\) \?\? ""/,
-    );
-  });
-
-  test("the menu entry needs a drafts store, like every other door to Rich Prompt", () => {
-    // The draft lands in the tenant's drafts store, so the chord
-    // (App.svelte), the catalog entry (requirement: "drafts") and this menu
-    // row must agree. The row calls toggleRichPromptForTab directly, past both
-    // command gates, so its own guard is the only thing standing between a
-    // draftless window and a createDraft against a tenant with no drafts
-    // route.
-    expect(terminal).toMatch(
-      /\{#if windowCaps\.drafts\}[\s\S]{1,160}onclick=\{toggleRichPromptFromMenu\}/,
-    );
-    expect(terminal).toMatch(
-      /import \{ windowCaps \} from "\.\.\/state\/windowCaps"/,
-    );
-  });
-
-  test("command launcher exposes the same Rich Prompt toggle", () => {
-    expect(terminalCommands).toMatch(
-      /id: "terminal\.richPrompt",[\s\S]{1,220}title: "Show\/Hide Rich Prompt",[\s\S]{1,120}category: "Terminal",[\s\S]{1,160}available: onWorkspaceTerminal,[\s\S]{1,120}dispatchChanCommand\("terminal\.richPrompt"\)/,
-    );
-    expect(app).toMatch(
-      /case "terminal\.richPrompt": \{[\s\S]{1,160}const term = activeTerminalTab\(\);[\s\S]{1,120}if \(term\) toggleRichPromptForTab\(term\.id\);/,
-    );
+  test("the launcher's command asks the app to toggle it", async () => {
+    const command = allCommands().find((c) => c.id === "terminal.richPrompt")!;
+    expect(command).toMatchObject({ title: "Show/Hide Rich Prompt", category: "Terminal", requirement: "drafts" });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail?.name);
+    window.addEventListener("chan:command", listener);
+    await command.run();
+    window.removeEventListener("chan:command", listener);
+    expect(heard).toEqual(["terminal.richPrompt"]);
   });
 });
