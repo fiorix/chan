@@ -4414,298 +4414,255 @@ mod tests {
     /// must leave that tenant alone, and must not describe it as failed: the
     /// tenant is serving, and the attempt's failure is the caller's to hear.
     ///
-    /// The bound expires deterministically because a second root's build is
-    /// parked while holding the host's registration lock, so the attempt for
-    /// this root cannot get past its first await, and it needs no sleep.
-    #[tokio::test]
-    async fn a_timed_out_attempt_leaves_a_tenant_it_did_not_open() {
-        use tower::ServiceExt;
+    /// The bound expires deterministically because the runtime's only
+    /// blocking thread is parked: the host computes a root's key on that pool
+    /// before it takes any lock, so the attempt for this root cannot get past
+    /// its first await, and it needs no sleep.
+    #[test]
+    fn a_timed_out_attempt_leaves_a_tenant_it_did_not_open() {
+        one_blocking_thread_runtime().block_on(async {
+            use tower::ServiceExt;
 
-        let _env = chan_home_env_read();
-        let home = tempfile::tempdir().expect("home");
-        let ws = tempfile::tempdir().expect("workspace");
-        let blocker = tempfile::tempdir().expect("blocking workspace");
-        std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
-        std::fs::write(blocker.path().join("b.md"), "# B\n").expect("seed");
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let ws = tempfile::tempdir().expect("workspace");
+            std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            complete_test_startup(&state).await;
 
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let lib = Library::open_at(home.path().join("config.toml")).expect("library");
-        let host = Arc::new(WorkspaceHost::new(
-            lib,
-            Arc::new(ParkOneRootBuilder {
-                park: chan_workspace::paths::canonicalize_normalized(blocker.path()),
-                entered: Mutex::new(Some(entered_tx)),
-            }),
-        ));
-        host.install_workspace_overlay(Arc::new(WorkspaceOverlay::open(
-            home.path().join("devserver").join("workspaces.json"),
-        )));
-        let state = Arc::new(DevserverState {
-            host,
-            addr: "127.0.0.1:0".parse().unwrap(),
-            token: Arc::new(std::sync::RwLock::new("test-token".to_string())),
-            token_minted_at: AtomicU64::new(0),
-            library_id: "lib-test".into(),
-            host_label: "test".into(),
-            workspaces: Mutex::new(HashMap::new()),
-            mount_attempt_lock: tokio::sync::Mutex::new(()),
-            startup: Arc::new(StartupCoordinator::new()),
-            store: DevserverStore::at(home.path().join("devserver").join("config.json")),
-            persist_serial: Mutex::new(()),
-            bound_port: AtomicU16::new(0),
+            // A launcher add mounts the root on the host and leaves no devserver
+            // record, which is the precondition that puts a live tenant under a
+            // later devserver attempt.
+            let prefix = allocate_workspace_prefix(ws.path()).expect("prefix");
+            state
+                .host
+                .library()
+                .register_workspace(ws.path())
+                .expect("the launcher's registration");
+            let hosted = state
+                .host
+                .open_or_get_registered_workspace(ws.path(), tenant_config(state.addr, &prefix))
+                .await
+                .expect("the launcher's own mount");
+            let token = hosted.handle.token.clone().unwrap_or_default();
+            assert!(
+                state.host.is_root_mounted(ws.path()),
+                "fixture: root mounted"
+            );
+
+            // A live terminal session in that tenant: what a forced close destroys.
+            let command = if cfg!(windows) {
+                "ping -n 86397 127.0.0.1"
+            } else {
+                "exec sleep 86397"
+            };
+            let create = HttpRequest::builder()
+                .method("POST")
+                .uri(format!("{prefix}/api/terminals"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "t", "command": command}).to_string(),
+                ))
+                .unwrap();
+            let created = state
+                .host
+                .clone()
+                .router()
+                .oneshot(create)
+                .await
+                .expect("terminal request");
+            assert_eq!(created.status(), StatusCode::CREATED, "fixture: terminal");
+            assert_eq!(state.host.tenant_terminal_session_count(&prefix), 1);
+
+            // Park the runtime's only blocking thread.
+            let (unpark, parked_thread) = std::sync::mpsc::channel::<()>();
+            let parked = tokio::task::spawn_blocking(move || {
+                let _ = parked_thread.recv();
+            });
+
+            // The devserver now attempts the mounted root and cannot get past its
+            // first await, the key hop queued behind the parked thread, so the
+            // bound expires.
+            let attempt = state
+                .begin_mount(ws.path(), &prefix)
+                .expect("prepare mount")
+                .expect("fresh attempt");
+            let error = state
+                .execute_mount_attempt(attempt, Duration::from_millis(50))
+                .await
+                .expect_err("the bound expires");
+            assert!(
+                error.to_string().contains("timed out"),
+                "expected a timeout: {error}"
+            );
+
+            assert!(
+                state.host.is_root_mounted(ws.path()),
+                "the timeout closed a tenant this attempt did not open"
+            );
+            assert_eq!(
+                state.host.tenant_terminal_session_count(&prefix),
+                1,
+                "the timeout ended a terminal session nobody asked to end"
+            );
+            // The row the launcher reads, which is where the symptom showed: the
+            // prefix went to `error` with `on: false` over a tenant that is
+            // serving, so a client saw a failed workspace and could not reach it.
+            let row = state
+                .entry_for(&prefix)
+                .expect("a row for the attempted prefix");
+            assert_eq!(
+                row.status,
+                WorkspaceStatus::Running,
+                "a serving tenant must not wear this attempt's failure"
+            );
+            assert_eq!(
+                row.error, None,
+                "a serving tenant carries no failure reason"
+            );
+            unpark.send(()).expect("unpark the blocking thread");
+            parked.await.expect("parked blocking task");
         });
-        complete_test_startup(&state).await;
-
-        // A launcher add mounts the root on the host and leaves no devserver
-        // record, which is the precondition that puts a live tenant under a
-        // later devserver attempt.
-        let prefix = allocate_workspace_prefix(ws.path()).expect("prefix");
-        state
-            .host
-            .library()
-            .register_workspace(ws.path())
-            .expect("the launcher's registration");
-        let hosted = state
-            .host
-            .open_or_get_registered_workspace(ws.path(), tenant_config(state.addr, &prefix))
-            .await
-            .expect("the launcher's own mount");
-        let token = hosted.handle.token.clone().unwrap_or_default();
-        assert!(
-            state.host.is_root_mounted(ws.path()),
-            "fixture: root mounted"
-        );
-
-        // A live terminal session in that tenant: what a forced close destroys.
-        let command = if cfg!(windows) {
-            "ping -n 86397 127.0.0.1"
-        } else {
-            "exec sleep 86397"
-        };
-        let create = HttpRequest::builder()
-            .method("POST")
-            .uri(format!("{prefix}/api/terminals"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .body(Body::from(
-                serde_json::json!({"name": "t", "command": command}).to_string(),
-            ))
-            .unwrap();
-        let created = state
-            .host
-            .clone()
-            .router()
-            .oneshot(create)
-            .await
-            .expect("terminal request");
-        assert_eq!(created.status(), StatusCode::CREATED, "fixture: terminal");
-        assert_eq!(state.host.tenant_terminal_session_count(&prefix), 1);
-
-        // Park a second root's build, which holds the registration lock.
-        let parked_host = state.host.clone();
-        let parked_root = blocker.path().to_path_buf();
-        let parked_prefix = allocate_workspace_prefix(blocker.path()).expect("blocker prefix");
-        let parked_addr = state.addr;
-        parked_host
-            .library()
-            .register_workspace(blocker.path())
-            .expect("blocker registration");
-        let parked = tokio::spawn(async move {
-            let _ = parked_host
-                .open_or_get_registered_workspace(
-                    &parked_root,
-                    tenant_config(parked_addr, &parked_prefix),
-                )
-                .await;
-        });
-        // A park that never fires must fail this test in seconds, not hang the job.
-        tokio::time::timeout(Duration::from_secs(10), entered_rx)
-            .await
-            .unwrap_or_else(|_| panic!("the parked build never entered: park did not match"))
-            .expect("the parked build holds the lock");
-
-        // The devserver now attempts the mounted root and cannot get past its
-        // first await, so the bound expires.
-        let attempt = state
-            .begin_mount(ws.path(), &prefix)
-            .expect("prepare mount")
-            .expect("fresh attempt");
-        let error = state
-            .execute_mount_attempt(attempt, Duration::from_millis(50))
-            .await
-            .expect_err("the bound expires");
-        assert!(
-            error.to_string().contains("timed out"),
-            "expected a timeout: {error}"
-        );
-
-        assert!(
-            state.host.is_root_mounted(ws.path()),
-            "the timeout closed a tenant this attempt did not open"
-        );
-        assert_eq!(
-            state.host.tenant_terminal_session_count(&prefix),
-            1,
-            "the timeout ended a terminal session nobody asked to end"
-        );
-        // The row the launcher reads, which is where the symptom showed: the
-        // prefix went to `error` with `on: false` over a tenant that is
-        // serving, so a client saw a failed workspace and could not reach it.
-        let row = state
-            .entry_for(&prefix)
-            .expect("a row for the attempted prefix");
-        assert_eq!(
-            row.status,
-            WorkspaceStatus::Running,
-            "a serving tenant must not wear this attempt's failure"
-        );
-        assert_eq!(
-            row.error, None,
-            "a serving tenant carries no failure reason"
-        );
-        parked.abort();
     }
 
-    /// The window the pre-check used to leave open: another caller publishes a
-    /// tenant at this prefix WHILE the attempt waits, so a check taken before
-    /// the wait says the root is free and the expiry tears down a tenant that
-    /// arrived in between.
+    /// The window a check taken when the attempt begins would leave open:
+    /// another caller publishes a tenant at this root WHILE the attempt waits,
+    /// so such a check says the root is free and the expiry describes, or
+    /// tears down, a tenant that arrived in between.
     ///
-    /// Ordered, not timed. The target root's own build parks while holding the
-    /// registration lock; a second root queues behind it; the attempt queues
-    /// third, reading an unmounted root on its way past. Releasing the first
-    /// build publishes the tenant and hands the lock to the second root, which
-    /// parks for good, so the attempt can only expire, and by then the tenant
-    /// it never opened is serving.
-    #[tokio::test]
-    async fn a_timed_out_attempt_leaves_a_tenant_that_arrived_while_it_waited() {
-        let _env = chan_home_env_read();
-        let home = tempfile::tempdir().expect("home");
-        let ws = tempfile::tempdir().expect("workspace");
-        let blocker = tempfile::tempdir().expect("blocking workspace");
-        std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
-        std::fs::write(blocker.path().join("b.md"), "# B\n").expect("seed");
+    /// Ordered, not timed. The launcher's own mount of the root parks in its
+    /// build; the attempt begins, reading an unmounted root, and waits on the
+    /// devserver's attempt lock, which the test holds. The launcher's build
+    /// is then released and publishes the tenant. With the runtime's only
+    /// blocking thread parked, releasing the attempt lock lets the attempt
+    /// reach no further than the host's key hop, so it can only expire, and by
+    /// then the tenant it never opened is serving.
+    #[test]
+    fn a_timed_out_attempt_leaves_a_tenant_that_arrived_while_it_waited() {
+        one_blocking_thread_runtime().block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let ws = tempfile::tempdir().expect("workspace");
+            std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
 
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let lib = Library::open_at(home.path().join("config.toml")).expect("library");
-        let host = Arc::new(WorkspaceHost::new(
-            lib,
-            Arc::new(HandoffBuilder {
-                hold: chan_workspace::paths::canonicalize_normalized(ws.path()),
-                block: chan_workspace::paths::canonicalize_normalized(blocker.path()),
-                entered: Mutex::new(Some(entered_tx)),
-                release: Mutex::new(Some(release_rx)),
-            }),
-        ));
-        host.install_workspace_overlay(Arc::new(WorkspaceOverlay::open(
-            home.path().join("devserver").join("workspaces.json"),
-        )));
-        let state = Arc::new(DevserverState {
-            host,
-            addr: "127.0.0.1:0".parse().unwrap(),
-            token: Arc::new(std::sync::RwLock::new("test-token".to_string())),
-            token_minted_at: AtomicU64::new(0),
-            library_id: "lib-test".into(),
-            host_label: "test".into(),
-            workspaces: Mutex::new(HashMap::new()),
-            mount_attempt_lock: tokio::sync::Mutex::new(()),
-            startup: Arc::new(StartupCoordinator::new()),
-            store: DevserverStore::at(home.path().join("devserver").join("config.json")),
-            persist_serial: Mutex::new(()),
-            bound_port: AtomicU16::new(0),
-        });
-        complete_test_startup(&state).await;
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let lib = Library::open_at(home.path().join("config.toml")).expect("library");
+            let host = Arc::new(WorkspaceHost::new(
+                lib,
+                Arc::new(HoldOneRootBuilder {
+                    hold: chan_workspace::paths::canonicalize_normalized(ws.path()),
+                    entered: Mutex::new(Some(entered_tx)),
+                    release: Mutex::new(Some(release_rx)),
+                }),
+            ));
+            host.install_workspace_overlay(Arc::new(WorkspaceOverlay::open(
+                home.path().join("devserver").join("workspaces.json"),
+            )));
+            let state = Arc::new(DevserverState {
+                host,
+                addr: "127.0.0.1:0".parse().unwrap(),
+                token: Arc::new(std::sync::RwLock::new("test-token".to_string())),
+                token_minted_at: AtomicU64::new(0),
+                library_id: "lib-test".into(),
+                host_label: "test".into(),
+                workspaces: Mutex::new(HashMap::new()),
+                mount_attempt_lock: tokio::sync::Mutex::new(()),
+                startup: Arc::new(StartupCoordinator::new()),
+                store: DevserverStore::at(home.path().join("devserver").join("config.json")),
+                persist_serial: Mutex::new(()),
+                bound_port: AtomicU16::new(0),
+            });
+            complete_test_startup(&state).await;
 
-        let prefix = allocate_workspace_prefix(ws.path()).expect("prefix");
-        state
-            .host
-            .library()
-            .register_workspace(ws.path())
-            .expect("the launcher's registration");
-        state
-            .host
-            .library()
-            .register_workspace(blocker.path())
-            .expect("blocker registration");
+            let prefix = allocate_workspace_prefix(ws.path()).expect("prefix");
+            state
+                .host
+                .library()
+                .register_workspace(ws.path())
+                .expect("the launcher's registration");
 
-        // The launcher's own mount for this root, parked mid-build while it
-        // holds the registration lock. Nothing is published yet.
-        let launcher_host = state.host.clone();
-        let launcher_root = ws.path().to_path_buf();
-        let launcher_prefix = prefix.clone();
-        let launcher_addr = state.addr;
-        let launcher = tokio::spawn(async move {
-            let _ = launcher_host
-                .open_or_get_registered_workspace(
-                    &launcher_root,
-                    tenant_config(launcher_addr, &launcher_prefix),
-                )
-                .await;
-        });
-        // A park that never fires must fail this test in seconds, not hang the job.
-        tokio::time::timeout(Duration::from_secs(10), entered_rx)
-            .await
-            .unwrap_or_else(|_| panic!("the launcher build never entered: hold did not match"))
-            .expect("the launcher build holds the lock");
+            // The launcher's own mount for this root, parked mid-build. Nothing
+            // is published yet.
+            let launcher_host = state.host.clone();
+            let launcher_root = ws.path().to_path_buf();
+            let launcher_prefix = prefix.clone();
+            let launcher_addr = state.addr;
+            let launcher = tokio::spawn(async move {
+                launcher_host
+                    .open_or_get_registered_workspace(
+                        &launcher_root,
+                        tenant_config(launcher_addr, &launcher_prefix),
+                    )
+                    .await
+            });
+            // A park that never fires must fail this test in seconds, not hang the job.
+            tokio::time::timeout(Duration::from_secs(10), entered_rx)
+                .await
+                .unwrap_or_else(|_| panic!("the launcher build never entered: hold did not match"))
+                .expect("the launcher build parked");
 
-        // A second root queues on the lock BEFORE the attempt, so that when the
-        // launcher's build finishes the lock goes to a build that never ends.
-        let blocked_host = state.host.clone();
-        let blocked_root = blocker.path().to_path_buf();
-        let blocked_prefix = allocate_workspace_prefix(blocker.path()).expect("blocker prefix");
-        let blocked_addr = state.addr;
-        let blocked = tokio::spawn(async move {
-            let _ = blocked_host
-                .open_or_get_registered_workspace(
-                    &blocked_root,
-                    tenant_config(blocked_addr, &blocked_prefix),
-                )
-                .await;
-        });
-        tokio::task::yield_now().await;
+            // The attempt begins over an unmounted root and waits on the
+            // attempt lock.
+            let serialization = state.mount_attempt_lock.lock().await;
+            assert!(
+                !state.host.is_root_mounted(ws.path()),
+                "fixture: the tenant has not been published yet"
+            );
+            let attempt = state
+                .begin_mount(ws.path(), &prefix)
+                .expect("prepare mount")
+                .expect("fresh attempt");
+            let mut attempt =
+                std::pin::pin!(state.execute_mount_attempt(attempt, Duration::from_millis(200)));
+            let waiting = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(attempt.as_mut(), cx).is_pending())
+            })
+            .await;
+            assert!(
+                waiting,
+                "fixture: the attempt did not wait on the attempt lock"
+            );
 
-        assert!(
-            !state.host.is_root_mounted(ws.path()),
-            "fixture: the tenant has not been published yet"
-        );
-
-        let attempt = state
-            .begin_mount(ws.path(), &prefix)
-            .expect("prepare mount")
-            .expect("fresh attempt");
-        // Fires after the attempt has read the root and queued behind the
-        // second build, which is what puts the publication inside its wait.
-        let releaser = tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
+            // The launcher publishes while the attempt waits.
             let _ = release_tx.send(());
+            launcher
+                .await
+                .expect("launcher task")
+                .expect("the launcher's mount publishes");
+            assert!(
+                state.host.is_root_mounted(ws.path()),
+                "fixture: the tenant arrived while the attempt waited"
+            );
+
+            // Park the runtime's only blocking thread, then let the attempt run.
+            let (unpark, parked_thread) = std::sync::mpsc::channel::<()>();
+            let parked = tokio::task::spawn_blocking(move || {
+                let _ = parked_thread.recv();
+            });
+            drop(serialization);
+            let error = attempt.await.expect_err("the bound expires");
+            assert!(
+                error.to_string().contains("timed out"),
+                "expected a timeout: {error}"
+            );
+
+            assert!(
+                state.host.is_root_mounted(ws.path()),
+                "the expiry closed a tenant that was published while it waited"
+            );
+            let row = state
+                .entry_for(&prefix)
+                .expect("a row for the attempted prefix");
+            assert_eq!(
+                row.status,
+                WorkspaceStatus::Running,
+                "a serving tenant must not wear this attempt's failure"
+            );
+            unpark.send(()).expect("unpark the blocking thread");
+            parked.await.expect("parked blocking task");
         });
-        let error = state
-            .execute_mount_attempt(attempt, Duration::from_millis(200))
-            .await
-            .expect_err("the bound expires");
-        assert!(
-            error.to_string().contains("timed out"),
-            "expected a timeout: {error}"
-        );
-
-        assert!(
-            state.host.is_root_mounted(ws.path()),
-            "the expiry closed a tenant that was published while it waited"
-        );
-        let row = state
-            .entry_for(&prefix)
-            .expect("a row for the attempted prefix");
-        assert_eq!(
-            row.status,
-            WorkspaceStatus::Running,
-            "a serving tenant must not wear this attempt's failure"
-        );
-
-        releaser.abort();
-        blocked.abort();
-        launcher.abort();
     }
 
     /// The other side of the same rule: with nothing serving the root, the
@@ -4765,6 +4722,16 @@ mod tests {
     /// Build a `DevserverState` over a sandbox dir for the on/off
     /// state-machine tests: a fresh `Library`, an empty host, and a devserver
     /// store under `home`.
+    /// A runtime whose blocking pool is one thread, so a test that parks that
+    /// thread holds every later blocking hop behind it.
+    fn one_blocking_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
     fn test_state(home: &Path, addr: SocketAddr) -> Arc<DevserverState> {
         let lib = Library::open_at(home.join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
@@ -5300,84 +5267,23 @@ mod tests {
         assert_eq!(asserted.status(), StatusCode::NO_CONTENT);
     }
 
-    /// Parks the tenant build for one chosen root and builds a real tenant for
-    /// every other. The parked build holds the host's registration lock, which
-    /// is what an attempt for an unrelated root then waits on, so a bound can
-    /// be made to expire over a live tenant with no sleep.
+    /// Parks the tenant build of the root `hold` until the test releases it,
+    /// announcing itself on `entered` first, and builds a real tenant for
+    /// every other root.
     ///
-    /// `park` holds the root in the registry's canonical form. The registry
+    /// `hold` holds the root in the registry's canonical form. The registry
     /// stores canonical roots and `Workspace::root()` returns that stored form,
     /// while a `TempDir` path is spelled as `TMPDIR` spells it: on macOS that is
     /// `/var/folders/...` and `/var` is a symlink to `/private/var`, so a raw
     /// temp path never equals the root the builder is handed.
-    struct ParkOneRootBuilder {
-        park: PathBuf,
-        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl chan_library::TenantBuilder for ParkOneRootBuilder {
-        async fn build_workspace(
-            &self,
-            library: Library,
-            workspace: Arc<chan_workspace::Workspace>,
-            config: &ServeConfig,
-            desktop: crate::DesktopBridge,
-            unserve: chan_library::UnserveMode,
-            control_identity: Option<String>,
-        ) -> Result<chan_library::TenantArtifacts, Error> {
-            if workspace.root() == self.park {
-                if let Some(entered) = self
-                    .entered
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take()
-                {
-                    let _ = entered.send(());
-                }
-                std::future::pending::<()>().await;
-            }
-            let artifacts = crate::build_app(
-                library,
-                workspace,
-                config,
-                desktop,
-                unserve,
-                control_identity,
-            )
-            .await?;
-            Ok(crate::into_tenant_artifacts(artifacts))
-        }
-
-        async fn build_terminal(
-            &self,
-            _library: Library,
-            _config: &ServeConfig,
-            _desktop: crate::DesktopBridge,
-            _unserve: chan_library::UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
-            _control_identity: Option<String>,
-        ) -> Result<chan_library::TenantArtifacts, Error> {
-            Err(Error::Config("parking builder has no terminal".into()))
-        }
-    }
-
-    /// Parks two roots differently so a test can hand the host's registration
-    /// lock from one waiter to the next in a chosen order: `hold` parks until
-    /// the test releases it, announcing itself on `entered` first, and `block`
-    /// parks for good. Every other root builds normally. `hold` and `block` are
-    /// canonical for the reason given on `ParkOneRootBuilder`.
-    struct HandoffBuilder {
+    struct HoldOneRootBuilder {
         hold: PathBuf,
-        block: PathBuf,
         entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
         release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     }
 
     #[async_trait::async_trait]
-    impl chan_library::TenantBuilder for HandoffBuilder {
+    impl chan_library::TenantBuilder for HoldOneRootBuilder {
         async fn build_workspace(
             &self,
             library: Library,
@@ -5406,9 +5312,6 @@ mod tests {
                     let _ = release.await;
                 }
             }
-            if workspace.root() == self.block {
-                std::future::pending::<()>().await;
-            }
             let artifacts = crate::build_app(
                 library,
                 workspace,
@@ -5432,7 +5335,7 @@ mod tests {
             _drafts_store_root: Option<PathBuf>,
             _control_identity: Option<String>,
         ) -> Result<chan_library::TenantArtifacts, Error> {
-            Err(Error::Config("handoff builder has no terminal".into()))
+            Err(Error::Config("holding builder has no terminal".into()))
         }
     }
 
