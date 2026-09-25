@@ -1096,7 +1096,9 @@ impl RootedFs {
                 return Err(stage.discard(error));
             }
             // The file has left its stage; dropping the guard removes the
-            // empty directory.
+            // emptied directory, best effort. A failure there is only logged
+            // and the copy still succeeds: the file has already landed at
+            // `to`, and an error now would report a finished copy as failed.
             drop(stage);
             // The atomic writer synced the stage directory and checked the
             // root before this rename committed; do both for the directory
@@ -1461,8 +1463,9 @@ impl RootedFs {
 }
 
 /// A copy's stage directory beside its destination. Dropping it removes the
-/// stage unless it was published or discarded, so a copy that unwinds
-/// between creating the stage and publishing it strands nothing.
+/// stage, best effort and logged on failure, unless it was published or
+/// discarded, so a copy that unwinds between creating the stage and
+/// publishing it strands nothing.
 struct CopyStage<'a> {
     fs: &'a RootedFs,
     name: String,
@@ -1481,8 +1484,9 @@ impl CopyStage<'_> {
         self.armed = false;
     }
 
-    /// Remove a failed copy's stage and return the error to report, with any
-    /// cleanup failure folded in so a stage left behind is never silent.
+    /// Remove the stage of a copy that failed and return the error to report,
+    /// with any cleanup failure folded into it, so a failed copy that leaves
+    /// its stage behind says so.
     fn discard(mut self, error: ChanError) -> ChanError {
         self.armed = false;
         let stage = &self.name;
