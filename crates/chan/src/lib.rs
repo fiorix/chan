@@ -11589,6 +11589,45 @@ mod tests {
         );
     }
 
+    /// The flags a restart reads back come from the command a definition
+    /// runs, never from its environment: a unit's `Environment=` lines render
+    /// before `ExecStart=`, and a PATH entry may hold the same text.
+    #[test]
+    fn persisted_flags_come_from_the_command_line_only() {
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let unit = devserver_systemd_unit_spec(Path::new("/usr/bin/chan"), addr, None, None)
+            .with_search_path(std::ffi::OsStr::new(
+                "/opt/x--port=1/bin:/opt/y--tunnel-url=https://z/bin:/usr/bin",
+            ))
+            .render();
+        assert_eq!(
+            persisted_flag_value(&unit, "--port="),
+            Some("8787"),
+            "the port must come from ExecStart: {unit}"
+        );
+        assert_eq!(devserver_addr_from_persisted_args(&unit), Some(addr));
+        assert_eq!(
+            persisted_tunnel_url(&unit),
+            None,
+            "a local unit must not read as a tunnel unit: {unit}"
+        );
+
+        // A plist keeps the flags in ProgramArguments, wherever its
+        // environment sits.
+        let plist = "<dict>\n  <key>EnvironmentVariables</key>\n  <dict>\n    \
+                     <key>PATH</key>\n    <string>/opt/x--port=1/bin:/usr/bin</string>\n  \
+                     </dict>\n  <key>ProgramArguments</key>\n  <array>\n    \
+                     <string>/usr/local/bin/chan</string>\n    <string>devserver</string>\n    \
+                     <string>run</string>\n    <string>--bind=127.0.0.1</string>\n    \
+                     <string>--port=8787</string>\n  </array>\n</dict>\n";
+        assert_eq!(
+            persisted_flag_value(plist, "--port="),
+            Some("8787"),
+            "the port must come from ProgramArguments: {plist}"
+        );
+        assert_eq!(devserver_addr_from_persisted_args(plist), Some(addr));
+    }
+
     /// `status` command extraction: the systemd ExecStart value and the
     /// launchd ProgramArguments joined (with plist `<string>` values unescaped).
     #[test]
