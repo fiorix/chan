@@ -9,7 +9,8 @@
 // last one), then offers Flip and Reload. Its carousel shows the workspace,
 // the index graph and an About slide with the version, the build, the links,
 // the donation QR and the free-software line; its dots and rotation skip a
-// switched-off slide. A lone pane with no tabs shows the welcome surface
+// switched-off slide, and its index graph draws only while the carousel is
+// active. A lone pane with no tabs shows the welcome surface
 // instead, and the pane menu's Apps rows, in title order, spawn every tab
 // kind, the dashboard included.
 
@@ -26,6 +27,7 @@ import { api } from "../api/client";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { boardLoaded } from "../__tests__/excalidraw";
 import { fileTab, resetLayout } from "../__tests__/tabs";
+import { indexingCache } from "../state/indexingStatus.svelte";
 import { openTabMenu } from "../state/tabMenu.svelte";
 import {
   DASHBOARD_SLOT_COUNT,
@@ -259,6 +261,37 @@ describe("the carousel's slides", () => {
     show({ slide: 0, autoRotate: false, onSlideChange: (i: number) => paused.push(i) });
     vi.advanceTimersByTime(11_000);
     expect(paused).toEqual([]);
+  });
+
+  test("draws the index graph while it is active and stops drawing while it is not", async () => {
+    const state = {
+      root: "",
+      nodes: [
+        { path: "", state: "indexed" as const, children_count: 1 },
+        { path: "docs", state: "indexed" as const, children_count: 0 },
+      ],
+    };
+    vi.mocked(api.indexingState).mockResolvedValue(state);
+    // An inactive carousel does not poll; it draws what the last poll left.
+    indexingCache.last = state;
+    const frames = vi.spyOn(globalThis, "requestAnimationFrame");
+    async function framesDrawn(active: boolean): Promise<number> {
+      show({ slide: 1, active });
+      await vi.waitFor(() => expect(target.querySelector(".indexing-graph-host canvas")).not.toBeNull());
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const before = frames.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      unmount(view!);
+      view = null;
+      return frames.mock.calls.length - before;
+    }
+
+    try {
+      expect(await framesDrawn(true)).toBeGreaterThan(0);
+      expect(await framesDrawn(false)).toBe(0);
+    } finally {
+      indexingCache.last = null;
+    }
   });
 });
 
