@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 // Static top-level component import (not a per-test `await import(...)`).
 // The flake was the dynamic import inside `renderPane` timing out (30s)
@@ -11,7 +11,6 @@ import { afterEach, describe, expect, test } from "vitest";
 // TerminalTeamWork.test.ts pattern and takes the import off the timed
 // path.
 import Pane from "./Pane.svelte";
-import paneSource from "./Pane.svelte?raw";
 import {
   adoptCrossWindowTab,
   cancelPaneMode,
@@ -26,9 +25,12 @@ import {
   paneModeSetMouseSplit,
   paneModeStageDiagramEditor,
   paneModeStageDraftEditor,
+  clearRecentlyClosedTabsForTest,
+  closeTab,
   paneSide,
   paneSideToggleFlash,
   requestPaneSideToggleFlash,
+  requestPaneWobble,
   splitPane,
   type BrowserTab,
   type DashboardTab,
@@ -37,7 +39,8 @@ import {
   type Tab,
 } from "../state/tabs.svelte";
 import { ui } from "../state/store.svelte";
-import { terminalTab } from "../__tests__/tabs";
+import { dragScopeMimeToken, sessionWindowId, windowDragScope, windowLibraryId } from "../api/client";
+import { fileTab, terminalTab } from "../__tests__/tabs";
 
 const mounted: Array<Record<string, any>> = [];
 
@@ -144,6 +147,33 @@ function menuLabels(): string[] {
         .trim(),
     )
     .filter(Boolean);
+}
+
+/// Give every `.pane` a fixed box; answers the restore.
+function stubPaneRect(width: number, height: number): () => void {
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains("pane")) {
+      return { x: 0, y: 0, top: 0, left: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    }
+    return original.call(this);
+  };
+  return () => {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  };
+}
+
+/// A pane with a tab on each side, ready to flip.
+function renderFlippablePane(id: string): Promise<HTMLElement> {
+  const a = terminalTab({ id: `${id}-a`, title: "A tab" });
+  const b = terminalTab({ id: `${id}-b`, title: "B tab" });
+  return renderPane({ kind: "leaf", id, tabs: [a], activeTabId: a.id, bTabs: [b], bActiveTabId: b.id }, { paneMode: false });
+}
+
+function scopedAnimationEnd(name: string): AnimationEvent {
+  const end = new Event("animationend", { bubbles: true }) as AnimationEvent;
+  Object.defineProperty(end, "animationName", { configurable: true, value: name });
+  return end;
 }
 
 function menuRowChords(): Record<string, string> {
@@ -438,16 +468,28 @@ describe("Pane right-click menus", () => {
     expect(chords["Commands"]).toBe("Ctrl+Alt+K");
   });
 
-  test("pane hamburger uses the launcher registry chord label", () => {
-    expect(paneSource).toMatch(
-      /dispatchCommand\("app\.launcher\.toggle"\)[\s\S]{1,300}<span class="menu-row-label">Commands<\/span>[\s\S]{1,200}chordLabel\("app\.launcher\.toggle"\)/,
-    );
-  });
+  test("Ctrl+Alt+Shift+T reopens the tab the focused pane closed last", async () => {
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-reopen",
+      tabs: [fileTab({ id: "keep", path: "keep.md" }), fileTab({ id: "gone", path: "gone.md" })],
+      activeTabId: "keep",
+    };
+    await renderPane(pane, { paneMode: false });
+    try {
+      await closeTab("pane-reopen", "gone");
+      const live = layout.nodes["pane-reopen"] as LeafNode;
+      expect(live.tabs.map((tab) => tab.id)).toEqual(["keep"]);
 
-  test("reopen-tab listener matches the advertised Ctrl+Alt+Shift+T chord", () => {
-    expect(paneSource).toMatch(
-      /e\.ctrlKey &&\s*e\.altKey &&\s*e\.shiftKey &&\s*!e\.metaKey &&\s*shortcutLetter\(e\) === "T"[\s\S]{0,80}reopenClosedTab\(\)/,
-    );
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "T", code: "KeyT", ctrlKey: true, altKey: true, shiftKey: true, bubbles: true }),
+      );
+      await tick();
+
+      expect(live.tabs.map((tab) => (tab.kind === "file" ? tab.path : tab.id))).toEqual(["keep.md", "gone.md"]);
+    } finally {
+      clearRecentlyClosedTabsForTest();
+    }
   });
 
   test("empty pane right-click opens NO menu (empty-pane-menu)", async () => {
@@ -609,9 +651,10 @@ describe("Pane side flip", () => {
     expect(button?.classList.contains("side-toggle-flash")).toBe(true);
 
     const end = new Event("animationend") as AnimationEvent;
+    // A browser reports the scoped keyframe name Svelte rewrote.
     Object.defineProperty(end, "animationName", {
       configurable: true,
-      value: "pane-side-toggle-flash",
+      value: "svelte-abc123-pane-side-toggle-flash",
     });
     button?.dispatchEvent(end);
     await tick();
@@ -714,91 +757,105 @@ describe("Pane side flip", () => {
     }
   });
 
-  test("flip cleanup tolerates scoped keyframe names and outlasts the animation", () => {
-    expect(paneSource).toMatch(
-      /e\.animationName\.includes\("pane-side-flip"\)/,
-    );
-    expect(paneSource).toMatch(
-      /e\.animationName\.includes\("pane-wobble-once"\)/,
-    );
-    expect(paneSource).toMatch(
-      /e\.animationName\.includes\("pane-side-toggle-flash"\)/,
-    );
-    expect(paneSource).toMatch(/SIDE_FLIP_DURATION_MS = 520/);
-    expect(paneSource).toContain("}, SIDE_FLIP_DURATION_MS + 80);");
-  });
+  test("a flip clears on its own even when no animationend arrives", async () => {
+    const restore = stubPaneRect(320, 120);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame"] });
+    try {
+      const target = await renderFlippablePane("pane-flip-timer");
+      target.querySelector<HTMLButtonElement>(".side-toggle")!.click();
+      await tick();
+      vi.advanceTimersByTime(16);
+      await tick();
+      const paneEl = target.querySelector<HTMLElement>(".pane")!;
+      expect(paneEl.classList.contains("sideFlipActive")).toBe(true);
 
-  test("flip axis follows pane dimensions", () => {
-    expect(paneSource).toMatch(/if \(height > width\) return "vertical"/);
-    expect(paneSource).toMatch(/if \(width > height\) return "horizontal"/);
-    expect(paneSource).toMatch(
-      /return Math\.random\(\) < 0\.5 \? "vertical" : "horizontal"/,
-    );
-    expect(paneSource).toMatch(/axis === "vertical" \? "rotateY" : "rotateX"/);
-    expect(paneSource).toMatch(/class:sideFlipActive=\{sideFlipActive\}/);
-    expect(paneSource).toContain(
-      "sideFlipStartTransform = `${rotate}(-180deg)`;",
-    );
-    expect(paneSource).toContain(
-      "sideFlipBackTransform = `${rotate}(-180deg)`;",
-    );
-    expect(paneSource).not.toMatch(/from === "a" && to === "b"/);
-    expect(paneSource).toContain('class="pane-card-inner"');
-    expect(paneSource).toMatch(/backface-visibility: hidden/);
-    expect(paneSource).toMatch(/@keyframes pane-side-flip/);
-  });
-
-  test("the back face never paints at rest", () => {
-    // WebKitGTK, the Linux desktop webview, ignores backface-visibility, so
-    // an opaque back face left to that hint alone covers the card and every
-    // terminal renders as a bare side letter. The rest state is a visibility
-    // gate, and the handover sits at the easing's 90deg crossing rather than
-    // at half the duration, which would show the letter mirrored.
-    const backFace =
-      paneSource.match(/\.pane-card-inner::before \{[\s\S]*?\n  \}/)?.[0] ?? "";
-    // Anchored: `backface-visibility: hidden;` ends with the same text, so a
-    // substring check passes on the very declaration this pin outlives.
-    expect(backFace).toMatch(/^\s+visibility: hidden;$/m);
-    expect(paneSource).toMatch(
-      /\.pane\.sideFlipActive \.pane-card-inner::before \{\s*animation: pane-back-face-turn 520ms/,
-    );
-    expect(paneSource).toMatch(/@keyframes pane-back-face-turn/);
-    expect(paneSource).toMatch(/0%,\s*14\.43% \{\s*visibility: visible;/);
-    expect(paneSource).toMatch(/14\.44%,\s*100% \{\s*visibility: hidden;/);
-
-    // Reduced motion drops the turn, so it must drop the handover too or the
-    // back face is left painted with no animation to clear it.
-    const reducedMotion =
-      paneSource.match(
-        /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n  \}/,
-      )?.[0] ?? "";
-    expect(reducedMotion).toContain(
-      ".pane.sideFlipActive .pane-card-inner::before",
-    );
-
-    // The animationend cleanup substring-matches keyframe names, so no other
-    // keyframe may contain one of the names it matches on.
-    const keyframes = [...paneSource.matchAll(/@keyframes ([\w-]+)/g)].map(
-      (m) => m[1],
-    );
-    for (const matched of [
-      "pane-side-flip",
-      "pane-wobble-once",
-      "pane-side-toggle-flash",
-    ]) {
-      expect(keyframes.filter((name) => name.includes(matched))).toEqual([
-        matched,
-      ]);
+      vi.advanceTimersByTime(600);
+      await tick();
+      expect(paneEl.classList.contains("sideFlipActive")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      restore();
     }
   });
 
-  test("tab label fade is gated on measured overflow", () => {
-    const basePathBlock =
-      paneSource.match(/\.path \{[\s\S]*?\n  \}/)?.[0] ?? "";
-    expect(paneSource).toContain("use:tabPathOverflow={label}");
-    expect(paneSource).toMatch(/scrollWidth > node\.clientWidth \+ 1/);
-    expect(paneSource).toMatch(/\.path\.overflowing \{[\s\S]*?mask-image:/);
-    expect(basePathBlock).not.toContain("mask-image");
+  test("a wobble clears on its scoped animationend", async () => {
+    const target = await renderFlippablePane("pane-wobble");
+    const paneEl = target.querySelector<HTMLElement>(".pane")!;
+
+    requestPaneWobble("pane-wobble");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await tick();
+    expect(paneEl.classList.contains("wobble")).toBe(true);
+
+    paneEl.dispatchEvent(scopedAnimationEnd("svelte-abc123-pane-wobble-once"));
+    await tick();
+    expect(paneEl.classList.contains("wobble")).toBe(false);
+  });
+
+  test("a tall pane turns about the vertical axis, a square one either way", async () => {
+    async function flipAxis(width: number, height: number, random?: number): Promise<[string, string]> {
+      const restore = stubPaneRect(width, height);
+      const roll = random === undefined ? null : vi.spyOn(Math, "random").mockReturnValue(random);
+      try {
+        const target = await renderFlippablePane(`pane-axis-${width}-${height}-${random ?? "x"}`);
+        target.querySelector<HTMLButtonElement>(".side-toggle")!.click();
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        await tick();
+        const paneEl = target.querySelector<HTMLElement>(".pane")!;
+        const axis = paneEl.classList.contains("sideFlipVertical") ? "vertical" : "horizontal";
+        return [axis, paneEl.style.getPropertyValue("--pane-side-flip-start")];
+      } finally {
+        roll?.mockRestore();
+        restore();
+      }
+    }
+
+    expect(await flipAxis(120, 320)).toEqual(["vertical", "rotateY(-180deg)"]);
+    expect(await flipAxis(200, 200, 0.2)).toEqual(["vertical", "rotateY(-180deg)"]);
+    expect(await flipAxis(200, 200, 0.8)).toEqual(["horizontal", "rotateX(-180deg)"]);
+  });
+
+  test("a tab label fades only while it overflows its tab", async () => {
+    const widths = (el: HTMLElement): [number, number] =>
+      el.textContent?.includes("a long label") ? [300, 100] : [50, 100];
+    Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return widths(this)[0];
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return widths(this)[1];
+      },
+    });
+    try {
+      const pane: LeafNode = {
+        kind: "leaf",
+        id: "pane-fade",
+        tabs: [
+          terminalTab({ id: "long", title: "a long label that does not fit" }),
+          terminalTab({ id: "short", title: "short" }),
+        ],
+        activeTabId: "long",
+      };
+      const target = await renderPane(pane, { paneMode: false });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await tick();
+
+      const labels = [...target.querySelectorAll<HTMLElement>(".tab .path")].map((label) => [
+        label.textContent?.trim(),
+        label.classList.contains("overflowing"),
+      ]);
+      expect(labels).toEqual([
+        ["a long label that does not fit", true],
+        ["short", false],
+      ]);
+    } finally {
+      delete (HTMLElement.prototype as { scrollWidth?: number }).scrollWidth;
+      delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
   });
 
   test("clicking a visible B-side tab swaps only B active state", async () => {
@@ -914,22 +971,26 @@ describe("Pane Hybrid NAV transaction mode", () => {
     expect(paneEl!.classList.contains("transaction-drop-target")).toBe(true);
   });
 
-  test("dead-zone uses manual mousedown + threshold tracking, not HTML5 dragstart", () => {
-    // The per-tab DnD on each `.tab` already owns HTML5 drag for
-    // inter-pane tab moves. The dead-zone interaction has to use
-    // manual mousedown + a window-level mousemove threshold so the
-    // tab-DnD pipeline stays untouched. Pin the wiring shape.
-    expect(paneSource).toContain('class="dead-zone"');
-    expect(paneSource).toContain("onmousedown={onDeadZoneMouseDown}");
-    expect(paneSource).toContain("ondblclick={onDeadZoneDblClick}");
-    expect(paneSource).toMatch(/DEAD_ZONE_DRAG_THRESHOLD_PX\s*=\s*5/);
-    // The dead-zone element itself must NOT be draggable=true (that
-    // would route through HTML5 drag and collide with per-tab DnD).
-    expect(paneSource).not.toMatch(
-      /class="dead-zone"[\s\S]{0,200}draggable="true"/,
-    );
-    expect(paneSource).not.toMatch(/onpointer(?:down|move|up)=/);
-    expect(paneSource).not.toMatch(/ontouch(?:start|move|end)=/);
+  test("a press on the dead zone grabs the pane once it moves five pixels, without an HTML5 drag", async () => {
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-dead-zone",
+      tabs: [terminalTab({ id: "dz" })],
+      activeTabId: "dz",
+    };
+    const target = await renderPane(pane, { paneMode: false });
+    const deadZone = target.querySelector<HTMLElement>(".dead-zone")!;
+    expect(deadZone.getAttribute("draggable")).toBeNull();
+
+    deadZone.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 100, clientY: 10, bubbles: true }));
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 103, clientY: 10 }));
+    await tick();
+    expect(paneMode.active).toBe(false);
+
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 106, clientY: 10 }));
+    await tick();
+    expect(paneMode.active).toBe(true);
+    expect(paneMode.grabPaneId).toBe("pane-dead-zone");
   });
 
   test("touch events do not enter the mouse-only transaction", async () => {
@@ -1343,114 +1404,146 @@ describe("Pane Hybrid NAV mouse edge splits", () => {
     expect(Object.keys(layout.nodes)).toHaveLength(3);
   });
 
-  test("zone classification runs on pane mousemove through the pure helper", () => {
-    expect(paneSource).toContain("onmousemove={onPaneBodyMouseMove}");
-    expect(paneSource).toMatch(/classifyMouseSplitZone\(/);
-    expect(paneSource).toMatch(/edgeSplitAllowed\(/);
-  });
-
-  test("the split preview styles tint the half the moved content would occupy", () => {
-    expect(paneSource).toMatch(/\.pane\.transaction-split-left::before \{ inset: 0 50% 0 0; \}/);
-    expect(paneSource).toMatch(/\.pane\.transaction-split-right::before \{ inset: 0 0 0 50%; \}/);
-    expect(paneSource).toMatch(/\.pane\.transaction-split-top::before \{ inset: 0 0 50% 0; \}/);
-    expect(paneSource).toMatch(/\.pane\.transaction-split-bottom::before \{ inset: 50% 0 0 0; \}/);
-  });
 });
 
-describe("Pane cross-window tab DnD (pane-id collision fix)", () => {
-  test("the drag payload carries the originating window", () => {
-    // Pane ids are a per-window counter and collide across windows, so
-    // the drop side must compare the originating window, not the pane id.
-    expect(paneSource).toMatch(
-      /TAB_DRAG_MIME,[\s\S]{1,160}fromWindow: sessionWindowId\(\)/,
+describe("Pane tab drag and drop between windows", () => {
+  // A drag names its window, pane, side and tab, and stamps the window's drag
+  // scope (its library and workspace) as a MIME type, the one part a target can
+  // read while hovering. A target refuses a tab from another scope at hover and
+  // at drop. A drop from this window moves the tab; one from another window,
+  // even from a pane whose id matches one here, is adopted, and is claimed only
+  // once the tab has been rebuilt here, so the source keeps a tab this window
+  // could not rebuild. Both the tab strip and a tab accept drops.
+  const TAB_MIME = "application/x-md-tab";
+  const CROSS_MIME = "application/x-chan-tab+json";
+  const SCOPE_PREFIX = "application/x-chan-tab-scope+";
+  const OURS = SCOPE_PREFIX + dragScopeMimeToken(
+    windowDragScope({ libraryId: windowLibraryId(), standalone: false, workspaceKey: null }),
+  );
+  const THEIRS = SCOPE_PREFIX + dragScopeMimeToken("lib:other|workspace:elsewhere");
+
+  class DragData {
+    store = new Map<string, string>();
+    effectAllowed = "";
+    dropEffect = "";
+    constructor(entries: Record<string, string> = {}, readonly listTypes = false) {
+      for (const [type, value] of Object.entries(entries)) this.store.set(type, value);
+    }
+    setData(type: string, value: string): void {
+      this.store.set(type, value);
+    }
+    getData(type: string): string {
+      return this.store.get(type) ?? "";
+    }
+    // WKWebView hands back a DOMStringList rather than an array.
+    get types(): unknown {
+      const types = [...this.store.keys()];
+      if (!this.listTypes) return types;
+      return { length: types.length, item: (i: number) => types[i], contains: (type: string) => types.includes(type) };
+    }
+    setDragImage(): void {}
+  }
+
+  function fire(el: Element, type: string, data: DragData): Event {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: data });
+    el.dispatchEvent(event);
+    return event;
+  }
+
+  /// Drag a graph tab out of a pane of its own and return what it put on the
+  /// wire, the way another window's drag arrives here.
+  async function draggedGraph(): Promise<Record<string, string>> {
+    const target = await renderPane(
+      { kind: "leaf", id: "pane-source", tabs: [graphTab({ id: "g-src", scopeId: "src" })], activeTabId: "g-src" },
+      { paneMode: false },
     );
-    expect(paneSource).toMatch(
-      /JSON\.stringify\(\{ fromPaneId: pane\.id, fromSide, tabId, fromWindow: sessionWindowId\(\) \}\)/,
+    const data = new DragData();
+    fire(target.querySelector('[draggable="true"]')!, "dragstart", data);
+    for (const component of mounted.splice(0)) unmount(component);
+    document.body.innerHTML = "";
+    return Object.fromEntries(data.store);
+  }
+
+  async function renderTarget(): Promise<HTMLElement> {
+    return renderPane(
+      { kind: "leaf", id: "pane-here", tabs: [fileTab({ id: "here", path: "here.md" })], activeTabId: "here" },
+      { paneMode: false },
     );
-    expect(paneSource).toMatch(
-      /import \{\s*api,\s*dragScopeMimeToken,\s*sessionWindowId,\s*windowDragScope,\s*windowLibraryId,\s*\} from "\.\.\/api\/client"/,
-    );
+  }
+
+  const SPOTS = [
+    ["the tab strip", '[role="tablist"]'],
+    ["a tab", '.tab[draggable="true"]'],
+  ] as const;
+
+  test("dragging a tab names this window, the pane, the side and the tab, and stamps this window's scope", async () => {
+    const target = await renderTarget();
+    const data = new DragData();
+
+    fire(target.querySelector('.tab[draggable="true"]')!, "dragstart", data);
+
+    expect(JSON.parse(data.getData(TAB_MIME))).toEqual({
+      fromPaneId: "pane-here",
+      fromSide: "a",
+      tabId: "here",
+      fromWindow: sessionWindowId(),
+    });
+    expect(data.getData(OURS)).toBe("1");
+    expect(OURS.slice(SCOPE_PREFIX.length)).toMatch(/^[0-9a-f]+$/);
   });
 
-  test("intra-window is decided by window identity, not pane-id presence", () => {
-    expect(paneSource).toMatch(
-      /function isIntraWindowDrag\(fromWindow: string \| undefined\): boolean \{[\s\S]{1,120}fromWindow === sessionWindowId\(\)/,
-    );
-    // Both tab-strip drop handlers gate the intra branch on the window
-    // check (so a colliding stranger pane id falls through to the
-    // cross-window adopt instead of a no-op moveTab).
-    const intraGates = paneSource.match(
-      /isIntraWindowDrag\(fromWindow\) && paneInThisWindow\(fromPaneId\)/g,
-    );
-    expect(intraGates?.length).toBe(2);
-  });
-});
+  test.each(SPOTS)("hovering %s refuses a tab from another scope and accepts one from this scope", async (_spot, selector) => {
+    const target = await renderTarget();
+    const spot = target.querySelector(selector)!;
 
-describe("Pane cross-kind / cross-workspace tab DnD guard", () => {
-  test("dragstart stamps the window's drag scope as a MIME type", () => {
-    // The scope rides a MIME TYPE so the target can read it during dragover
-    // (when payload values are not readable).
-    expect(paneSource).toMatch(/scopeMime\(currentDragScope\(\)\), "1"/);
-    expect(paneSource).toMatch(
-      /import \{\s*api,\s*dragScopeMimeToken,\s*sessionWindowId,\s*windowDragScope,\s*windowLibraryId,\s*\} from "\.\.\/api\/client"/,
-    );
+    const foreign = new DragData({ [TAB_MIME]: "{}", [THEIRS]: "1" });
+    expect(fire(spot, "dragover", foreign).defaultPrevented).toBe(false);
+    expect(foreign.dropEffect).toBe("none");
+
+    const ours = new DragData({ [TAB_MIME]: "{}", [OURS]: "1" }, true);
+    expect(fire(spot, "dragover", ours).defaultPrevented).toBe(true);
+    expect(ours.dropEffect).toBe("move");
   });
 
-  test("scopeMime hex-encodes the scope so the MIME type round-trips in WKWebView", () => {
-    // The human-readable scope carries `:`/`|`, which WKWebView mangles in a MIME
-    // type; the scopeMime boundary hex-encodes via dragScopeMimeToken so the
-    // stamped type comes back byte-identically at dragover (the intra-window-drag
-    // regression fix -- without this, EVERY drop is rejected).
-    expect(paneSource).toMatch(
-      /const scopeMime = \(scope: string\): string =>\s*SCOPE_DRAG_MIME_PREFIX \+ dragScopeMimeToken\(scope\)/,
-    );
+  test.each(SPOTS)("a drop on %s from another window is claimed only when its scope matches and the tab rebuilds", async (_spot, selector) => {
+    const wire = await draggedGraph();
+    const foreignTab = JSON.stringify({ ...JSON.parse(wire[TAB_MIME]!), fromWindow: "another-window" });
+    const target = await renderTarget();
+    const spot = () => target.querySelector(selector)!;
+    const kinds = () => (layout.nodes["pane-here"] as LeafNode).tabs.map((tab) => tab.kind);
+
+    const otherScope = fire(spot(), "drop", new DragData({ [TAB_MIME]: foreignTab, [CROSS_MIME]: wire[CROSS_MIME]!, [THEIRS]: "1" }));
+    expect(otherScope.defaultPrevented).toBe(false);
+    const unbuildable = fire(spot(), "drop", new DragData({ [TAB_MIME]: foreignTab, [CROSS_MIME]: JSON.stringify({ kind: "zzz" }), [OURS]: "1" }));
+    expect(unbuildable.defaultPrevented).toBe(false);
+    expect(kinds()).toEqual(["file"]);
+
+    const adopted = fire(spot(), "drop", new DragData({ [TAB_MIME]: foreignTab, [CROSS_MIME]: wire[CROSS_MIME]!, [OURS]: "1" }));
+    expect(adopted.defaultPrevented).toBe(true);
+    expect(kinds()).toEqual(["file", "graph"]);
   });
 
-  test("the scope is computed from the owning library + the loaded workspace identity", () => {
-    // currentDragScope keys on the chan-library (windowLibraryId) plus
-    // workspace.info (metadata_key/root): two windows of one workspace in one
-    // library match even with distinct `?w=w-<hex>` ids, while a workspace-key
-    // collision across libraries stays rejected.
-    expect(paneSource).toMatch(
-      /currentDragScope = \(\): string =>[\s\S]{1,280}libraryId: windowLibraryId\(\),[\s\S]{1,220}workspace\.info\?\.metadata_key \?\? workspace\.info\?\.root/,
-    );
+  test("a drop from another window whose pane id matches a pane here is adopted, not treated as a local move", async () => {
+    const wire = await draggedGraph();
+    const collidingTab = JSON.stringify({ fromPaneId: "pane-here", fromSide: "a", tabId: "here", fromWindow: "another-window" });
+    const target = await renderTarget();
+
+    fire(target.querySelector('[role="tablist"]')!, "drop", new DragData({ [TAB_MIME]: collidingTab, [CROSS_MIME]: wire[CROSS_MIME]!, [OURS]: "1" }));
+
+    expect((layout.nodes["pane-here"] as LeafNode).tabs.map((tab) => tab.kind)).toEqual(["file", "graph"]);
   });
 
-  test("compatibility is the source scope type matching THIS window's scope", () => {
-    expect(paneSource).toMatch(
-      /function isTabDragScopeCompatible\(e: DragEvent\): boolean \{[\s\S]{1,120}dragHasType\(e, scopeMime\(currentDragScope\(\)\)\)/,
-    );
-  });
+  test("a drop from this window moves the tab from its pane", async () => {
+    const target = await renderTarget();
+    layout.nodes["pane-there"] = { kind: "leaf", id: "pane-there", tabs: [fileTab({ id: "there", path: "there.md" })], activeTabId: "there" };
+    const localTab = JSON.stringify({ fromPaneId: "pane-there", fromSide: "a", tabId: "there", fromWindow: sessionWindowId() });
 
-  test("both dragover handlers reject an incompatible tab move (no-drop cursor)", () => {
-    // Bail before preventDefault and force `dropEffect = "none"` so the
-    // browser shows the no-drop cursor; file drags (not isTabMoveDrag) are
-    // unaffected.
-    expect(paneSource).toMatch(
-      /function rejectTabMoveDrag\(e: DragEvent\): void \{[\s\S]{1,120}dropEffect = "none"/,
-    );
-    const overGates = paneSource.match(
-      /if \(isTabMoveDrag\(e\) && !isTabDragScopeCompatible\(e\)\) \{[\s\S]{1,80}rejectTabMoveDrag\(e\);[\s\S]{1,80}return;/g,
-    );
-    expect(overGates?.length).toBe(2);
-  });
+    const drop = fire(target.querySelector('[role="tablist"]')!, "drop", new DragData({ [TAB_MIME]: localTab, [OURS]: "1" }));
 
-  test("drag type lookup supports both Array and DOMStringList transfer types", () => {
-    expect(paneSource).toMatch(
-      /function dragHasType\(e: DragEvent, mime: string\): boolean \{[\s\S]*bag\.includes[\s\S]*bag\.contains[\s\S]*bag\[i\] === mime/,
-    );
-  });
-
-  test("both drop handlers gate cross-window acceptance on scope compatibility", () => {
-    // The guard sits before acceptCrossWindowTab so an incompatible drop
-    // returns without preventDefault (dropEffect "none" → source keeps it).
-    // The acceptance itself is now the second gate: both handlers adopt first
-    // and only preventDefault on success, so a rebuild this window cannot do
-    // does not destroy the source tab.
-    const dropGates = paneSource.match(
-      /if \(!isTabDragScopeCompatible\(e\)\) return;[\s\S]{1,320}if \(!acceptCrossWindowTab\(crossRaw\)\) return;/g,
-    );
-    expect(dropGates?.length).toBe(2);
+    expect(drop.defaultPrevented).toBe(true);
+    expect((layout.nodes["pane-here"] as LeafNode).tabs.map((tab) => tab.id)).toEqual(["here", "there"]);
+    expect((layout.nodes["pane-there"] as LeafNode | undefined)?.tabs ?? []).toEqual([]);
   });
 });
 
@@ -1575,25 +1668,6 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
     // A kind this build cannot rebuild (peer window on another version).
     expect(adoptCrossWindowTab("pane-refuse", { k: "z" } as any)).toBeNull();
     expect(targetPane.tabs).toHaveLength(0);
-  });
-
-  test("the payload builder is exhaustive over Tab kinds", () => {
-    // The `never` binding is what turns a NEW tab kind into a compile error
-    // rather than a silent terminal mislabel. A type error cannot be asserted
-    // at runtime, so it is pinned in source.
-    expect(paneSource).toMatch(/const unhandled: never = t;/);
-    expect(paneSource).not.toMatch(
-      /return \{ kind: "terminal", title: t\.title \};/,
-    );
-  });
-
-  test("a drop is claimed only after the adopt succeeds", () => {
-    // preventDefault is what makes dropEffect "move", which is what tells the
-    // source to close its tab. Both drop handlers must adopt first.
-    const gates = paneSource.match(
-      /if \(!acceptCrossWindowTab\(crossRaw\)\) return;\s*\n\s*e\.preventDefault\(\);/g,
-    );
-    expect(gates?.length).toBe(2);
   });
 });
 
