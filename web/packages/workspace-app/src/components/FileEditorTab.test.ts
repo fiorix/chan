@@ -7,7 +7,7 @@
 import { highlightingFor } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
-import { mount, tick, unmount } from "svelte";
+import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileEditorTab from "./FileEditorTab.svelte";
@@ -820,6 +820,39 @@ describe("focus follows the active pane", () => {
 
     layout.activePaneId = "pane-left";
     await settle(2);
+    expect(hosts["pane-left"]!.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
+  });
+
+  test("a pane that gains and loses focus in one stack leaves its editor alone", async () => {
+    const left = fileTab({ id: "left-file" });
+    const right = fileTab({ id: "right-file", path: "notes/other.md" });
+    layout.nodes = {
+      root: { kind: "split", id: "root", direction: "row", ratio: 0.5, a: "pane-left", b: "pane-right" },
+      "pane-left": { kind: "leaf", id: "pane-left", tabs: [left], activeTabId: left.id },
+      "pane-right": { kind: "leaf", id: "pane-right", tabs: [right], activeTabId: right.id },
+    } as typeof layout.nodes;
+    layout.rootId = "root";
+    layout.activePaneId = "pane-left";
+    const hosts: Record<string, HTMLElement> = {};
+    for (const id of ["pane-left", "pane-right"]) {
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(Pane, { target, props: { pane: layout.nodes[id] as LeafNode } }));
+      hosts[id] = target;
+    }
+    await settle();
+    const rightFocused: EventTarget[] = [];
+    hosts["pane-right"]!.addEventListener("focusin", (e) => rightFocused.push(e.target!));
+
+    // The right pane becomes focused, and its effect defers the focus call to
+    // a microtask; before that microtask runs, focus moves back. The deferred
+    // call must see that and do nothing.
+    layout.activePaneId = "pane-right";
+    flushSync();
+    layout.activePaneId = "pane-left";
+    flushSync();
+    await settle(2);
+    expect(rightFocused, "the right editor never took focus").toEqual([]);
     expect(hosts["pane-left"]!.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
   });
 });
