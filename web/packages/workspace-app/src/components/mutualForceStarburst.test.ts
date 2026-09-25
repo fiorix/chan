@@ -1,4 +1,5 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import MutualForceStarburst from "./MutualForceStarburst.svelte";
 import {
   advanceMutualForceParticles,
   createMutualForceParticles,
@@ -6,30 +7,70 @@ import {
   fitMutualForceStarburst,
   MUTUAL_FORCE_PARTICLE_COUNT,
 } from "./mutualForceStarburst";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./mutualForceStarburst", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./mutualForceStarburst")>();
+  return {
+    ...actual,
+    advanceMutualForceParticles: vi.fn(actual.advanceMutualForceParticles),
+  };
+});
+
+afterEach(stopAnimations);
 
 describe("Mutual Force Starburst", () => {
-  test("keeps the source simulation rate, styling, and attribution", async () => {
-    const renderer = (await import("./MutualForceStarburst.svelte?raw"))
-      .default as string;
-    const motion = (await import("./mutualForceStarburst.ts?raw"))
-      .default as string;
+  test("steps the source simulation 60 times per second of animation time", () => {
+    const { callbacks } = startAnimation(MutualForceStarburst, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const advance = vi.mocked(advanceMutualForceParticles);
+    advance.mockClear();
+    for (let timeMs = 1050; timeMs <= 2000; timeMs += 50) callbacks.frame(timeMs);
 
-    expect(renderer).toMatch(
-      /const SOURCE_FRAMES_PER_SECOND = 60;/,
+    expect(advance).toHaveBeenCalledTimes(60);
+  });
+
+  test("catches up at most four source steps after a stall", () => {
+    const { callbacks } = startAnimation(MutualForceStarburst, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const advance = vi.mocked(advanceMutualForceParticles);
+    advance.mockClear();
+    callbacks.frame(6000);
+
+    expect(advance).toHaveBeenCalledTimes(4);
+  });
+
+  test("fades each source step by 9/255 of the background its theme token names", () => {
+    const { ctx, ops } = recordingContext2d();
+    const { run, callbacks } = startAnimation(MutualForceStarburst, ctx);
+    const host = run.canvas.parentElement!;
+    host.style.setProperty("--mutual-force-starburst-background-rgb", "1, 2, 3");
+    host.style.setProperty("--mutual-force-starburst-point-rgb", "4, 5, 6");
+    host.style.setProperty("--mutual-force-starburst-point-alpha", "0.5");
+    callbacks.resize(800, 800, false, 0);
+    ops.length = 0;
+    callbacks.frame(1000);
+
+    const fade = ops.findIndex(
+      ({ op, args }) => op === "set globalAlpha" && args[0] === 9 / 255,
     );
-    expect(renderer).toMatch(/const SOURCE_FADE_ALPHA = 9 \/ 255;/);
-    expect(renderer).toContain(
-      "--mutual-force-starburst-point-alpha: 0.24;",
-    );
-    expect(renderer).toContain(
-      "--mutual-force-starburst-point-alpha: 0.38;",
-    );
-    expect(motion).toContain(
-      "https://x.com/hisadan/status/1937852453929783400",
-    );
-    expect(motion).toContain(
-      "https://x.com/hisadan/status/1937852456584814776",
-    );
+    expect(fade).toBeGreaterThanOrEqual(0);
+    expect(ops.slice(fade, fade + 3)).toEqual([
+      { op: "set globalAlpha", args: [9 / 255] },
+      { op: "set fillStyle", args: ["rgb(1, 2, 3)"] },
+      { op: "fillRect", args: [0, 0, 800, 800] },
+    ]);
+    expect(ops).toContainEqual({ op: "set strokeStyle", args: ["rgb(4, 5, 6)"] });
+    expect(ops).toContainEqual({ op: "set globalAlpha", args: [0.5] });
   });
 
   test("creates the source sketch's 300 centered particles", () => {
