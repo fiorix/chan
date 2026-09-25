@@ -3,9 +3,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import App from "./App.svelte";
-import appSource from "./App.svelte?raw";
 import { library, reportError, stopWatching } from "./state/library.svelte";
-import { clearNotices } from "./state/notices.svelte";
+import { clearNotices, notices } from "./state/notices.svelte";
 import { screen } from "./state/screen.svelte";
 import { controlAttention, clearAllControlAttention } from "./state/controlAttention.svelte";
 import {
@@ -216,11 +215,44 @@ describe("launcher root", () => {
     expect(flipLabel()).toBe("Computers");
   });
 
-  it("subscribes the desktop's structured launcher-notice event", () => {
-    // jsdom has no Tauri event bridge, so the wiring is source-pinned: the
-    // structured notices channel must stay subscribed alongside auth-error.
-    expect(appSource).toContain('onTauriEvent<Notice>("launcher-notice", pushNotice)');
-    expect(appSource).toContain('onTauriEvent<string>("auth-error", reportError)');
+  it("shows the desktop's launcher notices and auth errors as they arrive", async () => {
+    // A stand-in for the desktop's event bridge: the launcher subscribes
+    // through window.__TAURI__.event.listen, and the test emits on it.
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    Object.defineProperty(window, "__TAURI__", {
+      configurable: true,
+      value: {
+        event: {
+          listen: (name: string, callback: (event: { payload: unknown }) => void) => {
+            listeners.set(name, callback);
+            return Promise.resolve(() => {});
+          },
+        },
+      },
+    });
+    try {
+      target = document.createElement("div");
+      document.body.appendChild(target);
+      app = mount(App, { target });
+      await settle();
+
+      listeners.get("launcher-notice")!({
+        payload: {
+          id: "n-1",
+          kind: "info",
+          source: { type: "devserver", id: "ds-1", label: "box" },
+          title: "Devserver connected",
+          message: "box is online",
+          at: 1,
+        },
+      });
+      listeners.get("auth-error")!({ payload: "token rejected" });
+
+      expect(notices.items.map((notice) => notice.title)).toContain("Devserver connected");
+      expect(library.error).toBe("token rejected");
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
   });
 
   it("does not clear existing control attention on the first connected snapshot", async () => {
