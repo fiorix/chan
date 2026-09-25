@@ -42,6 +42,7 @@ export class FakeTerminal {
   pasted: string[] = [];
   selection = "";
   focusCount = 0;
+  blurCount = 0;
   disposed = false;
   /// When set, the next writes answer with this reply the way xterm answers
   /// a query in the output it parses: during the write.
@@ -123,7 +124,9 @@ export class FakeTerminal {
   focus(): void {
     this.focusCount += 1;
   }
-  blur(): void {}
+  blur(): void {
+    this.blurCount += 1;
+  }
   dispose(): void {
     this.disposed = true;
   }
