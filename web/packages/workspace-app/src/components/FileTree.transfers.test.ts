@@ -3,7 +3,8 @@
 // Files leave and enter the workspace through the Download and Upload rows,
 // never through a drag: dragging a tree row carries only the in-app move,
 // the open-in-editor payload for a file, and the path as plain text, so
-// nothing is offered to the OS as a file. Download hands the browser the
+// nothing is offered to the OS as a file, and files dropped from the OS onto
+// the tree upload nothing, while a row dropped on a folder moves into it. Download hands the browser the
 // entry's download link. Upload on a folder uploads into it, and on a file
 // replaces it in place and reloads any tab showing it. The inspector's
 // Upload and Download do the same for the entry it shows.
@@ -100,6 +101,37 @@ describe("dragging a tree row", () => {
     await openFilesTab();
 
     expect(drag("docs").types).toEqual(["application/x-chan-tree-move", "text/plain"]);
+  });
+});
+
+describe("dropping onto a tree folder", () => {
+  function drop(path: string, data: Record<string, string>, files: File[] = []): void {
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: { types: Object.keys(data), files, getData: (type: string) => data[type] ?? "" },
+    });
+    row(path)!.dispatchEvent(event);
+  }
+
+  test("files from the OS upload nothing", async () => {
+    await openFilesTab();
+    const upload = vi.spyOn(api, "uploadFile");
+
+    drop("docs", { Files: "" }, [new File(["os"], "os.md")]);
+    await settle();
+
+    expect(upload).not.toHaveBeenCalled();
+    await expect(api.read("docs/os.md")).rejects.toThrow();
+  });
+
+  test("a tree row moves into the folder", async () => {
+    await openFilesTab();
+
+    drop("docs", {
+      "application/x-chan-tree-move": JSON.stringify({ path: "a.md", isDir: false, paths: ["a.md"] }),
+    });
+
+    await vi.waitFor(() => expect(api.read("docs/a.md")).resolves.toMatchObject({ content: "old body" }));
   });
 });
 
