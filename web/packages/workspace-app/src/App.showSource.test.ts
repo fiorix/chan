@@ -1,83 +1,126 @@
-import { describe, expect, test } from "vitest";
-import shortcuts from "../state/shortcuts.ts?raw";
-import app from "../App.svelte?raw";
-import tabs from "../state/tabs.svelte.ts?raw";
-import editor from "./FileEditorTab.svelte?raw";
+// @vitest-environment jsdom
+//
+// Show Source Code flips the active file tab between its rendered view and
+// its source: Ctrl+E (Cmd+E on macOS), or the app.editor.toggleMode command.
+// A markdown file keeps its caret across the flip, remapped between rendered
+// and source offsets; a file with no rendered view stays in source, and a
+// tab that is not a file is left alone. The chord stays inside a focused
+// terminal, where Ctrl+E is readline's end-of-line, and the editor's tab menu
+// does not repeat the command.
 
-// Mod+E "Show Source Code" chord. Pins: registry entry, keymap handler
-// in App.svelte, runCommand branch, and toggleActiveFileTabMode helper
-// (mode gate + caret remap). The editor tab menu no longer duplicates
-// this command-launcher action.
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("shortcut registry entry", () => {
-  test("app.editor.toggleMode entry exists with Mod+E (web + native)", () => {
-    expect(shortcuts).toMatch(
-      /id: "app\.editor\.toggleMode",[\s\S]{1,200}label: "Show Source Code \(toggle rendered\/source\)",[\s\S]{1,200}native: "Mod\+E",[\s\S]{1,80}web: "Mod\+E",/,
-    );
+vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
+
+import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { fileTab, readTab, resetLayout, terminalTab } from "./__tests__/tabs";
+import { renderedCaretForSourceCaret, sourceCaretForRenderedCaret } from "./editor/caret_mapping";
+import { SHORTCUTS, shouldEscapeTerminal } from "./state/shortcuts";
+import { openTabMenu, closeTabMenu } from "./state/tabMenu.svelte";
+import { layout, type LeafNode } from "./state/tabs.svelte";
+
+stubAppEnvironment();
+
+const DOC = "# Title\n\nsome **bold** text";
+const CTRL_E = { key: "e", code: "KeyE", ctrlKey: true } as const;
+
+beforeEach(async () => {
+  await mountApp();
+});
+
+afterEach(async () => {
+  closeTabMenu();
+  vi.restoreAllMocks();
+  await unmountApp();
+});
+
+async function seedDoc(mode: "wysiwyg" | "source", caret = { from: 12, to: 12 }): Promise<void> {
+  resetLayout([fileTab({ id: "doc", path: "notes/a.md", content: DOC, saved: DOC, mode, caret })]);
+  await settle();
+}
+
+describe("Show Source Code", () => {
+  test("Ctrl+E flips a document to source with its caret remapped, and back", async () => {
+    await seedDoc("wysiwyg");
+    const rendered = { ...readTab("doc")!.caret! };
+
+    press(CTRL_E);
+    expect(readTab("doc")!.mode).toBe("source");
+    expect(readTab("doc")!.caret).toEqual(sourceCaretForRenderedCaret(DOC, rendered));
+
+    const source = { ...readTab("doc")!.caret! };
+    press(CTRL_E);
+    expect(readTab("doc")!.mode).toBe("wysiwyg");
+    expect(readTab("doc")!.caret).toEqual(renderedCaretForSourceCaret(DOC, source));
   });
 
-  test("entry sits in the Editor group + does NOT escape terminal", () => {
-    // Off macOS Mod+E is Ctrl+E, which a focused terminal needs for
-    // readline (move-to-end-of-line), so the chord must stay inside xterm.
-    expect(shortcuts).toMatch(
-      /id: "app\.editor\.toggleMode",[\s\S]{1,800}group: "Editor",[\s\S]{1,800}escapeTerminal: false,/,
+  test("Cmd+E flips it on macOS", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
     );
+    await seedDoc("wysiwyg");
+
+    press({ key: "e", code: "KeyE", metaKey: true });
+
+    expect(readTab("doc")!.mode).toBe("source");
   });
 
-  test("Editor group added to the ShortcutGroup union", () => {
-    expect(shortcuts).toMatch(/export type ShortcutGroup =[\s\S]{1,200}\| "Editor";/);
+  test("the host's toggle command flips it the same way", async () => {
+    await seedDoc("source");
+
+    hostCommand("app.editor.toggleMode");
+    await settle();
+
+    expect(readTab("doc")!.mode).toBe("wysiwyg");
+  });
+
+  test("leaves a file with no rendered view in source", async () => {
+    resetLayout([
+      fileTab({ id: "code", path: "src/main.rs", fileKind: "text", content: "fn main() {}", saved: "fn main() {}", mode: "source" }),
+    ]);
+    await settle();
+
+    press(CTRL_E);
+
+    expect(readTab("code")!.mode).toBe("source");
+  });
+
+  test("leaves a terminal tab alone", async () => {
+    resetLayout([terminalTab({ id: "term" })]);
+    await settle();
+
+    press(CTRL_E);
+
+    expect((layout.nodes["pane-test"] as LeafNode).tabs).toMatchObject([{ id: "term", kind: "terminal" }]);
   });
 });
 
-describe("keymap + runCommand routing", () => {
-  test("Mod+E hotkey in onWindowKey calls toggleActiveFileTabMode (per-OS)", () => {
-    expect(app).toMatch(
-      /const toggleModeChord =[\s\S]{1,80}currentOS\(\) === "mac"[\s\S]{1,120}e\.metaKey && !e\.ctrlKey[\s\S]{1,80}shortcutLetter\(e\) === "E"[\s\S]{1,120}: e\.ctrlKey && !e\.metaKey[\s\S]{1,80}shortcutLetter\(e\) === "E";[\s\S]{1,200}toggleActiveFileTabMode\(\);/,
-    );
+describe("the chord", () => {
+  test("is Mod+E in the Editor group of the shortcut table", () => {
+    expect(SHORTCUTS.find((shortcut) => shortcut.id === "app.editor.toggleMode")).toMatchObject({
+      label: "Show Source Code (toggle rendered/source)",
+      web: "Mod+E",
+      native: "Mod+E",
+      group: "Editor",
+    });
   });
 
-  test("runCommand branch routes app.editor.toggleMode through the same helper", () => {
-    expect(app).toMatch(
-      /case "app\.editor\.toggleMode":[\s\S]{1,400}toggleActiveFileTabMode\(\);/,
-    );
+  test("stays inside a focused terminal", () => {
+    expect(shouldEscapeTerminal(new KeyboardEvent("keydown", CTRL_E))).toBe(false);
   });
 
-  test("toggleActiveFileTabMode imported from tabs.svelte", () => {
-    expect(app).toMatch(
-      /import \{[\s\S]{1,4000}toggleActiveFileTabMode,[\s\S]{1,200}\} from "\.\/state\/tabs\.svelte";/,
-    );
-  });
-});
+  test("is not repeated in the editor's tab menu", async () => {
+    await seedDoc("wysiwyg");
 
-describe("store-side helper", () => {
-  test("toggleActiveFileTabMode flips between source and the file's rendered mode", () => {
-    // Gated to renderable files via defaultModeForPath (md→wysiwyg, json→pretty,
-    // csv→table); source-only files (.rs/.py) yield "source" and the toggle
-    // no-ops. Mirrors FileEditorTab's hasRenderedMode / renderedModeForTab gate.
-    expect(tabs).toMatch(
-      /export function toggleActiveFileTabMode\(\): void \{[\s\S]{1,120}const tab = activeFileTab\(\);[\s\S]{1,120}if \(!tab\) return;[\s\S]{1,300}const rendered = defaultModeForPath\(tab\.path, tab\.fileKind\);[\s\S]{1,120}if \(rendered === "source"\) return;[\s\S]{1,200}const next = tab\.mode === "source" \? rendered : "source";[\s\S]{1,700}setMode\(tab, next\);/,
-    );
-  });
+    openTabMenu("doc", { left: 0, top: 0, right: 0, bottom: 0 });
+    await settle();
 
-  test("toggleActiveFileTabMode remaps the caret across the source<->wysiwyg flip (#16)", () => {
-    // Only the wysiwyg pair has an offset correspondence; the helper maps
-    // tab.caret through caret_mapping and setTabCaret before flipping, so
-    // Cmd+E keeps the caret where the right-click "Show Source" path does.
-    expect(tabs).toMatch(
-      /if \(tab\.caret && rendered === "wysiwyg"\) \{[\s\S]{1,200}renderedCaretForSourceCaret\(tab\.content, tab\.caret\)[\s\S]{1,120}sourceCaretForRenderedCaret\(tab\.content, tab\.caret\)[\s\S]{1,120}setTabCaret\(tab, mapped\.from, mapped\.to\);/,
-    );
-  });
-
-  test("helper is a no-op when the active tab isn't a file", () => {
-    expect(tabs).toMatch(
-      /export function toggleActiveFileTabMode\(\): void \{[\s\S]{1,120}const tab = activeFileTab\(\);[\s\S]{1,120}if \(!tab\) return;/,
-    );
-  });
-});
-
-describe("editor tab menu", () => {
-  test("Show Source Code row is not duplicated in the tab menu", () => {
-    expect(editor).not.toContain('<span class="mbtn-label">Show Source Code</span>');
-    expect(editor).not.toContain('chordLabel("app.editor.toggleMode")');
+    const menu = document.querySelector('[aria-label="tab menu"]')!;
+    expect(menu).not.toBeNull();
+    expect(menu.textContent).not.toContain("Show Source Code");
   });
 });
