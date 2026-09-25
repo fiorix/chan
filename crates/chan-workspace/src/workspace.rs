@@ -10804,7 +10804,7 @@ mod tests {
         // own and the already-exists refusal names it more accurately.
         assert!(matches!(
             workspace.copy("proj", "proj"),
-            Err(ChanError::Io(_))
+            Err(ChanError::PathAlreadyExists(_))
         ));
 
         // A sibling whose name merely shares the source's prefix is not a
@@ -10820,7 +10820,10 @@ mod tests {
         workspace.write_text("a.md", "x").unwrap();
         workspace.write_text("b.md", "y").unwrap();
         let err = workspace.copy("a.md", "b.md").unwrap_err();
-        assert!(matches!(err, ChanError::Io(_)));
+        assert!(
+            matches!(err, ChanError::PathAlreadyExists(ref path) if path == "b.md"),
+            "an existing destination is a conflict: {err:?}"
+        );
         // b.md was not clobbered.
         assert_eq!(workspace.read_text("b.md").unwrap(), "y");
     }
