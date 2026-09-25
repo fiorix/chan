@@ -12,10 +12,15 @@ publish = false
 name = "chan_library"
 
 [features]
-# Test-only registry helpers (`Registry::attach`/`len`/`is_empty`) compiled
-# for downstream test builds. chan-server's tests drive the registry directly
-# (host.rs, routes/terminal.rs), so they enable this in their dev-dependency;
-# production builds never see these methods.
+# Test-only items compiled for downstream test builds: the terminal registry's
+# `Registry::attach`/`len`/`is_empty` helpers and its output injector
+# `Registry::inject_output`, the attach seam (`AttachSeam`, `arm_attach_seam`)
+# that runs a test hook at a ring-lock boundary of an attach or an output, and
+# `WorkspaceHost::test_connect_window_presence` and
+# `TenantTaskOwner::task_count`. chan-server's tests (lib.rs,
+# routes/terminal.rs, routes/library_command_capability_tests.rs) use all but
+# `len`/`is_empty`, so they enable this in their dev-dependency; production
+# builds never see these items.
 test-util = []
 
 [dependencies]

@@ -89,9 +89,14 @@ url = { workspace = true }
 # [dependencies] entry above, so this line adds a feature without changing which
 # ones default.
 chan-workspace = { workspace = true, default-features = false, features = ["test-hooks"] }
-# This crate's tests (host.rs, routes/terminal.rs) drive chan-library's
-# terminal-session registry directly, including its test-only `attach`/`len`/
-# `is_empty` helpers behind the `test-util` feature; enable it for the test build.
+# This crate's tests reach chan-library's test-only items behind the
+# `test-util` feature: routes/terminal.rs drives the terminal-session registry
+# with `Registry::attach`, places output with `Registry::inject_output`, and
+# arms the attach seam (`AttachSeam`, `arm_attach_seam`) to inject output just
+# before an attach takes its ring lock; lib.rs also uses `Registry::attach` and
+# `TenantTaskOwner::task_count`, and routes/library_command_capability_tests.rs
+# uses `WorkspaceHost::test_connect_window_presence`. Enable it for the test
+# build.
 chan-library = { workspace = true, features = ["test-util"] }
 # The clipboard round-trip timeout test runs on a paused tokio clock
 # (`#[tokio::test(start_paused = true)]`) so the 30s reply window elapses
