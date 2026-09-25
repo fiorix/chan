@@ -4,9 +4,9 @@
 // {"type":"ping"} -> server {"type":"pong"}, the watcher vocabulary), the
 // read-deadline that force-closes a half-open zombie, and the capped-backoff
 // redial through the existing session/since/generation reattach. The kit
-// shares the watcher's constants from transport.ts (source-pinned below so
-// the two cannot drift); the live 300s gateway-cut proof rides the host
-// smoke + the gateway rig.
+// shares the watcher's constants from transport.ts, and these tests drive
+// the timers by those same constants; the live 300s gateway-cut proof rides
+// the host smoke + the gateway rig.
 
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";

@@ -124,9 +124,9 @@ describe("Mod-Enter with a ring-selected image", () => {
 });
 
 // The deck's Mod+Enter claim is an element-capture listener on the
-// `.editor-host` div (FileEditorTab.svelte's onSlideShortcutKeydown; the
-// mount's existence on both hosts is source-pinned by
-// components/slideShortcuts.test.ts). These tests mount a real CodeMirror
+// `.editor-host` div (FileEditorTab.svelte's onSlideShortcutKeydown, on both
+// editor hosts; components/FileEditorTab.test.ts drives it on the rich
+// editor's host). These tests mount a real CodeMirror
 // inside a host carrying a capture listener of the SAME shape and pin the
 // ordering contract the Mod-Enter pile-up depends on: exactly one claimant
 // runs per press, and the claim never covers a chord it is not advertised
@@ -153,8 +153,9 @@ describe("deck capture claim and the Mod-Enter pile-up", () => {
   /// real handler's other gates (slidesSpec, tab.loading, the single
   /// OS-resolved Mod, shouldIgnoreSlideShortcutTarget,
   /// builtInChordSuperseded, the Shift routing to present vs preview);
-  /// those are source-pinned by components/slideShortcuts.test.ts, so
-  /// green here says nothing about them.
+  /// those are driven on a mounted FileEditorTab by the slide chord tests
+  /// in components/FileEditorTab.test.ts, so green here says nothing about
+  /// them.
   function deckClaim(action: () => void): (e: KeyboardEvent) => void {
     return (e: KeyboardEvent) => {
       if (e.key !== "Enter" || e.altKey || !(e.ctrlKey || e.metaKey)) return;

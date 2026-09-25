@@ -11,15 +11,15 @@ import { terminalTab } from "../__tests__/tabs";
 
 // Rich Prompt queue visibility -- the tab-level state machine the WS frame
 // handler (TerminalTab.svelte) and the bubble (RichPrompt.svelte) share.
-// The wire/markup shape is pinned in richPromptTerminalWiring.test.ts and
-// richPromptComponent.test.ts; this exercises the store transitions.
+// The frames and the markup are driven in TerminalTab.richPrompt.test.ts and
+// RichPrompt.svelte.test.ts; this exercises the store transitions.
 
 describe("terminal queue depth", () => {
   // The store setter takes whatever depth the server sent. What the depth
   // MEANS (logical messages, one absolute step per drained batch) is the
   // server's contract, pinned in chan-library; that the handler assigns it
-  // instead of adjusting the badge relatively is pinned in
-  // richPromptTerminalWiring.test.ts.
+  // instead of adjusting the badge relatively is driven in
+  // TerminalTab.richPrompt.test.ts.
   test("positive depths stick; zero collapses to undefined (truthiness renders)", () => {
     const tab = terminalTab();
     setTerminalQueueDepth(tab, 3);

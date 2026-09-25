@@ -9,11 +9,10 @@
 // A failed probe is its own state. It is asked for again when something could
 // change the answer: a reload, or a move to another scope.
 //
-// This is the counting stub the item's acceptance asks for. It also carries
-// two of the three things a source-text pin in graphDirInspectorHotfix used to
-// hold: the dir probe fetches at FS_GRAPH_DEPTH_MAX, and the probe re-runs
-// when the dir scope changes. The third, that a result for a scope which has
-// moved on is discarded, is NOT asserted here: while a probe is in flight
+// The api stub counts the probe requests. The tests also pin two things about
+// the dir probe: it fetches at FS_GRAPH_DEPTH_MAX, and it re-runs when the dir
+// scope changes. A third, that a result for a scope which has moved on is
+// discarded, is NOT asserted here: while a probe is in flight
 // `dirDepthProbeLoading` stops a second one starting, so the stale-resolve
 // path that guard defends is not reachable from the outside.
 
