@@ -32,7 +32,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [source-text-tests-pin-spelling-not-behaviour][rawt] | accepted | build |
 | [one-question-is-answered-in-many-places][dedup] | accepted | after rawt |
 | [frontend-comments-narrate-history][cmts] | raised | after rawt |
-| [hand-mirrored-contracts-have-no-gate][mirr] | accepted | build |
+| [hand-mirrored-contracts-have-no-gate][mirr] | landed | GA |
 | [the-frontend-review-remainder-has-no-owner][ferem] | raised | triage |
 
 **From the v0.99.0 follow-ups**
@@ -62,7 +62,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-mount-retry-test-races-a-wall-clock][mwclk] | landed | GA |
 | [desktop-design-omits-the-root-health-probe][dhp] | landed | GA |
 | [a-dropped-indexers-driver-eats-recovery][drvr] | landed | GA |
-| [the-bulk-skip-note-calls-unknown-locked][bskip] | accepted | build |
+| [the-bulk-skip-note-calls-unknown-locked][bskip] | landed | GA |
 | [mcp-write-errors-follow-an-unpinned-display][mcpd] | landed | GA |
 | [a-joining-snapshot-fails-during-reconcile][join] | landed | GA |
 | [profile-workers-have-no-shutdown-owner][pwork] | landed | GA |
@@ -75,10 +75,10 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [move-and-create-can-replace-a-new-file][clob] | landed | GA |
 | [the-graph-indexer-drops-renames-and-lingers][gidx] | landed | GA |
 | [the-side-effect-and-error-lows-are-unread][unread] | accepted | analyze |
-| [the-launcher-says-off-beside-running][offrn] | accepted | build |
+| [the-launcher-says-off-beside-running][offrn] | landed | GA |
 | [devserver-root-probe-wiring-has-no-test][rprob] | landed | GA |
 | [page-break-scan-and-renderer-still-differ][pgres] | withdrawn | GA |
-| [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | accepted | build |
+| [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | landed | GA |
 | [graph-bodies-have-no-mounted-test][gmnt] | accepted | after rawt |
 | [the-nsis-uninstaller-stub-ships-unsigned][nsis] | accepted | rc1 |
 | [signing-has-no-early-credential-probe][cprb] | landed | GA |
@@ -101,7 +101,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | item | state | next |
 | --- | --- | --- |
 | [a-revocation-aborts-the-bridge-before-its-close][revab] | landed | GA |
-| [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | accepted | build |
+| [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | landed | GA |
 | [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | landed | GA |
 | [a-restart-replays-only-the-manifest-tail][rtail] | raised | decide |
 | [a-crash-restart-restores-a-stale-manifest][crash] | raised | decide |
