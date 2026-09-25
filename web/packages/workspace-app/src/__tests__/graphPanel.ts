@@ -322,3 +322,169 @@ export const fsg = {
     return { source: parent, target: child, kind: "contains" };
   },
 };
+
+// ---- GraphCanvas ---------------------------------------------------------
+//
+// GraphCanvas itself draws on a 2D context from a force simulation. A test
+// mounts it with `installCanvasDom()`: the context records every frame it
+// paints, animation frames run only when the test calls `runFrames`, and the
+// host's size and resize notifications are the test's to set. Nodes are
+// located with the component's `nodeScreenCircle` export.
+
+/// One painted frame: the view transform, every filled disc, every stroked
+/// line segment and every label, each with the style it was drawn in. Disc
+/// and line coordinates are in world space, as the paint pass issues them.
+export type Frame = {
+  transform: { k: number; x: number; y: number };
+  discs: Array<{ x: number; y: number; r: number; fill: string; alpha: number }>;
+  lines: Array<{ x1: number; y1: number; x2: number; y2: number; stroke: string; alpha: number }>;
+  labels: string[];
+};
+
+type Style = { fillStyle: string; strokeStyle: string; globalAlpha: number };
+
+/// A 2D context that records what is painted, one Frame per paint pass (a
+/// pass opens with setTransform).
+export class RecordingContext {
+  frames: Frame[] = [];
+  fillStyle = "#000";
+  strokeStyle = "#000";
+  globalAlpha = 1;
+  lineWidth = 1;
+  font = "";
+  textAlign = "start";
+  textBaseline = "alphabetic";
+  #arc: [number, number, number] | null = null;
+  #segments: Array<[number, number, number, number]> = [];
+  #at: [number, number] | null = null;
+  #saved: Style[] = [];
+
+  get frame(): Frame {
+    if (this.frames.length === 0) this.setTransform(1, 0, 0, 1, 0, 0);
+    return this.frames[this.frames.length - 1]!;
+  }
+
+  setTransform(a: number, _b: number, _c: number, _d: number, e: number, f: number): void {
+    this.frames.push({ transform: { k: a, x: e, y: f }, discs: [], lines: [], labels: [] });
+  }
+  beginPath(): void {
+    this.#arc = null;
+    this.#segments = [];
+    this.#at = null;
+  }
+  moveTo(x: number, y: number): void {
+    this.#at = [x, y];
+  }
+  lineTo(x: number, y: number): void {
+    if (this.#at) this.#segments.push([this.#at[0], this.#at[1], x, y]);
+    this.#at = [x, y];
+  }
+  arc(x: number, y: number, r: number): void {
+    this.#arc = [x, y, r];
+  }
+  fill(): void {
+    if (!this.#arc) return;
+    const [x, y, r] = this.#arc;
+    this.frame.discs.push({ x, y, r, fill: this.fillStyle, alpha: this.globalAlpha });
+  }
+  stroke(): void {
+    for (const [x1, y1, x2, y2] of this.#segments) {
+      this.frame.lines.push({ x1, y1, x2, y2, stroke: this.strokeStyle, alpha: this.globalAlpha });
+    }
+  }
+  fillText(text: string): void {
+    this.frame.labels.push(text);
+  }
+  save(): void {
+    this.#saved.push({ fillStyle: this.fillStyle, strokeStyle: this.strokeStyle, globalAlpha: this.globalAlpha });
+  }
+  restore(): void {
+    const s = this.#saved.pop();
+    if (s) Object.assign(this, s);
+  }
+  measureText(): { width: number } {
+    return { width: 0 };
+  }
+  getLineDash(): number[] {
+    return [];
+  }
+  clearRect(): void {}
+  setLineDash(): void {}
+  drawImage(): void {}
+  strokeText(): void {}
+  closePath(): void {}
+  rect(): void {}
+  clip(): void {}
+  translate(): void {}
+  scale(): void {}
+  rotate(): void {}
+}
+
+/// The host's size, the pending animation frames, and the resize callbacks
+/// the canvas registered.
+export const canvasHost = {
+  width: 400,
+  height: 300,
+  frames: [] as Array<FrameRequestCallback | null>,
+  resizeCallbacks: [] as Array<() => void>,
+};
+
+export function installCanvasDom(): void {
+  installGraphDom();
+  canvasHost.frames = [];
+  canvasHost.resizeCallbacks = [];
+  class TestResizeObserver {
+    constructor(cb: ResizeObserverCallback) {
+      canvasHost.resizeCallbacks.push(() => cb([], this as unknown as ResizeObserver));
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  globalThis.ResizeObserver = TestResizeObserver as unknown as typeof ResizeObserver;
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+    canvasHost.frames.push(cb);
+    return canvasHost.frames.length;
+  }) as typeof requestAnimationFrame;
+  globalThis.cancelAnimationFrame = ((id: number) => {
+    canvasHost.frames[id - 1] = null;
+  }) as typeof cancelAnimationFrame;
+  const contexts = new WeakMap<HTMLCanvasElement, RecordingContext>();
+  HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement) {
+    let ctx = contexts.get(this);
+    if (!ctx) {
+      ctx = new RecordingContext();
+      contexts.set(this, ctx);
+    }
+    return ctx;
+  } as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return new DOMRect(0, 0, canvasHost.width, canvasHost.height);
+  };
+  for (const prop of ["clientWidth", "clientHeight"] as const) {
+    Object.defineProperty(HTMLCanvasElement.prototype, prop, {
+      configurable: true,
+      get: () => (prop === "clientWidth" ? canvasHost.width : canvasHost.height),
+    });
+  }
+}
+
+/// Runs the animation frames queued so far, `n` rounds.
+export function runFrames(n = 1): void {
+  for (let i = 0; i < n; i += 1) {
+    const due = canvasHost.frames;
+    canvasHost.frames = [];
+    for (const cb of due) cb?.(performance.now());
+  }
+}
+
+/// Delivers a resize notification to every observer the canvas registered.
+export function fireResize(): void {
+  for (const cb of canvasHost.resizeCallbacks) cb();
+}
+
+export function paintedContext(target: HTMLElement): RecordingContext {
+  const canvasEl = target.querySelector("canvas");
+  if (!canvasEl) throw new Error("no canvas");
+  return canvasEl.getContext("2d") as unknown as RecordingContext;
+}
