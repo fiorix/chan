@@ -1,65 +1,57 @@
-// The session-role badge shows ONLY when the roster is genuinely split by
-// ORIGIN: at least one local Leader AND at least one remote Follower. A sole-user
-// all-local roster (his standalone terminals, his workspace windows) stays quiet;
-// a mixed roster (a gateway browser joined a devserver) shows the badge, reading
-// the self window's role.
+// @vitest-environment jsdom
 //
-// The visibility PREDICATE is unit-tested directly; the ?raw source pin guards
-// that AppStatusBar still computes it this way and reads the self role. A real
-// browser badge smoke is a host-smoke item (a ?raw pin misses Svelte-5 runtime
-// reactivity).
+// The session role badge shows only when the roster is split by origin: at
+// least one local leader and at least one remote follower (a gateway browser
+// joined a devserver). A sole user's all-local roster, a remote-only roster
+// and an empty one stay quiet. The badge names this window's own role.
 
-import { describe, expect, test } from "vitest";
-import statusBar from "./AppStatusBar.svelte?raw";
-import type { SessionParticipant } from "../state/session.svelte";
+import { flushSync, mount, unmount } from "svelte";
+import { afterEach, describe, expect, test } from "vitest";
 
-function participant(role: "leader" | "follower"): SessionParticipant {
-  return { window_id: `w-${role}`, name: null, role, status: "live" };
-}
+import { sessionWindowId } from "../api/client";
+import { sessionState, type SessionParticipant } from "../state/session.svelte";
+import AppStatusBar from "./AppStatusBar.svelte";
 
-// The exact predicate AppStatusBar uses for roleVisible: a real origin split.
-function roleVisible(participants: SessionParticipant[]): boolean {
-  return (
-    participants.some((p) => p.role === "leader") &&
-    participants.some((p) => p.role === "follower")
-  );
-}
+let view: Record<string, unknown> | null = null;
 
-describe("session role badge visibility", () => {
-  test("hidden for a sole-user all-local roster (all leaders)", () => {
-    expect(roleVisible([participant("leader")])).toBe(false);
-    expect(roleVisible([participant("leader"), participant("leader")])).toBe(
-      false,
-    );
-  });
-
-  test("hidden for a remote-only roster (all followers)", () => {
-    expect(
-      roleVisible([participant("follower"), participant("follower")]),
-    ).toBe(false);
-  });
-
-  test("shown for a mixed roster (a gateway browser joined)", () => {
-    expect(roleVisible([participant("leader"), participant("follower")])).toBe(
-      true,
-    );
-  });
-
-  test("hidden for an empty roster", () => {
-    expect(roleVisible([])).toBe(false);
-  });
+afterEach(() => {
+  if (view) unmount(view);
+  view = null;
+  document.body.innerHTML = "";
+  sessionState.participants = [];
 });
 
-describe("AppStatusBar source keeps the origin-split rule", () => {
-  test("roleVisible is a leader-AND-follower split, not a bare participant count", () => {
-    expect(statusBar).toMatch(
-      /sessionState\.participants\.some\(\(p\) => p\.role === "leader"\)[\s\S]{1,80}sessionState\.participants\.some\(\(p\) => p\.role === "follower"\)/,
-    );
-    // The old count-based rule must be gone.
-    expect(statusBar).not.toMatch(/participants\.length > 1/);
+function participant(role: "leader" | "follower", window_id = `w-${role}-${Math.random()}`): SessionParticipant {
+  return { window_id, name: null, role, status: "live" };
+}
+
+function badge(participants: SessionParticipant[]): string | null {
+  sessionState.participants = participants;
+  const target = document.createElement("div");
+  document.body.append(target);
+  view = mount(AppStatusBar, { target });
+  flushSync();
+  return target.querySelector('[aria-label="session role"]')?.textContent?.trim() ?? null;
+}
+
+describe("the session role badge", () => {
+  test("stays hidden for an all-local roster", () => {
+    expect(badge([participant("leader", sessionWindowId()), participant("leader")])).toBeNull();
   });
 
-  test("the badge reads the self participant's role", () => {
-    expect(statusBar).toMatch(/selfParticipant\(\)\?\.role/);
+  test("stays hidden for a remote-only roster", () => {
+    expect(badge([participant("follower", sessionWindowId()), participant("follower")])).toBeNull();
+  });
+
+  test("stays hidden for an empty roster", () => {
+    expect(badge([])).toBeNull();
+  });
+
+  test("names this window's role once a remote follower joins a local leader", () => {
+    expect(badge([participant("leader", sessionWindowId()), participant("follower")])).toBe("leader");
+  });
+
+  test("names the follower role in the remote window", () => {
+    expect(badge([participant("leader"), participant("follower", sessionWindowId())])).toBe("follower");
   });
 });
