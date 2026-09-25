@@ -88,7 +88,7 @@ That harness needs python-gobject with the WebKit2 4.1 typelib and a display. Un
 
 **Run.** Set `gsettings set org.gnome.desktop.interface enable-animations false` or the equivalent for the host toolkit, then swap screens in the launcher and flip a pane's side.
 
-**Backing.** Both source-pin tests assert the reduced-motion block names the back face alongside the card. No engine check runs under a reduced-motion preference.
+**Backing.** Both source-pin tests assert the reduced-motion block names the back face. No engine check runs under a reduced-motion preference.
 
 **Evidence.** Screenshots of both surfaces immediately after the swap.
 
