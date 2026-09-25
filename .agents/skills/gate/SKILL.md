@@ -36,7 +36,8 @@ The gate runs, in order:
 16. `make web-check` (svelte-check + vitest + production build)
 17. `make web-marketing-check` (marketing site build + smokes)
 18. `make shortcuts-check`
-19. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
+19. `make file-classes-check` (compiles the workspace app's `state/fileTypes.ts` and diffs its `SERVER_CLASSIFIER_MIRROR` sets against the `classify_ext` and `classify_basename` match arms in `crates/chan-workspace/src/fs_ops.rs`, so a file extension widened on one side alone fails here; `FRONTEND_ONLY` in `scripts/check-file-classes.py` names any difference carried on purpose, and an entry that stops being a difference fails the check too)
+20. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
 
 Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additionally proves that every shipped build surface still has an automatic native, distro, or container build edge, and that a change to a root crate the gateway builds from reaches Gateway CI.
 
