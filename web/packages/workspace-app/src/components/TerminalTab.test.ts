@@ -513,6 +513,33 @@ describe("TerminalTab menu", () => {
     },
   );
 
+  test("neither the tab menu nor the body menu offers Reload or Open Inspector", async () => {
+    const tab = terminalTab({ terminalSessionId: "term-session-1" });
+    const { target } = await renderTerminal(tab, true);
+    const labels = () =>
+      Array.from(document.body.querySelectorAll(".mbtn-label")).map((el) => (el.textContent || "").trim());
+
+    openTabMenu(tab.id, { left: 0, top: 0, right: 0, bottom: 0 });
+    await tick();
+    await tick();
+    const tabMenu = labels();
+    closeTabMenu();
+    await tick();
+    target
+      .querySelector(".terminal-tab")!
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+    await tick();
+    await tick();
+    const bodyMenu = labels();
+
+    expect(tabMenu.length).toBeGreaterThan(0);
+    expect(bodyMenu).toContain("Copy Scrollback");
+    for (const label of ["Reload", "Open Inspector"]) {
+      expect(tabMenu).not.toContain(label);
+      expect(bodyMenu).not.toContain(label);
+    }
+  });
+
   test("the terminal menu has NO Team Work toggle (the bubble is gone)", async () => {
     const tab = terminalTab({ terminalSessionId: "term-session-1" });
     await renderTerminal(tab, true);
