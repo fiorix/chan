@@ -1,74 +1,90 @@
-import { describe, expect, test } from "vitest";
-import wysiwyg from "../editor/Wysiwyg.svelte?raw";
-import source from "../editor/Source.svelte?raw";
-import rightClickNoSelectMod from "../editor/right_click_no_select.ts?raw";
-import pathPromptModal from "./PathPromptModal.svelte?raw";
+// @vitest-environment jsdom
+//
+// A right-click in an editor leaves the selection alone, so the context menu
+// acts on what the user had selected rather than on the word or line under
+// the pointer. CodeMirror never selects on a right-button press; the browser
+// does, unless the press is consumed, which is what rightClickNoSelect does.
+// Mouse-downs are dispatched on real editor views and the tests read whether
+// the default was prevented and what stayed selected.
 
-// Three small editor fixes:
-// 1. Right-click selects a line/word before the context menu opens.
-//    Fix: CodeMirror domEventHandler returns true on button === 2 mousedown.
-// 2. Image-as-raw-text after tab switch. Fix: view.requestMeasure()
-//    in focus() + onMount so image decorations re-evaluate.
-// 3. New Directory dialog selects the whole pre-populated path.
-//    Fix: cursor-at-end for kind="folder" mode="create".
+import { EditorSelection, EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { flushSync, mount, unmount, type ComponentProps } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
-describe("(1): right-click no select", () => {
-  test("right_click_no_select extension returns true on button===2 mousedown", () => {
-    expect(rightClickNoSelectMod).toMatch(
-      /export function rightClickNoSelect\(\)[\s\S]*?mousedown\(e\)[\s\S]*?if \(e\.button === 2\) return true;/,
-    );
+import SourceComponent from "./Source.svelte";
+import { rightClickNoSelect } from "./right_click_no_select";
+import { installEditorDom, mountWysiwyg, unmountWysiwygs } from "../__tests__/wysiwyg";
+
+installEditorDom();
+
+const DOC = "alpha beta\ngamma delta";
+const SELECTED = EditorSelection.single(0, 5);
+const views: EditorView[] = [];
+const mounted: Array<Record<string, unknown>> = [];
+
+afterEach(() => {
+  for (const v of views.splice(0)) v.destroy();
+  for (const c of mounted.splice(0)) unmount(c);
+  unmountWysiwygs();
+  document.body.innerHTML = "";
+  vi.restoreAllMocks();
+});
+
+/// Press `button` in the editor with `selection` set ("alpha" by default).
+function pressOn(view: EditorView, button: number, selection: EditorSelection = SELECTED): MouseEvent {
+  view.dispatch({ selection });
+  const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button, detail: 1, clientX: 5, clientY: 5 });
+  view.contentDOM.dispatchEvent(event);
+  return event;
+}
+
+function plainView(extensions = [rightClickNoSelect()]): EditorView {
+  const parent = document.createElement("div");
+  document.body.append(parent);
+  const view = new EditorView({ state: EditorState.create({ doc: DOC, extensions }), parent });
+  views.push(view);
+  return view;
+}
+
+describe("rightClickNoSelect", () => {
+  test("consumes a right-button press, keeping the selection", () => {
+    const view = plainView();
+    expect(pressOn(view, 2).defaultPrevented).toBe(true);
+    expect(view.state.selection.main).toMatchObject({ from: 0, to: 5 });
   });
 
-  test("Wysiwyg includes rightClickNoSelect() in its extensions list", () => {
-    expect(wysiwyg).toMatch(/import \{ rightClickNoSelect \} from "\.\/right_click_no_select";/);
-    expect(wysiwyg).toMatch(/rightClickNoSelect\(\),/);
+  test("is what consumes it: CodeMirror alone leaves the press to the browser", () => {
+    const view = plainView([]);
+    expect(pressOn(view, 2).defaultPrevented).toBe(false);
   });
 
-  test("Source includes rightClickNoSelect() in its extensions list", () => {
-    expect(source).toMatch(/import \{ rightClickNoSelect \} from "\.\/right_click_no_select";/);
-    expect(source).toMatch(/rightClickNoSelect\(\),/);
+  test("leaves a left-button press to CodeMirror, which moves the caret", () => {
+    const view = plainView();
+    pressOn(view, 0, EditorSelection.single(DOC.length));
+    expect(view.state.selection.main.head).not.toBe(DOC.length);
   });
 });
 
-describe("(2): image-as-text re-render on tab focus", () => {
-  test("Wysiwyg focus() export calls view.requestMeasure() so image decorations re-evaluate", () => {
-    expect(wysiwyg).toMatch(
-      /export function focus\(\): boolean \{[\s\S]*?view\.focus\(\);[\s\S]*?view\.requestMeasure\(\);/,
-    );
+describe("in the editors", () => {
+  test("Wysiwyg keeps the selection through a right-button press", async () => {
+    const { view } = await mountWysiwyg({ value: DOC });
+    expect(pressOn(view, 2).defaultPrevented).toBe(true);
+    expect(view.state.selection.main).toMatchObject({ from: 0, to: 5 });
   });
 
-  test("Source focus() export mirrors the requestMeasure() call for parity", () => {
-    expect(source).toMatch(
-      /export function focus\(\): boolean \{[\s\S]*?view\.focus\(\);[\s\S]*?view\.requestMeasure\(\);/,
+  test("Source keeps the selection through a right-button press", () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(
+      mount(SourceComponent, {
+        target,
+        props: { autoFocus: false, path: "note.md", value: DOC } as ComponentProps<typeof SourceComponent>,
+      }),
     );
-  });
-
-  test("Wysiwyg onMount also forces a requestMeasure() after view creation", () => {
-    // Animate-in panes can mount the editor against a zero-size
-    // host; the post-mount measure fires the decoration pass.
-    expect(wysiwyg).toMatch(
-      /view = new EditorView\(\{ state, parent: host \}\);[\s\S]*?view\.requestMeasure\(\);/,
-    );
-  });
-});
-
-describe("(3): New Directory dialog cursor at end", () => {
-  test("PathPromptModal places cursor at end for folder+create (no select-all)", () => {
-    expect(pathPromptModal).toMatch(
-      /pathPromptState\.kind === "folder" &&\s*pathPromptState\.mode === "create"[\s\S]*?const end = pathPromptState\.defaultValue\.length;[\s\S]*?inputEl\?\.setSelectionRange\(end, end\);/,
-    );
-  });
-
-  test("file+create stem selection preserved (case unchanged)", () => {
-    // The existing file+create case must not regress.
-    expect(pathPromptModal).toMatch(
-      /pathPromptState\.kind === "file" &&\s*pathPromptState\.mode === "create"[\s\S]*?setSelectionRange\(\s*stemStart/,
-    );
-  });
-
-  test("default select-all branch still exists for other kinds/modes", () => {
-    // Move / attach / file-non-default-name fall through to the
-    // original select-all behavior - preserved.
-    expect(pathPromptModal).toMatch(/} else \{[\s\S]*?inputEl\?\.select\(\);/);
+    flushSync();
+    const view = EditorView.findFromDOM(target.querySelector<HTMLElement>(".cm-editor")!)!;
+    expect(pressOn(view, 2).defaultPrevented).toBe(true);
+    expect(view.state.selection.main).toMatchObject({ from: 0, to: 5 });
   });
 });

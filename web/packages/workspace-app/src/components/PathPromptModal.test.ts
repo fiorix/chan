@@ -54,6 +54,7 @@ async function settle(turns = 4): Promise<void> {
 type Prompt = {
   kind: PathPromptKind;
   mode: PathPromptMode;
+  defaultValue?: string;
   allowAbsolute?: boolean;
   notice?: string;
   sourcePath?: string;
@@ -268,5 +269,34 @@ describe("the file-or-directory kind", () => {
 
     expect(statusText(target)).toBe("✗ 'notes.md' is an existing file, can't create a directory");
     expect(okButton(target).disabled).toBe(true);
+  });
+});
+
+describe("the text selected when the dialog opens", () => {
+  async function openWith(prompt: Prompt & { defaultValue: string }): Promise<HTMLInputElement> {
+    const target = mountModal();
+    void uiPathPrompt({ title: "path", ...prompt });
+    await settle(2);
+    return target.querySelector("input")!;
+  }
+
+  test("New Directory puts the caret after the parent path, selecting nothing", async () => {
+    const input = await openWith({ kind: "folder", mode: "create", defaultValue: "docs/" });
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 5]);
+  });
+
+  test("New File or Directory does the same", async () => {
+    const input = await openWith({ kind: "either", mode: "create", defaultValue: "docs/" });
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 5]);
+  });
+
+  test("New File selects the proposed file name, not its directory", async () => {
+    const input = await openWith({ kind: "file", mode: "create", defaultValue: "docs/untitled.md" });
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 16]);
+  });
+
+  test("a move selects the whole path", async () => {
+    const input = await openWith({ kind: "file", mode: "move", defaultValue: "docs/old.md", sourcePath: "docs/old.md" });
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, 11]);
   });
 });
