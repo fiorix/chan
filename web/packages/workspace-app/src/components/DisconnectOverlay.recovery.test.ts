@@ -1,67 +1,161 @@
-import { describe, expect, test } from "vitest";
-import overlay from "./DisconnectOverlay.svelte?raw";
-import desktop from "../api/desktop.ts?raw";
+// @vitest-environment jsdom
+//
+// Once the connection to the chan server has been up and then drops, the
+// overlay covers the window after a short grace: a spinner, what it is doing,
+// and a retry readout of the reconnect attempt and the time elapsed. On a
+// desktop window backed by a devserver it also offers Reconnect (the desktop
+// force-closes the dead control terminal and dials again) and Abandon, each
+// showing it is busy and saying why when the desktop refuses. A browser, or a
+// desktop window on the local library, gets no actions: the watcher keeps
+// retrying on its own.
 
-// The disconnect overlay is a reconnecting status plus recovery actions on a
-// devserver-backed desktop window: a primary Reconnect (force-close the dead
-// control terminal + re-dial) and Abandon (give up). The manual "Retry now"
-// button is gone (the watcher loop auto-reconnects), the never-emitted "closed"
-// branch is neutralized, and the standing subline is removed everywhere.
-describe("DisconnectOverlay", () => {
-  test("drops the manual Retry button and reconnectWatcher wiring", () => {
-    expect(overlay).not.toMatch(/Retry now/);
-    expect(overlay).not.toMatch(/reconnectWatcher/);
+import { mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+import { abandonDevserverForWindow, reconnectDevserverForWindow } from "../api/desktop";
+import { ui } from "../state/store.svelte";
+import DisconnectOverlay from "./DisconnectOverlay.svelte";
+
+type TauriWindow = { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } };
+
+let invoke: ReturnType<typeof vi.fn<(cmd: string) => Promise<unknown>>>;
+const mounted: Array<Record<string, unknown>> = [];
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  invoke = vi.fn(async () => undefined);
+  ui.ws = "open";
+  ui.wsAttempt = 0;
+});
+
+afterEach(() => {
+  for (const view of mounted.splice(0)) unmount(view);
+  document.body.innerHTML = "";
+  delete (window as TauriWindow).__TAURI_INTERNALS__;
+  history.replaceState(null, "", "/");
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  ui.ws = "connecting";
+  ui.wsAttempt = 0;
+});
+
+function desktopWindow(lib: string): void {
+  (window as TauriWindow).__TAURI_INTERNALS__ = { invoke };
+  history.replaceState(null, "", `/?lib=${lib}`);
+}
+
+async function dropConnection(): Promise<HTMLElement> {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(DisconnectOverlay, { target }));
+  await tick();
+  ui.ws = "reconnecting";
+  await tick();
+  vi.advanceTimersByTime(600);
+  await tick();
+  expect(target.querySelector(".overlay")).not.toBeNull();
+  return target;
+}
+
+function button(target: HTMLElement, label: string): HTMLButtonElement {
+  return [...target.querySelectorAll<HTMLButtonElement>(".actions button")].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  )!;
+}
+
+describe("the reconnect overlay", () => {
+  test("shows a spinner, what it is doing, and the attempt with the time elapsed", async () => {
+    ui.wsAttempt = 3;
+    const target = await dropConnection();
+
+    expect(target.querySelector(".spinner")).not.toBeNull();
+    expect(target.querySelector(".title")?.textContent).toBe("reconnecting to the chan server");
+    expect(target.querySelector(".meta")?.textContent).toBe("attempt 3 · 00:00");
+
+    vi.advanceTimersByTime(65_000);
+    await tick();
+    expect(target.querySelector(".meta")?.textContent).toBe("attempt 3 · 01:05");
   });
 
-  test("offers Reconnect + Abandon, gated on canRecover, via the desktop IPC", () => {
-    expect(overlay).toMatch(
-      /const canRecover = isTauriDesktop\(\) && windowLibraryId\(\) !== "local"/,
+  test("shows only the time elapsed before the first attempt", async () => {
+    const target = await dropConnection();
+
+    expect(target.querySelector(".meta")?.textContent).toBe("00:00");
+  });
+
+  test("offers no actions in a browser, even one on a devserver", async () => {
+    history.replaceState(null, "", "/?lib=dev-1");
+    const target = await dropConnection();
+
+    expect(target.querySelector(".actions")).toBeNull();
+  });
+
+  test("offers no actions on a desktop window of the local library", async () => {
+    desktopWindow("local");
+    const target = await dropConnection();
+
+    expect(target.querySelector(".actions")).toBeNull();
+  });
+});
+
+describe("recovering a devserver-backed desktop window", () => {
+  test("Reconnect and Abandon each ask the desktop", async () => {
+    desktopWindow("dev-1");
+    const target = await dropConnection();
+
+    button(target, "Reconnect").click();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reconnect_devserver_for_window", undefined));
+    await vi.waitFor(() => expect(button(target, "Abandon").disabled).toBe(false));
+    button(target, "Abandon").click();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("abandon_devserver_for_window", undefined));
+  });
+
+  test("a pending action says so and holds both buttons", async () => {
+    desktopWindow("dev-1");
+    let finish!: () => void;
+    invoke.mockImplementation(() => new Promise<undefined>((resolve) => (finish = () => resolve(undefined))));
+    const target = await dropConnection();
+
+    button(target, "Reconnect").click();
+    await tick();
+
+    const buttons = [...target.querySelectorAll<HTMLButtonElement>(".actions button")];
+    expect(buttons.map((b) => [b.textContent?.trim(), b.disabled])).toEqual([
+      ["Reconnecting...", true],
+      ["Abandon", true],
+    ]);
+
+    finish();
+    await vi.waitFor(() => expect(button(target, "Reconnect")?.disabled).toBe(false));
+  });
+
+  test("a refused action shows the desktop's reason", async () => {
+    desktopWindow("dev-1");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    invoke.mockRejectedValue(new Error("not allowed for this window"));
+    const target = await dropConnection();
+
+    button(target, "Abandon").click();
+
+    await vi.waitFor(() =>
+      expect(target.querySelector('[role="alert"]')?.textContent).toBe("not allowed for this window"),
     );
-    // Both recovery buttons render together under the same desktop gate.
-    expect(overlay).toMatch(
-      /\{#if canRecover\}[\s\S]*onclick=\{reconnect\}[\s\S]*onclick=\{abandon\}/,
-    );
-    // Each button invokes its own desktop IPC wrapper through the shared
-    // pending/error path.
-    expect(overlay).toMatch(/runRecovery\("reconnect", reconnectDevserverForWindow\)/);
-    expect(overlay).toMatch(/runRecovery\("abandon", abandonDevserverForWindow\)/);
+  });
+});
+
+describe("the desktop's recovery calls", () => {
+  test("refuse outside the desktop", async () => {
+    await expect(reconnectDevserverForWindow()).rejects.toThrow("not running under Tauri");
+    await expect(abandonDevserverForWindow()).rejects.toThrow("not running under Tauri");
   });
 
-  test("recovery actions expose pending state and visible IPC errors", () => {
-    expect(overlay).toMatch(/let pendingAction = \$state<"reconnect" \| "abandon" \| null>/);
-    expect(overlay).toMatch(/let recoveryError = \$state<string \| null>/);
-    expect(overlay).toMatch(/disabled=\{pendingAction !== null\}/);
-    expect(overlay).toMatch(/\{pendingAction === "reconnect" \? "Reconnecting\.\.\." : "Reconnect"\}/);
-    expect(overlay).toMatch(/\{#if recoveryError\}[\s\S]*role="alert"[\s\S]*\{recoveryError\}/);
-  });
+  test("log a refused call and pass the failure on", async () => {
+    desktopWindow("dev-1");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    invoke.mockRejectedValue(new Error("denied"));
 
-  test("desktop recovery IPC wrappers throw after logging failures", () => {
-    expect(desktop).toMatch(/throw new Error\("not running under Tauri"\)/);
-    expect(desktop).toMatch(
-      /abandonDevserverForWindow[\s\S]*catch \(err\)[\s\S]*console\.warn[\s\S]*throw err;/,
-    );
-    expect(desktop).toMatch(
-      /reconnectDevserverForWindow[\s\S]*catch \(err\)[\s\S]*console\.warn[\s\S]*throw err;/,
-    );
-  });
-
-  test("removes the standing subline (Q7=b: everywhere)", () => {
-    expect(overlay).not.toMatch(/this usually clears on its own/);
-    expect(overlay).not.toMatch(/class="subline"/);
-  });
-
-  test("neutralizes the never-emitted 'closed' branch", () => {
-    expect(overlay).not.toMatch(/disconnected from the chan server/);
-    expect(overlay).not.toMatch(/the server may have stopped/);
-  });
-
-  // The overlay adopts the desktop connecting screen's retry readout: a live
-  // elapsed timer and an "attempt N" counter driven by the watcher transport's
-  // reconnect count (`ui.wsAttempt`), alongside the existing spinner.
-  test("shows the retry-counter presentation (attempt count + elapsed timer)", () => {
-    expect(overlay).toMatch(/ui\.wsAttempt/);
-    expect(overlay).toMatch(/function fmtElapsed/);
-    expect(overlay).toMatch(/attempt \$\{ui\.wsAttempt\}/);
-    expect(overlay).toMatch(/class="meta"/);
+    await expect(reconnectDevserverForWindow()).rejects.toThrow("denied");
+    await expect(abandonDevserverForWindow()).rejects.toThrow("denied");
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 });
