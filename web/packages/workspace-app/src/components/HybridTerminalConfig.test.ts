@@ -4,14 +4,15 @@
 // title and an OK that hands back to the pane. It renders no control and
 // sends no request. The terminal's settings live in Settings > Terminal,
 // which writes each one into the terminal preferences and keeps the others:
-// TERM and MCP discovery here (scrollback, mouse capture and the font are
+// TERM, written once typing pauses, and MCP discovery here (scrollback,
+// mouse capture and the font are
 // driven in SettingsOverlay.render.test.ts and TerminalSection.font.test.ts).
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { recordRequests, stopRecordingRequests } from "../__tests__/fetch";
-import { closeSettings, openSettings, settingsPreferences } from "../__tests__/settings";
+import { closeSettings, openSettings, settingsPreferences, settleSettings } from "../__tests__/settings";
 import HybridTerminalConfig from "./HybridTerminalConfig.svelte";
 
 const TERMINAL = settingsPreferences().terminal as Record<string, unknown>;
@@ -46,13 +47,25 @@ describe("the Hybrid Terminal back card", () => {
 describe("Settings > Terminal", () => {
   afterEach(closeSettings);
 
-  test("TERM writes terminal.default_term and keeps the other terminal settings", async () => {
+  test("TERM writes terminal.default_term once typing pauses and keeps the other terminal settings", async () => {
     const { target, writes } = await openSettings("Terminal");
     const term = target.querySelector<HTMLInputElement>('input[aria-label="Terminal TERM value"]')!;
     expect(term.value).toBe("xterm-256color");
 
-    term.value = "screen-256color";
-    term.dispatchEvent(new Event("input", { bubbles: true }));
+    vi.useFakeTimers();
+    try {
+      for (const value of ["screen", "screen-256color"]) {
+        term.value = value;
+        term.dispatchEvent(new Event("input", { bubbles: true }));
+        vi.advanceTimersByTime(300);
+        await settleSettings();
+      }
+      expect(writes).toEqual([]);
+
+      vi.advanceTimersByTime(100);
+    } finally {
+      vi.useRealTimers();
+    }
 
     await vi.waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0]).toEqual({ terminal: { ...TERMINAL, default_term: "screen-256color" } });

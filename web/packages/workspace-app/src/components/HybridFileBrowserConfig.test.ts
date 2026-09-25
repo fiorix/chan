@@ -70,6 +70,7 @@ describe("Settings > This workspace > Excluded directories", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     if (view) unmount(view);
     view = null;
     document.body.innerHTML = "";
@@ -104,11 +105,12 @@ describe("Settings > This workspace > Excluded directories", () => {
     await vi.waitFor(() => expect(api.setExcludedDirs).toHaveBeenCalledWith(["build", "target"]));
   });
 
-  test("refuses a path, a name already excluded and a machine-wide one", async () => {
+  test("refuses a path, a name already excluded and a machine-wide one", () => {
+    vi.useFakeTimers();
     add("docs/out");
     add("BUILD");
     add("node_modules");
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    vi.runAllTimers();
 
     expect(chips()).toEqual(["build"]);
     expect(api.setExcludedDirs).not.toHaveBeenCalled();
