@@ -30,7 +30,13 @@ vi.mock("../state/store.svelte", async (importOriginal) => {
   };
 });
 
-import { persistPaneWidths, scheduleSessionSave } from "../state/store.svelte";
+import {
+  paneWidths,
+  persistPaneWidths,
+  refreshTree,
+  refreshWorkspace,
+  scheduleSessionSave,
+} from "../state/store.svelte";
 
 class TestResizeObserver {
   observe() {}
@@ -155,4 +161,69 @@ describe("a File-Browser inspector resize", () => {
     }
   });
 
+});
+
+describe("the File-Browser tab's own view state", () => {
+  test("the inspector uses the tab's width, else the shared one, and a drag leaves the shared one alone", async () => {
+    const timers = trackTimers();
+    installDemoWorkspace({
+      metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1, fileCount: 0, textCount: 0 },
+      files: [],
+    });
+    try {
+      paneWith({ kind: "browser", id: "browser-1", title: "Files", inspectorOpen: true, inspectorWidth: 333 });
+      const own = document.createElement("div");
+      document.body.append(own);
+      mounted.push(
+        mount(FileBrowserSurface, {
+          target: own,
+          props: { variant: "tab", tab: (layout.nodes["pane-test"] as LeafNode).tabs[0] as BrowserTab },
+        }),
+      );
+      await settle();
+      expect(own.querySelector<HTMLElement>("aside.inspector")!.style.width).toBe("333px");
+      unmount(mounted.pop()!);
+
+      const shared = paneWidths.browser;
+      const target = await renderTabWithInspector();
+      const aside = target.querySelector<HTMLElement>("aside.inspector")!;
+      expect(aside.style.width).toBe(`${shared}px`);
+      drag(target.querySelector(".handle")!, -30);
+      await settle();
+      expect(paneWidths.browser, "the shared width is not the drag target").toBe(shared);
+    } finally {
+      uninstallDemoWorkspace();
+      timers.release();
+    }
+  });
+
+  test("expanding a directory in the tab reaches the URL hash", async () => {
+    const timers = trackTimers();
+    installDemoWorkspace({
+      metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1, fileCount: 1, textCount: 1 },
+      files: [{ path: "notes/a.md", kind: "document", size: 1, mtime: 1, content: "a" }],
+    });
+    try {
+      await refreshWorkspace();
+      await refreshTree();
+      const target = await renderTabWithInspector();
+      await new Promise((r) => setTimeout(r, 400));
+      window.history.replaceState(null, "", "#");
+
+      const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find((el) =>
+        el.textContent?.includes("notes"),
+      );
+      row!.querySelector<HTMLButtonElement>("button.twirl")!.click();
+      await settle();
+      await new Promise((r) => setTimeout(r, 400));
+
+      const tab = (layout.nodes["pane-test"] as LeafNode).tabs[0] as BrowserTab;
+      expect(tab.expanded).toEqual(["notes"]);
+      const params = new URLSearchParams(window.location.hash.slice(1));
+      expect([...params.values()].some((v) => v.includes('"notes"')), "the layout in the hash").toBe(true);
+    } finally {
+      uninstallDemoWorkspace();
+      timers.release();
+    }
+  });
 });

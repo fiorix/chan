@@ -15,7 +15,7 @@ import { bufferKey, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 import type { MockWorkspaceStore } from "../demo/store";
-import { fileOps, refreshTree, refreshWorkspace } from "../state/store.svelte";
+import { fileOps, paneWidths, refreshTree, refreshWorkspace } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
 
@@ -67,6 +67,8 @@ class TestResizeObserver {
 globalThis.ResizeObserver = TestResizeObserver as unknown as typeof ResizeObserver;
 Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
 Range.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+HTMLElement.prototype.setPointerCapture = () => {};
+HTMLElement.prototype.releasePointerCapture = () => {};
 Object.defineProperty(window, "matchMedia", {
   configurable: true,
   value: (query: string) => ({
@@ -682,5 +684,45 @@ describe("the slide chord", () => {
     await settle(2);
     expect(tab.slidePreview?.open).toBe(false);
     expect(target.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
+  });
+});
+
+describe("the side panels' widths", () => {
+  /// Drags a panel edge `dx` pixels, as a pointer would.
+  function drag(handle: Element, dx: number): void {
+    const at = (type: string, clientX: number) =>
+      handle.dispatchEvent(
+        Object.assign(new MouseEvent(type, { bubbles: true, cancelable: true, clientX }), { pointerId: 1 }),
+      );
+    at("pointerdown", 500);
+    at("pointermove", 500 + dx);
+    at("pointerup", 500 + dx);
+  }
+
+  test("the details and outline panels take the tab's own widths", async () => {
+    const tab = seat(fileTab({ inspectorOpen: true, inspectorWidth: 310, outlineOpen: true, outlineWidth: 190 }));
+    const { target } = await render(tab);
+
+    expect(target.querySelector<HTMLElement>("aside.inspector.right")!.style.width).toBe("310px");
+    expect(target.querySelector<HTMLElement>("aside.inspector.left")!.style.width).toBe("190px");
+  });
+
+  test("without them they use the shared widths, and a drag writes only the tab's", async () => {
+    const sharedInspector = paneWidths.inspector;
+    const sharedOutline = paneWidths.outline;
+    const tab = seat(fileTab({ inspectorOpen: true, outlineOpen: true }));
+    const { target } = await render(tab);
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const outline = target.querySelector<HTMLElement>("aside.inspector.left")!;
+    expect(details.style.width).toBe(`${sharedInspector}px`);
+    expect(outline.style.width).toBe(`${sharedOutline}px`);
+
+    drag(details.previousElementSibling!, -40);
+    drag(outline.nextElementSibling!, 30);
+    await settle(2);
+    expect(tab.inspectorWidth).toBe(sharedInspector + 40);
+    expect(tab.outlineWidth).toBe(sharedOutline + 30);
+    expect(paneWidths.inspector).toBe(sharedInspector);
+    expect(paneWidths.outline).toBe(sharedOutline);
   });
 });
