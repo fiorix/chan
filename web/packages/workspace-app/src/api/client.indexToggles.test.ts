@@ -1,37 +1,48 @@
-import { describe, expect, test } from "vitest";
-import client from "./client.ts?raw";
+// @vitest-environment jsdom
+//
+// The per-workspace index toggles. chan-reports and semantic search share one
+// shape: a GET of the state, and a POST each to enable and disable, every one
+// answering with the resulting state.
 
-describe("reports client methods", () => {
-  test("api.reportsState hits GET /api/index/reports/state", () => {
-    expect(client).toMatch(
-      /reportsState: \(\) =>[\s\S]*?req<\{ enabled: boolean \}>\("GET", "\/api\/index\/reports\/state"\)/,
-    );
+import { afterEach, describe, expect, test } from "vitest";
+import { api } from "./client";
+import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
+
+afterEach(stopRecordingRequests);
+
+describe.each([
+  {
+    toggle: "reports",
+    state: () => api.reportsState(),
+    enable: () => api.reportsEnable(),
+    disable: () => api.reportsDisable(),
+  },
+  {
+    toggle: "semantic",
+    state: () => api.semanticState(),
+    enable: () => api.semanticEnable(),
+    disable: () => api.semanticDisable(),
+  },
+])("the $toggle toggle", ({ toggle, state, enable, disable }) => {
+  test("reads its state with a GET", async () => {
+    const requests = recordRequests(() => json({ enabled: true }));
+
+    await expect(state()).resolves.toMatchObject({ enabled: true });
+    expect(requests).toMatchObject([{ method: "GET", path: `/api/index/${toggle}/state` }]);
   });
 
-  test("api.reportsEnable hits POST /api/index/reports/enable", () => {
-    expect(client).toMatch(
-      /reportsEnable: \(\) =>[\s\S]*?req<\{ enabled: boolean \}>\("POST", "\/api\/index\/reports\/enable"\)/,
-    );
-  });
+  test("turns on and off with a POST each, answering with the new state", async () => {
+    let enabled = false;
+    const requests = recordRequests((request) => {
+      enabled = request.path.endsWith("/enable");
+      return json({ enabled });
+    });
 
-  test("api.reportsDisable hits POST /api/index/reports/disable", () => {
-    expect(client).toMatch(
-      /reportsDisable: \(\) =>[\s\S]*?req<\{ enabled: boolean \}>\("POST", "\/api\/index\/reports\/disable"\)/,
-    );
-  });
-
-  test("doc comment references the reports route and indexing-pass trigger", () => {
-    expect(client).toMatch(/Per-workspace chan-reports toggle/);
-    expect(client).toMatch(/reports_toggle\.rs/);
-    expect(client).toMatch(/incremental indexing pass/i);
-  });
-
-  test("shape mirrors the semantic-toggle methods", () => {
-    // Both reports + semantic ship the same 3-method shape:
-    // state (GET) + enable (POST) + disable (POST). This pin
-    // anchors the parallel so a future audit can see they're
-    // siblings.
-    expect(client).toMatch(/semanticState: \(\) =>/);
-    expect(client).toMatch(/reportsState: \(\) =>/);
+    await expect(enable()).resolves.toMatchObject({ enabled: true });
+    await expect(disable()).resolves.toMatchObject({ enabled: false });
+    expect(requests.map(({ method, path }) => [method, path])).toEqual([
+      ["POST", `/api/index/${toggle}/enable`],
+      ["POST", `/api/index/${toggle}/disable`],
+    ]);
   });
 });
