@@ -195,7 +195,7 @@ function drawn(pane: HTMLElement): { strip: string[]; bodies: number; failed: bo
 }
 
 /// The warnings the pane gave for a repeated id, one per dropped copy.
-function duplicateWarnings(warn: ReturnType<typeof vi.spyOn>): string[] {
+function duplicateWarnings(warn: { mock: { calls: unknown[][] } }): string[] {
   return warn.mock.calls
     .map((call) => String(call[0]))
     .filter((message) => message.includes("lists tab"));
@@ -270,7 +270,7 @@ describe("a pane whose tab lists repeat an id", () => {
     expect({
       drawsFirstCopy: bodies.some((text) => text.includes("README.md")),
       drawsSecondCopy: bodies.some((text) => text.includes("other.md")),
-      secondCopyKept: (layout.nodes[PANE_A] as LeafNode).bTabs?.[0]?.path,
+      secondCopyKept: ((layout.nodes[PANE_A] as LeafNode).bTabs?.[0] as FileTab | undefined)?.path,
       warned: duplicateWarnings(warn)[0],
     }).toEqual({
       drawsFirstCopy: true,
