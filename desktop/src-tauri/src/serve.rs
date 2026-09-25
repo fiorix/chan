@@ -2028,7 +2028,7 @@ mod tests {
     ///
     /// Determinism comes from the library's own in-process guard: while the
     /// test holds an `Arc<Workspace>` for the root, the host polls inside its
-    /// one-second release budget while holding `register_lock`. Both callers
+    /// one-second release budget while holding that root's lock. Both callers
     /// remain past the pre-check with `serves` empty: one waits for release,
     /// the other for registration. Dropping the handle lets both use one
     /// mount, and whichever inserts second takes the duplicate branch.
