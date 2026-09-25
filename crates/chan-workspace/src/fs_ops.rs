@@ -147,7 +147,7 @@ pub enum FileClass {
     /// and well-known no-extension files (Makefile, Dockerfile,
     /// LICENSE, .gitignore, ...).
     Text,
-    /// `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.avif`.
+    /// `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.avif`, `.bmp`.
     /// Read-only via `read` / `write_bytes`; the editor's inspector
     /// pane previews these inline.
     Image,
@@ -373,7 +373,7 @@ fn classify_ext(ext: &str) -> Option<FileClass> {
         "md" | "txt" => FileClass::EditableText,
 
         // Media + dedicated preview classes.
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" => FileClass::Image,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "bmp" => FileClass::Image,
         "pdf" => FileClass::Pdf,
 
         // Source / config text. Editable, not indexed.
@@ -397,7 +397,10 @@ fn classify_ext(ext: &str) -> Option<FileClass> {
         | "bzl" | "ninja" | "gradle" | "patch" | "diff" | "rst" | "adoc" | "asciidoc" | "org"
         | "tex" | "latex" | "ltx" | "bib" | "gitignore" | "gitattributes" | "editorconfig"
         | "npmrc" | "nvmrc" | "babelrc" | "prettierrc" | "eslintrc" | "eslintignore"
-        | "dockerignore" => FileClass::Text,
+        | "dockerignore" | "cs" | "d" | "edn" | "f" | "f90" | "f95" | "gql" | "graphql" | "jl"
+        | "jsonc" | "odin" | "proto" | "s" | "sv" | "v" | "verilog" | "vhd" | "vhdl" => {
+            FileClass::Text
+        }
 
         _ => return None,
     };

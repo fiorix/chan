@@ -537,8 +537,7 @@ fn file_label(rel: &str) -> String {
 /// `web/packages/workspace-app/src/state/fileTypes.ts`, the module that
 /// owns the frontend's file classification: `classifyPath` there, and
 /// `classifyFile` and `fileBucket` in `state/kinds.ts` built on it, are
-/// what the canvas, its filter chips and the file browser read. Both
-/// carry `bmp`, which chan-workspace's `FileClass::Image` does not. The
+/// what the canvas, its filter chips and the file browser read. The
 /// graph route uses this to enrich the file set with image files
 /// referenced by markdown so a `![](pic.png)` lands on a real file node
 /// instead of a ghost. Keep this list and that set in sync.

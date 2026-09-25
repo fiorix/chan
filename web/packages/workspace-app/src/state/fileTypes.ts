@@ -26,8 +26,7 @@
 //     Maps to `FileClass::Text`. Editable through the UTF-8 gate
 //     but not indexed (false positives like `#include` looking
 //     like a `#tag` would pollute the graph).
-//   - IMAGE_EXTENSIONS: raster + svg. Maps to `FileClass::Image`, plus
-//     bmp, which that class lacks.
+//   - IMAGE_EXTENSIONS: raster + svg. Maps to `FileClass::Image`.
 //   - PDF_EXTENSIONS: .pdf. Maps to `FileClass::Pdf`.
 //
 // Well-known no-extension files (Makefile, Dockerfile, LICENSE, ...)
@@ -62,9 +61,6 @@ const IMAGE_EXTENSIONS = new Set([
   "webp",
   "svg",
   "avif",
-  // chan-workspace's FileClass::Image lacks bmp, so the server lists a .bmp
-  // as binary; it stays here so a bmp previews as an image. The one
-  // difference scripts/check-file-classes.py allows, by name.
   "bmp",
 ]);
 
@@ -132,6 +128,23 @@ const TEXT_EXTENSIONS = new Set([
   "awk",
   "asm",
   "vb",
+  "cs",
+  "d",
+  "jl",
+  "odin",
+  "edn",
+  // Fortran.
+  "f",
+  "f90",
+  "f95",
+  // Assembly, alongside "asm".
+  "s",
+  // Hardware description.
+  "v",
+  "sv",
+  "verilog",
+  "vhd",
+  "vhdl",
   // Shell.
   "sh",
   "bash",
@@ -148,6 +161,7 @@ const TEXT_EXTENSIONS = new Set([
   "yaml",
   "yml",
   "json",
+  "jsonc",
   "json5",
   "jsonl",
   "ndjson",
@@ -155,6 +169,10 @@ const TEXT_EXTENSIONS = new Set([
   "cfg",
   "conf",
   "properties",
+  // Schemas and query languages.
+  "proto",
+  "graphql",
+  "gql",
   "env",
   "envrc",
   "lock",

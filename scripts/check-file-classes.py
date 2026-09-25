@@ -28,12 +28,7 @@ GENERATOR = ROOT / "web" / "packages" / "workspace-app" / "scripts" / "file-clas
 # Entries one side carries on purpose. Each names the side that lacks it; an
 # entry that stops being a difference fails the check, so it is removed with
 # the change that settles it rather than lingering.
-FRONTEND_ONLY = {
-    ("classify_ext", "Image", "bmp"): (
-        "FileClass::Image lacks bmp, so the server lists a .bmp as binary; the "
-        "frontend keeps it so a bmp previews as an image"
-    ),
-}
+FRONTEND_ONLY: dict[tuple[str, str, str], str] = {}
 
 FN = re.compile(r"\bfn (classify_ext|classify_basename)\([^)]*\)[^{]*\{(?P<body>.*?)\n\}", re.DOTALL)
 ARM = re.compile(r'(?P<pats>"[^"]*"(?:\s*\|\s*"[^"]*")*)\s*=>\s*(?:\{\s*)?FileClass::(?P<class>\w+)')
