@@ -17,10 +17,13 @@ function zIndexAfter(anchor: RegExp): number {
   if (!at || at.index === undefined) {
     throw new Error(`anchor not found in Wysiwyg.svelte: ${anchor}`);
   }
-  const block = wysiwyg.slice(at.index + at[0].length);
+  // The anchored rule's own body, up to its closing brace, so a rule that
+  // loses its z-index cannot borrow the next rule's.
+  const rest = wysiwyg.slice(at.index + at[0].length);
+  const block = rest.slice(0, rest.indexOf("}"));
   const z = block.match(/z-index:\s*(-?\d+)/);
   if (!z) {
-    throw new Error(`no z-index after anchor: ${anchor}`);
+    throw new Error(`no z-index in the rule at anchor: ${anchor}`);
   }
   return Number(z[1]);
 }
