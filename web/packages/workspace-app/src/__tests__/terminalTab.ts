@@ -9,7 +9,10 @@ import { mount, tick, unmount, type Component } from "svelte";
 import { expect, vi } from "vitest";
 
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { layout, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import { resetLayout } from "./tabs";
+
+export { terminalTab } from "./tabs";
 
 /// What the stand-in xterm recorded.
 export const xterm = {
@@ -307,28 +310,12 @@ export function installTerminalDom(): void {
   });
 }
 
-export function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
-
 export const TERMINAL_PANE = "terminal-test-pane";
 
-/// Seat the tabs in a one-pane layout and return the live (proxied) copies.
+/// Seat the tabs in a one-pane layout, the pane `mountTerminal` names, and
+/// return the live (proxied) copies.
 export function seatTerminals(tabs: TerminalTabState[]): TerminalTabState[] {
-  layout.rootId = TERMINAL_PANE;
-  layout.activePaneId = TERMINAL_PANE;
-  layout.nodes = {
-    [TERMINAL_PANE]: { kind: "leaf", id: TERMINAL_PANE, tabs, activeTabId: tabs[0]?.id ?? null },
-  };
-  return (layout.nodes[TERMINAL_PANE] as { tabs: TerminalTabState[] }).tabs;
+  return resetLayout(tabs, { id: TERMINAL_PANE }).tabs as TerminalTabState[];
 }
 
 const mounted: Array<Record<string, unknown>> = [];
