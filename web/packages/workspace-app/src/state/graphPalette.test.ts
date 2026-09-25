@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
-// Build-time contract: the literal CSS palette blocks equal the TS defaults.
-// vitest drops component CSS, so the stylesheets are read as text.
+// Build-time contract: App's literal CSS palette blocks equal the TS defaults; vitest drops component CSS.
 import app from "../App.svelte?raw";
+// Build-time contract: the tuner's literal CSS palette blocks equal the TS defaults; vitest drops component CSS.
 import tuner from "../graph-tuner/GraphTuner.svelte?raw";
 
 import {

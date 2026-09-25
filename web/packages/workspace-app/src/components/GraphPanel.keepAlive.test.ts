@@ -18,6 +18,7 @@ vi.mock("../api/client", async (importOriginal) =>
 );
 
 import Pane from "./Pane.svelte";
+// Build-time contract: a hidden graph tab keeps its size (visibility, not display: none); vitest drops component CSS.
 import graphPanelSource from "./GraphPanel.svelte?raw";
 import {
   canvas,

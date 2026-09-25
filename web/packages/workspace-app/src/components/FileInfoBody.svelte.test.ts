@@ -8,6 +8,7 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileInfoBody from "./FileInfoBody.svelte";
+// Build-time contract: the Drafts palette tokens and the language names' pointer and focus ring; vitest drops component CSS.
 import fileInfoSource from "./FileInfoBody.svelte?raw";
 import { classifyFileActions } from "../state/fileActions";
 import { terminalFromHereTarget } from "../terminal/fromHere";

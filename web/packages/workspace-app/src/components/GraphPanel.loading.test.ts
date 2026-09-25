@@ -17,6 +17,7 @@ vi.mock("../api/client", async (importOriginal) =>
 );
 
 import GraphPanel from "./GraphPanel.svelte";
+// Build-time contract: the indexing cue stops pulsing under prefers-reduced-motion; vitest drops component CSS.
 import graphPanelSource from "./GraphPanel.svelte?raw";
 import {
   canvas,
