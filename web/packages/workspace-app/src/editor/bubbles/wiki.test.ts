@@ -1,143 +1,242 @@
-import { describe, expect, test } from "vitest";
-import client from "../../api/client.ts?raw";
-import types from "../../api/types.ts?raw";
-import wiki from "./wiki.ts?raw";
+// @vitest-environment jsdom
+//
+// The wiki link bubble: `[[query` lists the graph's link targets (files and
+// headings) beside workspace paths completed from the file tree, `#` switches
+// to a target's headings and `^` to its blocks, and a commit writes relative
+// markdown, or a wiki link in a file that already uses them. Inside an
+// existing `[label](url)` slot it searches the URL's basename, fills the slot
+// with a bare path, and offers to open the link already there.
 
-describe("wiki file completion uses graph link targets", () => {
-  test("typed API client exposes /api/link-targets with q and limit", () => {
-    expect(types).toMatch(/export type LinkTarget = \{/);
-    expect(client).toMatch(
-      /linkTargets: \(q: string, limit = 10\) => \{[\s\S]*?new URLSearchParams\(\{ q, limit: String\(limit\) \}\)[\s\S]*?req<LinkTarget\[\]>\("GET", `\/api\/link-targets\?\$\{params\}`\)/,
-    );
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { api } from "../../api/client";
+import type { LinkTarget, TreeEntry } from "../../api/types";
+import { openWikiBubble, type WikiBubbleOpts } from "./wiki";
+import { json, recordRequests, stopRecordingRequests } from "../../__tests__/fetch";
+
+// CodeMirror measures text ranges to place the bubble; jsdom has no layout.
+Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+Range.prototype.getBoundingClientRect = () => new DOMRect();
+
+function target(path: string, over: Partial<LinkTarget> = {}): LinkTarget {
+  return { kind: "File", path, title: null, heading: null, anchor: null, level: null, mtime: 1, ...over };
+}
+
+function entry(path: string): TreeEntry {
+  return { path, is_dir: false, mtime: 1, size: 1 } as TreeEntry;
+}
+
+let views: EditorView[] = [];
+
+beforeEach(() => {
+  vi.spyOn(api, "linkTargets").mockResolvedValue([]);
+  vi.spyOn(api, "list").mockResolvedValue([]);
+});
+
+afterEach(() => {
+  for (const view of views.splice(0)) view.destroy();
+  document.body.innerHTML = "";
+  vi.restoreAllMocks();
+});
+
+/// Open the bubble over `doc`, triggered by the text from `start` to the end.
+function open(doc: string, start: number, over: Partial<WikiBubbleOpts> = {}) {
+  const parent = document.createElement("div");
+  document.body.append(parent);
+  const view = new EditorView({ state: EditorState.create({ doc }), parent });
+  views.push(view);
+  const handle = openWikiBubble({
+    view,
+    triggerStart: start,
+    triggerEnd: doc.length,
+    initialQuery: doc.slice(start).replace(/^\[\[/, ""),
+    prefix: null,
+    fromPath: "notes/here.md",
+    onDismiss: () => {},
+    ...over,
   });
+  const key = (key: string, init: KeyboardEventInit = {}) =>
+    handle.handleKey(new KeyboardEvent("keydown", { key, ...init }));
+  return { view, handle, key };
+}
 
-  test("file-mode wiki bubble calls api.linkTargets instead of api.search", () => {
-    expect(wiki).toMatch(/\.linkTargets\(term, SEARCH_LIMIT\)/);
-    expect(wiki).not.toMatch(/\.search\(query, SEARCH_LIMIT/);
-  });
+function rows(): string[] {
+  return [...document.querySelectorAll(".md-bubble-row")].map((row) => row.textContent ?? "");
+}
 
-  test("raw mode searches the URL basename, not the verbatim path", () => {
-    // Editing an existing `[label](url)` slot: link_targets ranks on
-    // basename/title, so the verbatim `../../x/y.md` matched nothing
-    // ("No matches"). rawSearchTerm reduces it to the last segment so
-    // the linked file surfaces and the pill is openable / re-pickable.
-    expect(wiki).toMatch(/function rawSearchTerm\(q: string\): string \{/);
-    // "raw" (a markdown URL slot) and "code" (an inline-code link) both fill
-    // an existing slot, so basename search + file-only mode key off the
-    // shared slotMode flag.
-    expect(wiki).toMatch(
-      /const slotMode =\s*opts\.templateMode === "raw" \|\| opts\.templateMode === "code";/,
-    );
-    expect(wiki).toMatch(/const term = slotMode \? rawSearchTerm\(query\) : query;/);
-    // Slot mode never enters heading/block authoring modes (the `#`/`^`
-    // there belong to the URL/anchor, not the picker).
-    expect(wiki).toMatch(/slotMode \? \{ kind: "file" \} : classifyQuery\(/);
-  });
+function selectedRow(): number {
+  return [...document.querySelectorAll(".md-bubble-row")].findIndex((row) =>
+    row.classList.contains("md-bubble-row-selected"),
+  );
+}
 
-  test("file-mode wiki bubble keeps file and heading targets", () => {
-    expect(wiki).toMatch(/let fileHits: LinkTarget\[\] = \[\];/);
-    expect(wiki).toMatch(/fileHits = results;/);
-    expect(wiki).not.toMatch(/\.filter\(\(hit\) => hit\.kind === "File"\)/);
-  });
-
-  test("`[[` completes workspace paths (BOTH: names + paths, additive)", () => {
-    // The LinkTarget wire type carries a "Path" kind alongside
-    // File / Heading.
-    expect(types).toMatch(/kind: "File" \| "Heading" \| "Path";/);
-    // The picker renders a "Path" row leading with the full workspace
-    // path so a `[[dir/sub` query surfaces path candidates.
-    expect(wiki).toMatch(/else if \(t\.kind === "Path"\)/);
-    expect(wiki).toMatch(/tag\.textContent = "PATH";/);
-  });
-
-  test("path candidates are synthesized CLIENT-SIDE off the file tree", () => {
-    // No backend link-targets change: paths come from the existing
-    // /api/fs listing (api.list), filtered + tagged "Path" here.
-    expect(wiki).toMatch(/function computePathHits\(/);
-    // api.list() may be formatted as a method chain (api\n.list()).
-    expect(wiki).toMatch(/api\s*\.list\(\)/);
-    expect(wiki).toMatch(/kind: "Path" as const,/);
-    // Merged AFTER the link-target hits, deduped against same-path file
-    // rows (a file matched by both name and path lists once).
-    expect(wiki).toMatch(/const extras = pathHits\.filter\(/);
-  });
-
-  test("file-mode commit extracts the heading anchor and defers to fileLinkInsert", () => {
-    expect(wiki).toMatch(
-      /const lt = hit as LinkTarget;[\s\S]*?const anchor = lt\.kind === "Heading" \? \(lt\.anchor \?\? null\) : null;[\s\S]*?insert = fileLinkInsert\(lt\.path, anchor, raw\);/,
-    );
-  });
-
-  test("fileLinkInsert emits relative markdown by default and keeps wiki links only in a wiki-mode file", () => {
-    // Default (markdown-mode file): relative markdown via links.ts.
-    expect(wiki).toMatch(
-      /return wikiLinkToMarkdown\(\s*path,\s*undefined,\s*anchor \?\? undefined,\s*opts\.fromPath \?\? undefined,\s*\);/,
-    );
-    // Wiki-mode file: preserve the `[[path#anchor]]` form.
-    expect(wiki).toMatch(
-      /if \(fileUsesWikiLinks\) \{[\s\S]*?const ref = anchor \? `\$\{path\}#\$\{anchor\}` : path;[\s\S]*?return `\[\[\$\{ref\}\]\]`;/,
-    );
-    // The per-file style snapshot is a complete `[[...]]` match.
-    expect(wiki).toMatch(/const fileUsesWikiLinks = WIKI_LINK_RE\.test\(/);
-  });
-
-  test("heading-mode commit relativizes the typed target via fileLinkInsert", () => {
-    // The explicit `#` mode no longer emits a verbatim `[[target#anchor]]`;
-    // it routes through fileLinkInsert so the on-disk link is relative
-    // markdown (or wiki form in a wiki-mode file), same as a file hit.
-    expect(wiki).toMatch(
-      /const h = hit as HeadingHit;\s*insert = fileLinkInsert\(mode\.target, h\.anchor, raw\);/,
-    );
-    expect(wiki).not.toMatch(/const ref = `\$\{mode\.target\}#\$\{h\.anchor\}`;/);
-  });
-
-  test("block-mode commit emits a #^id anchor via fileLinkInsert", () => {
-    // The block ref is now a `#^id` fragment routed through
-    // fileLinkInsert (relative markdown / wiki form), not the old
-    // unresolvable `[[target^id]]`.
-    expect(wiki).toMatch(
-      /const insert = fileLinkInsert\(target, `\^\$\{anchorId\}`, raw\);/,
-    );
-    expect(wiki).not.toMatch(/const ref = `\$\{target\}\^\$\{anchorId\}`;/);
+describe("the link-target search", () => {
+  test("is a GET of /api/link-targets with the query and a limit", async () => {
+    vi.mocked(api.linkTargets).mockRestore();
+    const hits = [target("notes/other.md")];
+    const requests = recordRequests(() => json(hits));
+    try {
+      await expect(api.linkTargets("oth", 5)).resolves.toEqual(hits);
+    } finally {
+      stopRecordingRequests();
+    }
+    expect(requests).toMatchObject([{ method: "GET", path: "/api/link-targets" }]);
+    expect(Object.fromEntries(requests[0]!.query)).toMatchObject({ q: "oth", limit: "5" });
   });
 });
 
-describe("raw-mode self-link (open the link in the slot)", () => {
-  test("resolves the raw URL slot via parseInternalLink, gated on raw + file + open handler", () => {
-    expect(wiki).toMatch(
-      /import \{ parseInternalLink \} from "\.\.\/widgets\/wikilink";/,
-    );
-    expect(wiki).toMatch(
-      /function selfHit\(\): SelfHit \| null \{[\s\S]*?if \(!opts\.onOpenLink\) return null;[\s\S]*?!slotMode \|\| mode\.kind !== "file"[\s\S]*?doc\.sliceString\(opts\.triggerStart, triggerEnd\)[\s\S]*?parseInternalLink\(literal, "", opts\.fromPath \?\? null\)/,
-    );
-    // External / anchor-only slots resolve to null -> no Self row.
-    expect(wiki).toMatch(/if \(!parsed\) return null;/);
+describe("the file picker", () => {
+  test("lists the graph's link targets for the query, five at a time", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValue([
+      target("notes/other.md", { title: "Other" }),
+      target("notes/other.md", { kind: "Heading", heading: "Intro", anchor: "intro", level: 2 }),
+    ]);
+    open("see [[oth", 4);
+
+    await vi.waitFor(() => expect(rows()).toEqual(["Other - notes/other.md", "H2Intro notes/other.md"]));
+    expect(api.linkTargets).toHaveBeenCalledWith("oth", 5);
   });
 
-  test("activeHits prepends the Self row before file + path hits", () => {
-    expect(wiki).toMatch(
-      /return self \? \[self, \.\.\.fileHits, \.\.\.extras\] : \[\.\.\.fileHits, \.\.\.extras\];/,
-    );
+  test("completes workspace paths beside the names, once per file", async () => {
+    vi.mocked(api.list).mockResolvedValue([entry("docs/a.md"), entry("docs/b.md"), entry("notes/n.md")]);
+    vi.mocked(api.linkTargets).mockResolvedValue([target("docs/a.md")]);
+    open("[[docs/", 0);
+
+    await vi.waitFor(() => expect(rows()).toEqual(["docs/a.md", "PATHdocs/b.md"]));
   });
 
-  test("commit routes a Self hit to onOpenLink and NEVER to fileLinkInsert (doc-corruption guard)", () => {
-    expect(wiki).toMatch(
-      /function commit\(hit: [^)]*SelfHit\): void \{\s*if \(isSelfHit\(hit\)\) \{[\s\S]*?opts\.onOpenLink\(hit\.target, hit\.anchor\);[\s\S]*?dismiss\(\);[\s\S]*?return;/,
-    );
+  test("keeps the selection on a path row when the named results arrive after it", async () => {
+    let answer: (hits: LinkTarget[]) => void = () => {};
+    vi.mocked(api.linkTargets).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    vi.mocked(api.list).mockResolvedValue([entry("docs/a.md"), entry("docs/b.md")]);
+    const { key } = open("[[docs/", 0);
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+    key("ArrowDown");
+    answer([target("notes/docs.md")]);
+
+    await vi.waitFor(() => expect(rows()).toHaveLength(3));
+    expect(selectedRow()).toBe(1);
   });
 
-  test("openSelected opens a Self hit before the LinkTarget cast", () => {
-    expect(wiki).toMatch(
-      /const hit = hits\[selectedIndex\];\s*if \(isSelfHit\(hit\)\) \{\s*opts\.onOpenLink\(hit\.target, hit\.anchor\);/,
-    );
+  test("a pick writes a relative markdown link from the file being edited", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValue([target("notes/other.md")]);
+    const { view, key } = open("see [[oth", 4);
+    await vi.waitFor(() => expect(rows()).toHaveLength(1));
+    key("Enter");
+
+    expect(view.state.doc.toString()).toBe("see [other](./other.md)");
   });
 
-  test("the selectedIndex clamp counts the full active list, not just fileHits", () => {
-    expect(wiki).toMatch(
-      /if \(selectedIndex >= activeHits\(\)\.length\) selectedIndex = 0;/,
+  test("a heading pick links to its anchor", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValue([
+      target("docs/a b.md", { kind: "Heading", heading: "Intro", anchor: "intro", level: 2 }),
+    ]);
+    const { view, key } = open("see [[intr", 4);
+    await vi.waitFor(() => expect(rows()).toHaveLength(1));
+    key("Enter");
+
+    expect(view.state.doc.toString()).toBe("see [a b](../docs/a%20b.md#intro)");
+  });
+
+  test("a file that already uses wiki links gets a wiki link", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValue([
+      target("notes/other.md", { kind: "Heading", heading: "Intro", anchor: "intro", level: 2 }),
+    ]);
+    const doc = "[[old]] see [[intr";
+    const { view, key } = open(doc, doc.indexOf("[[intr"));
+    await vi.waitFor(() => expect(rows()).toHaveLength(1));
+    key("Enter");
+
+    expect(view.state.doc.toString()).toBe("[[old]] see [[notes/other.md#intro]]");
+  });
+});
+
+describe("the heading and block pickers", () => {
+  test("# lists the target's headings and links to the one picked", async () => {
+    vi.spyOn(api, "headings").mockResolvedValue([
+      { level: 1, text: "Other", anchor: "other" },
+      { level: 2, text: "Intro", anchor: "intro" },
+    ] as never);
+    const { view, key } = open("see [[notes/other.md#int", 4);
+
+    await vi.waitFor(() => expect(rows()).toEqual(["H2Intro"]));
+    expect(api.headings).toHaveBeenCalledWith("notes/other.md");
+    key("Enter");
+    expect(view.state.doc.toString()).toBe("see [other](./other.md#intro)");
+  });
+
+  test("^ lists the target's blocks and anchors the one picked before linking it", async () => {
+    vi.spyOn(api, "read").mockResolvedValue({
+      path: "notes/other.md",
+      content: "First paragraph.\n\nSecond paragraph.\n",
+      mtime: 1,
+      mtime_ns: "1",
+      authority_version: 1,
+    } as never);
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2 } as never);
+    const { view, key } = open("see [[notes/other.md^Second", 4);
+
+    await vi.waitFor(() => expect(rows()).toEqual(["BLKSecond paragraph."]));
+    key("Enter");
+
+    await vi.waitFor(() => expect(view.state.doc.toString()).toMatch(/^see \[other\]\(\.\/other\.md#\^[\w-]+\)$/));
+    const id = /#\^([\w-]+)\)$/.exec(view.state.doc.toString())![1];
+    expect(write).toHaveBeenCalledWith(
+      "notes/other.md",
+      `First paragraph.\n\nSecond paragraph. ^${id}\n`,
+      "1",
+      1,
+      1,
     );
-    expect(wiki).not.toMatch(
-      /if \(selectedIndex >= fileHits\.length\) selectedIndex = 0;/,
-    );
+  });
+});
+
+describe("inside an existing link's URL", () => {
+  const doc = "see [x](../../team-x/bootstrap.md#setup)";
+  const start = doc.indexOf("../");
+
+  test("searches the linked file's basename, not the verbatim path", async () => {
+    open(doc, start, { templateMode: "raw", initialQuery: doc.slice(start, -1) });
+
+    await vi.waitFor(() => expect(api.linkTargets).toHaveBeenCalledWith("bootstrap.md", 5));
+  });
+
+  test("a pick fills the slot with a bare relative path", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValue([target("notes/other.md")]);
+    const slot = "see [x](old.md";
+    const at = slot.indexOf("old.md");
+    const { view, key } = open(slot, at, { templateMode: "raw", initialQuery: "old.md" });
+    await vi.waitFor(() => expect(rows()).toHaveLength(1));
+    key("Enter");
+
+    expect(view.state.doc.toString()).toBe("see [x](./other.md");
+  });
+
+  test("offers to open the link already there, and opening it leaves the text alone", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValue([target("notes/other.md")]);
+    const onOpenLink = vi.fn();
+    const slot = "see [x](other.md#intro";
+    const at = slot.indexOf("other.md");
+    const { view, key } = open(slot, at, { templateMode: "raw", initialQuery: "other.md#intro", onOpenLink });
+    await vi.waitFor(() => expect(rows()).toEqual(["OPENother.md#intro", "notes/other.md"]));
+    key("Enter");
+
+    expect(onOpenLink).toHaveBeenCalledWith("notes/other.md", "intro");
+    expect(view.state.doc.toString()).toBe(slot);
+  });
+
+  test("Mod+Enter opens the selected row instead of filling the slot", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValue([target("notes/other.md")]);
+    const onOpenLink = vi.fn();
+    const slot = "see [x](other.md";
+    const at = slot.indexOf("other.md");
+    const { view, key } = open(slot, at, { templateMode: "raw", initialQuery: "other.md", onOpenLink });
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+    key("ArrowDown");
+    key("Enter", { ctrlKey: true });
+
+    expect(onOpenLink).toHaveBeenCalledWith("notes/other.md", null);
+    expect(view.state.doc.toString()).toBe(slot);
   });
 });
