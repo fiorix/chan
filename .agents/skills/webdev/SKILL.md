@@ -119,3 +119,18 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
 - No decorative framework churn. Prefer small, boring components and explicit state transitions.
 - Verify with `npm run check`, focused Vitest tests, and manual interaction.
 - For shell changes, explicitly check overlay stacking, Escape behavior, menu placement, context-menu parity, command dispatch, focus restoration, and safe-area/mobile gutters.
+
+## Tests
+
+- A frontend test fails when behaviour breaks and passes when a comment or a spelling changes. Test what a user or a caller can observe: mount the component with `svelte`'s `mount` (the whole app over the in-memory demo transport in `src/demo/` when the behaviour crosses components) or call the exported function, and assert on the DOM, the state module, the request sent, or the value returned.
+- Source-text assertions (a `?raw` import of a production module, `import.meta.glob` with `query: "?raw"`, a `node:fs` read of a source file) survive only for a build-time contract with no runtime seam: a property of the source tree that no mounted or behavioural test can observe, typically because it must hold for a module nobody has written yet. The allowed cases are:
+  - `no_native_dialogs.test.ts` in both SPAs: no shipped module calls `window.alert`, `window.confirm` or `window.prompt`, which fail silently in the desktop WebView.
+  - `random_uuid_centralization.test.ts`: only `state/ids.ts` names `crypto.randomUUID`, which throws outside a secure context such as a devserver reached over plain http.
+  - `tauri_invoke_centralization.test.ts`: `tauriInvoke` is called only in `api/desktop.ts` and the Tauri globals are reached only from the audited modules, because the desktop ACL parity test reads the invoke vocabulary from those files with `include_str!`.
+  - `editor/widgets/widgetWritable.test.ts`: every widget module that dispatches a document change imports the write predicate, so a widget added later is checked the moment it lands.
+  - The launcher's `themeTokens.test.ts`: both themes define the same tokens and no source spells a token's colour as a literal, which `var()` resolution hides from every runtime check.
+- A new allowed case is added to this list in the same commit as the pin it justifies, and a surviving pin carries a one-line comment above it naming its contract.
+- No assertion on comment text. A comment is documentation; rewording it to follow the writing rules must never turn the suite red.
+- No absence assertion on an identifier that exists nowhere in the tree: a `not.toMatch` on a name nobody spells passes against an empty file and cannot fail for a real reason. A negative stays only where it guards a shape someone could plausibly re-add and no positive assertion can express it.
+- Test files are named `<module>[.<concern>].test.ts` beside the module they test (`tabs.test.ts`, `shortcuts.windows.test.ts`), not after the incident, round or feature that prompted them. Re-homing a file is two commits, a rename with no content change and then the edit, so history follows the file.
+- Shared fixtures live under the package's `src/__tests__/`. The workspace app's tree-wide scanners skip that directory and vitest runs only `*.test.ts`, so a fixture there is never read as production source or run as a test.
