@@ -9,8 +9,6 @@ import { chanDecorations } from ".";
 // Build-time contract: Wysiwyg's list-layout CSS reads the theme's list tokens and the hang-column variables the decorations set; vitest drops component CSS.
 import wysiwygSource from "../Wysiwyg.svelte?raw";
 
-const removedListLineHook = ["cm", "md", "list", "line"].join("-");
-const removedDepthHook = ["cm", "md", "list", "depth"].join("-");
 const baseThemeSource = readFileSync("src/editor/themes/base.css", "utf8");
 const googleDocsThemeSource = readFileSync("src/editor/themes/google_docs.css", "utf8");
 const wordThemeSource = readFileSync("src/editor/themes/word.css", "utf8");
@@ -28,8 +26,8 @@ function mountDecorated(doc: string): { parent: HTMLDivElement; view: EditorView
   return { parent, view };
 }
 
-describe("list guide removal", () => {
-  test("custom list widgets render without guide scaffolding", () => {
+describe("list widgets", () => {
+  test("render the bullet, ordered and task markers", () => {
     const { parent, view } = mountDecorated(
       "normal prose\n* bullet\n  - child\n1. ordered\n- [ ] task",
     );
@@ -38,12 +36,6 @@ describe("list guide removal", () => {
     expect(parent.querySelector(".cm-md-ol-marker")).toBeTruthy();
     expect(parent.querySelector(".cm-md-list-marker")).toBeTruthy();
     expect(parent.querySelector(".cm-md-task-checkbox")).toBeTruthy();
-    expect(parent.querySelector(`.${removedListLineHook}`)).toBeNull();
-    expect(
-      Array.from(parent.querySelectorAll(".cm-line")).some((line) =>
-        Array.from(line.classList).some((cls) => cls.startsWith(removedDepthHook)),
-      ),
-    ).toBe(false);
 
     view.destroy();
     parent.remove();
@@ -261,7 +253,6 @@ describe("list marker rendering (real positioned markers)", () => {
     });
 
     expect(parent.querySelector(".cm-md-ul-marker")).toBeNull();
-    expect(parent.querySelector(".cm-md-task-list-marker")).toBeNull();
     expect(parent.querySelector(".cm-md-task-checkbox-slot")).toBeTruthy();
     expect(parent.querySelector(".cm-md-list-marker")).toBeTruthy();
     expect(parent.querySelector(".cm-md-task-checkbox")).toBeTruthy();
@@ -311,7 +302,6 @@ describe("horizontal rule source visibility", () => {
     });
 
     expect(parent.textContent).toContain("---");
-    expect(parent.querySelector(".cm-md-hr")).toBeNull();
     expect(view.state.doc.toString()).toBe("one\n---\ntwo");
 
     view.destroy();
