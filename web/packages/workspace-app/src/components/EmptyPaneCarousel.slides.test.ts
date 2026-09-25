@@ -72,8 +72,8 @@ async function render(slide: number): Promise<HTMLElement> {
 const cached: IndexingStateResponse = {
   root: "/ws",
   nodes: [
-    { path: "", state: "indexed" },
-    { path: "notes", state: "indexing" },
+    { path: "", state: "indexed", children_count: 1 },
+    { path: "notes", state: "indexing", children_count: 0 },
   ],
 };
 
@@ -87,7 +87,10 @@ describe("the Search slide", () => {
   });
 
   test("keeps each poll's answer for the next mount", async () => {
-    const fresh: IndexingStateResponse = { root: "/ws", nodes: [{ path: "", state: "indexed" }] };
+    const fresh: IndexingStateResponse = {
+      root: "/ws",
+      nodes: [{ path: "", state: "indexed", children_count: 0 }],
+    };
     poll.next = Promise.resolve(fresh);
     await render(1);
 
