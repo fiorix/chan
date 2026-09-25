@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 
-import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import SixfoldVortex from "./SixfoldVortex.svelte";
 import {
@@ -12,161 +11,112 @@ import {
   SIXFOLD_VORTEX_POINT_VERTEX_SHADER,
   SIXFOLD_VORTEX_SURFACE_FRAGMENT_SHADER,
 } from "./sixfoldVortex";
+import {
+  recordingWebgl2,
+  startAnimation,
+  stopAnimations,
+  type CanvasOp,
+} from "../__tests__/canvas";
 
-let mounted: Record<string, unknown> | null = null;
-
-afterEach(() => {
-  if (mounted) unmount(mounted);
-  mounted = null;
-  document.body.innerHTML = "";
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./sixfoldVortex", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./sixfoldVortex")>();
+  return {
+    ...actual,
+    advanceSixfoldVortexParticles: vi.fn(actual.advanceSixfoldVortexParticles),
+  };
 });
 
-interface FakeDrawCall {
-  mode: number;
-  first: number;
-  count: number;
+afterEach(() => {
+  stopAnimations();
+  vi.restoreAllMocks();
+});
+
+/// The source time of every simulation step from here on.
+function steppedTimes(): () => number[] {
+  const advance = vi.mocked(advanceSixfoldVortexParticles);
+  advance.mockClear();
+  return () => advance.mock.calls.map(([, sourceTime]) => sourceTime);
 }
 
-function createFakeWebgl2(): {
-  gl: WebGL2RenderingContext;
-  draws: FakeDrawCall[];
-  pointsMode: number;
-} {
-  const draws: FakeDrawCall[] = [];
-  const gl = {
-    VERTEX_SHADER: 0x8b31,
-    FRAGMENT_SHADER: 0x8b30,
-    COMPILE_STATUS: 0x8b81,
-    LINK_STATUS: 0x8b82,
-    ARRAY_BUFFER: 0x8892,
-    STATIC_DRAW: 0x88e4,
-    DYNAMIC_DRAW: 0x88e8,
-    FLOAT: 0x1406,
-    POINTS: 0x0000,
-    TRIANGLES: 0x0004,
-    BLEND: 0x0be2,
-    DEPTH_TEST: 0x0b71,
-    SRC_ALPHA: 0x0302,
-    ONE_MINUS_SRC_ALPHA: 0x0303,
-    TEXTURE_2D: 0x0de1,
-    TEXTURE0: 0x84c0,
-    TEXTURE_MIN_FILTER: 0x2801,
-    TEXTURE_MAG_FILTER: 0x2800,
-    TEXTURE_WRAP_S: 0x2802,
-    TEXTURE_WRAP_T: 0x2803,
-    NEAREST: 0x2600,
-    CLAMP_TO_EDGE: 0x812f,
-    RGBA: 0x1908,
-    UNSIGNED_BYTE: 0x1401,
-    FRAMEBUFFER: 0x8d40,
-    COLOR_ATTACHMENT0: 0x8ce0,
-    COLOR_BUFFER_BIT: 0x4000,
-    drawingBufferWidth: 1,
-    drawingBufferHeight: 1,
-    createShader: vi.fn(() => ({})),
-    shaderSource: vi.fn(),
-    compileShader: vi.fn(),
-    getShaderParameter: vi.fn(() => true),
-    getShaderInfoLog: vi.fn(() => ""),
-    deleteShader: vi.fn(),
-    createProgram: vi.fn(() => ({})),
-    attachShader: vi.fn(),
-    linkProgram: vi.fn(),
-    getProgramParameter: vi.fn(() => true),
-    getProgramInfoLog: vi.fn(() => ""),
-    deleteProgram: vi.fn(),
-    getAttribLocation: vi.fn(() => 0),
-    getUniformLocation: vi.fn(() => ({})),
-    createBuffer: vi.fn(() => ({})),
-    bindBuffer: vi.fn(),
-    bufferData: vi.fn(),
-    deleteBuffer: vi.fn(),
-    useProgram: vi.fn(),
-    enableVertexAttribArray: vi.fn(),
-    vertexAttribPointer: vi.fn(),
-    uniform1f: vi.fn(),
-    uniform2f: vi.fn(),
-    uniform3f: vi.fn(),
-    uniform1i: vi.fn(),
-    drawArrays: vi.fn((mode: number, first: number, count: number) => {
-      draws.push({ mode, first, count });
-    }),
-    enable: vi.fn(),
-    disable: vi.fn(),
-    blendFunc: vi.fn(),
-    viewport: vi.fn(),
-    clearColor: vi.fn(),
-    clear: vi.fn(),
-    createTexture: vi.fn(() => ({})),
-    bindTexture: vi.fn(),
-    texImage2D: vi.fn(),
-    texParameteri: vi.fn(),
-    deleteTexture: vi.fn(),
-    createFramebuffer: vi.fn(() => ({})),
-    bindFramebuffer: vi.fn(),
-    framebufferTexture2D: vi.fn(),
-    deleteFramebuffer: vi.fn(),
-    activeTexture: vi.fn(),
-  };
-  return {
-    gl: gl as unknown as WebGL2RenderingContext,
-    draws,
-    pointsMode: gl.POINTS,
-  };
+/// The point counts of the particle draws in `calls`.
+function pointDraws(calls: CanvasOp[]): number[] {
+  return calls
+    .filter(({ op, args }) => op === "drawArrays" && args[0] === "POINTS")
+    .map(({ args }) => args[2] as number);
 }
 
 describe("Sixfold Vortex", () => {
-  test("keeps the source simulation rate and attribution", async () => {
-    const renderer = (await import("./SixfoldVortex.svelte?raw"))
-      .default as string;
-    const motion = (await import("./sixfoldVortex.ts?raw"))
-      .default as string;
+  test("runs the source simulation 60 steps per second of animation time", () => {
+    const { callbacks } = startAnimation(SixfoldVortex, recordingWebgl2().gl);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const times = steppedTimes();
+    for (let timeMs = 1050; timeMs <= 2050; timeMs += 50) callbacks.frame(timeMs);
 
-    expect(renderer).toMatch(/const SOURCE_TIME_SPEED = 60;/);
-    expect(renderer).toContain(
-      "--sixfold-vortex-point-alpha: 0.066;",
-    );
-    expect(renderer).toContain(
-      "--sixfold-vortex-point-alpha: 0.088;",
-    );
-    expect(motion).toContain(
-      "https://x.com/hisadan/status/1974838123864756613",
-    );
+    const stepped = times();
+    expect(stepped.at(-1)! - stepped[0]!).toBeCloseTo(60, 9);
   });
 
-  test("renders through WebGL2 with ping-pong trail surfaces", async () => {
-    const renderer = (await import("./SixfoldVortex.svelte?raw"))
-      .default as string;
-    const motion = (await import("./sixfoldVortex.ts?raw"))
-      .default as string;
+  test("catches up at most four source steps after a stall", () => {
+    const { callbacks } = startAnimation(SixfoldVortex, recordingWebgl2().gl);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const times = steppedTimes();
+    callbacks.frame(1050);
+    callbacks.frame(6050);
+    callbacks.frame(6100);
 
-    expect(renderer).toContain("runWebgl2Animation");
-    expect(motion).toContain("framebufferTexture2D");
-    expect(motion).toContain("gl.DYNAMIC_DRAW");
+    const [, stalled, after] = times();
+    expect(after! - stalled!).toBeCloseTo(4, 9);
+  });
+
+  test("a resize keeps the simulation where it was", () => {
+    // A pane resize arrives as a burst of resizes; restarting the field or
+    // its clock on each one would visibly reset the vortex while dragging.
+    const { callbacks } = startAnimation(SixfoldVortex, recordingWebgl2().gl);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    callbacks.frame(1050);
+    const advance = vi.mocked(advanceSixfoldVortexParticles);
+    const [particles, before] = advance.mock.calls.at(-1)!;
+    callbacks.resize(600, 600, false, 1100);
+
+    const [resizedParticles, resized] = advance.mock.calls.at(-1)!;
+    expect(resizedParticles).toBe(particles);
+    expect(resized).toBeGreaterThan(before);
+  });
+
+  test("a clock that steps back does not run the simulation backwards", () => {
+    const { callbacks } = startAnimation(SixfoldVortex, recordingWebgl2().gl);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(2000);
+    const times = steppedTimes();
+    callbacks.frame(1500);
+    callbacks.frame(1550);
+
+    const [back, next] = times();
+    expect(next).toBe(back);
+  });
+
+  test("renders through WebGL2, trailing into an off-screen surface", () => {
+    const { gl, calls } = recordingWebgl2();
+    const { run, callbacks } = startAnimation(SixfoldVortex, gl);
+    expect(run.runner).toBe("webgl2");
+    callbacks.resize(800, 800, false, 0);
+
+    expect(calls.map(({ op }) => op)).toContain("framebufferTexture2D");
+    expect(calls).toContainEqual({
+      op: "bufferData",
+      args: ["ARRAY_BUFFER", expect.any(Float32Array), "DYNAMIC_DRAW"],
+    });
     expect(SIXFOLD_VORTEX_SURFACE_FRAGMENT_SHADER).toContain(
       "mix(previous, uBackgroundColor, uFade)",
     );
     expect(SIXFOLD_VORTEX_POINT_VERTEX_SHADER).toContain(
       "gl_PointSize = 1.0;",
-    );
-  });
-
-  test("preserves simulation state across resize bursts", async () => {
-    const renderer = (await import("./SixfoldVortex.svelte?raw"))
-      .default as string;
-    const resizeBody = renderer.match(
-      /resize\(nextWidth, nextHeight, reducedMotion, timeMs\) \{([\s\S]*?)\n\s*\},/,
-    )?.[1];
-
-    expect(resizeBody).toBeDefined();
-    expect(resizeBody).not.toContain(
-      "particles = createSixfoldVortexParticles()",
-    );
-    expect(resizeBody).not.toContain("sourceTime = 0");
-    expect(renderer).toContain(
-      ": Math.max(0, timeMs - lastSimulationMs);",
     );
   });
 
@@ -190,9 +140,7 @@ describe("Sixfold Vortex", () => {
     expect([...particles]).not.toEqual([100, 50, -80, 120]);
   });
 
-  test("keeps escaped startup particles out of the canvas path", async () => {
-    const renderer = (await import("./SixfoldVortex.svelte?raw"))
-      .default as string;
+  test("tells an escaped startup particle from a drawable one", () => {
     const particles = new Float32Array([0.01, 0.01]);
 
     advanceSixfoldVortexParticles(particles, 0);
@@ -205,31 +153,9 @@ describe("Sixfold Vortex", () => {
     expect(isSixfoldVortexPointDrawable(Number.NaN, 400, 800, 800)).toBe(
       false,
     );
-    expect(renderer).toMatch(
-      /if \([\s\S]{0,80}!isSixfoldVortexPointDrawable\(pointX, pointY, width, height\)[\s\S]{0,80}continue;/,
-    );
   });
 
-  test("never traces escaped startup particles into the point upload", async () => {
-    const { gl, draws, pointsMode } = createFakeWebgl2();
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
-      gl,
-    );
-    Object.defineProperty(document, "hidden", {
-      configurable: true,
-      value: false,
-    });
-
-    const frames: FrameRequestCallback[] = [];
-    vi.stubGlobal(
-      "requestAnimationFrame",
-      vi.fn((callback: FrameRequestCallback) => {
-        frames.push(callback);
-        return frames.length;
-      }),
-    );
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
-
+  test("never traces escaped startup particles into the point upload", () => {
     const randomValues = [0.5, 0.2499863, 0.25];
     let randomIndex = 0;
     vi.spyOn(Math, "random").mockImplementation(() => {
@@ -237,25 +163,15 @@ describe("Sixfold Vortex", () => {
       randomIndex += 1;
       return value;
     });
+    const { gl, calls } = recordingWebgl2();
+    const { callbacks } = startAnimation(SixfoldVortex, gl);
+    callbacks.resize(800, 800, false, 0);
 
-    const target = document.createElement("div");
-    document.body.append(target);
-    mounted = mount(SixfoldVortex, { target });
-    await tick();
+    expect(pointDraws(calls)).toEqual([SIXFOLD_VORTEX_PARTICLE_COUNT]);
+    calls.length = 0;
+    callbacks.frame(100);
 
-    const firstFramePoints = draws.filter(
-      (draw) => draw.mode === pointsMode,
-    );
-    expect(firstFramePoints).toHaveLength(1);
-    expect(firstFramePoints[0].count).toBe(SIXFOLD_VORTEX_PARTICLE_COUNT);
-    draws.length = 0;
-
-    expect(frames).toHaveLength(1);
-    frames.shift()?.(performance.now() + 100);
-
-    expect(
-      draws.filter((draw) => draw.mode === pointsMode),
-    ).toHaveLength(0);
+    expect(pointDraws(calls)).toEqual([]);
   });
 
   test("fits rectangular panes without distorting the center", () => {
