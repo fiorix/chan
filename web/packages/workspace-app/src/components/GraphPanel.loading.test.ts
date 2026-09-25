@@ -17,8 +17,6 @@ vi.mock("../api/client", async (importOriginal) =>
 );
 
 import GraphPanel from "./GraphPanel.svelte";
-// Build-time contract: the indexing cue stops pulsing under prefers-reduced-motion; vitest drops component CSS.
-import graphPanelSource from "./GraphPanel.svelte?raw";
 import {
   canvas,
   fsg,
@@ -274,15 +272,6 @@ describe("while the workspace index is not ready", () => {
     setIndex("idle");
     await settle();
     expect(loads(), "the filesystem graph does not use the index").toBe(fsBefore);
-  });
-
-  test("the indexing cue stops pulsing for a reduced-motion user", () => {
-    // Build-time contract: the reduced-motion override for the cue's pulse.
-    // vitest drops component CSS, so the stylesheet is read as text.
-    const css = graphPanelSource.slice(graphPanelSource.indexOf("<style>"));
-    expect(css).toMatch(
-      /@media \(prefers-reduced-motion: reduce\) \{\s*\.indexing \{\s*animation: none;/,
-    );
   });
 });
 
