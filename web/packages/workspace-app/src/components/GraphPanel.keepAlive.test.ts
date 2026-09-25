@@ -1,144 +1,174 @@
-import { describe, expect, test } from "vitest";
-import pane from "./Pane.svelte?raw";
-import graphPanel from "./GraphPanel.svelte?raw";
-import graphCanvas from "./GraphCanvas.svelte?raw";
+// @vitest-environment jsdom
+//
+// Graph tabs stay mounted while hidden. A Pane is mounted with two graph tabs
+// over a fixed graph and GraphCanvas replaced by a stand-in; the assertions
+// read the panels' DOM, the requests they make and the props each hands its
+// canvas.
 
-// Graph tabs are kept ALIVE, exactly like terminals and file editors
-// (see paneTerminalMount / paneFileTabKeepAlive): Pane.svelte renders
-// every graph tab from an all-pane each-block and flips an
-// `active` prop; inactive graphs hide via the visibility:hidden
-// contract (never display:none -- a display:none host reports 0x0,
-// GraphCanvas.resize() refits to nothing and pan/zoom is lost). Before
-// this, GraphPanel mounted only the active graph from the if-chain, so
-// every switch remounted it and GraphCanvas.start() refetched +
-// re-laid-out from scratch -- the full redraw on activation. These pins
-// catch any regression back to that.
+import { mount, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("graph tabs survive tab switches (keep-alive)", () => {
-  // A graph body cannot be mounted here: GraphPanel paints a real canvas and
-  // jsdom has none. So the pins below are all this kind has, and its mounting
-  // and keying are covered only by the shape it shares with the file and
-  // dashboard lists in paneKeepAliveMount.test.ts.
+vi.mock("./GraphCanvas.svelte", async () =>
+  (await import("../__tests__/graphPanel")).canvasProbeModule(),
+);
+vi.mock("../api/client", async (importOriginal) =>
+  (await import("../__tests__/graphPanel")).graphApiModule(
+    await importOriginal<typeof import("../api/client")>(),
+  ),
+);
 
-  test("graph tabs no longer mount from the active-tab if-chain", () => {
-    // The pre-fix branch mounted ONLY the active graph
-    // (`<GraphPanel tab={active} ...>` under
-    // `{:else if active?.kind === "graph"}`), so every switch
-    // remounted it. What must not return is a GraphPanel mounted off
-    // `active`.
-    expect(pane).not.toMatch(/<GraphPanel\s+tab=\{active\}/);
+import Pane from "./Pane.svelte";
+import graphPanelSource from "./GraphPanel.svelte?raw";
+import {
+  canvas,
+  g,
+  GRAPH_PANE,
+  graphServer,
+  graphTab,
+  installGraphDom,
+  resetGraphServer,
+  settle,
+} from "../__tests__/graphPanel";
+import { trackTimers, type TimerTrack } from "../demo/timers";
+import { graphReloadSignal } from "../state/store.svelte";
+import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
+import { layout, type LeafNode } from "../state/tabs.svelte";
+
+installGraphDom();
+
+let timers: TimerTrack;
+const mounted: Array<Record<string, unknown>> = [];
+
+beforeEach(() => {
+  timers = trackTimers();
+  resetGraphServer();
+  graphServer.view = {
+    nodes: [g.dir(""), g.dir("notes"), g.file("notes/a.md")],
+    edges: [g.edge("", "directory:notes", "contains"), g.edge("directory:notes", "notes/a.md", "contains")],
+  };
+});
+
+afterEach(async () => {
+  closeTabMenu();
+  for (const app of mounted.splice(0)) unmount(app);
+  document.body.innerHTML = "";
+  await settle(2);
+  timers.release();
+});
+
+/// A pane with graph tabs one and two, one active.
+async function renderPane(): Promise<{ pane: LeafNode; panels: () => HTMLElement[] }> {
+  layout.nodes = {
+    [GRAPH_PANE]: {
+      kind: "leaf",
+      id: GRAPH_PANE,
+      tabs: [
+        graphTab({ id: "one", scopeId: "workspace" }),
+        graphTab({ id: "two", scopeId: "dir:notes" }),
+      ],
+      activeTabId: "one",
+    },
+  };
+  layout.rootId = GRAPH_PANE;
+  layout.activePaneId = GRAPH_PANE;
+  const pane = layout.nodes[GRAPH_PANE] as LeafNode;
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(Pane, { target, props: { pane } }) as Record<string, unknown>);
+  await settle();
+  return { pane, panels: () => [...target.querySelectorAll<HTMLElement>(".graph-tab")] };
+}
+
+describe("graph tabs in a pane", () => {
+  test("stay mounted; only the active one is shown", async () => {
+    const { pane, panels } = await renderPane();
+    const [one, two] = panels();
+    expect(panels()).toHaveLength(2);
+    expect(one!.classList.contains("active")).toBe(true);
+    expect(one!.getAttribute("aria-hidden")).toBe("false");
+    expect(two!.classList.contains("active")).toBe(false);
+    expect(two!.getAttribute("aria-hidden")).toBe("true");
+    expect(two!.getAttribute("role")).toBe("tabpanel");
+
+    pane.activeTabId = "two";
+    await settle();
+    expect(panels()[0], "the same element, not a remount").toBe(one);
+    expect(two!.classList.contains("active")).toBe(true);
+    expect(one!.getAttribute("aria-hidden")).toBe("true");
   });
 
-  test("active prop is gated by pane mode + visible-side active tab", () => {
-    expect(pane).toMatch(
-      /<GraphPanel\s+tab=\{t\}\s+active=\{isLiveActive\(t\)\}/,
-    );
+  test("a hidden tab loads when first shown, not before", async () => {
+    const { pane } = await renderPane();
+    expect(graphServer.graphStreamCalls, "only the shown tab loaded").toBe(1);
+
+    pane.activeTabId = "two";
+    await settle();
+    expect(graphServer.graphStreamCalls).toBe(2);
+
+    pane.activeTabId = "one";
+    await settle();
+    expect(graphServer.graphStreamCalls, "coming back needs no reload").toBe(2);
   });
 
-  test("onClose / onFlip capture the each-item t, not the outer active", () => {
-    // BUG TO AVOID: the old branch closed over `active.id`; an
-    // each-block callback that still referenced `active` would close
-    // the wrong (or a stale) tab. Both callbacks must use `t`.
-    expect(pane).toMatch(
-      /<GraphPanel\s+tab=\{t\}[\s\S]{1,200}onClose=\{\(\) => \{\s*void closeTab\(pane\.id, t\.id\);\s*\}\}/,
-    );
-    // No graph each-item callback references active.id.
-    expect(pane).not.toMatch(
-      /<GraphPanel\s+tab=\{t\}[\s\S]{1,200}closeTab\(pane\.id, active\.id\)/,
-    );
+  test("an edit while hidden reloads the tab when it is shown again", async () => {
+    const { pane } = await renderPane();
+    pane.activeTabId = "two";
+    await settle();
+    pane.activeTabId = "one";
+    await settle();
+    const before = graphServer.graphStreamCalls;
+
+    graphReloadSignal.paths = ["notes/new.md"];
+    graphReloadSignal.nonce += 1;
+    await settle();
+    await new Promise((r) => setTimeout(r, 300));
+    const whileHidden = graphServer.graphStreamCalls;
+
+    pane.activeTabId = "two";
+    await settle();
+    expect(whileHidden - before, "the shown tab reloads; the hidden one waits").toBe(1);
+    expect(graphServer.graphStreamCalls - whileHidden, "the hidden one reloads on show").toBe(1);
   });
 
-  test("no `focused` prop on GraphPanel (a graph owns no keyboard caret)", () => {
-    expect(pane).not.toMatch(/<GraphPanel\s+tab=\{t\}[\s\S]{1,300}focused=/);
+  test("a canvas opens the first time its tab is shown and pauses while hidden", async () => {
+    const { pane } = await renderPane();
+    const [one, two] = canvas.all;
+    expect(one!.open).toBe(true);
+    expect(one!.paused).toBe(false);
+    expect(two!.open, "never shown yet").toBe(false);
+    expect(two!.paused).toBe(true);
+
+    pane.activeTabId = "two";
+    await settle();
+    pane.activeTabId = "one";
+    await settle();
+    expect(two!.open, "stays open once shown").toBe(true);
+    expect(two!.paused).toBe(true);
+  });
+
+  test("Close in a tab's menu closes that tab, not the active one", async () => {
+    const { pane } = await renderPane();
+    openTabMenu("two", { left: 10, top: 10, right: 10, bottom: 10 });
+    await settle(2);
+
+    const close = [...document.body.querySelectorAll<HTMLButtonElement>(".tab-menu-bubble button.mbtn")].find(
+      (b) => b.querySelector(".mbtn-label")?.textContent === "Close",
+    );
+    close!.click();
+    await settle();
+    expect(pane.tabs.map((t) => t.id)).toEqual(["one"]);
+  });
+
+  test("hide a graph without dropping its layout", () => {
+    // Build-time contract: a hidden graph keeps its size (visibility, not
+    // display: none) so its canvas does not re-fit on every tab switch.
+    // vitest drops component CSS, so the stylesheet is read as text.
+    const css = graphPanelSource.slice(graphPanelSource.indexOf("<style>"));
+    const rule = (selector: string) => css.slice(css.indexOf(`\n  ${selector} {`), css.indexOf("}", css.indexOf(`\n  ${selector} {`)));
+    expect(rule(".graph-tab")).toContain("visibility: hidden;");
+    expect(rule(".graph-tab")).toContain("position: absolute;");
+    expect(rule(".graph-tab")).not.toContain("display: none");
+    expect(rule(".graph-tab.active")).toContain("visibility: visible;");
   });
 });
 
-describe("GraphPanel threads active + gates load on visibility", () => {
-  test("declares an `active` prop (defaulting false for non-pane hosts)", () => {
-    expect(graphPanel).toMatch(
-      /let \{\s*tab,\s*active = false,/,
-    );
-  });
-
-  test("`visible` is derived from active (was a constant true)", () => {
-    expect(graphPanel).toMatch(/const visible = \$derived\(active\);/);
-    // The old constant must be gone, or hidden graphs would still load.
-    expect(graphPanel).not.toMatch(/const visible: boolean = true;/);
-  });
-
-  test("load gating uses lazy-first + keyChanged + dirty, with PLAIN latches", () => {
-    // Plain locals (not $state) so the load/watcher effects can write
-    // them without tripping state_unsafe_mutation.
-    expect(graphPanel).toMatch(/let hasLoadedOnce = false;/);
-    expect(graphPanel).toMatch(/let graphDirty = false;/);
-    expect(graphPanel).toMatch(/let lastLoadedKey: string \| null = null;/);
-    expect(graphPanel).toMatch(
-      /if \(!hasLoadedOnce \|\| keyChanged \|\| graphDirty\)/,
-    );
-  });
-
-  test("a hidden graph marks dirty on an in-scope edit instead of reloading", () => {
-    // The watcher effect, after the in-scope filter, must NOT reload a
-    // hidden graph -- it sets graphDirty for a one-shot reload on the
-    // next activation.
-    expect(graphPanel).toMatch(
-      /if \(!visible\) \{\s*\/\/[\s\S]{1,400}graphDirty = true;\s*return;\s*\}/,
-    );
-  });
-
-  test("root carries the keep-alive contract: class:active + tabpanel + aria-hidden", () => {
-    expect(graphPanel).toMatch(
-      /class="graph-tab"\s+class:active\s+data-theme=\{tab \? surfaceThemeOverride\("graph"\) : undefined\}\s+style=\{paletteStyle \|\| undefined\}[\s\S]{1,120}role="tabpanel"\s+aria-hidden=\{!active\}/,
-    );
-  });
-
-  test("hidden graphs keep layout via visibility, not display:none", () => {
-    expect(graphPanel).toMatch(
-      /\.graph-tab \{[^}]*position: absolute;[^}]*inset: 0;[^}]*visibility: hidden;[^}]*pointer-events: none;[^}]*\}/,
-    );
-    expect(graphPanel).toMatch(
-      /\.graph-tab\.active \{\s*visibility: visible;\s*pointer-events: auto;\s*\}/,
-    );
-    // flex:1 is dropped (no longer a flex child of the pane body).
-    expect(graphPanel).not.toMatch(/\.graph-tab \{[^}]*flex: 1;[^}]*\}/);
-  });
-
-  test("GraphCanvas open LATCHES via canvasEverShown + paused tracks !active", () => {
-    // open={active} would reset pan/zoom on every switch (start() resets
-    // the transform, stop() discards the sim) -- open MUST latch.
-    expect(graphPanel).toMatch(/let canvasEverShown = \$state\(false\);/);
-    expect(graphPanel).toMatch(
-      /\$effect\(\(\) => \{\s*if \(active\) canvasEverShown = true;\s*\}\);/,
-    );
-    expect(graphPanel).toMatch(
-      /<GraphCanvas\s+open=\{canvasEverShown\}\s+paused=\{!active\}/,
-    );
-    expect(graphPanel).not.toMatch(/<GraphCanvas\s+open=\{visible\}/);
-  });
-});
-
-describe("GraphCanvas pauses instead of tearing down when hidden", () => {
-  test("declares a `paused` prop (default false)", () => {
-    expect(graphCanvas).toMatch(/paused\?: boolean;/);
-    expect(graphCanvas).toMatch(/paused = false,/);
-  });
-
-  test("loop() short-circuits and nulls the handle while paused", () => {
-    // This braced form (null the handle, then bail) is unique to
-    // loop(); the resume effect uses a bare `if (paused) return;`.
-    expect(graphCanvas).toMatch(
-      /if \(paused\) \{\s*rafId = null;\s*return;\s*\}/,
-    );
-  });
-
-  test("resume effect re-arms the loop with resize(), never start()", () => {
-    // On un-pause with a live sim and a stopped loop: resize() (the pane
-    // may have resized while hidden) then requestAnimationFrame(loop).
-    // No start() -- that would reset the transform.
-    // markDirty() between the two: the repaint gate would otherwise hold
-    // the first post-resume frame back until something else changed.
-    expect(graphCanvas).toMatch(
-      /if \(paused\) return;\s*if \(!sim \|\| rafId !== null\) return;\s*resize\(\);\s*markDirty\(\);\s*rafId = requestAnimationFrame\(loop\);/,
-    );
-  });
-});

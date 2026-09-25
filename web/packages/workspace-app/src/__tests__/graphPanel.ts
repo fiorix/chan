@@ -46,7 +46,9 @@ export type CanvasProps = {
   onSetAsScope: () => void;
 };
 
-export const canvas: { props: CanvasProps | null } = { props: null };
+/// The props of the last canvas the panel mounted, and of every canvas in
+/// mount order (a pane keeps one per graph tab alive).
+export const canvas: { props: CanvasProps | null; all: CanvasProps[] } = { props: null, all: [] };
 
 /// The GraphCanvas module the test file mocks in: a component that renders
 /// nothing and records the props object it was given.
@@ -54,6 +56,7 @@ export function canvasProbeModule(): { default: (anchor: unknown, props: CanvasP
   return {
     default: (_anchor: unknown, props: CanvasProps) => {
       canvas.props = props;
+      canvas.all.push(props);
     },
   };
 }
@@ -89,6 +92,7 @@ export function resetGraphServer(): void {
   graphServer.languageGraphCalls = 0;
   graphServer.fsGraphCalls = [];
   canvas.props = null;
+  canvas.all = [];
 }
 
 function depthBelow(root: string, path: string): number {

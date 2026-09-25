@@ -75,6 +75,7 @@ const mounted: Array<Record<string, unknown>> = [];
 
 type Props = {
   open: boolean;
+  paused?: boolean;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   visibleNodeIds: Set<string>;
@@ -525,5 +526,28 @@ describe("colours and sizes", () => {
     expect(r("#t")).toBeLessThan(r("directory:notes"));
     expect(r("directory:notes")).toBeLessThan(r("notes/a.md"));
     expect(r("notes/a.md")).toBeLessThan(r(""));
+  });
+});
+
+describe("pausing", () => {
+  test("a paused canvas stops painting and resumes with its layout and view untouched", () => {
+    const p = props();
+    const { api, target } = render(p);
+    const ctx = paintedContext(target);
+    const before = circle(api, "notes/a.md");
+
+    p.paused = true;
+    flushSync();
+    runFrames(1);
+    const painted = ctx.frames.length;
+    runFrames(5);
+    expect(ctx.frames.length, "nothing painted while paused").toBe(painted);
+    expect(canvasHost.frames.filter(Boolean), "no frame left queued").toHaveLength(0);
+
+    p.paused = false;
+    flushSync();
+    runFrames(2);
+    expect(ctx.frames.length).toBeGreaterThan(painted);
+    expect(circle(api, "notes/a.md"), "no restart, no re-fit").toEqual(before);
   });
 });
