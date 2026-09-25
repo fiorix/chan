@@ -21,17 +21,22 @@ export interface DemoAppTeardown {
   settle?: () => Promise<void>;
 }
 
-/// Run the teardown. Call it with real timers installed.
+/// Run the teardown. Call it with real timers installed. A settle that
+/// rejects is the teardown's result, and every later step still runs, so the
+/// failure belongs to the test that mounted the app and not to the next one.
 export async function teardownDemoApp({
   mounted,
   timers,
   settle = demoTransportSettled,
 }: DemoAppTeardown): Promise<void> {
-  await settle();
-  for (const app of mounted.splice(0)) unmount(app);
-  stopIndexStatusPoller();
-  timers?.release();
-  uninstallDemoWorkspace();
-  history.replaceState(null, "", window.location.pathname + window.location.search);
-  sessionStorage.clear();
+  try {
+    await settle();
+  } finally {
+    for (const app of mounted.splice(0)) unmount(app);
+    stopIndexStatusPoller();
+    timers?.release();
+    uninstallDemoWorkspace();
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    sessionStorage.clear();
+  }
 }
