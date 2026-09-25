@@ -2418,6 +2418,63 @@ mod tests {
         assert_eq!(bm25_paths(&workspace, "loneindextoken"), vec!["b.md"]);
     }
 
+    /// The case-folding directory named by `CHAN_CASEFOLD_TEST_DIR`, or `None`
+    /// with the skip reason written straight to stderr, past the harness's
+    /// output capture, so a skipped run does not read as a pass. A directory
+    /// that does not fold case fails the test.
+    fn casefold_test_dir(test: &str) -> Option<std::path::PathBuf> {
+        use std::io::Write;
+        let Some(dir) = std::env::var_os("CHAN_CASEFOLD_TEST_DIR") else {
+            let _ = writeln!(
+                std::io::stderr(),
+                "{test}: skipped, CHAN_CASEFOLD_TEST_DIR names no case-folding directory"
+            );
+            return None;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let probe = TempDir::new_in(&dir).unwrap();
+        fs::write(probe.path().join("Probe"), b"").unwrap();
+        assert!(
+            probe.path().join("probe").exists(),
+            "CHAN_CASEFOLD_TEST_DIR={} does not fold case",
+            dir.display()
+        );
+        Some(dir)
+    }
+
+    // A case-only rename on a case-insensitive volume arrives as two lone
+    // renames, and a lookup finds the file under either name. Only the name
+    // the directory lists may stay in the served index. A Linux case-folding
+    // directory keeps the stored name on a direct rename between two
+    // spellings, so the rename goes through a temporary name, which leaves
+    // `note.md` stored as APFS does in one step.
+    #[test]
+    fn a_case_only_rename_leaves_one_served_row() {
+        let Some(base) = casefold_test_dir("a_case_only_rename_leaves_one_served_row") else {
+            return;
+        };
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new_in(&base).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        fs::write(root.path().join("Note.md"), "# Note\ncasefoldtoken\n").unwrap();
+        workspace.reindex(None).unwrap();
+        fs::rename(root.path().join("Note.md"), root.path().join("hop")).unwrap();
+        fs::rename(root.path().join("hop"), root.path().join("note.md")).unwrap();
+
+        for path in ["Note.md", "note.md"] {
+            classify_and_apply(&workspace, &ev(WatchKind::Renamed, Some(path), None));
+        }
+
+        assert_eq!(
+            workspace.graph().unwrap().files().unwrap(),
+            vec!["note.md"],
+            "a case-only rename must leave one served row, under the listed name"
+        );
+        assert_eq!(bm25_paths(&workspace, "casefoldtoken"), vec!["note.md"]);
+    }
+
     // An editor's atomic save renames a temporary file over the target, which
     // FSEvents reports as a lone rename of the target. The target stays.
     #[test]

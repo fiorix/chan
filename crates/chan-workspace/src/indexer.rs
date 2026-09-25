@@ -725,6 +725,41 @@ mod tests {
     /// event per destination. Each asks for a reconcile, a walk of the whole
     /// tree under the workspace write lock, so the asks inside one debounce
     /// window must run one.
+    /// A case-only rename on a case-insensitive volume arrives as two lone
+    /// events, and a lookup finds the file under either name. Only the name
+    /// the directory lists may stay.
+    #[test]
+    fn a_case_only_rename_through_lone_events_leaves_the_listed_name() {
+        let Some(base) = crate::workspace::casefold_test_dir(
+            "a_case_only_rename_through_lone_events_leaves_the_listed_name",
+        ) else {
+            return;
+        };
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new_in(&base).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.write_text("Note.md", "# Note\nbody\n").unwrap();
+        workspace.reindex(None).unwrap();
+        crate::workspace::rename_case_only(root.path(), "Note.md", "note.md");
+
+        apply_and_settle(
+            &workspace,
+            vec![
+                lone_rename("Note.md", false, &workspace),
+                lone_rename("note.md", false, &workspace),
+            ],
+        );
+
+        assert_eq!(
+            workspace.graph().unwrap().files().unwrap(),
+            vec!["note.md"],
+            "a case-only rename must leave one row, under the listed name"
+        );
+        assert_eq!(workspace.indexed_paths().unwrap(), vec!["note.md"]);
+    }
+
     #[test]
     fn lone_directory_renames_in_one_window_run_one_reconcile() {
         let (_cfg, _workspace_dir, workspace) = setup_workspace();

@@ -5157,6 +5157,43 @@ fn split_anchor(target: &str) -> (String, Option<String>) {
     }
 }
 
+/// The case-folding directory named by `CHAN_CASEFOLD_TEST_DIR`, for the
+/// tests that need a case-insensitive volume, or `None` when it is unset.
+/// The skip reason goes straight to stderr, past the test harness's output
+/// capture, so a skipped run says so in the log instead of reading as a
+/// pass. A directory that does not fold case fails the test.
+#[cfg(test)]
+pub(crate) fn casefold_test_dir(test: &str) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    let Some(dir) = std::env::var_os("CHAN_CASEFOLD_TEST_DIR") else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "{test}: skipped, CHAN_CASEFOLD_TEST_DIR names no case-folding directory"
+        );
+        return None;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let probe = tempfile::TempDir::new_in(&dir).unwrap();
+    std::fs::write(probe.path().join("Probe"), b"").unwrap();
+    assert!(
+        probe.path().join("probe").exists(),
+        "CHAN_CASEFOLD_TEST_DIR={} does not fold case",
+        dir.display()
+    );
+    Some(dir)
+}
+
+/// Rename `from` to `to` inside `dir` where the two differ only in case. A
+/// Linux case-folding directory keeps the stored name on a direct rename
+/// between two spellings of one name, so this goes through a temporary name
+/// and leaves `to` stored, the state APFS reaches in one rename.
+#[cfg(test)]
+pub(crate) fn rename_case_only(dir: &Path, from: &str, to: &str) {
+    let hop = dir.join("case-only-rename-hop");
+    std::fs::rename(dir.join(from), &hop).unwrap();
+    std::fs::rename(&hop, dir.join(to)).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10914,6 +10951,37 @@ mod tests {
             !workspace.recovery_is_unowned(),
             "a driver is exactly what makes the pass claimable"
         );
+    }
+
+    /// A case-only rename made with no events, as while nothing was
+    /// watching, is what a cold open's reconcile meets. On a case-insensitive
+    /// volume the old spelling still resolves, so only the directory listing
+    /// says it is gone.
+    #[test]
+    fn reconcile_forgets_a_spelling_its_directory_no_longer_lists() {
+        let Some(base) =
+            casefold_test_dir("reconcile_forgets_a_spelling_its_directory_no_longer_lists")
+        else {
+            return;
+        };
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new_in(&base).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.write_text("Note.md", "# Note\nbody\n").unwrap();
+        workspace.reindex(None).unwrap();
+        rename_case_only(root.path(), "Note.md", "note.md");
+
+        let report = workspace.reconcile().unwrap();
+
+        assert_eq!(
+            workspace.graph().unwrap().files().unwrap(),
+            vec!["note.md"],
+            "reconcile must keep only the spelling the directory lists: {report:?}"
+        );
+        assert_eq!(workspace.indexed_paths().unwrap(), vec!["note.md"]);
+        assert_eq!(report.forgotten, vec!["Note.md"]);
     }
 
     #[test]
