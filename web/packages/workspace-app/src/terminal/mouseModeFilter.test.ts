@@ -1,6 +1,32 @@
-import { describe, expect, test } from "vitest";
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+import TerminalTab from "../components/TerminalTab.svelte";
+import type { Preferences } from "../api/types";
+import { __testSetStandalonePreferences } from "../state/store.svelte";
+import { writeTerminalSnapshot } from "./snapshotCache";
 import { MOUSE_MODE_PARAMS, MouseModeFilter } from "./mouseModeFilter";
-import tab from "../components/TerminalTab.svelte?raw";
+import {
+  attach,
+  installTerminalDom,
+  mountTerminal,
+  output,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  terminalTab,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
 
 // Probe matrix ported from the Item B headless repro (44/44 green): the
 // filter must strip DECSET mouse enables byte-exactly, rewrite mixed param
@@ -168,36 +194,70 @@ describe("MouseModeFilter: throughput sanity", () => {
   });
 });
 
-// Integration pins against the TerminalTab source (?raw, in the style of
-// TerminalTab.scrollback.test.ts): with the setting ON (default / absent
-// field) NO filter instance exists on the write path, keeping today's
-// byte-for-byte behavior; with it off the filter runs INSIDE writePtyOutput
-// (never at the ws.onmessage callsite, so receivedSeq counts original
-// bytes) and on the snapshot-restore write.
-describe("TerminalTab mouse-capture wiring", () => {
-  test("setting read is spawn-time with the ?? true fallback; on means no filter", () => {
-    expect(tab).toMatch(
-      /const terminalPrefs = currentPreferences\(\)\?\.terminal;[\s\S]*?mouseFilter = \(terminalPrefs\?\.mouse_capture \?\? true\)\s*\? null\s*: new MouseModeFilter\(\)/,
-    );
+// A mounted TerminalTab: with mouse capture on (the default, or no setting)
+// no filter runs and output reaches xterm byte for byte; with it off, mouse
+// enables are stripped from live output and from a restored snapshot, while
+// the resume cursor still counts the bytes the server sent.
+describe("a mounted terminal's mouse capture setting", () => {
+  const ENABLE = "\x1b[?1000h";
+
+  afterEach(() => {
+    resetTerminals();
+    __testSetStandalonePreferences(null);
+    localStorage.clear();
   });
 
-  test("filter applies inside writePtyOutput, before ptyWrites.write", () => {
-    expect(tab).toMatch(
-      /if \(mouseFilter\) \{\s*bytes = mouseFilter\.push\(bytes\);\s*if \(bytes\.length === 0\) return;\s*\}\s*writeParsedPtyOutput\(bytes, origin\);[\s\S]*?osc52Bridge\?\.push\(bytes\);[\s\S]*?ptyWrites\.write\(termWriter, bytes, origin,/,
-    );
+  function serveMouseCapture(on: boolean): void {
+    __testSetStandalonePreferences({ terminal: { mouse_capture: on } } as unknown as Preferences);
+  }
+
+  async function live() {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket, { id: "sess-1", generation: 2, seq: 10 });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    return { term, socket };
+  }
+
+  test("on by default: mouse enables reach xterm untouched", async () => {
+    const { term, socket } = await live();
+    await output(socket, `a${ENABLE}b`);
+    expect(term.written.join("")).toContain(`a${ENABLE}b`);
   });
 
-  test("receivedSeq counts ORIGINAL frame bytes at the callsite", () => {
-    expect(tab).toMatch(
-      /writePtyOutput\(bytes, attachPtyWriteOrigin\(\)\);[\s\S]{0,600}?receivedSeq \+= bytes\.length;/,
-    );
+  test("off: mouse enables are stripped from what xterm gets", async () => {
+    serveMouseCapture(false);
+    const { term, socket } = await live();
+    await output(socket, `a${ENABLE}b`);
+    expect(term.written.join("")).toContain("ab");
+    expect(term.written.join("")).not.toContain(ENABLE);
   });
 
-  test("snapshot restore routes through the same filter", () => {
-    expect(tab).toMatch(
-      /mouseFilter\.push\(\s*new TextEncoder\(\)\.encode\(pendingSnapshot\.ansi\),?\s*\)/,
-    );
-    expect(tab).toMatch(/writeParsedPtyOutput\(filtered, "replay"\)/);
-    expect(tab).not.toMatch(/term\?\.write\(pendingSnapshot\.ansi\)/);
+  test("off: the resume cursor still counts every byte the server sent", async () => {
+    serveMouseCapture(false);
+    const { socket } = await live();
+    await output(socket, `a${ENABLE}b`);
+    socket.close();
+    await vi.waitFor(() => expect(TerminalSocket.all.length).toBe(2), { timeout: 3000 });
+    const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
+    expect(query.get("since")).toBe(String(10 + 2 + ENABLE.length));
+  });
+
+  test("off: a restored snapshot is filtered the same way", async () => {
+    serveMouseCapture(false);
+    writeTerminalSnapshot("sess-1", {
+      ansi: `before${ENABLE}after`,
+      generation: 2,
+      lastSeq: 5,
+      cols: 80,
+      rows: 24,
+      updatedAt: 1,
+    });
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: "sess-1" })]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    await attach(TerminalSocket.all.at(-1)!, { id: "sess-1", generation: 2, seq: 5 });
+    expect(term.written.join("")).toContain("beforeafter");
+    expect(term.written.join("")).not.toContain(ENABLE);
   });
 });
