@@ -6409,6 +6409,7 @@ fn devserver_log_path() -> Result<PathBuf> {
 /// Write the LaunchAgent plist whose `ProgramArguments` run the resolved `chan`
 /// CLI's foreground devserver on `addr`. Returns the plist path.
 fn write_devserver_launch_agent(addr: SocketAddr) -> Result<PathBuf> {
+    use std::io::IsTerminal;
     let exe = resolve_relaunchable_exe()?;
     let log = devserver_log_path()?;
     if let Some(parent) = log.parent() {
@@ -6420,10 +6421,52 @@ fn write_devserver_launch_agent(addr: SocketAddr) -> Result<PathBuf> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let plist = devserver_launch_agent_plist(&exe, addr, &log, devserver_chan_home().as_deref());
+    // launchd starts the agent with its own environment, so the plist
+    // records a PATH for the same reason the systemd unit does, chosen by
+    // the same rule.
+    let installed = std::fs::read_to_string(&plist_path).ok();
+    let search_path = launch_agent_search_path(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        installed.as_deref(),
+        std::io::stdin().is_terminal(),
+    );
+    let plist = devserver_launch_agent_plist(
+        &exe,
+        addr,
+        &log,
+        devserver_chan_home().as_deref(),
+        search_path.as_deref(),
+    );
     std::fs::write(&plist_path, plist)
         .with_context(|| format!("writing {}", plist_path.display()))?;
     Ok(plist_path)
+}
+
+/// The `PATH` the LaunchAgent plist records when it replaces `installed`:
+/// the one `installed` records when [`keeps_recorded_service_path`] says so,
+/// else the entries of `current` that [`chan_systemd::service_search_path`]
+/// keeps, the same filter the systemd unit applies.
+fn launch_agent_search_path(
+    current: &std::ffi::OsStr,
+    installed: Option<&str>,
+    interactive: bool,
+) -> Option<String> {
+    match installed.and_then(recorded_launch_agent_search_path) {
+        Some(recorded) if keeps_recorded_service_path(current, interactive) => Some(recorded),
+        _ => chan_systemd::service_search_path(current),
+    }
+}
+
+/// The `PATH` a LaunchAgent plist's `EnvironmentVariables` records, unescaped.
+fn recorded_launch_agent_search_path(plist: &str) -> Option<String> {
+    let (_, environment) = plist.split_once("<key>EnvironmentVariables</key>")?;
+    let (environment, _) = environment.split_once("</dict>")?;
+    let (_, value) = environment.split_once("<key>PATH</key>")?;
+    let (value, _) = value
+        .trim_start()
+        .strip_prefix("<string>")?
+        .split_once("</string>")?;
+    Some(unescape_plist_xml(value))
 }
 
 /// Build the LaunchAgent plist XML. `RunAtLoad` starts it on bootstrap;
@@ -6434,16 +6477,25 @@ fn devserver_launch_agent_plist(
     addr: SocketAddr,
     log: &Path,
     chan_home: Option<&str>,
+    search_path: Option<&str>,
 ) -> String {
     // launchd starts the agent with a fresh environment, so a CHAN_HOME-scoped
     // supervisor bakes it into the plist; else the agent runs against ~/.chan.
-    let environment = match chan_home {
-        Some(home) => format!(
-            "  <key>EnvironmentVariables</key>\n  \
-             <dict>\n    <key>CHAN_HOME</key>\n    <string>{}</string>\n  </dict>\n",
-            xml_escape(home)
-        ),
-        None => String::new(),
+    // The PATH is the one `launch_agent_search_path` chose. The dict follows
+    // ProgramArguments, where persisted_command_line reads the flags.
+    let mut variables = String::new();
+    for (key, value) in [("CHAN_HOME", chan_home), ("PATH", search_path)] {
+        if let Some(value) = value {
+            variables.push_str(&format!(
+                "    <key>{key}</key>\n    <string>{}</string>\n",
+                xml_escape(value)
+            ));
+        }
+    }
+    let environment = if variables.is_empty() {
+        String::new()
+    } else {
+        format!("  <key>EnvironmentVariables</key>\n  <dict>\n{variables}  </dict>\n")
     };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -12347,7 +12399,8 @@ mod tests {
 
         let unit = devserver_systemd_unit(&exe, addr, None, None);
         let systemd = systemd_execstart_line(&unit).expect("the unit has an ExecStart");
-        let plist = devserver_launch_agent_plist(&exe, addr, Path::new("/tmp/devserver.log"), None);
+        let plist =
+            devserver_launch_agent_plist(&exe, addr, Path::new("/tmp/devserver.log"), None, None);
         let launchd = launchd_program_arguments(&plist).expect("the plist has ProgramArguments");
 
         for (source, command) in [("systemd", &systemd), ("launchd", &launchd)] {
@@ -14020,6 +14073,7 @@ mod tests {
             "127.0.0.1:8799".parse().unwrap(),
             Path::new("/Users/x/.chan/devserver/devserver.log"),
             None,
+            None,
         );
         assert!(plist.contains("<string>app.chan.devserver</string>"));
         assert!(plist.contains("<string>/usr/local/bin/chan</string>"));
@@ -14041,6 +14095,7 @@ mod tests {
             "127.0.0.1:8799".parse().unwrap(),
             Path::new("/tmp/iso/.chan/devserver/devserver.log"),
             Some("/tmp/iso & home"),
+            None,
         );
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
         assert!(plist.contains("<key>CHAN_HOME</key>"));
@@ -14049,11 +14104,86 @@ mod tests {
     }
 
     #[test]
+    fn launch_agent_plist_records_the_install_time_search_path() {
+        let addr: SocketAddr = "127.0.0.1:8799".parse().unwrap();
+        let plist = devserver_launch_agent_plist(
+            Path::new("/usr/local/bin/chan"),
+            addr,
+            Path::new("/tmp/log"),
+            Some("/tmp/iso"),
+            Some("/Users/x/.local/bin:/opt/a&b/bin:/usr/bin"),
+        );
+        assert!(
+            plist.contains(
+                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>CHAN_HOME</key>\n    \
+                 <string>/tmp/iso</string>\n    <key>PATH</key>\n    \
+                 <string>/Users/x/.local/bin:/opt/a&amp;b/bin:/usr/bin</string>\n  </dict>\n"
+            ),
+            "the plist must record the PATH, XML-escaped, beside CHAN_HOME: {plist}"
+        );
+        // The environment follows the command, and neither the status line
+        // nor the persisted address reads it.
+        assert!(
+            plist.find("<key>ProgramArguments</key>")
+                < plist.find("<key>EnvironmentVariables</key>")
+        );
+        assert_eq!(
+            launchd_program_arguments(&plist).as_deref(),
+            Some("/usr/local/bin/chan devserver run --bind=127.0.0.1 --port=8799")
+        );
+        assert_eq!(devserver_addr_from_persisted_args(&plist), Some(addr));
+        assert_eq!(
+            recorded_launch_agent_search_path(&plist).as_deref(),
+            Some("/Users/x/.local/bin:/opt/a&b/bin:/usr/bin")
+        );
+    }
+
+    #[test]
+    fn launch_agent_search_path_follows_the_unit_rule() {
+        let plist = |search_path: Option<&str>| {
+            devserver_launch_agent_plist(
+                Path::new("/usr/local/bin/chan"),
+                "127.0.0.1:8799".parse().unwrap(),
+                Path::new("/tmp/log"),
+                None,
+                search_path,
+            )
+        };
+        let installed = plist(Some("/Users/x/.local/bin:/usr/bin"));
+        let script = std::ffi::OsStr::new("/usr/bin:/bin:relative:/usr/bin");
+
+        assert_eq!(
+            launch_agent_search_path(script, Some(&installed), false).as_deref(),
+            Some("/Users/x/.local/bin:/usr/bin"),
+            "a render without a terminal must keep the recorded PATH"
+        );
+        assert_eq!(
+            launch_agent_search_path(script, Some(&installed), true).as_deref(),
+            Some("/usr/bin:/bin"),
+            "a render from a terminal must record its own PATH, filtered like the unit's"
+        );
+        for installed in [Some(plist(None)), None] {
+            assert_eq!(
+                launch_agent_search_path(script, installed.as_deref(), false).as_deref(),
+                Some("/usr/bin:/bin"),
+                "a plist with no recorded PATH must gain one"
+            );
+        }
+        assert_eq!(
+            launch_agent_search_path(std::ffi::OsStr::new("::bin:."), Some(&installed), true)
+                .as_deref(),
+            Some("/Users/x/.local/bin:/usr/bin"),
+            "a PATH with no usable entry must not delete the recorded one"
+        );
+    }
+
+    #[test]
     fn launch_agent_plist_escapes_xml_in_paths() {
         let plist = devserver_launch_agent_plist(
             Path::new("/opt/a & b/chan"),
             "127.0.0.1:1".parse().unwrap(),
             Path::new("/tmp/log"),
+            None,
             None,
         );
         assert!(plist.contains("/opt/a &amp; b/chan"));
