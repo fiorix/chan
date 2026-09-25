@@ -1,22 +1,39 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import ThreefoldVeil from "./ThreefoldVeil.svelte";
 import {
   buildThreefoldVeilPoints,
   fitThreefoldVeil,
   THREEFOLD_VEIL_POINT_COUNT,
 } from "./threefoldVeil";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./threefoldVeil", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./threefoldVeil")>();
+  return { ...actual, buildThreefoldVeilPoints: vi.fn(actual.buildThreefoldVeilPoints) };
+});
+
+afterEach(stopAnimations);
 
 describe("Threefold Veil", () => {
-  test("keeps the source timing and credits @yuruyurau", async () => {
-    const renderer = (await import("./ThreefoldVeil.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./threefoldVeil.ts?raw"))
-      .default as string;
+  test("advances pi radians per second of animation time", () => {
+    const { callbacks } = startAnimation(ThreefoldVeil, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    const build = vi.mocked(buildThreefoldVeilPoints);
+    build.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toMatch(/const PHASE_SPEED = Math\.PI;/);
-    expect(geometry).toContain("@yuruyurau");
-    expect(geometry).toContain(
-      "https://x.com/yuruyurau/status/2083185617345921400",
-    );
+    expect(build.mock.calls.map(([phase]) => phase)).toEqual([
+      expect.closeTo(Math.PI, 9),
+      expect.closeTo(3 * Math.PI, 9),
+    ]);
   });
 
   test("builds the source sketch's 10,000 points", () => {
