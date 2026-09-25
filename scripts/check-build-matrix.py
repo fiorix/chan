@@ -128,6 +128,16 @@ def check_make_contract() -> None:
     # that block would still match as a substring.
     for step in ("$(MAKE) nix-hash-contract-check", "$(MAKE) nix-hash-check"):
         require_unconditional_step(makefile, "pre-push", step)
+    # The AUR check() contract is only as good as the shapes its contract
+    # test proves it refuses, so the target that runs one runs the other.
+    require_target(
+        makefile,
+        "build-matrix-check",
+        (
+            "$(PYTHON) scripts/check-build-matrix.py",
+            "$(PYTHON) scripts/test-check-build-matrix.py",
+        ),
+    )
     require_target(
         makefile,
         "nix-hash-check",
@@ -1195,67 +1205,71 @@ def check_aur_check_selection_contract() -> None:
     `-p chan -p chan-server`, the widenings this contract refuses.
     """
     for path in AUR_RECIPES:
-        recipe = read(path)
-        pkgname = re.search(r"^pkgname=([A-Za-z0-9_.+-]+)$", recipe, re.MULTILINE)
-        if pkgname is None:
-            raise ContractError(f"{path}: no `pkgname=` line")
-        package = pkgname.group(1)
-        # The package is named by what package() installs, so a recipe that
-        # stops installing its own cargo package's binary has to update this
-        # contract rather than pass it.
-        require(
-            "\n".join(line for _, line in shell_function(recipe, "package", path)),
-            f"install -Dm755 target/release/{package} ",
-            f"{path} package()",
-        )
-        cargo_calls = 0
-        for number, words in shell_commands(shell_function(recipe, "check", path), path):
+        check_aur_recipe(path, read(path))
+
+
+def check_aur_recipe(path: str, recipe: str) -> None:
+    """The AUR check() selection contract for one recipe's text."""
+    pkgname = re.search(r"^pkgname=([A-Za-z0-9_.+-]+)$", recipe, re.MULTILINE)
+    if pkgname is None:
+        raise ContractError(f"{path}: no `pkgname=` line")
+    package = pkgname.group(1)
+    # The package is named by what package() installs, so a recipe that
+    # stops installing its own cargo package's binary has to update this
+    # contract rather than pass it.
+    require(
+        "\n".join(line for _, line in shell_function(recipe, "package", path)),
+        f"install -Dm755 target/release/{package} ",
+        f"{path} package()",
+    )
+    cargo_calls = 0
+    for number, words in shell_commands(shell_function(recipe, "check", path), path):
+        program = words[0]
+        if program in ("command", "env", "exec", "time") and len(words) > 1:
+            words = words[1:]
             program = words[0]
-            if program in ("command", "env", "exec", "time") and len(words) > 1:
-                words = words[1:]
-                program = words[0]
-            where = f"{path}:{number}: check() runs `{' '.join(words)}`"
-            if program.startswith("$"):
-                raise ContractError(
-                    f"{where}, a program named by a variable, so its package "
-                    "selection cannot be read"
-                )
-            if Path(program).name in OPAQUE_RUNNERS:
-                raise ContractError(
-                    f"{where}, which can run cargo with a package selection "
-                    f"this check cannot read; call cargo with `-p {package}`"
-                )
-            if Path(program).name != "cargo":
-                continue
-            arguments = words[1:]
-            if arguments and arguments[0].startswith("+"):
-                arguments = arguments[1:]
-            subcommand = next((word for word in arguments if not word.startswith("-")), None)
-            if subcommand in CARGO_NON_BUILDING:
-                continue
-            cargo_calls += 1
-            packages, wider = cargo_selection(arguments)
-            if wider:
-                raise ContractError(
-                    f"{where}, and {', '.join(wider)} selects beyond {package}, "
-                    "the package this recipe installs"
-                )
-            if not packages:
-                raise ContractError(
-                    f"{where} with no `-p`, which selects the workspace's "
-                    f"default members instead of {package} alone"
-                )
-            others = sorted(set(packages) - {package})
-            if others:
-                raise ContractError(
-                    f"{where}, which selects {', '.join(others)}; only "
-                    f"{package}, the package this recipe installs, may be selected"
-                )
-        if cargo_calls == 0:
+        where = f"{path}:{number}: check() runs `{' '.join(words)}`"
+        if program.startswith("$"):
             raise ContractError(
-                f"{path}: check() runs no cargo build or test, so the selection "
-                "this contract pins is gone; update the contract with the recipe"
+                f"{where}, a program named by a variable, so its package "
+                "selection cannot be read"
             )
+        if Path(program).name in OPAQUE_RUNNERS:
+            raise ContractError(
+                f"{where}, which can run cargo with a package selection "
+                f"this check cannot read; call cargo with `-p {package}`"
+            )
+        if Path(program).name != "cargo":
+            continue
+        arguments = words[1:]
+        if arguments and arguments[0].startswith("+"):
+            arguments = arguments[1:]
+        subcommand = next((word for word in arguments if not word.startswith("-")), None)
+        if subcommand in CARGO_NON_BUILDING:
+            continue
+        cargo_calls += 1
+        packages, wider = cargo_selection(arguments)
+        if wider:
+            raise ContractError(
+                f"{where}, and {', '.join(wider)} selects beyond {package}, "
+                "the package this recipe installs"
+            )
+        if not packages:
+            raise ContractError(
+                f"{where} with no `-p`, which selects the workspace's "
+                f"default members instead of {package} alone"
+            )
+        others = sorted(set(packages) - {package})
+        if others:
+            raise ContractError(
+                f"{where}, which selects {', '.join(others)}; only "
+                f"{package}, the package this recipe installs, may be selected"
+            )
+    if cargo_calls == 0:
+        raise ContractError(
+            f"{path}: check() runs no cargo build or test, so the selection "
+            "this contract pins is gone; update the contract with the recipe"
+        )
 
 
 NODE_MAJOR_FILE = ".nvmrc"
@@ -1525,7 +1539,33 @@ def check_node_major_contract() -> None:
             raise ContractError(f"{path}: no nodejs_{major} attribute")
 
 
-def main() -> int:
+def check_aur_recipe_files(paths: list[str]) -> int:
+    """Run the AUR check() selection contract alone over PATHS.
+
+    The entry point of scripts/test-check-build-matrix.py, which proves the
+    contract against throwaway recipes; build-matrix-check itself runs it
+    over AUR_RECIPES with every other contract.
+    """
+    failed = False
+    for path in paths:
+        try:
+            try:
+                recipe = Path(path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                raise ContractError(f"{path}: cannot read: {error}") from error
+            check_aur_recipe(path, recipe)
+        except ContractError as error:
+            print(f"build-matrix contract: FAIL: {error}", file=sys.stderr)
+            failed = True
+    if failed:
+        return 1
+    print("build-matrix contract: PASS")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv[1:2] == ["aur-recipe"]:
+        return check_aur_recipe_files(argv[2:])
     # Each contract runs even when an earlier one fails, so one broken
     # contract, or an interpreter too old for the gateway one, does not hide
     # the verdict of the rest.
@@ -1553,4 +1593,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))
