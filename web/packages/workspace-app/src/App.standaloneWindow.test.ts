@@ -18,11 +18,11 @@ vi.hoisted(() => {
   window.history.replaceState({}, "", "/?kind=terminal&w=w-standalone&seed=0");
 });
 
-vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xterm);
-vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit);
-vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
-vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
-vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
+vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
 
 const themeWatch = vi.hoisted(() => ({ opened: 0, closed: 0 }));
 

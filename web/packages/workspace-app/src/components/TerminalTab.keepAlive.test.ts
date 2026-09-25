@@ -7,14 +7,14 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xterm);
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fit);
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).search);
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serialize);
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinks);
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
-import { xterm } from "../__tests__/xterm";
+import { FakeTerminal } from "../__tests__/xterm";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { cancelPaneMode, flipHybrid } from "../state/tabs.svelte";
 
@@ -40,7 +40,7 @@ describe("a terminal tab", () => {
     await settle();
     await vi.waitFor(() => expect(terminal()).not.toBeNull());
     const mounted = terminal();
-    const dispose = vi.spyOn(xterm.Terminal.prototype, "dispose");
+    const dispose = vi.spyOn(FakeTerminal.prototype, "dispose");
     expect(mounted.getAttribute("aria-hidden")).toBe("false");
 
     press({ key: ".", code: "Period", ctrlKey: true });
