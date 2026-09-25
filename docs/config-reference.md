@@ -69,7 +69,7 @@ Each regular `.toml` file declares one local subprocess. The lowercase file stem
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `name` | `String` | required | Launcher row and tab title, 1 to 128 characters after trimming |
-| `command` | `String` | required | Executable to spawn; bare names use the serving process's `PATH` (for the systemd devserver service, the one its unit records; see [the environment](extensions.md#the-environment)), while `./name` resolves from the extension config directory |
+| `command` | `String` | required | Executable to spawn; bare names use the serving process's `PATH` (for a devserver service, the one its systemd unit or launchd plist records; see [the environment](extensions.md#the-environment)), while `./name` resolves from the extension config directory |
 | `args` | `String[]` | `[]` | Arguments passed verbatim after `command` |
 | `capabilities` | `String[]` | `[]` | Explicit host grants: `session-context` and/or `presentation`; unknown values reject the declaration |
 
