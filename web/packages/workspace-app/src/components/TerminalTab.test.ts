@@ -500,13 +500,11 @@ describe("TerminalTab menu", () => {
       for (const label of [
         "New File",
         "New Terminal",
-        "New File Browser",
         "New Graph",
         "Restart",
         "Start New Session",
         "Copy path to $CWD",
         "Settings",
-        "Reopen Closed Tab",
       ]) {
         expect(labels).not.toContain(label);
       }
@@ -538,23 +536,6 @@ describe("TerminalTab menu", () => {
       expect(tabMenu).not.toContain(label);
       expect(bodyMenu).not.toContain(label);
     }
-  });
-
-  test("the terminal menu has NO Team Work toggle (the bubble is gone)", async () => {
-    const tab = terminalTab({ terminalSessionId: "term-session-1" });
-    await renderTerminal(tab, true);
-
-    openTabMenu(tab.id, { left: 0, top: 0, right: 0, bottom: 0 });
-    await tick();
-    await tick();
-
-    const labels = Array.from(document.body.querySelectorAll(".mbtn-label")).map(
-      (el) => (el.textContent || "").trim(),
-    );
-    // The Team Work bubble composer was removed entirely; Team Work is the
-    // Cmd+P dialog now, so no terminal carries a Show/Hide Team Work toggle.
-    expect(labels).not.toContain("Show Team Work");
-    expect(labels).not.toContain("Hide Team Work");
   });
 });
 

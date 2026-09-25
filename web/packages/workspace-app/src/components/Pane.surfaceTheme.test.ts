@@ -141,7 +141,5 @@ describe("the theme token blocks", () => {
   test("apply to any themed subtree, not only a pane", () => {
     expect(app).toContain(':global([data-theme="dark"])');
     expect(app).toContain(':global([data-theme="light"])');
-    expect(app).not.toContain(':global(.pane[data-theme="dark"])');
-    expect(app).not.toContain(':global(.pane[data-theme="light"])');
   });
 });

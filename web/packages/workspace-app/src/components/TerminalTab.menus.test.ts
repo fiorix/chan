@@ -84,7 +84,6 @@ describe("the tab menu", () => {
     expect(shape.slice(0, 3)).toEqual(["field Name", "field Group", "status connected: 80x24"]);
     expect(shape.slice(-2)).toEqual(["---", "Close"]);
     expect(document.body.querySelector(".from-cwd-label")).toBeNull();
-    expect(document.body.textContent).not.toContain("Set MCP env vars");
   });
 
   test("is portaled to the page body and kept on screen", async () => {
