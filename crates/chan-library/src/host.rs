@@ -5704,7 +5704,12 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_mount_cancellation_settles_starting() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound, for the reason given in
+        // `interrupted_mount_already_open_reports_releasing_and_allows_retry`. The
+        // gated builder, the semaphore and the library-change notify already order
+        // the steps; this bound fails the test if one of them never fires, while
+        // the mounts and the close around them stay real I/O a slow runner stretches.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -5753,12 +5758,17 @@ mod tests {
             host.close_workspace("/workspace", false).await.unwrap();
         })
         .await
-        .unwrap();
+        .expect("the cancelled-mount sequence hung past its 30 s guard");
     }
 
     #[tokio::test]
     async fn interrupted_mount_after_cancelled_close_never_stays_starting() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound, for the reason given in
+        // `interrupted_mount_already_open_reports_releasing_and_allows_retry`. The
+        // gated shutdown's entered channel orders the cancelled close; this bound
+        // fails the test if it never fires or a mount never gets the root back,
+        // while the mounts and the close stay real I/O a slow runner stretches.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -5799,7 +5809,7 @@ mod tests {
             host.open_registered_workspace(root.path(), serve_config("/workspace")).await.unwrap();
             assert_eq!(host.workspace_status(root.path()).0, WorkspaceStatus::Running);
             host.close_workspace("/workspace", false).await.unwrap();
-        }).await.unwrap();
+        }).await.expect("the cancelled-close remount sequence hung past its 30 s guard");
     }
 
     #[tokio::test]
