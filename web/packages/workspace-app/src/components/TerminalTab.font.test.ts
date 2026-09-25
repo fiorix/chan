@@ -28,7 +28,7 @@ import {
 
 installTerminalDom();
 
-// Build-time contract: fonts.css loads the face from a relative url, since the app is served under a tenant prefix; vitest empties CSS imports, so the file is read from disk.
+// Build-time contract: fonts.css declares the face under the family the terminal requests, and loads it from a relative url since the app is served under a tenant prefix; vitest empties CSS imports, so the file is read from disk.
 const fonts = readFileSync("src/fonts.css", "utf8");
 
 afterEach(() => {
@@ -81,6 +81,22 @@ describe("the mounted terminal", () => {
 });
 
 describe("TerminalTab font + cursor parity", () => {
+  test("fonts.css declares the face under the family the terminal requests", async () => {
+    // Renaming the family on either side leaves every terminal on a fallback
+    // face with no error, so the declared name is read from the stylesheet
+    // and the requested one from what the mounted terminal asks for.
+    const declared = /@font-face\s*\{[^}]*font-family:\s*(["'])(.*?)\1/.exec(fonts)?.[2];
+    expect(declared, "fonts.css declares a family").toBeTruthy();
+
+    vi.mocked(document.fonts.load).mockClear();
+    const [tab] = seatTerminals([terminalTab()]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    const first = String(term.options.fontFamily).split(",")[0]!.trim().replace(/^["']|["']$/g, "");
+    expect(first, "the first family xterm is given").toBe(declared);
+    const awaited = vi.mocked(document.fonts.load).mock.calls.map(([font]) => /"([^"]+)"/.exec(String(font))?.[1]);
+    expect(awaited, "the face the terminal waits for before it builds a renderer").toContain(declared);
+  });
+
   test("@font-face src is relative so it resolves under a tenant prefix", () => {
     // WorkspaceHost mounts each tenant under a single-segment slug, and
     // vite builds with base "./" for exactly that reason. An absolute
