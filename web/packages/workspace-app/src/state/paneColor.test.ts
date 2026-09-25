@@ -1,6 +1,18 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinks);
+
+import { api } from "../api/client";
+import { ApiError } from "../api/errors";
+import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { resetLayout } from "../__tests__/tabs";
+import { layout } from "./tabs.svelte";
 import {
   NAMED_PANE_HEX,
   applyInitialPaneColor,
@@ -14,8 +26,6 @@ import {
   seedInitialFocusColor,
   syncLiveFocusColorMenu,
 } from "./paneColor";
-import paneSource from "../components/Pane.svelte?raw";
-import clientSource from "../api/client.ts?raw";
 // Importing the module registers the launcher focus-colour commands.
 import "./commands/panes";
 import { availableCommands, type CommandContext } from "./commands";
@@ -365,50 +375,61 @@ describe("applyNamedFocusColor applies the full preset path", () => {
   });
 });
 
-describe("Pane.svelte doSetFocusColor persists + recolours per library", () => {
-  test("delegates to the shared applyNamedFocusColor path", () => {
-    // The button and the launcher command must share ONE apply body; the
-    // button injects the selection setter and its best-effort persist.
-    expect(paneSource).toMatch(
-      /applyNamedFocusColor\(color, setWindowFocusColor, /,
-    );
-  });
-  test("fires api.setLocalColor(hex) best-effort, swallowing failure", () => {
-    expect(paneSource).toMatch(
-      /void api\.setLocalColor\(hex\)\.catch\([\s\S]*?console\.warn/,
-    );
-  });
-});
+describe("the pane menu's focus border colours", () => {
+  // The menu and the launcher's app.pane.focusColor.* commands share the one
+  // apply path above; the menu also saves the colour for the library, best
+  // effort. The request that save sends is checked in
+  // api/localColorRootPath.test.ts.
+  stubAppEnvironment();
 
-describe("api.setLocalColor PUTs the library local-color route", () => {
-  test("setLocalColor PUTs via requestRoot (ROOT path, not the tenant prefix) -- C8", () => {
-    // MUST be `requestRoot`, NOT `req`/`request`: the local-color route lives only
-    // on the root launcher router, so a window served under a tenant prefix would
-    // 404 if the prefix were prepended (`apiPath`). See localColorRootPath.test.ts
-    // for the behavioural proof. The window's `?t=` bearer still travels.
-    expect(clientSource).toMatch(
-      /setLocalColor: \(color: string\) =>[\s\S]*?requestRoot<void>\([\s\S]*?"PUT",[\s\S]*?"\/api\/library\/local-color",[\s\S]*?\{ color \}/,
-    );
+  afterEach(async () => {
+    await unmountApp();
+    vi.restoreAllMocks();
   });
-});
 
-describe("Pane.svelte active-pane highlight prefers --pane-highlight-color", () => {
-  test(".pane.focused border falls back through the highlight var", () => {
-    expect(paneSource).toMatch(
-      /\.pane\.focused \{[\s\S]*?border-color: var\(--pane-highlight-color, var\(--pane-active-focus\)\);/,
-    );
+  async function chooseFromMenu(color: string): Promise<void> {
+    document.querySelector<HTMLButtonElement>('.pane [aria-label="Menu"]')!.click();
+    await settle();
+    [...document.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")]
+      .find((button) => button.textContent?.trim() === color)!
+      .click();
+    await settle();
+  }
+
+  function checked(): string[] {
+    return [...document.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")]
+      .filter((button) => button.querySelector(".color-dot") && button.querySelector("svg:not(.color-dot)"))
+      .map((button) => button.textContent!.trim());
+  }
+
+  test("choosing one recolours the window, checks it and saves its colour for the library", async () => {
+    const save = vi.spyOn(api, "setLocalColor").mockResolvedValue(undefined);
+    await mountApp();
+    resetLayout([]);
+    await settle();
+
+    await chooseFromMenu("orange");
+
+    expect(layout.focusColor).toBe("orange");
+    expect(document.documentElement.style.getPropertyValue(CSS_VAR)).toBe(NAMED_PANE_HEX.orange);
+    expect(save).toHaveBeenCalledWith(NAMED_PANE_HEX.orange);
+    document.querySelector<HTMLButtonElement>('.pane [aria-label="Menu"]')!.click();
+    await settle();
+    expect(checked()).toEqual(["orange"]);
   });
-  test("the focus halo box-shadow uses the highlight var inside color-mix", () => {
-    expect(paneSource).toMatch(
-      /color-mix\(in srgb, var\(--pane-highlight-color, var\(--pane-active-focus\)\) 55%, transparent\)/,
-    );
-  });
-  test("the data-focus-color presets are unchanged", () => {
-    expect(paneSource).toMatch(
-      /\.pane\[data-focus-color="blue"\] \{ --pane-active-focus: var\(--pane-focus\); \}/,
-    );
-    expect(paneSource).toMatch(
-      /\.pane\[data-focus-color="orange"\] \{ --pane-active-focus: #f97316; \}/,
-    );
+
+  test("a save the library refuses is logged, and the colour stays", async () => {
+    vi.spyOn(api, "setLocalColor").mockRejectedValue(new ApiError(404, "not found"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await mountApp();
+    resetLayout([]);
+    await settle();
+
+    await chooseFromMenu("green");
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    expect(String(warn.mock.calls[0][0])).toContain("setLocalColor failed");
+    expect(layout.focusColor).toBe("green");
+    expect(document.documentElement.style.getPropertyValue(CSS_VAR)).toBe(NAMED_PANE_HEX.green);
   });
 });
