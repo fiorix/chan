@@ -14,11 +14,17 @@ import { openExternalUrl } from "../editor/external_links";
 import { showSurvey, surveyState } from "../state/survey.svelte";
 import {
   bumpTabFocusPulse,
-  layout,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { installTerminalDom, resetTerminals, TerminalSocket, xterm } from "../__tests__/terminalTab";
+import {
+  installTerminalDom,
+  resetTerminals,
+  seatTerminals,
+  TerminalSocket,
+  terminalTab,
+  xterm,
+} from "../__tests__/terminalTab";
 
 vi.mock("../editor/external_links", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../editor/external_links")>()),
@@ -59,38 +65,11 @@ function keyHandler(): (e: KeyboardEvent) => boolean {
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   resetTerminals();
-  setTerminalTabsInLayout([]);
+  seatTerminals([]);
   surveyState.byTab = {};
   surveyState.windowWide = null;
   vi.clearAllMocks();
 });
-
-function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
-
-function setTerminalTabsInLayout(tabs: TerminalTabState[]): TerminalTabState[] {
-  const paneId = "terminal-tab-test-pane";
-  layout.rootId = paneId;
-  layout.activePaneId = paneId;
-  layout.nodes = {
-    [paneId]: {
-      kind: "leaf",
-      id: paneId,
-      tabs,
-      activeTabId: tabs[0]?.id ?? null,
-    },
-  };
-  return (layout.nodes[paneId] as { tabs: TerminalTabState[] }).tabs;
-}
 
 async function renderTerminal(
   tab: TerminalTabState,
@@ -237,7 +216,7 @@ describe("TerminalTab activity frames", () => {
 
 describe("TerminalTab metadata settlement", () => {
   test("blur sends one pair, disables both fields, and adopts the settled ack", async () => {
-    const [tab] = setTerminalTabsInLayout([
+    const [tab] = seatTerminals([
       terminalTab({ title: "url-name", group: "url-group" }),
     ]);
     await renderTerminal(tab, true);
@@ -316,7 +295,7 @@ describe("TerminalTab metadata settlement", () => {
   });
 
   test("Enter submits once and a socket drop leaves the draft editable", async () => {
-    const [tab] = setTerminalTabsInLayout([terminalTab()]);
+    const [tab] = seatTerminals([terminalTab()]);
     await renderTerminal(tab, true);
     const socket = openSocket();
 
