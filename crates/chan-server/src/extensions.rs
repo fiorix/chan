@@ -1127,4 +1127,175 @@ mod tests {
             "the warning must carry the child's exit status: {ignored}"
         );
     }
+
+    /// systemd's compiled-in `PATH` for the services of a user manager that
+    /// no `environment.d` file or session import has extended: what a
+    /// devserver started by a unit without a `PATH` line runs with.
+    #[cfg(unix)]
+    const SERVICE_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin";
+
+    /// Set, to the extensions directory, in the re-run that plays chan.
+    #[cfg(unix)]
+    const SERVICE_ENVIRONMENT_CHILD: &str = "CHAN_TEST_EXTENSION_SERVICE_ENVIRONMENT_CHILD";
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).expect("write executable");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("make executable");
+    }
+
+    /// Run [`a_service_environment_is_what_an_extension_resolves_through`]'s
+    /// child half in a process whose whole environment is `PATH`, the way a
+    /// systemd service starts, and return the catalog ids and every captured
+    /// log line it reports.
+    #[cfg(unix)]
+    async fn start_in_service_environment(
+        extensions: &Path,
+        path: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let output = tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "extensions::tests::a_service_environment_is_what_an_extension_resolves_through",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("PATH", path)
+                .env(SERVICE_ENVIRONMENT_CHILD, extensions)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("service-environment child timed out")
+        .expect("spawn the service-environment child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "service-environment child failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let catalog = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("CATALOG="))
+            .expect("the child reports its catalog")
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
+        let logs = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("LOG="))
+            .map(str::to_string)
+            .collect();
+        (catalog, logs)
+    }
+
+    /// An extension is spawned without a shell, so it inherits the serving
+    /// process's `PATH` verbatim and nothing reads a shell profile: a bare
+    /// `command` and every helper the extension runs by name resolve through
+    /// that `PATH` alone. Under a systemd service that is the unit's `PATH`
+    /// line when it has one, and systemd's default when it has none. The
+    /// chan process here is a re-run of this test whose environment holds
+    /// nothing but `PATH`, which is the case a service produces, covered
+    /// without one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_service_environment_is_what_an_extension_resolves_through() {
+        if let Some(extensions) = std::env::var_os(SERVICE_ENVIRONMENT_CHILD) {
+            let (logs, guard) = capture_logs();
+            let runtime = ExtensionRuntime::start_in(Path::new(&extensions)).await;
+            let mut ids: Vec<_> = runtime
+                .catalog
+                .views()
+                .into_iter()
+                .map(|view| view.id)
+                .collect();
+            ids.sort();
+            runtime.shutdown().await;
+            drop(guard);
+            println!("CATALOG={}", ids.join(","));
+            for line in logs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
+                println!("LOG={}", line.replace('\n', " "));
+            }
+            return;
+        }
+
+        let root = tempfile::tempdir().expect("tempdir");
+        // The user's own bin directory, which a login shell puts on PATH and
+        // systemd's default does not.
+        let user_bin = root.path().join("bin");
+        std::fs::create_dir(&user_bin).expect("user bin");
+        let handshake = format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            r#"CHAN_EXTENSION_V1={"url":"http://127.0.0.1:9/","token":"test"}"#,
+        );
+        write_executable(&user_bin.join("chan-test-bare-extension"), &handshake);
+        write_executable(&user_bin.join("chan-test-extension-helper"), &handshake);
+
+        let extensions = root.path().join("extensions");
+        std::fs::create_dir(&extensions).expect("extensions dir");
+        std::fs::write(
+            extensions.join("bare.toml"),
+            "name = \"Bare\"\ncommand = \"chan-test-bare-extension\"\n",
+        )
+        .expect("write bare config");
+        std::fs::write(
+            extensions.join("helper.toml"),
+            "name = \"Helper\"\ncommand = \"/bin/sh\"\nargs = [\"extension.sh\"]\n",
+        )
+        .expect("write helper config");
+        std::fs::write(
+            extensions.join("extension.sh"),
+            "printf '%s\\n' \"$PATH\" > seen-path\nexec chan-test-extension-helper\n",
+        )
+        .expect("write helper extension script");
+        let seen_path = || {
+            std::fs::read_to_string(extensions.join("seen-path"))
+                .expect("the extension recorded its PATH")
+                .trim_end()
+                .to_string()
+        };
+
+        // A unit without a PATH line: neither the bare command nor the
+        // helper resolves, and each failure names itself.
+        let (catalog, logs) = start_in_service_environment(&extensions, SERVICE_DEFAULT_PATH).await;
+        assert!(catalog.is_empty(), "nothing resolves: {catalog:?}");
+        assert_eq!(
+            seen_path(),
+            SERVICE_DEFAULT_PATH,
+            "the extension inherits the service's PATH verbatim"
+        );
+        assert!(
+            logs.iter().any(|line| line.contains("extension bare from")
+                && line.contains("spawning chan-test-bare-extension: No such file or directory")),
+            "a bare command outside PATH must say it was not found: {logs:#?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("extension helper from")
+                    && line.contains("exit status: 127")
+                    && line.contains("extension stdout closed before the handshake marker")),
+            "a helper outside PATH must say the extension exited 127 before its handshake: \
+             {logs:#?}"
+        );
+
+        // The unit chan renders from a login shell: the user's bin directory
+        // is on the recorded PATH, and both resolve through it.
+        let installed = format!("{}:{SERVICE_DEFAULT_PATH}", user_bin.display());
+        let (catalog, logs) = start_in_service_environment(&extensions, &installed).await;
+        assert_eq!(catalog, ["bare", "helper"], "{logs:#?}");
+        assert_eq!(
+            seen_path(),
+            installed,
+            "the extension inherits the service's PATH verbatim"
+        );
+    }
 }
