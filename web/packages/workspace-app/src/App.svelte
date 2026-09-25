@@ -447,6 +447,10 @@
     // stretch to seconds before the user returns; a manual nudge lands the
     // connection immediately. Debounced 300 ms so a quick tab-switch flicker
     // doesn't fire the reconnect twice.
+    //
+    // This runs after the bootstrap, so an app unmounted while it waited
+    // installs nothing here.
+    if (wakeReleased) return;
     let resumeTimer: ReturnType<typeof setTimeout> | null = null;
     function scheduleResume(): void {
       if (resumeTimer) clearTimeout(resumeTimer);
@@ -455,10 +459,16 @@
         reconnectWatcher();
         // The tree refresh hits /api/fs and the workspace refresh
         // /api/workspace; a window gets each only where its tenant serves it,
-        // so a terminals-only window takes the watcher reconnect alone.
+        // so a terminals-only window takes the watcher reconnect alone. A
+        // refresh that fails (the server still coming back after a wake) is
+        // logged and left to the next wake and the reconnected watcher's resync.
         if (!windowCaps.files) return;
-        void refreshTree();
-        if (windowCaps.workspace) void refreshWorkspace();
+        refreshTree().catch((err) => console.warn("[chan] resume tree refresh failed", err));
+        if (windowCaps.workspace) {
+          refreshWorkspace().catch((err) =>
+            console.warn("[chan] resume workspace refresh failed", err),
+          );
+        }
       }, 300);
     }
     function onVisibility(): void {
@@ -471,7 +481,24 @@
     // wall-clock detector catches that sleep off a late-firing coarse interval
     // and runs the same resume, so a post-sleep window is not left on a dead
     // watcher under a stale tree.
-    installWakeGapDetector(scheduleResume);
+    const disposeWakeGap = installWakeGapDetector(scheduleResume);
+    releaseWake = () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      disposeWakeGap();
+      if (resumeTimer) clearTimeout(resumeTimer);
+      resumeTimer = null;
+    };
+  });
+
+  // The wake path's teardown. The mount above is async and installs the wake
+  // path only after the bootstrap, so it cannot return its cleanup; it leaves
+  // it here instead, and an unmount that lands first stops the install.
+  let wakeReleased = false;
+  let releaseWake: (() => void) | null = null;
+  onDestroy(() => {
+    wakeReleased = true;
+    releaseWake?.();
+    releaseWake = null;
   });
 
   /// Context-aware spawn helpers shared by all chord entry paths (top-level
