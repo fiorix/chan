@@ -3,9 +3,9 @@
 // `crypto.randomUUID` is restricted to secure contexts, and a devserver
 // reached over plain http at a LAN address is not one. A call site that names
 // it directly therefore throws there, in whatever handler it sits in, and the
-// user is told nothing. state/ids.ts is the one module allowed to name it,
-// because it is the one module that has an answer when it is missing;
-// everything else calls `newUuid()`.
+// user is told nothing. state/ids.ts is the module meant to name it, because
+// it has an answer when it is missing; everything else calls `newUuid()`,
+// except the modules OWN_MINT lists, which still carry a fallback of their own.
 
 import { describe, expect, test } from "vitest";
 
@@ -57,8 +57,8 @@ describe("randomUUID centralization", () => {
     ).toBeDefined();
   });
 
-  // Source-text contract: no shipped module but state/ids.ts names crypto.randomUUID, which throws outside a secure context.
-  test("no module outside it reaches for crypto.randomUUID", () => {
+  // Source-text contract: the shipped modules outside state/ids.ts that name crypto.randomUUID, which throws outside a secure context, are exactly OWN_MINT.
+  test("no module outside it and OWN_MINT reaches for crypto.randomUUID", () => {
     expect(
       modulesNamingRandomUuid(),
       `crypto.randomUUID throws on a devserver served over plain http, so a ` +
