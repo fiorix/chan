@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 
+import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import client from "../api/client.ts?raw";
-import dialog from "./TeamDialog.svelte?raw";
 import { api } from "../api/client";
 import type { TeamConfigWire } from "../api/client";
 import type { WorkspaceInfo } from "../api/types";
+import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
 import {
   runTeamBootstrap,
   translateConfig,
@@ -14,63 +14,159 @@ import {
 import { resizeTeamMembers } from "../state/teamDialog.svelte";
 import { layout, type LeafNode, type TerminalTab } from "../state/tabs.svelte";
 import { workspace } from "../state/workspace.svelte";
+import TeamDialog from "./TeamDialog.svelte";
 
 // The orchestrator refuses to start a team whose workspace root it does not
 // know (the identity prompt names bootstrap.md by its absolute path), so the
 // root every test here runs under is seeded once.
 workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 
-// Dir-based New/Load config flow. Load reads an existing team's
-// config.toml back via readTeamConfig, prepopulates the
-// (still-editable) form via wireToDialog, and re-saves the edited
-// config on Bootstrap.
+// Load mode reads an existing team's config.toml from the directory the user
+// names, fills the dialog's form with it (still editable), and says which
+// file it found or why it could not. The directory field suggests workspace
+// folders only. Bootstrap writes the edited config back to that directory.
 
-describe("api client: dir-based team-config read/write", () => {
-  test("readTeamConfig POSTs /api/team-config/read with { dir }", () => {
-    expect(client).toMatch(
-      /readTeamConfig: \(dir: string\) =>[\s\S]{1,200}req<TeamConfigWire>\("POST", "\/api\/team-config\/read", \{ dir \}\)/,
-    );
+describe("the team-config client calls", () => {
+  afterEach(stopRecordingRequests);
+
+  test("readTeamConfig posts the directory and answers the config", async () => {
+    const requests = recordRequests(() => json(loadedWire()));
+
+    await expect(api.readTeamConfig("saved-team")).resolves.toMatchObject({ team_name: "saved-team" });
+    expect(requests).toMatchObject([
+      { method: "POST", path: "/api/team-config/read", body: { dir: "saved-team" } },
+    ]);
   });
 
-  test("writeTeamConfig POSTs /api/team-config/write with { dir, config, brief_content }", () => {
-    expect(client).toMatch(
-      /writeTeamConfig: \(dir: string, config: TeamConfigWire, briefContent\?: string\) =>[\s\S]{1,200}req<void>\("POST", "\/api\/team-config\/write", \{[\s\S]{1,120}dir,[\s\S]{1,40}config,[\s\S]{1,80}brief_content: briefContent,/,
-    );
+  test("writeTeamConfig posts the directory, the config and the brief", async () => {
+    const requests = recordRequests(() => new Response(null, { status: 204 }));
+
+    await api.writeTeamConfig("saved-team", loadedWire(), "# Brief");
+
+    expect(requests).toMatchObject([
+      {
+        method: "POST",
+        path: "/api/team-config/write",
+        body: { dir: "saved-team", config: { team_name: "saved-team" }, brief_content: "# Brief" },
+      },
+    ]);
   });
 });
 
-describe("TeamDialog Load flow", () => {
-  test("Load populates the form from wireToDialog + stays editable (resizeTeamMembers)", () => {
-    expect(dialog).toMatch(/const wire = await api\.readTeamConfig\(path\);/);
-    expect(dialog).toMatch(/const loaded = wireToDialog\(wire, path\);/);
-    expect(dialog).toMatch(/config = resizeTeamMembers\(loaded\);/);
+describe("the dialog's Load mode", () => {
+  let view: Record<string, unknown> | null = null;
+
+  afterEach(() => {
+    if (view) unmount(view);
+    view = null;
+    document.body.innerHTML = "";
   });
 
-  test("Load surfaces the backend 400 inline instead of throwing", () => {
-    expect(dialog).toMatch(/loadError = \(err as Error\)\.message/);
-  });
-});
+  async function openLoad(): Promise<HTMLElement> {
+    setLayout(leadTab());
+    const target = document.createElement("div");
+    document.body.append(target);
+    view = mount(TeamDialog, { target, props: { request: { leadTabId: "lead-tab", leadPaneId: "pane-test" } } });
+    flushSync();
+    [...target.querySelectorAll<HTMLButtonElement>(".team-realestate-mode")]
+      .find((button) => button.textContent?.trim() === "Load")!
+      .click();
+    await settle();
+    return target;
+  }
 
-describe("TeamDialog Load UX (TW1)", () => {
-  test("team-dir input is backed by a directory autocomplete datalist", () => {
-    expect(dialog).toContain('list="team-dir-suggestions"');
-    expect(dialog).toMatch(
-      /<datalist id="team-dir-suggestions">[\s\S]*?dirSuggestions/,
+  function dirInput(target: HTMLElement): HTMLInputElement {
+    return target.querySelector<HTMLInputElement>('input[list="team-dir-suggestions"]')!;
+  }
+
+  function type(input: HTMLInputElement, value: string): void {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  async function enter(input: HTMLInputElement, value: string): Promise<void> {
+    type(input, value);
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+  }
+
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 4; i++) await tick();
+    flushSync();
+  }
+
+  test("reads the named directory's config and names the file it found", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    const read = vi.spyOn(api, "readTeamConfig").mockResolvedValue(loadedWire());
+    const target = await openLoad();
+
+    await enter(dirInput(target), "saved-team/");
+
+    expect(read).toHaveBeenCalledWith("saved-team");
+    const found = target.querySelector('[role="status"]')?.textContent?.replace(/\s+/g, " ").trim();
+    expect(found).toBe("saved-team/config.toml saved-team · 2 members");
+  });
+
+  test("fills the form from the loaded config, which stays editable", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    vi.spyOn(api, "readTeamConfig").mockResolvedValue({ ...loadedWire(), tab_group: "saved-group" });
+    const target = await openLoad();
+
+    await enter(dirInput(target), "saved-team");
+
+    const group = target.querySelector<HTMLInputElement>('input[placeholder="chan-team"]')!;
+    expect(group.value).toBe("saved-group");
+    type(group, "edited-group");
+    flushSync();
+    expect(group.value).toBe("edited-group");
+  });
+
+  test("shows the server's refusal inline", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    vi.spyOn(api, "readTeamConfig").mockRejectedValue(new Error("no config.toml in saved-team"));
+    const target = await openLoad();
+
+    await enter(dirInput(target), "saved-team");
+
+    expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe("no config.toml in saved-team");
+  });
+
+  test("asks for a directory when none is named", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    const read = vi.spyOn(api, "readTeamConfig");
+    const target = await openLoad();
+
+    await enter(dirInput(target), "  ");
+
+    expect(read).not.toHaveBeenCalled();
+    expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe("Team directory required");
+  });
+
+  test("suggests workspace folders only, matching what is typed", async () => {
+    const list = vi.spyOn(api, "list").mockImplementation(async (dir) =>
+      dir === "teams"
+        ? [{ path: "teams/alpha", is_dir: true, size: 0, mtime: null }]
+        : [
+            { path: "teams", is_dir: true, size: 0, mtime: null },
+            { path: "tmp", is_dir: true, size: 0, mtime: null },
+            { path: "todo.md", is_dir: false, size: 1, mtime: null },
+          ],
     );
-  });
+    const target = await openLoad();
+    const options = () => [...target.querySelectorAll("#team-dir-suggestions option")].map((option) => option.getAttribute("value"));
 
-  test("autocomplete lists workspace directories only (forces a dir choice)", () => {
-    // refreshDirSuggestions lists the typed parent segment and filters to
-    // directories, so files never appear as path completions.
-    expect(dialog).toMatch(/api\.list\(parent \|\| null\)/);
-    expect(dialog).toMatch(/\.filter\(\(e\) => e\.is_dir\)/);
-  });
+    type(dirInput(target), "t");
+    await settle();
+    expect(options()).toEqual(["teams/", "tmp/"]);
 
-  test("a successful load surfaces the resolved config.toml + team summary", () => {
-    expect(dialog).toMatch(
-      /loadedConfig = \{[\s\S]*?teamName: wire\.team_name,[\s\S]*?memberCount: wire\.members\.length,/,
-    );
-    expect(dialog).toContain("/config.toml");
+    type(dirInput(target), "te");
+    await settle();
+    expect(options()).toEqual(["teams/"]);
+
+    type(dirInput(target), "teams/");
+    await settle();
+    expect(list).toHaveBeenLastCalledWith("teams");
+    expect(options()).toEqual(["teams/alpha/"]);
   });
 });
 
