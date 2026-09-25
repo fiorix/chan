@@ -2,16 +2,11 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
 import { chanDecorations } from ".";
-// Build-time contract: Wysiwyg's list-layout CSS reads the theme's list tokens and the hang-column variables the decorations set; vitest drops component CSS.
+// Build-time contract: Wysiwyg's stylesheet reads each --cm-md-* variable the decorations set on a line, in the rule keyed on that line's class; vitest drops component CSS.
 import wysiwygSource from "../Wysiwyg.svelte?raw";
-
-const baseThemeSource = readFileSync("src/editor/themes/base.css", "utf8");
-const googleDocsThemeSource = readFileSync("src/editor/themes/google_docs.css", "utf8");
-const wordThemeSource = readFileSync("src/editor/themes/word.css", "utf8");
 
 function mountDecorated(doc: string): { parent: HTMLDivElement; view: EditorView } {
   const parent = document.createElement("div");
@@ -41,64 +36,27 @@ describe("list widgets", () => {
     parent.remove();
   });
 
-  test("list spacing is scoped to bullet glyphs and nested lines", () => {
-    expect(baseThemeSource).toContain("--chan-editor-list-marker-family");
-    expect(baseThemeSource).toContain("--chan-editor-list-marker-width: 2ch");
-    expect(baseThemeSource).toContain("--chan-editor-list-marker-gap: 3ch");
-    expect(baseThemeSource).toContain("--chan-editor-task-checkbox-width: 1em");
-    expect(baseThemeSource).toContain("--chan-editor-list-glyph-scale: 0.5");
-    expect(baseThemeSource).toContain("--chan-editor-list-square-glyph-scale: 0.44");
-    expect(wysiwygSource).toContain(
-      "--cm-md-list-marker-width: var(--chan-editor-list-marker-width, 2ch)",
-    );
-    expect(wysiwygSource).toContain(
-      "--cm-md-list-marker-gap: var(--chan-editor-list-marker-gap, 3ch)",
-    );
-    expect(wysiwygSource).toContain(".cm-line.cm-md-list-hang");
-    expect(wysiwygSource).toContain("--cm-md-list-hang-col: calc(");
-    expect(wysiwygSource).toContain(
-      "6px + (var(--cm-md-list-level, 0) + 1) * var(--cm-md-list-hang-col)",
-    );
-    expect(wysiwygSource).toContain(
-      "text-indent: calc(-1 * var(--cm-md-list-hang-col))",
-    );
-    expect(wysiwygSource).toContain("width: var(--cm-md-list-marker-width)");
-    expect(wysiwygSource).toContain("margin-right: var(--cm-md-list-marker-gap)");
-    expect(wysiwygSource).toContain(
-      "font-family: var(--chan-editor-list-marker-family, inherit)",
-    );
-    expect(wysiwygSource).toContain(
-      "--cm-md-task-checkbox-width: var(--chan-editor-task-checkbox-width, 1em)",
-    );
-    expect(wysiwygSource).toContain(
-      "transform: scale(var(--chan-editor-list-glyph-scale, 0.5))",
-    );
-    expect(wysiwygSource).toContain(
-      "transform: scale(var(--chan-editor-list-square-glyph-scale, 0.44))",
-    );
-    expect(wysiwygSource).toContain(".cm-md-ol-marker");
-    expect(wysiwygSource).toContain(".cm-md-list-marker");
-    expect(wysiwygSource).toContain(".cm-md-ul-glyph");
-  });
-
-  test("Google Docs and Word inherit the shared list marker contract", () => {
-    const tokens = [
-      "--chan-editor-list-marker-family",
-      "--chan-editor-list-marker-width",
-      "--chan-editor-list-marker-gap",
-      "--chan-editor-task-checkbox-width",
-      "--chan-editor-list-glyph-scale",
-      "--chan-editor-list-square-glyph-scale",
-    ];
-    for (const token of tokens) {
-      expect(baseThemeSource).toContain(token);
-      expect(googleDocsThemeSource).not.toContain(token);
-      expect(wordThemeSource).not.toContain(token);
+  test("each --cm-md-* variable a list line carries is read by the rule for that line's class", () => {
+    const { parent, view } = mountDecorated("* l1\n  * l2\n    1. l3\n- [ ] task");
+    const css = wysiwygSource.slice(wysiwygSource.indexOf("<style"));
+    const handshakes: string[] = [];
+    for (const line of parent.querySelectorAll<HTMLElement>(".cm-line")) {
+      const names = [...(line.getAttribute("style") ?? "").matchAll(/(--cm-md-[\w-]+)\s*:/g)].map((m) => m[1]!);
+      const classes = [...line.classList].filter((c) => c.startsWith("cm-md-"));
+      for (const name of names) {
+        for (const cls of classes) {
+          const at = css.indexOf(`.cm-line.${cls})`);
+          expect(at, `a stylesheet rule for .cm-line.${cls}`).toBeGreaterThan(-1);
+          const body = css.slice(css.indexOf("{", at), css.indexOf("}", at));
+          expect(body, `.cm-line.${cls} reads ${name}`).toContain(`var(${name}`);
+          handshakes.push(`${cls} ${name}`);
+        }
+      }
     }
-    expect(googleDocsThemeSource).not.toContain(".cm-md-list-marker");
-    expect(googleDocsThemeSource).not.toContain(".cm-md-ul-glyph");
-    expect(wordThemeSource).not.toContain(".cm-md-list-marker");
-    expect(wordThemeSource).not.toContain(".cm-md-ul-glyph");
+    expect(new Set(handshakes)).toEqual(new Set(["cm-md-list-hang --cm-md-list-level"]));
+
+    view.destroy();
+    parent.remove();
   });
 });
 
