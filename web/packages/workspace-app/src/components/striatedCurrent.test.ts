@@ -1,21 +1,38 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import StriatedCurrent from "./StriatedCurrent.svelte";
 import {
   buildStriatedCurrentPoints,
   STRIATED_CURRENT_POINT_COUNT,
 } from "./striatedCurrent";
+import { startAnimation, stopAnimations } from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./yuruyurauPointCloud", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./yuruyurauPointCloud")>()),
+  createYuruyurauPointCloudRenderer: () => ({ draw: () => {}, destroy: () => {} }),
+}));
+vi.mock("./striatedCurrent", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./striatedCurrent")>();
+  return { ...actual, buildStriatedCurrentPoints: vi.fn(actual.buildStriatedCurrentPoints) };
+});
+
+afterEach(stopAnimations);
 
 describe("Striated Current", () => {
-  test("keeps the source cadence and credits @yuruyurau", async () => {
-    const renderer = (await import("./StriatedCurrent.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./striatedCurrent.ts?raw"))
-      .default as string;
+  test("advances the source 3 pi / 4 radians per second", () => {
+    const { callbacks } = startAnimation(StriatedCurrent, {});
+    callbacks.resize(800, 800, false, 0);
+    const build = vi.mocked(buildStriatedCurrentPoints);
+    build.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toContain("const PHASE_SPEED = (3 * Math.PI) / 4;");
-    expect(geometry).toContain("@yuruyurau");
-    expect(geometry).toContain(
-      "https://x.com/yuruyurau/status/2082474544644985022",
-    );
+    expect(build.mock.calls.map(([sourceTime]) => sourceTime)).toEqual([
+      expect.closeTo((3 * Math.PI) / 4, 9),
+      expect.closeTo((9 * Math.PI) / 4, 9),
+    ]);
   });
 
   test("builds the source sketch's 10,000 points", () => {
