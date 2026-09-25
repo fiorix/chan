@@ -57,18 +57,18 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-team-poke-names-a-path-it-does-not-anchor][poke] | landed | GA |
 | [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | landed | GA |
 | [an-expired-survey-cannot-be-dismissed][surv] | raised | repro |
-| [the-test-util-comments-omit-the-attach-seam][tutil] | accepted | build |
-| [the-fdstore-manifest-splits-seq-and-tail][fdsq] | accepted | build |
-| [a-mount-retry-test-races-a-wall-clock][mwclk] | accepted | build |
+| [the-test-util-comments-omit-the-attach-seam][tutil] | landed | GA |
+| [the-fdstore-manifest-splits-seq-and-tail][fdsq] | landed | GA |
+| [a-mount-retry-test-races-a-wall-clock][mwclk] | landed | GA |
 | [desktop-design-omits-the-root-health-probe][dhp] | landed | GA |
 | [a-dropped-indexers-driver-eats-recovery][drvr] | landed | GA |
 | [the-bulk-skip-note-calls-unknown-locked][bskip] | accepted | build |
-| [mcp-write-errors-follow-an-unpinned-display][mcpd] | accepted | build |
+| [mcp-write-errors-follow-an-unpinned-display][mcpd] | landed | GA |
 | [a-joining-snapshot-fails-during-reconcile][join] | landed | GA |
 | [profile-workers-have-no-shutdown-owner][pwork] | landed | GA |
 | [the-email-fold-merges-distinct-characters][fold] | withdrawn | GA |
-| [the-move-out-spare-covers-the-whole-window][spare] | accepted | build |
-| [an-emptied-window-waits-without-a-bound][ewait] | accepted | build |
+| [the-move-out-spare-covers-the-whole-window][spare] | landed | GA |
+| [an-emptied-window-waits-without-a-bound][ewait] | landed | GA |
 | [the-chan-home-fallback-trusts-var-tmp][vtmp] | landed | GA |
 | [three-inputs-have-no-size-cap][caps] | landed | GA |
 | [content-search-truncation-ignores-its-window][trunc] | landed | GA |
@@ -81,7 +81,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | accepted | build |
 | [graph-bodies-have-no-mounted-test][gmnt] | accepted | after rawt |
 | [the-nsis-uninstaller-stub-ships-unsigned][nsis] | accepted | rc1 |
-| [signing-has-no-early-credential-probe][cprb] | accepted | build |
+| [signing-has-no-early-credential-probe][cprb] | landed | GA |
 
 **From the development archive's backlog**
 
@@ -105,11 +105,18 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | landed | GA |
 | [a-restart-replays-only-the-manifest-tail][rtail] | raised | decide |
 | [a-crash-restart-restores-a-stale-manifest][crash] | raised | decide |
-| [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | raised | decide |
+| [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | landed | GA |
 | [a-failed-dial-makes-the-next-replay-from-zero][fdial] | raised | decide |
 | [the-served-index-forgets-a-lone-rename][srename] | landed | GA |
 | [a-case-only-rename-leaves-a-phantom-row][casef] | landed | GA |
 | [the-apps-wake-path-outlives-its-mount][wgap] | landed | GA |
+| [a-watcher-loss-leaves-the-code-report-stale][wrep] | raised | decide |
+| [terminal-env-overrides-are-silently-dropped][tenv] | raised | decide |
+| [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | raised | decide |
+| [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | raised | decide |
+| [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | raised | decide |
+| [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | raised | decide |
+| [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -172,6 +179,13 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [srename]: v0.101.0/the-served-index-forgets-a-lone-rename.md
 [casef]: v0.101.0/a-case-only-rename-leaves-a-phantom-row.md
 [wgap]: v0.101.0/the-apps-wake-path-outlives-its-mount.md
+[wrep]: v0.101.0/a-watcher-loss-leaves-the-code-report-stale.md
+[tenv]: v0.101.0/terminal-env-overrides-are-silently-dropped.md
+[dscfg]: v0.101.0/a-corrupt-devserver-config-re-mints-the-library-identity.md
+[dcwd]: v0.101.0/the-detached-daemon-keeps-the-launching-shells-directory.md
+[rsyes]: v0.101.0/a-scripted-reports-disable-exits-zero-having-changed-nothing.md
+[kring]: v0.101.0/a-keychain-failure-freezes-a-connected-gateways-roster.md
+[resave]: v0.101.0/a-graceful-restarts-session-save-drops-the-terminals-session-id.md
 
 ## Completed
 
