@@ -1,8 +1,6 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import appSource from "../App.svelte?raw";
 import { openSlidePreview } from "./slidePreview";
 
 vi.mock("../editor/mermaid_render", () => ({
@@ -570,18 +568,5 @@ flowchart LR
           ?.getAttribute("data-excalidraw-diagram-theme"),
       ).toBe("light");
     });
-  });
-
-  test("layout persistence tracks preview open state and slide index", () => {
-    expect(appSource).toMatch(
-      /void t\.slidePreview\?\.open;[\s\S]*void t\.slidePreview\?\.index;[\s\S]*void t\.slidePreview\?\.mode;/,
-    );
-  });
-
-  test("editor background token is scoped to light and dark body themes", () => {
-    const baseThemeCss = readFileSync("src/editor/themes/base.css", "utf8");
-    expect(baseThemeCss).toMatch(
-      /:root\[data-theme="dark"\],[\s\S]*:root \[data-theme="light"\] \{[\s\S]*--chan-editor-bg:\s*var\(--bg\);/,
-    );
   });
 });

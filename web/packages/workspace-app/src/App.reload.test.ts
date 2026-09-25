@@ -5,7 +5,9 @@
 // the shell's reverse search), the host's `app.window.reload` command, and the
 // pane menu's Reload row, which shows the chord the user's OS resolves. A
 // reload restores the layout the app last saved, so the save must also follow
-// a pane's visible side and theme, which live on the pane rather than a tab.
+// a pane's visible side and theme, which live on the pane rather than a tab,
+// and a document's slide preview: whether it is open, on which slide, and
+// whether it is playing.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -31,7 +33,7 @@ import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } 
 import { fileTab, resetLayout } from "./__tests__/tabs";
 import { renderTable } from "./state/shortcuts";
 import { schedulePersistStateToHash, scheduleSessionSave } from "./state/store.svelte";
-import { flipHybrid, type LeafNode } from "./state/tabs.svelte";
+import { flipHybrid, type FileTab, type LeafNode, type SlidePreviewTabState } from "./state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -111,6 +113,30 @@ describe("what a reload restores", () => {
   test("a pane theme change is saved", async () => {
     pane.theme = "light";
     await settle();
+    expect(schedulePersistStateToHash).toHaveBeenCalled();
+    expect(scheduleSessionSave).toHaveBeenCalled();
+  });
+
+  test.each([
+    ["opening", (preview: SlidePreviewTabState) => (preview.open = true)],
+    ["turning to another slide", (preview: SlidePreviewTabState) => (preview.index = 2)],
+    ["starting to play", (preview: SlidePreviewTabState) => (preview.mode = "play")],
+  ])("a slide preview's %s is saved", async (_change, change) => {
+    pane = resetLayout([
+      fileTab({
+        id: "deck",
+        path: "deck.md",
+        content: "hello",
+        saved: "hello",
+        slidePreview: { open: false, index: 0, mode: "preview" },
+      }),
+    ]);
+    await settle();
+    vi.clearAllMocks();
+
+    change((pane.tabs[0] as FileTab).slidePreview!);
+    await settle();
+
     expect(schedulePersistStateToHash).toHaveBeenCalled();
     expect(scheduleSessionSave).toHaveBeenCalled();
   });
