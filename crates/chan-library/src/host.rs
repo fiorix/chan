@@ -5641,7 +5641,14 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_mount_already_open_reports_releasing_and_allows_retry() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound. The sequence is real I/O (library and
+        // workspace opens, three mount attempts, a close) with no completion signal
+        // to await. A paused clock does not fit either: each mount opens on the
+        // blocking pool and times its release wait with `std::time::Instant`, so a
+        // paused runtime would jump this timeout forward while a mount is still
+        // working. Thirty seconds is far past any runner's filesystem latency, and a
+        // mount that never gets the root back still fails here.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -5692,7 +5699,7 @@ mod tests {
             host.close_workspace("/workspace", false).await.unwrap();
         })
         .await
-        .unwrap();
+        .expect("the interrupted-mount retry sequence hung past its 30 s guard");
     }
 
     #[tokio::test]
