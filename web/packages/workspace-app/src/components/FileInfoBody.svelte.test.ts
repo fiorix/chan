@@ -8,6 +8,7 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileInfoBody from "./FileInfoBody.svelte";
+import fileInfoSource from "./FileInfoBody.svelte?raw";
 import { classifyFileActions } from "../state/fileActions";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 import type { TreeEntry } from "../api/types";
@@ -420,3 +421,54 @@ describe("the actions section", () => {
     }
   });
 });
+
+describe("the Drafts directory", () => {
+  test("a draft directory carries the DRAFTS chip and the drafts notice", async () => {
+    // A configured name, so the chip and the notice have to come from
+    // draftsDir() rather than a spelled-out default.
+    h.draftsDir = "Scratch";
+    h.entries = [dir("Scratch/idea")];
+    const target = await render({ path: "Scratch/idea" });
+
+    const chip = target.querySelector(".head .drafts-chip");
+    expect(chip?.textContent?.trim()).toBe("DRAFTS");
+    expect(target.querySelector(".head .kind-chip:not(.drafts-chip)")).toBeNull();
+    const notice = target.querySelector(".drafts-notice[role='note']");
+    expect(notice?.querySelector("strong")?.textContent).toBe(
+      "Drafts are uncommitted scratch space.",
+    );
+    expect(notice?.querySelector("code")?.textContent).toBe("Scratch/untitled-N/");
+  });
+
+  test("any other directory, one named Drafts included, is a plain folder", async () => {
+    h.draftsDir = "Scratch";
+    h.entries = [dir("Drafts"), dir("docs")];
+    const onSetAsScope = vi.fn();
+    for (const path of ["Drafts", "docs"]) {
+      const target = await render({ path, onSetAsScope });
+      expect(target.querySelector(".drafts-chip"), path).toBeNull();
+      expect(target.querySelector(".drafts-notice"), path).toBeNull();
+      const chip = target.querySelector<HTMLButtonElement>(".head button.kind-chip");
+      expect(chip?.textContent?.trim(), path).toBe("directory");
+      chip!.click();
+    }
+    expect(onSetAsScope, "the folder chip scopes the graph").toHaveBeenCalledTimes(2);
+  });
+
+  test("the chip and the notice paint with the drafts palette tokens", () => {
+    // Build-time contract: the Drafts tint comes from the shared palette
+    // tokens. vitest drops component CSS, so the stylesheet is read as text.
+    expect(styleRule(".kind-chip.drafts-chip")).toContain("background: var(--fb-drafts-fg);");
+    const notice = styleRule(".drafts-notice");
+    expect(notice).toContain("background: var(--fb-drafts-bg);");
+    expect(notice).toContain("border-left: 3px solid var(--fb-drafts-fg);");
+  });
+});
+
+/// The body of one rule in the component's stylesheet.
+function styleRule(selector: string): string {
+  const css = fileInfoSource.slice(fileInfoSource.indexOf("<style>"));
+  const at = css.indexOf(`\n  ${selector} {`);
+  expect(at, `${selector} has a rule`).toBeGreaterThan(-1);
+  return css.slice(at, css.indexOf("}", at));
+}
