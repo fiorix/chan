@@ -29,11 +29,19 @@ const work = mkdtempSync(join(tmpdir(), "chan-file-classes-"));
 try {
   const inFile = join(work, "fileTypes.ts");
   copyFileSync(tsPath, inFile);
-  execFileSync(
-    process.execPath,
-    [tscBin, "--target", "es2022", "--module", "es2022", "--moduleResolution", "bundler", "--strict", "--outDir", work, inFile],
-    { cwd: webDir, stdio: ["ignore", "ignore", "inherit"] },
-  );
+  try {
+    execFileSync(
+      process.execPath,
+      [tscBin, "--target", "es2022", "--module", "es2022", "--moduleResolution", "bundler", "--strict", "--outDir", work, inFile],
+      { cwd: webDir, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+    );
+  } catch (err) {
+    // tsc prints its diagnostics on stdout; forward them so a type error in
+    // fileTypes.ts reads as itself in the check's failure. The file they name
+    // is the temporary copy, line for line the same as the source.
+    process.stderr.write(`${err.stdout ?? ""}${err.stderr ?? ""}`);
+    process.exit(1);
+  }
   const mod = await import(pathToFileURL(join(work, "fileTypes.js")).href);
   const out = {};
   for (const [fn, classes] of Object.entries(mod.SERVER_CLASSIFIER_MIRROR)) {
