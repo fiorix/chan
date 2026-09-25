@@ -1082,6 +1082,14 @@ OPAQUE_RUNNERS = frozenset({"bash", "eval", "gmake", "just", "make", "sh", "xarg
 # the edge of a backtick command substitution.
 CARGO_WORD = re.compile(r"(?:^|[/`])cargo(?:`|$)")
 
+# makepkg's own name for the package a recipe builds, expanded the way bash
+# would; the recipe's `pkgname=` line gives its value.
+PKGNAME_EXPANSION = re.compile(r"\$\{pkgname\}|\$pkgname(?![A-Za-z0-9_])")
+
+# Any other parameter expansion or command substitution in a word, whose
+# value this check cannot know.
+SHELL_EXPANSION = re.compile(r"\$\{[^}]*\}?|\$[A-Za-z_][A-Za-z0-9_]*|\$.?|`[^`]*`?")
+
 # The characters that end a word in bash, so a `#` after one starts a comment.
 SHELL_WORD_ENDS = " \t;&|()<>"
 
@@ -1289,13 +1297,23 @@ def check_aur_recipe(path: str, recipe: str) -> None:
                     f"with `-p {package}`"
                 )
             continue
-        arguments = words[1:]
+        arguments = [PKGNAME_EXPANSION.sub(package, word) for word in words[1:]]
         if arguments and arguments[0].startswith("+"):
             arguments = arguments[1:]
         subcommand = next((word for word in arguments if not word.startswith("-")), None)
         if subcommand in CARGO_NON_BUILDING:
             continue
         cargo_calls += 1
+        # Words after `--` reach the test binaries, not cargo's selection.
+        cargo_words = arguments[: arguments.index("--")] if "--" in arguments else arguments
+        for word in cargo_words:
+            expansion = SHELL_EXPANSION.search(word)
+            if expansion:
+                raise ContractError(
+                    f"{where}, and {expansion.group(0)!r} is a shell expansion this "
+                    f"check cannot resolve, so it could select anything; only "
+                    f"$pkgname resolves, to {package}"
+                )
         packages, wider = cargo_selection(arguments)
         if wider:
             raise ContractError(
