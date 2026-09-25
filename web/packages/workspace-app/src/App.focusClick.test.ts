@@ -1,74 +1,116 @@
-import { describe, expect, test } from "vitest";
-import app from "../App.svelte?raw";
-import pane from "./Pane.svelte?raw";
+// @vitest-environment jsdom
+//
+// The click that brings a window back to the front selects the pane under
+// the cursor. On macOS the OS can take that first mousedown for the window's
+// activation, so it never reaches the pane's own handler; App listens on the
+// window in the capture phase and takes a mousedown that lands within 50 ms
+// of the window regaining focus. Only that first click counts, and a focus
+// with no click after it (Cmd+Tab) changes nothing.
 
-// Pane-focus-click restore on click-to-focus (not Cmd+Tab). When the
-// app is unfocused and the user clicks back, the first click also selects
-// the pane under the cursor. A focus event without an adjacent mousedown
-// (Cmd+Tab) must NOT change pane selection.
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("pane data-pane-id attribute", () => {
-  test("Pane root carries data-pane-id={pane.id} so the window-level mousedown handler can map a click target to a pane", () => {
-    expect(pane).toMatch(/data-pane-id=\{pane\.id\}/);
+vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
+
+import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { fileTab, resetLayout } from "./__tests__/tabs";
+import { layout, splitPane } from "./state/tabs.svelte";
+
+stubAppEnvironment();
+
+let other: string;
+let now = 0;
+
+// Keeps the mousedown from the pane's own handler, the way the OS keeps an
+// activation click, so only App's window listener can act on it.
+function swallowBeforePanes(event: Event): void {
+  event.stopPropagation();
+}
+
+beforeEach(async () => {
+  await mountApp();
+  resetLayout([fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" })]);
+  other = splitPane("pane-test", "row")!;
+  layout.activePaneId = "pane-test";
+  await settle();
+  now = 1_000;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  document.addEventListener("mousedown", swallowBeforePanes, true);
+});
+
+afterEach(async () => {
+  document.removeEventListener("mousedown", swallowBeforePanes, true);
+  vi.restoreAllMocks();
+  await unmountApp();
+});
+
+function paneElement(id: string): HTMLElement {
+  return document.querySelector<HTMLElement>(`.pane[data-pane-id="${id}"]`)!;
+}
+
+function clickAt(target: Element, at: number): void {
+  now = at;
+  target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+}
+
+function windowRegainsFocus(at: number): void {
+  now = at;
+  window.dispatchEvent(new FocusEvent("focus"));
+}
+
+describe("a click as the window regains focus", () => {
+  test("selects the pane under the cursor, though the pane never sees the click", () => {
+    windowRegainsFocus(1_000);
+    clickAt(paneElement(other), 1_020);
+
+    expect(layout.activePaneId).toBe(other);
+  });
+
+  test("counts only once: the next click is the pane's own", () => {
+    windowRegainsFocus(1_000);
+    clickAt(paneElement(other), 1_010);
+    clickAt(paneElement("pane-test"), 1_020);
+
+    expect(layout.activePaneId).toBe(other);
   });
 });
 
-describe("window-level focus + mousedown wiring", () => {
-  test("FOCUS_CLICK_WINDOW_MS constant defines the click/focus correlation window", () => {
-    // 50ms aligns with the bug body's recommendation; small enough
-    // to avoid false-positive click-to-focus assignments on idle
-    // clicks that happen to land on a pane.
-    expect(app).toMatch(/const FOCUS_CLICK_WINDOW_MS = 50;/);
+describe("the selection is left alone", () => {
+  test("by a focus with no click after it", () => {
+    windowRegainsFocus(1_000);
+
+    expect(layout.activePaneId).toBe("pane-test");
   });
 
-  test("focusRestoreAt timestamp stamped on window focus event", () => {
-    expect(app).toMatch(
-      /function onWindowFocus\(\): void \{[\s\S]*?focusRestoreAt = Date\.now\(\);/,
-    );
+  test("by a click more than 50 ms after the focus", () => {
+    windowRegainsFocus(1_000);
+    clickAt(paneElement(other), 1_051);
+
+    expect(layout.activePaneId).toBe("pane-test");
   });
 
-  test("mousedown handler walks the target's DOM ancestry for .pane[data-pane-id]", () => {
-    expect(app).toMatch(
-      /const paneEl = target\.closest<HTMLElement>\("\.pane\[data-pane-id\]"\);/,
-    );
+  test("by a click with no focus before it", () => {
+    clickAt(paneElement(other), 1_000);
+
+    expect(layout.activePaneId).toBe("pane-test");
   });
 
-  test("mousedown handler calls setActivePane with the resolved pane id", () => {
-    expect(app).toMatch(/setActivePane\(paneId\);/);
-  });
+  test("once App is unmounted", async () => {
+    await unmountApp();
+    resetLayout([fileTab({ id: "doc" })]);
+    const second = splitPane("pane-test", "row")!;
+    layout.activePaneId = "pane-test";
+    const stale = document.createElement("div");
+    stale.className = "pane";
+    stale.dataset.paneId = second;
+    document.body.append(stale);
 
-  test("mousedown handler short-circuits when the focus window has expired (Cmd+Tab path)", () => {
-    // Cmd+Tab fires `focus` but no mousedown follows. When the user
-    // later clicks a pane the gap exceeds FOCUS_CLICK_WINDOW_MS so
-    // we treat it as a normal click and let Pane.svelte handle it.
-    expect(app).toMatch(/if \(focusRestoreAt === 0\) return;/);
-    expect(app).toMatch(
-      /if \(Date\.now\(\) - focusRestoreAt > FOCUS_CLICK_WINDOW_MS\) \{[\s\S]*?focusRestoreAt = 0;[\s\S]*?return;/,
-    );
-  });
+    windowRegainsFocus(1_000);
+    clickAt(stale, 1_010);
 
-  test("focusRestoreAt resets to 0 after a matching click so subsequent clicks use Pane.svelte's handler", () => {
-    // The timestamp must be cleared after the first matching mousedown
-    // so a later long-idle click does not incorrectly match.
-    expect(app).toMatch(
-      /function onWindowMouseDown\(e: MouseEvent\): void \{[\s\S]*?focusRestoreAt = 0;[\s\S]*?const target = e\.target;/,
-    );
-  });
-
-  test("mousedown listener uses capture phase to fire before per-pane handlers", () => {
-    expect(app).toMatch(
-      /window\.addEventListener\("mousedown", onWindowMouseDown, true\);/,
-    );
-  });
-
-  test("listeners cleaned up onDestroy", () => {
-    expect(app).toMatch(/window\.removeEventListener\("focus", onWindowFocus\);/);
-    expect(app).toMatch(
-      /window\.removeEventListener\("mousedown", onWindowMouseDown, true\);/,
-    );
-  });
-
-  test("setActivePane imported from state/tabs.svelte", () => {
-    expect(app).toMatch(/setActivePane,/);
+    expect(layout.activePaneId).toBe("pane-test");
   });
 });
