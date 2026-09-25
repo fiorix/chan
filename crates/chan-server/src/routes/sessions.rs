@@ -554,7 +554,7 @@ mod tests {
     }
 
     /// The runtime `assert_uses_blocking_pool` needs: one blocking thread,
-    /// which the helper holds while it polls the handler once.
+    /// which the helper holds while it drives the handler.
     fn one_blocking_thread_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

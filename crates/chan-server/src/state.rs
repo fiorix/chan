@@ -315,11 +315,22 @@ pub(crate) mod test_support {
     use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
     use crate::{EditorPrefs, ServerConfig};
 
-    /// Poll a handler while the runtime's sole blocking worker is occupied.
-    /// The caller must use a runtime with `max_blocking_threads(1)`.
-    pub async fn assert_uses_blocking_pool<F: std::future::Future>(future: F) -> F::Output {
-        use futures::FutureExt;
+    /// How long a handler is driven while the blocking pool is held. A
+    /// handler whose work waits on the pool cannot finish in any amount of
+    /// time, so this bounds only how long a chain of other awaits can hide
+    /// inline work from the pin.
+    const HELD_FOR: Duration = Duration::from_millis(50);
 
+    /// Drive a handler while the runtime's sole blocking worker is occupied,
+    /// and fail if it completes. The caller must use a runtime with
+    /// `max_blocking_threads(1)`.
+    ///
+    /// The handler is polled again each time it is woken during `HELD_FOR`,
+    /// so work behind a yield or another await that needs no pool thread
+    /// completes, and fails, while the pool is held. Work done inline right
+    /// before or right after the handler awaits a pool task is invisible
+    /// here: the handler is pending either way.
+    pub async fn assert_uses_blocking_pool<F: std::future::Future>(future: F) -> F::Output {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let blocker = tokio::task::spawn_blocking(move || {
@@ -328,10 +339,12 @@ pub(crate) mod test_support {
         });
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         tokio::pin!(future);
-        let first_poll = future.as_mut().now_or_never();
+        let completed_while_held = tokio::time::timeout(HELD_FOR, future.as_mut())
+            .await
+            .is_ok();
         release_tx.send(()).unwrap();
         assert!(
-            first_poll.is_none(),
+            !completed_while_held,
             "blocking handler completed on the runtime thread while the blocking pool was occupied"
         );
         tokio::time::timeout(Duration::from_secs(5), blocker)
