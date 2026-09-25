@@ -245,10 +245,12 @@ export function visibleIds(): string[] {
   return [...(canvas.props?.visibleNodeIds ?? [])].sort();
 }
 
-/// Node and edge literals for a semantic graph view.
+/// Node and edge literals for a semantic graph view, with the server's id
+/// schemes: a file's id is its path, a directory's is `directory:<path>` (the
+/// root's is ""), a tag's `#name` and a mention's `@@name`.
 export const g = {
   file(path: string, extra: Partial<Extract<GraphViewNode, { kind: "file" }>> = {}): GraphViewNode {
-    return { kind: "file", id: `f:${path}`, label: path.split("/").pop() ?? path, path, ...extra };
+    return { kind: "file", id: path, label: path.split("/").pop() ?? path, path, ...extra };
   },
   dir(path: string): GraphViewNode {
     return {

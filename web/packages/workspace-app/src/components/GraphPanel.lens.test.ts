@@ -31,11 +31,11 @@ import { layout } from "../state/tabs.svelte";
 
 installGraphDom();
 
-const A = "f:notes/a.md";
-const B = "f:notes/b.md";
-const C = "f:notes/c.md";
-const DEEP = "f:notes/deep/d.md";
-const MAIN = "f:src/main.rs";
+const A = "notes/a.md";
+const B = "notes/b.md";
+const C = "notes/c.md";
+const DEEP = "notes/deep/d.md";
+const MAIN = "src/main.rs";
 const NOTES = "directory:notes";
 const NOTES_DEEP = "directory:notes/deep";
 const SRC = "directory:src";

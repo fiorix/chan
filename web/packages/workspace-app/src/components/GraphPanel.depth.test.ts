@@ -37,9 +37,9 @@ import { layout, type GraphTab } from "../state/tabs.svelte";
 
 installGraphDom();
 
-const A = "f:notes/a.md";
-const D = "f:notes/deep/d.md";
-const MAIN = "f:src/main.rs";
+const A = "notes/a.md";
+const D = "notes/deep/d.md";
+const MAIN = "src/main.rs";
 const NOTES = "directory:notes";
 const DEEP = "directory:notes/deep";
 const SRC = "directory:src";

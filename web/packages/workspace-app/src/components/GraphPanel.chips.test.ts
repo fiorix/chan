@@ -43,11 +43,11 @@ import {
 
 installGraphDom();
 
-const README = "f:notes/readme.md";
-const PLAN = "f:notes/plan.md";
-const MAIN = "f:src/main.rs";
-const PIC = "f:img/cat.png";
-const ALICE = "f:Contacts/alice.md";
+const README = "notes/readme.md";
+const PLAN = "notes/plan.md";
+const MAIN = "src/main.rs";
+const PIC = "img/cat.png";
+const ALICE = "Contacts/alice.md";
 const NOTES = "directory:notes";
 const SRC = "directory:src";
 const IMG = "directory:img";
@@ -251,7 +251,7 @@ describe("file buckets", () => {
         workspaceTab({ filters: { ...graphTab().filters, [chip]: false } }),
       );
       const shown = new Set(visibleIds());
-      const hidden = paths.filter((p) => !shown.has(`f:${p}`));
+      const hidden = paths.filter((p) => !shown.has(p));
       expect(hidden, `${chip} off`).toEqual(paths.filter((p) => fileBucket(p) === bucket));
       unmountGraphPanels();
     }
