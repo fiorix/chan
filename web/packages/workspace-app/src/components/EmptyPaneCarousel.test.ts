@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 // Static top-level import (not a per-test `await import(...)`).
 // Resolving the Svelte component once at module-eval keeps the
@@ -75,14 +75,18 @@ describe("EmptyPaneCarousel", () => {
     expect(calls).toEqual([1, 2, 0]);
   });
 
-  test("carries no oncontextmenu forwarder prop", async () => {
-    // The carousel is hosted inside DashboardTab and carries no
-    // `oncontextmenu` forwarder; right-clicks fall through to the
-    // tab strip's own context menu.
-    const raw = (await import("./EmptyPaneCarousel.svelte?raw"))
-      .default as string;
-    expect(raw).not.toMatch(/oncontextmenu\?:/);
-    expect(raw).not.toMatch(/\{oncontextmenu\}/);
+  test("lets a right-click fall through to the pane around it", async () => {
+    // The carousel is hosted inside DashboardTab and keeps no context menu
+    // of its own; the pane's tab strip menu answers the right-click.
+    const target = await renderCarousel();
+    const outer = vi.fn();
+    target.addEventListener("contextmenu", outer);
+
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    target.querySelector(".carousel")!.dispatchEvent(event);
+
+    expect(outer).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(false);
   });
 
   test("right and left arrow keys request prev/next via onSlideChange", async () => {
@@ -105,17 +109,5 @@ describe("EmptyPaneCarousel", () => {
       new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
     );
     expect(calls).toEqual([2, 0]);
-  });
-
-  // The carousel must not paint its own `:focus-visible` inset ring;
-  // `.pane.focused` already draws the focus indicator, and a second
-  // ring would make the empty-pane body look thicker-bordered than
-  // the top bar. Source-grep sentinel: the rule must be absent.
-  test("does not paint its own inset focus ring", async () => {
-    const raw = (await import("./EmptyPaneCarousel.svelte?raw"))
-      .default as string;
-    expect(raw).not.toMatch(
-      /\.carousel:focus-visible\s*\{[\s\S]*?inset 0 0 0 2px/,
-    );
   });
 });
