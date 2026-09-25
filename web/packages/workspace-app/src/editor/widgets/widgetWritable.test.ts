@@ -78,6 +78,7 @@ describe("the widget write predicate", () => {
 });
 
 describe("every widget that writes asks the predicate", () => {
+  // Source-text contract: every widget module that dispatches a document change imports the write predicate, including one added later.
   test("a module dispatching a document change imports it", () => {
     const offenders = widgetModules()
       .filter(([, source]) =>
@@ -88,6 +89,7 @@ describe("every widget that writes asks the predicate", () => {
     expect(offenders).toEqual([]);
   });
 
+  // Source-text contract: the widget scan reads the real modules, so its pass above means something.
   test("the enumeration sees the modules that do write", () => {
     // A guard on the guard: if the scan stopped finding writes, the test
     // above would pass over an empty set and prove nothing.

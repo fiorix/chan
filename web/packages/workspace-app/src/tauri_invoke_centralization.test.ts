@@ -46,6 +46,7 @@ function isShipped(rel: string): boolean {
 }
 
 describe("tauri invoke centralization", () => {
+  // Source-text contract: the desktop ACL parity test reads the invoke vocabulary from api/desktop.ts alone.
   test("tauriInvoke call sites live only in api/desktop.ts", () => {
     const offences: string[] = [];
     const CALL = /\btauriInvoke\s*[<(]/g;
@@ -67,6 +68,7 @@ describe("tauri invoke centralization", () => {
     ).toEqual([]);
   });
 
+  // Source-text contract: only the modules the parity test audits reach the Tauri globals.
   test("window.__TAURI__* globals stay inside the audited modules", () => {
     const offences: string[] = [];
     for (const [rel, text] of Object.entries(sources)) {
@@ -81,6 +83,7 @@ describe("tauri invoke centralization", () => {
     ).toEqual([]);
   });
 
+  // Source-text contract: shortcuts.ts reads the Tauri globals to detect the shell and never invokes through them.
   test("shortcuts.ts stays detection-only (no invoke through the globals)", () => {
     const text = sources["./state/shortcuts.ts"];
     expect(

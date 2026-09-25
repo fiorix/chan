@@ -46,6 +46,7 @@ function isShipped(rel: string): boolean {
 }
 
 describe("no native browser dialogs in shipped sources", () => {
+  // Source-text contract: no shipped module calls a native dialog, which fails silently in the desktop WebView.
   test("window.alert / window.confirm / window.prompt are not invoked", () => {
     const offences: string[] = [];
     for (const [rel, text] of Object.entries(sources)) {

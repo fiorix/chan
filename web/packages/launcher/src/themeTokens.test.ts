@@ -37,12 +37,14 @@ function tokensOf(selector: string): string[] {
 }
 
 describe("theme tokens", () => {
+  // Source-text contract: both launcher themes define the same tokens, which var() resolution hides from every runtime check.
   it("gives every root token a light-theme value", () => {
     const dark = tokensOf(":root");
     expect(dark.length).toBeGreaterThan(0);
     expect(tokensOf(':root[data-theme="light"]')).toEqual(dark);
   });
 
+  // Source-text contract: no launcher source spells a token's colour as a literal that a theme switch cannot reach.
   it("spells a themed colour only where its token is defined", () => {
     const values = [...styles.matchAll(/^\s*--[\w-]+:\s*(#[0-9a-fA-F]{3,8});/gm)].map((m) =>
       m[1]!.toLowerCase(),

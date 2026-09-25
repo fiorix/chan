@@ -49,14 +49,15 @@ function modulesNamingRandomUuid(): string[] {
 }
 
 describe("randomUUID centralization", () => {
-  test("state/ids.ts is where the id is minted", () => {
+  // Source-text contract: the one module the scan below exempts is in the scanned set (what newUuid mints is in state/ids.test.ts).
+  test("state/ids.ts, the one exempt module, is in the scanned set", () => {
     expect(
       sources[ID_MODULE],
       `${ID_MODULE} moved or was renamed; this guard has nothing to point at`,
     ).toBeDefined();
-    expect(sources[ID_MODULE]).toMatch(/export function newUuid\(\)/);
   });
 
+  // Source-text contract: no shipped module but state/ids.ts names crypto.randomUUID, which throws outside a secure context.
   test("no module outside it reaches for crypto.randomUUID", () => {
     expect(
       modulesNamingRandomUuid(),
