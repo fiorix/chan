@@ -1,21 +1,39 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import RadialRibbons from "./RadialRibbons.svelte";
 import {
   buildRadialRibbons,
   fitRadialRibbons,
   RADIAL_RIBBON_COUNT,
 } from "./radialRibbons";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./radialRibbons", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./radialRibbons")>();
+  return { ...actual, buildRadialRibbons: vi.fn(actual.buildRadialRibbons) };
+});
+
+afterEach(stopAnimations);
 
 describe("Radial Ribbons", () => {
-  test("keeps the source timing and attribution", async () => {
-    const renderer = (await import("./RadialRibbons.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./radialRibbons.ts?raw"))
-      .default as string;
+  test("turns 0.0576 radians per second of animation time", () => {
+    const { callbacks } = startAnimation(RadialRibbons, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    const build = vi.mocked(buildRadialRibbons);
+    build.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toMatch(/const PHASE_SPEED = 0\.0576;/);
-    expect(geometry).toContain(
-      "https://x.com/hisadan/status/1993339904181567873",
-    );
+    expect(build.mock.calls.map(([phase]) => phase)).toEqual([
+      expect.closeTo(0.0576, 9),
+      expect.closeTo(0.1728, 9),
+    ]);
   });
 
   test("builds the source sketch's 20 eight-point ribbons", () => {
