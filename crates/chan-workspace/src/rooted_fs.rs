@@ -1077,36 +1077,8 @@ impl RootedFs {
         let to_canon = canonical_posix(to);
         let mut created = Vec::new();
         if src_ft.is_file() {
-            // The staged file keeps the destination's own name inside a stage
-            // directory: the atomic writer keys the editable-text UTF-8 check
-            // on the path it writes, and a dotted sibling name would classify
-            // by its last extension and skip that check.
-            let leaf = to_rel.file_name().ok_or(ChanError::PathEmpty)?;
-            let stage = self.create_copy_stage(&to_rel, &to_canon)?;
-            let staged = stage.rel().join(leaf);
-            if let Err(error) = self
-                .copy_one_file(&from_rel, &staged, &to_canon, &mut created)
-                .and_then(|()| self.publish_copy(&staged, &to_rel, to))
-            {
-                return Err(stage.discard(error));
-            }
-            // The file has left its stage; dropping the guard removes the
-            // emptied directory, best effort. A failure there is only logged
-            // and the copy still succeeds: the file has already landed at
-            // `to`, and an error now would report a finished copy as failed.
-            drop(stage);
-            // The atomic writer synced the stage directory and checked the
-            // root before this rename committed; do both for the directory
-            // that holds the destination name.
-            let dir = self.dir();
-            match to_rel.parent().filter(|p| !p.as_os_str().is_empty()) {
-                Some(parent) => fs_ops::sync_dir_handle(
-                    &dir.open_dir(parent)
-                        .map_err(|error| map_cap_err(error, &to_rel))?,
-                )?,
-                None => fs_ops::sync_dir_handle(&dir)?,
-            }
-            self.ensure_root_available()?;
+            self.copy_file_exclusive(&from_rel, &to_rel, to, &to_canon)?;
+            created.push(to_canon);
         } else {
             self.preflight_tree(&posix_path(&from_rel), true)?;
             let stage = self.create_copy_stage(&to_rel, &to_canon)?;
@@ -1122,12 +1094,58 @@ impl RootedFs {
         Ok(CopyOutcome { created })
     }
 
+    /// Copy one regular file to `to_rel`, publishing it only while the name is
+    /// still free: a destination taken meanwhile is kept and the copy is
+    /// `PathAlreadyExists` for `to`. The file is staged under the
+    /// destination's own name inside a stage directory, because the atomic
+    /// writer keys the editable-text UTF-8 check on the path it writes and a
+    /// dotted sibling name would classify by its last extension and skip it.
+    /// `to_canon` is the final path a non-UTF-8 refusal names.
+    pub(crate) fn copy_file_exclusive(
+        &self,
+        from_rel: &std::path::Path,
+        to_rel: &std::path::Path,
+        to: &str,
+        to_canon: &str,
+    ) -> Result<()> {
+        let leaf = to_rel.file_name().ok_or(ChanError::PathEmpty)?;
+        let stage = self.create_copy_stage(to_rel, to_canon)?;
+        let staged = stage.rel().join(leaf);
+        if let Err(error) = self
+            .copy_one_file(from_rel, &staged, to_canon)
+            .and_then(|()| self.publish_copy(&staged, to_rel, to))
+        {
+            return Err(stage.discard(error));
+        }
+        // The file has left its stage; dropping the guard removes the
+        // emptied directory, best effort. A failure there is only logged
+        // and the copy still succeeds: the file has already landed at
+        // `to`, and an error now would report a finished copy as failed.
+        drop(stage);
+        // The atomic writer synced the stage directory and checked the
+        // root before this rename committed; do both for the directory
+        // that holds the destination name.
+        let dir = self.dir();
+        match to_rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(parent) => fs_ops::sync_dir_handle(
+                &dir.open_dir(parent)
+                    .map_err(|error| map_cap_err(error, to_rel))?,
+            )?,
+            None => fs_ops::sync_dir_handle(&dir)?,
+        }
+        self.ensure_root_available()
+    }
+
     /// Reserve a fresh stage directory beside `to_rel` for a copy in flight,
     /// creating the destination's parents first, and return the guard that
     /// removes it unless it is published. Beside it, so the publishing
     /// rename never crosses filesystems; after a root check, so nothing is
     /// created inside a root that was renamed or unlinked away.
-    fn create_copy_stage(&self, to_rel: &std::path::Path, to_canon: &str) -> Result<CopyStage<'_>> {
+    pub(crate) fn create_copy_stage(
+        &self,
+        to_rel: &std::path::Path,
+        to_canon: &str,
+    ) -> Result<CopyStage<'_>> {
         self.ensure_root_available()?;
         let name = self.temp_sibling_name(to_canon)?;
         let rel = self.rel(&name)?;
@@ -1146,7 +1164,7 @@ impl RootedFs {
     /// Publish a finished copy at `to_rel` with a rename that refuses an
     /// existing destination, so a name taken after the absence check is kept
     /// and the copy is `PathAlreadyExists` for `to`.
-    fn publish_copy(
+    pub(crate) fn publish_copy(
         &self,
         staged: &std::path::Path,
         to_rel: &std::path::Path,
@@ -1346,16 +1364,14 @@ impl RootedFs {
     }
 
     /// Copy one regular file from `src_rel` to `dst_rel` (both relative
-    /// to `self.dir()`), recording the destination's workspace-rooted POSIX
-    /// path in `created`. `dst_canon` is the file's final path: `dst_rel` is
-    /// inside a copy stage, so the final path is also what a non-UTF-8
-    /// refusal names.
+    /// to `self.dir()`). `dst_canon` is the file's final workspace-rooted
+    /// POSIX path: `dst_rel` is inside a copy stage, so the final path is what
+    /// a non-UTF-8 refusal names.
     fn copy_one_file(
         &self,
         src_rel: &std::path::Path,
         dst_rel: &std::path::Path,
         dst_canon: &str,
-        created: &mut Vec<String>,
     ) -> Result<()> {
         let src_str = src_rel
             .to_str()
@@ -1367,9 +1383,7 @@ impl RootedFs {
             .map_err(|error| match error {
                 ChanError::NonUtf8EditableText(_) => non_utf8_editable_text(dst_canon),
                 error => error,
-            })?;
-        created.push(dst_canon.to_string());
-        Ok(())
+            })
     }
 
     /// Recursively copy the contents of directory `src_rel` into the
@@ -1412,7 +1426,8 @@ impl RootedFs {
                     .map_err(ChanError::from)?;
                 self.copy_subtree(&child_src, &child_dst, &child_dst_canon, created)?;
             } else {
-                self.copy_one_file(&child_src, &child_dst, &child_dst_canon, created)?;
+                self.copy_one_file(&child_src, &child_dst, &child_dst_canon)?;
+                created.push(child_dst_canon);
             }
         }
         Ok(())
@@ -1467,7 +1482,7 @@ impl RootedFs {
 /// stage, best effort and logged on failure, unless it was published or
 /// discarded, so a copy that unwinds between creating the stage and
 /// publishing it strands nothing.
-struct CopyStage<'a> {
+pub(crate) struct CopyStage<'a> {
     fs: &'a RootedFs,
     name: String,
     rel: std::path::PathBuf,
@@ -1475,20 +1490,25 @@ struct CopyStage<'a> {
 }
 
 impl CopyStage<'_> {
+    /// The stage's root-relative name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     /// The stage's validated root-relative path.
-    fn rel(&self) -> &std::path::Path {
+    pub(crate) fn rel(&self) -> &std::path::Path {
         &self.rel
     }
 
     /// The stage itself became the destination; nothing is left to remove.
-    fn published(mut self) {
+    pub(crate) fn published(mut self) {
         self.armed = false;
     }
 
     /// Remove the stage of a copy that failed and return the error to report,
     /// with any cleanup failure folded into it, so a failed copy that leaves
     /// its stage behind says so.
-    fn discard(mut self, error: ChanError) -> ChanError {
+    pub(crate) fn discard(mut self, error: ChanError) -> ChanError {
         self.armed = false;
         let stage = &self.name;
         let Err(cleanup) = self.fs.remove_tree(stage) else {

@@ -387,9 +387,10 @@ impl MiniWorkspace {
 
     /// Plain copy: destination must not exist, the whole source tree is
     /// preflighted (readable, regular files and directories only), and the
-    /// copy lands in a uniquely named temporary sibling that is renamed to
-    /// the final name only when complete. A failure removes only that
-    /// temporary tree, never a pre-existing destination.
+    /// copy lands in a uniquely named stage beside the destination that is
+    /// renamed to the final name only when complete (a single file is staged
+    /// under its destination's own name inside it). A failure removes only
+    /// that stage, never a pre-existing destination.
     pub fn copy_plain(&self, from: &str, to: &str) -> Result<()> {
         let from = self.wire_rel(from)?;
         let from = from.as_str();
@@ -502,35 +503,41 @@ impl MiniWorkspace {
         Ok(())
     }
 
-    /// Stage a copy of `from` in a uniquely named temporary sibling of `to`
+    /// Stage a copy of `from` in a uniquely named stage directory beside `to`
     /// and rename it into place once complete. The whole source tree is
-    /// preflighted first; a failure at any later step removes only the
-    /// temporary tree and never creates `to`. The final rename refuses an
-    /// existing `to`: a copy can run for minutes, and whatever appeared at
-    /// the destination meanwhile is kept and answered as a conflict.
+    /// preflighted first; a failure at any later step, or an unwind, removes
+    /// only the stage and never creates `to`. A single file is staged under
+    /// the destination's own name inside the stage, so the atomic writer's
+    /// editable-text UTF-8 check keys on a name that classifies like `to`.
+    /// The final rename refuses an existing `to`: a copy can run for minutes,
+    /// and whatever appeared at the destination meanwhile is kept and
+    /// answered as a conflict.
     fn stage_tree_copy(&self, from: &str, to: &str) -> Result<()> {
         self.fs.preflight_tree(from, false)?;
-        let tmp = self.fs.temp_sibling_name(to)?;
-        if let Err(error) = self.copy_tree_plain(from, &tmp) {
-            self.fs.remove_tree_best_effort(&tmp);
-            return Err(error);
-        }
-        let (_, tmp_path) = self.fs.resolve_io(&tmp)?;
+        let (dir, from_path) = self.fs.resolve_io(from)?;
         let (_, to_path) = self.fs.resolve_io(to)?;
+        let source = dir.symlink_metadata(&from_path).map_err(ChanError::from)?;
+        if source.is_file() {
+            #[cfg(test)]
+            race_window::open();
+            return self.fs.copy_file_exclusive(&from_path, &to_path, to, to);
+        }
+        let stage = self.fs.create_copy_stage(&to_path, to)?;
+        if let Err(error) = self.copy_tree_plain(from, stage.name()) {
+            return Err(stage.discard(error));
+        }
         #[cfg(test)]
         race_window::open();
-        if let Err(error) = self.fs.rename_no_replace(&tmp_path, &to_path) {
-            self.fs.remove_tree_best_effort(&tmp);
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                return Err(ChanError::PathAlreadyExists(to.to_string()));
-            }
-            return Err(ChanError::from(error));
+        if let Err(error) = self.fs.publish_copy(stage.rel(), &to_path, to) {
+            return Err(stage.discard(error));
         }
+        stage.published();
         Ok(())
     }
 
-    /// Copy the preflighted tree at `from` to the (absent) `to`,
-    /// preserving the atomic per-file write posture.
+    /// Copy the preflighted tree at `from` to `to` inside a copy stage,
+    /// preserving the atomic per-file write posture; `to` itself may already
+    /// exist.
     fn copy_tree_plain(&self, from: &str, to: &str) -> Result<()> {
         let (dir, from_path) = self.fs.resolve_io(from)?;
         let meta = dir.symlink_metadata(&from_path).map_err(ChanError::from)?;
