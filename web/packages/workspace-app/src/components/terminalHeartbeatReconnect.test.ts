@@ -27,13 +27,13 @@ import { WAKE_PROBE_MS } from "../wakeGap";
 import {
   bumpTabFocusPulse,
   type FileTab,
-  type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
 import {
   installTerminalDom,
   mountTerminal,
   resetTerminals,
   TerminalSocket,
+  terminalTab,
   xterm,
 } from "../__tests__/terminalTab";
 
@@ -72,18 +72,6 @@ function xtermFocusCalls(): number {
 
 function pings(socket: TerminalSocket): number {
   return socket.sent.filter((s) => s === JSON.stringify({ type: "ping" })).length;
-}
-
-function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
-  return {
-    kind: "terminal",
-    id: "term-hb-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
 }
 
 function lastSocket(): TerminalSocket {
