@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
+// Build-time contract: the literal CSS palette blocks equal the TS defaults.
+// vitest drops component CSS, so the stylesheets are read as text.
 import app from "../App.svelte?raw";
-import canvas from "../components/GraphCanvas.svelte?raw";
-import graphPanel from "../components/GraphPanel.svelte?raw";
 import tuner from "../graph-tuner/GraphTuner.svelte?raw";
 
 import {
@@ -15,8 +15,8 @@ import {
 // The graph palette has ONE definition (GRAPH_PALETTE_DEFAULTS). The
 // copies that must stay literal CSS - App.svelte's theme blocks and the
 // standalone GraphTuner's mirror - are asserted equal to it here, and
-// the canvas's runtime fallbacks import it directly. A retune that
-// lands in only one place goes red.
+// GraphCanvas.svelte.test.ts checks that the canvas falls back to it. A
+// retune that lands in only one place goes red.
 //
 // The unit half pins the override mechanics: per-key hex rejection (a
 // hand-edited preferences.toml can carry anything), standard mode
@@ -76,57 +76,10 @@ describe("graph palette defaults: single definition", () => {
     expect(codeAliases).toHaveLength(2);
   });
 
-  test("GraphCanvas carries no literal palette hexes", () => {
-    // Its readTheme fallbacks and $state seed import the module, so no
-    // default hex may appear in a palette declaration (`--g-doc: #...`)
-    // or a readTheme fallback (`v("--g-doc", "#...")`). The bare-hex
-    // form is NOT asserted: an unrelated token's fallback can share a
-    // palette hex by coincidence (the dark --text-secondary fallback
-    // equals the dark folder hue), and that is not a palette copy. The
-    // contact hue is exempt: its readTheme fallback is the warn-text
-    // chain (`--g-contact` -> `--warn-text` -> literal), and that
-    // terminal literal belongs to the warning hue, not the palette.
-    for (const theme of ["dark", "light"] as const) {
-      for (const { kind, cssVar } of GRAPH_COLOR_ROWS) {
-        if (kind === "contact") continue;
-        const hex = GRAPH_PALETTE_DEFAULTS[theme][kind];
-        expect(canvas).not.toContain(`${cssVar}: ${hex}`);
-        expect(canvas).not.toContain(`v("${cssVar}", "${hex}"`);
-      }
-    }
-    expect(canvas).toMatch(/from "\.\.\/state\/graphPalette\.svelte"/);
-  });
 
-  test("canvas mention slot reads --g-contact with the warn-text fallback chain", () => {
-    // Contact and mention share one token: the canvas reads the
-    // settable --g-contact first and falls back to the warning hue, so
-    // a graph-scoped override repaints mentions while every surface
-    // outside the graph keeps the warn default.
-    expect(canvas).toMatch(/mention: v\("--g-contact", v\("--warn-text", "#e3b341"\)\)/);
-  });
 
-  test("GraphCanvas re-reads on a style change (palette override lands inline)", () => {
-    expect(canvas).toMatch(/attributeFilter: \["data-theme", "style"\]/);
-  });
 
-  test("icon re-rasterisation is keyed on its two real inputs", () => {
-    // rebuildIcons output is a function of (bg, ghostStroke) only; the
-    // guard keeps a hue-only colour-picker drag from rebuilding twenty
-    // byte-identical images per pointer move.
-    expect(canvas).toMatch(/if \(iconKey === lastIconKey\) return;/);
-  });
 
-  test("the override is bound on exactly two elements, both inside the graph surface", () => {
-    // The negative half of the containment contract: changing a graph
-    // colour changes the graph and nothing outside it, and that rests
-    // on .graph-tab and the portaled tab-menu bubble being the ONLY
-    // bind sites. A third bind (or one on :root) must go red here.
-    const binds = graphPanel.match(/style=\{paletteStyle \|\| undefined\}/g);
-    expect(binds).toHaveLength(2);
-    // No other component may bind the palette style block either.
-    expect(app).not.toContain("graphPaletteStyleFor");
-    expect(app).not.toMatch(/style=\{[^}]*--g-/);
-  });
 });
 
 describe("graph palette overrides", () => {

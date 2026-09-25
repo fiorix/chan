@@ -41,6 +41,7 @@ import {
   refreshWorkspace,
 } from "../state/store.svelte";
 import { setFetchImpl } from "../api/transport";
+import { applyGraphColorPrefs } from "../state/graphPalette.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import {
   layout,
@@ -470,5 +471,24 @@ describe("the inspector's width", () => {
     await settle(2);
     expect(tab.inspectorWidth).toBe(shared + 40);
     expect(paneWidths.graph, "the shared width is left alone").toBe(shared);
+  });
+});
+
+describe("a custom graph palette", () => {
+  test("is applied on the graph surface and its menu, not on the page", async () => {
+    applyGraphColorPrefs({ mode: "custom", dark: { doc: "#ff0000" }, light: { doc: "#ff0000" } });
+    try {
+      const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+      expect(target.querySelector<HTMLElement>(".graph-tab")!.style.getPropertyValue("--g-doc")).toBe("#ff0000");
+      openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
+      await settle(2);
+      expect(
+        document.body.querySelector<HTMLElement>(".tab-menu-bubble")!.style.getPropertyValue("--g-doc"),
+      ).toBe("#ff0000");
+      expect(document.documentElement.getAttribute("style") ?? "").not.toContain("--g-doc");
+      expect(document.body.getAttribute("style") ?? "").not.toContain("--g-doc");
+    } finally {
+      applyGraphColorPrefs(undefined);
+    }
   });
 });

@@ -19,6 +19,7 @@ import {
 import type { GraphViewEdge, GraphViewNode } from "../api/types";
 import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
 import { colorVarForBucket, type FileBucket } from "../state/kinds";
+import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
 
 type CanvasNode = Extract<GraphViewNode, { kind: "file" | "tag" | "mention" | "language" | "folder" }>;
 type CanvasEdge = GraphViewEdge & { kind: "link" | "tag" | "mention" | "contains" | "language" | "group" };
@@ -526,6 +527,63 @@ describe("colours and sizes", () => {
     expect(r("#t")).toBeLessThan(r("directory:notes"));
     expect(r("directory:notes")).toBeLessThan(r("notes/a.md"));
     expect(r("notes/a.md")).toBeLessThan(r(""));
+  });
+});
+
+describe("the palette source", () => {
+  function withPalette(vars: Record<string, string>): void {
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation(
+      () => ({ getPropertyValue: (name: string) => vars[name] ?? "" }) as CSSStyleDeclaration,
+    );
+  }
+
+  test("with no palette in CSS, nodes fall back to the shared palette defaults", () => {
+    withPalette({});
+    const { api, target } = render(props());
+    runFrames(1);
+    const frame = lastFrame(target);
+    expect(discOf(api, frame, "notes/a.md").fill).toBe(GRAPH_PALETTE_DEFAULTS.dark.doc);
+    expect(discOf(api, frame, "src/c.rs").fill).toBe(GRAPH_PALETTE_DEFAULTS.dark.source);
+    expect(discOf(api, frame, "directory:notes").fill).toBe(GRAPH_PALETTE_DEFAULTS.dark.folder);
+  });
+
+  test("a contact takes --g-contact, else --warn-text", () => {
+    const graph = tree();
+    graph.nodes.push(n.file("notes/alice.md", { node_kind: "contact" }));
+    withPalette({ "--warn-text": "#aa7700" });
+    const first = render(props(graph));
+    runFrames(1);
+    expect(discOf(first.api, lastFrame(first.target), "notes/alice.md").fill).toBe("#aa7700");
+    unmount(mounted.pop()!);
+
+    vi.restoreAllMocks();
+    withPalette({ "--warn-text": "#aa7700", "--g-contact": "#1188ee" });
+    const second = render(props(graph));
+    runFrames(1);
+    expect(discOf(second.api, lastFrame(second.target), "notes/alice.md").fill).toBe("#1188ee");
+  });
+
+  test("re-reads the palette when the graph surface's inline style changes", async () => {
+    const palette: Record<string, string> = { "--g-doc": "#111111" };
+    withPalette(palette);
+    const surface = document.createElement("div");
+    surface.className = "graph-tab";
+    document.body.append(surface);
+    const target = document.createElement("div");
+    surface.append(target);
+    const component = mount(GraphCanvas, { target, props: props() });
+    mounted.push(component as Record<string, unknown>);
+    flushSync();
+    runFrames(2);
+    const api = component as unknown as CanvasApi;
+    expect(discOf(api, lastFrame(target), "notes/a.md").fill).toBe("#111111");
+
+    palette["--g-doc"] = "#222222";
+    surface.setAttribute("style", "--g-doc:#222222;");
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    runFrames(1);
+    expect(discOf(api, lastFrame(target), "notes/a.md").fill).toBe("#222222");
   });
 });
 
