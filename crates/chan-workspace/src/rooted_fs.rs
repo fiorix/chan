@@ -2040,6 +2040,11 @@ mod mutation_tests {
             matches!(refused, Err(ChanError::NonUtf8EditableText(_))),
             "a markdown destination must refuse non-UTF-8 bytes: {refused:?}"
         );
+        let message = refused.unwrap_err().to_string();
+        assert!(
+            message.ends_with(": note.md") && !message.contains("chan-copy"),
+            "the refusal names the destination, not the stage: {message}"
+        );
         assert!(!root.path().join("note.md").exists());
         let copied = rooted.copy("plain.bin", "copied.md").unwrap();
         assert_eq!(copied.created, ["copied.md"]);
