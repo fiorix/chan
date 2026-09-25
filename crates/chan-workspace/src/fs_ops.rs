@@ -2512,6 +2512,22 @@ mod tests {
     }
 
     #[test]
+    fn classify_reads_schema_and_hardware_sources_as_text_and_bmp_as_image() {
+        // The frontend's path classifier mirrors these arms and
+        // `make file-classes-check` holds the two together.
+        for ext in [
+            "cs", "d", "edn", "f", "f90", "f95", "gql", "graphql", "jl", "jsonc", "odin", "proto",
+            "s", "sv", "v", "verilog", "vhd", "vhdl",
+        ] {
+            assert_eq!(classify(&format!("a.{ext}")), FileClass::Text, "a.{ext}");
+        }
+        assert_eq!(classify("a.cs"), FileClass::Text);
+        assert_eq!(classify("a.proto"), FileClass::Text);
+        assert_eq!(classify("a.bmp"), FileClass::Image);
+        assert_eq!(classify("Scan.BMP"), FileClass::Image);
+    }
+
+    #[test]
     fn looks_like_text_accepts_real_text() {
         assert!(looks_like_text(b""));
         assert!(looks_like_text(b"plain ascii\n"));

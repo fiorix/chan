@@ -59,10 +59,18 @@ describe("fileBucket", () => {
 
   test("extensions the server's classifier does not know bucket as binary", () => {
     // Unknown to FileClass, so the server sniffs their content and the
-    // path alone cannot say text: `.proto`, `.graphql` and `.cs` included.
-    for (const p of ["archive.zip", "font.woff2", "blob.bin", "mystery.xyz", "api.proto", "schema.graphql", "Main.cs"]) {
+    // path alone cannot say text.
+    for (const p of ["archive.zip", "font.woff2", "blob.bin", "mystery.xyz"]) {
       expect(fileBucket(p)).toBe("binary");
     }
+  });
+
+  test("schema and hardware sources bucket as source, and a bmp as media", () => {
+    expect(fileBucket("x.cs")).toBe("source");
+    expect(fileBucket("x.proto")).toBe("source");
+    expect(fileBucket("schema.graphql")).toBe("source");
+    expect(fileBucket("top.vhdl")).toBe("source");
+    expect(fileBucket("x.bmp")).toBe("img");
   });
 
   test("contact discriminator wins over markdown / source, but media still wins first", () => {
