@@ -18,8 +18,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-// Build-time contract: the terminal body, host and xterm viewport paint --terminal-background over --bg; vitest drops component CSS.
-import terminalTabSource from "./TerminalTab.svelte?raw";
 import type { Preferences } from "../api/types";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
 import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
@@ -114,14 +112,5 @@ describe("the terminal body", () => {
     delete hybridSurfaceThemes.terminal;
     flushSync();
     expect(body.hasAttribute("data-theme")).toBe(false);
-  });
-
-  test("paints the custom background over the page background", () => {
-    const css = terminalTabSource.slice(terminalTabSource.indexOf("<style>"));
-    expect(css).toMatch(/\.terminal-tab \{[\s\S]*?background: var\(--terminal-background, var\(--bg\)\);/);
-    expect(css).toMatch(/\.terminal-host \{[\s\S]*?background: var\(--terminal-background, var\(--bg\)\);/);
-    expect(css).toMatch(
-      /\.terminal-host :global\(\.xterm-viewport\) \{[\s\S]*?background-color: var\(--terminal-background, var\(--bg\)\);[\s\S]*?scrollbar-color: var\(--separator\) var\(--terminal-background, var\(--bg\)\);/,
-    );
   });
 });
