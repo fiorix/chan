@@ -1,183 +1,258 @@
 // @vitest-environment jsdom
+//
+// Settings > This workspace > Screen lock: the toggle, and while it is on the
+// inactivity timeout, the PIN controls, the theme picker with its preview and
+// a Test button. Every change is written through /api/screensaver and then
+// reloaded into the lock itself, so the running lock follows the settings.
 
-import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
-import shortcuts from "./shortcuts.ts?raw";
-import app from "../App.svelte?raw";
-import screenLock from "../components/settings/workspace/ScreenLockControl.svelte?raw";
-import numberField from "../components/settings/NumberField.svelte?raw";
-import NumberField from "../components/settings/NumberField.svelte";
+import { flushSync, mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import ScreenLockControl from "./ScreenLockControl.svelte";
+import NumberField from "../NumberField.svelte";
+import { api } from "../../../api/client";
+import { demoWorkspaceInfo } from "../../../demo/data";
 import {
+  hashPin,
   SCREENSAVER_MAX_TIMEOUT_SECS,
   SCREENSAVER_MIN_TIMEOUT_SECS,
-} from "./screensaver";
+  type ScreensaverTheme,
+} from "../../../state/screensaver";
+import { screensaver } from "../../../state/screensaver.svelte";
+import { workspace } from "../../../state/store.svelte";
+import { recordingContext2d } from "../../../__tests__/canvas";
 
-// Screensaver settings UI + Hybrid Nav lock chord. Tests pin the ownership:
-// Screen Lock + Screensaver controls live in Settings > This workspace, in
-// settings/workspace/ScreenLockControl.svelte.
+type LockState = {
+  enabled: boolean;
+  timeout_secs: number;
+  theme: ScreensaverTheme;
+  pin_set: boolean;
+};
 
-describe("Hybrid Nav lock chord", () => {
-  test("screen lock has no built-in chord in the registry (no-defaults)", () => {
-    // The Mod+. L default was dropped in the no-defaults round. Screen lock
-    // stays reachable through the Settings workspace tab and the launcher, and
-    // is assignable in the config UI, so no app.screensaver.lock entry remains
-    // in SHORTCUTS. Plain Mod+L is likewise never claimed.
-    expect(shortcuts).not.toContain('id: "app.screensaver.lock"');
-    expect(shortcuts).not.toMatch(/web: "Mod\+L"[\s\S]{1,80}native: "Mod\+L"/);
+let server: LockState;
+const mounted: Array<() => void> = [];
+
+beforeEach(() => {
+  server = { enabled: false, timeout_secs: 300, theme: "plain", pin_set: false };
+  vi.spyOn(api, "screensaverState").mockImplementation(async () => ({ ...server }));
+  vi.spyOn(api, "screensaverPatch").mockImplementation(async (body) => {
+    server = { ...server, ...body };
+    return { ...server };
   });
-
-  test("App.svelte runCommand branch routes app.screensaver.lock through lockNow", () => {
-    expect(app).toMatch(
-      /case "app\.screensaver\.lock":[\s\S]{1,60}lockNow\(\);/,
-    );
+  vi.spyOn(api, "screensaverSetPin").mockImplementation(async () => {
+    server = { ...server, pin_set: true };
+    return { ...server };
   });
-
-  test("App.svelte does not claim plain Mod+L", () => {
-    expect(app).not.toMatch(/e\.code === "KeyL"[\s\S]{1,160}lockNow\(\);/);
+  vi.spyOn(api, "screensaverClearPin").mockImplementation(async () => {
+    server = { ...server, pin_set: false };
+    return { ...server };
   });
-
-  test("App.svelte no longer binds a Hybrid Nav L handler", () => {
-    // The no-defaults round dropped the Mod+. L screen-lock binding; lock is
-    // reached via the app.screensaver.lock command and the launcher.
-    expect(app).not.toMatch(/case "l":[\s\S]{1,40}case "L":[\s\S]{1,220}lockNow\(\);/);
+  // The previews draw on a canvas.
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+    recordingContext2d().ctx as unknown as RenderingContext,
+  );
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: true,
+    media: query,
+    addEventListener() {},
+    removeEventListener() {},
+  }));
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  workspace.info = demoWorkspaceInfo({
+    metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+    files: [],
   });
-
-  test("App.svelte imports lockNow alongside the tracker + loader", () => {
-    expect(app).toMatch(
-      /import \{[\s\S]{1,400}lockNow,[\s\S]{1,200}\} from "\.\/state\/screensaver\.svelte";/,
-    );
-  });
-});
-
-describe("Screen lock + Screensaver UI in Settings workspace tab", () => {
-  test("ScreenLockControl imports hashPin + bounds + lock helpers", () => {
-    expect(screenLock).toMatch(
-      /import \{[\s\S]{1,400}hashPin,[\s\S]{1,200}SCREENSAVER_MAX_TIMEOUT_SECS,[\s\S]{1,80}SCREENSAVER_MIN_TIMEOUT_SECS,[\s\S]{1,40}\} from "\.\.\/\.\.\/\.\.\/state\/screensaver";/,
-    );
-    expect(screenLock).toMatch(
-      /import \{[\s\S]{1,200}loadScreensaverState,[\s\S]{1,80}lockNow,[\s\S]{1,80}screensaver,[\s\S]{1,40}\} from "\.\.\/\.\.\/\.\.\/state\/screensaver\.svelte";/,
-    );
-  });
-
-  test("ScreenLockControl carries the screensaver-settings reactive state vars", () => {
-    expect(screenLock).toMatch(
-      /let screensaverEnabled = \$state<boolean \| null>\(null\);/,
-    );
-    expect(screenLock).toMatch(/let screensaverTimeoutSecs = \$state<number>\(300\);/);
-    expect(screenLock).toMatch(/let screensaverTheme = \$state<ScreensaverTheme>\("plain"\);/);
-    expect(screenLock).toMatch(/let screensaverPinSet = \$state\(false\);/);
-    expect(screenLock).toMatch(/let screensaverBusy = \$state\(false\);/);
-    expect(screenLock).toMatch(/let screensaverError = \$state<string \| null>\(null\);/);
-    expect(screenLock).toMatch(
-      /let pinDialog = \$state<\{ pin1: string; pin2: string \} \| null>\(null\);/,
-    );
-  });
-
-  test("loadScreenLockState fetches screensaver state via api.screensaverState", () => {
-    expect(screenLock).toMatch(
-      /const s = await api\.screensaverState\(\);[\s\S]{1,200}screensaverEnabled = s\.enabled;[\s\S]{1,200}screensaverTimeoutSecs = s\.timeout_secs;[\s\S]{1,200}screensaverTheme = s\.theme;[\s\S]{1,200}screensaverPinSet = s\.pin_set;/,
-    );
-  });
-
-  test("theme picker persists plain/matrix through screensaverPatch", () => {
-    expect(screenLock).toMatch(/type ScreensaverTheme/);
-    expect(screenLock).toMatch(
-      /async function commitScreensaverTheme\(e: Event\): Promise<void> \{[\s\S]{1,700}api\.screensaverPatch\(\{ theme \}\);[\s\S]{1,300}await loadScreensaverState\(\);/,
-    );
-    expect(screenLock).toMatch(
-      /<select[\s\S]{1,300}bind:value=\{screensaverTheme\}[\s\S]{1,200}onchange=\{commitScreensaverTheme\}[\s\S]{1,300}<option value="plain">Default<\/option>[\s\S]{1,120}<option value="matrix">Matrix<\/option>/,
-    );
-  });
-
-  test("Test button reloads state and locks immediately (no overlay open/close dance)", () => {
-    // The Settings overlay survives the screensaver cover, so testScreenLock
-    // simply reloads state + calls lockNow. No returnToSettingsAfterTest.
-    expect(screenLock).toMatch(
-      /async function testScreenLock\(\): Promise<void> \{[\s\S]{1,400}await loadScreensaverState\(\);[\s\S]{1,200}if \(!screensaver\.loaded\) \{[\s\S]{1,200}screen lock state unavailable[\s\S]{1,200}lockNow\(\);/,
-    );
-    expect(screenLock).not.toMatch(/returnToSettingsAfterTest/);
-    expect(screenLock).toMatch(
-      /<button type="button" onclick=\{testScreenLock\} disabled=\{screensaverBusy\}>[\s\S]{1,80}Test[\s\S]{1,80}<\/button>/,
-    );
-  });
-
-  test("toggle handler patches enabled + reloads singleton", () => {
-    expect(screenLock).toMatch(
-      /async function toggleScreensaverEnabled\(\): Promise<void> \{[\s\S]{1,600}api\.screensaverPatch\(\{ enabled: target \}\);[\s\S]{1,400}await loadScreensaverState\(\);/,
-    );
-  });
-
-  test("commit timeout clamps to MIN/MAX + patches + reloads", () => {
-    // The clamp mechanics live in the NumberField primitive, fed the
-    // same bounds; the handler keeps the clamp-then-save-with-message
-    // policy and the reload.
-    expect(screenLock).toMatch(/min=\{SCREENSAVER_MIN_TIMEOUT_SECS\}/);
-    expect(screenLock).toMatch(/max=\{SCREENSAVER_MAX_TIMEOUT_SECS\}/);
-    expect(screenLock).toMatch(
-      /async function commitTimeout\([\s\S]{1,200}clampedTo[\s\S]{1,800}SCREENSAVER_MIN_TIMEOUT_SECS[\s\S]{1,400}SCREENSAVER_MAX_TIMEOUT_SECS[\s\S]{1,400}api\.screensaverPatch\(\{ timeout_secs: next \}\);[\s\S]{1,400}await loadScreensaverState\(\);/,
-    );
-  });
-
-  test("clamp onto the stored timeout warns without a redundant patch", () => {
-    // NumberField reports a clamp even when the clamped number equals
-    // the committed value, and commitTimeout raises the warning before
-    // its unchanged-value guard, so an out-of-range entry at the bound
-    // shows the message while the PATCH is skipped.
-    expect(numberField).toMatch(/if \(n === value && clampedTo === null\) return;/);
-    expect(screenLock).toMatch(
-      /Timeout must be at most[\s\S]{1,400}if \(next === screensaverTimeoutSecs\) return;[\s\S]{1,400}api\.screensaverPatch\(\{ timeout_secs: next \}\);/,
-    );
-  });
-
-  test("commit PIN validates match + hashes with workspace root salt + posts", () => {
-    expect(screenLock).toMatch(
-      /async function commitPin\(\): Promise<void> \{[\s\S]{1,600}if \(pin1 !== pin2\) \{[\s\S]{1,200}screensaverError = "PINs don't match";[\s\S]{1,400}const salt = workspace\.info\?\.root \?\? "";[\s\S]{1,200}const hash = await hashPin\(pin1, salt\);[\s\S]{1,200}api\.screensaverSetPin\(hash\);[\s\S]{1,400}await loadScreensaverState\(\);/,
-    );
-  });
-
-  test("clearPin calls screensaverClearPin + reloads", () => {
-    expect(screenLock).toMatch(
-      /async function clearPin\(\): Promise<void> \{[\s\S]{1,400}api\.screensaverClearPin\(\);[\s\S]{1,400}await loadScreensaverState\(\);/,
-    );
-  });
-
-  test("markup renders the screen-lock row with the enable toggle", () => {
-    expect(screenLock).toMatch(/<SettingField[\s\S]{1,120}label="Screen lock"/);
-    expect(screenLock).toMatch(/<PillToggle[\s\S]{1,400}toggleScreensaverEnabled/);
-  });
-
-  test("timeout input + PIN buttons gated on enabled=true", () => {
-    expect(screenLock).toMatch(
-      /\{#if screensaverEnabled === true\}[\s\S]{1,4000}<NumberField/,
-    );
-    expect(screenLock).toMatch(/onclick=\{openPinDialog\}/);
-    expect(screenLock).toMatch(/onclick=\{clearPin\}/);
-  });
-
-  test("Theme picker renders INSIDE the screen lock enabled gate", () => {
-    // The screensaver theme picker must live inside the
-    // `{#if screensaverEnabled === true}` block of the Screen lock
-    // SettingField, not as a standalone section sibling. Toggling
-    // Screen lock OFF hides the theme picker and timeout/PIN controls
-    // together.
-    expect(screenLock).toMatch(
-      /<SettingField[\s\S]{1,200}label="Screen lock"[\s\S]{1,4000}\{#if screensaverEnabled === true\}[\s\S]{1,4000}bind:value=\{screensaverTheme\}[\s\S]{1,4000}\{\/if\}[\s\S]{1,200}<\/SettingField>/,
-    );
-    expect(screenLock).not.toMatch(/<section class="screensaver">/);
-    expect(screenLock).not.toMatch(/<h3>Screensaver<\/h3>/);
-  });
-
-  test("inline PIN dialog binds pin1/pin2 + wires save+cancel", () => {
-    expect(screenLock).toMatch(
-      /\{#if pinDialog === null\}[\s\S]{1,4000}\{:else\}[\s\S]{1,2000}bind:value=\{pinDialog\.pin1\}[\s\S]{1,400}bind:value=\{pinDialog\.pin2\}[\s\S]{1,400}onclick=\{commitPin\}[\s\S]{1,200}onclick=\{cancelPinDialog\}/,
-    );
+  Object.assign(screensaver, {
+    enabled: false,
+    timeout_secs: 300,
+    theme: "plain",
+    pin_set: false,
+    locked: false,
+    loaded: false,
   });
 });
 
-// The timeout field mounted with the screensaver bounds. The commit
-// contract commitTimeout relies on: an out-of-range entry clamps back
-// onto the stored bound yet still fires with the bound named, so the
-// handler can show its warning and skip the write itself.
+afterEach(() => {
+  for (const stop of mounted.splice(0)) stop();
+  document.body.innerHTML = "";
+  screensaver.locked = false;
+  workspace.info = null;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 5; turn += 1) {
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  flushSync();
+}
+
+async function render(state: Partial<LockState> = {}): Promise<HTMLElement> {
+  server = { ...server, ...state };
+  const target = document.createElement("div");
+  document.body.append(target);
+  const instance = mount(ScreenLockControl, { target });
+  mounted.push(() => unmount(instance));
+  await settle();
+  return target;
+}
+
+function button(target: HTMLElement, label: string): HTMLButtonElement {
+  const found = [...target.querySelectorAll("button")].find(
+    (b) => b.textContent?.trim() === label,
+  );
+  expect(found, `a "${label}" button`).toBeDefined();
+  return found!;
+}
+
+function alertText(target: HTMLElement): string | null {
+  return target.querySelector('[role="alert"]')?.textContent ?? null;
+}
+
+function type(input: HTMLInputElement, text: string): void {
+  input.value = text;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+describe("the Screen lock toggle", () => {
+  test("shows the stored state and hides the settings while the lock is off", async () => {
+    const target = await render();
+
+    expect(target.textContent).toContain("Screen lock");
+    expect(target.querySelector("label.pill")?.textContent?.trim()).toBe("Off");
+    expect(target.querySelector('[aria-label="Inactivity timeout in seconds"]')).toBeNull();
+    expect(target.querySelector("select")).toBeNull();
+  });
+
+  test("turning it on writes the change and loads it into the running lock", async () => {
+    const target = await render();
+    const toggle = target.querySelector<HTMLInputElement>('label.pill input[type="checkbox"]');
+    expect(toggle?.checked).toBe(false);
+    toggle!.click();
+    await settle();
+
+    expect(api.screensaverPatch).toHaveBeenCalledWith({ enabled: true });
+    expect(screensaver.enabled).toBe(true);
+    expect(target.querySelector('[aria-label="Inactivity timeout in seconds"]')).not.toBeNull();
+  });
+});
+
+describe("with the lock on", () => {
+  test("a timeout is written and loaded into the running lock", async () => {
+    const target = await render({ enabled: true });
+    const field = target.querySelector<HTMLInputElement>('[aria-label="Inactivity timeout in seconds"]')!;
+    type(field, "600");
+    field.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await settle();
+
+    expect(api.screensaverPatch).toHaveBeenCalledWith({ timeout_secs: 600 });
+    expect(screensaver.timeout_secs).toBe(600);
+    expect(alertText(target)).toBeNull();
+  });
+
+  test("an entry below the minimum is written as the minimum, with a warning", async () => {
+    const target = await render({ enabled: true });
+    const field = target.querySelector<HTMLInputElement>('[aria-label="Inactivity timeout in seconds"]')!;
+    type(field, "3");
+    field.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await settle();
+
+    expect(api.screensaverPatch).toHaveBeenCalledWith({ timeout_secs: SCREENSAVER_MIN_TIMEOUT_SECS });
+    expect(alertText(target)).toBe(`Timeout must be at least ${SCREENSAVER_MIN_TIMEOUT_SECS}s`);
+  });
+
+  test("an entry above the stored maximum warns without writing it again", async () => {
+    const target = await render({ enabled: true, timeout_secs: SCREENSAVER_MAX_TIMEOUT_SECS });
+    const field = target.querySelector<HTMLInputElement>('[aria-label="Inactivity timeout in seconds"]')!;
+    type(field, String(SCREENSAVER_MAX_TIMEOUT_SECS * 2));
+    field.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await settle();
+
+    expect(api.screensaverPatch).not.toHaveBeenCalled();
+    expect(alertText(target)).toBe(`Timeout must be at most ${SCREENSAVER_MAX_TIMEOUT_SECS}s`);
+  });
+
+  test("the theme picker offers Default and Matrix, writes the choice and previews it", async () => {
+    const target = await render({ enabled: true });
+    const select = target.querySelector("select")!;
+    expect([...select.options].map((o) => [o.value, o.textContent])).toEqual([
+      ["plain", "Default"],
+      ["matrix", "Matrix"],
+    ]);
+    expect(target.querySelector(".preview-box canvas")).toBeNull();
+
+    select.value = "matrix";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+
+    expect(api.screensaverPatch).toHaveBeenCalledWith({ theme: "matrix" });
+    expect(screensaver.theme).toBe("matrix");
+    expect(target.querySelector(".preview-box canvas")).not.toBeNull();
+  });
+
+  test("Set PIN asks twice, refuses a mismatch and saves the workspace-salted hash", async () => {
+    const target = await render({ enabled: true });
+    button(target, "Set PIN").click();
+    flushSync();
+    const [pin, confirm] = [...target.querySelectorAll<HTMLInputElement>('input[type="password"]')];
+    type(pin!, "1234");
+    type(confirm!, "1235");
+    button(target, "Save").click();
+    await settle();
+    expect(alertText(target)).toBe("PINs don't match");
+    expect(api.screensaverSetPin).not.toHaveBeenCalled();
+
+    type(confirm!, "1234");
+    button(target, "Save").click();
+    await settle();
+
+    expect(api.screensaverSetPin).toHaveBeenCalledWith(await hashPin("1234", "/ws"));
+    expect(screensaver.pin_set).toBe(true);
+    expect(target.querySelector('input[type="password"]')).toBeNull();
+    button(target, "Change PIN");
+  });
+
+  test("Clear PIN clears it and loads the change into the running lock", async () => {
+    const target = await render({ enabled: true, pin_set: true });
+    screensaver.pin_set = true;
+    button(target, "Clear PIN").click();
+    await settle();
+
+    expect(api.screensaverClearPin).toHaveBeenCalledTimes(1);
+    expect(screensaver.pin_set).toBe(false);
+    button(target, "Set PIN");
+  });
+
+  test("Test loads the settings and locks at once", async () => {
+    const target = await render({ enabled: true });
+    button(target, "Test").click();
+    await settle();
+
+    expect(screensaver.locked).toBe(true);
+  });
+
+  test("Test reports a lock it cannot load instead of locking", async () => {
+    const target = await render({ enabled: true });
+    vi.mocked(api.screensaverState).mockRejectedValue(new Error("offline"));
+    button(target, "Test").click();
+    await settle();
+
+    expect(screensaver.locked).toBe(false);
+    expect(alertText(target)).toBe("screen lock state unavailable");
+  });
+});
+
+// The timeout field mounted with the screensaver bounds. The commit contract
+// the timeout relies on: an out-of-range entry clamps back onto the stored
+// bound yet still fires with the bound named, so the control can show its
+// warning and skip the write itself.
 describe("NumberField timeout clamp at the stored bound", () => {
   let target: HTMLDivElement;
   let cleanups: (() => void)[] = [];
@@ -215,10 +290,6 @@ describe("NumberField timeout clamp at the stored bound", () => {
   }
 
   test("out-of-range entry with the stored value at the min still reports the clamp", async () => {
-    // The regression this pins: an out-of-range entry that clamps onto
-    // the already-stored bound must still fire oncommit with the bound
-    // named, so ScreenLockControl can show its warning. The old no-op
-    // guard swallowed it because the clamped result equalled `value`.
     const commits = mountTimeoutField(SCREENSAVER_MIN_TIMEOUT_SECS);
     await tick();
     enterAndBlur(String(SCREENSAVER_MIN_TIMEOUT_SECS - 5));
