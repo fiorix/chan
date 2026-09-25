@@ -2071,6 +2071,29 @@ mod mutation_tests {
         );
     }
 
+    #[test]
+    fn a_directory_copy_names_the_destination_in_a_utf8_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/inner.md"), b"\xff\xfe not text").unwrap();
+
+        let refused = rooted.copy("src", "dst");
+        eprintln!("copy={refused:?}");
+
+        assert!(
+            matches!(&refused, Err(ChanError::NonUtf8EditableText(message))
+                if message.ends_with(": dst/inner.md") && !message.contains("chan-copy")),
+            "the refusal names the destination, not the stage: {refused:?}"
+        );
+        assert!(!root.path().join("dst").exists());
+        assert_eq!(
+            copy_stages(root.path()),
+            Vec::<String>::new(),
+            "no copy stage remains"
+        );
+    }
+
     /// A panic between creating the stage and publishing it, which
     /// `run_blocking` surfaces as a `JoinError`, must not strand the stage
     /// beside the destination.
