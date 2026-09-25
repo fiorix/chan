@@ -3443,8 +3443,11 @@ async function closeTabOnce(
   const { tab } = found;
   // Capture move-out intent NOW, before the terminal close-sink below consumes
   // `terminalsMovingOut`. A cross-window MOVE marks the tab moving-out
-  // (Pane.svelte drag-end) right before this call.
+  // (Pane.svelte drag-end) right before this call. The session id is captured
+  // with it because on a move the sink (TerminalTab's `closeTerminalForTab`)
+  // clears the tab's session binding before the record below is built.
   const movingOut = tab.kind === "terminal" && terminalsMovingOut.has(tabId);
+  const movedSession = tab.kind === "terminal" ? (tab.terminalSessionId ?? null) : null;
   let discarded = false;
   if (isDraftTab(tab) && !opts?.force) {
     if (!(await handleDraftTabClose(tab))) return;
@@ -3473,10 +3476,7 @@ async function closeTabOnce(
   // unconditionally (null for a real close) so a prior move-out can't leak into
   // a later genuine discard, and set right before the splice so the reactive
   // empty-window `$effect` reads it deterministically.
-  lastMovedOut =
-    movingOut && now.tab.kind === "terminal"
-      ? { session: now.tab.terminalSessionId ?? null }
-      : null;
+  lastMovedOut = movingOut && now.tab.kind === "terminal" ? { session: movedSession } : null;
   // A discarded file has nothing to reopen: the close deleted it, and every
   // claim the record would carry about disk (`saved`, the mtime token, the
   // authority version, `openedEmpty`) belongs to a load that ended. Replaying
