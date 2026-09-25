@@ -879,7 +879,8 @@
 
   // The "choose the moved file" reopen instruction (set in
   // doReopenMissing) is a deliberately persistent status (see
-  // toastAutoDismissSweep.test). Clear it when this tab unmounts, so an
+  // FileEditorTab.test.ts, "re-opening a moved file asks the user to pick
+  // it in Files, until the tab goes"). Clear it when this tab unmounts, so an
   // abandoned reopen (the user closes the tab instead of picking the
   // moved file) does not leave the status stuck in the bar. The literal
   // must match the one set below.
