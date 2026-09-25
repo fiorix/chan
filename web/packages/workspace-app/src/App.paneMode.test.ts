@@ -8,7 +8,8 @@
 // help. The dock toggles commit first. A draft gone stale answers only Escape
 // and h. Outside it, the spawn commands and the new-terminal chord open at the
 // focused tab's folder, and the pane commands close tabs, panes and empty
-// sides.
+// sides. Cmd+W closes a tab the same way in a control-terminal window, so a
+// live terminal there asks first.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -35,7 +36,7 @@ vi.mock("./state/store.svelte", async (importOriginal) => ({
 
 import { api } from "./api/client";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
-import { fileTab, resetLayout } from "./__tests__/tabs";
+import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { browserSidePanes, discardWindowSession, ui } from "./state/store.svelte";
 import {
   cancelPaneMode,
@@ -415,6 +416,24 @@ describe("the pane commands", () => {
 
     press({ key: "w", code: "KeyW", metaKey: true });
     await vi.waitFor(() => expect(leaf(layout, "pane-test").tabs).toEqual([]));
+  });
+
+  test("Cmd+W in a control-terminal window asks before closing its live terminal, as any window does", async () => {
+    ui.terminalOnly = true;
+    ui.terminalControl = true;
+    try {
+      resetLayout([terminalTab({ id: "control" }), terminalTab({ id: "second" })], { activeTabId: "second" });
+      await settle();
+
+      press({ key: "w", code: "KeyW", metaKey: true });
+
+      await vi.waitFor(() => expect(document.querySelector(".modal .title")?.textContent).toBe("Close tab?"));
+      document.querySelector<HTMLButtonElement>(".modal .actions button.ok")!.click();
+      await vi.waitFor(() => expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["control"]));
+    } finally {
+      ui.terminalOnly = false;
+      ui.terminalControl = false;
+    }
   });
 
   test("Close tab on an empty pane closes the pane", async () => {
