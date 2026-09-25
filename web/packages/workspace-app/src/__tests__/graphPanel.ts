@@ -273,3 +273,17 @@ export const g = {
     return { source, target, kind };
   },
 };
+
+/// Node and edge literals for the filesystem graph. Ids are paths; the root
+/// directory's id is "".
+export const fsg = {
+  dir(path: string): FsGraphNode {
+    return { id: path, kind: "directory", name: path.split("/").pop() ?? "", path, size: 0 };
+  },
+  file(path: string): FsGraphNode {
+    return { id: path, kind: "file", name: path.split("/").pop() ?? path, path, size: 1 };
+  },
+  contains(parent: string, child: string): FsGraphEdge {
+    return { source: parent, target: child, kind: "contains" };
+  },
+};
