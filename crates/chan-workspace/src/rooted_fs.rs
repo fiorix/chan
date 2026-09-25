@@ -1043,6 +1043,8 @@ impl RootedFs {
         }
         // Both paths resolve through the capability handle. The destination
         // check still assumes no concurrent external creator before rename.
+        #[cfg(test)]
+        rename_window::open();
         self.dir()
             .rename(&from_rel, &self.dir(), &to_rel)
             .map_err(ChanError::from)?;
@@ -2115,6 +2117,70 @@ mod mutation_tests {
         );
     }
 
+    #[test]
+    fn a_rename_keeps_a_file_created_inside_the_race_window() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::write(root.path().join("mine.md"), "mine").unwrap();
+        let theirs = root.path().join("taken.md");
+        rename_window::set(move || fs::write(theirs, "theirs").unwrap());
+
+        let result = rooted.rename("mine.md", "taken.md");
+        eprintln!(
+            "rename={result:?}; taken.md={:?}; mine.md={:?}",
+            fs::read_to_string(root.path().join("taken.md")),
+            fs::read_to_string(root.path().join("mine.md"))
+        );
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "taken.md"),
+            "a destination created after the check must be a conflict: {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("taken.md")).unwrap(),
+            "theirs",
+            "the file created inside the window survives"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("mine.md")).unwrap(),
+            "mine",
+            "the source stays where it was"
+        );
+    }
+
+    #[test]
+    fn a_rename_keeps_an_empty_directory_created_inside_the_race_window() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/inner.md"), "inner").unwrap();
+        let theirs = root.path().join("dst");
+        // POSIX rename(2) replaces an empty destination directory, so this
+        // is the directory form of the same clobber.
+        rename_window::set(move || fs::create_dir(theirs).unwrap());
+
+        let result = rooted.rename("src", "dst");
+        eprintln!(
+            "rename={result:?}; dst entries={:?}",
+            fs::read_dir(root.path().join("dst")).map(|entries| entries
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>())
+        );
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "dst"),
+            "a destination created after the check must be a conflict: {result:?}"
+        );
+        assert!(
+            root.path().join("src/inner.md").exists(),
+            "the source stays where it was"
+        );
+        assert!(
+            !root.path().join("dst/inner.md").exists(),
+            "nothing is moved into the directory created inside the window"
+        );
+    }
+
     /// A panic between creating the stage and publishing it, which
     /// `run_blocking` surfaces as a `JoinError`, must not strand the stage
     /// beside the destination.
@@ -2187,6 +2253,31 @@ mod mutation_tests {
             Vec::<String>::new(),
             "no copy stage remains"
         );
+    }
+}
+
+/// Test-only pause between a rename's destination check and the rename that
+/// commits it. A test installs a closure here to create the destination inside
+/// that window, which is the race a check-then-rename loses; the closure runs
+/// once, on the thread that set it.
+#[cfg(test)]
+mod rename_window {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn set(hook: impl FnOnce() + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn open() {
+        if let Some(hook) = HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 }
 
