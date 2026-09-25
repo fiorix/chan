@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
 
+import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinks);
 
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
-import appRaw from "../App.svelte?raw";
-import extensionTabRaw from "../components/ExtensionTab.svelte?raw";
+import { apiPath } from "../api/transport";
+import { hostCommand, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { resetLayout } from "../__tests__/tabs";
+import ExtensionTab from "../components/ExtensionTab.svelte";
 import { allCommands } from "./commands";
 import {
   extensionFor,
@@ -108,10 +117,6 @@ describe("local extensions", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]?.id).toBe("say-hello");
     unregister();
-
-    expect(appRaw).toMatch(
-      /commandName\.startsWith\("extension\."\)[\s\S]{0,300}allCommands\(\)[\s\S]{0,300}command\.run\(\)/,
-    );
   });
 });
 
@@ -246,15 +251,71 @@ describe("catalog refresh across a devserver restart", () => {
     expect(extensions).toHaveBeenCalledTimes(1);
   });
 
-  test("ExtensionTab's frame src tracks the live catalog, with the unavailable fallthrough", () => {
-    expect(extensionTabRaw).toContain(
-      "const extension = $derived(extensionFor(tab.extensionId));",
-    );
-    expect(extensionTabRaw).toContain(
-      "const frameSrc = $derived(extension ? apiPath(extension.entry_path) : undefined);",
-    );
-    expect(extensionTabRaw).toMatch(
-      /\{#if extension\}[\s\S]{1,600}<iframe[\s\S]{1,300}src=\{frameSrc\}[\s\S]{1,600}\{:else\}[\s\S]{1,500}is unavailable\./,
-    );
+  test("an open extension tab's frame follows the live catalog, and says when the extension is gone", async () => {
+    resetLayout([]);
+    vi.spyOn(api, "extensions").mockResolvedValue([
+      { id: "echo", name: "Echo", entry_path: `/_chan/extensions/echo/${capA}/`, singleton: true },
+    ]);
+    await refreshExtensions();
+    allCommands()
+      .find((entry) => entry.id === "extension.echo")
+      ?.run();
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "extension") throw new Error("expected extension tab");
+    const target = document.createElement("div");
+    document.body.append(target);
+    const view = mount(ExtensionTab, { target, props: { tab, paneId: activePane().id } });
+    try {
+      flushSync();
+      expect(target.querySelector("iframe")?.getAttribute("src")).toBe(
+        apiPath(`/_chan/extensions/echo/${capA}/`),
+      );
+
+      vi.spyOn(api, "extensions").mockResolvedValue([
+        { id: "echo", name: "Echo", entry_path: `/_chan/extensions/echo/${capB}/`, singleton: true },
+      ]);
+      await refreshExtensions();
+      flushSync();
+      expect(target.querySelector("iframe")?.getAttribute("src")).toBe(
+        apiPath(`/_chan/extensions/echo/${capB}/`),
+      );
+
+      vi.spyOn(api, "extensions").mockResolvedValue([]);
+      await refreshExtensions();
+      flushSync();
+      expect(target.querySelector("iframe")).toBeNull();
+      expect(target.textContent).toContain(`${tab.title} is unavailable.`);
+    } finally {
+      unmount(view);
+      target.remove();
+    }
+  });
+});
+
+// Hosts and user-assigned chords name an extension command by its id; App
+// has no switch case for them and resolves them through the launcher's
+// registry.
+describe("the host's command bridge", () => {
+  stubAppEnvironment();
+
+  afterEach(async () => {
+    await unmountApp();
+    vi.restoreAllMocks();
+  });
+
+  test("runs an extension's command by id", async () => {
+    vi.spyOn(api, "extensions").mockResolvedValue([
+      { id: "echo", name: "Echo test", entry_path: `/_chan/extensions/echo/${"d".repeat(64)}/`, singleton: true },
+    ]);
+    await mountApp();
+    await refreshExtensions();
+    resetLayout([]);
+    await settle();
+
+    hostCommand("extension.echo");
+    await settle();
+
+    const tab = activePane().tabs[0];
+    expect(tab).toMatchObject({ kind: "extension", extensionId: "echo" });
   });
 });
