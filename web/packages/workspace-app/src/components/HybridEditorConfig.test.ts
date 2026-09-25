@@ -52,21 +52,47 @@ describe("Settings > Editor", () => {
     await vi.waitFor(() => expect(writes.at(-1)).toEqual({ line_spacing: "compact" }));
   });
 
-  // The date format select reads its value off the change event inside the
-  // write, which runs after the event has finished and its currentTarget is
-  // null, so the write is refused and the field goes back to the stored
-  // format. This test states what the select should do and fails until that
-  // read moves out of the write.
-  test.fails("the date format writes date_format alone", async () => {
-    const { target, writes } = await openSettings("Editor");
-    const select = [...target.querySelectorAll<HTMLSelectElement>("select")].find((candidate) =>
-      [...candidate.options].some((option) => option.value === DATE_FORMATS[1]!.id),
-    )!;
+  describe("the date format", () => {
+    function dateFormatSelect(target: HTMLElement): HTMLSelectElement | undefined {
+      return [...target.querySelectorAll<HTMLSelectElement>("select")].find((candidate) =>
+        [...candidate.options].some((option) => option.value === DATE_FORMATS[1]!.id),
+      );
+    }
 
-    select.value = DATE_FORMATS[1]!.id;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
+    function choose(select: HTMLSelectElement, id: string): void {
+      select.value = id;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
 
-    await vi.waitFor(() => expect(writes.at(-1)).toEqual({ date_format: DATE_FORMATS[1]!.id }));
+    // What the expected failure below takes for granted, checked where a
+    // failure counts: the select is there and a choice reaches the write's
+    // config read.
+    test("offers each format, and a choice asks for the config to write into", async () => {
+      const { target, requests } = await openSettings("Editor");
+      const select = dateFormatSelect(target);
+      expect(select, "the date format select").toBeDefined();
+      expect([...select!.options].map((option) => option.value)).toEqual(DATE_FORMATS.map((format) => format.id));
+      const before = requests.length;
+
+      choose(select!, DATE_FORMATS[1]!.id);
+
+      await vi.waitFor(() =>
+        expect(requests.slice(before)).toContainEqual(expect.objectContaining({ method: "GET", path: "/api/config" })),
+      );
+    });
+
+    // The select reads its value off the change event inside the write, which
+    // runs after the event has finished and its currentTarget is null, so the
+    // write is refused and the field goes back to the stored format. This test
+    // states what the select should do and fails until that read moves out of
+    // the write.
+    test.fails("writes date_format alone", async () => {
+      const { target, writes } = await openSettings("Editor");
+
+      choose(dateFormatSelect(target)!, DATE_FORMATS[1]!.id);
+
+      await vi.waitFor(() => expect(writes.at(-1)).toEqual({ date_format: DATE_FORMATS[1]!.id }));
+    });
   });
 
   test("Strip on save writes strip_trailing_whitespace_on_save alone", async () => {
