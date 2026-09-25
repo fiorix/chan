@@ -9,7 +9,7 @@ An extension is a local program the operator declares in `<chan-home>/extensions
 Four pieces carry the whole design:
 
 - **A declaration.** One `.toml` per extension; the lowercase file stem is the stable ID. `name` titles the tab and launcher row, `command` and `args` say what to spawn (bare names resolve through `PATH`, `./name` resolves from the config directory, installers write absolute paths), and `capabilities` lists the host grants the extension wants. Malformed or oversized declarations, spawn failures, and failed handshakes warn and are skipped without failing Chan startup.
-- **A handshake.** The child inherits Chan's environment, starts in the config directory, gets null stdin and inherited stderr, and must print one newline-terminated line on stdout within five seconds and 32 bounded lines: `CHAN_EXTENSION_V1={"url":"http://127.0.0.1:<port>/","token":"<unguessable>", ...}`. The URL must be plain HTTP on `127.0.0.1` or `localhost` (pinned to `127.0.0.1` after validation, so a mutable hosts file cannot re-target the proxy), with a usable port, no userinfo, and no pre-existing `t` query parameter. Optional fields: `singleton` and up to 32 static `commands`.
+- **A handshake.** The child inherits Chan's environment (see [The environment](#the-environment)), starts in the config directory, gets null stdin and inherited stderr, and must print one newline-terminated line on stdout within five seconds and 32 bounded lines: `CHAN_EXTENSION_V1={"url":"http://127.0.0.1:<port>/","token":"<unguessable>", ...}`. The URL must be plain HTTP on `127.0.0.1` or `localhost` (pinned to `127.0.0.1` after validation, so a mutable hosts file cannot re-target the proxy), with a usable port, no userinfo, and no pre-existing `t` query parameter. Optional fields: `singleton` and up to 32 static `commands`.
 - **A capability-path proxy.** Each ready extension gets a random 256-bit path under `/_chan/extensions/<id>/<capability>/...` inside the workspace tenant. The browser only ever sees that path: the loopback address and token stay process-private, and the proxy adds the token on the private upstream leg only. Because everything rides Chan's existing port, one route serves every deployment shape unchanged: standalone server, chan-desktop, a devserver, an SSH port forward, and the gateway tunnel.
 - **A sandboxed tab.** The iframe runs with `allow-forms allow-scripts` and without `allow-same-origin`, so extension scripts execute at an opaque origin: they cannot touch Chan's DOM, storage, or APIs even though their network requests share Chan's port. The only host channel is `postMessage`, and Chan accepts bridge messages only from that tab's exact `contentWindow`.
 
@@ -20,6 +20,23 @@ One word of warning about vocabulary: "capability" means three unrelated things 
 ## Lifecycle
 
 Chan discovers and starts extensions once per serving process, not once per workspace tenant. Successful children live until Chan shuts down, when each child's process group receives TERM and then KILL after a grace period. A child that exits is not respawned; fix it and restart the serving Chan process. Extension stderr is inherited, so an extension's own logs land in Chan's stderr stream, which is what you watch while developing one.
+
+## The environment
+
+An extension is spawned without a shell, so nothing reads a shell profile for it: it inherits the serving Chan process's environment verbatim, and a bare `command` and every helper the extension runs by name resolve through that process's `PATH`. A Chan started from a terminal passes on the terminal's `PATH`.
+
+A devserver running as the systemd user service on Linux (`chan devserver start`, `join` or `restart`, whose default backend there is systemd) runs with the `PATH` its unit records. The command that writes `~/.config/systemd/user/chan-devserver.service` copies the `PATH` of the shell it runs in into an `Environment="PATH=..."` line, keeping absolute entries only, the first occurrence of a repeated one, and none containing `"` or `\`. A later `chan devserver restart` from a shell with a different `PATH` rewrites the line, so after adding a directory an extension needs, run the restart from a shell that has it.
+
+Three service definitions record no `PATH`, so their extensions see the service manager's default: the distro packages' `/usr/lib/systemd/user/chan-devserver.service` when it is enabled with `systemctl --user` directly, the unit `packaging/sdme/chan-devserver-provision.sh` writes into an sdme container, and the launchd agent Chan writes on macOS, whose plist sets no environment beyond `CHAN_HOME`. For a systemd unit, and for any `PATH` the recorded copy should not decide, a drop-in sets it: run `systemctl --user edit chan-devserver.service`, add
+
+```ini
+[Service]
+Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin
+```
+
+and restart the service. systemd reads a drop-in after the unit, so its assignment wins over the unit's own, and Chan never writes or inspects drop-ins. An extension meant to run under the launchd agent names its helpers by absolute path.
+
+An extension that fails before its handshake is logged once, as `extension ignored`, with the whole cause. For a helper missing from `PATH` that is the closed stdout and the child's exit status, `reading handshake (child exit status: 127): extension stdout closed before the handshake marker`, where 127 is a shell's "command not found"; for a bare `command` missing from `PATH` it is the failed spawn, `spawning <command>: No such file or directory`.
 
 ## The host bridge
 

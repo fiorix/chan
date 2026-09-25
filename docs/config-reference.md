@@ -69,7 +69,7 @@ Each regular `.toml` file declares one local subprocess. The lowercase file stem
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `name` | `String` | required | Launcher row and tab title, 1 to 128 characters after trimming |
-| `command` | `String` | required | Executable to spawn; bare names use `PATH`, while `./name` resolves from the extension config directory |
+| `command` | `String` | required | Executable to spawn; bare names use the serving process's `PATH` (for the systemd devserver service, the one its unit records; see [the environment](extensions.md#the-environment)), while `./name` resolves from the extension config directory |
 | `args` | `String[]` | `[]` | Arguments passed verbatim after `command` |
 | `capabilities` | `String[]` | `[]` | Explicit host grants: `session-context` and/or `presentation`; unknown values reject the declaration |
 
@@ -80,7 +80,7 @@ args = []
 capabilities = []
 ```
 
-Chan discovers and starts extensions once per serving process, not once per workspace tenant. The subprocess inherits Chan's environment, starts with the config directory as its working directory, receives null stdin, and owns its stderr. It must print a newline-terminated handshake within five seconds and 32 bounded stdout lines:
+Chan discovers and starts extensions once per serving process, not once per workspace tenant. The subprocess inherits Chan's environment verbatim with no shell in between, so the helpers it runs by name resolve through the same `PATH` as `command`; it starts with the config directory as its working directory, receives null stdin, and owns its stderr. It must print a newline-terminated handshake within five seconds and 32 bounded stdout lines:
 
 ```text
 CHAN_EXTENSION_V1={"url":"http://127.0.0.1:49152/","token":"unguessable-secret","singleton":true,"commands":[{"id":"run","title":"Run"}]}
