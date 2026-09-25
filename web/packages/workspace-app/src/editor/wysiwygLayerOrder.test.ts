@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+// Build-time contract: the z-index order of Wysiwyg's negative-z paint layers; vitest drops component CSS.
 import wysiwyg from "./Wysiwyg.svelte?raw";
 
 // The WYSIWYG negative-z paint order is a shared stacking context
