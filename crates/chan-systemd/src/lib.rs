@@ -52,31 +52,30 @@ impl DevserverUnit {
     /// systemd starts a user service with the user manager's environment, not
     /// the environment of the shell that installed it, so without this line
     /// the devserver and every extension it spawns resolve commands through
-    /// the manager's default `PATH`. Entries are split on `:` because the
-    /// unit is a Linux file whatever host renders it. Only absolute entries
-    /// are kept (an empty or relative one would search the service's working
-    /// directory), the first occurrence of a repeated entry wins, and an entry
-    /// systemd's quoting cannot carry raw (a `"`, a `\`, a control character,
-    /// or bytes that are not UTF-8) is dropped rather than escaped, so the
-    /// line reads back byte for byte. `%` is written as `%%` so systemd's
+    /// the manager's default `PATH`. The entries are the ones
+    /// [`service_search_path`] keeps, and `%` is written as `%%` so systemd's
     /// specifier expansion hands the service the literal directory. Nothing
     /// is added when no entry survives.
     pub fn with_search_path(self, search_path: &OsStr) -> Self {
-        let search_path = search_path.to_string_lossy();
-        let mut entries: Vec<&str> = Vec::new();
-        for entry in search_path.split(':') {
-            if entry.starts_with('/')
-                && !entry.contains(['"', '\\', char::REPLACEMENT_CHARACTER])
-                && !entry.chars().any(char::is_control)
-                && !entries.contains(&entry)
-            {
-                entries.push(entry);
+        match service_search_path(search_path) {
+            Some(search_path) => {
+                self.with_environment(format!("PATH={}", search_path.replace('%', "%%")))
             }
+            None => self,
         }
-        if entries.is_empty() {
-            return self;
-        }
-        self.with_environment(format!("PATH={}", entries.join(":").replace('%', "%%")))
+    }
+
+    /// The value of the `PATH` assignment `installed` records, exactly as the
+    /// unit spells it (specifiers still escaped), or `None` when it has none.
+    ///
+    /// Rendering it back with [`with_environment`](Self::with_environment)
+    /// reproduces the line byte for byte, which is how a rewrite keeps the
+    /// `PATH` an earlier install recorded.
+    pub fn recorded_search_path(installed: &str) -> Option<&str> {
+        installed
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("Environment=\"PATH=")?.strip_suffix('"'))
     }
 
     /// Render the canonical systemd user unit.
@@ -182,6 +181,32 @@ impl DevserverUnit {
         unit.push_str("\n[Install]\nWantedBy=default.target\n");
         unit
     }
+}
+
+/// The `PATH` a supervised devserver definition records from `search_path`,
+/// the installing process's own, or `None` when no entry survives.
+///
+/// Entries are split on `:`, the separator of every platform that has a
+/// service manager chan drives. Only absolute entries are kept (an empty or
+/// relative one would search the service's working directory), the first
+/// occurrence of a repeated entry wins, and an entry a service definition
+/// cannot carry raw (a `"`, a `\`, a control character, or bytes that are
+/// not UTF-8) is dropped rather than escaped, so what a definition records
+/// reads back byte for byte. The value is unescaped: each definition escapes
+/// it for its own syntax.
+pub fn service_search_path(search_path: &OsStr) -> Option<String> {
+    let search_path = search_path.to_string_lossy();
+    let mut entries: Vec<&str> = Vec::new();
+    for entry in search_path.split(':') {
+        if entry.starts_with('/')
+            && !entry.contains(['"', '\\', char::REPLACEMENT_CHARACTER])
+            && !entry.chars().any(char::is_control)
+            && !entries.contains(&entry)
+        {
+            entries.push(entry);
+        }
+    }
+    (!entries.is_empty()).then(|| entries.join(":"))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -418,6 +443,27 @@ mod unit_tests {
                 .render(),
             bare.render()
         );
+    }
+
+    #[test]
+    fn devserver_unit_reads_back_the_search_path_it_recorded() {
+        let spec = || {
+            DevserverUnit::new("/usr/bin/chan devserver run")
+                .with_environment("CHAN_HOME=/tmp/chan")
+        };
+        let installed = spec()
+            .with_search_path(OsStr::new("/opt/100%/bin:/usr/bin"))
+            .render();
+        let recorded = DevserverUnit::recorded_search_path(&installed);
+        assert_eq!(recorded, Some("/opt/100%%/bin:/usr/bin"));
+        // Rendered back, the recorded value reproduces the unit byte for byte.
+        assert_eq!(
+            spec()
+                .with_environment(format!("PATH={}", recorded.unwrap()))
+                .render(),
+            installed
+        );
+        assert_eq!(DevserverUnit::recorded_search_path(&spec().render()), None);
     }
 
     #[test]
