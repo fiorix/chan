@@ -64,14 +64,26 @@ export function canvasProbeModule(): { default: (anchor: unknown, props: CanvasP
 export const graphServer = {
   view: { nodes: [], edges: [] } as GraphView,
   fs: { nodes: [], edges: [] } as { nodes: FsGraphNode[]; edges: FsGraphEdge[] },
+  /// When set, fsGraph pages a limited request into batches of this many
+  /// nodes, with a cursor, the way the server pages a large directory.
+  fsPageSize: null as number | null,
+  /// When set, graphStream waits on it before it delivers anything.
+  streamGate: null as Promise<void> | null,
+  /// When set, a paged fsGraph request (the spine seed) waits on it.
+  fsGate: null as Promise<void> | null,
   graphStreamCalls: 0,
-  fsGraphCalls: [] as Array<{ path: string; depth: number }>,
+  languageGraphCalls: 0,
+  fsGraphCalls: [] as Array<{ path: string; depth: number; cursor?: string }>,
 };
 
 export function resetGraphServer(): void {
   graphServer.view = { nodes: [], edges: [] };
   graphServer.fs = { nodes: [], edges: [] };
+  graphServer.fsPageSize = null;
+  graphServer.streamGate = null;
+  graphServer.fsGate = null;
   graphServer.graphStreamCalls = 0;
+  graphServer.languageGraphCalls = 0;
   graphServer.fsGraphCalls = [];
   canvas.props = null;
 }
@@ -117,15 +129,34 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         ) => {
           graphServer.graphStreamCalls += 1;
           await Promise.resolve();
+          if (graphServer.streamGate) await graphServer.streamGate;
           opts.onNodes?.(graphServer.view.nodes);
           opts.onEdges?.(graphServer.view.edges);
           return graphServer.view;
         },
       ),
       graph: vi.fn(async () => graphServer.view),
-      fsGraph: vi.fn(async (o: { path: string; depth: number }) => {
-        graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth });
-        return fsResponse(o.path, o.depth);
+      languageGraph: vi.fn(async () => {
+        graphServer.languageGraphCalls += 1;
+        return { nodes: [], edges: [], max_depth: 1 };
+      }),
+      fsGraph: vi.fn(async (o: { path: string; depth: number; limit?: number; cursor?: string }) => {
+        graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth, cursor: o.cursor });
+        if (o.limit !== undefined && graphServer.fsGate) await graphServer.fsGate;
+        const whole = fsResponse(o.path, o.depth);
+        const size = graphServer.fsPageSize;
+        if (size === null || o.limit === undefined) return whole;
+        const start = Number(o.cursor ?? 0);
+        const nodes = whole.nodes.slice(start, start + size);
+        const ids = new Set(nodes.map((n) => n.id));
+        const done = start + size >= whole.nodes.length;
+        return {
+          ...whole,
+          nodes,
+          edges: whole.edges.filter((e) => ids.has(e.target)),
+          cursor: done ? null : String(start + size),
+          done,
+        };
       }),
       health: vi.fn(async () => ({})),
       inspector: vi.fn(async () => null),
@@ -138,7 +169,8 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
 }
 
 /// The jsdom pieces a mounted graph reaches for: layout observers, animation
-/// frames that never run (the canvas stand-in paints nothing), and matchMedia.
+/// frames (the panel yields one between paged loads; the canvas stand-in
+/// paints nothing), and matchMedia.
 export function installGraphDom(): void {
   class TestResizeObserver {
     observe() {}
@@ -146,8 +178,9 @@ export function installGraphDom(): void {
     disconnect() {}
   }
   globalThis.ResizeObserver = TestResizeObserver as unknown as typeof ResizeObserver;
-  globalThis.requestAnimationFrame = (() => 0) as typeof requestAnimationFrame;
-  globalThis.cancelAnimationFrame = (() => undefined) as typeof cancelAnimationFrame;
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+    setTimeout(() => cb(performance.now()), 0)) as unknown as typeof requestAnimationFrame;
+  globalThis.cancelAnimationFrame = ((id: number) => clearTimeout(id)) as typeof cancelAnimationFrame;
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: (query: string) => ({
