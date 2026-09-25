@@ -298,6 +298,29 @@ describe("tab close confirmation", () => {
     isTerminalMoving(unbound.id);
   });
 
+  test("a mounted terminal moving out records its session though the close sink clears it", async () => {
+    // Every terminal tab stays mounted, so a real move runs TerminalTab's
+    // `closeTerminalForTab` as the close sink: it drains the move marker and
+    // clears the tab's session binding before closeTab removes the tab.
+    const moving = terminalTab({ id: "term-move", terminalSessionId: "sess-move" });
+    const pane = resetLayout([moving]);
+    const live = activePane().tabs[0];
+    if (live?.kind !== "terminal") throw new Error("expected the terminal tab");
+    const closeSink = vi.fn(() => {
+      if (isTerminalMoving(live.id)) clearTerminalSession(live);
+      return true;
+    });
+    const unregister = registerTerminalCloseSink(live.id, closeSink);
+
+    markTerminalMovingOut(live.id);
+    await closeTab(pane.id, live.id, { force: true });
+
+    unregister();
+    expect(closeSink).toHaveBeenCalledTimes(1);
+    expect(live.terminalSessionId).toBeUndefined();
+    expect(consumeLastMovedOutSession()).toEqual({ session: "sess-move" });
+  });
+
   test("draft tab close prompts for discard or save", async () => {
     const tab = fileTab({
       id: "draft-tab",
