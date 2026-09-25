@@ -1,68 +1,117 @@
-import { describe, expect, test } from "vitest";
-import app from "../App.svelte?raw";
-import overlay from "./CloseConfirmOverlay.svelte?raw";
-import globalCommands from "../state/commands/global.ts?raw";
-import shortcuts from "../state/shortcuts.ts?raw";
+// @vitest-environment jsdom
+//
+// Hide window buries this window in chan-desktop: its sessions stay warm and
+// it reopens from the launcher. It is the close prompt's Hide answer without
+// the prompt, so every way to reach it (Cmd/Ctrl+Shift+H, the launcher row,
+// the host command and the prompt's own Hide button) calls the one hide the
+// prompt uses. A browser has no such IPC, so there the chord is not claimed
+// and the launcher does not offer it.
 
-// The "Hide window" command (app.window.hide): the close-confirm overlay's
-// Hide answer without the prompt. Every surface -- the Mod+Shift+H chord, the
-// launcher row, and the chan:command bridge -- must funnel through the SAME
-// `hideWindowFromCloseConfirm()` bury IPC the overlay's Hide button uses, so
-// the command can never grow a parallel hide path. Desktop-only: the IPC is an
-// explicit no-op in a plain browser, so no web chord is minted and the
-// launcher entry is not offered there.
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("hide-window chord registry entry", () => {
-  test("app.window.hide is a native-only Mod+Shift+H App-group descriptor", () => {
-    expect(shortcuts).toMatch(
-      /id: "app\.window\.hide",\s*label: "Hide window",\s*native: "Mod\+Shift\+H",\s*group: "App",/,
-    );
+vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
+
+const host = vi.hoisted(() => ({ desktop: false }));
+
+vi.mock("./api/desktop", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api/desktop")>()),
+  isTauriDesktop: () => host.desktop,
+  hideWindowFromCloseConfirm: vi.fn(async () => {}),
+}));
+
+import { hideWindowFromCloseConfirm } from "./api/desktop";
+import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { fileTab, resetLayout } from "./__tests__/tabs";
+import { uiCloseConfirm } from "./state/closeConfirm.svelte";
+import { allCommands, type CommandContext } from "./state/commands";
+import { renderTable, shouldEscapeTerminal } from "./state/shortcuts";
+
+stubAppEnvironment();
+
+const HIDE_CHORD = { key: "H", code: "KeyH", ctrlKey: true, shiftKey: true } as const;
+
+beforeEach(async () => {
+  host.desktop = false;
+  await mountApp();
+  resetLayout([fileTab({ id: "a-file", path: "README.md", content: "hello", saved: "hello" })]);
+  await settle();
+  vi.clearAllMocks();
+});
+
+afterEach(async () => {
+  await unmountApp();
+  delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+});
+
+function launcherContext(): CommandContext {
+  return {
+    terminalOnly: false,
+    terminalControl: false,
+    caps: { workspace: true, files: true, drafts: true, terminal: true },
+    activeSurface: null,
+    activeSide: null,
+    activeTabId: null,
+    activeExtensionId: null,
+  };
+}
+
+describe("under chan-desktop", () => {
+  beforeEach(() => {
+    host.desktop = true;
+  });
+
+  test("Ctrl+Shift+H hides the window", async () => {
+    press(HIDE_CHORD);
+    await settle();
+    expect(hideWindowFromCloseConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  test("the host's hide command hides it", async () => {
+    hostCommand("app.window.hide");
+    await settle();
+    expect(hideWindowFromCloseConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  test("the launcher offers Hide window and runs the same hide", () => {
+    const hide = allCommands().find((command) => command.id === "app.window.hide");
+    expect(hide?.available(launcherContext())).toBe(true);
+    hide!.run();
+    expect(hideWindowFromCloseConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  test("the close prompt's Hide button hides it the same way", async () => {
+    const answer = uiCloseConfirm();
+    await settle();
+    document.querySelector<HTMLButtonElement>(".actions button.hide")!.click();
+
+    await expect(answer).resolves.toBe("hide");
+    expect(hideWindowFromCloseConfirm).toHaveBeenCalledTimes(1);
   });
 
   test("the chord escapes a focused terminal", () => {
-    expect(shortcuts).toMatch(
-      /id: "app\.window\.hide",[\s\S]*?escapeTerminal: true,/,
-    );
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    expect(shouldEscapeTerminal(new KeyboardEvent("keydown", HIDE_CHORD))).toBe(true);
   });
 });
 
-describe("App.svelte keymap binding", () => {
-  test("hideWindowFromCloseConfirm imported from api/desktop", () => {
-    expect(app).toMatch(
-      /import \{[^}]*\bhideWindowFromCloseConfirm\b[^}]*\} from "\.\/api\/desktop";/,
-    );
-  });
-
-  test("hide chord is desktop-gated, branches per-OS, honors overrides", () => {
-    // Gate: KeyH + isTauriDesktop. macOS: Cmd+Shift+H. Non-macOS:
-    // Ctrl+Shift+H. A user override supersedes the built-in chord.
-    expect(app).toMatch(
-      /shortcutLetter\(e\) === "H" && isTauriDesktop\(\)[\s\S]*?e\.metaKey && !e\.ctrlKey && !e\.altKey && e\.shiftKey[\s\S]*?e\.ctrlKey && !e\.metaKey && !e\.altKey && e\.shiftKey[\s\S]*?!builtInChordSuperseded\("app\.window\.hide"\)/,
-    );
-    expect(app).toMatch(
-      /if \(hideChord\) \{[\s\S]*?e\.preventDefault\(\);[\s\S]*?void hideWindowFromCloseConfirm\(\);/,
-    );
-  });
-
-  test("chan:command bridge routes app.window.hide through the same IPC", () => {
-    expect(app).toMatch(
-      /case "app\.window\.hide":[\s\S]{1,300}void hideWindowFromCloseConfirm\(\);[\s\S]{1,40}return;/,
-    );
+describe("in a browser", () => {
+  test("the chord is not claimed and the launcher does not offer it", async () => {
+    press(HIDE_CHORD);
+    await settle();
+    expect(hideWindowFromCloseConfirm).not.toHaveBeenCalled();
+    const hide = allCommands().find((command) => command.id === "app.window.hide");
+    expect(hide?.available(launcherContext())).toBe(false);
   });
 });
 
-describe("launcher catalog entry reuses the overlay's Hide action", () => {
-  test("the catalog run() dispatches hideWindowFromCloseConfirm()", () => {
-    expect(globalCommands).toMatch(
-      /id: "app\.window\.hide",[\s\S]*?available: \(\) => isTauriDesktop\(\),[\s\S]*?run: \(\) => void hideWindowFromCloseConfirm\(\),/,
-    );
-  });
-
-  test("the overlay's Hide button calls the identical function", () => {
-    // The parity pin: if the overlay's Hide handler is ever renamed or
-    // rerouted, the command must move with it (host ruling: one hide path).
-    expect(overlay).toMatch(
-      /function hide\(\): void \{\s*void hideWindowFromCloseConfirm\(\);/,
-    );
+describe("the shortcut table", () => {
+  test("lists the chord for the desktop only", () => {
+    expect(renderTable("native", "linux")).toMatch(/^Hide window +Ctrl\+Shift\+H /m);
+    expect(renderTable("native", "mac")).toMatch(/^Hide window +Cmd\+Shift\+H /m);
+    expect(renderTable("web", "linux")).not.toMatch(/^Hide window/m);
   });
 });
