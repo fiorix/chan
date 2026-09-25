@@ -224,3 +224,13 @@ describe("suggestions for a deep path", () => {
     expect(options).toContain("docs/watch/inbox/");
   });
 });
+
+describe("move mode", () => {
+  test("an existing directory is no target: the dialog asks for a new path", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "folder", mode: "move", sourcePath: "old" }, "docs");
+
+    expect(statusText(target)).toBe("✗ 'docs' is an existing directory; choose a new path");
+    expect(okButton(target).disabled).toBe(true);
+  });
+});
