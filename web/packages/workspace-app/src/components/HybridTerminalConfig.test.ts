@@ -1,47 +1,70 @@
-import { describe, expect, test } from "vitest";
-import source from "./HybridTerminalConfig.svelte?raw";
-import shell from "./HybridSurfaceConfigShell.svelte?raw";
-import terminalSource from "./settings/TerminalSection.svelte?raw";
+// @vitest-environment jsdom
+//
+// The Hybrid Terminal back card is the shared shell and nothing else: its
+// title and an OK that hands back to the pane. It renders no control and
+// sends no request. The terminal's settings live in Settings > Terminal,
+// which writes each one into the terminal preferences and keeps the others:
+// TERM and MCP discovery here (scrollback, mouse capture and the font are
+// driven in SettingsOverlay.render.test.ts and TerminalSection.font.test.ts).
 
-describe("HybridTerminalConfig back card", () => {
-  test("it is shell-only and routes OK through onDone", () => {
-    expect(source).toMatch(
-      /let \{ onDone \}: \{ onDone\?: \(\) => void \} = \$props\(\)/,
-    );
-    expect(source).toMatch(
-      /<HybridSurfaceConfigShell title="Hybrid Terminal" \{onDone\} \/>/,
-    );
-    expect(shell).toMatch(
-      /<button type="button" class="config-ok" onclick=\{\(\) => onDone\?\.\(\)\}>OK<\/button>/,
-    );
+import { flushSync, mount, unmount } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+import { recordRequests, stopRecordingRequests } from "../__tests__/fetch";
+import { closeSettings, openSettings, settingsPreferences } from "../__tests__/settings";
+import HybridTerminalConfig from "./HybridTerminalConfig.svelte";
+
+const TERMINAL = settingsPreferences().terminal as Record<string, unknown>;
+
+describe("the Hybrid Terminal back card", () => {
+  afterEach(() => {
+    stopRecordingRequests();
+    document.body.innerHTML = "";
   });
 
-  test("moved terminal controls no longer render or save from the card", () => {
-    expect(source).not.toMatch(/hybrid-terminal-/);
-    expect(source).not.toMatch(/fontDownloading/);
-    expect(source).not.toMatch(/setFontChoice/);
-    expect(source).not.toMatch(/updateGlobalConfigSerial/);
-    expect(source).not.toMatch(/api\./);
+  test("shows its title and no control, sends nothing, and hands back on OK", () => {
+    const requests = recordRequests();
+    const onDone = vi.fn();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const view = mount(HybridTerminalConfig, { target, props: { onDone } });
+    try {
+      flushSync();
+      const card = target.querySelector<HTMLElement>('[aria-label="Hybrid Terminal configuration"]')!;
+      expect(card.querySelector("h2")?.textContent).toBe("Hybrid Terminal");
+      expect(card.querySelectorAll("input, select, textarea")).toHaveLength(0);
+
+      card.querySelector<HTMLButtonElement>(".config-ok")!.click();
+      expect(onDone).toHaveBeenCalledTimes(1);
+      expect(requests).toEqual([]);
+    } finally {
+      unmount(view);
+    }
   });
 });
 
-describe("Settings owns terminal controls", () => {
-  test("Terminal section owns scrollback, TERM, MCP discovery, mouse capture, and font", () => {
-    expect(terminalSource).toMatch(/label="Scrollback"/);
-    expect(terminalSource).toMatch(/scrollback_mb: mb/);
-    expect(terminalSource).toMatch(/default_term: value/);
-    expect(terminalSource).toMatch(/mcp_env: on/);
-    expect(terminalSource).toMatch(/mouse_capture: on/);
-    expect(terminalSource).toMatch(/mouse_capture \?\? true/);
-    expect(terminalSource).toMatch(/aria-label="Terminal font"/);
+describe("Settings > Terminal", () => {
+  afterEach(closeSettings);
+
+  test("TERM writes terminal.default_term and keeps the other terminal settings", async () => {
+    const { target, writes } = await openSettings("Terminal");
+    const term = target.querySelector<HTMLInputElement>('input[aria-label="Terminal TERM value"]')!;
+    expect(term.value).toBe("xterm-256color");
+
+    term.value = "screen-256color";
+    term.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({ terminal: { ...TERMINAL, default_term: "screen-256color" } });
   });
 
-  test("terminal.font persists straight from the select", () => {
-    // The face ships in the SPA bundle, so there is no download leg to
-    // sequence the preference write behind.
-    expect(terminalSource).toMatch(/function selectFont\(/);
-    expect(terminalSource).toMatch(/<option value="source-code-pro">/);
-    expect(terminalSource).toMatch(/<option value="os-default">/);
-    expect(terminalSource).not.toMatch(/fontsSourceCodeProDownload/);
+  test("MCP discovery writes terminal.mcp_env and keeps the other terminal settings", async () => {
+    const { target, writes } = await openSettings("Terminal");
+    const toggle = [...target.querySelectorAll<HTMLLabelElement>("label.pill")]
+      .find((pill) => pill.textContent?.trim() === "Enable in new terminals")!
+      .querySelector("input")!;
+
+    toggle.click();
+    await vi.waitFor(() => expect(writes.at(-1)).toEqual({ terminal: { ...TERMINAL, mcp_env: true } }));
   });
 });
