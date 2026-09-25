@@ -15,6 +15,8 @@ import type { MockWorkspaceData } from "../demo/data";
 import { demoTransportSettled, installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
+import { standInForBoards } from "./excalidraw";
+import { resetLayout } from "./tabs";
 import "../state/commands/install";
 
 /// The browser surface jsdom lacks and the app reaches for: resize
@@ -95,6 +97,7 @@ const mounted: Array<Record<string, unknown>> = [];
 let timers: TimerTrack | null = null;
 
 /// Install the demo workspace, mount the app, and wait for its bootstrap.
+/// A canvas board the app opens loads the stand-ins in `./excalidraw`.
 /// `preferences` overrides the demo server's saved preferences. Pair with
 /// `unmountApp` in `afterEach`. Timers the app arms from here
 /// on are tracked and released at unmount, so mount with real timers
@@ -104,6 +107,7 @@ export async function mountApp(
   data: MockWorkspaceData = demoData(),
   opts: { preferences?: Partial<Preferences> } = {},
 ): Promise<HTMLElement> {
+  await standInForBoards();
   timers ??= trackTimers();
   installDemoWorkspace(data, opts);
   const target = document.createElement("div");
@@ -123,13 +127,16 @@ export async function settle(): Promise<void> {
 }
 
 /// Tear down every app `mountApp` mounted, with the demo transport's
-/// teardown, and clear the document.
+/// teardown, clear the document, and put the layout back to one empty pane:
+/// the layout is module state, and the next mount would otherwise open this
+/// test's tabs again before its own test runs.
 export async function unmountApp(): Promise<void> {
   try {
     await teardownDemoApp({ mounted, timers });
   } finally {
     timers = null;
     document.body.innerHTML = "";
+    resetLayout();
   }
 }
 

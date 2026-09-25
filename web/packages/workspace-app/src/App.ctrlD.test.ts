@@ -16,13 +16,9 @@ vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit)
 vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
 vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
-// A canvas board opens in this file.
-vi.mock("@excalidraw/excalidraw", async () => (await import("./__tests__/excalidraw")).excalidraw);
-vi.mock("react", async () => (await import("./__tests__/excalidraw")).react);
-vi.mock("react-dom/client", async () => (await import("./__tests__/excalidraw")).reactDom);
 
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
-import { reactDom } from "./__tests__/excalidraw";
+import { boardLoaded } from "./__tests__/excalidraw";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { confirmState } from "./state/confirm.svelte";
 import { assignOverride, hydrateOverrides } from "./state/keymapOverrides.svelte";
@@ -181,7 +177,7 @@ describe("Ctrl+D is left alone", () => {
 
   test("on a canvas board, which duplicates with it", async () => {
     await seed(fileTab({ id: "board", path: "board.excalidraw", mode: "canvas", content: "{}", saved: "{}" }));
-    await vi.waitFor(() => expect(reactDom.createRoot).toHaveBeenCalled());
+    await boardLoaded();
 
     const event = press(CTRL_D);
     await settle();

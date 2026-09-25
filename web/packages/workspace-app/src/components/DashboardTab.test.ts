@@ -21,14 +21,10 @@ vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fit
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).search);
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serialize);
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinks);
-// A canvas board opens in this file.
-vi.mock("@excalidraw/excalidraw", async () => (await import("../__tests__/excalidraw")).excalidraw);
-vi.mock("react", async () => (await import("../__tests__/excalidraw")).react);
-vi.mock("react-dom/client", async () => (await import("../__tests__/excalidraw")).reactDom);
 
 import { api } from "../api/client";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
-import { reactDom } from "../__tests__/excalidraw";
+import { boardLoaded } from "../__tests__/excalidraw";
 import { fileTab, resetLayout } from "../__tests__/tabs";
 import { openTabMenu } from "../state/tabMenu.svelte";
 import {
@@ -322,6 +318,6 @@ describe("the empty pane", () => {
 
     await run("New diagram");
     await vi.waitFor(() => expect(createDiagram).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(reactDom.createRoot).toHaveBeenCalled());
+    await boardLoaded();
   });
 });

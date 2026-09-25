@@ -14,10 +14,6 @@ vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit)
 vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
 vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
-// A canvas board opens in this file.
-vi.mock("@excalidraw/excalidraw", async () => (await import("./__tests__/excalidraw")).excalidraw);
-vi.mock("react", async () => (await import("./__tests__/excalidraw")).react);
-vi.mock("react-dom/client", async () => (await import("./__tests__/excalidraw")).reactDom);
 
 vi.mock("./state/store.svelte", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./state/store.svelte")>();
@@ -27,7 +23,7 @@ vi.mock("./state/store.svelte", async (importOriginal) => {
 import { api } from "./api/client";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
-import { reactDom } from "./__tests__/excalidraw";
+import { boardLoaded } from "./__tests__/excalidraw";
 import { fileTab, resetLayout } from "./__tests__/tabs";
 import { allCommands, type CommandContext } from "./state/commands";
 import { SHORTCUTS } from "./state/shortcuts";
@@ -203,7 +199,7 @@ describe("drafts staged in Hybrid Nav", () => {
     expect(createDraft).not.toHaveBeenCalled();
     expect(fileTabsIn("pane-test")[0]).toMatchObject({ path: "board.excalidraw" });
     expect(fileTabsIn("pane-test")[0].caret).toBeUndefined();
-    await vi.waitFor(() => expect(reactDom.createRoot).toHaveBeenCalled());
+    await boardLoaded();
   });
 
   test("Escape drops them, creating nothing", async () => {
