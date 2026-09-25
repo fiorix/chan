@@ -4777,15 +4777,33 @@ fn devserver_addr_from_persisted_args(text: &str) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
-/// The value immediately following `flag` in `text`, read up to the next
+/// The value immediately following `flag` in the command a persisted unit or
+/// plist runs (see [`persisted_command_line`]), read up to the next
 /// whitespace or `<` (the XML element close in a plist).
 fn persisted_flag_value<'a>(text: &'a str, flag: &str) -> Option<&'a str> {
-    let start = text.find(flag)? + flag.len();
-    let rest = &text[start..];
+    let command = persisted_command_line(text)?;
+    let start = command.find(flag)? + flag.len();
+    let rest = &command[start..];
     let end = rest
         .find(|c: char| c.is_whitespace() || c == '<')
         .unwrap_or(rest.len());
     Some(&rest[..end])
+}
+
+/// The command a persisted definition runs: a unit's `ExecStart=` line, or a
+/// plist's `ProgramArguments` array. Flags are read from here alone because a
+/// definition's environment (a recorded PATH, CHAN_HOME) can hold the same
+/// text, and a unit renders its `Environment=` lines before `ExecStart=`.
+fn persisted_command_line(text: &str) -> Option<&str> {
+    if let Some(exec_start) = text
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("ExecStart="))
+    {
+        return Some(exec_start);
+    }
+    let (_, arguments) = text.split_once("<key>ProgramArguments</key>")?;
+    let (_, array) = arguments.split_once("<array>")?;
+    array.split_once("</array>").map(|(array, _)| array)
 }
 
 /// The persisted systemd unit contents, if the file exists.
@@ -11573,18 +11591,21 @@ mod tests {
         // Old-form ExecStart (no run verb): units installed by an older chan must still parse.
         assert_eq!(
             devserver_addr_from_persisted_args(
-                "/usr/bin/chan devserver --bind=0.0.0.0 --port=9000"
+                "[Service]\nExecStart=/usr/bin/chan devserver --bind=0.0.0.0 --port=9000\n"
             ),
             Some("0.0.0.0:9000".parse().unwrap())
         );
         assert_eq!(
             devserver_addr_from_persisted_args(
-                "<string>--bind=192.168.1.5</string>\n<string>--port=8080</string>"
+                "<key>ProgramArguments</key>\n<array>\n<string>--bind=192.168.1.5</string>\n\
+                 <string>--port=8080</string>\n</array>"
             ),
             Some("192.168.1.5:8080".parse().unwrap())
         );
         assert_eq!(
-            devserver_addr_from_persisted_args("/usr/bin/chan devserver --bind=0.0.0.0"),
+            devserver_addr_from_persisted_args(
+                "[Service]\nExecStart=/usr/bin/chan devserver --bind=0.0.0.0\n"
+            ),
             None
         );
     }
