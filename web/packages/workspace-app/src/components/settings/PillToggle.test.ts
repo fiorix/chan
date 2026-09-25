@@ -1,123 +1,115 @@
-import { describe, expect, test } from "vitest";
-import settingField from "./settings/SettingField.svelte?raw";
-import pillToggle from "./settings/PillToggle.svelte?raw";
-import pillRadio from "./settings/PillRadio.svelte?raw";
-import reportsControl from "./settings/workspace/ReportsControl.svelte?raw";
-import semanticControl from "./settings/workspace/SemanticControl.svelte?raw";
-
-// Checkbox and radio pills carry the same selected-state contract: shape,
-// spacing, neutral border, and checked background stay, and the selected
-// state does not switch the outer border to blue. That contract used to be
-// pinned at four identical `.pill.on` copies (PillToggle, PillRadio,
-// ReportsControl, SemanticControl); the v0.89.0 settings reorganisation
-// collapsed them into ONE block, living in SettingField, which every pill
-// user nests inside. These pins now assert both halves of that: the one
-// block keeps the contract, and the copies stay gone.
+// @vitest-environment jsdom
 //
-// Pinned against source rather than computed style. The vitest block in
-// vite.config.ts runs jsdom with no `css` option and the svelte plugin emits
-// component CSS externally, so a component <style> block never reaches a
-// mounted node. getComputedStyle would report an empty border whether or not
-// the rule exists, which is a check that cannot go red.
+// A setting's on/off control is a pill: a label wrapping a native checkbox,
+// marked on while checked, reporting each toggle, and disabled while its write
+// is in flight. A choice among values is a group of pills wrapping native
+// radios, the chosen one marked on. The workspace's chan-reports switch is
+// such a pill, held while it writes. (The pills' look is one block in
+// SettingField's stylesheet, which jsdom does not apply.)
 
-/// One CSS declaration block inside a :global(...) wrapper, so an assertion
-/// can neither be satisfied nor defeated by an unrelated declaration
-/// elsewhere in the same component. The selector may be one of a
-/// comma-separated list sharing the block.
-function globalRuleBlock(source: string, selector: string): string {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = source.match(
-    new RegExp(`:global\\(${escaped}\\)[^{]*\\{[\\s\\S]*?\\}`),
-  );
-  if (match === null) {
-    throw new Error(`no \`:global(${selector})\` rule in this component`);
-  }
-  return match[0];
+import { flushSync, mount, tick, unmount, type Component } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+import { api } from "../../api/client";
+import PillRadio from "./PillRadio.svelte";
+import PillToggle from "./PillToggle.svelte";
+import ReportsControl from "./workspace/ReportsControl.svelte";
+
+const mounted: Array<Record<string, unknown>> = [];
+
+afterEach(() => {
+  for (const view of mounted.splice(0)) unmount(view);
+  document.body.innerHTML = "";
+  vi.restoreAllMocks();
+});
+
+function render<Props extends Record<string, any>>(component: Component<Props>, props: Props): HTMLElement {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(component, { target, props }) as Record<string, unknown>);
+  flushSync();
+  return target;
 }
 
-describe("the one .pill block carries the contract", () => {
-  test("exactly one .pill.on block survives under components/settings/", () => {
-    // The consolidation acceptance line: the four copies collapsed into
-    // SettingField, so a second declaration anywhere is a fork regrowing.
-    const sources = [settingField, pillToggle, pillRadio, reportsControl, semanticControl];
-    const declarations = sources.flatMap((s) => s.match(/\.pill\.on[)\s]*\{/g) ?? []);
-    expect(declarations).toHaveLength(1);
-    expect(settingField).toMatch(/\.pill\.on/);
+describe("PillToggle", () => {
+  test("is a label wrapping a checkbox, marked on while checked", () => {
+    const off = render(PillToggle, { checked: false, label: "Strip on save", ontoggle: () => {} });
+    const on = render(PillToggle, { checked: true, label: "Strip on save", ontoggle: () => {} });
+
+    expect(off.querySelector("label.pill > input[type=checkbox]")).not.toBeNull();
+    expect(off.querySelector("label.pill")!.classList.contains("on")).toBe(false);
+    expect(on.querySelector("label.pill")!.classList.contains("on")).toBe(true);
+    expect(on.querySelector("label.pill")!.textContent?.trim()).toBe("Strip on save");
   });
 
-  test(".pill.on sets no border-color at all", () => {
-    // Not just `var(--link)`: the checked pill falls back to the base
-    // rule's neutral border, so any border-color here is a regression.
-    expect(globalRuleBlock(settingField, ".pill.on")).not.toMatch(/border-color:/);
+  test("reports each toggle", () => {
+    const ontoggle = vi.fn();
+    const target = render(PillToggle, { checked: false, label: "Strip on save", ontoggle });
+
+    target.querySelector<HTMLInputElement>("input")!.click();
+
+    expect(ontoggle).toHaveBeenCalledWith(true);
   });
 
-  test(".pill.on keeps the checked background", () => {
-    expect(globalRuleBlock(settingField, ".pill.on")).toMatch(
-      /background: var\(--hover-bg\);/,
-    );
-  });
+  test("disables its checkbox while disabled", () => {
+    const target = render(PillToggle, { checked: false, label: "x", disabled: true, ontoggle: () => {} });
 
-  test(".pill keeps shape, spacing, and the neutral border", () => {
-    const base = globalRuleBlock(settingField, ".pill");
-    expect(base).toMatch(/padding: 4px 10px;/);
-    expect(base).toMatch(/border: 1px solid var\(--btn-border\);/);
-    expect(base).toMatch(/border-radius: 4px;/);
-    expect(base).toMatch(/background: var\(--btn-bg\);/);
-  });
-
-  test("the hover border rule survives", () => {
-    expect(globalRuleBlock(settingField, ".pill:hover")).toMatch(
-      /border-color: var\(--btn-hover\);/,
-    );
-  });
-
-  test("the native input reset survives for checkbox and radio", () => {
-    // Zeroes the input's own chrome only; the native control keeps its
-    // checked rendering, and the wrapping label keeps focus and Space.
-    expect(globalRuleBlock(settingField, '.pill input[type="checkbox"]')).toMatch(
-      /border: 0;/,
-    );
-    expect(globalRuleBlock(settingField, '.pill input[type="radio"]')).toMatch(
-      /border: 0;/,
-    );
-  });
-
-  test("the disabled pill rule survives", () => {
-    // Both workspace toggles gate a disabled pill during their busy write.
-    expect(globalRuleBlock(settingField, ".pill:has(input:disabled)")).toMatch(
-      /cursor: not-allowed;[\s\S]*?opacity: 0\.7;/,
-    );
+    expect(target.querySelector<HTMLInputElement>("input")!.disabled).toBe(true);
   });
 });
 
-describe("the pill components render bare markup and the copies stay gone", () => {
-  test("PillToggle: a label.pill still wraps a native checkbox", () => {
-    // The item cannot be satisfied by dropping the pill chrome instead.
-    expect(pillToggle).toMatch(/<label class="pill" class:on=/);
-    expect(pillToggle).toMatch(/type="checkbox"/);
-    // PillToggle carries the disabled prop the copies implemented.
-    expect(pillToggle).toMatch(/disabled\?: boolean/);
+describe("PillRadio", () => {
+  const options = [
+    { value: "standard", label: "Standard" },
+    { value: "compact", label: "Compact" },
+  ] as const;
+
+  test("is a radio group of pills, the chosen one marked on", () => {
+    const target = render(PillRadio, {
+      value: "standard",
+      options,
+      name: "spacing",
+      ariaLabel: "Line spacing",
+      onselect: () => {},
+    });
+
+    const group = target.querySelector('[role="radiogroup"][aria-label="Line spacing"]')!;
+    const pills = [...group.querySelectorAll("label.pill")];
+    expect(pills.map((pill) => [pill.textContent?.trim(), pill.classList.contains("on")])).toEqual([
+      ["Standard", true],
+      ["Compact", false],
+    ]);
+    expect(group.querySelectorAll('label.pill > input[type="radio"][name="spacing"]')).toHaveLength(2);
+    expect(group.querySelector('input[type="checkbox"]')).toBeNull();
   });
 
-  test("PillRadio: a label.pill still wraps a native radio", () => {
-    expect(pillRadio).toMatch(/<label class="pill" class:on=/);
-    expect(pillRadio).toMatch(/type="radio"/);
-    expect(pillRadio).not.toMatch(/type="checkbox"/);
-  });
+  test("reports the chosen value", () => {
+    const onselect = vi.fn();
+    const target = render(PillRadio, { value: "standard", options, name: "spacing", ariaLabel: "x", onselect });
 
-  test("the former copies declare no pill CSS of their own", () => {
-    for (const [name, source] of [
-      ["PillToggle", pillToggle],
-      ["PillRadio", pillRadio],
-      ["ReportsControl", reportsControl],
-      ["SemanticControl", semanticControl],
-    ] as const) {
-      expect(source, `${name} must not redeclare .pill`).not.toMatch(/\.pill \{/);
-    }
-  });
+    target.querySelector<HTMLInputElement>('input[value="compact"]')!.click();
 
-  test("the workspace toggles are PillToggle call sites", () => {
-    expect(reportsControl).toMatch(/<PillToggle/);
-    expect(semanticControl).toMatch(/<PillToggle/);
+    expect(onselect).toHaveBeenCalledWith("compact");
+  });
+});
+
+describe("the chan-reports switch", () => {
+  test("is a pill, held while it writes and on once the write lands", async () => {
+    vi.spyOn(api, "reportsState").mockResolvedValue({ enabled: false });
+    let land!: () => void;
+    vi.spyOn(api, "reportsEnable").mockImplementation(
+      () => new Promise((resolve) => (land = () => resolve({ enabled: true }))),
+    );
+    const target = render(ReportsControl, {});
+    await vi.waitFor(() => expect(target.querySelector("label.pill > input[type=checkbox]")).not.toBeNull());
+    const input = target.querySelector<HTMLInputElement>("label.pill > input")!;
+
+    input.click();
+    await tick();
+    expect(target.querySelector<HTMLInputElement>("label.pill > input")!.disabled).toBe(true);
+
+    land();
+    await vi.waitFor(() => expect(target.querySelector("label.pill")!.classList.contains("on")).toBe(true));
+    expect(target.querySelector<HTMLInputElement>("label.pill > input")!.disabled).toBe(false);
   });
 });
