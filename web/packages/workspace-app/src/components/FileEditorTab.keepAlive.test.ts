@@ -5,7 +5,7 @@
 // compares the nodes). Only the live tab on the pane's visible side is
 // active, and Hybrid Nav makes none active; an editor that is not active is
 // hidden from assistive tech. Only the active editor of the focused pane
-// takes the caret.
+// takes the caret. The editors run their view plugins without a crash.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -74,6 +74,18 @@ describe("a file tab's editor", () => {
     await settle();
     expect(editorOf("a.md")).toBe(editor);
     expect(editor.getAttribute("aria-hidden")).toBe("false");
+  });
+
+  test("runs its view plugins without a crash", async () => {
+    const errors = vi.spyOn(console, "error");
+
+    // A tab no other test opens, so its editor is built after the spy.
+    resetLayout([fileTab({ id: "plugins", path: "a.md", content: "alpha", saved: "alpha" })]);
+    await settle();
+    await vi.waitFor(() => expect(document.querySelectorAll(".editor-tab .cm-content")).toHaveLength(1));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    expect(errors.mock.calls.filter(([first]) => String(first).startsWith("CodeMirror plugin crashed"))).toEqual([]);
   });
 
   test("takes the caret only as the active tab of the focused pane", async () => {

@@ -18,25 +18,46 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 
 /// The browser surface jsdom lacks and the app reaches for: resize
-/// observation, animation frames (run synchronously), a canvas context, font
-/// loading, media queries, and scrolling an element into view.
+/// observation, animation frames, a canvas with no context (the answer a
+/// browser without one gives), text-range geometry for CodeMirror's measure,
+/// font loading, media queries, and scrolling an element into view.
 export function stubAppEnvironment(): void {
   globalThis.ResizeObserver = class {
     observe() {}
     unobserve() {}
     disconnect() {}
   } as unknown as typeof ResizeObserver;
+  // A frame runs one task after it is requested, as in a browser, never
+  // inside the call that asked for it: CodeMirror's layer views request a
+  // measure while their EditorView is still being built, and a measure run
+  // then reads the view before its DOM observer exists. The task comes from
+  // the setTimeout in place now, so frames keep running under fake timers a
+  // test installs later, where jsdom's own frame interval would wait for the
+  // test to advance the clock.
+  const nextTask = globalThis.setTimeout;
+  const frames = new Map<number, FrameRequestCallback>();
+  let lastFrame = 0;
   globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
-    callback(0);
-    return 0;
+    const id = ++lastFrame;
+    frames.set(id, callback);
+    nextTask(() => {
+      const run = frames.get(id);
+      frames.delete(id);
+      run?.(performance.now());
+    }, 0);
+    return id;
   }) as typeof requestAnimationFrame;
-  HTMLCanvasElement.prototype.getContext = (() =>
-    ({})) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  globalThis.cancelAnimationFrame = ((id: number) => {
+    frames.delete(id);
+  }) as typeof cancelAnimationFrame;
+  HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext;
   Object.defineProperty(document, "fonts", {
     configurable: true,
     value: { load: vi.fn(async () => [{}]), ready: Promise.resolve() },
   });
   Element.prototype.scrollIntoView = () => {};
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: (query: string) => ({
