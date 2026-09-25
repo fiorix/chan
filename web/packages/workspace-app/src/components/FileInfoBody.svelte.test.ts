@@ -1,171 +1,422 @@
-import { describe, expect, test } from "vitest";
-import fileInfo from "./FileInfoBody.svelte?raw";
+// @vitest-environment jsdom
+//
+// FileInfoBody, mounted. The inspector reads its entry from the tree store and
+// its reports from the api client; both are stubbed here so each test hands the
+// component one entry and reads what it renders and what it calls.
 
-// The inspector renders one consistent layout on every surface:
-//   header -> actions section -> lazy content (report / refs).
-// The actions are a single PILL (primary action) plus a caret that drops
-// the secondary actions, chosen per item category (directory / media /
-// editable file / binary) and per surface (the editor "Show Details"
-// inspector has no onOpen, so its file pill is "Show file"). A full-path
-// toggle sits above the pill. These source pins lock that contract so the
-// layout can't silently drift.
+import { flushSync, mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("shared actions section under the filename", () => {
-  test("defines a reusable actionsSection snippet driven by actionModel", () => {
-    expect(fileInfo).toMatch(/\{#snippet actionsSection\(\)\}/);
-    expect(fileInfo).toMatch(/<div class="actions-section">/);
-    // The category logic lives in the script (actionModel), not inline.
-    expect(fileInfo).toMatch(/const actionModel = \$derived\.by</);
+import FileInfoBody from "./FileInfoBody.svelte";
+import { classifyFileActions } from "../state/fileActions";
+import { terminalFromHereTarget } from "../terminal/fromHere";
+import type { TreeEntry } from "../api/types";
+
+type Entry = {
+  path: string;
+  is_dir: boolean;
+  kind?: TreeEntry["kind"];
+  size: number;
+  mtime: number | null;
+};
+
+const h = vi.hoisted(() => ({
+  entries: [] as Entry[],
+  caps: { workspace: true, files: true, drafts: true, terminal: true },
+  draftsDir: ".Drafts",
+}));
+
+vi.mock("../state/windowCaps", () => ({ windowCaps: h.caps }));
+
+vi.mock("../api/client", () => ({
+  api: {
+    inspector: vi.fn(async () => null),
+    reportDir: vi.fn(async () => null),
+    reportPrefix: vi.fn(async () => null),
+    reportFileStream: vi.fn(async () => null),
+    graphStream: vi.fn(async () => null),
+    backlinksStream: vi.fn(async () => {}),
+  },
+  withTokenQuery: (u: string) => `${u}?token=inspector-test`,
+}));
+
+vi.mock("../state/store.svelte", () => ({
+  copyTextToClipboard: vi.fn(async () => {}),
+  draftsDir: () => h.draftsDir,
+  isDraftPath: (p: string) => p === h.draftsDir || p.startsWith(`${h.draftsDir}/`),
+  setTransientStatus: vi.fn(),
+  ui: { status: "", statusKind: "transient" },
+  workspace: { info: { root: "/home/me/ws/", label: "ws" } },
+  fileOps: {
+    downloadPathWithProgress: vi.fn(),
+    uploadFilesTo: vi.fn(async () => {}),
+    replaceFileAt: vi.fn(async () => {}),
+  },
+  loadTreeDir: vi.fn(async () => {}),
+  openGraphAtNode: vi.fn(),
+  openGraphForContact: vi.fn(),
+  openGraphForLanguage: vi.fn(),
+  openGraphForMention: vi.fn(),
+  openGraphForTag: vi.fn(),
+  revealPathInBrowser: vi.fn(),
+  tree: {
+    get entries() {
+      return h.entries;
+    },
+    loadingDirs: {},
+    loadedDirs: {},
+    dirErrors: {},
+  },
+}));
+
+vi.mock("../state/tabs.svelte", () => ({ openTerminalInActivePane: vi.fn() }));
+vi.mock("../state/mediaOpen", () => ({
+  openMediaViewer: vi.fn(() => true),
+  dirImageSet: () => [],
+}));
+vi.mock("../state/imageZoom", () => ({ openImageZoom: vi.fn() }));
+vi.mock("../state/videoViewer", () => ({ openVideoViewer: vi.fn() }));
+vi.mock("../state/fileActionExecutors", () => ({ exportPathToPdf: vi.fn(async () => {}) }));
+
+import { fileOps, revealPathInBrowser } from "../state/store.svelte";
+import { openTerminalInActivePane } from "../state/tabs.svelte";
+import { openMediaViewer } from "../state/mediaOpen";
+import { exportPathToPdf } from "../state/fileActionExecutors";
+
+type Props = {
+  path: string | null;
+  onOpen?: () => void;
+  onReveal?: () => void;
+  onSetAsScope?: () => void;
+  onNewTerminal?: () => void;
+  onContactNavigate?: (path: string) => void;
+  showRefs?: boolean;
+  allowUpload?: boolean;
+};
+
+const mounted: Array<Record<string, unknown>> = [];
+
+function file(path: string, kind: TreeEntry["kind"] = "document"): Entry {
+  return { path, is_dir: false, kind, size: 2048, mtime: 1_700_000_000 };
+}
+
+function dir(path: string): Entry {
+  return { path, is_dir: true, size: 0, mtime: null };
+}
+
+async function render(props: Props): Promise<HTMLElement> {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(FileInfoBody, { target, props }));
+  await settle();
+  return target;
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) {
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+function pill(target: HTMLElement): HTMLButtonElement {
+  const main = target.querySelector<HTMLButtonElement>(".pill-main");
+  if (!main) throw new Error("no action pill rendered");
+  return main;
+}
+
+function caret(target: HTMLElement): HTMLButtonElement | null {
+  return target.querySelector<HTMLButtonElement>(".pill-caret");
+}
+
+/// Opens the caret menu and returns its item labels, in order.
+function openMenu(target: HTMLElement): string[] {
+  const c = caret(target);
+  if (!c) throw new Error("no caret rendered");
+  c.click();
+  flushSync();
+  return [...target.querySelectorAll(".action-menu [role='menuitem']")].map(
+    (el) => el.textContent?.trim() ?? "",
+  );
+}
+
+function menuItem(target: HTMLElement, label: string): HTMLButtonElement {
+  const item = [...target.querySelectorAll<HTMLButtonElement>(".action-menu-item")].find(
+    (el) => el.textContent?.trim() === label,
+  );
+  if (!item) throw new Error(`no menu item ${label}`);
+  return item;
+}
+
+beforeEach(() => {
+  h.entries = [];
+  h.caps.workspace = true;
+  h.draftsDir = ".Drafts";
+});
+
+afterEach(() => {
+  for (const app of mounted.splice(0)) unmount(app);
+  document.body.innerHTML = "";
+  vi.clearAllMocks();
+});
+
+describe("the actions section", () => {
+  test("a directory offers Open with upload, download, terminal and graph behind the caret", async () => {
+    h.entries = [dir("docs"), file("docs/a.md")];
+    const onSetAsScope = vi.fn();
+    const target = await render({ path: "docs", onSetAsScope });
+
+    expect(pill(target).textContent?.trim()).toBe("Open");
+    expect(target.querySelector(".action-menu"), "the menu starts closed").toBeNull();
+    expect(openMenu(target)).toEqual([
+      "Upload file here",
+      "Download tarball",
+      "New terminal here",
+      "Graph from here",
+    ]);
+    expect(caret(target)?.getAttribute("aria-expanded")).toBe("true");
   });
 
-  test("actions section carries the full-path toggle + revealed path row", () => {
-    expect(fileInfo).toMatch(
-      /class="path-toggle"[\s\S]*?onclick=\{\(\) => \(showFullPath = !showFullPath\)\}/,
-    );
-    expect(fileInfo).toMatch(
-      /\{#if showFullPath\}[\s\S]*?<div class="path-row mono"/,
-    );
-    // The toggle state resets when the selection changes.
-    expect(fileInfo).toMatch(/showFullPath = false;/);
+  test("picking a menu item runs it and closes the menu", async () => {
+    h.entries = [dir("docs")];
+    const onSetAsScope = vi.fn();
+    const target = await render({ path: "docs", onSetAsScope });
+
+    openMenu(target);
+    menuItem(target, "Download tarball").click();
+    flushSync();
+
+    expect(fileOps.downloadPathWithProgress).toHaveBeenCalledWith("docs", true);
+    expect(target.querySelector(".action-menu")).toBeNull();
+
+    openMenu(target);
+    menuItem(target, "Graph from here").click();
+    expect(onSetAsScope).toHaveBeenCalledTimes(1);
   });
 
-  test("renders a pill (primary) + caret that toggles the dropdown", () => {
-    expect(fileInfo).toMatch(
-      /<button[\s\S]*?class="pill-main"[\s\S]*?onclick=\{actionModel\.main\.onClick\}[\s\S]*?\{actionModel\.main\.label\}/,
-    );
-    // Caret only renders when there are secondary actions, and toggles the menu.
-    expect(fileInfo).toMatch(
-      /\{#if actionModel\.secondary\.length > 0\}[\s\S]*?class="pill-caret"[\s\S]*?onclick=\{\(\) => \(menuOpen = !menuOpen\)\}/,
+  test("Escape and a click outside close the menu", async () => {
+    h.entries = [dir("docs")];
+    const target = await render({ path: "docs" });
+
+    openMenu(target);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    flushSync();
+    expect(target.querySelector(".action-menu")).toBeNull();
+
+    openMenu(target);
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    flushSync();
+    expect(target.querySelector(".action-menu")).toBeNull();
+  });
+
+  test("a directory's Open reveals it in a new File Browser tab unless the host reveals it", async () => {
+    h.entries = [dir("docs")];
+    const first = await render({ path: "docs" });
+    pill(first).click();
+    expect(revealPathInBrowser).toHaveBeenCalledWith("docs", {
+      enter: true,
+      inspectorOpen: true,
+    });
+
+    vi.clearAllMocks();
+    const onReveal = vi.fn();
+    const second = await render({ path: "docs", onReveal });
+    pill(second).click();
+    expect(onReveal).toHaveBeenCalledTimes(1);
+    expect(revealPathInBrowser).not.toHaveBeenCalled();
+  });
+
+  test("an editable file opens through the host, and markdown exports to PDF", async () => {
+    h.entries = [file("notes/plan.md")];
+    const onOpen = vi.fn();
+    const target = await render({ path: "notes/plan.md", onOpen });
+
+    expect(pill(target).textContent?.trim()).toBe("Open");
+    pill(target).click();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    expect(openMenu(target)).toEqual(["Download file", "New terminal here", "Export to PDF"]);
+    menuItem(target, "Export to PDF").click();
+    expect(exportPathToPdf).toHaveBeenCalledWith("notes/plan.md");
+  });
+
+  test("with no Open the editor's details panel leads with Show file", async () => {
+    h.entries = [file("notes/plan.md")];
+    const onReveal = vi.fn();
+    const target = await render({ path: "notes/plan.md", onReveal });
+
+    expect(pill(target).textContent?.trim()).toBe("Show file");
+    pill(target).click();
+    expect(onReveal).toHaveBeenCalledTimes(1);
+  });
+
+  test("media keeps a per-kind label and opens through the shared media router", async () => {
+    const cases: Array<[string, string]> = [
+      ["pics/cat.png", "View / Zoom"],
+      ["clips/intro.mp4", "View Video"],
+      ["sound/theme.mp3", "View Audio"],
+      ["papers/spec.pdf", "View PDF"],
+    ];
+    h.entries = cases.map(([p]) => file(p, "media"));
+    for (const [path, label] of cases) {
+      const target = await render({ path });
+      expect(pill(target).textContent?.trim(), path).toBe(label);
+      pill(target).click();
+      expect(openMediaViewer).toHaveBeenLastCalledWith(path);
+    }
+  });
+
+  test("the pill has no caret when there is nothing behind it", async () => {
+    // A binary file with no graph host: download is the only action.
+    h.entries = [file("bin/tool", "binary")];
+    const target = await render({ path: "bin/tool" });
+
+    expect(pill(target).textContent?.trim()).toBe("Download file");
+    expect(caret(target)).toBeNull();
+    pill(target).click();
+    expect(fileOps.downloadPathWithProgress).toHaveBeenCalledWith("bin/tool", false);
+  });
+
+  test("the rendered actions are the shared classifier's, in its order", async () => {
+    // Applicability is the classifier's decision (the FileTree menu reads the
+    // same one); the inspector maps ids to labels. Render each shape and
+    // compare against the classifier directly.
+    const label: Record<string, string> = {
+      open: "Open",
+      showFile: "Show file",
+      download: "Download file",
+      upload: "Upload file here",
+      newTerminal: "New terminal here",
+      exportPdf: "Export to PDF",
+      graphFromHere: "Graph from here",
+      viewMedia: "View / Zoom",
+    };
+    const shapes: Array<{ entry: Entry; props: Omit<Props, "path"> }> = [
+      { entry: file("a.md"), props: { onOpen() {}, onReveal() {}, onSetAsScope() {} } },
+      { entry: file("src/main.rs", "text"), props: { onOpen() {} } },
+      { entry: file("img/a.png", "media"), props: { onSetAsScope() {} } },
+      { entry: file("blob.bin", "binary"), props: { onSetAsScope() {} } },
+    ];
+    h.entries = shapes.map((s) => s.entry);
+    for (const { entry, props } of shapes) {
+      const set = classifyFileActions(
+        { path: entry.path, isDir: false, serverKind: entry.kind, isDraft: false },
+        { open: !!props.onOpen, reveal: !!props.onReveal, graph: !!props.onSetAsScope, upload: true },
+      );
+      const target = await render({ path: entry.path, ...props });
+      expect(pill(target).textContent?.trim(), entry.path).toBe(label[set.main]);
+      const rendered = set.secondary.length > 0 ? openMenu(target) : [];
+      expect(rendered, entry.path).toEqual(set.secondary.map((id) => label[id]));
+    }
+  });
+
+  test("a directory's terminal action roots a terminal in it", async () => {
+    h.entries = [dir("src/lib")];
+    const target = await render({ path: "src/lib" });
+    openMenu(target);
+    menuItem(target, "New terminal here").click();
+
+    expect(openTerminalInActivePane).toHaveBeenCalledWith(terminalFromHereTarget("src/lib", true));
+  });
+
+  test("a file's terminal action opens in its parent with the name seeded", async () => {
+    h.entries = [file("src/it's here.rs", "text")];
+    const target = await render({ path: "src/it's here.rs", onOpen() {} });
+    openMenu(target);
+    menuItem(target, "New terminal here").click();
+
+    expect(openTerminalInActivePane).toHaveBeenCalledWith(
+      terminalFromHereTarget("src/it's here.rs", false),
     );
   });
 
-  test("dropdown lists the secondary actions as menu items", () => {
-    expect(fileInfo).toMatch(
-      /\{#if menuOpen && actionModel\.secondary\.length > 0\}[\s\S]*?<div class="action-menu" role="menu">/,
-    );
-    expect(fileInfo).toMatch(
-      /\{#each actionModel\.secondary as item[\s\S]*?class="action-menu-item"[\s\S]*?item\.onClick\(\)/,
-    );
-    // Selecting an item closes the menu.
-    expect(fileInfo).toMatch(/menuOpen = false;[\s\S]{1,40}item\.onClick\(\);/);
+  test("a host terminal handler takes over the directory action", async () => {
+    h.entries = [dir("src")];
+    const onNewTerminal = vi.fn();
+    const target = await render({ path: "src", onNewTerminal });
+    openMenu(target);
+    menuItem(target, "New terminal here").click();
+
+    expect(onNewTerminal).toHaveBeenCalledTimes(1);
+    expect(openTerminalInActivePane).not.toHaveBeenCalled();
   });
 
-  test("applicability comes from the shared classifier, capabilities from the host", () => {
-    // The inspector does not decide WHICH actions exist; it feeds the
-    // entry facts + host-bound capabilities into classifyFileActions
-    // (the same policy the FileTree menu consumes) and maps the ids.
-    expect(fileInfo).toMatch(
-      /import \{[\s\S]*?classifyFileActions,[\s\S]*?\} from "\.\.\/state\/fileActions";/,
-    );
-    expect(fileInfo).toMatch(
-      /const set = classifyFileActions\([\s\S]*?path: entry\.path,[\s\S]*?isDir: entry\.is_dir,[\s\S]*?serverKind: entry\.kind,[\s\S]*?isDraft: entry\.path === draftsDir\(\) \|\| isDraftPath\(entry\.path\),/,
-    );
-    expect(fileInfo).toMatch(
-      /open: !!onOpen,[\s\S]*?reveal: !!onReveal,[\s\S]*?graph: !!onSetAsScope,[\s\S]*?upload: allowUpload,/,
-    );
-    expect(fileInfo).toMatch(
-      /return \{ main: actionFor\(set\.main\), secondary: set\.secondary\.map\(actionFor\) \};/,
-    );
-  });
+  test("a draft file leads with a terminal in its parent, seeded with its name", async () => {
+    h.entries = [dir(".Drafts/idea"), file(".Drafts/idea/a b.md")];
+    const onNewTerminal = vi.fn();
+    const target = await render({ path: ".Drafts/idea/a b.md", onNewTerminal });
 
-  test("directory pill is Open -> a new File Browser tab", () => {
-    expect(fileInfo).toMatch(
-      /case "open":[\s\S]{1,160}\{ label: "Open", onClick: openDirInBrowser \}/,
-    );
-    // openDirInBrowser prefers the host onReveal, else reveals a new tab.
-    expect(fileInfo).toMatch(
-      /function openDirInBrowser\(\): void \{[\s\S]{1,200}revealPathInBrowser\(entry\.path, \{ enter: true/,
+    expect(pill(target).textContent?.trim()).toBe("Terminal from here");
+    expect(caret(target)).toBeNull();
+    pill(target).click();
+
+    // The draft file skips the host override and seeds its own name.
+    expect(onNewTerminal).not.toHaveBeenCalled();
+    expect(openTerminalInActivePane).toHaveBeenCalledWith(
+      terminalFromHereTarget(".Drafts/idea/a b.md", false),
     );
   });
 
-  test("media pill keeps per-kind labels over the shared media router", () => {
-    expect(fileInfo).toMatch(
-      /case "viewMedia":[\s\S]{1,400}"View \/ Zoom"[\s\S]{1,220}"View Video"[\s\S]{1,220}"View Audio"[\s\S]{1,220}"View PDF"[\s\S]{1,100}onClick: \(\) => void openMediaViewer\(p\)/,
+  test("a draft directory roots the terminal in itself", async () => {
+    h.entries = [dir(".Drafts/idea")];
+    const target = await render({ path: ".Drafts/idea" });
+
+    expect(pill(target).textContent?.trim()).toBe("Terminal from here");
+    pill(target).click();
+    expect(openTerminalInActivePane).toHaveBeenCalledWith(
+      terminalFromHereTarget(".Drafts/idea", true),
     );
   });
 
-  test("download / upload / graph map to the inspector handlers with their labels", () => {
-    expect(fileInfo).toMatch(
-      /case "download":[\s\S]{1,200}label: e\.is_dir \? "Download tarball" : "Download file",[\s\S]{1,120}onClick: downloadSelection/,
-    );
-    expect(fileInfo).toMatch(
-      /case "upload":[\s\S]{1,160}label: "Upload file here", onClick: triggerUpload/,
-    );
-    expect(fileInfo).toMatch(
-      /case "graphFromHere":[\s\S]{1,160}label: "Graph from here", onClick: \(\) => onSetAsScope\?\.\(\)/,
-    );
+  test("Upload opens the picker and sends the picked files to the directory", async () => {
+    h.entries = [dir("docs")];
+    const target = await render({ path: "docs" });
+    const picker = target.querySelector<HTMLInputElement>("input.file-picker")!;
+    const pick = vi.spyOn(picker, "click").mockImplementation(() => {});
+
+    openMenu(target);
+    menuItem(target, "Upload file here").click();
+    expect(pick).toHaveBeenCalledTimes(1);
+
+    const picked = [new File(["x"], "x.txt")];
+    Object.defineProperty(picker, "files", { configurable: true, value: picked });
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(fileOps.uploadFilesTo).toHaveBeenCalledWith("docs", picked);
   });
 
-  test("markdown Export to PDF rides the shared executor", () => {
-    // The operation lives in state/fileActionExecutors so the FileTree
-    // context menu exports the same way; the inspector delegates.
-    expect(fileInfo).toMatch(
-      /import \{ exportPathToPdf \} from "\.\.\/state\/fileActionExecutors";/,
-    );
-    expect(fileInfo).toMatch(
-      /async function exportSelectionToPdf\(\): Promise<void> \{[\s\S]{1,160}await exportPathToPdf\(entry\.path\);/,
-    );
-    expect(fileInfo).toMatch(
-      /case "exportPdf":[\s\S]{1,120}label: "Export to PDF", onClick: exportSelectionToPdf/,
-    );
+  test("the path toggle reveals the absolute path and resets on a new selection", async () => {
+    h.entries = [file("notes/plan.md"), file("notes/other.md")];
+    const props = $state<Props>({ path: "notes/plan.md", onOpen() {} });
+    const target = await render(props);
+    const toggle = target.querySelector<HTMLButtonElement>(".path-toggle")!;
+
+    expect(target.querySelector(".path-row")).toBeNull();
+    toggle.click();
+    flushSync();
+    expect(target.querySelector(".path-row")?.textContent).toBe("/home/me/ws/notes/plan.md");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    openMenu(target);
+    props.path = "notes/other.md";
+    await settle();
+    expect(target.querySelector(".path-row"), "the path row resets").toBeNull();
+    expect(target.querySelector(".action-menu"), "the menu resets").toBeNull();
   });
 
-  test("New terminal here and the draft terminal both map to the fromHere helper", () => {
-    // Draft directories root the terminal in the directory via
-    // newTerminalHere; a draft file seeds the same helper as a file. Drafts
-    // are in-root, so the inspector payload carries no absolute path and
-    // the component derives nothing from one.
-    expect(fileInfo).toMatch(
-      /case "newTerminal":[\s\S]{1,450}\{ label: "Terminal from here", onClick: newTerminalHere \}[\s\S]{1,120}\{ label: "Terminal from here", onClick: draftTerminalHere \}[\s\S]{1,120}\{ label: "New terminal here", onClick: newTerminalHere \}/,
-    );
-    expect(fileInfo).toMatch(
-      /function newTerminalHere\(\): void \{[\s\S]{1,200}terminalFromHereTarget\(entry\.path, entry\.is_dir\)/,
-    );
-    // The shell-quoting ban is scoped to the draft handler, the slice the
-    // positive check reads, so a quoted path elsewhere in the component (a
-    // copy action, say) is not a terminal-action failure.
-    const draftHandler = fileInfo.match(
-      /function draftTerminalHere\(\): void \{[\s\S]*?\n  \}/,
-    )?.[0];
-    expect(draftHandler).toBeDefined();
-    expect(draftHandler).toMatch(/terminalFromHereTarget\(entry\.path, false\)/);
-    expect(draftHandler).not.toMatch(/shellQuotePath/);
-    expect(fileInfo).not.toMatch(/abs_path/);
-    expect(fileInfo).toMatch(
-      /import \{[^}]*\bterminalFromHereTarget\b[^}]*\} from "\.\.\/terminal\/fromHere";/,
-    );
-    expect(fileInfo).toMatch(
-      /import \{ openTerminalInActivePane \} from "\.\.\/state\/tabs\.svelte";/,
-    );
-  });
-
-  test("dir branch renders actions BEFORE the dir stats meta-grid", () => {
-    // The dir branch order is: ... badges -> {@render actionsSection()}
-    // -> {#if dirStats} meta-grid. The actions must precede the stats.
-    const actionsIdx = fileInfo.indexOf("{@render actionsSection()}");
-    const dirStatsIdx = fileInfo.indexOf("{#if dirStats}");
-    expect(actionsIdx).toBeGreaterThan(0);
-    expect(dirStatsIdx).toBeGreaterThan(actionsIdx);
-  });
-
-  test("file branch renders actions BEFORE the size/modified meta-grid", () => {
-    // The file branch renders the (optional) image preview, then
-    // {@render actionsSection()}, then the size/modified meta-grid.
-    const lastActions = fileInfo.lastIndexOf("{@render actionsSection()}");
-    const sizeGrid = fileInfo.indexOf(
-      '<span class="k">size</span>',
-      lastActions,
-    );
-    expect(lastActions).toBeGreaterThan(0);
-    expect(sizeGrid).toBeGreaterThan(lastActions);
-  });
-
-  test("actions live only in the reusable section, not standalone bottom blocks", () => {
-    // The pill is defined once inside actionsSection and rendered via
-    // {@render actionsSection()}; there is no separate bottom-of-body
-    // action block to drift out of sync.
-    const sectionDefs = fileInfo.match(/<div class="actions-section">/g) ?? [];
-    expect(sectionDefs.length).toBe(1);
-    expect(fileInfo).toMatch(/\{@render actionsSection\(\)\}/);
+  test("the actions render once, above the stats, on both branches", async () => {
+    h.entries = [dir("docs"), file("docs/a.md")];
+    for (const path of ["docs", "docs/a.md"]) {
+      const target = await render({ path, onOpen() {} });
+      const sections = target.querySelectorAll(".actions-section");
+      expect(sections, path).toHaveLength(1);
+      const stats = target.querySelector(".info > .meta-grid");
+      expect(stats, path).not.toBeNull();
+      expect(
+        sections[0]!.compareDocumentPosition(stats!) & Node.DOCUMENT_POSITION_FOLLOWING,
+        `${path}: actions precede the stats`,
+      ).toBeTruthy();
+      unmount(mounted.pop()!);
+    }
   });
 });
