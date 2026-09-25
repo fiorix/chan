@@ -22,6 +22,7 @@ import Pane from "./Pane.svelte";
 import app from "../App.svelte?raw";
 import type { HybridSurfaceKind } from "../api/types";
 import { graphTab, installGraphDom, resetGraphServer } from "../__tests__/graphPanel";
+import { fileTab } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
@@ -81,28 +82,7 @@ const SURFACES: Array<[HybridSurfaceKind, string, () => Tab]> = [
   [
     "editor",
     ".editor-tab",
-    () => ({
-      kind: "file",
-      fileKind: "document",
-      id: "file-1",
-      path: "notes/a.md",
-      content: DOC,
-      saved: DOC,
-      savedMtime: 1,
-      mode: "wysiwyg",
-      loading: false,
-      error: null,
-      fileMissing: null,
-      inspectorOpen: false,
-      outlineOpen: false,
-      repoRoot: null,
-      readMode: false,
-      fsWritable: true,
-      styleToolbarOpen: false,
-      syntaxHighlight: true,
-      highlightTrailingWhitespace: false,
-      codeBlocksCollapsed: false,
-    }),
+    () => fileTab({ content: DOC, saved: DOC }),
   ],
   ["browser", ".browser", () => ({ kind: "browser", id: "fb-1", title: "Files", inspectorOpen: false })],
   ["graph", ".graph-tab", () => graphTab()],
