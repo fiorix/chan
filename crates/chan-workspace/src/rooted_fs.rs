@@ -1040,8 +1040,9 @@ impl RootedFs {
         let destination = self.preflight_rename(from, to)?;
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
-        // A directory renamed onto its own other spelling needs no write
-        // probe; everything else is checked like any write target.
+        // A directory renamed onto itself, by the same path or another
+        // spelling, needs no write probe; everything else is checked like
+        // any write target.
         if destination != (RenameDestination::Source { directory: true }) {
             self.ensure_writable(to)?;
         }
@@ -1060,9 +1061,10 @@ impl RootedFs {
                 }
                 Err(error) => Err(ChanError::from(error)),
             },
-            // The destination is the source under another spelling or link.
-            // A no-replace rename would refuse that, or not, by platform (see
-            // `no_replace`), so these cases keep the plain rename they mean.
+            // The destination is the source itself: the same path, another
+            // spelling, or a hard link. A no-replace rename would refuse that,
+            // or not, by platform (see `no_replace`), so these cases keep the
+            // plain rename they mean.
             RenameDestination::Source { .. } => self
                 .dir()
                 .rename(&from_rel, &self.dir(), &to_rel)

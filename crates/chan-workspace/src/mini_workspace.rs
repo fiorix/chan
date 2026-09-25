@@ -387,10 +387,11 @@ impl MiniWorkspace {
 
     /// Plain copy: destination must not exist, the whole source tree is
     /// preflighted (readable, regular files and directories only), and the
-    /// copy lands in a uniquely named stage beside the destination that is
-    /// renamed to the final name only when complete (a single file is staged
-    /// under its destination's own name inside it). A failure removes only
-    /// that stage, never a pre-existing destination.
+    /// copy is built in a uniquely named stage beside the destination and
+    /// renamed to the final name only when complete: the stage itself for a
+    /// directory, and for a single file the file inside it, staged under the
+    /// destination's own name. A failure removes only that stage, never a
+    /// pre-existing destination.
     pub fn copy_plain(&self, from: &str, to: &str) -> Result<()> {
         let from = self.wire_rel(from)?;
         let from = from.as_str();
@@ -504,7 +505,8 @@ impl MiniWorkspace {
     }
 
     /// Stage a copy of `from` in a uniquely named stage directory beside `to`
-    /// and rename it into place once complete. The whole source tree is
+    /// and rename it, or for a single file the file inside it, into place
+    /// once complete. The whole source tree is
     /// preflighted first; a failure at any later step, or an unwind, removes
     /// only the stage and never creates `to`. A single file is staged under
     /// the destination's own name inside the stage, so the atomic writer's
