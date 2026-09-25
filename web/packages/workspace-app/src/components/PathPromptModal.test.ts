@@ -1,65 +1,226 @@
-import { describe, expect, test } from "vitest";
-import modal from "./PathPromptModal.svelte?raw";
+// @vitest-environment jsdom
+//
+// PathPromptModal, mounted. The dialog opens through uiPathPrompt over a
+// fixed tree; each test types a path and reads the status row, the notice and
+// the OK button, or the directory listings the dialog asks for.
 
-// PathPromptModal `attach` mode: an existing directory should not
-// trigger an "overwrites" warning, and a missing absolute path should
-// not surface a "creates new directory" preamble (the SPA cannot see
-// the OS filesystem; the backend creates on demand).
+import { mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("PathPromptModal attach mode", () => {
-  test("modal renders 'attach watcher to' label in attach mode", () => {
-    expect(modal).toMatch(/status\.mode === "attach"[\s\S]{0,40}attach watcher to/);
+const listed = vi.hoisted(() => ({
+  calls: [] as string[],
+  children: {} as Record<string, Array<{ path: string; is_dir: boolean; mtime: null; size: number }>>,
+}));
+
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      list: vi.fn(async (dir: string) => {
+        listed.calls.push(dir);
+        return listed.children[dir] ?? [];
+      }),
+    },
+  };
+});
+
+import PathPromptModal from "./PathPromptModal.svelte";
+import {
+  resolvePathPrompt,
+  tree,
+  uiPathPrompt,
+  type PathPromptKind,
+  type PathPromptMode,
+} from "../state/store.svelte";
+
+const mounted: Array<Record<string, unknown>> = [];
+
+function mountModal(): HTMLElement {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(PathPromptModal, { target }) as Record<string, unknown>);
+  return target;
+}
+
+async function settle(turns = 4): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+type Prompt = {
+  kind: PathPromptKind;
+  mode: PathPromptMode;
+  allowAbsolute?: boolean;
+  notice?: string;
+  sourcePath?: string;
+};
+
+/// Open the dialog and type `text`. The resolve promise rides back inside an
+/// object so the caller's `await` does not block on the open dialog.
+async function openDialog(
+  target: HTMLElement,
+  prompt: Prompt,
+  text: string,
+): Promise<{ promise: Promise<string | null> }> {
+  const promise = uiPathPrompt({ title: "path", ...prompt });
+  await tick();
+  await type(target, text);
+  return { promise };
+}
+
+async function type(target: HTMLElement, text: string): Promise<void> {
+  const input = target.querySelector("input")!;
+  input.value = text;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await tick();
+}
+
+function statusText(target: HTMLElement): string {
+  return target.querySelector(".status")!.textContent!.replace(/\s+/g, " ").trim();
+}
+
+function statusRow(target: HTMLElement): HTMLElement {
+  return target.querySelector<HTMLElement>(".status")!;
+}
+
+/// The rendered path, one entry per segment: its text and whether it is
+/// coloured as new.
+function segments(target: HTMLElement): Array<[string, boolean]> {
+  return [...target.querySelectorAll<HTMLElement>(".status .seg")].map((s) => [
+    s.textContent ?? "",
+    s.classList.contains("isnew"),
+  ]);
+}
+
+function okButton(target: HTMLElement): HTMLButtonElement {
+  return target.querySelector(".actions .ok")!;
+}
+
+beforeEach(() => {
+  listed.calls = [];
+  listed.children = {};
+  tree.entries = [
+    { path: "docs", is_dir: true, mtime: null, size: 0 },
+    { path: "docs/watch", is_dir: true, mtime: null, size: 0 },
+    { path: "notes.md", is_dir: false, mtime: null, size: 3 },
+  ];
+  tree.loadedDirs = { "": true, docs: true };
+  tree.loadingDirs = {};
+  tree.dirErrors = {};
+});
+
+afterEach(() => {
+  resolvePathPrompt(null);
+  for (const c of mounted.splice(0)) unmount(c);
+  document.body.innerHTML = "";
+  tree.entries = [];
+  tree.loadedDirs = {};
+  vi.clearAllMocks();
+});
+
+describe("attach mode", () => {
+  test("an existing directory is the target, with no overwrite warning", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(target, { kind: "folder", mode: "attach" }, "docs/watch");
+
+    expect(statusText(target)).toBe("→ attach watcher to docs/watch/");
+    expect(statusRow(target).classList.contains("warn")).toBe(false);
+    expect(segments(target), "the existing directory is not coloured as new").toEqual([
+      ["docs/", false],
+      ["watch/", false],
+    ]);
+    okButton(target).click();
+    await expect(promise).resolves.toBe("docs/watch");
   });
 
-  test("existing-folder branch skips the overwrite warning in attach mode", () => {
-    // The status derivation has a `mode === "attach"` branch that
-    // returns a creates-shaped status with empty ancestors.
-    expect(modal).toMatch(/if \(pathPromptState\.mode === "attach"\) \{/);
-    expect(modal).toMatch(/newAncestors: \[\]/);
+  test("a missing directory under a missing parent names the ancestor", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "folder", mode: "attach" }, "logs/app");
+
+    expect(statusText(target)).toBe("⚠ attach watcher to logs/app/");
+    expect(statusRow(target).classList.contains("warn")).toBe(true);
+    expect(segments(target)).toEqual([
+      ["logs/", true],
+      ["app/", true],
+    ]);
   });
 
-  test("absolute-path branch suppresses the ancestor preamble", () => {
-    // Absolute paths bypass tree.entries, so we don't fabricate a
-    // mint-green ancestor chain that doesn't correspond to workspace
-    // state.
-    expect(modal).toMatch(
-      /pathPromptState\.mode === "attach" && path\.startsWith\("\/"\)/,
+  test("an absolute path gets no ancestor preamble", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "folder", mode: "attach", allowAbsolute: true }, "/var/log/app");
+
+    expect(statusText(target)).toBe("→ attach watcher to /var/log/app/");
+    expect(statusRow(target).classList.contains("warn")).toBe(false);
+    expect(okButton(target).disabled).toBe(false);
+  });
+
+  test("an existing file cannot take a watcher", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "folder", mode: "attach" }, "notes.md");
+
+    expect(statusText(target)).toBe("✗ 'notes.md' is an existing file, can't attach a watcher to a directory");
+    expect(okButton(target).disabled).toBe(true);
+  });
+});
+
+describe("the notice line", () => {
+  test("sits above the input, apart from the status row, and never blocks OK", async () => {
+    const target = mountModal();
+    await openDialog(
+      target,
+      { kind: "folder", mode: "create", notice: "The whole draft is saved as a directory." },
+      "saved",
     );
+    const notice = target.querySelector<HTMLElement>(".notice");
+
+    expect(notice?.textContent).toBe("The whole draft is saved as a directory.");
+    expect(notice!.compareDocumentPosition(target.querySelector("input")!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(notice!.closest(".status")).toBeNull();
+    expect(okButton(target).disabled).toBe(false);
   });
 
-  test("pathSegments demotes the final segment when attaching to an existing dir", () => {
-    // tailIsExisting flips the "new" colouring off so the segment
-    // reads as context rather than a fresh-create cue.
-    expect(modal).toMatch(/const tailIsExisting =\s+s\.mode === "attach"/);
-  });
-});
-
-describe("PathPromptModal notice line", () => {
-  // The save-from-draft flow passes a `notice` to explain that the
-  // draft directory is being saved as a folder. It renders above the
-  // input as a non-blocking info line (never gates submit).
-  test("modal renders the notice above the input when present", () => {
-    expect(modal).toMatch(/\{#if pathPromptState\.notice\}/);
-    expect(modal).toMatch(/<div class="notice">\{pathPromptState\.notice\}<\/div>/);
-  });
-
-  test("notice uses the muted info hue, not the error/warn colours", () => {
-    // The status row owns err/warn colours; the notice is contextual.
-    expect(modal).toMatch(/\.notice \{[\s\S]{0,120}var\(--info-text/);
+  test("is absent when the caller gives none", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "folder", mode: "create" }, "saved");
+    expect(target.querySelector(".notice")).toBeNull();
   });
 });
 
-describe("PathPromptModal progressive autocomplete", () => {
-  // tree.entries is loaded lazily (workspace root + File-Browser-expanded
-  // dirs only), so a dialog opened without first browsing to the target
-  // directory (e.g. save-from-draft) would show no suggestions for a deep
-  // path. The modal walks the typed ancestor chain and loads the children
-  // of each directory known to exist, so the next segment can be
-  // suggested. Gated on folderSet so a mistyped segment can't 404.
-  test("modal lazily loads typed ancestor directories for suggestions", () => {
-    expect(modal).toContain("loadTreeDir");
-    // That the load is gated on the directory already existing, so a mistyped
-    // segment never asks the server, is asserted behaviourally in
-    // pathPromptFailedAncestor.test.ts.
+describe("suggestions for a deep path", () => {
+  test("list each typed directory the tree knows but has not loaded", async () => {
+    tree.entries.push({ path: "docs/watch/deep", is_dir: true, mtime: null, size: 0 });
+    listed.children["docs/watch"] = [{ path: "docs/watch/deep", is_dir: true, mtime: null, size: 0 }];
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "docs/watch/deep/x");
+    await settle();
+
+    expect(listed.calls, "docs is loaded already").toEqual(["docs/watch", "docs/watch/deep"]);
+    expect(tree.loadedDirs["docs/watch"]).toBe(true);
+    expect(tree.loadedDirs["docs/watch/deep"]).toBe(true);
+  });
+
+  test("never list a typed segment the tree does not know", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "nowhere/deeper/x");
+    await settle();
+
+    expect(listed.calls).toEqual([]);
+  });
+
+  test("offer the children the listing brought in", async () => {
+    listed.children["docs/watch"] = [{ path: "docs/watch/inbox", is_dir: true, mtime: null, size: 0 }];
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "docs/watch/");
+    await settle();
+    await type(target, "docs/watch/in");
+
+    const options = [...target.querySelectorAll("[role='option']")].map((li) => li.textContent?.trim());
+    expect(options).toContain("docs/watch/inbox/");
   });
 });
