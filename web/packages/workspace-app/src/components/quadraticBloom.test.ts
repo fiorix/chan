@@ -1,25 +1,52 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import QuadraticBloom from "./QuadraticBloom.svelte";
 import {
   buildQuadraticBloomPoints,
   fitQuadraticBloom,
   QUADRATIC_BLOOM_GUTTER,
   QUADRATIC_BLOOM_ITERATIONS,
 } from "./quadraticBloom";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./quadraticBloom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./quadraticBloom")>();
+  return { ...actual, buildQuadraticBloomPoints: vi.fn(actual.buildQuadraticBloomPoints) };
+});
+
+afterEach(stopAnimations);
 
 describe("buildQuadraticBloomPoints", () => {
-  test("keeps the named renderer tuning and source attribution", async () => {
-    const renderer = (await import("./QuadraticBloom.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./quadraticBloom.ts?raw"))
-      .default as string;
+  test("advances 60 pi / 1000 radians per second of animation time", () => {
+    const { callbacks } = startAnimation(QuadraticBloom, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    const build = vi.mocked(buildQuadraticBloomPoints);
+    build.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toMatch(
-      /const PHASE_SPEED = \(Math\.PI \* 60\) \/ 1000;/,
-    );
-    expect(renderer).toMatch(/--quadratic-bloom-point-alpha: 0\.075;/);
-    expect(geometry).toContain(
-      "https://x.com/hisadan/status/2046584749175832639",
-    );
+    expect(build.mock.calls.map(([phase]) => phase)).toEqual([
+      expect.closeTo((Math.PI * 60) / 1000, 9),
+      expect.closeTo((Math.PI * 180) / 1000, 9),
+    ]);
+  });
+
+  test("paints its points in the colour and opacity its theme tokens name", () => {
+    const { ctx, ops } = recordingContext2d();
+    const { run, callbacks } = startAnimation(QuadraticBloom, ctx);
+    const host = run.canvas.parentElement!;
+    host.style.setProperty("--quadratic-bloom-point-rgb", "1, 2, 3");
+    host.style.setProperty("--quadratic-bloom-point-alpha", "0.5");
+    callbacks.resize(800, 800, false, 0);
+
+    expect(ops).toContainEqual({ op: "set fillStyle", args: ["rgb(1, 2, 3)"] });
+    expect(ops).toContainEqual({ op: "set globalAlpha", args: [0.5] });
   });
 
   test("preserves the source sketch's quadratic recurrence", () => {
