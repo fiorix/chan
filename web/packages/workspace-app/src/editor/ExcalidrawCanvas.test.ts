@@ -4,7 +4,7 @@ import { mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ExcalidrawCanvas, { noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
-// Build-time contract: the shell's CSS and its stylesheet import (page-width token, offscreen display: none); vitest drops CSS.
+// Build-time contract: the offscreen shell is display: none (WKWebView leaks the island through visibility: hidden), and the island imports Excalidraw's stylesheet so it rides the island's chunk; vitest drops CSS.
 import canvasSrc from "./ExcalidrawCanvas.svelte?raw";
 import type {
   SceneCanvasBinding,
@@ -98,11 +98,6 @@ describe("ExcalidrawCanvas island", () => {
     await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
     unmount(comp);
     expect(unmountMock).toHaveBeenCalledTimes(1);
-  });
-
-  test("the board host follows the shared page-width cap", () => {
-    expect(canvasSrc).toContain("width: min(100%, var(--chan-page-max-width, 100%))");
-    expect(canvasSrc).toContain("var(--page-shade)");
   });
 });
 
