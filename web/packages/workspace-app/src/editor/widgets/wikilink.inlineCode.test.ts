@@ -1,11 +1,37 @@
+// @vitest-environment jsdom
+//
+// An inline `code` span whose text names a real workspace file is a
+// Cmd/Ctrl-clickable internal link, and typing inside it re-points the target
+// through the wiki picker. The detect decision and the picker's trigger are
+// pure; the decoration, the click and the picker are driven in a mounted
+// Wysiwyg editor with the link resolver stubbed.
+
 import { EditorState } from "@codemirror/state";
 import { ensureSyntaxTree } from "@codemirror/language";
-import { describe, expect, test } from "vitest";
-import { codeSpanInternalTarget } from "./widgets/wikilink";
-import { computeBubbleSpec } from "./bubbles/triggers";
-import { chanMarkdown } from "./markdown/grammar";
-import wikilink from "./widgets/wikilink.ts?raw";
-import wysiwyg from "./Wysiwyg.svelte?raw";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+const files = vi.hoisted(() => ({ existing: new Set<string>() }));
+
+vi.mock("../../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      resolveLink: vi.fn(async (target: string) => {
+        if (!files.existing.has(target)) throw new Error("404 not found");
+        return { path: target, kind: "file", is_dir: false };
+      }),
+    },
+  };
+});
+
+import { codeSpanInternalTarget } from "./wikilink";
+import { computeBubbleSpec } from "../bubbles/triggers";
+import { chanMarkdown } from "../markdown/grammar";
+import { installEditorDom, mountWysiwyg, settle, unmountWysiwygs } from "../../__tests__/wysiwyg";
+
+installEditorDom();
 
 /// A parsed (markdown) editor state with the caret at `pos`. ensureSyntaxTree
 /// forces a synchronous parse so computeBubbleSpec's syntaxTree() lookup sees
@@ -53,45 +79,66 @@ describe("codeSpanInternalTarget (the detect decision)", () => {
   });
 });
 
-describe("inline-code link decoration + open wiring", () => {
-  test("decorates only a resolved real file, as a non-atomic data-carrying mark", () => {
-    // The detect decoration and the in-place change trigger share ONE gate
-    // (codeSpanInternalTarget + getKind === "file"), so both agree on which
-    // spans are links.
-    expect(wikilink).toMatch(/export function inlineCodeLinkTarget\(/);
-    expect(wikilink).toMatch(/if \(getKind\(target\) !== "file"\) return null;/);
-    expect(wikilink).toMatch(
-      /const target = inlineCodeLinkTarget\(text, currentPath\);/,
-    );
-    expect(wikilink).toMatch(
-      /class: "cm-md-code-link",\s*attributes: \{ "data-code-link-target": target \},/,
-    );
-    // Non-atomic: a Decoration.mark, never the atomic wiki-pill replace widget.
-    expect(wikilink).toMatch(/function codeLinkMark\(target: string\): Decoration \{\s*return Decoration\.mark\(/);
+describe("in the Wysiwyg editor", () => {
+  const DOC = "see `pasta` and `npm install` and `gone`";
+
+  beforeEach(() => {
+    // The resolver caches each target's kind for the life of the module, so
+    // every test serves the same files.
+    files.existing = new Set(["notes/pasta"]);
   });
 
-  test("the ViewPlugin re-runs on the shared kind-resolve broadcast", () => {
-    expect(wikilink).toMatch(/export function inlineCodeLinkDecorations\(/);
-    expect(wikilink).toMatch(
-      /update\(u: ViewUpdate\): void \{[\s\S]*?e\.is\(kindResolvedEffect\)[\s\S]*?scanInlineCodeLinks\(u\.view/,
-    );
+  afterEach(() => {
+    unmountWysiwygs();
+    document.body.innerHTML = "";
   });
 
-  test("Cmd/Ctrl-click opens via onWikiClick using the mark's data attribute", () => {
-    expect(wikilink).toMatch(
-      /export function inlineCodeLinkClickHandler\([\s\S]*?if \(!\(event\.metaKey \|\| event\.ctrlKey\)\) return false;[\s\S]*?closest\(\s*"\.cm-md-code-link",\s*\)[\s\S]*?dataset\.codeLinkTarget;[\s\S]*?opts\.onWikiClick\(\{/,
-    );
+  async function editor(onWikiClick = vi.fn()) {
+    const mounted = await mountWysiwyg({ value: DOC, currentPath: "notes/a.md", onWikiClick });
+    await settle(6);
+    return { ...mounted, onWikiClick };
+  }
+
+  function links(root: HTMLElement): HTMLElement[] {
+    return [...root.querySelectorAll<HTMLElement>(".cm-md-code-link")];
+  }
+
+  test("a span naming a real file becomes an editable link; a snippet or a missing file stays plain", async () => {
+    const { content } = await editor();
+    const found = links(content);
+    expect(found.map((el) => [el.textContent, el.dataset.codeLinkTarget])).toEqual([["pasta", "notes/pasta"]]);
+    expect(found[0]!.closest("[contenteditable='false']"), "a mark over the text, not a widget").toBeNull();
   });
 
-  test("Wysiwyg wires both the decorator and the Cmd/Ctrl-click opener", () => {
-    expect(wysiwyg).toMatch(/inlineCodeLinkClickHandler\(\{\s*onWikiClick,/);
-    expect(wysiwyg).toMatch(/inlineCodeLinkDecorations\(\{\s*onWikiClick,/);
+  test("Cmd- or Ctrl-click opens it through onWikiClick; a plain click does not", async () => {
+    const { content, onWikiClick } = await editor();
+    const link = links(content)[0]!;
+    const down = (init: MouseEventInit) =>
+      link.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ...init }));
+
+    down({});
+    expect(onWikiClick).not.toHaveBeenCalled();
+    down({ ctrlKey: true });
+    down({ metaKey: true });
+    expect(onWikiClick).toHaveBeenCalledTimes(2);
+    expect(onWikiClick).toHaveBeenLastCalledWith({
+      target: "notes/pasta",
+      label: "notes/pasta",
+      anchor: "",
+      wasAbs: false,
+      openInNewPane: false,
+    });
   });
 
-  test("Wysiwyg wires the inline-code change resolution gate", () => {
-    expect(wysiwyg).toMatch(
-      /isInlineCodeFileLink:\s*\(text, path\) =>\s*inlineCodeLinkTarget\(text, path\) !== null,/,
-    );
+  test("the caret inside the link opens the wiki picker; inside a snippet it does not", async () => {
+    const { view } = await editor();
+    view.dispatch({ selection: { anchor: DOC.indexOf("npm") + 2 } });
+    await settle();
+    expect(document.body.querySelector(".md-wiki-bubble")).toBeNull();
+
+    view.dispatch({ selection: { anchor: DOC.indexOf("pasta") + 2 } });
+    await settle();
+    expect(document.body.querySelector(".md-wiki-bubble")).not.toBeNull();
   });
 });
 
