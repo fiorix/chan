@@ -1,68 +1,109 @@
-import { describe, expect, test } from "vitest";
-import tabs from "./tabs.svelte.ts?raw";
-import store from "./store.svelte.ts?raw";
-
-// `new-file-and-draft-spec.md` item 2: after a successful create, an
-// EDITABLE file opens in the Hybrid Editor (markdown rendered, other
-// editable/source in source mode), and a DIRECTORY gets selected in
-// the tree. The behaviour already lands on `main` through the unified
-// create helpers + `defaultModeForPath`; these checks pin the
-// load-bearing contract so a refactor can't silently regress the
-// open-mode split or drop the open/select at the create-resolution
-// layer.
+// @vitest-environment jsdom
 //
-// Empirically verified on a fresh binary (scoped test workspace,
-// 2026-05-26): `.md` opens wysiwyg, `.txt` opens wysiwyg (it is
-// markdown-class app-wide), `build.sh` opens source mode, and a
-// `subdir/` create reveals + selects the dir while staying in the
-// File Browser.
+// What the create flows leave in front of the user once the path exists: an
+// editable file opens in the active pane at its top, rendered when it is a
+// document and in source mode when it is source; a directory is selected in
+// the file browser and nothing opens. Opening goes through the same path
+// every other open uses, which peeks a file whose extension is not known to
+// be text and refuses it only when the server calls it binary.
 
-describe("item 2: create-resolution open/select", () => {
-  test("createFile opens the new editable file in the active pane", () => {
-    expect(store).toMatch(
-      /async createFile\(parentPath: string\): Promise<void> \{[\s\S]{1,1500}await api\.create\(path, false, ""\);[\s\S]{1,400}await openInActivePane\(path, \{ landAtTop: true \}\);/,
-    );
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { api } from "../api/client";
+import { ApiError } from "../api/errors";
+import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { setNotifyHandler } from "./notify.svelte";
+import { browserSelection, fileOps, pathPromptState, resolvePathPrompt } from "./store.svelte";
+import {
+  activePane,
+  activeTabInPane,
+  openInActivePane,
+  type FileTab,
+} from "./tabs.svelte";
+import { resetLayout } from "../__tests__/tabs";
+
+const notices: string[] = [];
+
+beforeEach(() => {
+  installDemoWorkspace({
+    metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1, fileCount: 1, textCount: 1 },
+    files: [
+      { path: "notes/readme.custom", kind: "text", size: 5, mtime: 1, content: "hello" },
+      { path: "photo.raw", kind: "binary", size: 5, mtime: 1, content: "" },
+    ],
+  });
+  resetLayout([]);
+  setNotifyHandler((message) => notices.push(message));
+});
+
+afterEach(() => {
+  uninstallDemoWorkspace();
+  setNotifyHandler(null);
+  notices.length = 0;
+  vi.restoreAllMocks();
+});
+
+/// Run a create flow and answer its path prompt with `answer`.
+async function create(flow: Promise<void>, answer: string): Promise<void> {
+  await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
+  resolvePathPrompt(answer);
+  await flow;
+}
+
+function activeFile(): FileTab | undefined {
+  const tab = activeTabInPane(activePane());
+  return tab?.kind === "file" ? tab : undefined;
+}
+
+describe("creating a file or directory", () => {
+  test("a new document opens rendered, at its top", async () => {
+    await create(fileOps.createFileOrDir(""), "notes/new.md");
+
+    expect(activeFile()).toMatchObject({
+      path: "notes/new.md",
+      mode: "wysiwyg",
+      caretCommand: { from: 0, to: 0 },
+    });
   });
 
-  test("createDir reveals + selects the new directory in the tree", () => {
-    expect(store).toMatch(
-      /async createDir\(parentPath: string\): Promise<void> \{[\s\S]{1,1200}await api\.create\(path, true\);[\s\S]{1,400}revealAndSelect\(path\);/,
-    );
+  test("a new source file opens in source mode", async () => {
+    await create(fileOps.createFileOrDir(""), "build.sh");
+
+    expect(activeFile()).toMatchObject({ path: "build.sh", mode: "source" });
   });
 
-  test("createFileOrDir splits dir (reveal) vs file (open) on the resolved path", () => {
-    expect(store).toMatch(
-      /async createFileOrDir[\s\S]{1,2000}const isDir = next\.endsWith\("\/"\);[\s\S]{1,400}revealAndSelect\(next\);/,
-    );
-    expect(store).toMatch(
-      /async createFileOrDir[\s\S]{1,3000}await openInActivePane\(path, \{ landAtTop: true \}\);/,
-    );
+  test("New file adds .md to a bare name and opens it", async () => {
+    await create(fileOps.createFile(""), "notes/plain");
+
+    expect(activeFile()).toMatchObject({ path: "notes/plain.md", mode: "wysiwyg" });
+  });
+
+  test("a new directory is selected in the browser and nothing opens", async () => {
+    await create(fileOps.createFileOrDir(""), "sub/");
+
+    expect(browserSelection.path).toBe("sub/");
+    expect(activePane().tabs).toEqual([]);
+  });
+
+  test("New directory selects it too", async () => {
+    await create(fileOps.createDir(""), "dir");
+
+    expect(browserSelection.path).toBe("dir");
+    expect(activePane().tabs).toEqual([]);
   });
 });
 
-describe("item 2: defaultModeForPath open-mode split", () => {
-  test("markdown-class (document) files default to wysiwyg, text-kind to source", () => {
-    // The create flow reuses openInActivePane -> openInPane ->
-    // defaultModeForPath, the same path every other open uses. The
-    // mode split is: json -> pretty, csv -> table, text-kind ->
-    // source, everything else (document) -> wysiwyg. A new `.md`
-    // lands document -> wysiwyg (rendered); a `.sh` lands text ->
-    // source (source-code mode), per the spec.
-    expect(tabs).toMatch(
-      /function defaultModeForPath\(path: string, fileKind: FileKind\): Mode \{[\s\S]{1,200}return fileKind === "text" \? "source" : "wysiwyg";/,
-    );
+describe("opening a file whose extension is not known to be text", () => {
+  test("opens it once the server reads it as text", async () => {
+    await openInActivePane("notes/readme.custom");
+
+    expect(activeFile()?.path).toBe("notes/readme.custom");
   });
 
-  test("openInPane peeks content for non-extension-editable files, never gates on writability", () => {
-    // "Open even if read-only": the open path never consults the
-    // fs-writable flag, so a read-only file still opens. The hard
-    // extension gate is gone: an editable-by-extension file opens
-    // straight away, and any other file is peeked (the server's content
-    // gate decides) and refused only when it is binary.
-    expect(tabs).toMatch(
-      /export async function openInPane\([\s\S]{1,900}if \(!isEditableText\(path\) && \(await probeOpenableAsText\(path\)\) === "binary"\) \{/,
-    );
-    // The peek maps a 415 (the server's binary refusal) to "binary".
-    expect(tabs).toMatch(/probeOpenableAsText[\s\S]{1,1400}status === 415\) return "binary"/);
+  test("refuses it with a notice when the server calls it binary", async () => {
+    vi.spyOn(api, "readStream").mockRejectedValue(new ApiError(415, "binary"));
+    await openInActivePane("photo.raw");
+
+    expect(activePane().tabs).toEqual([]);
+    expect(notices).toEqual(["'photo.raw' cannot be opened in the editor"]);
   });
 });
