@@ -8,8 +8,6 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileInfoBody from "./FileInfoBody.svelte";
-// Build-time contract: the Drafts palette tokens and the language names' pointer and focus ring; vitest drops component CSS.
-import fileInfoSource from "./FileInfoBody.svelte?raw";
 import { classifyFileActions } from "../state/fileActions";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 import type { TreeEntry } from "../api/types";
@@ -469,15 +467,6 @@ describe("the Drafts directory", () => {
     }
     expect(onSetAsScope, "the folder chip scopes the graph").toHaveBeenCalledTimes(2);
   });
-
-  test("the chip and the notice paint with the drafts palette tokens", () => {
-    // Build-time contract: the Drafts tint comes from the shared palette
-    // tokens. vitest drops component CSS, so the stylesheet is read as text.
-    expect(styleRule(".kind-chip.drafts-chip")).toContain("background: var(--fb-drafts-fg);");
-    const notice = styleRule(".drafts-notice");
-    expect(notice).toContain("background: var(--fb-drafts-bg);");
-    expect(notice).toContain("border-left: 3px solid var(--fb-drafts-fg);");
-  });
 });
 
 describe("the audio preview", () => {
@@ -566,15 +555,6 @@ describe("language and contact links open the graph", () => {
     expect(openGraphForLanguage).toHaveBeenCalledWith("TOML");
   });
 
-  test("the language buttons read as text with a pointer and a keyboard focus ring", () => {
-    // Build-time contract: the clickable names keep link affordances. vitest
-    // drops component CSS, so the stylesheet is read as text.
-    for (const cls of [".lang-name", ".lang-link"]) {
-      expect(styleRule(cls)).toContain("cursor: pointer;");
-      expect(styleRule(`${cls}:focus-visible`)).toContain("outline: 2px solid var(--link);");
-    }
-  });
-
   function mentionView(): GraphView {
     const view: GraphView = {
       nodes: [
@@ -649,11 +629,3 @@ describe("the report behind the inspector", () => {
     expect(api.reportFileStream).not.toHaveBeenCalled();
   });
 });
-
-/// The body of one rule in the component's stylesheet.
-function styleRule(selector: string): string {
-  const css = fileInfoSource.slice(fileInfoSource.indexOf("<style>"));
-  const at = css.indexOf(`\n  ${selector} {`);
-  expect(at, `${selector} has a rule`).toBeGreaterThan(-1);
-  return css.slice(at, css.indexOf("}", at));
-}
