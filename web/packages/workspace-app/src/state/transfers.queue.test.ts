@@ -19,31 +19,12 @@ import {
   transfers,
   waitForTransferSlot,
 } from "./transfers.svelte";
-import { sessionWindowId } from "../api/client";
-import transfersSrc from "./transfers.svelte.ts?raw";
-import clientSrc from "../api/client.ts?raw";
-import storeSrc from "./store.svelte.ts?raw";
-import typesSrc from "../api/types.ts?raw";
-
-/// Every `not.toMatch` below is only as good as the string it scans: a `?raw`
-/// import that resolved to nothing would satisfy all of them at once and read
-/// as proof that the client-side admission machinery is gone. Prove the sources
-/// actually loaded before trusting any absence claim about them.
-///
-/// This scans the production files only, never this test's own source. A test
-/// that reads itself and asserts the absence of a string will always find that
-/// string in its own assertion.
-describe("the scanned sources are real", () => {
-  test.each([
-    ["transfers.svelte.ts", transfersSrc, "export function beginTransfer"],
-    ["client.ts", clientSrc, "function uploadXhrAttempt"],
-    ["store.svelte.ts", storeSrc, "export function onWatchEvent"],
-    ["types.ts", typesSrc, "export type WsTransferQueueFrame"],
-  ])("%s loaded and is the file we think it is", (_name, source, anchor) => {
-    expect(source.length).toBeGreaterThan(1000);
-    expect(source).toContain(anchor);
-  });
-});
+import { api, sessionWindowId } from "../api/client";
+import { ApiError } from "../api/errors";
+import { setXhrFactory } from "../api/transport";
+import { demoData } from "../__tests__/app";
+import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { fileOps, loadTreeDir, onWatchEvent, tree } from "./store.svelte";
 
 function resetTransfers(): void {
   transfers.items = [];
@@ -75,15 +56,6 @@ describe("the browser makes no admission decision", () => {
     cancelTransfer(id);
     await expect(waitForTransferSlot(id)).resolves.toBe(false);
     await expect(waitForTransferSlot("no-such-transfer")).resolves.toBe(false);
-  });
-
-  test("the client-side concurrency machinery is gone from the source", () => {
-    // Named individually: a reader restoring any one of these would be
-    // reintroducing an admission decision the server owns.
-    expect(transfersSrc).not.toMatch(/hasSlot/);
-    expect(transfersSrc).not.toMatch(/drainQueue/);
-    expect(transfersSrc).not.toMatch(/slotWaiters/);
-    expect(transfersSrc).not.toMatch(/MAX_ACTIVE_(DOWNLOADS|UPLOADS)/);
   });
 });
 
@@ -164,62 +136,133 @@ describe("transfer ids cannot collide across windows", () => {
   });
 });
 
-describe("wire literals, pinned in both casings", () => {
-  test("the frame type and its fields are spelled exactly once each", () => {
-    expect(typesSrc).toMatch(/type: "transfer_queue";/);
-    expect(typesSrc).toMatch(/window_id: string;/);
-    expect(typesSrc).toMatch(/transfer_id: string;/);
-    expect(typesSrc).toMatch(/state: "waiting" \| "active";/);
-    expect(typesSrc).toMatch(/position\?: number;/);
+/// An upload request that answers with `status` (and `retryAfter`, when set)
+/// as soon as it is sent, recording the headers the client set.
+class AnsweringXhr {
+  static sent: AnsweringXhr[] = [];
+  headers: Record<string, string> = {};
+  status = 0;
+  statusText = "";
+  responseText = "";
+  headerReads = 0;
+  upload: { onprogress: (() => void) | null } = { onprogress: null };
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  onloadend: (() => void) | null = null;
+  constructor(
+    private readonly answer: number,
+    private readonly retryAfter: string | null,
+  ) {
+    AnsweringXhr.sent.push(this);
+  }
+  open(): void {}
+  setRequestHeader(name: string, value: string): void {
+    this.headers[name] = value;
+  }
+  getResponseHeader(name: string): string | null {
+    this.headerReads += 1;
+    return name === "retry-after" ? this.retryAfter : null;
+  }
+  send(body: FormData): void {
+    const file = body.get("file") as File;
+    const dir = body.get("dir");
+    this.status = this.answer;
+    this.responseText = JSON.stringify({ path: `${dir ? `${dir}/` : ""}${file.name}`, size: file.size });
+    queueMicrotask(() => {
+      this.onload?.();
+      this.onloadend?.();
+    });
+  }
+  abort(): void {}
+}
+
+function answerUploads(status = 200, retryAfter: string | null = null): void {
+  AnsweringXhr.sent = [];
+  setXhrFactory(() => new AnsweringXhr(status, retryAfter) as unknown as XMLHttpRequest);
+}
+
+describe("the frame on the watch stream", () => {
+  test("is routed to the transfer it names", () => {
+    resetTransfers();
+    const id = begin();
+
+    onWatchEvent({ type: "transfer_queue", window_id: sessionWindowId(), transfer_id: id, state: "waiting", position: 4 });
+
+    expect(transfers.items[0]!.queue).toEqual({ state: "waiting", position: 4 });
+  });
+});
+
+describe("the tracking headers on an upload", () => {
+  afterEach(() => setXhrFactory(null));
+
+  test("name this window and the transfer, in lowercase, together", async () => {
+    answerUploads();
+
+    await api.uploadFile(new File(["x"], "a.md"), "", { transferId: "t-7" });
+
+    expect(AnsweringXhr.sent[0]!.headers).toMatchObject({
+      "x-chan-window-id": sessionWindowId(),
+      "x-chan-transfer-id": "t-7",
+    });
   });
 
-  test("the store routes the frame by its exact discriminator", () => {
-    expect(storeSrc).toMatch(/frameType === "transfer_queue"/);
-    expect(storeSrc).toMatch(/applyTransferQueueFrame\(/);
+  test("are both left off an untracked upload", async () => {
+    answerUploads();
+
+    await api.uploadFile(new File(["x"], "a.md"), "");
+
+    expect(Object.keys(AnsweringXhr.sent[0]!.headers)).not.toContain("x-chan-window-id");
+    expect(Object.keys(AnsweringXhr.sent[0]!.headers)).not.toContain("x-chan-transfer-id");
   });
 
-  test("the request headers are the contract's exact lowercase names", () => {
-    expect(clientSrc).toMatch(/"x-chan-window-id"/);
-    expect(clientSrc).toMatch(/"x-chan-transfer-id"/);
-    // Camel/snake variants of the wire names must not appear at all.
-    expect(clientSrc).not.toMatch(/xChanWindowId|x_chan_window_id/);
-    expect(clientSrc).not.toMatch(/xChanTransferId|x_chan_transfer_id/);
-  });
+  test("carry the transfer's own id on a new upload and on a replacement", async () => {
+    installDemoWorkspace(demoData([{ path: "a.md", kind: "document", size: 5, mtime: 100, content: "hello" }]));
+    try {
+      tree.entries = [];
+      tree.loadedDirs = {};
+      await loadTreeDir("");
+      answerUploads();
+      resetTransfers();
 
-  test("both headers travel together or not at all", () => {
-    expect(clientSrc).toMatch(
-      /if \(opts\.transferId\) \{[\s\S]{1,240}"x-chan-window-id"[\s\S]{1,160}"x-chan-transfer-id"/,
-    );
-  });
+      await fileOps.uploadFilesTo("", [new File(["new"], "b.md")]);
+      await fileOps.replaceFileAt("a.md", new File(["again"], "a.md"));
 
-  test("the two tracked upload call sites pass their transfer id", () => {
-    // The only transfers the browser can make tracked. Anchor downloads and
-    // native desktop transfers cannot carry headers and stay untracked.
-    expect(storeSrc).toMatch(/api\.replaceFile\([\s\S]{1,200}transferId: xferId,/);
-    expect(storeSrc).toMatch(/api\.uploadFile\([\s\S]{1,200}transferId: xferId,/);
+      expect(AnsweringXhr.sent.map((xhr) => xhr.headers["x-chan-transfer-id"])).toEqual(
+        transfers.items.map((item) => item.id),
+      );
+    } finally {
+      uninstallDemoWorkspace();
+      tree.entries = [];
+    }
   });
 });
 
 describe("the admission refusal is not a failure", () => {
-  test("a 503 is raised as busy with its retry interval, before any body is read", () => {
-    expect(clientSrc).toMatch(/response\.status === 503/);
-    expect(clientSrc).toMatch(/retryAfterSeconds: response\.retryAfterSeconds/);
-    expect(clientSrc).toMatch(/"server busy"/);
+  afterEach(() => setXhrFactory(null));
+
+  test("a 503 is raised as busy with its retry interval", async () => {
+    answerUploads(503, "7");
+
+    const refused = await api.uploadFile(new File(["x"], "a.md"), "").catch((error: unknown) => error);
+
+    expect(refused).toBeInstanceOf(ApiError);
+    expect(refused).toMatchObject({ status: 503, message: "server busy", data: { retryAfterSeconds: 7 } });
   });
 
-  test("a missing Retry-After stays absent rather than becoming zero", () => {
-    // Number(null) and Number("") are both 0, which would read as "retry now".
-    expect(clientSrc).toMatch(/if \(!trimmed\) return null;/);
-    expect(clientSrc).toMatch(/Number\.isFinite\(seconds\) \? seconds : null/);
+  test("a missing or blank Retry-After stays absent rather than becoming zero", async () => {
+    for (const header of [null, "", "  ", "soon"]) {
+      answerUploads(503, header);
+      const refused = await api.uploadFile(new File(["x"], "a.md"), "").catch((error: unknown) => error);
+      expect(refused).toMatchObject({ data: { retryAfterSeconds: null } });
+    }
   });
 
-  test("the header is read only on a refusal, and cannot strand the promise", () => {
-    // Reading it unconditionally threw inside onload against a response object
-    // that models no headers, which left the upload promise unsettled and the
-    // caller waiting rather than failing.
-    expect(clientSrc).toMatch(
-      /xhr\.status === 503[\s\S]{1,120}xhr\.getResponseHeader\?\.\("retry-after"\)/,
-    );
+  test("a success reads no header, so a response without them still settles", async () => {
+    answerUploads(200);
+
+    await expect(api.uploadFile(new File(["x"], "a.md"), "")).resolves.toMatchObject({ path: "a.md" });
+    expect(AnsweringXhr.sent[0]!.headerReads).toBe(0);
   });
 });
 
