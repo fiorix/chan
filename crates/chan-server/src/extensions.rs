@@ -1215,14 +1215,28 @@ mod tests {
         // sh exits 127 for a command it cannot find, which is the quickest
         // pointer at PATH an operator gets from one log line.
         assert!(
-            ignored.contains("exit status: 127"),
+            ignored.contains(&format!(
+                "reading handshake (child {}): ",
+                command_not_found_status()
+            )),
             "the warning must carry the child's exit status: {ignored}"
         );
     }
 
-    /// systemd's compiled-in `PATH` for the services of a user manager that
-    /// no `environment.d` file or session import has extended: what a
-    /// devserver started by a unit without a `PATH` line runs with.
+    /// The exit status a shell gives a command it cannot find, 127. chan's
+    /// own text is the `(child ...)` around it in the warning; how the status
+    /// itself reads is the platform's.
+    #[cfg(unix)]
+    fn command_not_found_status() -> std::process::ExitStatus {
+        std::os::unix::process::ExitStatusExt::from_raw(127 << 8)
+    }
+
+    /// A `PATH` of the standard system directories and none of the user's
+    /// own, which is the shape a systemd user manager gives its services when
+    /// no `environment.d` file or session import has extended its default:
+    /// what a devserver started by a unit without a `PATH` line runs with.
+    /// The test depends on that shape, not on the exact list any one systemd
+    /// build compiles in.
     #[cfg(unix)]
     const SERVICE_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin";
 
@@ -1238,7 +1252,7 @@ mod tests {
     /// process's `PATH` verbatim and nothing reads a shell profile: a bare
     /// `command` and every helper the extension runs by name resolve through
     /// that `PATH` alone. Under a systemd service that is the unit's `PATH`
-    /// line when it has one, and systemd's default when it has none. The
+    /// line when it has one, and the user manager's default when it has none. The
     /// chan process here is a re-run of this test whose environment holds
     /// nothing but `PATH`, which is the case a service produces, covered
     /// without one.
@@ -1254,7 +1268,7 @@ mod tests {
 
         let root = tempfile::tempdir().expect("tempdir");
         // The user's own bin directory, which a login shell puts on PATH and
-        // systemd's default does not.
+        // the user manager's default does not.
         let user_bin = root.path().join("bin");
         std::fs::create_dir(&user_bin).expect("user bin");
         let handshake = format!(
@@ -1302,16 +1316,25 @@ mod tests {
             SERVICE_DEFAULT_PATH,
             "the extension inherits the service's PATH verbatim"
         );
+        // chan's own text around the platform's error for a program that no
+        // PATH entry holds.
+        let not_found = std::process::Command::new("chan-test-bare-extension")
+            .env("PATH", SERVICE_DEFAULT_PATH)
+            .spawn()
+            .expect_err("no directory on the default PATH holds the bare extension");
+        let bare = format!("spawning chan-test-bare-extension: {not_found}");
         assert!(
-            logs.iter().any(|line| line.contains("extension bare from")
-                && line.contains("spawning chan-test-bare-extension: No such file or directory")),
+            logs.iter()
+                .any(|line| line.contains("extension bare from") && line.contains(&bare)),
             "a bare command outside PATH must say it was not found: {logs:#?}"
+        );
+        let helper = format!(
+            "reading handshake (child {}): extension stdout closed before the handshake marker",
+            command_not_found_status()
         );
         assert!(
             logs.iter()
-                .any(|line| line.contains("extension helper from")
-                    && line.contains("exit status: 127")
-                    && line.contains("extension stdout closed before the handshake marker")),
+                .any(|line| line.contains("extension helper from") && line.contains(&helper)),
             "a helper outside PATH must say the extension exited 127 before its handshake: \
              {logs:#?}"
         );
