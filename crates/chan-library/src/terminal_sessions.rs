@@ -10025,6 +10025,42 @@ mod tests {
             registry.close_all(CloseReason::Shutdown);
         }
 
+        // The registry's stop descriptor stays readable once a stop request
+        // fires it. A reader the request did not stop keeps reading its PTY,
+        // and after that one wake it stops watching the descriptor instead of
+        // waking on it again at once.
+        #[test]
+        fn a_stop_request_leaves_an_unparked_reader_reading_without_a_spin() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            // Windowless, so never parked and never asked to stop.
+            let mut handle = registry.create(opts(None, Some("exec cat"))).unwrap();
+            let id = handle.id().to_string();
+
+            let (woke_tx, woke_rx) = std::sync::mpsc::channel::<()>();
+            {
+                let woke_tx = woke_tx.clone();
+                arm_attach_seam(&id, AttachSeam::ReaderIdleWake, move || {
+                    let _ = woke_tx.send(());
+                });
+            }
+            registry.request_parked_reader_stop();
+            woke_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the stop descriptor woke the unparked reader");
+            arm_attach_seam(&id, AttachSeam::ReaderIdleWake, move || {
+                let _ = woke_tx.send(());
+            });
+            assert!(
+                woke_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+                "the unparked reader woke again at once on the readable stop descriptor"
+            );
+
+            handle.send_input(b"after-the-stop\n");
+            wait_for_output(&mut handle, b"after-the-stop");
+            registry.close_all(CloseReason::Shutdown);
+        }
+
         #[test]
         fn windowless_create_parks_only_on_first_window_rebind() {
             let hook = RecordingPark::default();
