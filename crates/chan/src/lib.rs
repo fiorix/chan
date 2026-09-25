@@ -5869,12 +5869,18 @@ fn write_devserver_unit(
     let dir = systemd_user_unit_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let unit_path = dir.join(DEVSERVER_SYSTEMD_UNIT);
+    // The service runs with the user manager's environment, so the PATH of
+    // the shell running this command is recorded in the unit: without it an
+    // extension that resolves a helper by name fails at every service start.
+    // A PATH that differs from the recorded one rewrites the unit, so a
+    // `chan devserver restart` is how a user refreshes it.
     let unit = devserver_systemd_unit_spec(
         &exe,
         addr,
         devserver_chan_home().as_deref(),
         tunnel.as_ref(),
-    );
+    )
+    .with_search_path(&std::env::var_os("PATH").unwrap_or_default());
     write_rendered_devserver_unit(&unit_path, &unit, tunnel.is_some())
 }
 
@@ -11613,6 +11619,41 @@ mod tests {
             std::fs::read_to_string(path).expect("foreign unit remains"),
             foreign
         );
+    }
+
+    #[test]
+    fn chan_own_unit_is_rewritten_with_the_installing_search_path() {
+        // The upgrade path over a unit an older chan wrote without a PATH, and
+        // a restart from a shell with another PATH, both rewrite the unit with
+        // the caller's PATH instead of refusing it as administrator-edited.
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let spec = || devserver_systemd_unit_spec(Path::new("/usr/bin/chan"), addr, None, None);
+        std::fs::write(&path, spec().render()).expect("seed a unit without a PATH");
+
+        let login = spec().with_search_path(std::ffi::OsStr::new("/home/dev/.local/bin:/usr/bin"));
+        let update = write_rendered_devserver_unit(&path, &login, false)
+            .expect("chan must upgrade a unit it wrote itself");
+        assert!(update.changed, "a unit without a PATH must gain one");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("Environment=\"PATH=/home/dev/.local/bin:/usr/bin\"\n"),
+            "the unit must carry the installing PATH: {written}"
+        );
+
+        let other_shell = spec().with_search_path(std::ffi::OsStr::new("/opt/tools/bin:/usr/bin"));
+        let update = write_rendered_devserver_unit(&path, &other_shell, false)
+            .expect("chan must refresh the PATH it recorded");
+        assert!(update.changed, "another PATH must rewrite the unit");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            other_shell.render()
+        );
+
+        let again = write_rendered_devserver_unit(&path, &other_shell, false)
+            .expect("the unit chan just wrote is its own");
+        assert!(!again.changed, "the same PATH must be a no-op");
     }
 
     #[test]
