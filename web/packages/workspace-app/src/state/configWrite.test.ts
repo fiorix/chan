@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import clientSource from "../api/client.ts?raw";
-import preferenceWriteSource from "../api/preferenceWrite.ts?raw";
-import storeSource from "./store.svelte.ts?raw";
-import configWriteSource from "./configWrite.ts?raw";
-import editorToolsSource from "./editorTools.svelte.ts?raw";
+import * as preferenceWrite from "../api/preferenceWrite";
+import * as configWrite from "./configWrite";
+import { persistStripTrailingWhitespaceOnSave } from "./editorTools.svelte";
 import {
   clearHybridSurfaceTheme,
+  paneWidths,
+  persistPaneWidths,
   setHybridSurfaceTheme,
+  setThemeChoice,
   updateGlobalConfigSerial,
 } from "./store.svelte";
 
@@ -83,6 +84,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -134,20 +136,14 @@ describe("revisioned partial config writes", () => {
   });
 });
 
-describe("all config writers share one helper", () => {
-  test("the state import point re-exports the API helper", () => {
-    expect(configWriteSource).toMatch(
-      /export \{ updateGlobalConfigSerial \} from "\.\.\/api\/preferenceWrite";/,
-    );
-    expect(preferenceWriteSource).toMatch(
-      /export function updateGlobalConfigSerial\(/,
-    );
-    expect(clientSource).not.toMatch(/queuePrefWrite|prefsWriteInflight/);
+describe("every config writer patches only its own field through one helper", () => {
+  test("the state import point and the store hand out the api helper itself", () => {
+    expect(configWrite.updateGlobalConfigSerial).toBe(preferenceWrite.updateGlobalConfigSerial);
+    expect(updateGlobalConfigSerial).toBe(preferenceWrite.updateGlobalConfigSerial);
   });
 
-  // The surface-theme writer is asserted by driving it rather than by
-  // matching its source: what matters is the body it sends, and it
-  // builds that inside the mutation now, where no single line spells it.
+  // The surface-theme writer builds its body inside the mutation, so what
+  // matters is the body it sends.
   test("a surface-theme write patches only its own field", async () => {
     await setHybridSurfaceTheme("editor", "dark");
     expect(patchBodies).toHaveLength(1);
@@ -160,22 +156,27 @@ describe("all config writers share one helper", () => {
     await clearHybridSurfaceTheme("editor");
   });
 
-  test("store writers return partial field patches", () => {
-    expect(storeSource).toMatch(
-      /persistThemeChoice\([\s\S]*?\{ theme: choice \}/,
-    );
-    expect(storeSource).toMatch(/return \{ pane_widths: snapshot \};/);
-    expect(storeSource).not.toMatch(
-      /dateFormatPersistInflight|sidePanesPersistInflight/,
-    );
+  test("a theme choice patches only the theme, and not at all when unchanged", async () => {
+    await setThemeChoice("light");
+    await setThemeChoice("light");
+    expect(patchBodies.map((body) => body.preferences)).toEqual([{ theme: "light" }]);
   });
 
-  test("editorTools uses the shared partial writer", () => {
-    expect(editorToolsSource).toMatch(
-      /import \{ updateGlobalConfigSerial \} from "\.\/configWrite";/,
-    );
-    expect(editorToolsSource).toMatch(
-      /\{ strip_trailing_whitespace_on_save: value \}/,
-    );
+  test("pane widths patch only pane_widths once the resize settles", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    paneWidths.inspector = 410;
+    persistPaneWidths();
+    persistPaneWidths();
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(Object.keys(patchBodies[0]!.preferences)).toEqual(["pane_widths"]);
+    expect(patchBodies[0]!.preferences.pane_widths).toMatchObject({ inspector: 410 });
+  });
+
+  test("strip-trailing-whitespace patches only its own field", async () => {
+    await persistStripTrailingWhitespaceOnSave(true);
+    expect(patchBodies.map((body) => body.preferences)).toEqual([
+      { strip_trailing_whitespace_on_save: true },
+    ]);
   });
 });
