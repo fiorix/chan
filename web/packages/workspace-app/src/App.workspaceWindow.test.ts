@@ -2,7 +2,8 @@
 //
 // What App starts in a workspace window. It reads the workspace's preflight
 // and its screen lock, installs the lock's activity tracker and mounts its
-// cover, and routes the search chord to the search overlay. It never follows
+// cover, locks on the host's lock command (which has no chord), and routes
+// the search chord to the search overlay. It never follows
 // the launcher's theme (that is a standalone window's) and never arms
 // close-when-empty. The per-library focus-colour watch lives only on the root
 // launcher router, which the desktop's hosts mount and a standalone `chan
@@ -52,9 +53,11 @@ vi.mock("./state/screensaver.svelte", async (importOriginal) => {
 });
 
 import { api } from "./api/client";
-import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { installScreensaverTracker, lockNow, screensaver } from "./state/screensaver.svelte";
+import { SHORTCUTS } from "./state/shortcuts";
 import { searchPanel, ui } from "./state/store.svelte";
+import { cancelPaneMode } from "./state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -92,6 +95,24 @@ describe("a workspace window", () => {
     lockNow();
     await settle();
     expect(target.querySelector(".screensaver-backdrop")).not.toBeNull();
+  });
+
+  test("locks on the host's lock command, which no chord or Hybrid Nav key reaches", async () => {
+    await mountApp();
+    await vi.waitFor(() => expect(screensaver.loaded).toBe(true));
+    expect(SHORTCUTS.find((shortcut) => shortcut.id === "app.screensaver.lock")).toBeUndefined();
+
+    press({ key: "l", code: "KeyL", ctrlKey: true });
+    press({ key: "l", code: "KeyL", metaKey: true });
+    press({ key: ".", code: "Period", ctrlKey: true });
+    press({ key: "l", code: "KeyL" });
+    cancelPaneMode();
+    await settle();
+    expect(screensaver.locked).toBe(false);
+
+    hostCommand("app.screensaver.lock");
+    await settle();
+    expect(screensaver.locked).toBe(true);
   });
 
   test("opens the search overlay from the search chord", async () => {
