@@ -824,11 +824,98 @@ mod tests {
     /// Install [`CapturedLogs`] for the current thread until the guard drops.
     /// A current-thread tokio test runs every future it awaits on this
     /// thread, so the runtime's own warnings land here too.
+    ///
+    /// Only [`report_extension_runtime`] calls it, in a process running one
+    /// test. tracing caches each callsite's interest process-wide, and a test
+    /// on another thread that reaches the same warning first, with no
+    /// subscriber of its own, can store "never" for it after this subscriber
+    /// registers; the capture then misses the warning. It did in 10 of 60
+    /// parallel runs of these tests.
     #[cfg(unix)]
     fn capture_logs() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let guard = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
         (lines, guard)
+    }
+
+    /// Set, to an extensions directory, in the re-run of one test that plays
+    /// chan: the re-run starts the extension runtime over that directory and
+    /// reports instead of running the test's own half.
+    #[cfg(unix)]
+    const EXTENSION_RUNTIME_CHILD: &str = "CHAN_TEST_EXTENSION_RUNTIME_CHILD";
+
+    /// The re-run's half: start the runtime over `extensions` under a
+    /// capture, stop it, and print the catalog ids and every captured line
+    /// for [`start_in_child_process`] to read.
+    #[cfg(unix)]
+    async fn report_extension_runtime(extensions: &Path) {
+        let (logs, guard) = capture_logs();
+        let runtime = ExtensionRuntime::start_in(extensions).await;
+        let mut ids: Vec<_> = runtime
+            .catalog
+            .views()
+            .into_iter()
+            .map(|view| view.id)
+            .collect();
+        ids.sort();
+        runtime.shutdown().await;
+        drop(guard);
+        println!("CATALOG={}", ids.join(","));
+        for line in logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            println!("LOG={}", line.replace('\n', " "));
+        }
+    }
+
+    /// Re-run `test` alone as the chan process over `extensions` and return
+    /// the catalog ids and every log line it reports. With `path`, the
+    /// re-run's whole environment is that `PATH`, the way a systemd service
+    /// starts; without it, the re-run inherits this process's environment.
+    #[cfg(unix)]
+    async fn start_in_child_process(
+        test: &str,
+        extensions: &Path,
+        path: Option<&str>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+        command.args(["--exact", test, "--nocapture"]);
+        if let Some(path) = path {
+            command.env_clear().env("PATH", path);
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(60),
+            command
+                .env(EXTENSION_RUNTIME_CHILD, extensions)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("extension runtime child timed out")
+        .expect("spawn the extension runtime child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "extension runtime child failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let catalog = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("CATALOG="))
+            .expect("the child reports its catalog")
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
+        let logs = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("LOG="))
+            .map(str::to_string)
+            .collect();
+        (catalog, logs)
     }
 
     #[test]
@@ -1094,6 +1181,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_closed_stdout_is_logged_with_its_cause_and_exit_status() {
+        if let Some(extensions) = std::env::var_os(EXTENSION_RUNTIME_CHILD) {
+            report_extension_runtime(Path::new(&extensions)).await;
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("helperless.toml"),
@@ -1106,15 +1197,13 @@ mod tests {
         )
         .expect("write extension script");
 
-        let (logs, _guard) = capture_logs();
-        let runtime = ExtensionRuntime::start_in(dir.path()).await;
-        assert!(runtime.catalog.views().is_empty());
-        runtime.shutdown().await;
-
-        let logs = logs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let (catalog, logs) = start_in_child_process(
+            "extensions::tests::a_closed_stdout_is_logged_with_its_cause_and_exit_status",
+            dir.path(),
+            None,
+        )
+        .await;
+        assert!(catalog.is_empty(), "nothing starts: {catalog:?}");
         let ignored = logs
             .iter()
             .find(|line| line.contains("extension ignored"))
@@ -1137,64 +1226,12 @@ mod tests {
     #[cfg(unix)]
     const SERVICE_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin";
 
-    /// Set, to the extensions directory, in the re-run that plays chan.
-    #[cfg(unix)]
-    const SERVICE_ENVIRONMENT_CHILD: &str = "CHAN_TEST_EXTENSION_SERVICE_ENVIRONMENT_CHILD";
-
     #[cfg(unix)]
     fn write_executable(path: &Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, script).expect("write executable");
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
             .expect("make executable");
-    }
-
-    /// Run [`a_service_environment_is_what_an_extension_resolves_through`]'s
-    /// child half in a process whose whole environment is `PATH`, the way a
-    /// systemd service starts, and return the catalog ids and every captured
-    /// log line it reports.
-    #[cfg(unix)]
-    async fn start_in_service_environment(
-        extensions: &Path,
-        path: &str,
-    ) -> (Vec<String>, Vec<String>) {
-        let output = tokio::time::timeout(
-            Duration::from_secs(60),
-            tokio::process::Command::new(std::env::current_exe().expect("test binary"))
-                .args([
-                    "--exact",
-                    "extensions::tests::a_service_environment_is_what_an_extension_resolves_through",
-                    "--nocapture",
-                ])
-                .env_clear()
-                .env("PATH", path)
-                .env(SERVICE_ENVIRONMENT_CHILD, extensions)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .expect("service-environment child timed out")
-        .expect("spawn the service-environment child");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success(),
-            "service-environment child failed:\n{stdout}\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let catalog = stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("CATALOG="))
-            .expect("the child reports its catalog")
-            .split(',')
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .collect();
-        let logs = stdout
-            .lines()
-            .filter_map(|line| line.strip_prefix("LOG="))
-            .map(str::to_string)
-            .collect();
-        (catalog, logs)
     }
 
     /// An extension is spawned without a shell, so it inherits the serving
@@ -1208,26 +1245,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_service_environment_is_what_an_extension_resolves_through() {
-        if let Some(extensions) = std::env::var_os(SERVICE_ENVIRONMENT_CHILD) {
-            let (logs, guard) = capture_logs();
-            let runtime = ExtensionRuntime::start_in(Path::new(&extensions)).await;
-            let mut ids: Vec<_> = runtime
-                .catalog
-                .views()
-                .into_iter()
-                .map(|view| view.id)
-                .collect();
-            ids.sort();
-            runtime.shutdown().await;
-            drop(guard);
-            println!("CATALOG={}", ids.join(","));
-            for line in logs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-            {
-                println!("LOG={}", line.replace('\n', " "));
-            }
+        const SERVICE_ENVIRONMENT_TEST: &str =
+            "extensions::tests::a_service_environment_is_what_an_extension_resolves_through";
+        if let Some(extensions) = std::env::var_os(EXTENSION_RUNTIME_CHILD) {
+            report_extension_runtime(Path::new(&extensions)).await;
             return;
         }
 
@@ -1269,7 +1290,12 @@ mod tests {
 
         // A unit without a PATH line: neither the bare command nor the
         // helper resolves, and each failure names itself.
-        let (catalog, logs) = start_in_service_environment(&extensions, SERVICE_DEFAULT_PATH).await;
+        let (catalog, logs) = start_in_child_process(
+            SERVICE_ENVIRONMENT_TEST,
+            &extensions,
+            Some(SERVICE_DEFAULT_PATH),
+        )
+        .await;
         assert!(catalog.is_empty(), "nothing resolves: {catalog:?}");
         assert_eq!(
             seen_path(),
@@ -1293,7 +1319,8 @@ mod tests {
         // The unit chan renders from a login shell: the user's bin directory
         // is on the recorded PATH, and both resolve through it.
         let installed = format!("{}:{SERVICE_DEFAULT_PATH}", user_bin.display());
-        let (catalog, logs) = start_in_service_environment(&extensions, &installed).await;
+        let (catalog, logs) =
+            start_in_child_process(SERVICE_ENVIRONMENT_TEST, &extensions, Some(&installed)).await;
         assert_eq!(catalog, ["bare", "helper"], "{logs:#?}");
         assert_eq!(
             seen_path(),
