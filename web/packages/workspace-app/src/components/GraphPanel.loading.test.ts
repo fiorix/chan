@@ -297,18 +297,23 @@ describe("watching the directories it shows", () => {
 
   test("a change inside the scope reloads it; one outside does not", async () => {
     await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
-    const change = async (paths: string[]) => {
-      graphReloadSignal.paths = paths;
-      graphReloadSignal.nonce += 1;
-      await settle();
-      await new Promise((r) => setTimeout(r, 300));
-      await settle();
-    };
+    // The reload is debounced; run every timer a change schedules, however
+    // long its delay, so "no reload" is judged after any reload would land.
+    vi.useFakeTimers();
+    try {
+      const change = async (paths: string[]) => {
+        graphReloadSignal.paths = paths;
+        graphReloadSignal.nonce += 1;
+        await vi.runAllTimersAsync();
+      };
 
-    const before = graphServer.graphStreamCalls;
-    await change(["src/other.rs"]);
-    expect(graphServer.graphStreamCalls, "src is not in dir:notes").toBe(before);
-    await change(["notes/new.md"]);
-    expect(graphServer.graphStreamCalls).toBe(before + 1);
+      const before = graphServer.graphStreamCalls;
+      await change(["src/other.rs"]);
+      expect(graphServer.graphStreamCalls, "src is not in dir:notes").toBe(before);
+      await change(["notes/new.md"]);
+      expect(graphServer.graphStreamCalls).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
