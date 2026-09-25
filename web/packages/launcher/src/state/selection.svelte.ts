@@ -175,8 +175,11 @@ function lockUnknownWorkspace(item: SelItem): boolean {
   return row !== undefined && workspaceCondition(row.status) === "unknown";
 }
 
-/** The skip counts are taken when the run starts, from the rows it left alone:
- * the live re-fetch can move a row's status while the run is in flight. */
+/** The skip set is fixed when a run starts, and the counts come from it.
+ * bulkSetOnAll picks the rows it acts on at that same moment; bulk remove
+ * filters its served rows only after the local removals, so a served row whose
+ * lock state the live re-fetch moves in between can be both removed and
+ * counted, or neither. */
 function bulkNote(
   verb: string,
   total: number,

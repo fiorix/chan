@@ -17,9 +17,11 @@
 // draws. Pane's `visibleTabs` and its tab labels feed the strip, which
 // renders outside both, so a throw there still reaches the window. `everyTab`
 // is read only inside the pane boundary, so a throw from `allPaneTabs` is
-// contained. A duplicate tab id is neither boundary's: a keyed list raises
-// `each_key_duplicate` from its own evaluation, which no per-tab boundary
-// encloses, so Pane drops a repeated id before any list is keyed on it
+// contained. A keyed list raises `each_key_duplicate` from its own
+// evaluation, which no per-tab boundary encloses: the body lists sit inside
+// the pane boundary, which would catch a duplicate and take every body in the
+// pane with it, and the strip's list sits outside both, where it would reach
+// the window. So Pane drops a repeated id before any list is keyed on it
 // (paneDuplicateTabId.test.ts).
 
 import { mount, tick } from "svelte";
