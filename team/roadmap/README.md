@@ -29,7 +29,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 
 | item | state | next |
 | --- | --- | --- |
-| [source-text-tests-pin-spelling-not-behaviour][rawt] | accepted | build |
+| [source-text-tests-pin-spelling-not-behaviour][rawt] | landed | GA |
 | [one-question-is-answered-in-many-places][dedup] | accepted | after rawt |
 | [frontend-comments-narrate-history][cmts] | raised | after rawt |
 | [hand-mirrored-contracts-have-no-gate][mirr] | landed | GA |
@@ -119,6 +119,13 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | raised | decide |
 | [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
 | [a-cut-paste-can-replace-the-first-moved-file][mvrep] | landed | GA |
+| [the-settings-date-format-never-saves][dfmt] | landed | GA |
+| [four-tests-still-read-source-with-node-fs][fsrd] | raised | decide |
+| [the-attach-prelude-order-has-no-rust-test][prel] | raised | decide |
+| [mounted-components-mutate-props-they-do-not-own][ownw] | raised | decide |
+| [a-sent-prompt-stays-editable-while-pending][rpro] | raised | decide |
+| [a-click-beside-a-graph-node-clears-the-selection][gring] | raised | decide |
+| [a-mirrored-value-focuses-an-unfocused-editor][afoc] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -190,6 +197,13 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [resave]: v0.101.0/a-graceful-restarts-session-save-drops-the-terminals-session-id.md
 [cpsk]: v0.101.0/a-single-file-copy-skips-the-utf8-gate.md
 [mvrep]: v0.101.0/a-cut-paste-can-replace-the-first-moved-file.md
+[dfmt]: v0.101.0/the-settings-date-format-never-saves.md
+[fsrd]: v0.101.0/four-tests-still-read-source-with-node-fs.md
+[prel]: v0.101.0/the-attach-prelude-order-has-no-rust-test.md
+[ownw]: v0.101.0/mounted-components-mutate-props-they-do-not-own.md
+[rpro]: v0.101.0/a-sent-prompt-stays-editable-while-pending.md
+[gring]: v0.101.0/a-click-beside-a-graph-node-clears-the-selection.md
+[afoc]: v0.101.0/a-mirrored-value-focuses-an-unfocused-editor.md
 
 ## Completed
 

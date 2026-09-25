@@ -1,6 +1,6 @@
 # Two hundred frontend tests pin spelling, not behaviour
 
-Status: accepted for v0.101.0 by the owner on 2026-09-24; raised for v0.101.0 from the frontend review (findings ORPH-01 and ORPH-02, high, and 21 medium findings about the same convention), phased out of v0.100.0 because it waits on two owner rulings. The count was re-taken against `main` at `d3de0180b`.
+Status: landed on 2026-09-25 in two file-disjoint lanes and an integration step; accepted for v0.101.0 by the owner on 2026-09-24; raised for v0.101.0 from the frontend review (findings ORPH-01 and ORPH-02, high, and 21 medium findings about the same convention), phased out of v0.100.0 because it waits on two owner rulings. The count was re-taken against `main` at `d3de0180b`.
 
 ## Owner ruling
 
@@ -19,6 +19,16 @@ v0.100.0 works under a narrow rule so its fixes are not blocked: a lane that cha
 A frontend test fails when behaviour breaks and passes when a comment or a spelling changes. Source-text assertions survive only where nothing else can express the check, and the cases are written down.
 
 Two rulings decide the shape, and the review puts them first among its questions for the owner: whether `?raw` pins stay as a policy with tighter rules, shrink to a narrow set of named cases with the rest converted or deleted, or go wherever jsdom allows; and how the deletion is done so history survives, in one pass or rename first and edit second. The review recommends the narrow rule and the two-commit path.
+
+## What shipped
+
+Two lanes took the 203 test files that imported a production module with `?raw` (lane 1 the policy, the shared harnesses and 104 files; lane 2 the `Wysiwyg`, `GraphPanel` and `TerminalTab` families and their neighbours, 99 files), each with an independent review and a second round, and an integration step gave both halves one set of harnesses. 19 such files remain. The webdev standards (`.agents/skills/webdev/SKILL.md`, `## Tests`) state the contract, the narrow rule and every allowed case; each surviving read carries a one-line contract comment and was shown red against a violation.
+
+- The survivors are the tree-wide scans (native dialogs in both packages, the one id mint, the Tauri invoke boundary, the widget write predicate, the launcher theme tokens) and CSS or import contracts jsdom never applies whose break ships a visible failure: the flip back face that once blanked every Linux window, keep-alive by `visibility`, the split chrome constant, the Wysiwyg paint layers and list-indent variables, no scale on a pane, the per-surface theme token blocks, the graph palette, the terminal font's entry import, relative src and family, and the Excalidraw island's offscreen `display` and stylesheet chunk. `terminal/protocol.test.ts` still reads `routes/terminal.rs`, until a Rust test pins the attach prelude order ([the-attach-prelude-order-has-no-rust-test](the-attach-prelude-order-has-no-rust-test.md)).
+- Shared harnesses live under `web/packages/workspace-app/src/__tests__/`: one tab-factory module, the standalone boot and typed preferences, the mounted App over the demo transport, one xterm stand-in that records the key handler, canvas contexts, the transport recorder, Settings, Wysiwyg, GraphPanel and the Excalidraw stand-ins.
+- `Wysiwyg.svelte`, `GraphPanel.svelte` and `TerminalTab.svelte` have mounted behavioural coverage for what their pins guarded. One production seam was added, `GraphCanvas.svelte`'s `nodeScreenCircle`, so a test can click a node the layout placed.
+- Every drop of coverage is listed in the lane reports (`dev/v0101-tasks/report-rawa.md`, `report-rawb.md` and their `-2` rounds). About two dozen inline tab factories in files outside both lanes' lists remain, and the four `node:fs` source readers outside both lanes are [four-tests-still-read-source-with-node-fs](four-tests-still-read-source-with-node-fs.md).
+- The mounts found product defects: [the-settings-date-format-never-saves](the-settings-date-format-never-saves.md) landed with lane 1; [a-sent-prompt-stays-editable-while-pending](a-sent-prompt-stays-editable-while-pending.md), [a-click-beside-a-graph-node-clears-the-selection](a-click-beside-a-graph-node-clears-the-selection.md), [a-mirrored-value-focuses-an-unfocused-editor](a-mirrored-value-focuses-an-unfocused-editor.md) and [mounted-components-mutate-props-they-do-not-own](mounted-components-mutate-props-they-do-not-own.md) are raised.
 
 ## Boundaries
 
