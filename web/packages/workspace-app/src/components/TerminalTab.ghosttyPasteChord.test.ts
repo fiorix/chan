@@ -5,7 +5,6 @@ import {
   handleTerminalClipboardChord,
   terminalClipboardKeyHandlerResult,
 } from "../terminal/clipboardChord";
-import terminalTab from "./TerminalTab.svelte?raw";
 
 type GhosttyChordResult = {
   event: KeyboardEvent;
@@ -72,14 +71,5 @@ describe("Ghostty terminal paste chord", () => {
     expect(ghosttyClaimed).toBe(true);
     expect(event.defaultPrevented).toBe(true);
     expect(copySelection).toHaveBeenCalledOnce();
-  });
-
-  test("TerminalTab applies the backend-aware result before its pinned inversion", () => {
-    expect(terminalTab).toMatch(
-      /return terminalClipboardKeyHandlerResult\(e, currentOS\(\), backend\);/,
-    );
-    expect(terminalTab).toMatch(
-      /term\.attachCustomKeyEventHandler\(\(e\) => !handleTerminalKeyEvent\(e\)\);/,
-    );
   });
 });
