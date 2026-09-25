@@ -260,6 +260,27 @@ describe("the filesystem graph", () => {
     expect(visibleIds()).toContain("notes");
   });
 
+  test("expanding a directory fetches its children and asks the canvas to fit them", async () => {
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", mode: "filesystem", expanded: { "": true } }),
+    );
+    expect(canvas.props!.nodes.some((n) => n.id === "notes/a.md"), "not loaded yet").toBe(false);
+
+    canvas.props!.onSelect("notes");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+
+    expect(tab.expanded.notes).toBe(true);
+    expect(graphServer.fsGraphCalls.some((c) => c.path === "notes" && c.depth === 1)).toBe(true);
+    expect(visibleIds()).toEqual(expect.arrayContaining(["notes/a.md", "notes/deep"]));
+    expect(canvas.props!.expansionFitRequest?.ids).toEqual(
+      expect.arrayContaining(["notes", "", "notes/a.md", "notes/deep"]),
+    );
+  });
+
   test("a file scope shows everything it loaded", async () => {
     await mountGraphPanel(
       GraphPanel,
