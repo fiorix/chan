@@ -119,8 +119,10 @@
 >
   <select
     value={prefs.date_format}
-    onchange={(e) =>
-      commit((p) => ({ ...p, date_format: e.currentTarget.value }))}
+    onchange={(e) => {
+      const value = e.currentTarget.value;
+      commit((p) => ({ ...p, date_format: value }));
+    }}
   >
     {#each DATE_FORMATS as f (f.id)}
       <option value={f.id}>{f.label}</option>
