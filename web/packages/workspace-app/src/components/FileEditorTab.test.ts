@@ -4,7 +4,9 @@
 // editors. The tab menu and the body menu are opened the way the pane opens
 // them (openTabMenu, a right-click in the editor body) and driven by clicks.
 
+import { highlightingFor } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
+import { tags } from "@lezer/highlight";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -16,7 +18,15 @@ import { bufferKey, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 import type { MockWorkspaceStore } from "../demo/store";
-import { fileOps, paneWidths, refreshTree, refreshWorkspace } from "../state/store.svelte";
+import { githubDarkHighlight, githubLightHighlight } from "../editor/highlight";
+import {
+  fileOps,
+  hybridSurfaceThemes,
+  paneWidths,
+  refreshTree,
+  refreshWorkspace,
+  ui,
+} from "../state/store.svelte";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import {
   bumpTabFocusPulse,
@@ -882,4 +892,37 @@ describe("a canvas tab", () => {
     (island.props?.onSceneChange as (json: string) => void)(next);
     expect((pane.tabs[0] as FileTab).content).toBe(next);
   });
+});
+
+describe("the editor surface's theme", () => {
+  /// Which of the two syntax palettes the editor highlights with.
+  function palette(view: EditorView): "dark" | "light" | null {
+    const classes = highlightingFor(view.state, [tags.keyword]) ?? "";
+    if (classes.includes(githubDarkHighlight.style([tags.keyword])!)) return "dark";
+    if (classes.includes(githubLightHighlight.style([tags.keyword])!)) return "light";
+    return null;
+  }
+
+  for (const mode of ["source", "wysiwyg"] as const) {
+    test(`the ${mode} editor highlights with the editor surface's theme, and follows it`, async () => {
+      const startTheme = ui.theme;
+      ui.theme = "light";
+      hybridSurfaceThemes.editor = "dark";
+      hybridSurfaceThemes.terminal = "light";
+      try {
+        const tab = seat(fileTab({ mode }));
+        const { target } = await render(tab);
+        const view = editorView(target);
+        expect(palette(view)).toBe("dark");
+
+        delete hybridSurfaceThemes.editor;
+        await settle(2);
+        expect(palette(view), "back to the app theme").toBe("light");
+      } finally {
+        delete hybridSurfaceThemes.editor;
+        delete hybridSurfaceThemes.terminal;
+        ui.theme = startTheme;
+      }
+    });
+  }
 });

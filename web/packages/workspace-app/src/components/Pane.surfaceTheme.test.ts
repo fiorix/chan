@@ -1,65 +1,147 @@
-import { describe, expect, test } from "vitest";
+// @vitest-environment jsdom
+//
+// Each Hybrid surface's body carries its own light or dark theme, set in
+// Settings independently of the app theme, and the pane around it carries
+// none. A Pane is mounted over the demo workspace with one tab of a surface
+// at a time; the assertions read the data-theme on the body and on the pane.
+
+import { mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("./GraphCanvas.svelte", async () =>
+  (await import("../__tests__/graphPanel")).canvasProbeModule(),
+);
+vi.mock("../api/client", async (importOriginal) =>
+  (await import("../__tests__/graphPanel")).graphApiModule(
+    await importOriginal<typeof import("../api/client")>(),
+  ),
+);
+
+import Pane from "./Pane.svelte";
+// Build-time contract: App.svelte's theme token blocks match any [data-theme] subtree, not only a pane; vitest drops component CSS.
 import app from "../App.svelte?raw";
-import sourceEditor from "../editor/Source.svelte?raw";
-import wysiwygEditor from "../editor/Wysiwyg.svelte?raw";
-import shell from "./HybridSurfaceConfigShell.svelte?raw";
-import surfaceThemeField from "./settings/SurfaceThemeField.svelte?raw";
-import pane from "./Pane.svelte?raw";
-import fileEditor from "./FileEditorTab.svelte?raw";
-import terminal from "./TerminalTab.svelte?raw";
-import browser from "./FileBrowserSurface.svelte?raw";
-import graph from "./GraphPanel.svelte?raw";
-import dashboard from "./DashboardTab.svelte?raw";
+import type { HybridSurfaceKind } from "../api/types";
+import { graphTab, installGraphDom, resetGraphServer } from "../__tests__/graphPanel";
+import { installEditorDom } from "../__tests__/wysiwyg";
+import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { trackTimers, type TimerTrack } from "../demo/timers";
+import { hybridSurfaceThemes, refreshTree, refreshWorkspace, ui } from "../state/store.svelte";
+import { layout, type LeafNode, type Tab } from "../state/tabs.svelte";
 
-describe("Track C: Hybrid surface body themes", () => {
-  test("Pane no longer themes the whole Hybrid chrome", () => {
-    expect(pane).not.toContain("data-theme={pane.theme}");
-    expect(pane).not.toContain("<HybridTerminalConfig");
-    expect(pane).not.toContain("<HybridEditorConfig");
-    expect(pane).toContain("<TerminalTab");
-    expect(pane).toContain("<FileEditorTab");
+installGraphDom();
+installEditorDom();
+
+const PANE = "surface-theme-pane";
+const DOC = "# A\n";
+const mounted: Array<Record<string, unknown>> = [];
+const startTheme = ui.theme;
+let timers: TimerTrack;
+
+beforeEach(async () => {
+  timers = trackTimers();
+  resetGraphServer();
+  installDemoWorkspace({
+    metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1_700_000_000_000, fileCount: 1, textCount: 1 },
+    files: [{ path: "notes/a.md", kind: "document", size: DOC.length, mtime: 100, content: DOC }],
+  });
+  await refreshWorkspace();
+  await refreshTree();
+  ui.theme = "light";
+});
+
+afterEach(async () => {
+  for (const app of mounted.splice(0)) unmount(app);
+  document.body.innerHTML = "";
+  for (const kind of Object.keys(hybridSurfaceThemes) as HybridSurfaceKind[]) delete hybridSurfaceThemes[kind];
+  ui.theme = startTheme;
+  await settle(2);
+  uninstallDemoWorkspace();
+  timers.release();
+});
+
+async function settle(turns = 6): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+async function renderPane(tab: Tab): Promise<HTMLElement> {
+  layout.nodes = { [PANE]: { kind: "leaf", id: PANE, tabs: [tab], activeTabId: tab.id } };
+  layout.rootId = PANE;
+  layout.activePaneId = PANE;
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(Pane, { target, props: { pane: layout.nodes[PANE] as LeafNode } }));
+  await settle();
+  return target;
+}
+
+const SURFACES: Array<[HybridSurfaceKind, string, () => Tab]> = [
+  [
+    "editor",
+    ".editor-tab",
+    () => ({
+      kind: "file",
+      fileKind: "document",
+      id: "file-1",
+      path: "notes/a.md",
+      content: DOC,
+      saved: DOC,
+      savedMtime: 1,
+      mode: "wysiwyg",
+      loading: false,
+      error: null,
+      fileMissing: null,
+      inspectorOpen: false,
+      outlineOpen: false,
+      repoRoot: null,
+      readMode: false,
+      fsWritable: true,
+      styleToolbarOpen: false,
+      syntaxHighlight: true,
+      highlightTrailingWhitespace: false,
+      codeBlocksCollapsed: false,
+    }),
+  ],
+  ["browser", ".browser", () => ({ kind: "browser", id: "fb-1", title: "Files", inspectorOpen: false })],
+  ["graph", ".graph-tab", () => graphTab()],
+  ["dashboard", ".dashboard", () => ({ kind: "dashboard", id: "dash-1", title: "Dashboard" })],
+];
+
+describe("a surface's body theme", () => {
+  for (const [kind, body, tab] of SURFACES) {
+    test(`the ${kind} body carries its own theme, and the pane carries none`, async () => {
+      hybridSurfaceThemes[kind] = "dark";
+      const target = await renderPane(tab());
+      const el = target.querySelector<HTMLElement>(body);
+      expect(el, `${kind} body rendered`).not.toBeNull();
+      expect(el!.dataset.theme).toBe("dark");
+      expect(target.querySelector(".pane")!.hasAttribute("data-theme")).toBe(false);
+
+      delete hybridSurfaceThemes[kind];
+      await settle(2);
+      expect(el!.hasAttribute("data-theme"), "inherits the app theme again").toBe(false);
+    });
+  }
+
+  test("an override for one surface leaves the others inheriting", async () => {
+    hybridSurfaceThemes.terminal = "dark";
+    const target = await renderPane(SURFACES[0]![2]());
+    expect(target.querySelector(".editor-tab")!.hasAttribute("data-theme")).toBe(false);
   });
 
-  test("CSS token blocks can apply to any themed surface subtree", () => {
-    expect(app).toContain(":global([data-theme=\"dark\"])");
-    expect(app).toContain(":global([data-theme=\"light\"])");
-    expect(app).not.toContain(":global(.pane[data-theme=\"dark\"])");
-    expect(app).not.toContain(":global(.pane[data-theme=\"light\"])");
+  test("the pane renders no per-surface configuration section", async () => {
+    const target = await renderPane(SURFACES[0]![2]());
+    expect(target.querySelector(".hybrid-config")).toBeNull();
   });
+});
 
-  test("Hybrid bodies opt into their surface override only", () => {
-    expect(fileEditor).toContain('data-theme={surfaceThemeOverride("editor")}');
-    expect(terminal).toContain("data-theme={terminalSurfaceThemeOverride()}");
-    expect(browser).toContain(
-      'data-theme={isTab ? surfaceThemeOverride("browser") : undefined}',
-    );
-    expect(graph).toContain(
-      'data-theme={tab ? surfaceThemeOverride("graph") : undefined}',
-    );
-    expect(dashboard).toContain(
-      'data-theme={surfaceThemeOverride("dashboard")}',
-    );
-  });
-
-  test("terminal and CodeMirror palettes follow surface theme resolution", () => {
-    expect(terminal).toContain('effectiveHybridSurfaceTheme("terminal")');
-    expect(sourceEditor).toContain('effectiveHybridSurfaceTheme("editor")');
-    // Wysiwyg themes on a `surface` prop (default "editor"; the Rich Prompt
-    // composer passes "terminal") so it can match the surface it floats over.
-    expect(wysiwygEditor).toContain('effectiveHybridSurfaceTheme(surface)');
-  });
-
-  test("Settings owns one per-surface switch, one section per surface", () => {
-    expect(surfaceThemeField).toContain("setHybridSurfaceTheme(kind");
-    expect(surfaceThemeField).toContain("clearHybridSurfaceTheme(kind)");
-    expect(surfaceThemeField).toContain('name={`settings-surface-theme-${kind}`}');
-  });
-
-  test("legacy config shell owns only footer OK", () => {
-    expect(shell).not.toContain("setHybridSurfaceTheme");
-    expect(shell).not.toContain("effectiveHybridSurfaceTheme");
-    expect(shell).not.toContain("ThemeToggleButton");
-    expect(shell).toContain('class="config-footer"');
-    expect(shell).toContain('class="config-ok"');
+describe("the theme token blocks", () => {
+  test("apply to any themed subtree, not only a pane", () => {
+    expect(app).toContain(':global([data-theme="dark"])');
+    expect(app).toContain(':global([data-theme="light"])');
+    expect(app).not.toContain(':global(.pane[data-theme="dark"])');
+    expect(app).not.toContain(':global(.pane[data-theme="light"])');
   });
 });
