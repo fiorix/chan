@@ -1,15 +1,24 @@
 import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+const graphLinks = vi.hoisted(() => ({ handled: true }));
+
+vi.mock("../state/store.svelte", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../state/store.svelte")>();
+  return { ...actual, openGraphFromLink: vi.fn(() => graphLinks.handled) };
+});
+
 import {
+  externalLinkClickHandler,
   externalUrlAtPos,
   isOpenableExternalUrl,
   linkUrlAtPos,
   openExternalUrl,
 } from "./external_links";
-import externalLinksSource from "./external_links.ts?raw";
 import { chanMarkdown } from "./markdown/grammar";
 import { setNotifyHandler } from "../state/notify.svelte";
+import { openGraphFromLink } from "../state/store.svelte";
 
 function state(doc: string): EditorState {
   return EditorState.create({ doc, extensions: [chanMarkdown()] });
@@ -56,21 +65,6 @@ describe("external link helpers", () => {
     // Image URLs are not navigable links -> null.
     const imgDoc = "![a](pic.png)";
     expect(linkUrlAtPos(state(imgDoc), imgDoc.indexOf("a"))).toBeNull();
-  });
-
-  test("click handler routes a chan://graph link to the graph opener", () => {
-    // Wiring is source-pinned (executing the click handler would need a
-    // live store/openGraphFromLink). The interception sits BEFORE the
-    // external-URL path and short-circuits on a handled graph link.
-    expect(externalLinksSource).toMatch(
-      /import \{ openGraphFromLink \} from "\.\.\/state\/store\.svelte";/,
-    );
-    expect(externalLinksSource).toMatch(
-      /import \{ GRAPH_LINK_PREFIX \} from "\.\.\/state\/tabs\.svelte";/,
-    );
-    expect(externalLinksSource).toMatch(
-      /raw\?\.startsWith\(GRAPH_LINK_PREFIX\) && openGraphFromLink\(raw\)/,
-    );
   });
 
   test("uses the Tauri opener bridge when available", async () => {
@@ -181,5 +175,62 @@ describe("openExternalUrl no-default-browser fallback", () => {
     await openExternalUrl("https://example.com");
 
     expect(open).not.toHaveBeenCalled();
+  });
+});
+
+describe("a click on a link in the editor", () => {
+  const views: EditorView[] = [];
+
+  afterEach(() => {
+    for (const view of views.splice(0)) view.destroy();
+    document.body.innerHTML = "";
+    graphLinks.handled = true;
+    vi.restoreAllMocks();
+    vi.mocked(openGraphFromLink).mockClear();
+  });
+
+  /// Clicks the rendered link over `text` in `doc`. jsdom has no layout, so
+  /// the view's hit test answers the link's position directly.
+  function click(doc: string, text: string): MouseEvent {
+    const view = new EditorView({
+      parent: document.body.appendChild(document.createElement("div")),
+      state: EditorState.create({ doc, extensions: [chanMarkdown(), externalLinkClickHandler()] }),
+    });
+    views.push(view);
+    const pos = doc.indexOf(text) + 1;
+    view.posAtCoords = () => pos;
+    const link = view.contentDOM.appendChild(document.createElement("span"));
+    link.className = "cm-md-link";
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true, clientX: 1, clientY: 1 });
+    link.dispatchEvent(event);
+    return event;
+  }
+
+  test("opens a chan://graph link in the graph and never navigates out", () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const event = click("see [g](chan://graph?s=workspace&d=2) here", "[g]");
+
+    expect(openGraphFromLink).toHaveBeenCalledWith("chan://graph?s=workspace&d=2");
+    expect(event.defaultPrevented).toBe(true);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  test("opens an external link in the browser, not the graph", () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const event = click("see [x](https://example.com) here", "[x]");
+
+    expect(open).toHaveBeenCalledWith("https://example.com", "_blank", "noopener,noreferrer");
+    expect(openGraphFromLink).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  test("leaves a chan:// link the graph cannot open alone", () => {
+    graphLinks.handled = false;
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const event = click("see [g](chan://graph?bad) here", "[g]");
+
+    expect(openGraphFromLink).toHaveBeenCalledTimes(1);
+    expect(open, "chan: is not an openable external scheme").not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
   });
 });
