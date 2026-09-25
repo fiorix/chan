@@ -18,167 +18,50 @@ import {
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-
-/// What TerminalTab registered with xterm: its key handler and the link
-/// handler it gave the web-links addon.
-const registered = vi.hoisted(() => ({
-  keyHandler: null as ((e: KeyboardEvent) => boolean) | null,
-  linkHandler: null as ((event: MouseEvent, uri: string) => void) | null,
-}));
+import { installTerminalDom, resetTerminals, TerminalSocket, xterm } from "../__tests__/terminalTab";
 
 vi.mock("../editor/external_links", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../editor/external_links")>()),
   openExternalUrl: vi.fn(async () => {}),
 }));
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
-const fitMock = vi.hoisted(() => ({
-  calls: 0,
-  failure: null as Error | null,
-  size: null as { cols: number; rows: number } | null,
-}));
 const mounted: Array<Record<string, any>> = [];
-const sockets: TestWebSocket[] = [];
-const terminalFocuses: string[] = [];
 
-class TestResizeObserver {
-  observe() {}
-  disconnect() {}
-}
-
-class TestWebSocket {
-  static OPEN = 1;
-
-  readyState = TestWebSocket.OPEN;
-  binaryType = "blob";
-  onopen: (() => void) | null = null;
-  onmessage: ((event: { data: unknown }) => void | Promise<void>) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  sent: string[] = [];
-
-  constructor(readonly url: string) {
-    sockets.push(this);
-  }
-
-  send(data: string) {
-    this.sent.push(data);
-  }
-
-  close() {
-    this.readyState = 3;
-    this.onclose?.();
-  }
-}
-
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-
-    loadAddon(addon: {
-      testFitAddon?: boolean;
-      activate?: (terminal: unknown) => void;
-    }) {
-      if (addon.testFitAddon) addon.activate?.(this);
-    }
-    open() {}
-    attachCustomKeyEventHandler(handler: (e: KeyboardEvent) => boolean) {
-      registered.keyHandler = handler;
-    }
-    onData() {}
-    onResize() {}
-    write() {}
-    writeln() {}
-    resize(cols: number, rows: number) {
-      this.cols = cols;
-      this.rows = rows;
-    }
-    focus() {
-      terminalFocuses.push("focus");
-    }
-    dispose() {}
-  },
-}));
-
-vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    testFitAddon = true;
-    terminal: { cols: number; rows: number } | null = null;
-
-    activate(terminal: { cols: number; rows: number }) {
-      this.terminal = terminal;
-    }
-
-    fit() {
-      fitMock.calls += 1;
-      if (fitMock.failure) throw fitMock.failure;
-      if (fitMock.size && this.terminal) {
-        this.terminal.cols = fitMock.size.cols;
-        this.terminal.rows = fitMock.size.rows;
-      }
-    }
-  },
-}));
-
-vi.mock("@xterm/addon-search", () => ({
-  SearchAddon: class {
-    findNext() {}
-    findPrevious() {}
-  },
-}));
-
-vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: class {
-    serialize() {
-      return "";
-    }
-  },
-}));
-
-vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class {
-    constructor(handler: (event: MouseEvent, uri: string) => void) {
-      registered.linkHandler = handler;
-    }
-  },
-}));
-
-globalThis.ResizeObserver = TestResizeObserver as any;
-globalThis.WebSocket = TestWebSocket as any;
-const immediateAnimationFrame = ((cb: FrameRequestCallback) => {
-  cb(0);
-  return 0;
-}) as any;
-globalThis.requestAnimationFrame = immediateAnimationFrame;
-HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
 // jsdom does not implement the CSS Font Loading API. Chan's supported browser
 // runtimes do, and TerminalTab waits for the bundled terminal face before
-// constructing either canvas renderer. Model that runtime contract here; the
-// loader's unavailable/rejected branches are covered directly in font.test.ts.
-Object.defineProperty(document, "fonts", {
-  configurable: true,
-  value: {
-    load: vi.fn(async () => [{}]),
-    ready: Promise.resolve(),
-  },
-});
+// constructing either canvas renderer; the harness models that runtime
+// contract. The loader's unavailable/rejected branches are covered directly
+// in font.test.ts.
+installTerminalDom();
+
+/// Focus calls on every terminal the tests made.
+function terminalFocuses(): number {
+  return xterm.terminals.reduce((n, term) => n + term.focusCount, 0);
+}
+
+function clearTerminalFocuses(): void {
+  for (const term of xterm.terminals) term.focusCount = 0;
+}
+
+/// The key handler the last terminal registered with xterm.
+function keyHandler(): (e: KeyboardEvent) => boolean {
+  const handler = xterm.terminals.at(-1)?.keyHandler;
+  if (!handler) throw new Error("no key handler registered");
+  return handler;
+}
 
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
-  sockets.splice(0);
-  terminalFocuses.splice(0);
-  document.body.innerHTML = "";
-  closeTabMenu();
-  fitMock.calls = 0;
-  fitMock.failure = null;
-  fitMock.size = null;
-  globalThis.requestAnimationFrame = immediateAnimationFrame;
+  resetTerminals();
   setTerminalTabsInLayout([]);
   surveyState.byTab = {};
   surveyState.windowWide = null;
-  registered.keyHandler = null;
-  registered.linkHandler = null;
   vi.clearAllMocks();
 });
 
@@ -223,12 +106,12 @@ async function renderTerminal(
   mounted.push(component);
   await tick();
   await tick();
-  await vi.waitFor(() => expect(sockets).toHaveLength(1));
+  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
   return { component, target };
 }
 
-function openSocket(): TestWebSocket {
-  const socket = sockets.at(-1);
+function openSocket(): TerminalSocket {
+  const socket = TerminalSocket.all.at(-1);
   if (!socket) throw new Error("expected terminal websocket");
   socket.onopen?.();
   return socket;
@@ -236,27 +119,27 @@ function openSocket(): TestWebSocket {
 
 describe("TerminalTab initial fit", () => {
   test("dials with the measured grid before deferred resize callbacks", async () => {
-    fitMock.size = { cols: 132, rows: 41 };
+    xterm.fit.size = { cols: 132, rows: 41 };
     globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
 
     await renderTerminal(terminalTab(), true);
 
-    expect(fitMock.calls).toBe(1);
-    expect(sockets).toHaveLength(1);
-    const query = new URL(sockets[0].url, "http://chan.test").searchParams;
+    expect(xterm.fit.calls).toBe(1);
+    expect(TerminalSocket.all).toHaveLength(1);
+    const query = new URL(TerminalSocket.all[0].url, "http://chan.test").searchParams;
     expect(query.get("cols")).toBe("132");
     expect(query.get("rows")).toBe("41");
   });
 
   test("still dials when the initial fit cannot measure the host", async () => {
-    fitMock.failure = new Error("host is not measurable");
+    xterm.fit.failure = new Error("host is not measurable");
     globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
 
     await renderTerminal(terminalTab(), true);
 
-    expect(fitMock.calls).toBe(1);
-    expect(sockets).toHaveLength(1);
-    const query = new URL(sockets[0].url, "http://chan.test").searchParams;
+    expect(xterm.fit.calls).toBe(1);
+    expect(TerminalSocket.all).toHaveLength(1);
+    const query = new URL(TerminalSocket.all[0].url, "http://chan.test").searchParams;
     expect(query.get("cols")).toBe("80");
     expect(query.get("rows")).toBe("24");
   });
@@ -291,16 +174,16 @@ describe("TerminalTab activity frames", () => {
     mounted.push(component);
     await tick();
     await tick();
-    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
     const socket = openSocket();
     await tick();
-    const connectionCount = sockets.length;
+    const connectionCount = TerminalSocket.all.length;
 
     component.move("pane-2", "b");
     await tick();
     await tick();
 
-    expect(sockets).toHaveLength(connectionCount);
+    expect(TerminalSocket.all).toHaveLength(connectionCount);
     expect(socket.sent).toContain(
       JSON.stringify({
         type: "placement",
@@ -333,7 +216,7 @@ describe("TerminalTab activity frames", () => {
 
       expect(tab.terminalActivity).toBe(true);
       expect(socket.sent).toContain(JSON.stringify({ type: "focus", focused: false }));
-      expect(terminalFocuses).toHaveLength(0);
+      expect(terminalFocuses()).toBe(0);
     },
   );
 
@@ -347,7 +230,7 @@ describe("TerminalTab activity frames", () => {
 
       expect(tab.terminalActivity).toBeUndefined();
       expect(socket.sent).toContain(JSON.stringify({ type: "focus", focused: true }));
-      expect(terminalFocuses.length).toBeGreaterThan(0);
+      expect(terminalFocuses()).toBeGreaterThan(0);
     },
   );
 });
@@ -549,7 +432,7 @@ describe("TerminalTab and the app around it", () => {
 
     // The command launcher's chord off the Mac, flagged to escape terminals.
     const event = new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true, altKey: true });
-    expect(registered.keyHandler!(event)).toBe(false);
+    expect(keyHandler()(event)).toBe(false);
     expect(socket.sent.filter((f) => JSON.parse(f).type === "input")).toEqual([]);
   });
 
@@ -570,28 +453,28 @@ describe("TerminalTab and the app around it", () => {
     const tab = terminalTab();
     await renderTerminal(tab, true);
     await tick();
-    terminalFocuses.splice(0);
+    clearTerminalFocuses();
 
     showSurvey(SURVEY, tab.id);
     bumpTabFocusPulse();
     await tick();
     await Promise.resolve();
-    expect(terminalFocuses, "the survey keeps the keyboard").toEqual([]);
+    expect(terminalFocuses(), "the survey keeps the keyboard").toBe(0);
 
     surveyState.byTab = {};
     await tick();
     await Promise.resolve();
-    expect(terminalFocuses, "closing the survey hands focus back").not.toEqual([]);
-    terminalFocuses.splice(0);
+    expect(terminalFocuses(), "closing the survey hands focus back").toBeGreaterThan(0);
+    clearTerminalFocuses();
     bumpTabFocusPulse();
     await tick();
     await Promise.resolve();
-    expect(terminalFocuses).toEqual(["focus"]);
+    expect(terminalFocuses()).toBe(1);
   });
 
   test("a clicked link opens through the external-link path", async () => {
     await renderTerminal(terminalTab(), true);
-    registered.linkHandler!(new MouseEvent("click"), "https://example.com/docs");
+    xterm.linkHandlers.at(-1)!(new MouseEvent("click"), "https://example.com/docs");
     expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/docs");
   });
 });

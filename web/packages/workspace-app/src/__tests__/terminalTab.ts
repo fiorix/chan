@@ -23,6 +23,11 @@ export const xterm = {
   webgl: [] as Array<{ loadedInto: FakeTerminal | null; onContextLoss: (() => void) | null; disposed: boolean }>,
   /// When set, constructing a WebglAddon throws, as it does without WebGL.
   webglThrows: false,
+  /// The link handler each WebLinksAddon was given.
+  linkHandlers: [] as Array<(event: MouseEvent, uri: string) => void>,
+  /// When set, each terminal opens a textarea in its host and focus() and
+  /// blur() move DOM focus to and from it, as xterm's own textarea does.
+  textareaFocus: false,
 };
 
 type CsiId = { prefix?: string; intermediates?: string; final: string };
@@ -44,6 +49,8 @@ export class FakeTerminal {
   focusCount = 0;
   blurCount = 0;
   disposed = false;
+  /// The textarea open() made when `xterm.textareaFocus` is set.
+  textarea: HTMLTextAreaElement | null = null;
   /// When set, the next writes answer with this reply the way xterm answers
   /// a query in the output it parses: during the write.
   replyDuringWrite: string | null = null;
@@ -72,6 +79,10 @@ export class FakeTerminal {
   }
   open(element: HTMLElement): void {
     this.element = element;
+    if (xterm.textareaFocus) {
+      this.textarea = document.createElement("textarea");
+      element.append(this.textarea);
+    }
   }
   attachCustomKeyEventHandler(handler: (e: KeyboardEvent) => boolean): void {
     this.keyHandler = handler;
@@ -123,12 +134,16 @@ export class FakeTerminal {
   }
   focus(): void {
     this.focusCount += 1;
+    this.textarea?.focus();
   }
   blur(): void {
     this.blurCount += 1;
+    this.textarea?.blur();
   }
   dispose(): void {
     this.disposed = true;
+    this.textarea?.remove();
+    this.textarea = null;
   }
 }
 
@@ -176,7 +191,13 @@ export function serializeAddonModule() {
 }
 
 export function webLinksAddonModule() {
-  return { WebLinksAddon: class {} };
+  return {
+    WebLinksAddon: class {
+      constructor(handler: (event: MouseEvent, uri: string) => void) {
+        xterm.linkHandlers.push(handler);
+      }
+    },
+  };
 }
 
 export function webglAddonModule() {
@@ -201,12 +222,15 @@ export function webglAddonModule() {
   };
 }
 
-/// The terminal WebSocket, recording what the component sends.
+/// The terminal WebSocket, recording what the component sends. A socket is
+/// open when made, unless `TerminalSocket.connecting` is set: then it stays
+/// CONNECTING until open() or failDial().
 export class TerminalSocket {
   static OPEN = 1;
   static all: TerminalSocket[] = [];
+  static connecting = false;
 
-  readyState = TerminalSocket.OPEN;
+  readyState = TerminalSocket.connecting ? 0 : TerminalSocket.OPEN;
   binaryType = "blob";
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void | Promise<void>) | null = null;
@@ -221,6 +245,16 @@ export class TerminalSocket {
     this.sent.push(data);
   }
   close() {
+    this.readyState = 3;
+    this.onclose?.();
+  }
+  /// The dial succeeds.
+  open() {
+    this.readyState = TerminalSocket.OPEN;
+    this.onopen?.();
+  }
+  /// The dial fails before the socket ever opens (connection refused).
+  failDial() {
     this.readyState = 3;
     this.onclose?.();
   }
@@ -414,6 +448,7 @@ export function resetTerminals(): void {
   closeTabMenu();
   for (const component of mounted.splice(0)) unmount(component);
   TerminalSocket.all.splice(0);
+  TerminalSocket.connecting = false;
   xterm.terminals.splice(0);
   xterm.serializeCalls.splice(0);
   xterm.serialized = "";
@@ -422,6 +457,8 @@ export function resetTerminals(): void {
   xterm.fit.size = null;
   xterm.webgl.splice(0);
   xterm.webglThrows = false;
+  xterm.linkHandlers.splice(0);
+  xterm.textareaFocus = false;
   resizeObservers.splice(0);
   globalThis.requestAnimationFrame = immediateFrame;
   document.body.innerHTML = "";

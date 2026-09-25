@@ -8,7 +8,7 @@
 // the two cannot drift); the live 300s gateway-cut proof rides the host
 // smoke + the gateway rig.
 
-import { mount, tick, unmount } from "svelte";
+import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import TerminalTab from "./TerminalTab.svelte";
@@ -29,147 +29,50 @@ import {
   type FileTab,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
+import {
+  installTerminalDom,
+  mountTerminal,
+  resetTerminals,
+  TerminalSocket,
+  xterm,
+} from "../__tests__/terminalTab";
 
-const mounted: Array<Record<string, any>> = [];
-const sockets: TestWebSocket[] = [];
-const xtermDataHandlers = vi.hoisted(() => [] as Array<(data: string) => void>);
-const xtermFocusCalls = vi.hoisted(() => [] as HTMLTextAreaElement[]);
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
-class TestResizeObserver {
-  observe() {}
-  disconnect() {}
-}
-
-class TestWebSocket {
-  static OPEN = 1;
-
-  readyState = 0;
-  binaryType = "blob";
-  onopen: (() => void) | null = null;
-  onmessage: ((event: { data: unknown }) => void | Promise<void>) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  sent: string[] = [];
-
-  constructor(readonly url: string) {
-    sockets.push(this);
-  }
-
-  send(data: string) {
-    this.sent.push(data);
-  }
-
-  close() {
-    this.readyState = 3;
-    this.onclose?.();
-  }
-
-  open() {
-    this.readyState = TestWebSocket.OPEN;
-    this.onopen?.();
-  }
-
-  // A dial that fails before ever opening (connection refused).
-  failDial() {
-    this.readyState = 3;
-    this.onclose?.();
-  }
-
-  pings(): number {
-    return this.sent.filter((s) => s === JSON.stringify({ type: "ping" })).length;
-  }
-}
-
-// Lines the component writes INTO the terminal (term.writeln): the surface
-// the version-skew guard must keep ping-error spam out of.
-const writtenLines = vi.hoisted(() => [] as string[]);
-
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    textarea: HTMLTextAreaElement | null = null;
-
-    loadAddon() {}
-    open(host: HTMLElement) {
-      this.textarea = document.createElement("textarea");
-      host.append(this.textarea);
-    }
-    attachCustomKeyEventHandler() {}
-    onData(handler: (data: string) => void) {
-      xtermDataHandlers.push(handler);
-    }
-    onResize() {}
-    write() {}
-    writeln(line: string) {
-      writtenLines.push(line);
-    }
-    resize(cols: number, rows: number) {
-      this.cols = cols;
-      this.rows = rows;
-    }
-    focus() {
-      if (!this.textarea) return;
-      xtermFocusCalls.push(this.textarea);
-      this.textarea.focus();
-    }
-    blur() {
-      this.textarea?.blur();
-    }
-    dispose() {
-      this.textarea?.remove();
-      this.textarea = null;
-    }
-  },
-}));
-
-vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    fit() {}
-  },
-}));
-
-vi.mock("@xterm/addon-search", () => ({
-  SearchAddon: class {
-    findNext() {}
-    findPrevious() {}
-  },
-}));
-
-vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: class {
-    serialize() {
-      return "";
-    }
-  },
-}));
-
-vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class {},
-}));
-
-globalThis.ResizeObserver = TestResizeObserver as any;
-globalThis.WebSocket = TestWebSocket as any;
-globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
-  cb(0);
-  return 0;
-}) as any;
-HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
+installTerminalDom();
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // Dials stay CONNECTING until a test opens or fails them, and each
+  // terminal's focus lands on a real textarea, as xterm's does.
+  TerminalSocket.connecting = true;
+  xterm.textareaFocus = true;
 });
 
 afterEach(() => {
-  for (const component of mounted.splice(0)) unmount(component);
-  sockets.splice(0);
-  xtermDataHandlers.splice(0);
-  xtermFocusCalls.splice(0);
-  writtenLines.splice(0);
-  document.body.innerHTML = "";
+  resetTerminals();
   vi.useRealTimers();
 });
+
+/// Lines the component wrote INTO the terminal: the surface the version-skew
+/// guard must keep ping-error spam out of.
+function writtenLines(): string[] {
+  return xterm.terminals.flatMap((term) => term.written);
+}
+
+/// Focus calls on every terminal the tests made.
+function xtermFocusCalls(): number {
+  return xterm.terminals.reduce((n, term) => n + term.focusCount, 0);
+}
+
+function pings(socket: TerminalSocket): number {
+  return socket.sent.filter((s) => s === JSON.stringify({ type: "ping" })).length;
+}
 
 function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
   return {
@@ -183,26 +86,13 @@ function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState 
   };
 }
 
-async function renderTerminal(tab: TerminalTabState, focused = false) {
-  const target = document.createElement("div");
-  document.body.append(target);
-  const component = mount(TerminalTab, {
-    target,
-    props: { tab, paneId: "pane-1", active: true, focused },
-  });
-  mounted.push(component);
-  await tick();
-  await tick();
-  return target;
-}
-
-function lastSocket(): TestWebSocket {
-  const socket = sockets.at(-1);
+function lastSocket(): TerminalSocket {
+  const socket = TerminalSocket.all.at(-1);
   if (!socket) throw new Error("expected terminal websocket");
   return socket;
 }
 
-async function attach(socket: TestWebSocket, id = "sess-1"): Promise<void> {
+async function attach(socket: TerminalSocket, id = "sess-1"): Promise<void> {
   socket.open();
   await socket.onmessage?.({
     data: JSON.stringify({
@@ -216,31 +106,31 @@ async function attach(socket: TestWebSocket, id = "sess-1"): Promise<void> {
   });
 }
 
-async function pong(socket: TestWebSocket): Promise<void> {
+async function pong(socket: TerminalSocket): Promise<void> {
   await socket.onmessage?.({ data: JSON.stringify({ type: "pong" }) });
 }
 
 describe("terminal heartbeat", () => {
   test("pings every WS_PING_MS while the socket is open", async () => {
-    await renderTerminal(terminalTab());
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = lastSocket();
     await attach(socket);
 
-    expect(socket.pings()).toBe(0);
+    expect(pings(socket)).toBe(0);
     await vi.advanceTimersByTimeAsync(WS_PING_MS);
-    expect(socket.pings()).toBe(1);
+    expect(pings(socket)).toBe(1);
     await pong(socket);
     await vi.advanceTimersByTimeAsync(WS_PING_MS);
-    expect(socket.pings()).toBe(2);
+    expect(pings(socket)).toBe(2);
     await pong(socket);
     // Frames kept arriving, so the read-deadline never tripped: one socket.
-    expect(sockets).toHaveLength(1);
-    expect(socket.readyState).toBe(TestWebSocket.OPEN);
+    expect(TerminalSocket.all).toHaveLength(1);
+    expect(socket.readyState).toBe(TerminalSocket.OPEN);
   });
 
   test("a silent socket trips the read-deadline and redials the SAME session", async () => {
     const tab = terminalTab();
-    await renderTerminal(tab);
+    await mountTerminal(TerminalTab, tab, { focused: false });
     const socket = lastSocket();
     await attach(socket, "sess-keep");
 
@@ -248,22 +138,22 @@ describe("terminal heartbeat", () => {
     // force-closes the zombie.
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
     expect(socket.readyState).toBe(3);
-    expect(sockets).toHaveLength(1);
+    expect(TerminalSocket.all).toHaveLength(1);
 
     // The redial fires after the first backoff step and reattaches by id.
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
-    expect(sockets).toHaveLength(2);
+    expect(TerminalSocket.all).toHaveLength(2);
     expect(lastSocket().url).toContain("session=sess-keep");
     expect(tab.terminalSessionId).toBe("sess-keep");
 
     // A successful reattach resumes the heartbeat on the new socket.
     await attach(lastSocket(), "sess-keep");
     await vi.advanceTimersByTimeAsync(WS_PING_MS);
-    expect(lastSocket().pings()).toBe(1);
+    expect(pings(lastSocket())).toBe(1);
   });
 
   test("exactly one redial is in flight after a deadline trip", async () => {
-    await renderTerminal(terminalTab());
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     await attach(lastSocket());
 
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
@@ -271,21 +161,21 @@ describe("terminal heartbeat", () => {
     // dial; past it the hung attempt is force-closed into the next backoff
     // step (the heal keeps healing, one dial at a time).
     await vi.advanceTimersByTimeAsync(WS_CONNECT_DEADLINE_MS - 1);
-    expect(sockets).toHaveLength(2);
+    expect(TerminalSocket.all).toHaveLength(2);
   });
 
   test("a dial stuck in CONNECTING trips the connect-deadline and redials", async () => {
-    await renderTerminal(terminalTab());
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = lastSocket();
     // Never opened: only the connect-deadline covers the hung dial.
     await vi.advanceTimersByTimeAsync(WS_CONNECT_DEADLINE_MS);
     expect(socket.readyState).toBe(3);
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
-    expect(sockets).toHaveLength(2);
+    expect(TerminalSocket.all).toHaveLength(2);
   });
 
   test("redial backoff doubles per failure and caps at the max", async () => {
-    await renderTerminal(terminalTab());
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     await attach(lastSocket());
 
     // Trip the deadline, then fail every dial the moment it is scheduled in.
@@ -293,18 +183,18 @@ describe("terminal heartbeat", () => {
     // Delays consumed: 500 (the trip's redial), then doubling per failed dial.
     const delays = [500, 1000, 2000, 4000, 8000, 8000, 8000];
     for (const delay of delays) {
-      const count = sockets.length;
+      const count = TerminalSocket.all.length;
       await vi.advanceTimersByTimeAsync(delay - 1);
-      expect(sockets.length).toBe(count);
+      expect(TerminalSocket.all.length).toBe(count);
       await vi.advanceTimersByTimeAsync(1);
-      expect(sockets.length).toBe(count + 1);
+      expect(TerminalSocket.all.length).toBe(count + 1);
       lastSocket().failDial();
     }
   });
 
   test("a resumable session id survives every transport failure and clears only on an explicit close", async () => {
     const tab = terminalTab({ terminalSessionId: "sess-durable" });
-    await renderTerminal(tab);
+    await mountTerminal(TerminalTab, tab, { focused: false });
 
     // An offline / sleep window: every dial dies on transport before its
     // `session` frame. The resumable id must survive all of them so the
@@ -328,7 +218,7 @@ describe("terminal heartbeat", () => {
   });
 
   test("an old server's unknown-variant ping error is liveness, not terminal spam", async () => {
-    await renderTerminal(terminalTab());
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = lastSocket();
     await attach(socket);
 
@@ -338,13 +228,13 @@ describe("terminal heartbeat", () => {
         message: "invalid terminal frame: unknown variant `ping`, expected one of `input`",
       }),
     });
-    expect(writtenLines.some((l) => l.includes("invalid terminal frame"))).toBe(false);
+    expect(writtenLines().some((l) => l.includes("invalid terminal frame"))).toBe(false);
 
     // A real error still writes into the terminal.
     await socket.onmessage?.({
       data: JSON.stringify({ type: "error", message: "pty write failed" }),
     });
-    expect(writtenLines.some((l) => l.includes("terminal error: pty write failed"))).toBe(true);
+    expect(writtenLines().some((l) => l.includes("terminal error: pty write failed"))).toBe(true);
   });
 });
 
@@ -364,15 +254,15 @@ describe("wake recycle", () => {
     // re-run the devserver connect script into the viewport.
     ui.terminalControl = true;
     try {
-      await renderTerminal(terminalTab());
+      await mountTerminal(TerminalTab, terminalTab(), { focused: false });
       const socket = lastSocket();
       await attach(socket, "sess-ctl");
-      expect(sockets).toHaveLength(1);
+      expect(TerminalSocket.all).toHaveLength(1);
 
       await wake();
 
-      expect(sockets).toHaveLength(1);
-      expect(socket.readyState).toBe(TestWebSocket.OPEN);
+      expect(TerminalSocket.all).toHaveLength(1);
+      expect(socket.readyState).toBe(TerminalSocket.OPEN);
     } finally {
       ui.terminalControl = false;
     }
@@ -380,16 +270,16 @@ describe("wake recycle", () => {
 
   test("an ordinary tab still redials with its prior session id after a wake", async () => {
     const tab = terminalTab();
-    await renderTerminal(tab);
+    await mountTerminal(TerminalTab, tab, { focused: false });
     const socket = lastSocket();
     await attach(socket, "sess-wake");
-    expect(sockets).toHaveLength(1);
+    expect(TerminalSocket.all).toHaveLength(1);
 
     await wake();
 
     // The recycle forces a reconnect through the normal resume path: a
     // second dial carrying the same session id, replaying missed bytes.
-    expect(sockets).toHaveLength(2);
+    expect(TerminalSocket.all).toHaveLength(2);
     expect(lastSocket().url).toContain("session=sess-wake");
     expect(tab.terminalSessionId).toBe("sess-wake");
   });
@@ -433,9 +323,9 @@ describe("the shared reconnect backoff", () => {
   async function redialDelays(count: number): Promise<number[]> {
     const delays: number[] = [];
     for (let i = 0; i < count; i += 1) {
-      const before = sockets.length;
+      const before = TerminalSocket.all.length;
       let waited = 0;
-      while (sockets.length === before && waited < WS_RECONNECT_BACKOFF_MAX_MS * 2) {
+      while (TerminalSocket.all.length === before && waited < WS_RECONNECT_BACKOFF_MAX_MS * 2) {
         await vi.advanceTimersByTimeAsync(100);
         waited += 100;
       }
@@ -448,14 +338,14 @@ describe("the shared reconnect backoff", () => {
   const EXPECTED = [500, 1000, 2000, 4000, 8000, 8000];
 
   test("the terminal socket reads its frames as ArrayBuffers", async () => {
-    await renderTerminal(terminalTab());
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     expect(lastSocket().binaryType).toBe("arraybuffer");
   });
 
   test("a live document session redials from the shared minimum, doubling to the shared maximum", async () => {
     expect([WS_RECONNECT_BACKOFF_MIN_MS, WS_RECONNECT_BACKOFF_MAX_MS]).toEqual([500, 8000]);
     localStorage.setItem("chan.docsync", "1");
-    setSocketFactory((url) => new TestWebSocket(url) as unknown as WebSocket);
+    setSocketFactory((url) => new TerminalSocket(url) as unknown as WebSocket);
     acquireDocSession(fileTab("notes/a.md", "source", "hello"));
     const first = lastSocket();
     first.open();
@@ -469,7 +359,7 @@ describe("the shared reconnect backoff", () => {
 
   test("a live scene session redials on the same schedule", async () => {
     localStorage.setItem("chan.scenesync", "1");
-    setSocketFactory((url) => new TestWebSocket(url) as unknown as WebSocket);
+    setSocketFactory((url) => new TerminalSocket(url) as unknown as WebSocket);
     acquireSceneSession(fileTab("boards/b.excalidraw", "canvas", '{"type":"excalidraw","elements":[]}'));
     const first = lastSocket();
     first.open();
@@ -500,7 +390,7 @@ describe("wake input recovery", () => {
 
   test("a wake restores DOM focus to the still-focused terminal", async () => {
     const tab = terminalTab();
-    const target = await renderTerminal(tab, true);
+    const { target } = await mountTerminal(TerminalTab, tab);
     await attach(lastSocket(), "sess-focus");
 
     const textarea = target.querySelector<HTMLTextAreaElement>(
@@ -521,23 +411,23 @@ describe("wake input recovery", () => {
   });
 
   test("a wake reissues focus when xterm still appears focused", async () => {
-    const target = await renderTerminal(terminalTab(), true);
+    const { target } = await mountTerminal(TerminalTab, terminalTab());
     await attach(lastSocket(), "sess-stale-focus");
 
     const textarea = target.querySelector<HTMLTextAreaElement>(
       ".terminal-host textarea",
     );
     expect(document.activeElement).toBe(textarea);
-    const callsBeforeWake = xtermFocusCalls.length;
+    const callsBeforeWake = xtermFocusCalls();
 
     await wake();
 
-    expect(xtermFocusCalls.length).toBe(callsBeforeWake + 1);
+    expect(xtermFocusCalls()).toBe(callsBeforeWake + 1);
     expect(document.activeElement).toBe(textarea);
   });
 
   test("a wake does not steal focus from another DOM owner", async () => {
-    await renderTerminal(terminalTab(), true);
+    await mountTerminal(TerminalTab, terminalTab());
     await attach(lastSocket(), "sess-external-focus");
     const external = document.createElement("input");
     document.body.append(external);
@@ -549,21 +439,21 @@ describe("wake input recovery", () => {
   });
 
   test("a wake does not focus a background terminal", async () => {
-    const target = await renderTerminal(terminalTab());
+    const { target } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     await attach(lastSocket(), "sess-background");
     const textarea = target.querySelector<HTMLTextAreaElement>(
       ".terminal-host textarea",
     );
-    expect(xtermFocusCalls).toHaveLength(0);
+    expect(xtermFocusCalls()).toBe(0);
 
     await wake();
 
-    expect(xtermFocusCalls).toHaveLength(0);
+    expect(xtermFocusCalls()).toBe(0);
     expect(document.activeElement).not.toBe(textarea);
   });
 
   test("the tab focus pulse restores the same lost terminal focus", async () => {
-    const target = await renderTerminal(terminalTab(), true);
+    const { target } = await mountTerminal(TerminalTab, terminalTab());
     await attach(lastSocket(), "sess-tab-focus");
 
     const textarea = target.querySelector<HTMLTextAreaElement>(
@@ -579,12 +469,12 @@ describe("wake input recovery", () => {
   });
 
   test("input typed during reconnect backoff is dropped rather than replayed", async () => {
-    await renderTerminal(terminalTab());
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = lastSocket();
     await attach(first, "sess-backoff");
 
     first.close();
-    const onData = xtermDataHandlers.at(-1);
+    const onData = xterm.terminals.at(-1)?.dataHandlers.at(-1);
     expect(onData).toBeDefined();
     onData?.("x");
     expect(first.sent).not.toContain(
