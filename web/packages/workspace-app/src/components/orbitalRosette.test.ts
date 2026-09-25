@@ -1,24 +1,56 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import OrbitalRosette from "./OrbitalRosette.svelte";
 import {
   buildOrbitalCircles,
   ORBITAL_RING_COUNT,
 } from "./orbitalRosette";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./orbitalRosette", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./orbitalRosette")>();
+  return { ...actual, buildOrbitalCircles: vi.fn(actual.buildOrbitalCircles) };
+});
+
+afterEach(stopAnimations);
 
 describe("buildOrbitalCircles", () => {
-  test("keeps the named renderer tuning and source attribution", async () => {
-    const renderer = (await import("./OrbitalRosette.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./orbitalRosette.ts?raw"))
-      .default as string;
+  test("turns -0.3 radians per second of animation time", () => {
+    const { callbacks } = startAnimation(OrbitalRosette, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    const build = vi.mocked(buildOrbitalCircles);
+    build.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toMatch(/const PHASE_SPEED = -0\.3;/);
-    expect(renderer).toMatch(
-      /--orbital-rosette-alpha-base: 0\.055;[\s\S]*--orbital-rosette-alpha-range: 0\.14;/,
-    );
-    expect(renderer).toMatch(/--orbital-rosette-size-scale: 1\.35;/);
-    expect(geometry).toContain(
-      "https://x.com/hisadan/status/2063631027063726297",
-    );
+    expect(build.mock.calls.map(([phase]) => phase)).toEqual([
+      expect.closeTo(-0.3, 9),
+      expect.closeTo(-0.9, 9),
+    ]);
+  });
+
+  test("strokes its rings in the colour, opacity and size its theme tokens name", () => {
+    const { ctx, ops } = recordingContext2d();
+    const { run, callbacks } = startAnimation(OrbitalRosette, ctx);
+    const host = run.canvas.parentElement!;
+    host.style.setProperty("--orbital-rosette-stroke-rgb", "1, 2, 3");
+    host.style.setProperty("--orbital-rosette-alpha-base", "0.1");
+    host.style.setProperty("--orbital-rosette-alpha-range", "0");
+    host.style.setProperty("--orbital-rosette-size-scale", "2");
+    const build = vi.mocked(buildOrbitalCircles);
+    build.mockClear();
+    callbacks.resize(800, 800, false, 0);
+
+    expect(ops).toContainEqual({ op: "set strokeStyle", args: ["rgb(1, 2, 3)"] });
+    expect(ops).toContainEqual({ op: "set globalAlpha", args: [0.1] });
+    // 800 px is the reference size, so the scale is the token itself.
+    expect(build.mock.calls.at(-1)?.[1]).toBe(2);
   });
 
   test("doubles each ring from 2 through 64 circles", () => {
