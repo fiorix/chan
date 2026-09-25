@@ -1082,8 +1082,8 @@ impl RootedFs {
             // on the path it writes, and a dotted sibling name would classify
             // by its last extension and skip that check.
             let leaf = to_rel.file_name().ok_or(ChanError::PathEmpty)?;
-            let (stage, stage_rel) = self.create_copy_stage(&to_rel, &to_canon)?;
-            let staged = stage_rel.join(leaf);
+            let stage = self.create_copy_stage(&to_rel, &to_canon)?;
+            let staged = stage.rel().join(leaf);
             if let Err(error) = self
                 .copy_one_file(&from_rel, &staged, &to_canon, &mut created)
                 // The writer names the staged path; the caller asked for `to`.
@@ -1093,9 +1093,11 @@ impl RootedFs {
                 })
                 .and_then(|()| self.publish_copy(&staged, &to_rel, to))
             {
-                return Err(self.discard_copy_stage(&stage, error));
+                return Err(stage.discard(error));
             }
-            self.remove_tree_best_effort(&stage);
+            // The file has left its stage; dropping the guard removes the
+            // empty directory.
+            drop(stage);
             // The atomic writer synced the stage directory and checked the
             // root before this rename committed; do both for the directory
             // that holds the destination name.
@@ -1110,35 +1112,38 @@ impl RootedFs {
             self.ensure_root_available()?;
         } else {
             self.preflight_tree(&posix_path(&from_rel), true)?;
-            let (stage, stage_rel) = self.create_copy_stage(&to_rel, &to_canon)?;
+            let stage = self.create_copy_stage(&to_rel, &to_canon)?;
             if let Err(error) = self
-                .copy_subtree(&from_rel, &stage_rel, &to_canon, &mut created)
-                .and_then(|()| self.publish_copy(&stage_rel, &to_rel, to))
+                .copy_subtree(&from_rel, stage.rel(), &to_canon, &mut created)
+                .and_then(|()| self.publish_copy(stage.rel(), &to_rel, to))
             {
-                return Err(self.discard_copy_stage(&stage, error));
+                return Err(stage.discard(error));
             }
+            stage.published();
         }
         created.sort();
         Ok(CopyOutcome { created })
     }
 
     /// Reserve a fresh stage directory beside `to_rel` for a copy in flight,
-    /// creating the destination's parents first. Beside it, so the publishing
+    /// creating the destination's parents first, and return the guard that
+    /// removes it unless it is published. Beside it, so the publishing
     /// rename never crosses filesystems; after a root check, so nothing is
     /// created inside a root that was renamed or unlinked away.
-    fn create_copy_stage(
-        &self,
-        to_rel: &std::path::Path,
-        to_canon: &str,
-    ) -> Result<(String, std::path::PathBuf)> {
+    fn create_copy_stage(&self, to_rel: &std::path::Path, to_canon: &str) -> Result<CopyStage<'_>> {
         self.ensure_root_available()?;
-        let stage = self.temp_sibling_name(to_canon)?;
-        let stage_rel = self.rel(&stage)?;
+        let name = self.temp_sibling_name(to_canon)?;
+        let rel = self.rel(&name)?;
         if let Some(parent) = to_rel.parent().filter(|p| !p.as_os_str().is_empty()) {
             self.dir().create_dir_all(parent)?;
         }
-        self.dir().create_dir(&stage_rel)?;
-        Ok((stage, stage_rel))
+        self.dir().create_dir(&rel)?;
+        Ok(CopyStage {
+            fs: self,
+            name,
+            rel,
+            armed: true,
+        })
     }
 
     /// Publish a finished copy at `to_rel` with a rename that refuses an
@@ -1158,20 +1163,6 @@ impl RootedFs {
                 Err(ChanError::PathAlreadyExists(to.to_string()))
             }
             Err(error) => Err(ChanError::from(error)),
-        }
-    }
-
-    /// Remove a failed copy's stage and return the error to report, with any
-    /// cleanup failure folded in so a stage left behind is never silent.
-    fn discard_copy_stage(&self, stage: &str, error: ChanError) -> ChanError {
-        let Err(cleanup) = self.remove_tree(stage) else {
-            return error;
-        };
-        let message = format!("{error}; failed to remove temporary copy {stage}: {cleanup}");
-        if matches!(error, ChanError::NotFound(_)) || matches!(cleanup, ChanError::NotFound(_)) {
-            ChanError::NotFound(message)
-        } else {
-            ChanError::Io(message)
         }
     }
 
@@ -1466,6 +1457,52 @@ impl RootedFs {
             return false;
         };
         self.dir().symlink_metadata(&rel_path).is_ok()
+    }
+}
+
+/// A copy's stage directory beside its destination. Dropping it removes the
+/// stage unless it was published or discarded, so a copy that unwinds
+/// between creating the stage and publishing it strands nothing.
+struct CopyStage<'a> {
+    fs: &'a RootedFs,
+    name: String,
+    rel: std::path::PathBuf,
+    armed: bool,
+}
+
+impl CopyStage<'_> {
+    /// The stage's validated root-relative path.
+    fn rel(&self) -> &std::path::Path {
+        &self.rel
+    }
+
+    /// The stage itself became the destination; nothing is left to remove.
+    fn published(mut self) {
+        self.armed = false;
+    }
+
+    /// Remove a failed copy's stage and return the error to report, with any
+    /// cleanup failure folded in so a stage left behind is never silent.
+    fn discard(mut self, error: ChanError) -> ChanError {
+        self.armed = false;
+        let stage = &self.name;
+        let Err(cleanup) = self.fs.remove_tree(stage) else {
+            return error;
+        };
+        let message = format!("{error}; failed to remove temporary copy {stage}: {cleanup}");
+        if matches!(error, ChanError::NotFound(_)) || matches!(cleanup, ChanError::NotFound(_)) {
+            ChanError::NotFound(message)
+        } else {
+            ChanError::Io(message)
+        }
+    }
+}
+
+impl Drop for CopyStage<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.fs.remove_tree_best_effort(&self.name);
+        }
     }
 }
 
