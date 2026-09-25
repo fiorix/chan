@@ -84,6 +84,7 @@ vi.mock("../state/imageZoom", () => ({ openImageZoom: vi.fn() }));
 vi.mock("../state/videoViewer", () => ({ openVideoViewer: vi.fn() }));
 vi.mock("../state/fileActionExecutors", () => ({ exportPathToPdf: vi.fn(async () => {}) }));
 
+import { api } from "../api/client";
 import {
   fileOps,
   openGraphForContact,
@@ -604,6 +605,47 @@ describe("language and contact links open the graph", () => {
     target.querySelector<HTMLButtonElement>("button.ref.contact")!.click();
     expect(onContactNavigate).toHaveBeenCalledWith("Contacts/alice.md");
     expect(openGraphForContact).not.toHaveBeenCalled();
+  });
+});
+
+describe("the report behind the inspector", () => {
+  const prefix: ReportPrefix = {
+    totals: { files: 1, code: 10, comments: 0, blanks: 0, complexity: 1 },
+    by_language: [{ name: "Rust", files: 1, code: 10, comments: 0, blanks: 0, complexity: 1 }],
+    cocomo: {
+      model: "organic",
+      effort_person_months: 0.1,
+      schedule_months: 0.2,
+      developers: 0.1,
+      estimated_cost_usd: 10,
+    },
+  };
+
+  test("a directory prefers the report cache and falls back to the walk on a 404", async () => {
+    h.entries = [dir("src"), file("src/main.rs", "text")];
+    vi.mocked(api.reportDir).mockRejectedValueOnce(new Error("404 not found"));
+    vi.mocked(api.reportPrefix).mockResolvedValueOnce(prefix);
+    const target = await render({ path: "src" });
+
+    expect(api.reportDir).toHaveBeenCalledWith("src");
+    expect(api.reportPrefix).toHaveBeenCalledWith("src");
+    expect(target.querySelector("button.lang-name")?.textContent).toBe("Rust");
+  });
+
+  test("without a workspace behind the window, nothing is requested and no report state shows", async () => {
+    h.caps.workspace = false;
+    h.prefixReport = prefix;
+    h.entries = [dir("src"), file("src/main.rs", "text")];
+    for (const path of ["src", "src/main.rs"]) {
+      const target = await render({ path });
+      expect(target.textContent, path).not.toContain("loading report");
+      expect(target.querySelector(".refs-error"), path).toBeNull();
+      expect(target.querySelector(".lang-name, .lang-link"), path).toBeNull();
+    }
+    expect(api.inspector).not.toHaveBeenCalled();
+    expect(api.reportDir).not.toHaveBeenCalled();
+    expect(api.reportPrefix).not.toHaveBeenCalled();
+    expect(api.reportFileStream).not.toHaveBeenCalled();
   });
 });
 
