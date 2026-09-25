@@ -1044,6 +1044,39 @@ jobs:
           "root=$($tool.DirectoryName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Output "CodeSignTool.bat: $($tool.FullName)"
 
+      - name: Probe SSL.com eSigner credentials
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
+          CODESIGNTOOL: ${{ steps.codesigntool.outputs.path }}
+          CODE_SIGN_TOOL_PATH: ${{ steps.codesigntool.outputs.root }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Without this probe a trust or credential break shows only at the
+          # first sign.ps1 call, after the release build. get_credential_ids
+          # (SSL.com's eSigner CodeSignTool command guide) authenticates and
+          # lists the account's credential ids without signing, so a listing
+          # that names CREDENTIAL_ID proves the bundled JDK trusts the signing
+          # endpoint and that the username, password and credential id are
+          # right. It takes no TOTP secret, so a bad ES_TOTP_SECRET still fails
+          # at the first sign. CodeSignTool exits 0 on failure, so the verdict is
+          # the listing, not the exit code. It runs from the tool root, as
+          # sign.ps1 does, and its output is never printed.
+          Push-Location -LiteralPath $env:CODE_SIGN_TOOL_PATH
+          try {
+            $output = & $env:CODESIGNTOOL "get_credential_ids" "-username=$env:ES_USERNAME" "-password=$env:ES_PASSWORD" 2>&1 | Out-String
+          } finally {
+            Pop-Location
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CREDENTIAL_ID) -or -not $output.Contains($env:CREDENTIAL_ID)) {
+            $lines = @($output -split "`n" | Where-Object { $_.Trim() }).Count
+            Write-Output "::error::CodeSignTool get_credential_ids ($lines output lines, exit code $LASTEXITCODE) did not list CREDENTIAL_ID: a TLS trust, username, password or credential id problem that would fail every signing call"
+            exit 1
+          }
+          Write-Output "CodeSignTool get_credential_ids lists CREDENTIAL_ID: TLS trust, username, password and credential id verified (the TOTP secret is not probed)"
+
       - name: Build Windows packages (signed CLI zip + signed NSIS installer)
         working-directory: chan
         shell: bash
