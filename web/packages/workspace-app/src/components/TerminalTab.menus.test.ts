@@ -1,136 +1,144 @@
-import { describe, expect, test } from "vitest";
-import terminal from "./TerminalTab.svelte?raw";
-
-// TerminalTab right-click menu shape. Tests pin the structure;
-// behavioral coverage (Mod+L equivalents, the broadcast checkbox
-// flow) belongs in TerminalTab.test.ts. The tab menu has:
+// @vitest-environment jsdom
 //
-// * Status row "connected: <detail>" (colon, not em dash).
-// * Name, Group, status, and broadcast controls.
-// * Close after a separator.
-//
-// The body menu starts with the live terminal engine and per-tab secret
-// masking control, then carries Find / Copy / Paste / Copy Scrollback,
-// while command-discovery rows live in the command launcher.
-// * No Reload Window / Open Inspector entries.
-// * MCP info-button opens a modal dialog.
+// A terminal's two menus. The tab menu (from the tab strip) names and groups
+// the terminal, shows its status and broadcast controls, and ends with Close.
+// The body menu (a right-click in the terminal) shows the live engine and the
+// secret-masking toggle, then Find, Copy, Paste and Copy Scrollback. Command
+// discovery lives in the launcher, not here. A TerminalTab is mounted over
+// the stand-in xterm and socket.
 
-describe("status row colon", () => {
-  test("status row uses colon-separator (no em dash)", () => {
-    expect(terminal).toMatch(/statusDetail \? `: \$\{statusDetail\}`/);
-    expect(terminal).not.toMatch(/statusDetail \? ` - \$\{statusDetail\}`/);
+import { tick } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+import TerminalTab from "./TerminalTab.svelte";
+import type { Preferences } from "../api/types";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
+import { __testSetStandalonePreferences } from "../state/store.svelte";
+import { closeTabMenu } from "../state/tabMenu.svelte";
+import { layout, type LeafNode } from "../state/tabs.svelte";
+import {
+  attach,
+  installTerminalDom,
+  menuRow,
+  mountTerminal,
+  openBodyMenu,
+  openTerminalMenu,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  terminalTab,
+  TERMINAL_PANE,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+afterEach(() => {
+  resetTerminals();
+  __testSetStandalonePreferences(null);
+  vi.restoreAllMocks();
+});
+
+async function attached(prefs: Record<string, unknown> | null = null) {
+  if (prefs) __testSetStandalonePreferences({ terminal: prefs } as unknown as Preferences);
+  const [tab] = seatTerminals([terminalTab()]);
+  const mounted = await mountTerminal(TerminalTab, tab!);
+  const socket = TerminalSocket.all.at(-1)!;
+  await attach(socket);
+  await receive(socket, { type: "ready", cols: 80, rows: 24 });
+  return { ...mounted, tab: tab!, socket };
+}
+
+/// The open menu's rows in order: a separator as "---", a label row by its
+/// label, a named field by its caption, the status row by its text.
+function menuShape(): string[] {
+  const menu = document.body.querySelector(".terminal-tab-menu-bubble")!;
+  return [...menu.querySelectorAll(".msep, .mbtn, .rename-row, .terminal-status-row, .terminal-backend-label")].map(
+    (el) => {
+      if (el.classList.contains("msep")) return "---";
+      if (el.classList.contains("rename-row")) return `field ${el.querySelector("span")?.textContent?.trim()}`;
+      if (el.classList.contains("terminal-status-row")) return `status ${el.querySelector(".terminal-status")?.textContent?.trim()}`;
+      if (el.classList.contains("terminal-backend-label")) return `engine ${el.querySelector(".terminal-backend-value")?.textContent?.trim()}`;
+      return el.querySelector(".mbtn-label")?.textContent?.trim() ?? "";
+    },
+  );
+}
+
+function maskingLabel(): string {
+  return menuShape().find((row) => row.startsWith("Secret masking")) ?? "";
+}
+
+describe("the tab menu", () => {
+  test("names and groups the terminal, then its status, and ends with Close after a separator", async () => {
+    const { tab } = await attached();
+    await openTerminalMenu(tab);
+    const shape = menuShape();
+
+    expect(shape.slice(0, 3)).toEqual(["field Name", "field Group", "status connected: 80x24"]);
+    expect(shape.slice(-2)).toEqual(["---", "Close"]);
+    expect(document.body.querySelector(".from-cwd-label")).toBeNull();
+    expect(document.body.textContent).not.toContain("Set MCP env vars");
   });
 
-  test("Name then Group rows precede the status row", () => {
-    // Name row, then the Group row (broadcast group, restart-gated), then
-    // the status row. The Group row's restart prompt is conditional, so
-    // allow it (or its absence) before the status comment.
-    expect(terminal).toMatch(
-      /<label class="rename-row">[\s\S]{1,800}<span>Name<\/span>[\s\S]{1,800}<\/label>\s*<label class="rename-row">[\s\S]{1,400}<span>Group<\/span>[\s\S]{1,1000}<\/label>[\s\S]{1,800}<!-- Status reads "connected: <detail>"[\s\S]{1,200}<div class="terminal-status-row">/,
-    );
+  test("Close asks about the live terminal, then closes this tab in its pane", async () => {
+    const { tab } = await attached();
+    await openTerminalMenu(tab);
+    menuRow("Close").click();
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    resolveConfirm(true);
+    await vi.waitFor(() => expect((layout.nodes[TERMINAL_PANE] as LeafNode).tabs).toEqual([]));
   });
 });
 
-describe("removed tab-menu command-discovery rows", () => {
-  test("From-$CWD spawn band is gone", () => {
-    expect(terminal).not.toMatch(/class="from-cwd-label">From \$CWD/);
-    expect(terminal).not.toMatch(/function openNewTerminal\(\): void \{/);
-    expect(terminal).not.toMatch(/function openNewFileBrowser\(\): void \{/);
-    expect(terminal).not.toMatch(/function openNewGraph\(\): void \{/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">New File<\/span>/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">New Terminal<\/span>/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">New File Browser<\/span>/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">New Graph<\/span>/);
+describe("the body menu", () => {
+  test("starts with the engine and masking, then Find, Copy, Paste and Copy Scrollback", async () => {
+    const { target } = await attached();
+    await openBodyMenu(target);
+    expect(menuShape()).toEqual([
+      "engine xterm",
+      "Secret masking: off",
+      "---",
+      "Find",
+      "Copy",
+      "Paste",
+      "Copy Scrollback",
+      ...menuShape().slice(7),
+    ]);
   });
 
-  test("Restart and Copy path to $CWD tab-menu rows are gone", () => {
-    expect(terminal).not.toMatch(/<span class="mbtn-label">Restart<\/span>/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">Start New Session<\/span>/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">Copy path to \$CWD<\/span>/);
+  test("masking starts from the setting, and each new terminal reads it again", async () => {
+    const first = await attached({ secret_masking: true });
+    await openBodyMenu(first.target);
+    expect(maskingLabel()).toBe("Secret masking: on");
+    closeTabMenu();
+    resetTerminals();
+
+    const second = await attached({ secret_masking: false });
+    await openBodyMenu(second.target);
+    expect(maskingLabel()).toBe("Secret masking: off");
   });
 
-  test("no per-terminal MCP env toggle remains in the menu", () => {
-    expect(terminal).not.toContain("mcp-env-row");
-    expect(terminal).not.toContain("Set MCP env vars");
-  });
-});
+  test("the toggle flips masking for this terminal only and saves nothing", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const { target } = await attached();
+    await openBodyMenu(target);
+    menuRow("Secret masking: off").click();
+    await tick();
+    await openBodyMenu(target);
+    expect(maskingLabel()).toBe("Secret masking: on");
 
-describe("terminal body-context vs tab-context split", () => {
-  test("body right-click opens the body source", () => {
-    expect(terminal).toMatch(
-      /function onTerminalContextMenu[\s\S]{1,200}openTabMenu\([\s\S]{1,300}"body",/,
-    );
-  });
-
-  test("body menu carries masking plus the tight Find / Copy / Paste / Copy Scrollback set", () => {
-    // The body branch renders the ephemeral masking control and these four;
-    // the tab branch no longer carries them. Pin their order and presence.
-    expect(terminal).toContain('{#if tabMenu.source === "body"}');
-    expect(terminal).toMatch(
-      /tabMenu\.source === "body"[\s\S]{1,1200}onclick=\{toggleSecretMasking\}[\s\S]{1,800}onclick=\{openFind\}[\s\S]{1,400}onclick=\{copySelectionOrScrollback\}[\s\S]{1,400}onclick=\{pasteClipboard\}[\s\S]{1,400}onclick=\{copyScrollback\}/,
-    );
-  });
-
-  test("body menu starts with the live post-fallback backend", () => {
-    expect(terminal).toMatch(
-      /tabMenu\.source === "body"[\s\S]{1,500}class="terminal-backend-label" data-terminal-backend=\{backend\}[\s\S]{1,200}\{backend\}[\s\S]{1,1000}onclick=\{toggleSecretMasking\}[\s\S]{1,1000}<div class="msep" role="separator"><\/div>/,
-    );
-  });
-
-  test("new xterm tabs seed from the persisted boolean with omitted default off", () => {
-    expect(terminal).toMatch(/let secretMaskingEnabled = \$state\(false\)/);
-    expect(terminal).toMatch(
-      /async function start\(\): Promise<void> \{[\s\S]{1,1200}secretMaskingEnabled = terminalPrefs\?\.secret_masking \?\? false/,
-    );
-    expect(terminal).toMatch(
-      /new TerminalSecretMasker\([\s\S]{1,300}secretMaskingEnabled/,
-    );
-  });
-
-  test("component recreation runs start and reseeds masking from configuration", () => {
-    expect(terminal).toMatch(
-      /\$effect\(\(\) => \{\s*if \(!host \|\| term\) return;\s*void tick\(\)\.then\(start\);\s*return teardown;\s*\}\)/,
-    );
-  });
-
-  test("the menu and command masking toggle stays ephemeral and xterm-only", () => {
-    const toggle = terminal.match(
-      /function toggleSecretMasking\(\): void \{([\s\S]*?)\n  \}/,
-    )?.[1];
-    expect(toggle).toBeDefined();
-    expect(toggle).toMatch(/backend !== "xterm"/);
-    expect(toggle).toContain("Secret masking unavailable on ghostty backend");
-    expect(toggle).toMatch(/secretMasker\?\.setEnabled\(secretMaskingEnabled\)/);
-    expect(toggle).not.toMatch(/api\.|localStorage|sessionStorage/);
-    expect(terminal).toMatch(
-      /name === "app\.terminal\.secretMasking\.toggle"\) toggleSecretMasking\(\)/,
-    );
-  });
-});
-
-describe("Close anchors the foot", () => {
-  test("Close menu entry wired to closeFromMenu", () => {
-    expect(terminal).toMatch(
-      /onclick=\{closeFromMenu\}[\s\S]{1,400}<span class="mbtn-label">Close<\/span>/,
-    );
-  });
-
-  test("closeFromMenu invokes closeTab with paneId + tab.id", () => {
-    expect(terminal).toMatch(
-      /function closeFromMenu\(\): void \{[\s\S]{1,200}closeTabMenu\(\);[\s\S]{1,200}void closeTab\(paneId, tab\.id\);/,
-    );
-  });
-
-  test("broadcast section is followed by separator + Close", () => {
-    expect(terminal).toMatch(
-      /\{#if crossWindowMembers\.length > 0\}[\s\S]{1,2000}\{\/if\}\s*<div class="msep" role="separator"><\/div>\s*<button class="mbtn" onclick=\{closeFromMenu\}>/,
-    );
-  });
-
-  test("Settings and Reopen rows are gone", () => {
-    expect(terminal).not.toMatch(/onclick=\{flipToSettings\}/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">Settings<\/span>/);
-    expect(terminal).not.toMatch(/onclick=\{doReopenClosedTab\}/);
-    expect(terminal).not.toMatch(/<span class="mbtn-label">Reopen Closed Tab<\/span>/);
+    closeTabMenu();
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.secretMasking.toggle" } }));
+    await tick();
+    await openBodyMenu(target);
+    expect(maskingLabel()).toBe("Secret masking: off");
+    expect(setItem.mock.calls.filter(([key]) => /mask/i.test(String(key)))).toEqual([]);
   });
 });
