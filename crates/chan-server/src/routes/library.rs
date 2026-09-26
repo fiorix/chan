@@ -671,13 +671,7 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
                 .ok()?
                 .trim_start_matches('/')
                 .to_string();
-            Some(local_launcher_row(
-                host,
-                &library_id,
-                workspace_id,
-                &workspace.root_path,
-                workspace.display_name.as_deref(),
-            ))
+            Some(local_launcher_row(host, &library_id, workspace_id, &workspace))
         })
         .collect();
     rows.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
@@ -688,23 +682,25 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
 ///
 /// The list route, `add` and `on` all build their row here, so the three cannot
 /// disagree about the same workspace: `status` and `error` come from
-/// [`WorkspaceHost::workspace_status`] rather than from what the caller just
-/// did, so a mounted tenant whose root is unreachable, gone or replaced reads
-/// `unavailable` with its reason instead of `running`. `on` is the live mounted
-/// bool; `status` carries the richer `starting`/`error`/`unavailable` the bool
-/// cannot express.
+/// [`WorkspaceHost::registered_workspace_status`] rather than from what the
+/// caller just did, so a mounted tenant whose root is unreachable, gone or
+/// replaced reads `unavailable` with its reason instead of `running`. The row
+/// is built from what the registry stores, so listing every workspace asks no
+/// workspace root's filesystem. `on` is the live mounted bool; `status` carries
+/// the richer `starting`/`error`/`unavailable` the bool cannot express.
 fn local_launcher_row(
     host: &WorkspaceHost,
     library_id: &str,
     workspace_id: String,
-    root: &Path,
-    display_name: Option<&str>,
+    registered: &KnownWorkspace,
 ) -> LauncherWorkspace {
-    let (status, error) = host.workspace_status(root);
+    let root = &registered.root_path;
+    let (status, error) = host.registered_workspace_status(registered);
     LauncherWorkspace {
         path: root.to_string_lossy().into_owned(),
-        label: display_name
-            .map(str::to_string)
+        label: registered
+            .display_name
+            .clone()
             .unwrap_or_else(|| workspace_label(root)),
         on: launcher_row_on(status),
         status,
@@ -819,7 +815,7 @@ async fn handle_library_command_action(
             let Some((_, root)) = resolve_workspace(&state.host, &workspace_id) else {
                 return StatusCode::NOT_FOUND.into_response();
             };
-            if state.host.workspace_status(&root).0 != WorkspaceStatus::Running {
+            if state.host.canonical_root_status(&root).0 != WorkspaceStatus::Running {
                 return command_capability_error(StatusCode::CONFLICT, "workspace is not running");
             }
             state.host.mint_window_with_origin(
@@ -1136,11 +1132,20 @@ async fn handle_create_library_window(
     State(host): State<Arc<WorkspaceHost>>,
     Json(req): Json<CreateWindow>,
 ) -> Response {
+    let mut workspace_path = req.workspace_path;
     if req.kind == WindowKind::Workspace {
-        let Some(path) = req.workspace_path.as_deref() else {
+        let Some(path) = workspace_path.as_deref() else {
             return (StatusCode::BAD_REQUEST, "workspace_path is required").into_response();
         };
-        let (status, _) = host.workspace_status(Path::new(path));
+        // The record stores the workspace's canonical root, the key the window
+        // feed finds its tenant by without asking any root's filesystem.
+        // Resolving the client's spelling asks this root's, so it runs off
+        // the runtime.
+        let key = match host.root_key(Path::new(path)).await {
+            Ok(key) => key,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        let (status, _) = host.canonical_root_status(&key);
         if status != WorkspaceStatus::Running {
             return (
                 StatusCode::CONFLICT,
@@ -1148,19 +1153,20 @@ async fn handle_create_library_window(
             )
                 .into_response();
         }
+        workspace_path = Some(key.to_string_lossy().into_owned());
     }
     // Leader gate on the TARGET tenant of the mint (workspace path, or the shared
     // terminal tenant for a terminal mint); leaderless establishes leadership at
     // the later /ws connect, so it is allowed.
     if let Err(resp) = leader_gate(
-        host.tenant_leader(req.kind, req.workspace_path.as_deref()),
+        host.tenant_leader(req.kind, workspace_path.as_deref()),
         req.acting_window_id.as_deref(),
     ) {
         return *resp;
     }
     // Stamp the client-claimed affinity at mint so chan-desktop never opens a
     // native twin for a browser-minted window (honest-client input).
-    match host.mint_window_with_origin(req.kind, req.workspace_path, req.origin) {
+    match host.mint_window_with_origin(req.kind, workspace_path, req.origin) {
         Ok(record) => Json(record).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1848,8 +1854,7 @@ async fn handle_add_workspace(
                 &state.host,
                 state.host.library_id(),
                 hosted.prefix.trim_start_matches('/').to_string(),
-                &hosted.root,
-                registered.display_name.as_deref(),
+                &registered,
             ))
             .into_response()
         }
@@ -1890,8 +1895,7 @@ async fn handle_workspace_on(
                 &state.host,
                 state.host.library_id(),
                 id,
-                &root,
-                registered.display_name.as_deref(),
+                &registered,
             ))
             .into_response()
         }

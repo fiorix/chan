@@ -58,8 +58,8 @@ use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, Worksp
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
 use chan_library::windows::{WindowKind, WindowRegistry};
 use chan_library::{
-    allocate_workspace_prefix, registered_workspace_prefix, workspace_prefix_for, FileLocalColor,
-    KeyedLocks, PersistedWorkspace, WorkspaceOverlay,
+    registered_workspace_prefix, workspace_prefix_for, FileLocalColor, KeyedLocks,
+    PersistedWorkspace, WorkspaceOverlay,
 };
 
 mod fdstore;
@@ -1520,10 +1520,11 @@ impl DevserverState {
         Some(self.off_row(prefix.to_string(), &root))
     }
 
-    /// The `on:false` row for a library workspace at `root` served under
-    /// `prefix`, with the host's status for that root and no token.
+    /// The `on:false` row for a library workspace at `root`, a registry row's
+    /// stored canonical root, served under `prefix`, with the host's status
+    /// for that root and no token.
     fn off_row(&self, prefix: String, root: &Path) -> WorkspaceEntry {
-        let (status, error) = self.host.workspace_status(root);
+        let (status, error) = self.host.canonical_root_status(root);
         WorkspaceEntry {
             prefix,
             path: root.to_string_lossy().into_owned(),
@@ -1538,25 +1539,25 @@ impl DevserverState {
     /// Build the wire [`WorkspaceEntry`] for a registered workspace record: an
     /// off row reports `on:false` with an empty token; an on row its live token.
     fn entry_from_record(&self, record: &WorkspaceRecord) -> WorkspaceEntry {
-        let mounted = self.host.is_root_mounted(&record.root);
+        let mounted = self.host.is_canonical_root_mounted(&record.root);
         let (status, error) = match &record.phase {
             MountPhase::Starting => (WorkspaceStatus::Starting, None),
             // A failed attempt does not get to describe a root something else
             // is serving. The row such a root earns is the one it would have
             // with no record here at all, and the attempt's own failure went to
             // whoever asked for the mount.
-            MountPhase::Failed(_) if mounted => self.host.workspace_status(&record.root),
+            MountPhase::Failed(_) if mounted => self.host.canonical_root_status(&record.root),
             MountPhase::Failed(reason) => (WorkspaceStatus::Error, Some(reason.clone())),
             // A mounted tenant is `running` UNLESS the health probe has found
             // its filesystem unreachable, so the degraded overlay is consulted
             // first: a dead mount must not show green in the launcher while
             // every read through it fails. Only that one state overrides:
             // every other overlay value on a mounted row stays `running`.
-            MountPhase::Mounted if mounted => match self.host.workspace_status(&record.root) {
+            MountPhase::Mounted if mounted => match self.host.canonical_root_status(&record.root) {
                 (WorkspaceStatus::Unavailable, reason) => (WorkspaceStatus::Unavailable, reason),
                 _ => (WorkspaceStatus::Running, None),
             },
-            MountPhase::Mounted | MountPhase::Stopped => self.host.workspace_status(&record.root),
+            MountPhase::Mounted | MountPhase::Stopped => self.host.canonical_root_status(&record.root),
         };
         let on =
             record.desired == DesiredMount::On && record.phase == MountPhase::Mounted && mounted;
@@ -1576,12 +1577,65 @@ impl DevserverState {
         }
     }
 
+    /// Register the persisted rows the library does not already hold, and
+    /// return the rows restore can prepare, in their order.
+    ///
+    /// A row the registry holds is recognized by the keys it stores, which
+    /// asks no filesystem. A row it does not hold is registered on the
+    /// blocking pool, every such row at once, within one mount bound: a
+    /// persisted root that stopped answering is skipped with a note instead
+    /// of holding up the restore of every row after it.
+    async fn register_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<PersistedWorkspace> {
+        let registered = registered_root_keys(self.host.library());
+        let deadline = tokio::time::Instant::now() + self.mount_timeout;
+        let registering: Vec<_> = rows
+            .into_iter()
+            .map(|row| {
+                let root = PathBuf::from(&row.path);
+                let task = (!registered.contains(&root)).then(|| {
+                    let library = self.host.library().clone();
+                    tokio::task::spawn_blocking(move || library.register_workspace(&root))
+                });
+                (row, task)
+            })
+            .collect();
+        let mut kept = Vec::new();
+        for (row, task) in registering {
+            let Some(task) = task else {
+                kept.push(row);
+                continue;
+            };
+            let failure = match tokio::time::timeout_at(deadline, task).await {
+                Ok(Ok(Ok(_))) => {
+                    kept.push(row);
+                    continue;
+                }
+                Ok(Ok(Err(error))) => error.to_string(),
+                Ok(Err(error)) => format!("registration task failed: {error}"),
+                Err(_) => format!(
+                    "it did not answer within {} seconds",
+                    whole_seconds(self.mount_timeout)
+                ),
+            };
+            eprintln!(
+                "chan devserver: NOTE: could not register persisted workspace {}: {failure}",
+                row.path
+            );
+        }
+        kept
+    }
+
     /// Insert every durable row before any desired-on restore future spawns.
+    ///
+    /// A row's path is the canonical root the overlay stores, so the prefix,
+    /// the record and the starting mark are all built from it without asking
+    /// any root's filesystem; [`register_restore_rows`](
+    /// Self::register_restore_rows) has registered the rows first.
     fn prepare_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<MountAttempt> {
         let mut attempts = Vec::new();
         for row in rows {
             let root = PathBuf::from(&row.path);
-            let prefix = match allocate_workspace_prefix(&root) {
+            let prefix = match registered_workspace_prefix(&root) {
                 Ok(prefix) => prefix,
                 Err(error) => {
                     eprintln!(
@@ -1591,14 +1645,6 @@ impl DevserverState {
                     continue;
                 }
             };
-            if let Err(error) = self.host.library().register_workspace(&root) {
-                eprintln!(
-                    "chan devserver: NOTE: could not register persisted workspace {}: {error}",
-                    row.path
-                );
-                continue;
-            }
-            let root = canonical_root(&root);
             let record = WorkspaceRecord::prepared(
                 root.clone(),
                 prefix.clone(),
@@ -1619,7 +1665,7 @@ impl DevserverState {
                     self.finish_failed_attempt(&attempt, reason);
                     continue;
                 }
-                self.host.mark_workspace_starting(&root);
+                self.host.mark_canonical_root_starting(&root);
                 attempts.push(attempt);
             }
         }
@@ -1983,6 +2029,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         .workspace_overlay()
         .map(|overlay| overlay.entries())
         .unwrap_or_default();
+    let restore_rows = state.register_restore_rows(restore_rows).await;
     let restore_attempts = state.prepare_restore_rows(restore_rows);
     state.persist_state();
 
@@ -2866,12 +2913,12 @@ fn workspace_label(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-/// Canonical form of a workspace root for cross-store comparison (the library
-/// registers canonical roots; the overlay/map store them as written). Falls
-/// back to the path as-is when it no longer resolves on disk so a vanished
-/// root still compares equal to its own stored form. The same normalization
-/// the registry keys on, so a Windows root never carries the `\\?\` verbatim
-/// prefix into the workspace listing, the persisted overlay, or a message.
+/// The canonical key the devserver stores for a workspace root, spelled the
+/// way the host's key hop computes it, for the tests that set up records and
+/// check them. The devserver itself never resolves a root here: a request's
+/// root comes from the host's key hop, and every other root from a key a
+/// store already holds.
+#[cfg(test)]
 fn canonical_root(root: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(root)
 }
@@ -3052,7 +3099,7 @@ mod tests {
         test_gateway_assertion, test_tunnel_assertion, test_tunnel_registration,
     };
     use super::*;
-    use chan_library::workspace_slug;
+    use chan_library::{allocate_workspace_prefix, workspace_slug};
     use chan_workspace::paths::root_stall;
     use std::sync::atomic::AtomicBool;
 
