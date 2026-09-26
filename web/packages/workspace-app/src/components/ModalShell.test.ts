@@ -216,6 +216,50 @@ describe("ModalShell", () => {
     expect(document.activeElement).toBe(dialog);
   });
 
+  // A body whose last control in the DOM is not somewhere Tab stops.
+  test.each([
+    ["a button taken out of the order", `<button type="button" tabindex="-1">Copy</button>`],
+    ["a hidden input", `<input hidden />`],
+    ["a button in a container that is not displayed", `<span style="display: none"><button type="button">Gone</button></span>`],
+    ["an invisible button", `<button type="button" style="visibility: hidden">Gone</button>`],
+    ["a button in a disabled fieldset", `<fieldset disabled><button type="button">Off</button></fieldset>`],
+    ["a button in an inert region", `<div inert><button type="button">Inert</button></div>`],
+  ])("Tab past the last stop wraps to the first when %s trails it", async (_name, trailing) => {
+    const trailed: Snippet = createRawSnippet(() => ({
+      render: () =>
+        `<div><h2 id="probe-title">Probe</h2><button type="button" class="first">First</button><button type="button" class="last">Last</button>${trailing}</div>`,
+    }));
+    const dialog = dialogIn(render({ children: trailed }))!;
+    await settle();
+    const last = dialog.querySelector<HTMLElement>(".last")!;
+    last.focus();
+    const tab = press(last, "Tab");
+    expect(document.activeElement, "focus wraps to the first control").toBe(dialog.querySelector(".first"));
+    expect(tab.defaultPrevented).toBe(true);
+  });
+
+  // Tab stops beyond buttons, links and form fields. jsdom cannot focus a
+  // media element, so the wrap is read from the focus call.
+  test.each([
+    ["an editing host", `<div contenteditable="true" class="end">Notes</div>`],
+    ["a details summary", `<details><summary class="end">More</summary>Body</details>`],
+    ["an iframe", `<iframe class="end" title="Frame"></iframe>`],
+    ["a video with controls", `<video controls class="end"></video>`],
+    ["an audio player with controls", `<audio controls class="end"></audio>`],
+  ])("Shift+Tab from the panel wraps to %s that ends it", async (_name, ending) => {
+    const ended: Snippet = createRawSnippet(() => ({
+      render: () =>
+        `<div><h2 id="probe-title">Probe</h2><button type="button" class="first">First</button>${ending}</div>`,
+    }));
+    const dialog = dialogIn(render({ children: ended }))!;
+    await settle();
+    const end = dialog.querySelector<HTMLElement>(".end")!;
+    const focus = vi.spyOn(end, "focus");
+    const tab = press(dialog, "Tab", { shiftKey: true });
+    expect(focus, "focus wraps to the control that ends the panel").toHaveBeenCalled();
+    expect(tab.defaultPrevented).toBe(true);
+  });
+
   test("hands the dialog every other key pressed inside the panel", () => {
     const onKeydown = vi.fn();
     const target = render({ onKeydown });

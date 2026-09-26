@@ -46,9 +46,36 @@
     };
   });
 
-  // The controls Tab stops on inside the panel, in DOM order.
-  const TAB_STOPS =
-    'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  // Elements whose kind can put them in the tab order, plus anything a body
+  // gave a tabindex. An editing host and a media element with controls are
+  // tab stops although their default tabIndex reads -1, so they are named.
+  const FOCUSABLE =
+    'a[href], button, input:not([type="hidden"]), select, textarea, iframe, summary, audio[controls], video[controls], [contenteditable]:not([contenteditable="false"]), [tabindex]';
+  const STOP_WITHOUT_TABINDEX =
+    'audio[controls], video[controls], [contenteditable]:not([contenteditable="false"])';
+
+  // The controls Tab stops on inside the panel, in DOM order: a tabindex
+  // puts an element in the order or takes it out, and without one its kind
+  // decides; a disabled control (a disabled fieldset disables what it
+  // holds), an inert one, and one that is not displayed or not visible are
+  // skipped, as the browser skips them.
+  function tabStops(root: HTMLElement): HTMLElement[] {
+    return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => {
+      const index = Number.parseInt(el.getAttribute("tabindex") ?? "", 10);
+      const inOrder = Number.isNaN(index)
+        ? el.tabIndex >= 0 || el.matches(STOP_WITHOUT_TABINDEX)
+        : index >= 0;
+      return inOrder && !el.matches(":disabled") && !el.closest("[inert]") && isRendered(el, root);
+    });
+  }
+
+  function isRendered(el: HTMLElement, root: HTMLElement): boolean {
+    if (getComputedStyle(el).visibility !== "visible") return false;
+    for (let n: Element | null = el; n && n !== root; n = n.parentElement) {
+      if (getComputedStyle(n).display === "none") return false;
+    }
+    return true;
+  }
 
   // Tab and Shift+Tab wrap inside the panel, so focus cannot leave a
   // dialog marked modal: Tab past the last control goes to the first, and
@@ -58,7 +85,7 @@
   // completes a path with it) stays that control's.
   function wrapTab(e: KeyboardEvent): void {
     if (!panel || e.defaultPrevented) return;
-    const stops = [...panel.querySelectorAll<HTMLElement>(TAB_STOPS)];
+    const stops = tabStops(panel);
     const first = stops[0];
     const last = stops.at(-1);
     if (!first || !last) {
