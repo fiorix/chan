@@ -691,10 +691,9 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
 /// caller just did, so a mounted tenant whose root is unreachable, gone or
 /// replaced reads `unavailable` with its reason instead of `running`. The row
 /// is built from what the registry stores, so listing every workspace resolves
-/// no workspace root, except that the writer-lock probe behind a `locked`
-/// status canonicalizes a root another process holds. `on` is the live mounted
-/// bool; `status` carries the richer `starting`/`error`/`unavailable` the bool
-/// cannot express.
+/// no workspace root, a root another process holds included. `on` is the live
+/// mounted bool; `status` carries the richer `starting`/`error`/`unavailable`
+/// the bool cannot express.
 fn local_launcher_row(
     host: &WorkspaceHost,
     library_id: &str,

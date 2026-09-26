@@ -362,14 +362,21 @@ pub enum ForeignHolder {
 /// and a live, torn or path-mismatched holder is [`ForeignHolder::Present`].
 /// What it will not do is turn a probe that established nothing into a holder;
 /// that is [`ForeignHolder::Unknown`].
-pub fn probe_foreign_holder(lock_dir: &Path, workspace_root: &Path) -> ForeignHolder {
+///
+/// `root_key` is the workspace root's canonical key, the form a registry row
+/// stores. A holder records the root it canonicalized when it took the lock,
+/// and the probe compares that record with `root_key` as given, resolving
+/// nothing, so it answers for a root another process holds even when that
+/// root's filesystem has stopped answering. A root whose canonical path has
+/// changed since its key was taken does not match its holder's record, so
+/// that holder is [`ForeignHolder::Present`] even when it is this process or
+/// provably dead.
+pub fn probe_foreign_holder(lock_dir: &Path, root_key: &Path) -> ForeignHolder {
     let path = lock_dir.join(LOCK_FILE);
     match open_lock_file(&path) {
         // The file stays open until classification returns, so a lock this
         // probe did take is held only for the probe and released on drop.
-        Ok(file) => {
-            classify_lock_attempt(FileExt::try_lock_exclusive(&file), lock_dir, workspace_root)
-        }
+        Ok(file) => classify_lock_attempt(FileExt::try_lock_exclusive(&file), lock_dir, root_key),
         Err(e) => ForeignHolder::Unknown {
             reason: format!("could not open {}: {e}", path.display()),
         },
@@ -382,7 +389,7 @@ pub fn probe_foreign_holder(lock_dir: &Path, workspace_root: &Path) -> ForeignHo
 fn classify_lock_attempt(
     attempt: std::io::Result<()>,
     lock_dir: &Path,
-    workspace_root: &Path,
+    root_key: &Path,
 ) -> ForeignHolder {
     match attempt {
         Ok(()) => ForeignHolder::Absent,
@@ -392,7 +399,7 @@ fn classify_lock_attempt(
             let Some((record, source)) = read_record_for(lock_dir) else {
                 return ForeignHolder::Present;
             };
-            let our_path = canonical_string(workspace_root);
+            let our_path = root_key.to_string_lossy();
             if record.path == our_path && record.pid == std::process::id() {
                 return ForeignHolder::Absent;
             }
@@ -594,10 +601,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // The workspace root for the record; the lock dir is a sibling
-    // tempdir so the two never alias.
+    // The workspace root as its canonical key, the form a registry row stores
+    // and the probe compares a holder's record with.
     fn root(tmp: &TempDir) -> std::path::PathBuf {
-        tmp.path().to_path_buf()
+        crate::paths::canonicalize_normalized(tmp.path())
     }
 
     fn reaped_child_pid() -> u32 {

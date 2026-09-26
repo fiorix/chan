@@ -3487,15 +3487,15 @@ impl WorkspaceHost {
     /// it. The launcher drives its spinner and toggle-disable off this, not an
     /// optimistic timer.
     pub fn workspace_status(&self, root: &Path) -> (WorkspaceStatus, Option<String>) {
-        self.workspace_status_by_key(&canonical_key(root), || self.foreign_holder(root))
+        let key = canonical_key(root);
+        self.workspace_status_by_key(&key, || self.foreign_holder(root, &key))
     }
 
     /// [`workspace_status`](Self::workspace_status) for a registry row, by
     /// the canonical root and the metadata key the row stores, so a listing
-    /// resolves no workspace root, with one exception: when another process
-    /// holds the root's writer lock, the probe behind a `locked` status
-    /// compares the holder's record with the root by canonicalizing it
-    /// (`chan_workspace::lock::probe_foreign_holder`).
+    /// resolves no workspace root, a root another process holds included: the
+    /// probe behind a `locked` status compares the holder's lock record with
+    /// the stored root as it is (`chan_workspace::lock::probe_foreign_holder`).
     pub fn registered_workspace_status(
         &self,
         row: &chan_workspace::KnownWorkspace,
@@ -3573,12 +3573,13 @@ impl WorkspaceHost {
         }
     }
 
-    /// What the writer lock says about a holder other than this process. A
-    /// root with no sidecar path has no lock to probe, which is the same as
+    /// What the writer lock says about a holder other than this process,
+    /// for `root` and the canonical `key` its caller resolved it to. A root
+    /// with no sidecar path has no lock to probe, which is the same as
     /// nothing holding it.
-    fn foreign_holder(&self, root: &Path) -> ForeignHolder {
+    fn foreign_holder(&self, root: &Path, key: &Path) -> ForeignHolder {
         match self.library.workspace_paths_for(root) {
-            Some(paths) => chan_workspace::lock::probe_foreign_holder(&paths.lock, root),
+            Some(paths) => chan_workspace::lock::probe_foreign_holder(&paths.lock, key),
             None => ForeignHolder::Absent,
         }
     }
