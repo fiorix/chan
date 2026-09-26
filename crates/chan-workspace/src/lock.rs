@@ -1049,7 +1049,9 @@ mod tests {
         );
     }
 
-    /// How long a test waits for a probe beside a stalled root.
+    /// How long a test waits for a probe beside a stalled root. Unix-only,
+    /// like the one test that reads it.
+    #[cfg(unix)]
     const HUNG_ROOT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
     /// A probe of a root another process holds answers while that root's
