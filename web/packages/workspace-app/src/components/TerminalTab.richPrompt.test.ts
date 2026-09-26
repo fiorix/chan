@@ -231,3 +231,39 @@ describe("the doors to the composer", () => {
     expect(heard).toEqual(["terminal.richPrompt"]);
   });
 });
+
+describe("the composer's pending card", () => {
+  /// A terminal with its composer open over a loaded draft, so the composer
+  /// is the one that settles the pending message.
+  async function withComposer() {
+    const at = await attached();
+    showRichPromptForTab(at.tab.id);
+    await vi.waitFor(() => expect(at.tab.richPromptDraftPath).toBe(".Drafts/rp/draft.md"));
+    await vi.waitFor(() => expect(document.querySelector(".rich-prompt .cm-content")).not.toBeNull());
+    return at;
+  }
+
+  test("a delivery clears the tab's pending message without an ownership warning", async () => {
+    const warnings = ownershipWarnings();
+    const { tab, socket } = await withComposer();
+
+    beginPendingPrompt(tab, "m-1");
+    await receive(socket, { type: "prompt-delivered", id: "m-1", depth: 0 });
+    await vi.waitFor(() => expect(tab.pendingPrompt).toBeUndefined());
+    expect(warnings()).toEqual([]);
+  });
+
+  test("its cancel control clears the tab's pending message without an ownership warning", async () => {
+    const warnings = ownershipWarnings();
+    const { tab } = await withComposer();
+
+    beginPendingPrompt(tab, "m-1");
+    await tick();
+    const cancel = document.querySelector<HTMLButtonElement>(".rich-prompt .rp-primary")!;
+    expect(cancel.textContent?.trim()).toBe("esc cancel");
+    cancel.click();
+    await tick();
+    expect(tab.pendingPrompt).toBeUndefined();
+    expect(warnings()).toEqual([]);
+  });
+});

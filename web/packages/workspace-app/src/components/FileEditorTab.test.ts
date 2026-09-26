@@ -35,6 +35,7 @@ import {
   bumpTabFocusPulse,
   ensureTabSlidePreview,
   layout,
+  openFind,
   saveTab,
   type FileTab,
   type LeafNode,
@@ -581,6 +582,17 @@ describe("recovering unsaved work from an earlier page load", () => {
     expect(banner(target)).toBeNull();
   });
 
+  test("Restore in a pane puts the buffer in the tab without an ownership warning", async () => {
+    const warnings = ownershipWarnings();
+    strandBuffer("notes/plan.md", "# Plan\n\nWork that never reached disk.\n");
+    const { target, tab } = await inPane(fileTab());
+
+    [...banner(target)!.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Restore")!.click();
+    await settle(2);
+    expect(tab.content).toBe("# Plan\n\nWork that never reached disk.\n");
+    expect(warnings()).toEqual([]);
+  });
+
   test("typing after a restore does not raise the banner again", async () => {
     // The decision reads the disk content, so it runs per load, not per
     // keystroke; an edit before the restored buffer is re-persisted must not
@@ -818,6 +830,78 @@ describe("the side panels' widths", () => {
     expect(paneWidths.inspector).toBe(sharedInspector);
     expect(paneWidths.outline).toBe(sharedOutline);
   });
+
+  test("a drag in a pane writes the tab's widths without an ownership warning", async () => {
+    const warnings = ownershipWarnings();
+    const { target, tab } = await inPane(
+      fileTab({ inspectorOpen: true, inspectorWidth: 300, outlineOpen: true, outlineWidth: 200 }),
+    );
+
+    drag(target.querySelector("aside.inspector.right")!.previousElementSibling!, -40);
+    drag(target.querySelector("aside.inspector.left")!.nextElementSibling!, 30);
+    await settle(2);
+    expect(tab.inspectorWidth).toBe(340);
+    expect(tab.outlineWidth).toBe(230);
+    expect(warnings()).toEqual([]);
+  });
+});
+
+describe("the read-mode lamp", () => {
+  test("a click in a pane toggles the tab's read mode without an ownership warning", async () => {
+    const warnings = ownershipWarnings();
+    const { target, tab } = await inPane(fileTab());
+    const lamp = target.querySelector<HTMLButtonElement>(".wiki-statusbar button.lamp")!;
+
+    lamp.click();
+    await settle(2);
+    expect(tab.readMode).toBe(true);
+    expect(lamp.textContent?.trim()).toBe("read");
+    lamp.click();
+    await settle(2);
+    expect(tab.readMode).toBe(false);
+    expect(warnings()).toEqual([]);
+  });
+});
+
+describe("the find bar", () => {
+  function key(input: HTMLInputElement, init: KeyboardEventInit): void {
+    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+  }
+
+  function type(input: HTMLInputElement, value: string): void {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  for (const mode of ["wysiwyg", "source"] as const) {
+    test(`in a pane's ${mode} editor, a query, its stepping and the case toggle reach the tab without an ownership warning`, async () => {
+      const warnings = ownershipWarnings();
+      const { target, tab } = await inPane(fileTab({ mode }));
+      openFind(tab.id);
+      await settle(2);
+      const input = target.querySelector<HTMLInputElement>(".find-input")!;
+
+      // "p" is in "Plan" and twice in "paragraph"; only the last two match case.
+      type(input, "p");
+      await vi.waitFor(() => expect(tab.find?.matches).toHaveLength(3));
+      expect(tab.find?.query).toBe("p");
+      expect(tab.find?.currentIndex).toBe(0);
+      key(input, { key: "Enter" });
+      expect(tab.find?.currentIndex).toBe(1);
+      key(input, { key: "Enter", shiftKey: true });
+      expect(tab.find?.currentIndex).toBe(0);
+
+      target.querySelector<HTMLButtonElement>('button[aria-label="match case"]')!.click();
+      await vi.waitFor(() => expect(tab.find?.matches).toHaveLength(2));
+      expect(tab.find?.caseSensitive).toBe(true);
+
+      type(input, "");
+      await settle(2);
+      expect(tab.find?.matches).toEqual([]);
+      expect(tab.find?.currentIndex).toBe(-1);
+      expect(warnings()).toEqual([]);
+    });
+  }
 });
 
 describe("focus follows the active pane", () => {

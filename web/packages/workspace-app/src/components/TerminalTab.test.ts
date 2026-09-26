@@ -23,9 +23,13 @@ import {
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { ownershipWarnings } from "../__tests__/svelteWarnings";
 import {
+  attach,
   installTerminalDom,
+  output,
+  receive,
   resetTerminals,
   seatTerminals,
+  sentFrames,
   TERMINAL_PANE,
   TerminalSocket,
   terminalTab,
@@ -364,6 +368,25 @@ describe("TerminalTab metadata settlement", () => {
     expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
       "before the metadata update was confirmed",
     );
+  });
+});
+
+describe("TerminalTab seed input", () => {
+  test("a seeded terminal in a pane types its seed after the first output without an ownership warning", async () => {
+    const warnings = ownershipWarnings();
+    const [tab] = seatTerminals([terminalTab({ seedInput: "today.md" })]);
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode } }));
+    await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
+    const socket = TerminalSocket.all[0]!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+
+    await output(socket, "$ ");
+    expect(tab!.seedInput).toBeUndefined();
+    await vi.waitFor(() => expect(sentFrames(socket)).toContainEqual({ type: "input", data: " today.md\x01" }));
+    expect(warnings()).toEqual([]);
   });
 });
 
