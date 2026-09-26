@@ -5763,6 +5763,91 @@ mod tests {
     }
 
     #[test]
+    fn a_watcher_loss_rescans_the_report_on_the_pass_it_requests() {
+        let (_cfg, root, workspace) = fixture();
+        await_recovery_ready(&workspace);
+        workspace.write_text("seen.md", "# Seen\n").unwrap();
+        workspace.report().unwrap();
+        // Written behind the watcher's back: the loss below stands for the
+        // event the provider dropped.
+        std::fs::write(root.path().join("unseen.md"), "# Unseen\n").unwrap();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let callback: Arc<dyn crate::WatchCallback> =
+            Arc::new(ChannelWatchCallback(std::sync::Mutex::new(event_tx)));
+        let fan = ReportFanOut::new(
+            callback,
+            Arc::clone(&workspace.report),
+            Arc::clone(&workspace.write_serial),
+        );
+        let listed = |workspace: &Workspace| {
+            workspace
+                .report()
+                .unwrap()
+                .files
+                .iter()
+                .any(|file| file.path == "unseen.md")
+        };
+
+        fan.on_event(crate::WatchEvent::loss(workspace.generation()));
+        assert!(!listed(&workspace), "no event named unseen.md");
+
+        // The pass the loss requests, claimed and run the way chan-server's
+        // recovery coordinator runs it.
+        let required = workspace.request_recovery(RecoveryAction::FullRebuild);
+        let pass = workspace.begin_recovery().expect("the loss's pass is pending");
+        assert_eq!(pass.generation, required);
+        workspace
+            .run_full_rebuild_pass(
+                pass,
+                None,
+                &crate::progress::NoProgress,
+                SearchAggression::Balanced,
+            )
+            .unwrap();
+        workspace.refresh_persisted_report_if_owed().unwrap();
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Complete)
+            .unwrap();
+
+        assert!(workspace.recovery_status().is_ready());
+        assert!(
+            listed(&workspace),
+            "the recovery pass a watcher loss requested left the report stale"
+        );
+    }
+
+    #[test]
+    fn a_watcher_loss_during_a_report_refresh_leaves_the_refresh_owed() {
+        let (_cfg, _root, workspace) = fixture();
+        await_recovery_ready(&workspace);
+        workspace.report().unwrap();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let callback: Arc<dyn crate::WatchCallback> =
+            Arc::new(ChannelWatchCallback(std::sync::Mutex::new(event_tx)));
+        let fan = ReportFanOut::new(
+            callback,
+            Arc::clone(&workspace.report),
+            Arc::clone(&workspace.write_serial),
+        );
+
+        // A refresh claimed before the loss arrived, whose scan may predate
+        // the events the provider dropped.
+        *workspace.persisted_report_refresh.lock().unwrap() = PersistedReportRefresh::Refreshing;
+        let mut refresh = PersistedReportRefreshGuard {
+            state: &workspace.persisted_report_refresh,
+            settled: false,
+        };
+        fan.on_event(crate::WatchEvent::loss(workspace.generation()));
+        refresh.settled = true;
+        drop(refresh);
+
+        assert!(
+            workspace.persisted_report_refresh_is_owed(),
+            "a refresh that overlapped a watcher loss settled the obligation"
+        );
+    }
+
+    #[test]
     fn serialize_queries_and_file_streams_remain_lock_free() {
         let (_cfg, _root, workspace) = fixture();
         workspace
