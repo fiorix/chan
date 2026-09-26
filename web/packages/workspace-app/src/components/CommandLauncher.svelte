@@ -38,7 +38,6 @@
     clearLauncherDraft,
     closeCommandLauncher,
     launcherDraft,
-    launcherReturnFocus,
     persistLauncherDraft,
   } from "../state/store.svelte";
   import {
@@ -115,9 +114,6 @@
   };
 
   let direction: "forward" | "back" | "still" = $state("still");
-  let wasOpen = false;
-  let ranCommand = false;
-  let restoreTarget: HTMLElement | null = null;
   let contextNoticeTimer: ReturnType<typeof setTimeout> | null = null;
   let scopedLibrary: ScopedLibrarySnapshot | null = $state(null);
   let scopedLibraryLoading = $state(false);
@@ -630,20 +626,6 @@
   );
 
   $effect(() => {
-    const open = launcherDraft.visible;
-    if (open && !wasOpen) {
-      restoreTarget = launcherReturnFocus();
-      ranCommand = false;
-    } else if (!open && wasOpen) {
-      if (!ranCommand && restoreTarget && document.contains(restoreTarget)) {
-        restoreTarget.focus();
-      }
-      restoreTarget = null;
-    }
-    wasOpen = open;
-  });
-
-  $effect(() => {
     JSON.stringify(launcherDraft);
     persistLauncherDraft();
   });
@@ -736,14 +718,12 @@
     }
     // Close first so a command-owned overlay/focus target lands on top. A
     // confirmed successful dispatch clears this draft; plain hiding does not.
-    ranCommand = true;
     closeCommandLauncher();
     clearLauncherDraft();
     await entry.command.run(entry.arg);
   }
 
   function succeeded(): void {
-    ranCommand = true;
     closeCommandLauncher();
     clearLauncherDraft();
   }

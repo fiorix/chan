@@ -3749,25 +3749,8 @@ export function clearLauncherDraft(): void {
   persistLauncherDraft();
 }
 
-/// The element that held focus when the launcher last opened. Captured
-/// here (not in the component) so a command whose flow OUTLIVES the
-/// launcher - Open's path dialog, cancelled - can hand focus back to
-/// where the user actually was, instead of to the long-dismissed
-/// launcher input. Plain module state, deliberately non-reactive.
-let launcherReturnFocusEl: HTMLElement | null = null;
-
-/// Where focus should return after a launcher-initiated flow dismisses
-/// without running anything. The component reads this for its own
-/// dismissal restore; command dialog flows read it for theirs.
-export function launcherReturnFocus(): HTMLElement | null {
-  return launcherReturnFocusEl;
-}
-
 /// Open or resume this window's launcher draft. Idempotent when already open.
-/// Captures the currently-focused element for launcherReturnFocus.
 export function openCommandLauncher(): void {
-  launcherReturnFocusEl =
-    document.activeElement instanceof HTMLElement ? document.activeElement : null;
   launcherPanel.open = true;
 }
 

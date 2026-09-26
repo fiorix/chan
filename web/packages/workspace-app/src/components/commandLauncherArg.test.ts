@@ -4,7 +4,7 @@
 // matches an acceptsArg command on its HEAD token and Enter forwards the
 // remainder to run() VERBATIM (case and inner spaces preserved); a bare
 // pick passes undefined (the command's dialog branch); commands without
-// acceptsArg never head-token match. Plus the launcherReturnFocus capture
+// acceptsArg never head-token match. Plus the deck's return-focus capture
 // that lets a command's dialog flow restore the pre-launcher focus.
 
 import { mount, tick, unmount } from "svelte";
@@ -19,9 +19,9 @@ import {
   clearLauncherDraft,
   closeCommandLauncher,
   launcherPanel,
-  launcherReturnFocus,
   openCommandLauncher,
 } from "../state/store.svelte";
+import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
 import { registerCommands } from "../state/commands";
 import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
@@ -142,13 +142,13 @@ describe("launcher argument forwarding", () => {
   });
 });
 
-describe("launcherReturnFocus capture", () => {
-  test("openCommandLauncher captures the focused element for later restore", () => {
+describe("deckReturnFocus capture", () => {
+  test("opening the launcher captures the focused element for later restore", async () => {
     const input = document.createElement("input");
     document.body.append(input);
     input.focus();
-    openCommandLauncher();
-    expect(launcherReturnFocus()).toBe(input);
+    await openLauncher();
+    expect(deckReturnFocus()).toBe(input);
     input.remove();
   });
 });

@@ -7,9 +7,9 @@
 // are desktop-only. Register with registerCommands. See state/commands.ts
 // for the Command shape and helpers.
 
+import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
 import { allowedInWindow, registerCommands, workspaceOnly } from "../commands";
 import {
-  launcherReturnFocus,
   setThemeChoice,
   setTransientStatus,
   ui,
@@ -92,7 +92,7 @@ async function executeOpen(target: string): Promise<void> {
 /// launcher opened (the launcher itself is long dismissed by now); a
 /// submitted open hands focus to the opened surface instead.
 async function openPathDialog(): Promise<void> {
-  const returnFocus = launcherReturnFocus();
+  const returnFocus = deckReturnFocus();
   const target = await uiPathPrompt({
     title: "Open path or chan://graph link",
     kind: "either",
