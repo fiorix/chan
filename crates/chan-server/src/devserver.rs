@@ -819,13 +819,13 @@ impl Drop for WorkspaceOffSettlement<'_> {
             // leaves the tenant mounted with its desired-on state intact.
             if record.generation != self.generation
                 || record.root.as_path() != self.root
-                || self.state.host.is_root_mounted(self.root)
+                || self.state.host.is_canonical_root_mounted(self.root)
             {
                 return;
             }
             record.turn_off();
         }
-        self.state.host.clear_workspace_lifecycle(self.root);
+        self.state.host.clear_canonical_root_lifecycle(self.root);
         self.state.persist_state();
     }
 }
@@ -1130,6 +1130,9 @@ impl DevserverState {
         self.persist_state();
     }
 
+    /// Publish the current record's phase at `prefix` to the host's lifecycle
+    /// row, by the canonical root the record stores, so a settlement asks no
+    /// root's filesystem.
     fn restore_current_host_lifecycle(&self, prefix: &str) {
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -1138,12 +1141,12 @@ impl DevserverState {
                 .map(|record| (record.root.clone(), record.phase.clone()))
         };
         match current {
-            Some((root, MountPhase::Starting)) => self.host.mark_workspace_starting(&root),
+            Some((root, MountPhase::Starting)) => self.host.mark_canonical_root_starting(&root),
             Some((root, MountPhase::Failed(reason))) => {
-                self.host.mark_workspace_failed(&root, reason)
+                self.host.mark_canonical_root_failed(&root, reason)
             }
             Some((root, MountPhase::Mounted | MountPhase::Stopped)) => {
-                self.host.clear_workspace_lifecycle(&root)
+                self.host.clear_canonical_root_lifecycle(&root)
             }
             None => {}
         }
@@ -1236,7 +1239,7 @@ impl DevserverState {
                     }
                 }
             }
-            self.host.clear_workspace_lifecycle(&root);
+            self.host.clear_canonical_root_lifecycle(&root);
             self.persist_state();
         }
         Ok(SetWorkspaceOnResult::Updated(

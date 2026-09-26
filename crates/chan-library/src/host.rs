@@ -3551,6 +3551,13 @@ impl WorkspaceHost {
     }
 
     /// [`clear_workspace_lifecycle`](Self::clear_workspace_lifecycle) for a
+    /// caller that already holds the root's canonical key, such as a
+    /// devserver record; touches no filesystem.
+    pub fn clear_canonical_root_lifecycle(&self, key: &Path) {
+        self.clear_workspace_lifecycle_by_key(key);
+    }
+
+    /// [`clear_workspace_lifecycle`](Self::clear_workspace_lifecycle) for a
     /// caller that already holds the canonical key.
     fn clear_workspace_lifecycle_by_key(&self, key: &Path) {
         let had = self
