@@ -28,6 +28,7 @@
     reloadConflictedTab,
     overwriteConflictedTab,
   } from "../state/tabs.svelte";
+  import ModalShell from "./ModalShell.svelte";
 
   function onReload(): void {
     void reloadConflictedTab();
@@ -38,54 +39,28 @@
 </script>
 
 {#if conflictDialog.open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={dismissConflict}>
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-      <div class="title">External edit detected</div>
-      <div class="body">
-        <p>
-          <code>{conflictDialog.path}</code> changed on disk since you opened it.
-          Saving now would clobber the external version.
-        </p>
-        <p class="muted">
-          Reload discards your unsaved edits. Overwrite keeps yours and
-          drops the external change. Cancel leaves the dialog and the
-          tab dirty.
-        </p>
-      </div>
-      <div class="actions">
-        <button class="cancel" onclick={dismissConflict}>Cancel</button>
-        <button class="overwrite" onclick={onOverwrite}>Overwrite</button>
-        <button class="reload" onclick={onReload}>Reload</button>
-      </div>
+  <ModalShell onClose={dismissConflict} minWidth="380px">
+    <div class="title">External edit detected</div>
+    <div class="body">
+      <p>
+        <code>{conflictDialog.path}</code> changed on disk since you opened it.
+        Saving now would clobber the external version.
+      </p>
+      <p class="muted">
+        Reload discards your unsaved edits. Overwrite keeps yours and
+        drops the external change. Cancel leaves the dialog and the
+        tab dirty.
+      </p>
     </div>
-  </div>
+    <div class="actions">
+      <button class="cancel" onclick={dismissConflict}>Cancel</button>
+      <button class="overwrite" onclick={onOverwrite}>Overwrite</button>
+      <button class="reload" onclick={onReload}>Reload</button>
+    </div>
+  </ModalShell>
 {/if}
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 26000;
-  }
-  .modal {
-    background: var(--bg-elev);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    padding: 1rem;
-    min-width: 380px;
-    max-width: 80vw;
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-  }
   .title {
     font-size: 16px;
     font-weight: 600;

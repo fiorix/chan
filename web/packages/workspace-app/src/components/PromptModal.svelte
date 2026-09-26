@@ -4,6 +4,7 @@
   // in the store: callers get a Promise<string | null> via uiPrompt().
 
   import { promptState, resolvePrompt } from "../state/store.svelte";
+  import ModalShell from "./ModalShell.svelte";
 
   let value = $state("");
   let inputEl: HTMLInputElement | undefined = $state();
@@ -38,49 +39,23 @@
 </script>
 
 {#if promptState.open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={cancel}>
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-      <div class="title">{promptState.title}</div>
-      <input
-        bind:this={inputEl}
-        bind:value
-        onkeydown={onKey}
-        spellcheck="false"
-        autocomplete="off"
-      />
-      <div class="actions">
-        <button class="cancel" onclick={cancel}>Cancel</button>
-        <button class="ok" onclick={ok}>OK</button>
-      </div>
+  <ModalShell onClose={cancel} minWidth="340px">
+    <div class="title">{promptState.title}</div>
+    <input
+      bind:this={inputEl}
+      bind:value
+      onkeydown={onKey}
+      spellcheck="false"
+      autocomplete="off"
+    />
+    <div class="actions">
+      <button class="cancel" onclick={cancel}>Cancel</button>
+      <button class="ok" onclick={ok}>OK</button>
     </div>
-  </div>
+  </ModalShell>
 {/if}
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 26000;
-  }
-  .modal {
-    background: var(--bg-elev);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    padding: 1rem;
-    min-width: 340px;
-    max-width: 80vw;
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-  }
   .title {
     font-size: 15px;
     color: var(--text-secondary);

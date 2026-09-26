@@ -24,6 +24,7 @@
   import { longestCommonPrefix } from "../state/lcp";
   import { GRAPH_LINK_PREFIX, parseGraphLink } from "../state/tabs.svelte";
   import type { PathPromptMode } from "../state/store.svelte";
+  import ModalShell from "./ModalShell.svelte";
 
   let value = $state("");
   let inputEl: HTMLInputElement | undefined = $state();
@@ -635,132 +636,106 @@
 </script>
 
 {#if pathPromptState.open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={cancel}>
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-      <div class="title">{pathPromptState.title}</div>
-      {#if pathPromptState.notice}
-        <div class="notice">{pathPromptState.notice}</div>
-      {/if}
-      <input
-        bind:this={inputEl}
-        bind:value
-        onkeydown={onKey}
-        spellcheck="false"
-        autocomplete="off"
-        placeholder={pathPromptState.kind === "folder"
-          ? "directory/path"
-          : pathPromptState.kind === "either"
-            ? "file/path or directory/path/"
-            : "file/path"}
-      />
+  <ModalShell onClose={cancel} minWidth="420px" gap="0.55rem">
+    <div class="title">{pathPromptState.title}</div>
+    {#if pathPromptState.notice}
+      <div class="notice">{pathPromptState.notice}</div>
+    {/if}
+    <input
+      bind:this={inputEl}
+      bind:value
+      onkeydown={onKey}
+      spellcheck="false"
+      autocomplete="off"
+      placeholder={pathPromptState.kind === "folder"
+        ? "directory/path"
+        : pathPromptState.kind === "either"
+          ? "file/path or directory/path/"
+          : "file/path"}
+    />
 
-      {#if suggestions.length > 0}
-        <ul class="suggestions" role="listbox">
-          {#each suggestions as s, i (s.path + s.kind)}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-            <li
-              role="option"
-              aria-selected={i === highlightIdx}
-              class:active={i === highlightIdx}
-              class:placeholder={s.kind === "new-file"}
-              onmousedown={(e) => {
-                e.preventDefault();
-                applySuggestion(s);
-              }}
-              onmouseenter={() => (highlightIdx = i)}
-            >{#if s.kind === "dir"}{s.path}/{:else}{s.path}
-              <span class="placeholder-hint">(new file - Tab to accept)</span>
-            {/if}</li>
-          {/each}
-        </ul>
-      {/if}
+    {#if suggestions.length > 0}
+      <ul class="suggestions" role="listbox">
+        {#each suggestions as s, i (s.path + s.kind)}
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <li
+            role="option"
+            aria-selected={i === highlightIdx}
+            class:active={i === highlightIdx}
+            class:placeholder={s.kind === "new-file"}
+            onmousedown={(e) => {
+              e.preventDefault();
+              applySuggestion(s);
+            }}
+            onmouseenter={() => (highlightIdx = i)}
+          >{#if s.kind === "dir"}{s.path}/{:else}{s.path}
+            <span class="placeholder-hint">(new file - Tab to accept)</span>
+          {/if}</li>
+        {/each}
+      </ul>
+    {/if}
 
-      <div
-        class="status"
-        class:err={status.kind === "invalid" || status.kind === "kind-mismatch"}
-        class:warn={status.kind === "dir-unreadable" ||
-          status.kind === "overwrites" ||
-          (status.kind === "creates" && status.newAncestors.length > 0)}
-      >
-        {#if status.kind === "empty"}
-          <span class="muted">type a path</span>
-        {:else if status.kind === "invalid"}
-          ✗ {status.reason}
-        {:else if status.kind === "kind-mismatch"}
-          ✗ {status.reason}
-        {:else if status.kind === "dir-unreadable"}
-          ⚠ cannot list <span class="mono">{status.path}</span>: {status.reason}
-        {:else if status.kind === "overwrites"}
-          ⚠ overwrites existing {status.isFolder ? "directory" : "file"}
-          <span class="mono">{status.path}{status.isFolder ? "/" : ""}</span>
-        {:else if status.kind === "no-op"}
-          <span class="muted">unchanged</span>
-        {:else if status.kind === "opens-graph"}
-          → opens graph link
-        {:else if status.kind === "opens"}
-          → opens {status.isFolder ? "directory " : ""}<span class="mono"
-            >{status.path}{status.isFolder ? "/" : ""}</span
-          >
+    <div
+      class="status"
+      class:err={status.kind === "invalid" || status.kind === "kind-mismatch"}
+      class:warn={status.kind === "dir-unreadable" ||
+        status.kind === "overwrites" ||
+        (status.kind === "creates" && status.newAncestors.length > 0)}
+    >
+      {#if status.kind === "empty"}
+        <span class="muted">type a path</span>
+      {:else if status.kind === "invalid"}
+        ✗ {status.reason}
+      {:else if status.kind === "kind-mismatch"}
+        ✗ {status.reason}
+      {:else if status.kind === "dir-unreadable"}
+        ⚠ cannot list <span class="mono">{status.path}</span>: {status.reason}
+      {:else if status.kind === "overwrites"}
+        ⚠ overwrites existing {status.isFolder ? "directory" : "file"}
+        <span class="mono">{status.path}{status.isFolder ? "/" : ""}</span>
+      {:else if status.kind === "no-op"}
+        <span class="muted">unchanged</span>
+      {:else if status.kind === "opens-graph"}
+        → opens graph link
+      {:else if status.kind === "opens"}
+        → opens {status.isFolder ? "directory " : ""}<span class="mono"
+          >{status.path}{status.isFolder ? "/" : ""}</span
+        >
+      {:else}
+        {@const segs = pathSegments(status)}
+        {@const arrow = status.newAncestors.length > 0 ? "⚠" : "→"}
+        {arrow}
+        {#if status.mode === "move"}
+          moves to
+        {:else if status.mode === "attach"}
+          attach watcher to
+        {:else if status.mode === "open"}
+          creates and opens
         {:else}
-          {@const segs = pathSegments(status)}
-          {@const arrow = status.newAncestors.length > 0 ? "⚠" : "→"}
-          {arrow}
-          {#if status.mode === "move"}
-            moves to
-          {:else if status.mode === "attach"}
-            attach watcher to
-          {:else if status.mode === "open"}
-            creates and opens
-          {:else}
-            new {status.target.isFolder ? "directory" : "file"}
-          {/if}
-          <span class="mono path-render">
-            {#each segs as seg, i (i)}
-              <span
-                class="seg"
-                class:isnew={seg.isNew}
-                class:auto={seg.auto}
-                title={seg.auto ? "added automatically (no extension typed)" : undefined}
-              >{seg.text}</span>
-            {/each}
-          </span>
+          new {status.target.isFolder ? "directory" : "file"}
         {/if}
-      </div>
-
-      <div class="actions">
-        <button class="cancel" onclick={cancel}>Cancel</button>
-        <button class="ok" onclick={ok} disabled={submitDisabled}>OK</button>
-      </div>
+        <span class="mono path-render">
+          {#each segs as seg, i (i)}
+            <span
+              class="seg"
+              class:isnew={seg.isNew}
+              class:auto={seg.auto}
+              title={seg.auto ? "added automatically (no extension typed)" : undefined}
+            >{seg.text}</span>
+          {/each}
+        </span>
+      {/if}
     </div>
-  </div>
+
+    <div class="actions">
+      <button class="cancel" onclick={cancel}>Cancel</button>
+      <button class="ok" onclick={ok} disabled={submitDisabled}>OK</button>
+    </div>
+  </ModalShell>
 {/if}
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 26000;
-  }
-  .modal {
-    background: var(--bg-elev);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    padding: 1rem;
-    min-width: 420px;
-    max-width: 80vw;
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-  }
   .title {
     font-size: 15px;
     color: var(--text-secondary);

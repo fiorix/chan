@@ -4,6 +4,7 @@
   // off confirmState in shared state.
 
   import { confirmState, resolveConfirm } from "../state/confirm.svelte";
+  import ModalShell from "./ModalShell.svelte";
 
   let okEl: HTMLButtonElement | undefined = $state();
 
@@ -33,56 +34,24 @@
 </script>
 
 {#if confirmState.open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={cancel}>
-    <div
-      class="modal"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={onKey}
-      role="dialog"
-      tabindex="-1"
-    >
-      <div class="title">{confirmState.title}</div>
-      {#if confirmState.message}
-        <div class="message">{confirmState.message}</div>
-      {/if}
-      <div class="actions">
-        <button class="cancel" onclick={cancel}>{confirmState.cancelLabel}</button>
-        <button
-          bind:this={okEl}
-          class="ok"
-          class:destructive={confirmState.destructive}
-          onclick={ok}
-        >{confirmState.confirmLabel}</button>
-      </div>
+  <ModalShell onClose={cancel} onKeydown={onKey} minWidth="360px">
+    <div class="title">{confirmState.title}</div>
+    {#if confirmState.message}
+      <div class="message">{confirmState.message}</div>
+    {/if}
+    <div class="actions">
+      <button class="cancel" onclick={cancel}>{confirmState.cancelLabel}</button>
+      <button
+        bind:this={okEl}
+        class="ok"
+        class:destructive={confirmState.destructive}
+        onclick={ok}
+      >{confirmState.confirmLabel}</button>
     </div>
-  </div>
+  </ModalShell>
 {/if}
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 26000;
-  }
-  .modal {
-    background: var(--bg-elev);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    padding: 1rem;
-    min-width: 360px;
-    max-width: 80vw;
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-  }
   .title {
     font-size: 15px;
     color: var(--text);
