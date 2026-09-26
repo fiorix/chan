@@ -1149,12 +1149,16 @@ fn persist_workspaces(state: &AppState) {
     // devserver `persist_state`: a workspace unmounted out-of-band (a
     // control-socket `chan close`) leaves no desktop-side trace, so reading the
     // live mount is what keeps a closed workspace from being persisted as `on`
-    // and resurrected on the next boot. `overlay.replace` sorts by path on save.
+    // and resurrected on the next boot. Each row is matched by the root it
+    // stores against the keys the host's runtimes store, resolving no root: a
+    // close, a toggle and a quit all run this, and one root that stops
+    // answering must not hold up any of them. `overlay.replace` sorts by path
+    // on save.
     let rows: Vec<chan_server::PersistedWorkspace> = embedded
         .library()
         .list_workspaces()
         .into_iter()
-        .filter(|ws| embedded.is_root_mounted(&ws.root_path))
+        .filter(|ws| embedded.is_canonical_root_mounted(&ws.root_path))
         .map(|ws| {
             chan_server::PersistedWorkspace::new(ws.root_path.to_string_lossy().into_owned(), true)
         })
@@ -4278,10 +4282,12 @@ fn library_id_for_window_label(label: &str) -> Option<&str> {
 
 /// Resolve the local library's opaque workspace id to its root path. The id is
 /// the workspace's slug prefix, so recomputing that prefix per registered root
-/// maps it back through the same function the library used to publish it. The
-/// workspace's CURRENTLY MOUNTED prefix is not the same string on chan-desktop
-/// (it mounts local workspaces at `workspace-<hash>`), so this cannot go
-/// through `mounted_prefix_for_root`.
+/// maps it back through the same function the library used to publish it. It
+/// hashes the root each row stores rather than resolving it, so a root that has
+/// stopped answering holds up no lookup of another. The workspace's CURRENTLY
+/// MOUNTED prefix is not the same string on chan-desktop (it mounts local
+/// workspaces at `workspace-<hash>`), so this cannot go through
+/// `mounted_prefix_for_root`.
 fn local_workspace_path(
     embedded: &embedded::EmbeddedServer,
     workspace_id: Option<String>,
@@ -4295,7 +4301,7 @@ fn local_workspace_path(
         .into_iter()
         .map(|workspace| workspace.root_path)
         .find(|root| {
-            chan_server::allocate_workspace_prefix(root)
+            chan_server::registered_workspace_prefix(root)
                 .ok()
                 .as_deref()
                 .map(|prefix| prefix.trim_start_matches('/'))

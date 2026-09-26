@@ -189,13 +189,17 @@ fn redacted_request_span(request: &axum::http::Request<axum::body::Body>) -> tra
 // the devserver, and the `chan` binary name them through `crate::` /
 // `chan_server::` without depending on chan-library.
 //
-// `allocate_workspace_prefix` is re-exported for the same reason: chan-desktop
-// depends on chan-server but not on chan-library, and it needs the one
-// authoritative `{slug}-{8hex}` computation to resolve a workspace id a client
-// sent. Recomputing that string in the shell would make a fourth copy of an
-// algorithm that must stay byte-identical, and a drift would surface as a
-// workspace that cannot be opened rather than as a build failure.
-pub use chan_library::{allocate_workspace_prefix, sanitize_prefix, ServeConfig, ServeHandle};
+// `allocate_workspace_prefix` and `registered_workspace_prefix` are re-exported
+// for the same reason: chan-desktop depends on chan-server but not on
+// chan-library, and it needs the one authoritative `{slug}-{8hex}` computation
+// to resolve a workspace id a client sent. Recomputing that string in the shell
+// would make a fourth copy of an algorithm that must stay byte-identical, and a
+// drift would surface as a workspace that cannot be opened rather than as a
+// build failure.
+pub use chan_library::{
+    allocate_workspace_prefix, registered_workspace_prefix, sanitize_prefix, ServeConfig,
+    ServeHandle,
+};
 
 /// Combine the `open_browser` config flag with the `BROWSER` env
 /// var. Returns false if the flag is off or if `BROWSER` is set to

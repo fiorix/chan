@@ -334,11 +334,20 @@ impl EmbeddedServer {
         self.host.library()
     }
 
-    /// True iff a workspace with this canonical root is mounted right now (under
-    /// any prefix). The launcher's `on` state and the workspace-overlay snapshot
-    /// read this so they reflect the REAL mount, not a stale shadow.
+    /// True iff a workspace with this root is mounted right now (under any
+    /// prefix), resolving `root` first, so a test can ask by the path it made.
+    #[cfg(test)]
     pub fn is_root_mounted(&self, root: &std::path::Path) -> bool {
         self.host.is_root_mounted(root)
+    }
+
+    /// True iff a runtime goes by `key`, its canonical root or the registry
+    /// row's root it was opened at, under any prefix. Answered from the keys
+    /// the host stores, touching no filesystem, so the workspace-overlay
+    /// snapshot can ask it of every registered row without waiting on a root
+    /// that has stopped answering.
+    pub fn is_canonical_root_mounted(&self, key: &std::path::Path) -> bool {
+        self.host.is_canonical_root_mounted(key)
     }
 
     pub async fn close_workspace_root(
