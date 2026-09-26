@@ -13,6 +13,7 @@
     surfaceThemeOverride,
   } from "../state/store.svelte";
   import {
+    DASHBOARD_SLOT_LABELS,
     type DashboardTab,
     dashboardSlotEnabled,
     firstEnabledSlot,
@@ -62,10 +63,6 @@
     menu?.close();
     await reloadWindow();
   }
-
-  // Slot labels mirror the carousel slide titles; the array index is the
-  // slide identity (0 Workspace, 1 Search, 2 About).
-  const SLOTS = ["Workspace", "Search", "About"] as const;
 
   function onSlotToggle(i: number): void {
     toggleDashboardSlot(tab, i);
@@ -123,7 +120,7 @@
          checkbox row for each carousel slide (at least one stays on,
          enforced in toggleDashboardSlot); unchecked slots drop out of
          auto-rotation and the dots. A separator, then Flip and Reload. -->
-    {#each SLOTS as label, i}
+    {#each DASHBOARD_SLOT_LABELS as label, i}
       <li>
         <button
           role="menuitemcheckbox"

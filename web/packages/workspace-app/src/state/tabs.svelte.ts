@@ -571,8 +571,8 @@ export type DashboardTab = {
   title: string;
   /// Persisted carousel slide index so a reload restores the user to the
   /// slide they were last on. 0 is Workspace; 1 is Search (the Indexing
-  /// graph); 2 is About - matching the `SLOTS` order in DashboardTab.svelte
-  /// and the `slideIndex === 1` indexing-poll gate in EmptyPaneCarousel.
+  /// graph); 2 is About - matching the `DASHBOARD_SLOT_LABELS` order and
+  /// the `slideIndex === 1` indexing-poll gate in EmptyPaneCarousel.
   /// The carousel's play/pause is server-persisted so the auto-rotate
   /// preference survives a reload independently.
   carouselSlide?: number;
@@ -600,12 +600,18 @@ export type ExtensionTab = {
   extensionId: string;
 };
 
+/// The Dashboard carousel's slots in display order, by label. The index is
+/// the slot's identity: `carouselSlide`, `disabledSlots` and the slide
+/// commands store it, and the carousel template renders one slide per
+/// index behind its `{#if slideIndex === n}` guards, whose titles repeat
+/// these labels. The tab menu's on/off rows and the flip-back's title and
+/// dots read them from here.
+export const DASHBOARD_SLOT_LABELS = ["Workspace", "Search", "About"] as const;
+
 /// Carousel slot count, shared by the on/off helpers below and the
-/// restore-time clamp. The carousel template renders exactly these three
-/// slides (About / Workspace / Search); keeping the count here lets the
-/// helpers reason about "the last enabled slot" without importing the
-/// component.
-export const DASHBOARD_SLOT_COUNT = 3;
+/// restore-time clamp, so the helpers can reason about "the last enabled
+/// slot" without importing the component.
+export const DASHBOARD_SLOT_COUNT = DASHBOARD_SLOT_LABELS.length;
 
 /// Whether slide `i` is currently shown for this Dashboard tab.
 export function dashboardSlotEnabled(tab: DashboardTab, i: number): boolean {
@@ -4751,7 +4757,7 @@ export function paneModeOpenDashboard(opts?: OpenDashboardOptions): void {
 
 /// Carousel slide index of the Search / Indexing graph. Matches the
 /// `slideIndex === 1` indexing-poll gate in EmptyPaneCarousel and the
-/// `SLOTS` order in DashboardTab.svelte (0 Workspace, 1 Search, 2 About).
+/// `DASHBOARD_SLOT_LABELS` order (0 Workspace, 1 Search, 2 About).
 export const DASHBOARD_SEARCH_SLIDE = 1;
 
 /// Optional overrides applied to a freshly-spawned Dashboard tab: pre-select

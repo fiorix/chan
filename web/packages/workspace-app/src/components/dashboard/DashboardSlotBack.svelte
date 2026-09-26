@@ -10,7 +10,11 @@
   // and OK) is HybridSurfaceConfigShell, same as every other Hybrid back.
 
   import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-svelte";
-  import type { DashboardTab } from "../../state/tabs.svelte";
+  import {
+    DASHBOARD_SLOT_COUNT,
+    DASHBOARD_SLOT_LABELS,
+    type DashboardTab,
+  } from "../../state/tabs.svelte";
   import { scheduleSessionSave } from "../../state/store.svelte";
   import HybridSurfaceConfigShell from "../HybridSurfaceConfigShell.svelte";
   import WorkspaceSlotConfig from "./WorkspaceSlotConfig.svelte";
@@ -18,11 +22,13 @@
   type Props = { tab: DashboardTab; onDone?: () => void };
   let { tab, onDone }: Props = $props();
 
-  const SLOTS = ["Workspace", "Search", "About"] as const;
   // Clamp to the valid slot range; the front carousel uses the same
   // clamp so the two faces never disagree on which slot is active.
   const slot = $derived(
-    Math.min(Math.max(0, Math.floor(tab.carouselSlide ?? 0)), SLOTS.length - 1),
+    Math.min(
+      Math.max(0, Math.floor(tab.carouselSlide ?? 0)),
+      DASHBOARD_SLOT_COUNT - 1,
+    ),
   );
   // The pause/play toggle drives `tab.autoRotate`, the per-tab DashboardTab
   // field the FRONT carousel reads (its `paused` derived includes
@@ -40,7 +46,7 @@
   // even when a slot is toggled off for the front rotation (the front carousel
   // filters its dots by disabledSlots; this navigator does not).
   function step(delta: number): void {
-    selectSlot((slot + delta + SLOTS.length) % SLOTS.length);
+    selectSlot((slot + delta + DASHBOARD_SLOT_COUNT) % DASHBOARD_SLOT_COUNT);
   }
 
   function toggleAutoRotate(): void {
@@ -50,7 +56,7 @@
 </script>
 
 <HybridSurfaceConfigShell
-  title={SLOTS[slot]}
+  title={DASHBOARD_SLOT_LABELS[slot]}
   ariaLabel="Dashboard settings"
   {onDone}
   footerBorder={false}
@@ -79,7 +85,7 @@
       <ChevronLeft size={16} strokeWidth={1.75} aria-hidden="true" />
     </button>
     <div class="dots" role="tablist" aria-label="Dashboard slot">
-      {#each SLOTS as label, i (label)}
+      {#each DASHBOARD_SLOT_LABELS as label, i (label)}
         <button
           type="button"
           class="dot-btn"
