@@ -31,6 +31,7 @@
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { TokenContext, TokenHandler } from "./walker";
 import { CheckboxWidget } from "../widgets/checkbox";
+import { copyTextToClipboard } from "../../state/store.svelte";
 
 /// Floating badge anchored at the top-right of a fenced-code block.
 /// Shows the language label (from the ```lang opener) and a copy
@@ -78,10 +79,10 @@ class FenceBadgeWidget extends WidgetType {
     btn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      void navigator.clipboard.writeText(this.code).then(
-        () => flashCopied(btn),
-        () => flashCopied(btn, "fail"),
-      );
+      void copyTextToClipboard(this.code, {
+        onSuccess: () => flashCopied(btn),
+        onError: () => flashCopied(btn, "fail"),
+      });
     });
     wrap.append(btn);
     return wrap;
