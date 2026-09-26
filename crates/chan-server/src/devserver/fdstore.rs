@@ -83,9 +83,11 @@ mod linux {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boot_id: Option<String>,
         /// Whether this is the seal's final write, taken once the parked
-        /// sessions' PTY readers stopped, so each `seq` is where its session
-        /// ended. Absent from a manifest written before the field, which
-        /// imports as sealed, as it always has.
+        /// sessions' PTY readers stopped or after `READER_STOP_WAIT` with
+        /// some still running. Each `seq` is where its session ended, but
+        /// for a read a still-running reader records after the write, which
+        /// only a ring file keeps. Absent from a manifest written before the
+        /// field, which imports as sealed, as it always has.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed: Option<bool>,
         sessions: Vec<ManifestSession>,

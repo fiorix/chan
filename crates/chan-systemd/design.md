@@ -25,7 +25,7 @@ flowchart TB
   Man --> Stop["systemctl stop: store released, masters close, shells HUP"]
 ```
 
-Session end (exit, close, restart-in-place, reap) sends `FDSTOREREMOVE` immediately; graceful shutdown seals the manifest with one final write, marked `sealed`, taken once the parked PTY readers stopped, and detaches the parked set without killing children. The stop/restart asymmetry lives entirely in systemd's default `FileDescriptorStorePreserve=restart` semantics; the devserver never guesses stop-vs-restart at SIGTERM.
+Session end (exit, close, restart-in-place, reap) sends `FDSTOREREMOVE` immediately; graceful shutdown seals the manifest with one final write, marked `sealed`, taken once the parked PTY readers stopped or after at most two seconds of waiting for them, and detaches the parked set without killing children. The stop/restart asymmetry lives entirely in systemd's default `FileDescriptorStorePreserve=restart` semantics; the devserver never guesses stop-vs-restart at SIGTERM.
 
 ## Platform split
 

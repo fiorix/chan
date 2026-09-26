@@ -237,6 +237,13 @@ impl RingBuffer {
     /// the session. It takes the file while that end is at or past the
     /// manifest's `seq`; once a manifest rewrite records a larger `seq`, the
     /// manifest wins, with the tail it carries for a ring no longer mirrored.
+    ///
+    /// The mark is best effort: a write to the file has just failed, and a
+    /// failed mark is only logged. A restore before that manifest rewrite
+    /// then reads the file as exact, so a client of this process resuming
+    /// past the file's end is honoured in the next process's numbering with
+    /// no notice. From the rewrite on the manifest wins, and the restore is
+    /// lossy unless the rewrite is the seal's.
     #[cfg(target_os = "linux")]
     fn stop_mirror_after(&mut self, error: io::Error) {
         tracing::warn!(error = %error, "writing the terminal ring file failed; it stops mirroring");
