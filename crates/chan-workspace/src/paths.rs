@@ -460,6 +460,8 @@ pub mod root_stall {
     #[derive(Default)]
     struct GateState {
         released: bool,
+        /// Calls still to let through before the stall starts holding.
+        passes: usize,
         entered: Vec<String>,
     }
 
@@ -483,6 +485,13 @@ pub mod root_stall {
     /// revalidation of a workspace rooted there, until the returned guard
     /// drops. Panics when `root` is already stalled.
     pub fn stall(root: impl Into<PathBuf>) -> RootStall {
+        stall_after(root, 0)
+    }
+
+    /// [`stall`] that lets the first `passes` calls through, the way a root
+    /// answers a request's first lookup and then stops answering. Held calls
+    /// are what [`RootStall::entered`] reports.
+    pub fn stall_after(root: impl Into<PathBuf>, passes: usize) -> RootStall {
         let root = root.into();
         let mut roots = vec![root.clone()];
         if let Ok(canonical) = dunce::canonicalize(&root) {
@@ -491,6 +500,10 @@ pub mod root_stall {
             }
         }
         let gate = Arc::new(Gate::default());
+        gate.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .passes = passes;
         let mut map = stalls();
         for spelling in &roots {
             let previous = map.insert(spelling.clone(), Arc::clone(&gate));
@@ -595,6 +608,10 @@ pub mod root_stall {
         };
         let chain = call_chain();
         let mut state = gate.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.passes > 0 {
+            state.passes -= 1;
+            return;
+        }
         state.entered.push(chain);
         gate.changed.notify_all();
         while !state.released {
