@@ -2791,9 +2791,12 @@ where
 
 /// Push `close_survey` for `survey_id` to each of `windows` but `exclude`,
 /// once, over the `/ws` broadcast. It takes the survey's open record and
-/// drops it first: a socket subscribed before this point receives the close,
-/// and one that attaches after it is synced without the survey, so no window
-/// misses both.
+/// drops it first (after a reply, `complete_survey` already took the survey
+/// out): a socket subscribed before this point receives the close, and one
+/// that attaches after it is synced without the survey, so no window the
+/// close goes to misses both. `exclude`, the window that answered, gets
+/// neither: its own reply cleared its overlay, and no sync built after the
+/// reply lists the survey.
 fn send_survey_close_commands(
     open: crate::survey::OpenSurveyGuard<'_>,
     windows: &[String],

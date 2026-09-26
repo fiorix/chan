@@ -16,16 +16,21 @@
 //! (reply, timeout, cancellation, or EOF from an opted-in client), promoting
 //! the next survey in arrival order.
 //!
-//! And the bus records which surveys are open: for each overlay the handler
-//! has pushed and not yet closed, the windows it went to, the tab it targets
-//! and its spec. `open_survey` and `close_survey` ride the `/ws` broadcast
-//! once each, so a window whose socket was down or lagged when one went out
-//! never gets it; the `/ws` attach and a lagged socket's pump send that
-//! window the record instead (`survey_sync`), the whole set of surveys the
-//! server still waits on there. The handler holds an [`OpenSurveyGuard`] from
-//! before the open push until before the close push, so no exit path leaves a
-//! closed survey in the record, and no window synced from it can raise a
-//! survey whose close it was not subscribed for.
+//! And the bus records which surveys are open: for each survey, from just
+//! before the handler pushes its overlay until its reply is accepted or just
+//! before its close is pushed, the windows it went to, the tab it targets and
+//! its spec. `open_survey` and `close_survey` ride the `/ws` broadcast once
+//! each, so a window whose socket was down or lagged when one went out never
+//! gets it; the `/ws` attach and a lagged socket's pump send that window the
+//! record instead (`survey_sync`), the whole set of surveys the server still
+//! waits on there. The handler holds an [`OpenSurveyGuard`] from before the
+//! open push and gives it up before any close push, and
+//! [`SurveyBus::complete_survey`] takes the survey out the moment it accepts a
+//! reply, so no exit path leaves a closed survey in the record and a sync
+//! built after a reply or a close never lists it. A sync built before either
+//! goes to a socket already subscribed for the close, which every target
+//! window but the one that answered is sent; that one's own reply cleared its
+//! overlay.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,8 +112,9 @@ struct OpenSurvey {
 
 /// RAII record of one open survey. Dropping it takes the survey out of what
 /// [`SurveyBus::open_for_window`] reports, so every exit of the blocked
-/// handler (reply, sender dropped, client EOF, deadline, a failed push, or the
-/// handler's future dropped) leaves the record.
+/// handler (sender dropped, client EOF, deadline, a failed push, or the
+/// handler's future dropped) leaves the record. After a reply the drop removes
+/// nothing: [`SurveyBus::complete_survey`] already took the survey out.
 pub(crate) struct OpenSurveyGuard<'a> {
     bus: &'a SurveyBus,
     survey_id: String,
@@ -161,9 +167,10 @@ impl SurveyBus {
     }
 
     /// Record `spec` (its id already stamped) as open in `windows` for
-    /// `tab_name` until the returned guard drops. The handler takes it before
-    /// it pushes `open_survey`, so a window that attaches too late for that
-    /// push is synced the survey instead, and drops it before it pushes
+    /// `tab_name` until the returned guard drops or
+    /// [`SurveyBus::complete_survey`] accepts its reply. The handler takes it
+    /// before it pushes `open_survey`, so a window that attaches too late for
+    /// that push is synced the survey instead, and drops it before it pushes
     /// `close_survey`, so a window that attaches too late for the close is
     /// synced without it.
     pub(crate) fn record_open(
@@ -296,9 +303,13 @@ impl SurveyBus {
 
     /// Complete a parked survey: take its sender out of the map and fire the
     /// oneshot with the reply and `answered_by` (the answering window's id, or
-    /// `None` when the SPA does not report it). Returns `false` when no survey
-    /// with that id is parked (it was already answered, or the id is stale),
-    /// which the reply route maps to a 404. C's `POST /api/survey/reply` is the
+    /// `None` when the SPA does not report it). An accepted reply also takes
+    /// the survey out of the open record in the same step, so no sync built
+    /// after it lists the survey: the handler's close skips the answering
+    /// window, and nothing would close an overlay such a sync raised there.
+    /// Returns `false` when no survey with that id is parked (it was already
+    /// answered, or the id is stale), which the reply route maps to a 404 and
+    /// which leaves the record as it is. C's `POST /api/survey/reply` is the
     /// only caller.
     pub fn complete_survey(
         &self,
@@ -306,7 +317,15 @@ impl SurveyBus {
         reply: SurveyReply,
         answered_by: Option<String>,
     ) -> bool {
-        self.pending.complete(survey_id, (reply, answered_by))
+        // The record's lock is held across the completion, so a sync is built
+        // wholly before an accepted reply or wholly after it. Lock order: the
+        // record, then the pending map; nothing takes them the other way.
+        let mut open = self.open.lock().expect("open surveys poisoned");
+        let accepted = self.pending.complete(survey_id, (reply, answered_by));
+        if accepted {
+            open.retain(|open| open.spec.survey_id != survey_id);
+        }
+        accepted
     }
 }
 
