@@ -5425,6 +5425,76 @@ mod tests {
         );
     }
 
+    /// Turning off a root that stopped answering settles its row from the
+    /// key the record stores, holding no runtime worker: on a runtime with
+    /// one worker, turning another root off still completes beside it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn turning_a_hung_root_off_leaves_the_runtime_serving() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+        register_off_with_a_window(&state, hung.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(other.path())
+            .expect("register the other root");
+        let hung_prefix = allocate_workspace_prefix(hung.path()).expect("prefix");
+        let other_prefix = allocate_workspace_prefix(other.path()).expect("prefix");
+
+        let stall = root_stall::stall(hung.path());
+        let toggling = Arc::clone(&state);
+        let hung_off =
+            tokio::spawn(async move { toggling.set_workspace_on(&hung_prefix, false, false).await });
+        let toggling = Arc::clone(&state);
+        completes_beside(
+            &stall,
+            "turning another root off beside a hung root's off",
+            async move { toggling.set_workspace_on(&other_prefix, false, false).await },
+        )
+        .await
+        .expect("turn the other root off");
+        drop(stall);
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, hung_off)
+            .await
+            .expect("the hung root's off finishes once it answers")
+            .expect("toggle task")
+            .expect("turn the hung root off");
+    }
+
+    /// A mount attempt that a newer off intent superseded before it ran
+    /// settles its root's row from the record's stored key, so it finishes
+    /// even when that root has stopped answering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_superseded_attempt_on_a_hung_root_settles_without_it() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = allocate_workspace_prefix(hung.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(hung.path(), &prefix)
+            .expect("prepare the mount")
+            .expect("a fresh attempt");
+        state
+            .set_workspace_on(&prefix, false, false)
+            .await
+            .expect("supersede the attempt");
+
+        let stall = root_stall::stall(hung.path());
+        let attempting = Arc::clone(&state);
+        let settled = completes_beside(&stall, "a superseded attempt on a hung root", async move {
+            attempting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        })
+        .await
+        .expect("the superseded attempt settles");
+        assert_eq!(settled, prefix);
+    }
+
     /// Closes of one hung root share the blocking thread that resolves its
     /// key, so a client retrying a close of a root that stopped answering
     /// cannot take the blocking pool from every other root.
