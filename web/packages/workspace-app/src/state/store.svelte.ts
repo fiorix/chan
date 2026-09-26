@@ -4312,9 +4312,11 @@ export function topOverlay(): OverlayId | null {
 /// conflict dialogs, the Team Work setup, the workspace warnings, the contacts
 /// import and the desktop's close prompt) or the window-wide survey. Ctrl+D
 /// and the pane flip read it and stand down rather than close or turn a tab
-/// the user cannot see. A survey over one terminal does not count: it covers
-/// only that terminal and leaves the rest of the window usable. The
-/// full-window covers are `appInputBlocked`'s.
+/// the user cannot see. The window-wide slot counts whatever survey shows
+/// there, a terminal's survey whose `tabName` no terminal here carries
+/// included, since it covers the whole window until answered. A survey over
+/// one terminal does not count: it covers only that terminal and leaves the
+/// rest of the window usable. The full-window covers are `appInputBlocked`'s.
 export function keyboardOwnedAbovePanes(): boolean {
   return (
     topOverlay() !== null ||
