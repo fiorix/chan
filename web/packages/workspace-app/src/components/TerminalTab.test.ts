@@ -225,7 +225,7 @@ describe("TerminalTab activity frames", () => {
 });
 
 describe("TerminalTab metadata settlement", () => {
-  test("a fresh unnamed terminal in a pane takes the server's next name before it dials", async () => {
+  test("a fresh unnamed terminal in a pane takes the server's next name without an ownership warning", async () => {
     const warnings = ownershipWarnings();
     const next = vi.spyOn(api, "terminalNextName").mockResolvedValue("t7");
     try {

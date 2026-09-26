@@ -724,7 +724,7 @@ describe("the slide chord", () => {
     expect(tab.slidePreview?.index).toBe(2);
   });
 
-  test("a first Mod+Shift+Enter keeps the deck in play mode", async () => {
+  test("a first Mod+Shift+Enter in a pane presents the deck without a stale-assignment warning", async () => {
     const warnings = ownershipWarnings();
     const { target, tab } = await inPane(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
 
