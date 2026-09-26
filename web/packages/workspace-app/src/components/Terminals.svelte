@@ -24,25 +24,27 @@
     <div>
       <div class="terminal-dock" {@attach dockTerminal(id, () => placementById.get(id)?.paneId)}>
         {#if terminalDocked(id)}
+          <!-- The placements are rebuilt on every layout change. Each prop
+               is a value of its own, so a terminal's effects re-run only when
+               what they read changes, not when another pane's tabs do. -->
           {@const placed = placementById.get(id)}
-          {#if placed}
+          {@const tab = placed?.tab}
+          {@const paneId = placed?.paneId ?? ""}
+          {@const side = placed?.side ?? "a"}
+          {@const active = placed?.active ?? false}
+          {@const focused = placed?.focused ?? false}
+          {#if tab}
             <svelte:boundary>
-              <TerminalTab
-                tab={placed.tab}
-                paneId={placed.paneId}
-                side={placed.side}
-                active={placed.active}
-                focused={placed.focused}
-              />
+              <TerminalTab {tab} {paneId} {side} {active} {focused} />
               {#snippet failed(error, reset)}
-                <div class="tab-failed" class:offscreen={!placed.active}>
+                <div class="tab-failed" class:offscreen={!active}>
                   <FailureCard
                     title="This tab could not be drawn."
                     {error}
                     hint="The pane's other tabs still work, and so does every other pane."
                     onRetry={reset}
-                    closeLabel={tabLabel(placed.tab)}
-                    onClose={() => void closeTab(placed.paneId, placed.tab.id)}
+                    closeLabel={tabLabel(tab)}
+                    onClose={() => void closeTab(paneId, tab.id)}
                   />
                 </div>
               {/snippet}
