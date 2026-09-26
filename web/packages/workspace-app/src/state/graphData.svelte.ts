@@ -27,10 +27,6 @@ let inflight: Promise<void> | null = null;
 let inflightAbort: AbortController | null = null;
 let inflightSeq = 0;
 
-function edgeKey(e: GraphViewEdge): string {
-  return `${e.source}\u0000${e.target}\u0000${e.kind}\u0000${e.rank ?? ""}`;
-}
-
 function publishGraphView(view: GraphView): void {
   graphData.view = {
     nodes: [...view.nodes],
@@ -52,26 +48,19 @@ export function ensureGraphLoaded(): Promise<void> {
   graphData.error = null;
   inflight = (async () => {
     try {
-      const nodesById = new Map<string, GraphViewNode>();
-      const edgesByKey = new Map<string, GraphViewEdge>();
-      const view = (): GraphView => ({
-        nodes: [...nodesById.values()],
-        edges: [...edgesByKey.values()],
-      });
       graphData.view = { nodes: [], edges: [] };
       graphData.view = await api.graphStream(
         {},
         {
           signal: inflightAbort?.signal,
-          onNodes(nodes) {
+          // graphStream passes the view it has accumulated so far.
+          onNodes(_nodes, view) {
             if (seq !== inflightSeq) return;
-            for (const node of nodes) nodesById.set(node.id, node);
-            publishGraphView(view());
+            publishGraphView(view);
           },
-          onEdges(edges) {
+          onEdges(_edges, view) {
             if (seq !== inflightSeq) return;
-            for (const edge of edges) edgesByKey.set(edgeKey(edge), edge);
-            publishGraphView(view());
+            publishGraphView(view);
           },
         },
       );
