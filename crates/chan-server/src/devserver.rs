@@ -6279,9 +6279,7 @@ mod tests {
         let stall = root_stall::stall(root.path());
         for what in ["a first health probe tick", "a second health probe tick"] {
             let host = Arc::clone(&state.host);
-            stall.finishes_beside(what, HEALTHY_ROOT_BOUND, move || {
-                host.probe_mounted_roots()
-            });
+            stall.finishes_beside(what, HEALTHY_ROOT_BOUND, move || host.probe_mounted_roots());
         }
         assert_eq!(
             row(&state).status,
