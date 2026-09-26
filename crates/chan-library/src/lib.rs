@@ -46,6 +46,7 @@ pub use host::{
     LocalColorStore, LocalThemeStore, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus,
 };
 pub use prefix::{allocate_workspace_prefix, workspace_slug};
+pub use root_locks::{KeyedLockGuard, KeyedLocks};
 pub use serve_config::{sanitize_prefix, ServeConfig, ServeHandle};
 pub use tenant::{
     BrowserWindowTarget, HostControl, OpenOutsideAck, StandaloneFiles, StandaloneOpenFrame,

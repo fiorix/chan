@@ -39,8 +39,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
 #[cfg(any(unix, windows))]
 const IO_TIMEOUT: Duration = Duration::from_millis(3000);
 // Exceeds devserver.rs's WORKSPACE_MOUNT_TIMEOUT (60 seconds), but the server
-// first waits without a bound on its mount lock. Startup restore can hold
-// that lock for minutes, so registration just after startup can time out.
+// first waits without a bound on the mount-attempt lock of the requested
+// root's prefix. That root's own startup restore holds it until the restore
+// settles, so registering that root just after startup can time out.
 #[cfg(any(unix, windows))]
 const REGISTER_REPLY_TIMEOUT: Duration = Duration::from_secs(75);
 #[cfg(any(unix, windows))]

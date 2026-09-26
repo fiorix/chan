@@ -3339,6 +3339,15 @@ impl WorkspaceHost {
         self.live_workspace(root).is_some()
     }
 
+    /// [`is_root_mounted`](Self::is_root_mounted) for a caller that already
+    /// holds the root's canonical key, such as the devserver's record of a
+    /// mount attempt: answered from the runtimes' stored keys without touching
+    /// the filesystem, so it answers even when that root has stopped
+    /// answering.
+    pub fn is_canonical_root_mounted(&self, key: &Path) -> bool {
+        self.hosted_for_key(key).ok().flatten().is_some()
+    }
+
     /// The prefix string this canonical root is CURRENTLY mounted at (the
     /// `workspaces` map key), regardless of which scheme mounted it (slug vs
     /// `workspace-<hash>`), or `None` when it is not mounted. The launcher's
@@ -3445,6 +3454,12 @@ impl WorkspaceHost {
     /// owner, such as the devserver's bounded-attempt timeout.
     pub fn mark_workspace_failed(&self, root: &Path, reason: String) {
         self.mark_mount_error(root, reason);
+    }
+
+    /// [`mark_workspace_failed`](Self::mark_workspace_failed) for a caller
+    /// that already holds the root's canonical key; touches no filesystem.
+    pub fn mark_canonical_root_failed(&self, key: &Path, reason: String) {
+        self.mark_mount_error_by_key(key, reason);
     }
 
     /// Mark a workspace root's mount as in flight (`starting`) and fire the

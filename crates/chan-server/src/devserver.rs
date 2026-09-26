@@ -58,7 +58,7 @@ use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, Worksp
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
 use chan_library::windows::{WindowKind, WindowRegistry};
 use chan_library::{
-    allocate_workspace_prefix, FileLocalColor, PersistedWorkspace, WorkspaceOverlay,
+    allocate_workspace_prefix, FileLocalColor, KeyedLocks, PersistedWorkspace, WorkspaceOverlay,
 };
 
 mod fdstore;
@@ -714,10 +714,14 @@ struct DevserverState {
     host_label: String,
     /// Registered workspaces by stable prefix, on and off.
     workspaces: Mutex<HashMap<String, WorkspaceRecord>>,
-    /// Extends the host's mount serialization through generation adoption or
-    /// compensating cleanup, so a newer attempt cannot adopt a tenant that an
-    /// older stale completion is about to close.
-    mount_attempt_lock: tokio::sync::Mutex<()>,
+    /// One lock per prefix, held by a mount attempt from its intent check
+    /// through generation adoption or the cleanup of a stale completion, so a
+    /// newer attempt for that prefix cannot adopt a tenant an older stale
+    /// completion is about to close. Keyed by prefix because that is all it
+    /// orders: an attempt waiting on its own root's filesystem or root lock
+    /// must not hold up another prefix's attempt. Taken before the host's
+    /// root lock; the lock order is stated on the host's root locks.
+    mount_attempt_locks: KeyedLocks<String>,
     startup: Arc<StartupCoordinator>,
     store: DevserverStore,
     /// Orders persisted snapshot capture and publication across both stores.
@@ -881,7 +885,7 @@ impl DevserverState {
         timeout: Duration,
     ) -> Result<String, Error> {
         let mut settlement = MountAttemptSettlement::new(self, &attempt);
-        let _attempt_guard = self.mount_attempt_lock.lock().await;
+        let _attempt_guard = self.mount_attempt_locks.lock(attempt.prefix.as_str()).await;
         if !self.reconcile_attempt_intent(&attempt, false) {
             self.restore_current_host_lifecycle(&attempt.prefix);
             self.remove_finished_tombstone(&attempt.prefix);
@@ -957,17 +961,18 @@ impl DevserverState {
     /// socket. The shared overlay generation is therefore the ordering edge:
     /// a newer off row supersedes this attempt, while an absent registry row
     /// means a concurrent remove won.
+    ///
+    /// The attempt's root is canonical, and the registry and the overlay
+    /// store canonical roots, so both are matched by their stored keys: this
+    /// check runs before the attempt's bound starts and never waits on a
+    /// filesystem, the attempt's own root's or another's.
     fn reconcile_attempt_intent(&self, attempt: &MountAttempt, mounted: bool) -> bool {
-        let registered = self
-            .host
-            .library()
-            .workspace_paths_for(&attempt.root)
-            .is_some();
+        let registered = registered_root_keys(self.host.library()).contains(&attempt.root);
         let persisted = self.host.workspace_overlay().and_then(|overlay| {
             overlay
                 .entries()
                 .into_iter()
-                .find(|row| canonical_root(Path::new(&row.path)) == canonical_root(&attempt.root))
+                .find(|row| Path::new(&row.path) == attempt.root)
         });
         let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
         let Some(record) = workspaces.get_mut(&attempt.prefix) else {
@@ -991,6 +996,10 @@ impl DevserverState {
     /// mark laid over a live tenant is invisible while it serves, because
     /// [`WorkspaceHost::workspace_status`] reports a mounted root as running,
     /// and surfaces later as a stale failure once that tenant closes.
+    ///
+    /// The check and the mark go by the attempt's canonical key, touching no
+    /// filesystem: an attempt that expired because its root stopped answering
+    /// must still settle.
     fn finish_failed_attempt(&self, attempt: &MountAttempt, reason: String) {
         let adopted_failure = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -999,8 +1008,8 @@ impl DevserverState {
                 .is_some_and(|record| record.complete_failure(attempt.generation, reason.clone()))
         };
         if adopted_failure {
-            if !self.host.is_root_mounted(&attempt.root) {
-                self.host.mark_workspace_failed(&attempt.root, reason);
+            if !self.host.is_canonical_root_mounted(&attempt.root) {
+                self.host.mark_canonical_root_failed(&attempt.root, reason);
             }
         } else {
             self.restore_current_host_lifecycle(&attempt.prefix);
@@ -1251,19 +1260,17 @@ impl DevserverState {
     ) {
         // Durable desired intent → the library-owned overlay store. Starting
         // and failed rows stay desired-on even though no host prefix is live.
+        // Records, overlay rows and registry rows all store canonical roots,
+        // so they are joined by those stored keys: a save runs on every
+        // mount, toggle and removal, and must not wait on the filesystem of
+        // any root, least of all one whose mount has stalled.
         if let Some(overlay) = self.host.workspace_overlay() {
             let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
                 .entries()
                 .into_iter()
-                .map(|row| (canonical_root(Path::new(&row.path)), row))
+                .map(|row| (PathBuf::from(&row.path), row))
                 .collect();
-            let registered: std::collections::HashSet<PathBuf> = self
-                .host
-                .library()
-                .list_workspaces()
-                .into_iter()
-                .map(|w| canonical_root(&w.root_path))
-                .collect();
+            let registered = registered_root_keys(self.host.library());
             let rows: Vec<PersistedWorkspace> = {
                 let mut map = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
                 // Keep the serving record and host mount snapshot in one lock
@@ -1282,12 +1289,12 @@ impl DevserverState {
                 // at a newer generation. A Starting row is deliberately not
                 // mistaken for an out-of-band close.
                 map.retain(|_, record| {
-                    registered.contains(&canonical_root(&record.root))
+                    registered.contains(&record.root)
                         || record.phase == MountPhase::Starting
                         || record.desired == DesiredMount::Forgotten
                 });
                 for record in map.values_mut() {
-                    if let Some(row) = durable.get(&canonical_root(&record.root)) {
+                    if let Some(row) = durable.get(&record.root) {
                         record.reconcile_persisted(row, mounted.contains(&record.prefix));
                     }
                     if record.phase == MountPhase::Mounted && !mounted.contains(&record.prefix) {
@@ -1295,7 +1302,7 @@ impl DevserverState {
                     }
                 }
                 map.values()
-                    .filter(|record| registered.contains(&canonical_root(&record.root)))
+                    .filter(|record| registered.contains(&record.root))
                     .filter_map(WorkspaceRecord::persisted)
                     .collect()
             };
@@ -1827,7 +1834,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         library_id,
         host_label: config.host_label,
         workspaces: Mutex::new(HashMap::new()),
-        mount_attempt_lock: tokio::sync::Mutex::new(()),
+        mount_attempt_locks: KeyedLocks::default(),
         startup: Arc::new(StartupCoordinator::new()),
         store,
         persist_serial: Mutex::new(()),
@@ -2722,6 +2729,18 @@ fn canonical_root(root: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(root)
 }
 
+/// Every registered root by the keys the registry stores for it: the root
+/// as written, which is canonical, and the canonical path it last resolved
+/// to. A devserver record's canonical root is registered when it is one of
+/// these, which says so without touching any root's filesystem.
+fn registered_root_keys(library: &Library) -> HashSet<PathBuf> {
+    library
+        .list_workspaces()
+        .into_iter()
+        .flat_map(|row| [row.cached_canonical_path().to_path_buf(), row.root_path])
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tunnel_test_support {
     //! The devserver's tunnel layer as tests elsewhere in the crate drive it:
@@ -3299,7 +3318,7 @@ mod tests {
             .advance(StartupPhase::ServingAndRestoring)
             .expect("binding -> serving");
 
-        let serialization = state.mount_attempt_lock.lock().await;
+        let serialization = state.mount_attempt_locks.lock(prefix.as_str()).await;
         let mount_state = state.clone();
         let mount = tokio::spawn(async move {
             mount_state
@@ -3352,7 +3371,7 @@ mod tests {
         let registered_root = attempt.root.clone();
         state.persist_state();
 
-        let serialization = state.mount_attempt_lock.lock().await;
+        let serialization = state.mount_attempt_locks.lock(prefix.as_str()).await;
         let mount_state = state.clone();
         let mount = tokio::spawn(async move {
             mount_state
@@ -3451,7 +3470,7 @@ mod tests {
         // Hold the real mount serialization boundary: the command observes a
         // Starting row, while the original attempt cannot acquire the writer
         // lock or complete until the test explicitly releases it.
-        let serialization = state.mount_attempt_lock.lock().await;
+        let serialization = state.mount_attempt_locks.lock(prefix.as_str()).await;
         let mount_state = state.clone();
         let mount = tokio::spawn(async move {
             mount_state
@@ -3584,7 +3603,7 @@ mod tests {
         let layout_sentinel = metadata.sessions.join("removed-layout.json");
         std::fs::write(&layout_sentinel, b"remove this layout").expect("seed layout");
 
-        let serialization = state.mount_attempt_lock.lock().await;
+        let serialization = state.mount_attempt_locks.lock(prefix.as_str()).await;
         let mount_state = state.clone();
         let mount = tokio::spawn(async move {
             mount_state
@@ -4613,7 +4632,7 @@ mod tests {
                 library_id: "lib-test".into(),
                 host_label: "test".into(),
                 workspaces: Mutex::new(HashMap::new()),
-                mount_attempt_lock: tokio::sync::Mutex::new(()),
+                mount_attempt_locks: KeyedLocks::default(),
                 startup: Arc::new(StartupCoordinator::new()),
                 store: DevserverStore::at(home.path().join("devserver").join("config.json")),
                 persist_serial: Mutex::new(()),
@@ -4650,7 +4669,7 @@ mod tests {
 
             // The attempt begins over an unmounted root and waits on the
             // attempt lock.
-            let serialization = state.mount_attempt_lock.lock().await;
+            let serialization = state.mount_attempt_locks.lock(prefix.as_str()).await;
             assert!(
                 !state.host.is_root_mounted(ws.path()),
                 "fixture: the tenant has not been published yet"
@@ -4828,7 +4847,7 @@ mod tests {
             library_id: "lib-test".into(),
             host_label: "test".into(),
             workspaces: Mutex::new(HashMap::new()),
-            mount_attempt_lock: tokio::sync::Mutex::new(()),
+            mount_attempt_locks: KeyedLocks::default(),
             startup: Arc::new(StartupCoordinator::new()),
             store: DevserverStore::at(home.join("devserver").join("config.json")),
             persist_serial: Mutex::new(()),
@@ -5084,6 +5103,83 @@ mod tests {
                 .iter()
                 .any(|row| row.root_path == other_key),
             "the other root is still registered"
+        );
+    }
+
+    /// A mount attempt whose own root has stopped answering still expires at
+    /// its bound and settles. What the attempt does before the bound starts,
+    /// taking its prefix's lock and folding in the host's intent, and what
+    /// it does after the bound expires, answer from stored state, so the only
+    /// wait on the hung root falls inside the bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mount_attempt_on_a_hung_root_expires_at_its_bound() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = allocate_workspace_prefix(hung.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(hung.path(), &prefix)
+            .expect("prepare the mount")
+            .expect("a fresh attempt");
+        state.persist_state();
+
+        let stall = root_stall::stall(hung.path());
+        let attempting = Arc::clone(&state);
+        let error = completes_beside(&stall, "a mount attempt on a hung root", async move {
+            attempting
+                .execute_mount_attempt(attempt, Duration::from_millis(200))
+                .await
+        })
+        .await
+        .expect_err("the attempt expires");
+        assert!(
+            error.to_string().contains("timed out"),
+            "expected the attempt's bound to expire: {error}"
+        );
+    }
+
+    /// A registered root that moved under a symlink still mounts through the
+    /// devserver. Its registry row caches the old spelling until the serve
+    /// request's registration re-resolves it, and the attempt's intent check
+    /// then finds the row by the canonical path that registration cached.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_devserver_mounts_a_registered_root_that_moved_under_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("mkdir");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register");
+
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).expect("move the parent");
+        symlink(&moved, &parent).expect("link the old parent");
+        let relinked = moved.join("ws");
+
+        let response = handle_discovery_request(&state, 8787, register_request(&relinked)).await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the relinked root's serve request failed: {response:?}"
+        );
+        assert!(
+            state.host.is_root_mounted(&relinked),
+            "the relinked root is not mounted"
+        );
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "the relinked root was registered a second time"
         );
     }
 
@@ -5775,7 +5871,7 @@ mod tests {
             library_id: "lib-test".into(),
             host_label: "test".into(),
             workspaces: Mutex::new(HashMap::new()),
-            mount_attempt_lock: tokio::sync::Mutex::new(()),
+            mount_attempt_locks: KeyedLocks::default(),
             startup: Arc::new(StartupCoordinator::new()),
             store: DevserverStore::at(home.path().join("devserver").join("config.json")),
             persist_serial: Mutex::new(()),
