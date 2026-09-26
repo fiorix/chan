@@ -6593,6 +6593,64 @@ mod tests {
             .expect("the refused runtime still holds the workspace");
     }
 
+    /// A management mount that passed the host's first publication check
+    /// before the stop, and is still checking its root once built when the
+    /// last sweep runs, is refused where it would publish: no tenant is left
+    /// serving after the stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mount_built_before_the_last_sweep_publishes_nothing() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let late = tempfile::tempdir().expect("root mounting at shutdown");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = allocate_workspace_prefix(late.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(late.path(), &prefix)
+            .expect("prepare the mount")
+            .expect("a fresh attempt");
+
+        let stall = root_stall::stall_matching(
+            late.path(),
+            &["workspace::Workspace::ensure_root_available"],
+        );
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount never reached its root check after the build"
+        );
+        let held = stall.entered();
+        assert!(
+            held.iter()
+                .all(|chain| chain.contains("WorkspaceHost::open_workspace")),
+            "fixture: the stall held a call outside the check after the build: {held:#?}"
+        );
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state, None))
+            .await
+            .expect("the shutdown did not return")
+            .expect("shut down");
+
+        drop(stall);
+        let mounted = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount did not settle once its root answered")
+            .expect("mount task");
+        assert_eq!(
+            state.host.mounted_prefixes().expect("prefixes"),
+            Vec::<String>::new(),
+            "a mount built before the last shutdown sweep published after it: {mounted:?}"
+        );
+        let refused = mounted.expect_err("the late mount reported success");
+        assert!(
+            refused.to_string().contains("shutting down"),
+            "the refusal does not say the host is shutting down: {refused}"
+        );
+    }
+
     /// A mount that settles after the shutdown sweeps leaves the overlay as
     /// it was when the stop began. The sweeps take every tenant out of the
     /// host, so a save from then on would read each workspace that was on as
