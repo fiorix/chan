@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
 import type { DeckConfirm, DeckItem } from "../command-deck/model";
+import { deckReturnFocus } from "./CommandDeck.svelte";
 import CommandDeckHarness from "./CommandDeck.test-harness.svelte";
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -215,5 +216,104 @@ describe("CommandDeck lazy confirmation", () => {
     expect(onChoose).toHaveBeenCalledOnce();
     expect(target.querySelector(".deck-operation")?.textContent).toContain("Fresh confirmation");
     expect(target.querySelector(".deck-decisions button.chosen")?.textContent).toBe("Cancel");
+  });
+});
+
+describe("CommandDeck focus on close", () => {
+  let origin: HTMLButtonElement;
+
+  const run = (over: Partial<DeckItem> = {}): DeckItem => ({
+    id: "run",
+    title: "Run",
+    breadcrumb: "Commands",
+    searchText: "run",
+    scope: "window",
+    ...over,
+  });
+
+  /// Focus a control, then mount the deck open over it.
+  async function openFromOrigin(
+    entry: DeckItem,
+    handlers: {
+      onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
+      onSuccess?: (item: DeckItem) => void;
+    } = {},
+  ): Promise<void> {
+    origin = document.createElement("button");
+    document.body.appendChild(origin);
+    origin.focus();
+    app = mount(CommandDeckHarness, {
+      target,
+      props: { items: [entry], ...handlers },
+    }) as Record<string, unknown>;
+    await flush();
+    expect(document.activeElement, "the deck takes focus").toBe(target.querySelector(".deck-input"));
+  }
+
+  const close = (): void => (app.close as () => void)();
+
+  afterEach(() => origin.remove());
+
+  it("hands focus back to the element it opened from on Escape", async () => {
+    await openFromOrigin(run());
+    escape();
+    await flush();
+    expect(document.activeElement).toBe(origin);
+  });
+
+  it("hands focus back when the host hides it", async () => {
+    await openFromOrigin(run());
+    close();
+    await flush();
+    expect(document.activeElement).toBe(origin);
+  });
+
+  it("leaves focus where it is when a chosen item closes the deck", async () => {
+    await openFromOrigin(run(), { onChoose: close });
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).not.toBe(origin);
+  });
+
+  it("leaves focus where it is when an awaited item's success closes the deck", async () => {
+    const onChoose = vi.fn(async () => {});
+    await openFromOrigin(run({ awaitResult: true, dismissImmediatelyOnSuccess: true }), {
+      onChoose,
+      onSuccess: close,
+    });
+    closeResult().click();
+    await flush();
+    expect(onChoose).toHaveBeenCalledOnce();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).not.toBe(origin);
+  });
+
+  it("treats the next close as a dismissal when a chosen item keeps the deck open", async () => {
+    const onChoose = vi.fn();
+    await openFromOrigin(run(), { onChoose });
+    closeResult().click();
+    await flush();
+    expect(onChoose).toHaveBeenCalledOnce();
+    escape();
+    await flush();
+    expect(document.activeElement).toBe(origin);
+  });
+
+  it("does not reach for an element that left the page", async () => {
+    await openFromOrigin(run());
+    const focus = vi.spyOn(origin, "focus");
+    origin.remove();
+    escape();
+    await flush();
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it("reports the element it opened from, still after it closes", async () => {
+    await openFromOrigin(run());
+    expect(deckReturnFocus()).toBe(origin);
+    escape();
+    await flush();
+    expect(deckReturnFocus()).toBe(origin);
   });
 });

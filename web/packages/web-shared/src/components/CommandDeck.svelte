@@ -1,3 +1,14 @@
+<script module lang="ts">
+  let lastReturnFocus: HTMLElement | null = null;
+
+  /// The element that held focus when a command deck last opened. A command
+  /// whose flow outlives the deck, such as a path dialog the user cancels,
+  /// hands focus back here rather than to the deck's long-gone input.
+  export function deckReturnFocus(): HTMLElement | null {
+    return lastReturnFocus;
+  }
+</script>
+
 <script lang="ts">
   import { tick } from "svelte";
   import type {
@@ -47,6 +58,13 @@
   let pointerIndex: number | null = $state(null);
   let scopeIndex = $state(0);
   let wasOpen = false;
+  // Where focus goes back to when the deck closes, captured as it opens.
+  let returnFocus: HTMLElement | null = null;
+  // The run that may close the deck: a plain item while the host handles it,
+  // an awaited one while the host takes its success. A close it causes leaves
+  // focus where the command put it; any other close (Escape, the backdrop,
+  // the host hiding the deck) hands focus back.
+  let closingRun: object | null = null;
   let confirmKeyReleased = true;
   // Whoever holds the operation card owns it: a preparation between its start
   // and its paint, an executing command between its pending card and its
@@ -75,10 +93,16 @@
   $effect(() => {
     const isOpen = open;
     if (isOpen && !wasOpen) {
+      returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      lastReturnFocus = returnFocus;
+      closingRun = null;
       reconcileSelection();
       zone = "input";
       pointerIndex = null;
       void tick().then(() => input?.focus());
+    } else if (!isOpen && wasOpen) {
+      if (!closingRun && returnFocus && document.contains(returnFocus)) returnFocus.focus();
+      returnFocus = null;
     }
     wasOpen = isOpen;
   });
@@ -189,11 +213,26 @@
     return error instanceof Error ? error.message : String(error);
   }
 
+  function succeed(item: DeckItem): void {
+    const run = {};
+    closingRun = run;
+    onSuccess?.(item);
+    if (open && closingRun === run) closingRun = null;
+  }
+
   async function execute(item: DeckItem): Promise<void> {
     if (item.disabled) return;
     const executionDraft = draft;
     if (!item.awaitResult) {
-      await onChoose(item);
+      const run = {};
+      closingRun = run;
+      try {
+        await onChoose(item);
+      } finally {
+        // Still open: the host kept the deck up (a submenu, a refusal), so
+        // the next close is a dismissal.
+        if (open && closingRun === run) closingRun = null;
+      }
       return;
     }
     const token = {};
@@ -222,13 +261,13 @@
         return;
       }
       if (item.dismissImmediatelyOnSuccess) {
-        onSuccess?.(item);
+        succeed(item);
         return;
       }
       executionDraft.operation = { kind: "success", itemId: item.id, title: item.title };
       await new Promise((resolve) => setTimeout(resolve, 260));
       if (draft !== executionDraft) return;
-      onSuccess?.(item);
+      succeed(item);
     } catch (error) {
       if (draft !== executionDraft) return;
       executionDraft.operation = {
