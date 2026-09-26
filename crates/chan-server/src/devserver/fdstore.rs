@@ -53,8 +53,9 @@ mod linux {
     use anyhow::Context;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use chan_library::terminal_sessions::{
-        fdstore_fd_name, FdStorePark, FdStoreParker, FdStoreSessionImport, FdStoreSessionMeta,
-        FdStoreSkippedSession, FDSTORE_FD_PREFIX,
+        fdstore_fd_name, fdstore_ring_fd_name, FdStoreManifestEntry, FdStorePark, FdStoreParker,
+        FdStoreSessionImport, FdStoreSessionMeta, FdStoreSkippedSession, FDSTORE_FD_PREFIX,
+        FDSTORE_RING_FD_PREFIX,
     };
     use serde::{Deserialize, Serialize};
 
@@ -85,6 +86,10 @@ mod linux {
     #[derive(Debug, Serialize, Deserialize)]
     struct ManifestSession {
         fd_name: String,
+        /// The session's ring file, stored beside the PTY master. Absent from
+        /// a manifest written before ring files, which restores its tail.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ring_fd_name: Option<String>,
         meta: FdStoreSessionMeta,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_start_time: Option<u64>,
@@ -179,12 +184,22 @@ mod linux {
         }
     }
 
-    /// Whether a park may proceed: `parked` counts the manifest snapshot
-    /// INCLUDING the candidate's provisional entry, so a store already at
-    /// its maximum refuses the candidate instead of manifesting an fd the
-    /// manager would reject.
+    /// Whether a park may proceed: `parked` counts the stored fds of the
+    /// manifest snapshot INCLUDING the candidate's provisional entry, so a
+    /// store already at its maximum refuses the candidate instead of
+    /// manifesting an fd the manager would reject.
     fn park_within_cap(parked_including_candidate: usize, store_max: usize) -> bool {
         parked_including_candidate <= store_max
+    }
+
+    /// The fds `entries` keep in the store: a PTY master each, and a ring
+    /// file beside it where the session has one. One session's fds are one
+    /// park decision, so a session never parks its PTY without its ring.
+    fn stored_fd_count(entries: &[FdStoreManifestEntry]) -> usize {
+        entries
+            .iter()
+            .map(|entry| 1 + usize::from(entry.ring_fd_name.is_some()))
+            .sum()
     }
 
     struct ParkerShared {
@@ -229,6 +244,7 @@ mod linux {
                     .into_iter()
                     .map(|entry| ManifestSession {
                         fd_name: entry.fd_name,
+                        ring_fd_name: entry.ring_fd_name,
                         child_start_time: entry.meta.child_pid.and_then(process_start_time),
                         meta: entry.meta,
                         replay_b64: BASE64.encode(&entry.replay),
@@ -252,8 +268,19 @@ mod linux {
     /// The [`FdStorePark`] hook handed to every tenant registry.
     struct ParkerHook(Arc<ParkerShared>);
 
+    impl ParkerHook {
+        fn remove_all(&self, fd_names: &[&str]) {
+            for name in fd_names {
+                self.0.store.remove(name);
+            }
+        }
+    }
+
     impl FdStorePark for ParkerHook {
-        fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool {
+        fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+            let Some(&(fd_name, _)) = fds.first() else {
+                return false;
+            };
             let phase = self.0.phase.lock().expect("fdstore parker poisoned");
             if *phase != ParkerPhase::Active {
                 return false;
@@ -261,45 +288,51 @@ mod linux {
             // One snapshot serves the cap check AND the commit content; the
             // caller's provisional reservation is already in it.
             let entries = self.0.host.fdstore_manifest_sessions();
-            if !park_within_cap(entries.len(), self.0.store_max) {
+            let stored = stored_fd_count(&entries);
+            if !park_within_cap(stored, self.0.store_max) {
                 tracing::warn!(
                     fd_name,
-                    parked = entries.len(),
+                    stored,
                     store_max = self.0.store_max,
                     "refusing park: the systemd fd store is at capacity"
                 );
                 return false;
             }
-            if let Err(error) = self.0.store.store(fd_name, fd) {
-                tracing::warn!(fd_name, error = %error, "storing PTY in systemd fdstore failed");
-                return false;
+            let mut submitted = Vec::with_capacity(fds.len());
+            for &(name, fd) in fds {
+                if let Err(error) = self.0.store.store(name, fd) {
+                    tracing::warn!(fd_name = name, error = %error, "storing a terminal fd in systemd fdstore failed");
+                    self.remove_all(&submitted);
+                    return false;
+                }
+                submitted.push(name);
             }
-            // Order: cap check, FDSTORE, barrier, durable manifest commit.
-            // The barrier proves the manager picked the submission up, so a
-            // spawn followed immediately by process death cannot outrun
-            // manager attribution; over-cap rejection is excluded by the
-            // precheck above, not here.
+            // Order: cap check, FDSTORE per fd, barrier, durable manifest
+            // commit. The barrier proves the manager picked the submissions
+            // up, so a spawn followed immediately by process death cannot
+            // outrun manager attribution; over-cap rejection is excluded by
+            // the precheck above, not here.
             if let Err(error) = self.0.store.barrier() {
                 tracing::warn!(
                     fd_name, error = %error,
-                    "the manager did not pick up the stored PTY (notify barrier failed); unparking"
+                    "the manager did not pick up the stored terminal fds (notify barrier failed); unparking"
                 );
-                self.0.store.remove(fd_name);
+                self.remove_all(&submitted);
                 return false;
             }
-            // The additive commit: the fd name must be durable before the
+            // The additive commit: the fd names must be durable before the
             // spawn/restart reports success. On failure, roll the store
             // back so no stored fd is ever absent from the manifest.
             if let Err(error) = self.0.write_entries_locked(&phase, entries) {
                 tracing::warn!(fd_name, error = %error, "committing fdstore manifest failed; unparking");
-                self.0.store.remove(fd_name);
+                self.remove_all(&submitted);
                 return false;
             }
             true
         }
 
-        fn unpark(&self, fd_name: &str) {
-            self.0.store.remove(fd_name);
+        fn unpark(&self, fd_names: &[&str]) {
+            self.remove_all(fd_names);
             // Removal staleness is safe (a manifest entry without a stored
             // fd is skipped and cleaned at boot), so the rewrite coalesces.
             self.0.dirty.notify_one();
@@ -448,12 +481,19 @@ mod linux {
         pub(crate) fn take() -> Self {
             let manifest_path = manifest_path();
             let named_fds = chan_systemd::take_listen_fds();
+            // Every chan name, PTY masters and ring files alike, for the
+            // paths that clean up whatever was inherited. Only a PTY name
+            // parses to a child pid, so a ring name never authorizes a signal.
             let mut fd_names = Vec::new();
             let mut fd_by_name = HashMap::new();
+            let mut ring_fd_by_name = HashMap::new();
             for named in named_fds {
                 if named.name.starts_with(FDSTORE_FD_PREFIX) {
                     fd_names.push(named.name.clone());
                     fd_by_name.insert(named.name, named.fd);
+                } else if named.name.starts_with(FDSTORE_RING_FD_PREFIX) {
+                    fd_names.push(named.name.clone());
+                    ring_fd_by_name.insert(named.name, named.fd);
                 }
             }
 
@@ -462,7 +502,7 @@ mod linux {
                 .and_then(|bytes| serde_json::from_slice::<RestartManifest>(&bytes).ok());
 
             let Some(manifest) = manifest else {
-                if fd_by_name.is_empty() {
+                if fd_names.is_empty() {
                     return Self::empty(manifest_path);
                 }
                 // Inherited fds without a readable manifest: no trustworthy
@@ -527,10 +567,18 @@ mod linux {
             for session in manifest.sessions {
                 let ManifestSession {
                     fd_name,
+                    ring_fd_name,
                     meta,
                     replay_b64,
                     ..
                 } = session;
+                // Claimed before any skip, so a skipped session's ring file
+                // is closed with it rather than reported as an orphan. Only
+                // the name derived from the session's own metadata is its
+                // ring; any other is left to the orphan cleanup.
+                let ring_fd = ring_fd_name
+                    .filter(|name| *name == fdstore_ring_fd_name(&meta.session_id, meta.child_pid))
+                    .and_then(|name| ring_fd_by_name.remove(&name));
                 if !fd_name.starts_with(FDSTORE_FD_PREFIX) {
                     push_skipped_session(
                         &mut skipped,
@@ -594,10 +642,15 @@ mod linux {
                 imports.push(FdStoreSessionImport {
                     meta,
                     master_fd,
+                    ring_fd,
                     replay,
                 });
             }
-            let orphan_fd_names: Vec<String> = fd_by_name.keys().cloned().collect();
+            let orphan_fd_names: Vec<String> = fd_by_name
+                .keys()
+                .chain(ring_fd_by_name.keys())
+                .cloned()
+                .collect();
             skipped.extend(
                 orphan_fd_names
                     .iter()
@@ -682,15 +735,18 @@ mod linux {
             );
 
             // Remove exactly the fds that will NOT live on: orphans plus
-            // every skipped session's deterministic name. Restored sessions
-            // keep their entries. (A skipped session whose fd was already
-            // cleaned at take() gets a harmless second FDSTOREREMOVE.)
+            // every skipped session's deterministic names, its PTY and its
+            // ring file. Restored sessions keep their entries. (A skipped
+            // session whose fd was already cleaned at take(), or that parked
+            // no ring file, gets a harmless FDSTOREREMOVE for a name the
+            // store does not hold.)
             let mut invalid_fd_names: Vec<String> = orphan_fd_names;
-            invalid_fd_names.extend(
-                skipped_sessions
-                    .iter()
-                    .map(|session| fdstore_fd_name(&session.session_id, session.child_pid)),
-            );
+            invalid_fd_names.extend(skipped_sessions.iter().flat_map(|session| {
+                [
+                    fdstore_fd_name(&session.session_id, session.child_pid),
+                    fdstore_ring_fd_name(&session.session_id, session.child_pid),
+                ]
+            }));
             if !invalid_fd_names.is_empty() {
                 chan_systemd::fdstore_remove_many(invalid_fd_names.iter().map(String::as_str));
             }
@@ -1070,6 +1126,10 @@ mod linux {
             assert_eq!(manifest.version, MANIFEST_VERSION);
             assert_eq!(manifest.sessions.len(), 1);
             assert_eq!(manifest.sessions[0].fd_name, name);
+            assert_eq!(
+                manifest.sessions[0].ring_fd_name, None,
+                "a manifest from before ring files restores its tail"
+            );
             assert_eq!(manifest.sessions[0].meta.session_id, "legacy");
             assert_eq!(manifest.sessions[0].meta.size.rows, 24);
             let mut skipped = Vec::new();
@@ -1091,6 +1151,8 @@ mod linux {
         struct FakeStoreState {
             calls: Mutex<Vec<String>>,
             fail_store: AtomicBool,
+            /// Fail only the store of this one name.
+            fail_store_name: Mutex<Option<String>>,
             fail_barrier: AtomicBool,
         }
 
@@ -1106,7 +1168,9 @@ mod linux {
         impl StoreOps for FakeStoreOps {
             fn store(&self, name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
                 self.0.calls.lock().unwrap().push(format!("store:{name}"));
-                if self.0.fail_store.load(Ordering::Relaxed) {
+                if self.0.fail_store.load(Ordering::Relaxed)
+                    || self.0.fail_store_name.lock().unwrap().as_deref() == Some(name)
+                {
                     return Err(std::io::Error::other("injected store failure"));
                 }
                 Ok(())
@@ -1149,7 +1213,7 @@ mod linux {
             let devnull = std::fs::File::open("/dev/null").unwrap();
 
             assert!(
-                !hook.park("chan.pty.a.1", devnull.as_fd()),
+                !hook.park(&[("chan.pty.a.1", devnull.as_fd())]),
                 "Disabled must refuse park"
             );
             assert!(
@@ -1163,7 +1227,7 @@ mod linux {
 
             parker.activate();
             assert!(
-                hook.park("chan.pty.a.1", devnull.as_fd()),
+                hook.park(&[("chan.pty.a.1", devnull.as_fd())]),
                 "Active parks and commits"
             );
             assert_eq!(
@@ -1178,7 +1242,7 @@ mod linux {
 
             assert_eq!(parker.seal_flush_detach(), 0);
             assert!(
-                !hook.park("chan.pty.a.2", devnull.as_fd()),
+                !hook.park(&[("chan.pty.a.2", devnull.as_fd())]),
                 "Sealed must refuse park"
             );
             assert!(!hook.adopt("chan.pty.a.3"), "Sealed must refuse adoption");
@@ -1324,7 +1388,7 @@ mod linux {
             let devnull = std::fs::File::open("/dev/null").unwrap();
 
             assert!(
-                !hook.park("chan.pty.b.7", devnull.as_fd()),
+                !hook.park(&[("chan.pty.b.7", devnull.as_fd())]),
                 "an unconfirmed store must refuse the park"
             );
             assert_eq!(
@@ -1351,7 +1415,7 @@ mod linux {
             parker.activate();
             let devnull = std::fs::File::open("/dev/null").unwrap();
 
-            assert!(!hook.park("chan.pty.c.9", devnull.as_fd()));
+            assert!(!hook.park(&[("chan.pty.c.9", devnull.as_fd())]));
             assert_eq!(
                 store.calls(),
                 vec!["store:chan.pty.c.9".to_string()],
@@ -1385,6 +1449,141 @@ mod linux {
             });
             let parsed: RestartManifest = serde_json::from_value(v1).unwrap();
             assert_ne!(parsed.version, MANIFEST_VERSION);
+        }
+
+        #[tokio::test]
+        async fn a_session_parks_its_pty_and_ring_behind_one_barrier() {
+            let store = FakeStoreOps::default();
+            let (parker, hook, _manifest) = test_parker(store.clone());
+            parker.activate();
+            let devnull = std::fs::File::open("/dev/null").unwrap();
+
+            assert!(hook.park(&[
+                ("chan.pty.d.3", devnull.as_fd()),
+                ("chan.ring.d.3", devnull.as_fd()),
+            ]));
+            assert_eq!(
+                store.calls(),
+                vec![
+                    "store:chan.pty.d.3".to_string(),
+                    "store:chan.ring.d.3".to_string(),
+                    "barrier".to_string(),
+                ]
+            );
+            hook.unpark(&["chan.pty.d.3", "chan.ring.d.3"]);
+            assert_eq!(
+                store.calls()[3..],
+                [
+                    "remove:chan.pty.d.3".to_string(),
+                    "remove:chan.ring.d.3".to_string(),
+                ],
+                "an unpark removes both of the session's names"
+            );
+            parker.stop().await;
+        }
+
+        // A session is never left with its PTY parked and its ring refused:
+        // a failure on either fd, or at the barrier, removes what it stored.
+        #[tokio::test]
+        async fn a_failure_on_either_fd_parks_neither() {
+            let (pty, ring) = ("chan.pty.e.4", "chan.ring.e.4");
+            for (fail_ring, fail_barrier, removed) in [
+                (true, false, vec!["remove:chan.pty.e.4"]),
+                (
+                    false,
+                    true,
+                    vec!["remove:chan.pty.e.4", "remove:chan.ring.e.4"],
+                ),
+            ] {
+                let store = FakeStoreOps::default();
+                if fail_ring {
+                    *store.0.fail_store_name.lock().unwrap() = Some(ring.to_string());
+                }
+                store.0.fail_barrier.store(fail_barrier, Ordering::Relaxed);
+                let (parker, hook, manifest) = test_parker(store.clone());
+                parker.activate();
+                let devnull = std::fs::File::open("/dev/null").unwrap();
+
+                assert!(!hook.park(&[(pty, devnull.as_fd()), (ring, devnull.as_fd()),]));
+                let removes: Vec<String> = store
+                    .calls()
+                    .into_iter()
+                    .filter(|call| call.starts_with("remove:"))
+                    .collect();
+                assert_eq!(removes, removed, "calls: {:?}", store.calls());
+                assert!(!manifest.exists(), "no manifest may describe a refused fd");
+                parker.stop().await;
+            }
+        }
+
+        fn manifest_entry(session_id: &str, with_ring: bool) -> FdStoreManifestEntry {
+            let meta: FdStoreSessionMeta = serde_json::from_value(serde_json::json!({
+                "tenant_prefix": "/t/terminals", "session_id": session_id,
+                "tab_name": null, "tab_group": null, "window_id": "w", "pane_id": null,
+                "tab_id": null, "cwd": null, "command": null,
+                "env": {}, "mcp_env": false, "child_pid": 7,
+                "size": { "rows": 24, "cols": 80, "pixel_width": 0, "pixel_height": 0 },
+                "seq": 0, "generation": 0, "alt_screen": false, "private_modes": [],
+            }))
+            .unwrap();
+            FdStoreManifestEntry {
+                fd_name: fdstore_fd_name(session_id, Some(7)),
+                ring_fd_name: with_ring.then(|| fdstore_ring_fd_name(session_id, Some(7))),
+                meta,
+                replay: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn the_cap_counts_a_ring_file_as_a_second_fd() {
+            // One parked session with its ring, one legacy PTY alone, and the
+            // candidate's provisional entry with its ring.
+            let entries = [
+                manifest_entry("a", true),
+                manifest_entry("b", false),
+                manifest_entry("c", true),
+            ];
+            assert_eq!(stored_fd_count(&entries), 5);
+            assert!(park_within_cap(stored_fd_count(&entries), 5));
+            assert!(
+                !park_within_cap(stored_fd_count(&entries), 4),
+                "a store with room for the PTY but not its ring refuses both"
+            );
+        }
+
+        #[test]
+        fn the_manifest_names_a_ring_file_only_when_one_is_stored() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fdstore-restart.json");
+            let manifest = RestartManifest {
+                version: MANIFEST_VERSION,
+                library_id: "lib-test".into(),
+                boot_id: None,
+                sessions: [manifest_entry("a", true), manifest_entry("b", false)]
+                    .into_iter()
+                    .map(|entry| ManifestSession {
+                        fd_name: entry.fd_name,
+                        ring_fd_name: entry.ring_fd_name,
+                        meta: entry.meta,
+                        child_start_time: None,
+                        replay_b64: String::new(),
+                    })
+                    .collect(),
+            };
+            write_manifest(&path, &manifest).unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                json["sessions"][0]["ring_fd_name"],
+                fdstore_ring_fd_name("a", Some(7))
+            );
+            assert!(json["sessions"][1].get("ring_fd_name").is_none());
+            let read: RestartManifest = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                read.sessions[0].ring_fd_name.as_deref(),
+                Some(fdstore_ring_fd_name("a", Some(7)).as_str())
+            );
+            assert_eq!(read.sessions[1].ring_fd_name, None);
         }
     }
 }

@@ -55,6 +55,8 @@ use redraw::force_redraw_with_wobble;
 #[cfg(test)]
 use redraw::redraw_wobble_size;
 use ring::RingBuffer;
+#[cfg(target_os = "linux")]
+use ring::RingFile;
 
 const BROADCAST_CAP: usize = 1024;
 
@@ -180,6 +182,8 @@ const DSR_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
 /// wins the race in ordinary interactive use, short enough that a headless
 /// session (tests, a server-side team spawn) is not visibly delayed.
 const DSR_ANSWER_GRACE_MS: i64 = 150;
+/// The replay tail the restart manifest carries per session, which is all an
+/// import without a ring file beside the PTY (a partial store) restores.
 #[cfg(target_os = "linux")]
 const FDSTORE_REPLAY_BYTES: usize = 128 * 1024;
 /// How long a PTY reader that cannot watch its registry's [`ReaderWake`]
@@ -195,8 +199,9 @@ const READER_STOP_DRAIN_READS: usize = 64;
 
 /// A restart seal's handshake with a session's PTY reader thread. The seal
 /// asks the reader to stop and waits until it has recorded its last read, so
-/// the final manifest holds everything this process took from the PTY, and
-/// what the child writes afterwards stays in the PTY for the next process.
+/// the final manifest's `seq` ends at the last byte this process took from the
+/// PTY (the parked ring file holds the bytes, the manifest a bounded tail),
+/// and what the child writes afterwards stays in the PTY for the next process.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 struct ReaderStop {
@@ -583,22 +588,39 @@ pub fn fdstore_fd_name(session_id: &str, child_pid: Option<u32>) -> String {
     format!("{FDSTORE_FD_PREFIX}{session_id}.{}", child_pid.unwrap_or(0))
 }
 
+/// Namespace prefix for the ring files parked beside chan PTY entries. A
+/// different prefix, so no consumer parsing a PTY name for its child pid
+/// can mistake a ring file for a PTY.
+#[cfg(target_os = "linux")]
+pub const FDSTORE_RING_FD_PREFIX: &str = "chan.ring.";
+
+/// The fd-store entry name of a session incarnation's ring file, derived
+/// like [`fdstore_fd_name`]: `chan.ring.<session_id>.<child_pid>`.
+#[cfg(target_os = "linux")]
+pub fn fdstore_ring_fd_name(session_id: &str, child_pid: Option<u32>) -> String {
+    format!(
+        "{FDSTORE_RING_FD_PREFIX}{session_id}.{}",
+        child_pid.unwrap_or(0)
+    )
+}
+
 /// Store-side half of continuous PTY parking. The devserver implements this
 /// against the systemd fd store; the registry drives it from session
 /// lifecycle events. Absent (never installed) on every non-systemd serving
 /// path, which keeps those paths byte-identical.
 #[cfg(target_os = "linux")]
 pub trait FdStorePark: Send + Sync {
-    /// Store `fd` under `fd_name` AND durably commit the restart manifest
+    /// Store every `(fd_name, fd)` of one session (its PTY master, then its
+    /// ring file when it has one) AND durably commit the restart manifest
     /// before returning. The caller has already made the session's
     /// provisional parked state visible, so the commit's snapshot includes
-    /// it. `false` means the fd is NOT stored (the implementation rolled
-    /// back) and the caller must clear the provisional state.
-    fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool;
-    /// Remove `fd_name` from the store. Manifest republication may be
-    /// deferred: a manifest entry without a stored fd is skipped and cleaned
-    /// at the next boot, so staleness in this direction is safe.
-    fn unpark(&self, fd_name: &str);
+    /// it. `false` means NONE of the fds is stored (the implementation
+    /// rolled back) and the caller must clear the provisional state.
+    fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool;
+    /// Remove every one of `fd_names` from the store. Manifest republication
+    /// may be deferred: a manifest entry without a stored fd is skipped and
+    /// cleaned at the next boot, so staleness in this direction is safe.
+    fn unpark(&self, fd_names: &[&str]);
     /// Accept an inherited fd that the store already retains under
     /// `fd_name` (boot restore). No store call; `false` refuses adoption
     /// and the caller clears the provisional state.
@@ -620,12 +642,12 @@ impl FdStoreParker {
         Self(Arc::new(hook))
     }
 
-    fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool {
-        self.0.park(fd_name, fd)
+    fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+        self.0.park(fds)
     }
 
-    fn unpark(&self, fd_name: &str) {
-        self.0.unpark(fd_name)
+    fn unpark(&self, fd_names: &[&str]) {
+        self.0.unpark(fd_names)
     }
 
     fn adopt(&self, fd_name: &str) -> bool {
@@ -644,13 +666,24 @@ impl std::fmt::Debug for FdStoreParker {
     }
 }
 
-/// A session's live fd-store reservation: the entry name plus the hook that
-/// manages it, taken exactly once on the first close/exit path to reach it.
+/// A session's live fd-store reservation: the entry names plus the hook that
+/// manages them, taken exactly once on the first close/exit path to reach it.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct ParkedFd {
     name: String,
+    /// The ring file's entry name, when the ring is parked beside the PTY.
+    ring_name: Option<String>,
     parker: FdStoreParker,
+}
+
+#[cfg(target_os = "linux")]
+impl ParkedFd {
+    fn names(&self) -> Vec<&str> {
+        std::iter::once(self.name.as_str())
+            .chain(self.ring_name.as_deref())
+            .collect()
+    }
 }
 
 /// Parse the ordinal from a default `Terminal-N` name for lowest-free
@@ -848,11 +881,14 @@ pub struct FdStoreSessionMeta {
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct FdStoreManifestEntry {
-    /// The fd-store entry name this session is parked under.
+    /// The fd-store entry name this session's PTY master is parked under.
     pub fd_name: String,
+    /// The fd-store entry name of the ring file parked beside it, when the
+    /// session has one.
+    pub ring_fd_name: Option<String>,
     pub meta: FdStoreSessionMeta,
     /// Bounded tail of the server replay ring, carried through the restart
-    /// manifest so a fresh browser attach can repaint the imported PTY.
+    /// manifest for an import that has no ring file beside the PTY.
     pub replay: Vec<u8>,
 }
 
@@ -861,6 +897,10 @@ pub struct FdStoreManifestEntry {
 pub struct FdStoreSessionImport {
     pub meta: FdStoreSessionMeta,
     pub master_fd: OwnedFd,
+    /// The ring file the previous process parked beside the PTY. It wins
+    /// over `meta.seq` and `replay` when it reads back intact and ends at or
+    /// past that `seq`.
+    pub ring_fd: Option<OwnedFd>,
     pub replay: Vec<u8>,
 }
 
@@ -4105,13 +4145,14 @@ impl Session {
         if self.closed.load(Ordering::Relaxed) {
             return None;
         }
-        let fd_name = self
-            .fdstore_parked
-            .lock()
-            .expect("terminal fdstore parked poisoned")
-            .as_ref()?
-            .name
-            .clone();
+        let (fd_name, ring_fd_name) = {
+            let parked = self
+                .fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned");
+            let parked = parked.as_ref()?;
+            (parked.name.clone(), parked.ring_name.clone())
+        };
         let size = *self.winsize.lock().expect("terminal winsize poisoned");
         let private_modes = self
             .private_modes
@@ -4123,10 +4164,10 @@ impl Session {
         let live_metadata = self.live_metadata();
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::ManifestBeforeReplayTail);
-        // The PTY reader keeps running while the manifest is rewritten, and the
-        // next process rebuilds the ring as this tail ending at this `seq`, so
-        // both come from one snapshot under the ring lock, the lock
-        // `record_output` pushes under.
+        // The PTY reader keeps running while the manifest is rewritten, and a
+        // next process without the ring file rebuilds the ring as this tail
+        // ending at this `seq`, so both come from one snapshot under the ring
+        // lock, the lock `record_output` pushes under.
         let (seq, replay) = self.fdstore_replay_tail();
         let meta = FdStoreSessionMeta {
             tenant_prefix: tenant_prefix.to_string(),
@@ -4156,6 +4197,7 @@ impl Session {
         };
         Some(FdStoreManifestEntry {
             fd_name,
+            ring_fd_name,
             meta,
             replay,
         })
@@ -4171,8 +4213,16 @@ impl Session {
         let FdStoreSessionImport {
             meta,
             master_fd,
+            ring_fd,
             replay,
         } = import;
+        let ring = restored_ring(
+            config.terminal.ring_bytes,
+            &meta.session_id,
+            meta.seq,
+            &replay,
+            ring_fd,
+        );
         let size: PtySize = meta.size.into();
         let cwd = meta
             .cwd
@@ -4220,11 +4270,7 @@ impl Session {
             master_fd: Some(master_fd),
             command_tx,
             output_tx,
-            ring: Mutex::new(RingBuffer::new_with_replay(
-                config.terminal.ring_bytes,
-                meta.seq,
-                &replay,
-            )),
+            ring: Mutex::new(ring),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -4802,19 +4848,38 @@ impl Session {
         let _ = self.command_tx.send(PtyCommand::Kill);
     }
 
-    /// Reserve the parked state, then store the fd and durably commit the
+    /// Reserve the parked state, then store the fds and durably commit the
     /// manifest. The reservation is made visible BEFORE the park call so the
     /// commit's host snapshot includes this session, and rolled back if the
     /// hook reports failure. Never called under a registry sessions lock.
+    ///
+    /// The ring file is made here rather than at spawn, because only a
+    /// parked session has a store to cross a restart in: an unparked one
+    /// pays nothing for it. It is seeded from the ring under the ring lock
+    /// and parked with the PTY master in one call that stores both or
+    /// neither. A session whose file cannot be made parks its PTY alone and
+    /// restores from the manifest's tail.
     #[cfg(target_os = "linux")]
     fn park_fdstore(&self, parker: &FdStoreParker) {
-        if self.closed.load(Ordering::Relaxed) {
+        if self.closed.load(Ordering::Relaxed) || self.is_fdstore_parked() {
             return;
         }
         let Some(master_fd) = self.master_fd.as_ref() else {
             return;
         };
         let name = fdstore_fd_name(&self.id, self.child_pid);
+        let capacity = self.ring.lock().expect("terminal ring poisoned").capacity();
+        let ring_file = RingFile::create(capacity)
+            .inspect_err(|error| {
+                tracing::warn!(
+                    session = %self.id, error = %error,
+                    "creating the terminal ring file failed; parking the PTY alone"
+                );
+            })
+            .ok();
+        let ring_name = ring_file
+            .as_ref()
+            .map(|_| fdstore_ring_fd_name(&self.id, self.child_pid));
         {
             let mut parked = self
                 .fdstore_parked
@@ -4825,10 +4890,35 @@ impl Session {
             }
             *parked = Some(ParkedFd {
                 name: name.clone(),
+                ring_name: ring_name.clone(),
                 parker: parker.clone(),
             });
         }
-        if !parker.park(&name, master_fd.as_fd()) {
+        // Attached only once the reservation is ours, so a racing park that
+        // lost cannot replace the winner's mirror with a file never stored.
+        let ring_fd = ring_file.and_then(|file| self.start_ring_mirror(file));
+        let ring_name = match ring_fd {
+            Some(_) => ring_name,
+            None => {
+                if let Some(parked) = self
+                    .fdstore_parked
+                    .lock()
+                    .expect("terminal fdstore parked poisoned")
+                    .as_mut()
+                    .filter(|parked| parked.name == name)
+                {
+                    parked.ring_name = None;
+                }
+                None
+            }
+        };
+        let mut fds = vec![(name.as_str(), master_fd.as_fd())];
+        if let (Some(ring_name), Some(ring_fd)) = (ring_name.as_deref(), ring_fd.as_ref()) {
+            fds.push((ring_name, ring_fd.as_fd()));
+        }
+        let names: Vec<&str> = fds.iter().map(|(name, _)| *name).collect();
+        if !parker.park(&fds) {
+            self.stop_ring_mirror();
             self.fdstore_parked
                 .lock()
                 .expect("terminal fdstore parked poisoned")
@@ -4838,7 +4928,7 @@ impl Session {
         // Did the reservation survive the in-flight park? A concurrent
         // close/exit may have CONSUMED it while `park` ran: its take-once
         // unpark then sent FDSTOREREMOVE before our FDSTORE landed, so the
-        // just-stored fd is ownerless and no later take can ever remove it.
+        // just-stored fds are ownerless and no later take can ever remove them.
         let survived = self
             .fdstore_parked
             .lock()
@@ -4847,8 +4937,9 @@ impl Session {
             .is_some_and(|parked| parked.name == name);
         if !survived {
             // Compensate directly: the reservation is gone, so this is the
-            // only remover left for the stored name.
-            parker.unpark(&name);
+            // only remover left for the stored names.
+            parker.unpark(&names);
+            self.stop_ring_mirror();
             return;
         }
         // Exit/close may have LANDED without consuming the reservation yet
@@ -4861,15 +4952,52 @@ impl Session {
         }
     }
 
-    /// Record an inherited fd the store already retains (boot restore).
-    /// Same reservation/rollback shape as [`Session::park_fdstore`], without
-    /// a store call.
+    /// Mirror the ring into `file` from now on, returning the file to park.
+    /// `None` when seeding it failed; the ring then has no mirror.
+    #[cfg(target_os = "linux")]
+    fn start_ring_mirror(&self, file: RingFile) -> Option<Arc<File>> {
+        let shared = file.shared_file();
+        match self
+            .ring
+            .lock()
+            .expect("terminal ring poisoned")
+            .mirror_into(file)
+        {
+            Ok(()) => Some(shared),
+            Err(error) => {
+                tracing::warn!(
+                    session = %self.id, error = %error,
+                    "seeding the terminal ring file failed; parking the PTY alone"
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stop_ring_mirror(&self) {
+        self.ring
+            .lock()
+            .expect("terminal ring poisoned")
+            .stop_mirror();
+    }
+
+    /// Record the inherited fds the store already retains (boot restore):
+    /// the PTY master, and the ring file when the import took the ring over
+    /// from it. Same reservation/rollback shape as [`Session::park_fdstore`],
+    /// without a store call.
     #[cfg(target_os = "linux")]
     fn adopt_fdstore(&self, parker: &FdStoreParker) {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
         let name = fdstore_fd_name(&self.id, self.child_pid);
+        let ring_name = self
+            .ring
+            .lock()
+            .expect("terminal ring poisoned")
+            .is_mirrored()
+            .then(|| fdstore_ring_fd_name(&self.id, self.child_pid));
         {
             let mut parked = self
                 .fdstore_parked
@@ -4880,6 +5008,7 @@ impl Session {
             }
             *parked = Some(ParkedFd {
                 name: name.clone(),
+                ring_name,
                 parker: parker.clone(),
             });
         }
@@ -4899,7 +5028,7 @@ impl Session {
         }
     }
 
-    /// Remove this session's fd-store entry, exactly once. Every close/exit
+    /// Remove this session's fd-store entries, exactly once. Every close/exit
     /// path converges here: explicit close, in-place restart, child exit,
     /// read failure, registry removal. Safe to call repeatedly and from any
     /// state; a never-parked or already-unparked session is a no-op.
@@ -4911,7 +5040,11 @@ impl Session {
             .expect("terminal fdstore parked poisoned")
             .take();
         if let Some(parked) = taken {
-            parked.parker.unpark(&parked.name);
+            parked.parker.unpark(&parked.names());
+            // No store holds the ring file any more, so nothing will read it.
+            if parked.ring_name.is_some() {
+                self.stop_ring_mirror();
+            }
         }
     }
 
@@ -5309,6 +5442,61 @@ pub(crate) fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
     // handle that is not keeping the live slave-side process attached.
     let fd = filedescriptor::FileDescriptor::dup(&RawMasterFd(raw_fd)).map_err(io::Error::other)?;
     fd.as_fd().try_clone_to_owned()
+}
+
+/// Rebuild an imported session's ring. The ring file parked beside the PTY
+/// wins when it reads back intact and ends at or past the manifest's `seq`:
+/// it is written on every PTY read and the manifest only at park, move,
+/// rename and seal, so its end is the session's real `seq` after a crash as
+/// well as after a graceful restart. Otherwise the manifest's `seq` and tail
+/// rebuild the ring: with no file (a partial store, or a manifest from before
+/// ring files), with a file that does not read back, and with one that ends
+/// behind the manifest because a write to it failed. A file that can still be
+/// used is then reset to mirror that ring; one that cannot is closed, and the
+/// store keeps it until the next boot finds it named by no manifest entry.
+#[cfg(target_os = "linux")]
+fn restored_ring(
+    capacity: usize,
+    session_id: &str,
+    seq: u64,
+    tail: &[u8],
+    ring_fd: Option<OwnedFd>,
+) -> RingBuffer {
+    let from_manifest = || RingBuffer::new_with_replay(capacity, seq, tail);
+    let Some(ring_fd) = ring_fd else {
+        return from_manifest();
+    };
+    let mut file = match RingFile::adopt(ring_fd) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                session_id, error = %error,
+                "the parked terminal ring file cannot be used; restoring the manifest's tail"
+            );
+            return from_manifest();
+        }
+    };
+    let reason = match file.read() {
+        Ok((end, bytes)) if end >= seq => {
+            let mut ring = RingBuffer::new_with_replay(capacity, end, &bytes);
+            ring.continue_mirror(file);
+            return ring;
+        }
+        Ok((end, _)) => format!("it ends at {end}, behind the manifest's seq {seq}"),
+        Err(reason) => reason,
+    };
+    tracing::warn!(
+        session_id, reason = %reason,
+        "the parked terminal ring file does not hold the ring; restoring the manifest's tail"
+    );
+    let mut ring = from_manifest();
+    if let Err(error) = ring.mirror_into(file) {
+        tracing::warn!(
+            session_id, error = %error,
+            "resetting the parked terminal ring file failed; it stops mirroring"
+        );
+    }
+    ring
 }
 
 #[cfg(target_os = "linux")]
@@ -6318,6 +6506,62 @@ mod tests {
         assert_eq!(missed, 552);
         assert!(replay.is_empty());
         assert_eq!(ring.end_seq(), 552);
+    }
+
+    // Which source a restored ring comes from: the parked ring file when it
+    // reads back intact and ends at or past the manifest's `seq`, else the
+    // manifest's `seq` and tail, with a usable file reset to mirror that ring.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_restored_ring_takes_the_ring_file_only_when_sound_and_current() {
+        use std::os::unix::fs::FileExt;
+        let stream: Vec<u8> = (0..200u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let parked = |bytes: &[u8]| {
+            let mut file = RingFile::create(64).unwrap();
+            file.append(0, bytes).unwrap();
+            let fd = file.shared_file().as_fd().try_clone_to_owned().unwrap();
+            (file, fd)
+        };
+        let reread = |file: &RingFile| {
+            let fd = file.shared_file().as_fd().try_clone_to_owned().unwrap();
+            RingFile::adopt(fd).unwrap().read().unwrap()
+        };
+        let held = |ring: &RingBuffer| ring.snapshot_since(Some(0)).0.concat();
+        // The manifest: `seq` 180 and a 30-byte tail.
+        let (seq, tail) = (180, &stream[150..180]);
+
+        // The file ends past the manifest, as after a crash: the file wins.
+        let (_file, fd) = parked(&stream);
+        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
+        assert_eq!(ring.end_seq(), 200);
+        assert_eq!(held(&ring), &stream[136..]);
+        assert!(ring.is_mirrored());
+
+        // The file ends at the manifest, as after a graceful restart.
+        let (_file, fd) = parked(&stream[..180]);
+        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
+        assert_eq!(ring.end_seq(), 180);
+        assert_eq!(held(&ring), &stream[116..180]);
+
+        // The file ends behind the manifest (a write to it failed): the
+        // manifest wins, and the file mirrors the manifest's ring from here.
+        let (file, fd) = parked(&stream[..170]);
+        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
+        assert_eq!((ring.end_seq(), held(&ring)), (180, tail.to_vec()));
+        assert!(ring.is_mirrored());
+        assert_eq!(reread(&file), (180, tail.to_vec()));
+
+        // The file's header cannot be trusted: the manifest wins the same way.
+        let (file, fd) = parked(&stream);
+        file.shared_file().write_all_at(b"NOTARING", 0).unwrap();
+        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
+        assert_eq!((ring.end_seq(), held(&ring)), (180, tail.to_vec()));
+        assert_eq!(reread(&file), (180, tail.to_vec()));
+
+        // No file beside the PTY (a partial store, an older manifest).
+        let ring = restored_ring(1024, "s", seq, tail, None);
+        assert_eq!((ring.end_seq(), held(&ring)), (180, tail.to_vec()));
+        assert!(!ring.is_mirrored());
     }
 
     #[test]
@@ -7361,10 +7605,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl FdStorePark for NoopPark {
-        fn park(&self, _fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+        fn park(&self, _fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
             true
         }
-        fn unpark(&self, _fd_name: &str) {}
+        fn unpark(&self, _fd_names: &[&str]) {}
         fn adopt(&self, _fd_name: &str) -> bool {
             true
         }
@@ -7383,6 +7627,7 @@ mod tests {
         let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
         *session.fdstore_parked.lock().unwrap() = Some(ParkedFd {
             name: "chan-pty-seam".to_string(),
+            ring_name: None,
             parker: FdStoreParker::new(NoopPark),
         });
         session.record_output(b"before\n");
@@ -7896,6 +8141,7 @@ mod tests {
             FdStoreSessionImport {
                 meta,
                 master_fd,
+                ring_fd: None,
                 replay: Vec::new(),
             },
             registry_last_exit.clone(),
@@ -9918,8 +10164,25 @@ mod tests {
             }
         }
 
+        /// Log one call per fd name, ring files under their own verb, so an
+        /// assertion on the PTY names reads the same with a ring beside them.
+        fn record_names<'a>(
+            calls: &Mutex<Vec<String>>,
+            verb: &str,
+            names: impl IntoIterator<Item = &'a str>,
+        ) {
+            let mut calls = calls.lock().unwrap();
+            for name in names {
+                if name.starts_with(FDSTORE_RING_FD_PREFIX) {
+                    calls.push(format!("{verb}-ring:{name}"));
+                } else {
+                    calls.push(format!("{verb}:{name}"));
+                }
+            }
+        }
+
         impl FdStorePark for RecordingPark {
-            fn park(&self, fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+            fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
                 // Simulate the devserver commit: snapshot the registry from
                 // inside the hook. Deadlock-free only if the caller holds no
                 // registry lock, and the provisional parked state must
@@ -9932,16 +10195,12 @@ mod tests {
                         .collect();
                     self.0.snapshot_seen.lock().unwrap().extend(seen);
                 }
-                self.0.calls.lock().unwrap().push(format!("park:{fd_name}"));
+                record_names(&self.0.calls, "park", fds.iter().map(|(name, _)| *name));
                 !self.0.refuse_park.load(Ordering::Relaxed)
             }
 
-            fn unpark(&self, fd_name: &str) {
-                self.0
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("unpark:{fd_name}"));
+            fn unpark(&self, fd_names: &[&str]) {
+                record_names(&self.0.calls, "unpark", fd_names.iter().copied());
             }
 
             fn adopt(&self, fd_name: &str) -> bool {
@@ -9989,9 +10248,25 @@ mod tests {
             let name = park.strip_prefix("park:").unwrap().to_string();
             assert!(name.starts_with(FDSTORE_FD_PREFIX));
             assert!(name.contains(&id));
+            // The ring file parks in the same call, under the name derived
+            // from the same session and pid.
+            let pid = name.rsplit('.').next().unwrap();
+            let ring = format!("{FDSTORE_RING_FD_PREFIX}{id}.{pid}");
+            assert_eq!(
+                hook.calls()
+                    .into_iter()
+                    .filter(|call| call.starts_with("park"))
+                    .collect::<Vec<_>>(),
+                vec![format!("park:{name}"), format!("park-ring:{ring}")]
+            );
 
             assert!(registry.close(&id, CloseReason::Explicit));
             assert_eq!(hook.unpark_calls(), vec![format!("unpark:{name}")]);
+            assert!(
+                hook.calls().contains(&format!("unpark-ring:{ring}")),
+                "a close removes the ring file with the PTY: {:?}",
+                hook.calls()
+            );
         }
 
         // A quiet shell's reader sleeps in its wait until output arrives or
@@ -10253,7 +10528,8 @@ mod tests {
         struct ReentrantClosePark(Arc<ReentrantCloseState>);
 
         impl FdStorePark for ReentrantClosePark {
-            fn park(&self, fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+            fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+                let fd_name = fds[0].0;
                 self.0
                     .calls
                     .lock()
@@ -10279,12 +10555,8 @@ mod tests {
                 true
             }
 
-            fn unpark(&self, fd_name: &str) {
-                self.0
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("unpark:{fd_name}"));
+            fn unpark(&self, fd_names: &[&str]) {
+                record_names(&self.0.calls, "unpark", fd_names.iter().copied());
             }
 
             fn adopt(&self, _fd_name: &str) -> bool {
@@ -10304,10 +10576,11 @@ mod tests {
             let _handle = registry.create(opts(Some("w1"), None)).unwrap();
 
             let calls = hook.0.calls.lock().unwrap().clone();
-            assert_eq!(calls.len(), 4, "calls: {calls:?}");
+            assert_eq!(calls.len(), 6, "calls: {calls:?}");
             let name = calls[0]
                 .strip_prefix("park-enter:")
                 .expect("first call is park entry");
+            let ring = name.replacen(FDSTORE_FD_PREFIX, FDSTORE_RING_FD_PREFIX, 1);
             assert_eq!(
                 calls,
                 vec![
@@ -10315,9 +10588,11 @@ mod tests {
                     // The consumed reservation's EARLY remove, racing ahead
                     // of the store.
                     format!("unpark:{name}"),
+                    format!("unpark-ring:{ring}"),
                     format!("park-exit:{name}"),
-                    // The COMPENSATING remove for the now-ownerless fd.
+                    // The COMPENSATING remove for the now-ownerless fds.
                     format!("unpark:{name}"),
+                    format!("unpark-ring:{ring}"),
                 ],
                 "the successful park must compensate for the consumed reservation"
             );
@@ -10357,6 +10632,7 @@ mod tests {
             let report = registry.restore_fdstore_sessions(vec![FdStoreSessionImport {
                 meta,
                 master_fd,
+                ring_fd: None,
                 replay: b"tail".to_vec(),
             }]);
             assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
@@ -10423,6 +10699,10 @@ mod tests {
                         master_fd: fds
                             .remove(&entry.fd_name)
                             .expect("the store retains every manifested PTY"),
+                        ring_fd: entry.ring_fd_name.map(|name| {
+                            fds.remove(&name)
+                                .expect("the store retains every manifested ring file")
+                        }),
                         meta: entry.meta,
                         replay: entry.replay,
                     })
@@ -10431,17 +10711,22 @@ mod tests {
         }
 
         impl FdStorePark for StoreSim {
-            fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool {
-                self.0.fds.lock().unwrap().insert(
-                    fd_name.to_string(),
-                    fd.try_clone_to_owned().expect("duplicate a parked fd"),
-                );
+            fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+                for (name, fd) in fds {
+                    self.0.fds.lock().unwrap().insert(
+                        name.to_string(),
+                        fd.try_clone_to_owned().expect("duplicate a parked fd"),
+                    );
+                }
                 self.publish();
                 true
             }
 
-            fn unpark(&self, fd_name: &str) {
-                self.0.fds.lock().unwrap().remove(fd_name);
+            fn unpark(&self, fd_names: &[&str]) {
+                let mut fds = self.0.fds.lock().unwrap();
+                for name in fd_names {
+                    fds.remove(*name);
+                }
             }
 
             fn adopt(&self, _fd_name: &str) -> bool {

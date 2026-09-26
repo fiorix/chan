@@ -8296,7 +8296,7 @@ mod tests {
         }
 
         impl FdStorePark for HostProbePark {
-            fn park(&self, fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+            fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
                 // The devserver commit path: snapshot HOST-wide from inside
                 // the hook. This re-enters both the workspaces RwLock and
                 // the registry sessions mutex, so completing at all proves
@@ -8309,11 +8309,14 @@ mod tests {
                         .collect();
                     self.0.snapshot_seen.lock().unwrap().extend(seen);
                 }
+                // The PTY master is first; a ring file may follow it.
+                let fd_name = fds[0].0;
                 self.0.calls.lock().unwrap().push(format!("park:{fd_name}"));
                 true
             }
 
-            fn unpark(&self, fd_name: &str) {
+            fn unpark(&self, fd_names: &[&str]) {
+                let fd_name = fd_names[0];
                 self.0
                     .calls
                     .lock()
@@ -8527,6 +8530,7 @@ mod tests {
                 crate::terminal_sessions::FdStoreSessionImport {
                     meta,
                     master_fd,
+                    ring_fd: None,
                     replay: b"replay".to_vec(),
                 },
             ]);
