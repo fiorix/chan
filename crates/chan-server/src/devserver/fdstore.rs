@@ -459,7 +459,7 @@ mod linux {
                 if running > 0 {
                     tracing::warn!(
                         running,
-                        "PTY readers still running at the final fdstore manifest write; output they read after it is lost"
+                        "PTY readers still running at the final fdstore manifest write; a session with a ring file keeps what they read after it there, one without loses it"
                     );
                 }
                 if let Err(error) = self.shared.write_manifest_locked(&phase) {

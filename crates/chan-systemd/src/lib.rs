@@ -365,8 +365,9 @@ mod unit_tests {
         );
     }
 
-    // Every unit installed before the store maximum rose carries 512 in an
-    // otherwise current shape: it must migrate, never be refused as foreign.
+    // A unit carrying FileDescriptorStoreMax=512 in an otherwise current
+    // shape, which chan rendered while each parked terminal stored one fd,
+    // must migrate, never be refused as foreign.
     #[test]
     fn devserver_unit_migrates_a_unit_installed_with_the_older_store_maximum() {
         let desired =
@@ -384,7 +385,7 @@ mod unit_tests {
         assert_eq!(
             desired.classify_installed(&installed_at_512),
             DevserverUnitClass::KnownLegacy,
-            "today's installed unit"
+            "the current shape at 512"
         );
         for legacy in [
             installed_at_512.replace("TimeoutStartSec=10min\n", ""),

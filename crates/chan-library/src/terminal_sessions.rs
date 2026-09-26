@@ -5511,9 +5511,9 @@ pub(crate) fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
 
 /// Rebuild an imported session's ring. The ring file parked beside the PTY
 /// wins when it reads back intact and ends at or past the manifest's `seq`:
-/// it is written on every PTY read and the manifest only at park, move,
-/// rename and seal, so its end is the session's real `seq` after a crash as
-/// well as after a graceful restart. Otherwise the manifest's `seq` and tail
+/// it is written on every PTY read and the manifest only at park, unpark,
+/// move, rename, placement change, activation and seal, so its end is the
+/// session's real `seq` after a crash as well as after a graceful restart. Otherwise the manifest's `seq` and tail
 /// rebuild the ring: with no file (a partial store, or a manifest from before
 /// ring files), with a file that does not read back, and with one that ends
 /// behind the manifest because a write to it failed. A file that can still be

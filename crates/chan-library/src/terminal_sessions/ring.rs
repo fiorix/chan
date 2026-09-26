@@ -146,9 +146,10 @@ impl RingBuffer {
         };
         if let Err(error) = mirror.append(start, bytes) {
             // The header is published last, so a failed write leaves the
-            // file describing only the bytes before it; its end then falls
-            // behind the next manifest's `seq`, and the next process restores
-            // from the manifest instead.
+            // file ending at the last byte before it. The next process takes
+            // the file while that end is at or past the manifest's `seq`,
+            // restoring the session at that end; once a manifest rewrite
+            // records a larger `seq`, the manifest's tail wins instead.
             tracing::warn!(error = %error, "writing the terminal ring file failed; it stops mirroring");
             self.mirror = None;
         }
