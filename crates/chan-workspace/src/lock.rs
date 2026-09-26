@@ -1095,8 +1095,14 @@ mod tests {
         let stored_key = crate::paths::canonicalize_normalized(parent.path()).join("stored");
         let moved_key = crate::paths::canonicalize_normalized(&moved);
         let _held = WorkspaceLock::acquire(lock_dir.path(), &moved_key).unwrap();
+        // A pid above every unix pid limit, rather than a reaped child: a child
+        // spawned here holds a duplicate of every descriptor this process has
+        // open until it execs, which keeps a concurrent test's lock held
+        // after that test closes it.
+        let dead_pid = 999_999_999;
+        assert_eq!(process_alive(dead_pid), ProcessLiveness::Dead);
         let dead = LockRecord {
-            pid: reaped_child_pid(),
+            pid: dead_pid,
             path: moved_key.to_string_lossy().into_owned(),
             started_at: "2000-01-01T00:00:00Z".to_string(),
         };
