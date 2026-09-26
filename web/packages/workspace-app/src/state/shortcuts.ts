@@ -790,9 +790,10 @@ export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
 /// Take a key for the handler that answered it: prevent its default and stop
 /// it there. A surface that owns its keys from a capture-phase listener on
 /// the document (the slide player, the media viewers) calls this for each key
-/// it acts on, so the key reaches neither the editor or terminal behind it
-/// nor the app's window handler, whose Escape would also close the overlay
-/// beneath the surface.
+/// it acts on, so the key goes no further: the focused editor or terminal
+/// behind the surface, and the app's window handler, would otherwise see it
+/// too. The window's Escape skips a prevented key on its own; its other
+/// chords do not.
 export function consumeKey(e: KeyboardEvent): void {
   e.preventDefault();
   e.stopPropagation();

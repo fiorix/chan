@@ -728,7 +728,7 @@
     // already took (a menu, a viewer, a dialog closing itself) is that
     // handler's. Only Escape defers: ghostty-web prevents the default of
     // every key its custom handler claims, which is every app chord the
-    // terminal lets through, so the chords above must not.
+    // terminal lets through, so the other chords must not.
     if (e.key === "Escape" && !e.defaultPrevented && !meta && !e.altKey && !e.shiftKey) {
       const top = topOverlay();
       if (top) {

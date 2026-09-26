@@ -650,14 +650,14 @@ export function closeWorkspaceWarningsDialog(): void {
   workspaceWarningsDialog.open = false;
 }
 
-/// Shared clipboard helper. Writes `text` through `writeClipboardText`
-/// (native on desktop, so a copy needs no user gesture there) and
-/// reports the result through the standard callbacks; callers wire it
-/// to either the workspace-warnings dialog state (legacy caller) or
-/// the global transient status pill (everyone else). Keeping the
-/// plumbing in one place means the editor's right-click "Copy path",
-/// the warnings dialog, and the inspector's COPY button all share the
-/// same fallback + error shape.
+/// Shared clipboard helper for the UI's Copy actions. Writes `text`
+/// through `writeClipboardText` (native on desktop, so a copy needs no
+/// user gesture there) and reports the result through the caller's
+/// callbacks, never by throwing. Each caller shows the outcome its own
+/// way: the workspace-warnings dialog in its own state, the code block's
+/// copy button as a flash on the button, and the rest in the status line.
+/// Keeping the plumbing in one place means every Copy shares the same
+/// fallback and error shape.
 export async function copyTextToClipboard(
   text: string,
   opts: {
