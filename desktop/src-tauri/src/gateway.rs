@@ -2512,6 +2512,80 @@ mod tests {
         );
     }
 
+    /// A Connect click on a runtime a finished connect left Connecting runs
+    /// a connect: no connect is in flight to finish on its own.
+    #[tokio::test]
+    async fn a_connect_click_on_a_runtime_no_connect_owns_connects() {
+        let (origin, server) = spawn_gateway_stub(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        {
+            let mut cfg = config::Config::default();
+            cfg.gateways.push(Gateway {
+                id: "gw-stuck".to_string(),
+                url: origin.clone(),
+                label: String::new(),
+                enabled: true,
+                added_at: 0,
+                native_trust: Vec::new(),
+            });
+            store.lock().unwrap().save(&cfg).unwrap();
+        }
+        let state = Arc::new(crate::AppState::with_store(store));
+        let app = tauri::test::mock_app();
+        // What a connect whose first roster fetch failed upstream leaves
+        // behind: Connecting, no sign-in pending, the poll its only driver.
+        let rt = new_runtime(GatewayDiscovery {
+            kind: "chan-gateway".into(),
+            api_version: 1,
+            identity_origin: origin.clone(),
+            desktop_authorize_url: format!("{origin}/desktop/authorize"),
+            desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
+            devserver_proxy_origin: "https://proxy.chan.app".into(),
+            devserver_proxy_host_depth: 2,
+            roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+        });
+        assert_eq!(rt.status, GatewayStatus::Connecting, "fixture");
+        state
+            .gateway_manager
+            .runtimes
+            .lock()
+            .unwrap()
+            .insert("gw-stuck".to_string(), rt);
+        crate::auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            crate::auth::StoredPat {
+                id: "pat-stuck".into(),
+                secret: "s3cret".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_gateway(
+                app.handle().clone(),
+                Arc::clone(&state),
+                "gw-stuck".into(),
+                true,
+            ),
+        )
+        .await
+        .expect("connect must finish")
+        .unwrap();
+        let view = state.gateway_manager.view("gw-stuck").unwrap();
+        crate::auth::test_gateway_pats().lock().unwrap().remove(&origin);
+        server.abort();
+        assert_eq!(
+            view.status,
+            GatewayStatus::Connected,
+            "a Connect click on a runtime no connect owns was swallowed"
+        );
+    }
+
     #[tokio::test]
     async fn rejected_pat_with_busy_signin_parks_and_allows_retry() {
         let (origin, server) = spawn_gateway_stub(true).await;
