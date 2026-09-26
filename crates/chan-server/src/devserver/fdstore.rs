@@ -72,7 +72,7 @@ mod linux {
     const READER_STOP_WAIT: Duration = Duration::from_secs(2);
     /// The canonical unit's FileDescriptorStoreMax, the cap fallback where
     /// the manager does not export `$FDSTORE`.
-    const UNIT_FDSTORE_MAX: usize = 512;
+    const UNIT_FDSTORE_MAX: usize = chan_systemd::DEVSERVER_FDSTORE_MAX;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct RestartManifest {

@@ -9,6 +9,15 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+/// The `FileDescriptorStoreMax` the canonical unit renders: two stored fds,
+/// a PTY master and its ring file, for each of 512 parked terminals.
+pub const DEVSERVER_FDSTORE_MAX: usize = 1024;
+
+/// The `FileDescriptorStoreMax` earlier chan units rendered, when each
+/// parked terminal stored its PTY master alone. A unit carrying it is still
+/// chan-owned, so it is migrated rather than refused.
+const LEGACY_FDSTORE_MAX: usize = 512;
+
 /// Relationship between an installed devserver unit and chan's renderer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DevserverUnitClass {
@@ -80,7 +89,7 @@ impl DevserverUnit {
 
     /// Render the canonical systemd user unit.
     pub fn render(&self) -> String {
-        self.render_profile(DevserverUnitProfile::Current)
+        self.render_profile(DevserverUnitProfile::Current, DEVSERVER_FDSTORE_MAX)
     }
 
     /// Classify an installed unit without accepting arbitrary lookalikes.
@@ -105,7 +114,13 @@ impl DevserverUnit {
             DevserverUnitProfile::NotifyLegacy,
         ]
         .into_iter()
-        .any(|profile| installed == canonical_unit(&candidate.render_profile(profile)));
+        .any(|profile| {
+            [DEVSERVER_FDSTORE_MAX, LEGACY_FDSTORE_MAX]
+                .into_iter()
+                .any(|fdstore_max| {
+                    installed == canonical_unit(&candidate.render_profile(profile, fdstore_max))
+                })
+        });
         if recognized {
             DevserverUnitClass::KnownLegacy
         } else {
@@ -151,7 +166,7 @@ impl DevserverUnit {
         })
     }
 
-    fn render_profile(&self, profile: DevserverUnitProfile) -> String {
+    fn render_profile(&self, profile: DevserverUnitProfile, fdstore_max: usize) -> String {
         let mut unit = String::from(
             "[Unit]\n\
              Description=chan devserver\n\
@@ -159,10 +174,10 @@ impl DevserverUnit {
              \n\
              [Service]\n\
              Type=notify\n\
-             NotifyAccess=main\n\
-             FileDescriptorStoreMax=512\n\
-             KillMode=process\n",
+             NotifyAccess=main\n",
         );
+        unit.push_str(&format!("FileDescriptorStoreMax={fdstore_max}\n"));
+        unit.push_str("KillMode=process\n");
         for assignment in &self.environment {
             unit.push_str("Environment=\"");
             unit.push_str(assignment);
@@ -299,7 +314,7 @@ mod unit_tests {
              [Service]\n\
              Type=notify\n\
              NotifyAccess=main\n\
-             FileDescriptorStoreMax=512\n\
+             FileDescriptorStoreMax=1024\n\
              KillMode=process\n\
              Environment=\"CHAN_HOME=/tmp/chan home\"\n\
              ExecStart=/usr/bin/chan devserver\n\
@@ -348,6 +363,53 @@ mod unit_tests {
             desired.classify_installed(&foreign_exec),
             DevserverUnitClass::Foreign
         );
+    }
+
+    // Every unit installed before the store maximum rose carries 512 in an
+    // otherwise current shape: it must migrate, never be refused as foreign.
+    #[test]
+    fn devserver_unit_migrates_a_unit_installed_with_the_older_store_maximum() {
+        let desired =
+            DevserverUnit::new("/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787")
+                .with_environment("CHAN_HOME=/tmp/chan");
+        let current = desired.render();
+        assert!(current.contains("\nFileDescriptorStoreMax=1024\n"));
+        assert_eq!(
+            desired.classify_installed(&current),
+            DevserverUnitClass::Current
+        );
+
+        let installed_at_512 =
+            current.replace("FileDescriptorStoreMax=1024", "FileDescriptorStoreMax=512");
+        assert_eq!(
+            desired.classify_installed(&installed_at_512),
+            DevserverUnitClass::KnownLegacy,
+            "today's installed unit"
+        );
+        for legacy in [
+            installed_at_512.replace("TimeoutStartSec=10min\n", ""),
+            installed_at_512
+                .replace("TimeoutStartSec=10min\n", "")
+                .replace("WatchdogSec=30\n", ""),
+        ] {
+            assert_eq!(
+                desired.classify_installed(&legacy),
+                DevserverUnitClass::KnownLegacy,
+                "an older installed unit: {legacy}"
+            );
+        }
+
+        for foreign in [
+            installed_at_512.replace("Restart=on-failure", "Restart=always"),
+            current.replace("FileDescriptorStoreMax=1024", "FileDescriptorStoreMax=4096"),
+            current.replace("FileDescriptorStoreMax=1024\n", ""),
+        ] {
+            assert_eq!(
+                desired.classify_installed(&foreign),
+                DevserverUnitClass::Foreign,
+                "a unit chan never rendered: {foreign}"
+            );
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ After=network.target
 [Service]
 Type=notify
 NotifyAccess=main
-FileDescriptorStoreMax=512
+FileDescriptorStoreMax=1024
 KillMode=process
 ExecStart=/usr/bin/chan devserver run
 TimeoutStartSec=10min

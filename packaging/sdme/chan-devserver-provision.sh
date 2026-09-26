@@ -244,7 +244,7 @@ After=network.target
 [Service]
 Type=notify
 NotifyAccess=main
-FileDescriptorStoreMax=512
+FileDescriptorStoreMax=1024
 KillMode=process
 Environment="CHAN_TUNNEL_TOKEN=$TOKEN"
 ${TUNNEL_URL_ENV}ExecStart=$EXEC

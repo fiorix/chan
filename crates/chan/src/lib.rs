@@ -13370,7 +13370,7 @@ mod tests {
         );
         assert!(unit.contains("Type=notify"));
         assert!(unit.contains("NotifyAccess=main"));
-        assert!(unit.contains("FileDescriptorStoreMax=512"));
+        assert!(unit.contains("FileDescriptorStoreMax=1024"));
         assert!(unit.contains("KillMode=process"));
         assert!(unit
             .contains("ExecStart=/usr/local/bin/chan devserver run --bind=127.0.0.1 --port=8799"));
@@ -13426,7 +13426,7 @@ mod tests {
         // The systemd fdstore scaffold is unchanged from the non-tunnel unit.
         assert!(unit.contains("Type=notify"));
         assert!(unit.contains("NotifyAccess=main"));
-        assert!(unit.contains("FileDescriptorStoreMax=512"));
+        assert!(unit.contains("FileDescriptorStoreMax=1024"));
     }
 
     #[test]
@@ -13727,7 +13727,7 @@ mod tests {
              [Service]\n\
              Type=notify\n\
              NotifyAccess=main\n\
-             FileDescriptorStoreMax=512\n\
+             FileDescriptorStoreMax=1024\n\
              KillMode=process\n\
              Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_abc123\"\n\
              Environment=\"CHAN_TUNNEL_URL=https://proxy.chan.app/v1/tunnel\"\n\
