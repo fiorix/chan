@@ -6,7 +6,8 @@
 // focus, and the surface of the focused tab takes the keyboard. A left
 // release on a terminal or file tab pulses again, so the focus the press gave
 // the tab itself moves on to its surface. A terminal that stops being focused
-// lets go of its xterm. A Pane is mounted over the demo workspace with a
+// lets go of its xterm. The pane tree (Workspace, which draws the pane and
+// docks its terminal into it) is mounted over the demo workspace with a
 // terminal (the stand-in xterm) and real editors.
 
 import { mount, tick, unmount } from "svelte";
@@ -19,7 +20,7 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
-import Pane from "./Pane.svelte";
+import Workspace from "./Workspace.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { refreshTree, refreshWorkspace } from "../state/store.svelte";
@@ -111,14 +112,15 @@ async function settle(turns = 6): Promise<void> {
   }
 }
 
-/// Mounts a Pane holding `tabs` (a terminal first) with the first one active.
+/// Mounts the pane tree over one pane holding `tabs` (a terminal first), with
+/// the first one active.
 async function mountPane(tabs: Tab[]): Promise<{ target: HTMLElement; term: FakeTerminal }> {
   layout.nodes = { [PANE]: { kind: "leaf", id: PANE, tabs, activeTabId: tabs[0]!.id } };
   layout.rootId = PANE;
   layout.activePaneId = PANE;
   const target = document.createElement("div");
   document.body.append(target);
-  mounted.push(mount(Pane, { target, props: { pane: layout.nodes[PANE] as LeafNode } }));
+  mounted.push(mount(Workspace, { target }));
   await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
   await settle();
   return { target, term: xterm.terminals.at(-1)! };

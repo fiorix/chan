@@ -9,15 +9,13 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 // static import still sees the mocked xterm modules.
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
-import Pane from "./Pane.svelte";
+import Workspace from "./Workspace.svelte";
 import { api } from "../api/client";
 import type { SurveySpec } from "../api/client";
 import { openExternalUrl } from "../editor/external_links";
 import { showSurvey, surveyState } from "../state/survey.svelte";
 import {
   bumpTabFocusPulse,
-  layout,
-  type LeafNode,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
@@ -30,7 +28,6 @@ import {
   resetTerminals,
   seatTerminals,
   sentFrames,
-  TERMINAL_PANE,
   TerminalSocket,
   terminalTab,
   xterm,
@@ -245,7 +242,7 @@ describe("TerminalTab metadata settlement", () => {
       const [tab] = seatTerminals([terminalTab({ pendingGlobalName: true })]);
       const target = document.createElement("div");
       document.body.append(target);
-      mounted.push(mount(Pane, { target, props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode } }));
+      mounted.push(mount(Workspace, { target }));
       await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
 
       expect(next).toHaveBeenCalledTimes(1);
@@ -390,7 +387,7 @@ describe("TerminalTab seed input", () => {
     const [tab] = seatTerminals([terminalTab({ seedInput: "today.md" })]);
     const target = document.createElement("div");
     document.body.append(target);
-    mounted.push(mount(Pane, { target, props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode } }));
+    mounted.push(mount(Workspace, { target }));
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
     const socket = TerminalSocket.all[0]!;
     await attach(socket);
