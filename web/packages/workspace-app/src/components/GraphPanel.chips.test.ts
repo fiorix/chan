@@ -262,7 +262,16 @@ describe("the chip state a tab keeps", () => {
   test("starts with every chip on, markdown and source included", async () => {
     await mountGraphPanel(GraphPanel, layout, workspaceTab());
     const tab = openGraphInActivePane({ scopeId: "workspace" });
-    expect(tab.filters).toEqual({ ...DEFAULT_GRAPH_FILTERS });
+    expect(tab.filters).toEqual({
+      link: true,
+      tag: true,
+      mention: true,
+      language: true,
+      img: true,
+      folder: true,
+      markdown: true,
+      source: true,
+    });
     expect(DEFAULT_GRAPH_FILTERS.markdown && DEFAULT_GRAPH_FILTERS.source).toBe(true);
   });
 
