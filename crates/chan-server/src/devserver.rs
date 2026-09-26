@@ -4688,40 +4688,56 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// Every case runs in this one test, under one capture: the warning's
-    /// callsite is then reached from no other thread, which could otherwise
-    /// cache a "never" interest for it before this subscriber registers.
-    #[test]
-    fn an_unreadable_config_is_set_aside_before_the_first_save() {
-        fn set_aside(dir: &Path) -> Vec<PathBuf> {
-            std::fs::read_dir(dir)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(OsStr::to_str)
-                        .and_then(|name| name.strip_prefix("config.json.unreadable-"))
-                        .is_some_and(|secs| secs.parse::<u64>().is_ok())
-                })
-                .collect()
-        }
+    /// Every file `dir` holds under a set-aside name, `config.json.unreadable-*`.
+    fn configs_set_aside(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.starts_with("config.json.unreadable-"))
+            })
+            .collect()
+    }
+
+    /// Capture this thread's log lines. Each test that reads a broken config
+    /// installs its own capture before the first read, so no warning callsite
+    /// these tests reach is reached from a thread without one, which could
+    /// cache a "never" interest for it.
+    fn capture_logs() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
-        let warnings_naming = |path: &Path| {
-            let lines = lines.lock().unwrap();
-            let path = path.display().to_string();
-            lines
-                .iter()
-                .filter(|line| line.starts_with("WARN") && line.contains(&path))
-                .count()
-        };
-        let _capture = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
+        let guard = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
+        (lines, guard)
+    }
+
+    fn warnings_naming(lines: &Mutex<Vec<String>>, path: &Path) -> usize {
+        let path = path.display().to_string();
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("WARN") && line.contains(&path))
+            .count()
+    }
+
+    /// The devserver's start sets an unparseable config aside before its first
+    /// save, under a name that carries the unix second and this process's pid,
+    /// and names both in one warning; a missing config is not a fault.
+    #[test]
+    fn the_devservers_start_sets_an_unparseable_config_aside() {
+        let (lines, _capture) = capture_logs();
 
         let missing = tempfile::tempdir().unwrap();
         let path = missing.path().join("config.json");
         let loaded = DevserverStore::at(path.clone()).load_for_start();
         assert_eq!(loaded.library_id, "");
-        assert_eq!(warnings_naming(&path), 0, "a missing config is not a fault");
-        assert!(set_aside(missing.path()).is_empty());
+        assert_eq!(
+            warnings_naming(&lines, &path),
+            0,
+            "a missing config is not a fault"
+        );
+        assert!(configs_set_aside(missing.path()).is_empty());
 
         let garbage = b"{\"devserver_token\": \"tok";
         let unparseable = tempfile::tempdir().unwrap();
@@ -4732,23 +4748,48 @@ mod tests {
         assert_eq!(loaded.devserver_token, "");
         assert_eq!(loaded.library_id, "");
         assert_eq!(loaded.port, 0);
-        assert_eq!(
-            warnings_naming(&path),
-            1,
-            "one warning must name the unparseable config: {:?}",
-            lines.lock().unwrap()
-        );
         store
             .save(&PersistedConfig {
                 library_id: "lib-fresh".into(),
                 ..PersistedConfig::default()
             })
             .unwrap();
-        let aside = set_aside(unparseable.path());
+        let aside = configs_set_aside(unparseable.path());
         assert_eq!(aside.len(), 1, "the unparseable config was not set aside");
+        let suffix = aside[0]
+            .file_name()
+            .and_then(OsStr::to_str)
+            .and_then(|name| name.strip_prefix("config.json.unreadable-"))
+            .unwrap()
+            .to_string();
+        let pid = std::process::id().to_string();
+        assert!(
+            suffix
+                .split_once('-')
+                .is_some_and(|(secs, by)| secs.parse::<u64>().is_ok() && by == pid),
+            "the set-aside name must carry the unix second and this process's pid: {suffix}"
+        );
         assert_eq!(std::fs::read(&aside[0]).unwrap(), garbage);
+        let warned = lines.lock().unwrap().clone();
+        let aside_name = aside[0].display().to_string();
+        assert_eq!(
+            warned
+                .iter()
+                .filter(|line| line.starts_with("WARN")
+                    && line.contains(&path.display().to_string())
+                    && line.contains(&aside_name))
+                .count(),
+            1,
+            "one warning must name the unparseable config and where it went: {warned:?}"
+        );
         assert_eq!(store.load().library_id, "lib-fresh");
+    }
 
+    /// A read error is not evidence that the file is broken, so the
+    /// devserver's start warns about it and leaves it where it is.
+    #[test]
+    fn the_devservers_start_leaves_an_unreadable_config_in_place() {
+        let (lines, _capture) = capture_logs();
         // A read error rather than a parse error: the path is a directory.
         let unreadable = tempfile::tempdir().unwrap();
         let path = unreadable.path().join("config.json");
@@ -4756,16 +4797,65 @@ mod tests {
         std::fs::write(path.join("evidence"), b"kept").unwrap();
         let store = DevserverStore::at(path.clone());
         assert_eq!(store.load_for_start().library_id, "");
+        assert!(
+            configs_set_aside(unreadable.path()).is_empty(),
+            "the devserver's start moved an unreadable config aside"
+        );
+        assert_eq!(std::fs::read(path.join("evidence")).unwrap(), b"kept");
         assert_eq!(
-            warnings_naming(&path),
+            warnings_naming(&lines, &path),
             1,
             "one warning must name the unreadable config: {:?}",
             lines.lock().unwrap()
         );
-        store.save(&PersistedConfig::default()).unwrap();
-        let aside = set_aside(unreadable.path());
-        assert_eq!(aside.len(), 1, "the unreadable config was not set aside");
-        assert_eq!(std::fs::read(aside[0].join("evidence")).unwrap(), b"kept");
+    }
+
+    /// The CLI's readers answer from defaults over a config they cannot
+    /// parse, with one warning naming it, and never move it: only the
+    /// devserver's start, whose next save replaces the file, sets it aside.
+    #[test]
+    fn a_readers_load_leaves_an_unparseable_config_in_place() {
+        let (lines, _capture) = capture_logs();
+        let garbage = b"{\"devserver_token\": \"tok";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, garbage).unwrap();
+        let loaded = DevserverStore::at(path.clone()).load();
+        assert_eq!(loaded.devserver_token, "");
+        assert!(
+            configs_set_aside(dir.path()).is_empty(),
+            "a reader moved an unparseable config aside"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), garbage);
+        assert_eq!(
+            warnings_naming(&lines, &path),
+            1,
+            "one warning must name the unparseable config: {:?}",
+            lines.lock().unwrap()
+        );
+    }
+
+    /// A read error, which on a healthy file can be transient (EIO, ESTALE,
+    /// a sharing violation), leaves a reader's config where it is.
+    #[test]
+    fn a_readers_load_leaves_an_unreadable_config_in_place() {
+        let (lines, _capture) = capture_logs();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("evidence"), b"kept").unwrap();
+        assert_eq!(DevserverStore::at(path.clone()).load().library_id, "");
+        assert!(
+            configs_set_aside(dir.path()).is_empty(),
+            "a reader moved an unreadable config aside"
+        );
+        assert_eq!(std::fs::read(path.join("evidence")).unwrap(), b"kept");
+        assert_eq!(
+            warnings_naming(&lines, &path),
+            1,
+            "one warning must name the unreadable config: {:?}",
+            lines.lock().unwrap()
+        );
     }
 
     #[test]
