@@ -818,9 +818,9 @@ fn env_value<'a>(
     ignore_case: bool,
 ) -> Option<&'a String> {
     env.iter()
-        .filter(|(candidate, _)| same_env_key(candidate, key, ignore_case))
+        .rev()
+        .find(|(candidate, _)| same_env_key(candidate, key, ignore_case))
         .map(|(_, value)| value)
-        .last()
 }
 
 /// chan's own entries for one spawn. It applies exactly the keys of
