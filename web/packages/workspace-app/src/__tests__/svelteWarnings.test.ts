@@ -12,6 +12,9 @@ import UnownedPropOwner from "./UnownedPropOwner.svelte";
 import { ownershipWarnings } from "./svelteWarnings";
 
 test("reports a component writing a prop it does not own", () => {
+  // Swallowed rather than printed, so a count of these warnings in a gate log
+  // counts only the ones nobody meant.
+  vi.spyOn(console, "warn").mockImplementation(() => {});
   const warnings = ownershipWarnings();
   const target = document.createElement("div");
   document.body.append(target);
