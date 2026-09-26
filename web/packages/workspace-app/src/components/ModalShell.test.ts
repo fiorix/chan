@@ -27,6 +27,12 @@ const body = createRawSnippet(() => ({
     `<div><h2 id="probe-title">Probe</h2><p class="body-probe"><button type="button">Inside</button></p></div>`,
 }));
 
+// A body with controls at both ends and one between them.
+const controls = createRawSnippet(() => ({
+  render: () =>
+    `<div><h2 id="probe-title">Probe</h2><button type="button" class="first">First</button><input class="middle" /><button type="button" class="last">Last</button></div>`,
+}));
+
 function render(props: Record<string, unknown> = {}): HTMLElement {
   const target = mountDialog(ModalShell, {
     labelledby: "probe-title",
@@ -149,6 +155,65 @@ describe("ModalShell", () => {
     expect(escape.defaultPrevented).toBe(true);
     expect(reached.keys, "keys that reached the document").toEqual([]);
     expect(onKeydown, "the dialog's own key handler").not.toHaveBeenCalled();
+  });
+
+  test("Tab past the last control wraps to the first", async () => {
+    const dialog = dialogIn(render({ children: controls }))!;
+    await settle();
+    const last = dialog.querySelector<HTMLElement>(".last")!;
+    last.focus();
+    const tab = press(last, "Tab");
+    expect(document.activeElement).toBe(dialog.querySelector(".first"));
+    expect(tab.defaultPrevented, "the browser does not move focus again").toBe(true);
+  });
+
+  test("Shift+Tab before the first control, or from the panel itself, wraps to the last", async () => {
+    const dialog = dialogIn(render({ children: controls }))!;
+    await settle();
+    const starts: Array<[string, HTMLElement]> = [
+      ["the first control", dialog.querySelector<HTMLElement>(".first")!],
+      ["the panel", dialog],
+    ];
+    for (const [name, from] of starts) {
+      from.focus();
+      const tab = press(from, "Tab", { shiftKey: true });
+      expect(document.activeElement, `Shift+Tab from ${name}`).toBe(dialog.querySelector(".last"));
+      expect(tab.defaultPrevented, `Shift+Tab from ${name}`).toBe(true);
+    }
+  });
+
+  test("leaves Tab between the first and last controls to the browser", async () => {
+    const dialog = dialogIn(render({ children: controls }))!;
+    await settle();
+    const first = dialog.querySelector<HTMLElement>(".first")!;
+    first.focus();
+    const tab = press(first, "Tab");
+    expect(tab.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(first);
+  });
+
+  test("leaves a Tab that a control inside already took to that control", async () => {
+    // PathPromptModal's input takes Tab to complete a path.
+    const completing: Snippet = createRawSnippet(() => ({
+      render: () =>
+        `<div><h2 id="probe-title">Probe</h2><button type="button" class="first">First</button><input class="last" /></div>`,
+      setup: (el) => el.querySelector(".last")!.addEventListener("keydown", (e) => e.preventDefault()),
+    }));
+    const dialog = dialogIn(render({ children: completing }))!;
+    await settle();
+    const input = dialog.querySelector<HTMLElement>(".last")!;
+    input.focus();
+    press(input, "Tab");
+    expect(document.activeElement).toBe(input);
+  });
+
+  test("keeps Tab on a panel with no controls", async () => {
+    const bare: Snippet = createRawSnippet(() => ({ render: () => `<h2 id="probe-title">Probe</h2>` }));
+    const dialog = dialogIn(render({ children: bare }))!;
+    await settle();
+    const tab = press(dialog, "Tab");
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(dialog);
   });
 
   test("hands the dialog every other key pressed inside the panel", () => {

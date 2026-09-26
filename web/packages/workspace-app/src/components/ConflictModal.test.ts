@@ -118,6 +118,17 @@ describe("ConflictModal", () => {
     expect(document.activeElement).toBe(origin);
   });
 
+  test("Tab and Shift+Tab wrap between its first and last buttons", async () => {
+    const target = mountDialog(ConflictModal);
+    await open(target);
+    const reload = button(target, "Reload");
+    reload.focus();
+    press(reload, "Tab");
+    expect(document.activeElement, "Tab past Reload").toBe(button(target, "Cancel"));
+    press(document.activeElement!, "Tab", { shiftKey: true });
+    expect(document.activeElement, "Shift+Tab before Cancel").toBe(reload);
+  });
+
   test("a click on the backdrop dismisses and a click inside the panel does not", async () => {
     const target = mountDialog(ConflictModal);
     await open(target);

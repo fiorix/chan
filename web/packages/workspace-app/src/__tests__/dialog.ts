@@ -53,9 +53,10 @@ export function clickBackdrop(target: HTMLElement): void {
 }
 
 /// Press `key` on `el` as the browser delivers it: a bubbling, cancelable
-/// keydown. The event comes back so a test can read `defaultPrevented`.
-export function press(el: Element, key: string): KeyboardEvent {
-  const e = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+/// keydown, with any modifiers `init` holds. The event comes back so a test
+/// can read `defaultPrevented`.
+export function press(el: Element, key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+  const e = new KeyboardEvent("keydown", { ...init, key, bubbles: true, cancelable: true });
   el.dispatchEvent(e);
   return e;
 }

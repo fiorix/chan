@@ -46,6 +46,35 @@
     };
   });
 
+  // The controls Tab stops on inside the panel, in DOM order.
+  const TAB_STOPS =
+    'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  // Tab and Shift+Tab wrap inside the panel, so focus cannot leave a
+  // dialog marked modal: Tab past the last control goes to the first, and
+  // Shift+Tab before the first, or from the panel itself where focus lands
+  // on open, goes to the last. Between the ends the browser moves focus,
+  // and a Tab a control inside has already taken (PathPromptModal's input
+  // completes a path with it) stays that control's.
+  function wrapTab(e: KeyboardEvent): void {
+    if (!panel || e.defaultPrevented) return;
+    const stops = [...panel.querySelectorAll<HTMLElement>(TAB_STOPS)];
+    const first = stops[0];
+    const last = stops.at(-1);
+    if (!first || !last) {
+      e.preventDefault();
+      return;
+    }
+    const at = document.activeElement;
+    if (e.shiftKey && (at === first || at === panel)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && at === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
   // Escape closes this dialog and goes no further. App's document-level
   // handler answers Escape too, by closing the topmost overlay, and must
   // not act on a press the dialog has already taken.
@@ -56,6 +85,7 @@
       onClose();
       return;
     }
+    if (e.key === "Tab") wrapTab(e);
     onKeydown?.(e);
   }
 </script>
