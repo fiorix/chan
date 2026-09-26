@@ -2297,6 +2297,13 @@ export function setTerminalQueueDepth(tab: TerminalTab, depth: number): void {
   tab.queueDepth = depth > 0 ? depth : undefined;
 }
 
+/// Whether a fresh terminal still waits for the server's next name before it
+/// dials. The terminal clears it before the fetch, so a reconnect during the
+/// fetch does not fetch again.
+export function setTerminalPendingGlobalName(tab: TerminalTab, pending: boolean): void {
+  tab.pendingGlobalName = pending;
+}
+
 /// Start tracking an in-flight Rich Prompt message: phase "sent" (the
 /// `prompt` frame went out on an open socket; no ack yet).
 export function beginPendingPrompt(tab: TerminalTab, id: string): void {

@@ -71,6 +71,7 @@
     toggleTerminalGroupBroadcast,
     setTerminalActivity,
     setTerminalActivityPulsing,
+    setTerminalPendingGlobalName,
     setTerminalQueueDepth,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -1282,7 +1283,7 @@
     // fresh auto-named terminal; a reattach already has its name + session.
     // Clear the flag first so a concurrent reconnect cannot re-fetch.
     if (!tab.terminalSessionId && tab.pendingGlobalName) {
-      tab.pendingGlobalName = false;
+      setTerminalPendingGlobalName(tab, false);
       await applyGlobalTerminalName(tab);
       if (!term) return; // torn down during the fetch
     }
