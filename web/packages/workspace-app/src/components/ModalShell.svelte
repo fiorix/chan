@@ -18,7 +18,8 @@
     labelledby: string;
     onClose: () => void;
     // Keys other than Escape that the dialog answers wherever focus sits
-    // inside the panel.
+    // inside the panel. It sees Tab before the shell wraps it, and a Tab it
+    // takes stays taken.
     onKeydown?: (e: KeyboardEvent) => void;
     minWidth?: string;
     // The spacing between the panel's rows, when the content wants it
@@ -112,8 +113,8 @@
       onClose();
       return;
     }
-    if (e.key === "Tab") wrapTab(e);
     onKeydown?.(e);
+    if (e.key === "Tab") wrapTab(e);
   }
 </script>
 

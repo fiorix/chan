@@ -260,6 +260,22 @@ describe("ModalShell", () => {
     expect(tab.defaultPrevented).toBe(true);
   });
 
+  test("hands Tab to the dialog before wrapping it, and leaves a Tab the dialog took", async () => {
+    let focusedWhenAsked: Element | null = null;
+    const onKeydown = (e: KeyboardEvent): void => {
+      if (e.key !== "Tab") return;
+      focusedWhenAsked = document.activeElement;
+      e.preventDefault();
+    };
+    const dialog = dialogIn(render({ children: controls, onKeydown }))!;
+    await settle();
+    const last = dialog.querySelector<HTMLElement>(".last")!;
+    last.focus();
+    press(last, "Tab");
+    expect(focusedWhenAsked, "the dialog sees Tab where the press landed").toBe(last);
+    expect(document.activeElement, "the shell leaves the dialog's Tab alone").toBe(last);
+  });
+
   test("hands the dialog every other key pressed inside the panel", () => {
     const onKeydown = vi.fn();
     const target = render({ onKeydown });
