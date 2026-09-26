@@ -119,4 +119,19 @@ describe("keys in the image viewer", () => {
     expect(reachedDocument).toBe(true);
     pressInPage({ key: "Escape" });
   });
+
+  test.each([
+    ["Ctrl+ArrowRight", { key: "ArrowRight", ctrlKey: true }],
+    ["Alt+ArrowLeft", { key: "ArrowLeft", altKey: true }],
+    ["Cmd+ArrowRight", { key: "ArrowRight", metaKey: true }],
+  ])("%s, a modified arrow over the set, travels on and steps nothing", (_name, init) => {
+    openImageZoom("https://x/2.png", null, SET);
+
+    const { event, reachedDocument } = pressInPage(init);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(reachedDocument).toBe(true);
+    expect(imgSrc()).toBe("https://x/2.png");
+    pressInPage({ key: "Escape" });
+  });
 });

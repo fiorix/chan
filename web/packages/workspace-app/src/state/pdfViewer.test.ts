@@ -42,4 +42,14 @@ describe("keys in the PDF viewer", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(reachedDocument).toBe(true);
   });
+
+  test("a modified Escape travels on and leaves the viewer open", () => {
+    openPdfViewer("docs/spec.pdf");
+
+    const { event, reachedDocument } = pressInPage({ key: "Escape", altKey: true });
+
+    expect(viewer()).not.toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+    expect(reachedDocument).toBe(true);
+  });
 });

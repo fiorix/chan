@@ -161,4 +161,31 @@ describe("keys in the diagram viewer", () => {
     expect(reachedDocument).toBe(true);
     pressInPage({ key: "Escape" });
   });
+
+  test.each([
+    ["Ctrl+Alt+S", { key: "s", code: "KeyS", ctrlKey: true, altKey: true }],
+    ["Cmd+=", { key: "=", code: "Equal", metaKey: true }],
+    ["Alt+ArrowLeft", { key: "ArrowLeft", code: "ArrowLeft", altKey: true }],
+    ["Ctrl+0", { key: "0", code: "Digit0", ctrlKey: true }],
+  ])("%s, a modified chord on a viewer key, travels on", (_name, init) => {
+    openDiagramZoom(SVG);
+    const before = layer()?.getAttribute("style");
+
+    const { event, reachedDocument } = pressInPage(init);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(reachedDocument).toBe(true);
+    expect(layer()?.getAttribute("style")).toBe(before);
+    pressInPage({ key: "Escape" });
+  });
+
+  test("Shift+W, the viewer's own Shift, still pans", () => {
+    openDiagramZoom(SVG);
+
+    const { event, reachedDocument } = pressInPage({ key: "W", code: "KeyW", shiftKey: true });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(reachedDocument).toBe(false);
+    pressInPage({ key: "Escape" });
+  });
 });

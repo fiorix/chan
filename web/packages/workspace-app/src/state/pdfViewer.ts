@@ -66,7 +66,10 @@ export function openPdfViewer(path: string): void {
     document.removeEventListener("keydown", onKey, true);
     backdrop.remove();
   };
+  // The viewer answers an unmodified Escape; a chord with Ctrl, Cmd or Alt
+  // held is the app's and travels on.
   const onKey = (ev: KeyboardEvent): void => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (ev.key === "Escape") {
       consumeKey(ev);
       dismiss();

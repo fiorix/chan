@@ -106,7 +106,10 @@ export function openImageZoom(
     document.removeEventListener("keydown", onKey, true);
     backdrop.remove();
   };
+  // The viewer answers Escape and, in a set, the arrows, unmodified; a chord
+  // with Ctrl, Cmd or Alt held is the app's and travels on.
   const onKey = (ev: KeyboardEvent): void => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (ev.key === "Escape") {
       consumeKey(ev);
       dismiss();

@@ -68,7 +68,10 @@ export function openAudioViewer(path: string): void {
     audio.load();
     backdrop.remove();
   };
+  // The viewer answers an unmodified Escape; a chord with Ctrl, Cmd or Alt
+  // held is the app's and travels on.
   const onKey = (event: KeyboardEvent): void => {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key !== "Escape") return;
     consumeKey(event);
     dismiss();

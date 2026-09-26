@@ -50,4 +50,14 @@ describe("keys in the video viewer", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(reachedDocument).toBe(true);
   });
+
+  test("a modified Escape travels on and leaves the viewer open", () => {
+    openVideoViewer("media/clip.mp4");
+
+    const { event, reachedDocument } = pressInPage({ key: "Escape", altKey: true });
+
+    expect(viewer()).not.toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+    expect(reachedDocument).toBe(true);
+  });
 });

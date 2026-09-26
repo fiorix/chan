@@ -189,8 +189,11 @@ export function openDiagramZoom(svg: string): void {
     backdrop.remove();
   };
   // Shortcuts are captured on the document so none leak to the editor's
-  // keymap while the overlay is open.
+  // keymap while the overlay is open. The viewer answers its keys
+  // unmodified; Shift is part of "+" and the capital WASD. A chord with
+  // Ctrl, Cmd or Alt held is the app's and travels on.
   const onKey = (e: KeyboardEvent): void => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     switch (e.key) {
       case "Escape":
         consumeKey(e);
