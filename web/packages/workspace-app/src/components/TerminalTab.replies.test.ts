@@ -18,6 +18,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MAX_MS } from "../api/transport";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import { createTerminalKeyboardProtocolState } from "../terminal/keymap";
 import {
   attach,
   installTerminalDom,
@@ -116,6 +117,31 @@ describe("the parser handlers", () => {
     pressInTerminal(term, { key: "Enter", shiftKey: true });
 
     expect(frames(socket, "input")).toEqual(["\n", "\x1b[27;2;13~"]);
+  });
+
+  describe("a restored tab's negotiated protocol", () => {
+    /// A tab restored with a session id and the modifyOtherKeys its program
+    /// negotiated, whose dial the server answers with `answeredId`.
+    async function restored(answeredId: string) {
+      const keyboardProtocol = createTerminalKeyboardProtocolState();
+      keyboardProtocol.xtermModifyOtherKeys = 2;
+      const [tab] = seatTerminals([terminalTab({ terminalSessionId: "sess-restored", keyboardProtocol })]);
+      const { term } = await mountTerminal(TerminalTab, tab!);
+      const socket = TerminalSocket.all.at(-1)!;
+      await attach(socket, { id: answeredId });
+      await receive(socket, { type: "ready", cols: 80, rows: 24 });
+      socket.sent.splice(0);
+      pressInTerminal(term, { key: "Enter", shiftKey: true });
+      return frames(socket, "input");
+    }
+
+    test("is dropped when a fresh shell replaces the session", async () => {
+      expect(await restored("sess-fresh")).toEqual(["\n"]);
+    });
+
+    test("is kept when the session itself is resumed", async () => {
+      expect(await restored("sess-restored")).toEqual(["\x1b[27;2;13~"]);
+    });
   });
 
   test("a keyboard-protocol query is answered on the PTY", async () => {
