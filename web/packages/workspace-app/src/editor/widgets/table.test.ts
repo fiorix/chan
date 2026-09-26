@@ -325,6 +325,7 @@ describe("tableDecorations", () => {
   });
 
   test("wide tables are contained so prose still wraps at page width", () => {
+    // Build-time contract: Wysiwyg.svelte scrolls a wide table inside its wrap so prose wraps at page width; jsdom lays out nothing.
     const source = readFileSync("src/editor/Wysiwyg.svelte", "utf8");
 
     expect(source).toMatch(/\.cm-content\)[\s\S]{1,500}min-width: 0;/);
@@ -343,6 +344,7 @@ describe("tableDecorations", () => {
     // clicks below the widget resolve to the wrong line (worst right after
     // a table, where the next line is usually a heading). Vertical spacing
     // on these roots must be padding.
+    // Build-time contract: Wysiwyg.svelte gives block-widget roots no vertical margin; jsdom lays out nothing.
     const source = readFileSync("src/editor/Wysiwyg.svelte", "utf8");
     const roots = [
       ".cm-md-table-wrap",
