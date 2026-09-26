@@ -462,6 +462,14 @@ pub mod root_stall {
         released: bool,
         /// Calls still to let through before the stall starts holding.
         passes: usize,
+        /// Only calls whose chain names one of these are held; empty holds
+        /// every call.
+        only: Vec<String>,
+        /// Calls let through so far.
+        passed: usize,
+        /// Bumped by [`RootStall::release_held`], which lets go the calls
+        /// held before it and keeps holding the ones after.
+        epoch: u64,
         entered: Vec<String>,
     }
 
@@ -492,7 +500,21 @@ pub mod root_stall {
     /// answers a request's first lookup and then stops answering. Held calls
     /// are what [`RootStall::entered`] reports.
     pub fn stall_after(root: impl Into<PathBuf>, passes: usize) -> RootStall {
-        let root = root.into();
+        install(root.into(), passes, Vec::new())
+    }
+
+    /// [`stall`] that holds only the calls whose chain of chan functions
+    /// names one of `functions`, and lets every other call through, so a
+    /// test can hold one step of an operation on the root and not the rest.
+    pub fn stall_matching(root: impl Into<PathBuf>, functions: &[&str]) -> RootStall {
+        install(
+            root.into(),
+            0,
+            functions.iter().map(|name| name.to_string()).collect(),
+        )
+    }
+
+    fn install(root: PathBuf, passes: usize, only: Vec<String>) -> RootStall {
         let mut roots = vec![root.clone()];
         if let Ok(canonical) = dunce::canonicalize(&root) {
             if canonical != root {
@@ -500,10 +522,11 @@ pub mod root_stall {
             }
         }
         let gate = Arc::new(Gate::default());
-        gate.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .passes = passes;
+        {
+            let mut state = gate.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.passes = passes;
+            state.only = only;
+        }
         let mut map = stalls();
         for spelling in &roots {
             let previous = map.insert(spelling.clone(), Arc::clone(&gate));
@@ -540,6 +563,50 @@ pub mod root_stall {
                     .0;
             }
             true
+        }
+
+        /// Let go every call held so far and keep holding later ones.
+        pub fn release_held(&self) {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.epoch += 1;
+            self.gate.changed.notify_all();
+        }
+
+        /// Wait up to `timeout` until `count` calls under the root have been
+        /// let through; true when they have.
+        pub fn wait_passed(&self, count: usize, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            while state.passed < count {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return false;
+                }
+                state = self
+                    .gate
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            true
+        }
+
+        /// How many calls under the root have been let through.
+        pub fn passed(&self) -> usize {
+            self.gate
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .passed
         }
 
         /// The chan call chain of every call that has reached the stall,
@@ -608,13 +675,20 @@ pub mod root_stall {
         };
         let chain = call_chain();
         let mut state = gate.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.passes > 0 {
-            state.passes -= 1;
+        let holds =
+            state.only.is_empty() || state.only.iter().any(|name| chain.contains(name.as_str()));
+        if !holds || state.passes > 0 {
+            if holds {
+                state.passes -= 1;
+            }
+            state.passed += 1;
+            gate.changed.notify_all();
             return;
         }
         state.entered.push(chain);
+        let epoch = state.epoch;
         gate.changed.notify_all();
-        while !state.released {
+        while !state.released && state.epoch == epoch {
             state = gate
                 .changed
                 .wait(state)
