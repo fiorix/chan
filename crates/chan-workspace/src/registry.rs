@@ -419,8 +419,8 @@ impl Registry {
         true
     }
 
-    /// [`remove`](Self::remove) for a match computed beforehand with every
-    /// row as a candidate: drops the cached match and every alias.
+    /// [`remove`](Self::remove) for a match computed beforehand: drops the
+    /// cached match and every alias the match found.
     pub(crate) fn remove_matched(&mut self, found: &RootMatch) -> bool {
         let before = self.workspaces.len();
         self.workspaces.retain(|d| {

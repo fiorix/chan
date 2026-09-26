@@ -240,7 +240,7 @@ impl Library {
         if !root.exists() {
             return Err(ChanError::WorkspaceRootMissing(root.to_path_buf()));
         }
-        let found = self.match_root(root, false);
+        let found = self.match_root(root);
         let mut reg = self.inner.registry.lock().unwrap();
         let idx = reg.touch_matched(&found);
         if let Some(name) = display_name {
@@ -282,7 +282,7 @@ impl Library {
         // don't want to wipe state for a path the user never
         // registered with this Library, just in case it collides
         // with an unrelated cached entry from an earlier install.
-        let found = self.match_root(root, false);
+        let found = self.match_root(root);
         let registered = self
             .inner
             .registry
@@ -301,7 +301,7 @@ impl Library {
     /// callers do `register_workspace` first if needed (CLI does both
     /// in one shot for the "point at a directory and go" path).
     pub fn open_workspace(&self, root: &Path) -> Result<Arc<Workspace>> {
-        let found = self.match_root(root, false);
+        let found = self.match_root(root);
         let reg = self.inner.registry.lock().unwrap();
         let entry = reg
             .find_matched(&found)
@@ -419,7 +419,7 @@ impl Library {
         // not the current filesystem path. An unregistered root has
         // no key in the registry, so there is nothing for this
         // Library to wipe.
-        let found = self.match_root(root, false);
+        let found = self.match_root(root);
         let Some(metadata_key) = self
             .inner
             .registry
@@ -465,7 +465,7 @@ impl Library {
         // the opposite order. _lock is dropped at the end of the
         // function after the registry write completes.
         if matches!(mode, ResetMode::Everything) {
-            let found = self.match_root(root, true);
+            let found = self.match_root(root);
             let mut reg = self.inner.registry.lock().unwrap();
             if reg.remove_matched(&found) {
                 reg.save_to(&self.inner.config_path)?;
@@ -500,8 +500,8 @@ impl Library {
             return Err(ChanError::WorkspaceRootMissing(new.to_path_buf()));
         }
         self.refuse_if_live(old)?;
-        let old_found = self.match_root(old, false);
-        let new_found = self.match_root(new, false);
+        let old_found = self.match_root(old);
+        let new_found = self.match_root(new);
         let mut reg = self.inner.registry.lock().unwrap();
         let Some(old_entry) = reg.find_matched(&old_found) else {
             return Ok(false);
@@ -528,7 +528,7 @@ impl Library {
     /// directly so the registry stays the only source of truth for
     /// "which metadata key is this path."
     pub fn workspace_paths_for(&self, root: &Path) -> Option<paths::WorkspacePaths> {
-        let found = self.match_root(root, false);
+        let found = self.match_root(root);
         let reg = self.inner.registry.lock().unwrap();
         let entry = reg.find_matched(&found)?;
         Some(paths::workspace_paths_for_metadata_key_in(
@@ -549,16 +549,18 @@ impl Library {
     /// could hide it behind are copied out under the mutex, and those roots
     /// are re-resolved, each within a bounded wait, after it is released. The
     /// caller takes the mutex again and applies the match, which re-checks
-    /// it against the rows as they are then. `every_row` makes every row
-    /// whose cached path differs a candidate, as a removal needs.
-    fn match_root(&self, root: &Path, every_row: bool) -> RootMatch {
+    /// it against the rows as they are then. The other rows are re-resolved
+    /// only when no row's cached canonical path is `root`'s, a removal
+    /// included, so removing a workspace whose row matches waits on no other
+    /// workspace's filesystem, one of which may have stalled.
+    fn match_root(&self, root: &Path) -> RootMatch {
         let canonical = canonical_form(root);
         let candidates = self
             .inner
             .registry
             .lock()
             .unwrap()
-            .alias_candidates(&canonical, every_row);
+            .alias_candidates(&canonical, false);
         RootMatch::resolve(canonical, &candidates)
     }
 
