@@ -10,9 +10,10 @@
 // based and intentionally simple; if/when chan-workspace grows a server-
 // side block index we can swap this out without touching the bubble.
 
+import { fenceLineTracker } from "../commands/fence";
+
 const BLOCK_ID_RE = /\^([A-Za-z0-9-]{4,})\s*$/;
 const HEADING_RE = /^\s{0,3}#{1,6}\s/;
-const FENCE_RE = /^\s{0,3}(```|~~~)/;
 
 export interface ParsedBlock {
   /// Block text joined by `\n`. The first line is what the bubble
@@ -35,7 +36,7 @@ export interface ParsedBlock {
 export function parseBlocks(text: string): ParsedBlock[] {
   const lines = text.split(/\r?\n/);
   const blocks: ParsedBlock[] = [];
-  let inFence = false;
+  const fence = fenceLineTracker();
   let buf: { startLine: number; lines: string[] } | null = null;
 
   const flush = (endLine: number): void => {
@@ -57,12 +58,12 @@ export function parseBlocks(text: string): ParsedBlock[] {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    if (FENCE_RE.test(line)) {
+    const kind = fence(line);
+    if (kind === "fence") {
       flush(i - 1);
-      inFence = !inFence;
       continue;
     }
-    if (inFence) {
+    if (kind === "code") {
       // Lines inside a code fence are not linkable blocks.
       continue;
     }
