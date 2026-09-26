@@ -136,13 +136,19 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
       graphStream: vi.fn(
         async (
           _scope: unknown,
-          opts: { onNodes?: (n: GraphViewNode[]) => void; onEdges?: (e: GraphViewEdge[]) => void } = {},
+          opts: {
+            onNodes?: (n: GraphViewNode[], view: GraphView) => void;
+            onEdges?: (e: GraphViewEdge[], view: GraphView) => void;
+          } = {},
         ) => {
           graphServer.graphStreamCalls += 1;
           await Promise.resolve();
           if (graphServer.streamGate) await graphServer.streamGate;
-          opts.onNodes?.(graphServer.view.nodes);
-          opts.onEdges?.(graphServer.view.edges);
+          // One batch of each, with the view accumulated so far beside it,
+          // as graphStream passes them.
+          const { nodes, edges } = graphServer.view;
+          opts.onNodes?.(nodes, { nodes: [...nodes], edges: [] });
+          opts.onEdges?.(edges, { nodes: [...nodes], edges: [...edges] });
           return graphServer.view;
         },
       ),

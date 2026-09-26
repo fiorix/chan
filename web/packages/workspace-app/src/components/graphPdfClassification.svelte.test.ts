@@ -10,7 +10,7 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import GraphPanel from "./GraphPanel.svelte";
-import type { GraphViewNode } from "../api/types";
+import type { GraphView, GraphViewNode } from "../api/types";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { classifyFile, fileBucket } from "../state/kinds";
 import { tabMenu } from "../state/tabMenu.svelte";
@@ -31,8 +31,13 @@ vi.mock("../api/client", async (importOriginal) => {
       ...actual.api,
       fsGraph: vi.fn(async () => ({ nodes: [], edges: [], truncated: false, done: true })),
       graphStream: vi.fn(
-        async (_opts: unknown, streamOpts: { onNodes?: (batch: GraphViewNode[]) => void }) => {
-          streamOpts.onNodes?.(NODES);
+        async (
+          _opts: unknown,
+          streamOpts: {
+            onNodes?: (batch: GraphViewNode[], view: GraphView) => void;
+          },
+        ) => {
+          streamOpts.onNodes?.(NODES, { nodes: [...NODES], edges: [] });
           return { nodes: NODES, edges: [] };
         },
       ),
