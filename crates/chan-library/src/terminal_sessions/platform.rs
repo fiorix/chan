@@ -214,9 +214,17 @@ pub(super) fn process_cwd(_pid: u32) -> Option<PathBuf> {
 /// false the spawned shell would fall back to the POSIX/C codeset and render
 /// multibyte UTF-8 as raw bytes in pagers / editors like `less` and `vim`.
 pub(super) fn locale_selects_utf8(requested: &BTreeMap<String, String>) -> bool {
+    locale_selects_utf8_on(requested, super::ENV_KEYS_IGNORE_CASE)
+}
+
+/// [`locale_selects_utf8`], with a requested key matched as a child's
+/// environment matches keys when `ignore_case`.
+pub(super) fn locale_selects_utf8_on(
+    requested: &BTreeMap<String, String>,
+    ignore_case: bool,
+) -> bool {
     let lookup = |key: &str| -> Option<String> {
-        requested
-            .get(key)
+        super::env_value(requested, key, ignore_case)
             .cloned()
             .or_else(|| std::env::var(key).ok())
             .filter(|value| !value.is_empty())

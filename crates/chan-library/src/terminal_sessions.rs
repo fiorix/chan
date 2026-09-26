@@ -765,19 +765,16 @@ pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
     "CHAN_MCP_SERVER_JSON",
 ];
 
-/// Whether a child's environment keys ignore ASCII case: on Windows
-/// portable-pty lowercases every key it is given, so a caller's `Path` or
-/// `chan_mcp_socket` is the variable chan's `PATH` or `CHAN_MCP_SOCKET`
-/// replaces.
+/// Whether a child's environment keys ignore case: on Windows portable-pty
+/// folds every key it is given with Unicode lowercasing and keeps the later
+/// of two that fold alike, so a caller's `Path` or `chan_mcp_socket` is the
+/// variable chan's `PATH` or `CHAN_MCP_SOCKET` replaces.
 const ENV_KEYS_IGNORE_CASE: bool = cfg!(windows);
 
-/// Whether `a` and `b` name one variable in a child's environment.
+/// Whether `a` and `b` name one variable in a child's environment, folded
+/// as portable-pty folds them when `ignore_case`.
 fn same_env_key(a: &str, b: &str, ignore_case: bool) -> bool {
-    if ignore_case {
-        a.eq_ignore_ascii_case(b)
-    } else {
-        a == b
-    }
+    a == b || (ignore_case && a.to_lowercase() == b.to_lowercase())
 }
 
 /// Whether `key` is one chan sets for itself at spawn
@@ -811,16 +808,19 @@ fn chan_overrides_spawn_env_on(
         && !(same_env_key(key, "CHAN_TAB_NAME", ignore_case) && Some(value) == tab_name)
 }
 
-/// The value `env` gives `key`, matched as a child's environment matches
-/// keys.
+/// The value the child gets for `key` from `env`, keys matched as the
+/// child's environment matches them. Of keys that fold alike it is the last
+/// in the map's order: the spawn applies a caller's entries in that order,
+/// and portable-pty keeps the later one.
 fn env_value<'a>(
     env: &'a BTreeMap<String, String>,
     key: &str,
     ignore_case: bool,
 ) -> Option<&'a String> {
     env.iter()
-        .find(|(candidate, _)| same_env_key(candidate, key, ignore_case))
+        .filter(|(candidate, _)| same_env_key(candidate, key, ignore_case))
         .map(|(_, value)| value)
+        .last()
 }
 
 /// chan's own entries for one spawn. It applies exactly the keys of
@@ -6937,6 +6937,21 @@ mod tests {
     // LC_ALL is the highest-precedence locale category, so when it is present
     // in the requested map the helper never consults the (test-host-dependent)
     // process environment; these cases stay deterministic.
+    // On Windows a caller's locale keys are matched as the child matches
+    // them, so a lowercase `lc_all` is the child's LC_ALL. The requested
+    // value is found before the process environment, which keeps this
+    // deterministic.
+    #[test]
+    fn a_caller_s_locale_key_is_found_as_the_windows_child_finds_it() {
+        let utf8 = |key: &str, value: &str, ignore_case: bool| {
+            let env = BTreeMap::from([(key.to_string(), value.to_string())]);
+            platform::locale_selects_utf8_on(&env, ignore_case)
+        };
+        assert!(utf8("lc_all", "C.UTF-8", true));
+        assert!(!utf8("lc_all", "C", true));
+        assert!(utf8("LC_ALL", "C.UTF-8", false));
+    }
+
     #[test]
     fn locale_selects_utf8_honors_lc_all_codeset() {
         let utf8 = |v: &str| {
