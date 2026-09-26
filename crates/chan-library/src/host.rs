@@ -52,7 +52,6 @@ type WorkspaceOpenProbe = Box<dyn FnMut(&mut chan_workspace::Result<Arc<Workspac
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RemovalHop {
-    WindowMatch,
     Unregister,
 }
 
@@ -2572,41 +2571,27 @@ impl WorkspaceHost {
     /// Discard every persisted window rooted at `root` -- a workspace turned OFF
     /// or FORGOTTEN must not leave ghost windows in the launcher feed (the windows
     /// persist in the registry, so without this they survive the unmount and, on a
-    /// devserver, a disconnect→reconnect). Matches a window's `workspace_path` to
-    /// `root` by canonical form (the same join [`assemble_window_records`](
-    /// Self::assemble_window_records) uses), discarding each via
+    /// devserver, a disconnect→reconnect). Matches each window's stored
+    /// `workspace_path` with [`workspace_window_ids`], discarding each via
     /// [`discard_window`](Self::discard_window) so its tenant state is reaped too.
-    /// Returns the count discarded; a no-op with no registry or no match. A
-    /// failed match is an error: the records are still on disk, so the
-    /// removal must not report them purged. Fires
+    /// Returns the count discarded; a no-op with no registry or no match. Fires
     /// only on explicit forget (via
     /// [`remove_workspace_for_root`](Self::remove_workspace_for_root)): OFF
     /// keeps the records and filters them from the live feed, and host shutdown
     /// drops runtimes without closing, so windows still restore across a
-    /// restart. `target` is the canonical key the removal already holds.
-    /// Matching a record canonicalizes the path it stores, so the match runs
-    /// off the runtime thread; the discards canonicalize nothing and stay on it.
-    async fn discard_workspace_windows(&self, target: &Path) -> Result<usize, Error> {
+    /// restart. `target` is the canonical key the removal already holds and
+    /// `root` the path it was asked to remove. Neither the match nor the
+    /// discards touch the filesystem, so the purge runs on the caller's
+    /// thread.
+    fn discard_workspace_windows(&self, target: &Path, root: &Path) -> usize {
         let Some(registry) = self.window_registry() else {
-            return Ok(0);
+            return 0;
         };
-        let registry = Arc::clone(registry);
-        let target = target.to_path_buf();
-        #[cfg(test)]
-        let probe = self.removal_hop_probe.lock().unwrap().clone();
-        let ids = self
-            .off_runtime(move || {
-                #[cfg(test)]
-                if let Some(probe) = probe {
-                    probe(RemovalHop::WindowMatch);
-                }
-                workspace_window_ids(&registry, &target)
-            })
-            .await?;
+        let ids = workspace_window_ids(registry, target, root);
         for id in &ids {
             let _ = self.discard_window(id);
         }
-        Ok(ids.len())
+        ids.len()
     }
 
     /// Reap all state a discarded `window_id` owns across mounted tenants, so a
@@ -3036,10 +3021,7 @@ impl WorkspaceHost {
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
         // and leaves the records -- filtered from the live feed until ON restores
         // them.) A no-op when the workspace had no windows.
-        if let Err(error) = self.discard_workspace_windows(&target).await {
-            removing.error = Some(error.to_string());
-            return Err(error);
-        }
+        self.discard_workspace_windows(&target, root);
         // The hop runs to its end even when the caller is dropped during it,
         // so it clears the row itself: no await separates the unregister from
         // the last of its bookkeeping.
@@ -3921,17 +3903,29 @@ fn unregister_registered_workspace(library: &Library, root: &Path) -> chan_works
     library.unregister_workspace(root)
 }
 
-/// Window records whose stored workspace path canonicalizes to `target`. A
-/// record keeps the path its window was minted with, which may be an alias of
-/// the mounted root, so each is canonicalized rather than compared as text.
-fn workspace_window_ids(registry: &WindowRegistry, target: &Path) -> Vec<String> {
+/// Window records rooted at the workspace a removal holds, matched by the
+/// path each record stores. A record is minted with a canonical root (the
+/// tenant's, the registry's, or one its caller canonicalized), so its path,
+/// lexically normalized, is `target` (the removal's canonical key) or `root`
+/// (the path the removal was asked for). No record's path is resolved: that
+/// would make a removal wait on the filesystem of every workspace that has a
+/// window, and one of those may have stalled. A record minted with some
+/// other alias of the root is not matched and stays.
+fn workspace_window_ids(registry: &WindowRegistry, target: &Path, root: &Path) -> Vec<String> {
+    let stored = |path: &Path| {
+        chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(
+            path,
+        ))
+    };
+    let root = stored(root);
     registry
         .snapshot()
         .into_iter()
         .filter(|row| {
-            row.workspace_path
-                .as_deref()
-                .is_some_and(|p| canonical_key(Path::new(p)) == target)
+            row.workspace_path.as_deref().is_some_and(|p| {
+                let path = stored(Path::new(p));
+                path == target || path == root
+            })
         })
         .map(|row| row.window_id)
         .collect()
@@ -4312,70 +4306,8 @@ mod tests {
     }
 
     #[test]
-    fn a_removal_abandoned_at_the_window_match_ends_retryable_or_removed() {
-        abandon_removal_at(RemovalHop::WindowMatch);
-    }
-
-    #[test]
     fn a_removal_abandoned_at_the_unregister_ends_retryable_or_removed() {
         abandon_removal_at(RemovalHop::Unregister);
-    }
-
-    /// The window match is the removal's last chance to find the records it
-    /// must purge. If that hop fails, the records are still on disk, so the
-    /// removal must fail and keep the workspace registered for a retry.
-    #[tokio::test]
-    async fn a_failed_window_match_fails_the_removal_and_keeps_it_retryable() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let cfg = tempfile::tempdir().expect("config dir");
-            let root = tempfile::tempdir().expect("workspace");
-            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
-            library.register_workspace(root.path()).expect("register");
-            let host = WorkspaceHost::new(library, fake_builder());
-            let store = tempfile::tempdir().expect("store dir");
-            let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
-            registry.create(
-                WindowKind::Workspace,
-                Some(root.path().to_string_lossy().into_owned()),
-            );
-            host.install_window_registry(registry.clone(), "local".into());
-            *host.removal_hop_probe.lock().unwrap() = Some(Arc::new(|hop| {
-                if hop == RemovalHop::WindowMatch {
-                    panic!("injected window match failure");
-                }
-            }));
-
-            let error = match host.remove_workspace_for_root(root.path(), false).await {
-                Err(error) => error,
-                Ok(outcome) => panic!(
-                    "a failed window match let the removal report {outcome:?} with its window records on disk"
-                ),
-            };
-            assert_eq!(
-                host.workspace_status(root.path()),
-                (WorkspaceStatus::Error, Some(error.to_string()))
-            );
-            assert!(
-                host.library().workspace_paths_for(root.path()).is_some(),
-                "a failed window match unregistered the workspace"
-            );
-            assert_eq!(
-                registry.snapshot().len(),
-                1,
-                "a failed window match discarded window records"
-            );
-
-            *host.removal_hop_probe.lock().unwrap() = None;
-            assert!(host
-                .remove_workspace_for_root(root.path(), false)
-                .await
-                .expect("retry")
-                .completed());
-            assert!(registry.snapshot().is_empty());
-            assert!(host.library().workspace_paths_for(root.path()).is_none());
-        })
-        .await
-        .expect("bounded");
     }
 
     #[test]
