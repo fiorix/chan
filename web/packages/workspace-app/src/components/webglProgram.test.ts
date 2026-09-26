@@ -101,6 +101,11 @@ describe("linkProgram", () => {
     expect(() => linkProgram(gl, "vertex", "fragment")).toThrow("link failed: varying mismatch");
     expect(deleted(calls)).toContain('deleteProgram {"created":"createProgram"}');
   });
+
+  test("names an empty link log as an unknown link error", () => {
+    const { gl } = recordingWebgl2({ getProgramParameter: () => false, getProgramInfoLog: () => "" });
+    expect(() => linkProgram(gl, "vertex", "fragment")).toThrow("unknown link error");
+  });
 });
 
 describe("uniformLocation", () => {
