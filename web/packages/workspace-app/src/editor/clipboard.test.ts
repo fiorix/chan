@@ -158,6 +158,27 @@ describe("Cut", () => {
   });
 });
 
+describe("in a browser without the Clipboard API", () => {
+  beforeEach(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  });
+
+  test("Copy says it could not copy", async () => {
+    await copySelection(editor("hello world", 0, 5));
+
+    expect(notes).toEqual(["Couldn't copy to clipboard"]);
+  });
+
+  test("Cut says it could not copy and keeps the text", async () => {
+    const view = editor("hello world", 0, 6);
+
+    await cutSelection(view);
+
+    expect(notes).toEqual(["Couldn't copy to clipboard"]);
+    expect(view.state.doc.toString()).toBe("hello world");
+  });
+});
+
 describe("on the desktop, where the webview has no Clipboard API", () => {
   beforeEach(() => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
