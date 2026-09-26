@@ -5431,6 +5431,60 @@ mod tests {
         );
     }
 
+    /// A mounted root whose filesystem hangs does not hold up the health
+    /// probe of the others: a tick checks every mounted root at once,
+    /// reconciles each that answers and returns at its budget, and a later
+    /// tick waits on the hung root's check instead of starting another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hung_root_does_not_hold_up_the_health_probe_of_another() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let holder = tempfile::tempdir().expect("holder");
+        let gone = holder.path().join("gone");
+        std::fs::create_dir(&gone).expect("mkdir");
+        let gone_key = canonical_root(&gone);
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        for root in [hung.path(), gone.as_path()] {
+            state
+                .host
+                .library()
+                .register_workspace(root)
+                .expect("register");
+            let prefix = allocate_workspace_prefix(root).expect("prefix");
+            state
+                .host
+                .open_registered_workspace(root, tenant_config(state.addr, &prefix))
+                .await
+                .expect("mount");
+        }
+        std::fs::rename(&gone, holder.path().join("moved")).expect("move a root away");
+
+        let stall = root_stall::stall(hung.path());
+        let host = Arc::clone(&state.host);
+        stall.finishes_beside(
+            "a health probe tick beside a hung root",
+            HEALTHY_ROOT_BOUND,
+            move || host.probe_mounted_roots(),
+        );
+        assert_eq!(
+            state.host.workspace_status(&gone_key).0,
+            WorkspaceStatus::Unavailable,
+            "the tick did not reconcile the root that went away"
+        );
+        let host = Arc::clone(&state.host);
+        stall.finishes_beside(
+            "a second health probe tick beside a hung root",
+            HEALTHY_ROOT_BOUND,
+            move || host.probe_mounted_roots(),
+        );
+        assert_eq!(
+            stall.entered().len(),
+            1,
+            "a later tick started another check of the hung root"
+        );
+    }
+
     /// A registered root that moved under a symlink still mounts through the
     /// devserver. Its registry row caches the old spelling until the serve
     /// request's registration re-resolves it, and the attempt's intent check
