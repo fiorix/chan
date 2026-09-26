@@ -5667,14 +5667,18 @@ impl Session {
         // and snapshots under, so an attaching client gets this chunk once: in
         // its replay if it attaches after the push, on its receiver if before.
         let mut ring = self.ring.lock().expect("terminal ring poisoned");
-        ring.push(bytes);
         // The ring file carries the state these bytes leave beside them.
         #[cfg(target_os = "linux")]
         if alt_screen_changed || private_modes_changed {
-            ring.publish_state(&self.terminal_state());
+            ring.push_with_state(bytes, &self.terminal_state());
+        } else {
+            ring.push(bytes);
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = (alt_screen_changed, private_modes_changed);
+        {
+            let _ = (alt_screen_changed, private_modes_changed);
+            ring.push(bytes);
+        }
         // The tab activity dot trips on the same visible text, for the same
         // reason.
         if visible > 0 && !self.focused.load(Ordering::Relaxed) {

@@ -62,7 +62,24 @@ impl RingBuffer {
         let start = self.end_seq;
         self.end_seq = self.end_seq.saturating_add(bytes.len() as u64);
         #[cfg(target_os = "linux")]
-        self.write_mirror(start, bytes);
+        self.write_mirror(start, bytes, None);
+        self.keep(start, bytes);
+    }
+
+    /// Push `bytes` that leave the terminal in `state`. The ring file takes
+    /// the state in the same write as the window that counts the bytes, so a
+    /// process killed at any point leaves the two from one moment.
+    #[cfg(target_os = "linux")]
+    pub(super) fn push_with_state(&mut self, bytes: &[u8], state: &TerminalState) {
+        let start = self.end_seq;
+        self.end_seq = self.end_seq.saturating_add(bytes.len() as u64);
+        self.write_mirror(start, bytes, Some(state));
+        self.keep(start, bytes);
+    }
+
+    /// Keep `bytes`, numbered from `start`, in memory, dropping the oldest
+    /// past the capacity.
+    fn keep(&mut self, start: u64, bytes: &[u8]) {
         if bytes.len() >= self.cap {
             self.chunks.clear();
             let tail = bytes[bytes.len() - self.cap..].to_vec();
@@ -174,20 +191,6 @@ impl RingBuffer {
         self.mirror = Some(file);
     }
 
-    /// Publish the terminal `state` the ring's bytes leave, after a push
-    /// that changed it, so a next process restores it with those bytes. A
-    /// stop mark the file carries stays.
-    #[cfg(target_os = "linux")]
-    pub(super) fn publish_state(&mut self, state: &TerminalState) {
-        let Some(mirror) = self.mirror.as_mut() else {
-            return;
-        };
-        let stopped = mirror.stopped();
-        if let Err(error) = mirror.publish_state(state, stopped) {
-            self.stop_mirror_after(error);
-        }
-    }
-
     /// Take the stop mark off the file this ring mirrors into, keeping its
     /// state: the restore that kept the mark has made its generation
     /// durable, so a next process may read the file as exact. A failed
@@ -214,12 +217,15 @@ impl RingBuffer {
         self.mirror = None;
     }
 
+    /// Write a push into the mirror, with the `state` it leaves when it
+    /// changed it. A stop mark the file carries stays.
     #[cfg(target_os = "linux")]
-    fn write_mirror(&mut self, start: u64, bytes: &[u8]) {
+    fn write_mirror(&mut self, start: u64, bytes: &[u8], state: Option<&TerminalState>) {
         let Some(mirror) = self.mirror.as_mut() else {
             return;
         };
-        if let Err(error) = mirror.append(start, bytes) {
+        let state = state.map(|state| state.encode(mirror.stopped()));
+        if let Err(error) = mirror.append_with_state(start, bytes, state) {
             self.stop_mirror_after(error);
         }
     }
@@ -348,6 +354,10 @@ mod layout {
     pub(super) const FLAG_STOPPED: u16 = 2;
 }
 
+// The state region follows the window, so one write can publish both.
+#[cfg(target_os = "linux")]
+const _: () = assert!(layout::STATE_AT == layout::WINDOW_AT + layout::WINDOW_LEN);
+
 // Every tracked mode that is on has a slot in the header.
 #[cfg(target_os = "linux")]
 const _: () = assert!(super::TRACKED_PRIVATE_MODES.len() <= layout::MODE_SLOTS);
@@ -362,8 +372,9 @@ const _: () = assert!(super::TRACKED_PRIVATE_MODES.len() <= layout::MODE_SLOTS);
 /// the header still counts first moves the header's start past them, then
 /// writes the data, then moves the end, so the header never describes a
 /// byte that is not intact. The header also carries the [`TerminalState`]
-/// the bytes leave, republished when output changes it, so a restore takes
-/// the state from the same moment as the bytes.
+/// the bytes leave, published in the same write as the window of the bytes
+/// that changed it, so a restore takes the state from the same moment as
+/// the bytes.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(super) struct RingFile {
@@ -575,6 +586,17 @@ impl RingFile {
     /// Append `bytes`, numbered from `at`. The ring keeps only the last
     /// `capacity` bytes, so older ones leave the window.
     pub(super) fn append(&mut self, at: u64, bytes: &[u8]) -> io::Result<()> {
+        self.append_with_state(at, bytes, None)
+    }
+
+    /// [`append`](Self::append), publishing the state region `state` in the
+    /// same write as the window that counts the bytes, when given.
+    fn append_with_state(
+        &mut self,
+        at: u64,
+        bytes: &[u8],
+        state: Option<[u8; layout::STATE_LEN]>,
+    ) -> io::Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -587,7 +609,10 @@ impl RingFile {
         let start = self.start.max(end.saturating_sub(self.capacity));
         self.retire(start)?;
         self.write_data(end - kept.len() as u64, kept)?;
-        self.publish(start, end)
+        match state {
+            Some(state) => self.publish_with_state(start, end, state),
+            None => self.publish(start, end),
+        }
     }
 
     /// Move the header's start up to `start` ahead of a write that lands on
@@ -629,6 +654,32 @@ impl RingFile {
         self.write_at(&self.window(start, end), layout::WINDOW_AT as u64)?;
         self.start = start;
         self.end = end;
+        Ok(())
+    }
+
+    /// Publish the window and, in the same write, the state region right
+    /// after it, then bring an older header's version up as
+    /// [`write_state`](Self::write_state) does.
+    fn publish_with_state(
+        &mut self,
+        start: u64,
+        end: u64,
+        state: [u8; layout::STATE_LEN],
+    ) -> io::Result<()> {
+        let mut header = [0u8; layout::WINDOW_LEN + layout::STATE_LEN];
+        header[..layout::WINDOW_LEN].copy_from_slice(&self.window(start, end));
+        header[layout::WINDOW_LEN..].copy_from_slice(&state);
+        self.write_at(&header, layout::WINDOW_AT as u64)?;
+        self.start = start;
+        self.end = end;
+        self.state = state;
+        if self.version != layout::FORMAT_VERSION {
+            self.write_at(
+                &layout::FORMAT_VERSION.to_le_bytes(),
+                layout::VERSION_AT as u64,
+            )?;
+            self.version = layout::FORMAT_VERSION;
+        }
         Ok(())
     }
 
