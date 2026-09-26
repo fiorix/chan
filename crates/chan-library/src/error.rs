@@ -2,7 +2,7 @@
 //!
 //! `Error` is returned by the host lifecycle (`WorkspaceHost::open_*`/`close_*`)
 //! and the tenant builder. The variants are generic (workspace / io / config /
-//! bad-request) with no HTTP coupling; `chan-server` maps them onto HTTP
+//! bad-request / shutting-down) with no HTTP coupling; `chan-server` maps them onto HTTP
 //! responses with its own `err_*` helpers and re-exports this type.
 
 #[derive(Debug, thiserror::Error)]
@@ -15,4 +15,8 @@ pub enum Error {
     Config(String),
     #[error("{0}")]
     BadRequest(String),
+    /// The host's last shutdown sweep has begun, so it publishes nothing
+    /// more; the message names what was not mounted.
+    #[error("{0}")]
+    ShuttingDown(String),
 }

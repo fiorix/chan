@@ -1869,6 +1869,9 @@ async fn handle_add_workspace(
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
         }
+        Err(e @ crate::Error::ShuttingDown(_)) => {
+            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
@@ -1915,6 +1918,9 @@ async fn handle_workspace_on(
             "workspace is open in another Chan process",
         )
             .into_response(),
+        Err(e @ crate::Error::ShuttingDown(_)) => {
+            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

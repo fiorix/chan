@@ -2889,6 +2889,9 @@ async fn handle_open(
 ) -> Response {
     match state.register_workspace(Path::new(&req.path)).await {
         Ok(prefix) => Json(MountedPrefix { prefix }).into_response(),
+        Err(e @ Error::ShuttingDown(_)) => {
+            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
@@ -2962,6 +2965,9 @@ async fn handle_set_workspace_on(
             }),
         )
             .into_response(),
+        Err(e @ Error::ShuttingDown(_)) => {
+            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

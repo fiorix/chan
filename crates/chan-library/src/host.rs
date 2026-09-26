@@ -4390,7 +4390,7 @@ fn display_prefix(prefix: &str) -> &str {
 /// The refusal every publication gives once the host's last shutdown sweep
 /// has begun; `what` names the root or the prefix that was not mounted.
 fn shutting_down_error(what: &str) -> Error {
-    Error::Config(format!(
+    Error::ShuttingDown(format!(
         "the workspace host is shutting down; {what} was not mounted"
     ))
 }
