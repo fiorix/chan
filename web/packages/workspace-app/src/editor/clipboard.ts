@@ -9,6 +9,7 @@ import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
 import { notify } from "../state/notify.svelte";
+import { copyTextToClipboard } from "../state/store.svelte";
 import {
   findWorkspaceImageRefs,
   writeDocSelectionToClipboard,
@@ -22,61 +23,58 @@ export function selectionText(view: EditorView): string {
   return view.state.sliceDoc(from, to);
 }
 
+/// Write a menu Copy or Cut's text: the rich HTML + plain flavors when a
+/// rich context (the WYSIWYG body menu) finds workspace image refs in it,
+/// else, or when that write fails, the plain text through the UI copy (the
+/// only path for the Source editor, which passes no context). Returns
+/// whether a write landed; a failed one has already told the user.
+async function writeSelection(
+  text: string,
+  ctx: ChanClipboardContext | undefined,
+  verb: "copy" | "cut",
+): Promise<boolean> {
+  if (ctx && findWorkspaceImageRefs(text).length > 0) {
+    try {
+      await writeDocSelectionToClipboard(text, ctx);
+      return true;
+    } catch (err) {
+      console.warn(`editor rich ${verb} failed, falling back to text`, err);
+    }
+  }
+  let wrote = false;
+  await copyTextToClipboard(text, {
+    onSuccess: () => {
+      wrote = true;
+    },
+    onError: (msg) => {
+      console.warn(`editor ${verb} failed`, msg);
+      notify("Couldn't copy to clipboard");
+    },
+  });
+  return wrote;
+}
+
 /// Copy the primary selection to the system clipboard. No-op (and no
-/// clipboard write) when the selection is empty. With a rich context (the
-/// WYSIWYG body menu), a selection carrying workspace image refs writes the
-/// rich HTML + plain flavors; the plain writeText is the fallback (and the
-/// only path for the Source editor, which passes no context).
+/// clipboard write) when the selection is empty.
 export async function copySelection(
   view: EditorView,
   ctx?: ChanClipboardContext,
 ): Promise<void> {
   const text = selectionText(view);
   if (!text) return;
-  if (ctx && findWorkspaceImageRefs(text).length > 0) {
-    try {
-      await writeDocSelectionToClipboard(text, ctx);
-      return;
-    } catch (err) {
-      console.warn("editor rich copy failed, falling back to text", err);
-    }
-  }
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (err) {
-    console.warn("editor copy failed", err);
-    notify("Couldn't copy to clipboard");
-  }
+  await writeSelection(text, ctx, "copy");
 }
 
 /// Copy then delete the primary selection, leaving the caret where the
-/// selection started. No-op when the selection is empty. Rich context as in
-/// `copySelection`.
+/// selection started. No-op when the selection is empty, and the text stays
+/// when the write fails.
 export async function cutSelection(
   view: EditorView,
   ctx?: ChanClipboardContext,
 ): Promise<void> {
   const { from, to } = view.state.selection.main;
   if (from === to) return;
-  const text = view.state.sliceDoc(from, to);
-  let wrote = false;
-  if (ctx && findWorkspaceImageRefs(text).length > 0) {
-    try {
-      await writeDocSelectionToClipboard(text, ctx);
-      wrote = true;
-    } catch (err) {
-      console.warn("editor rich cut failed, falling back to text", err);
-    }
-  }
-  if (!wrote) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch (err) {
-      console.warn("editor cut failed", err);
-      notify("Couldn't copy to clipboard");
-      return;
-    }
-  }
+  if (!(await writeSelection(view.state.sliceDoc(from, to), ctx, "cut"))) return;
   view.dispatch({
     changes: { from, to, insert: "" },
     selection: EditorSelection.cursor(from),
