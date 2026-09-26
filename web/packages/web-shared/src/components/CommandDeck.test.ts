@@ -233,7 +233,7 @@ describe("CommandDeck focus on close", () => {
 
   /// Focus a control, then mount the deck open over it.
   async function openFromOrigin(
-    entry: DeckItem,
+    entries: DeckItem | DeckItem[],
     handlers: {
       onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
       onSuccess?: (item: DeckItem) => void;
@@ -244,13 +244,21 @@ describe("CommandDeck focus on close", () => {
     origin.focus();
     app = mount(CommandDeckHarness, {
       target,
-      props: { items: [entry], ...handlers },
+      props: { items: Array.isArray(entries) ? entries : [entries], ...handlers },
     }) as Record<string, unknown>;
     await flush();
     expect(document.activeElement, "the deck takes focus").toBe(target.querySelector(".deck-input"));
   }
 
   const close = (): void => (app.close as () => void)();
+
+  function result(title: string): HTMLButtonElement {
+    const found = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
+      (button) => button.querySelector(".deck-result-title")?.textContent === title,
+    );
+    if (!found) throw new Error(`missing result ${title}`);
+    return found;
+  }
 
   afterEach(() => origin.remove());
 
@@ -323,5 +331,43 @@ describe("CommandDeck focus on close", () => {
     escape();
     await flush();
     expect(deckReturnFocus()).toBe(origin);
+  });
+
+  it("keeps a newer run's claim when an older run settles first", async () => {
+    const older = deferred<void>();
+    const newer = deferred<void>();
+    const onChoose = vi.fn((item: DeckItem) => (item.id === "older" ? older.promise : newer.promise));
+    await openFromOrigin(
+      [run({ id: "older", title: "Older", searchText: "older" }), run({ id: "newer", title: "Newer", searchText: "newer" })],
+      { onChoose },
+    );
+    result("Older").click();
+    await flush();
+    result("Newer").click();
+    await flush();
+    older.resolve();
+    await flush();
+    close();
+    await flush();
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).not.toBe(origin);
+    newer.resolve();
+  });
+
+  it("leaves focus where it is when the success card's timer closes the deck", async () => {
+    await openFromOrigin(run({ awaitResult: true }), { onChoose: async () => {}, onSuccess: close });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      closeResult().click();
+      await flush();
+      expect(target.querySelector(".deck-operation")?.textContent, "the success card").toContain("Run");
+      expect(target.querySelector(".deck-shell"), "still open on the card").not.toBeNull();
+      vi.advanceTimersByTime(260);
+      await flush();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).not.toBe(origin);
   });
 });
