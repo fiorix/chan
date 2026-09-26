@@ -91,7 +91,7 @@
     shallowestFileDepth,
   } from "../graph/depth";
   import { ancestorClosure } from "../graph/containmentSpine";
-  import { pullMetaNeighbours } from "../graph/lensClosure";
+  import { lensClosure } from "../graph/lensClosure";
   import { ancestorsExpanded } from "../graph/pathVisibility";
 
   let {
@@ -1101,32 +1101,12 @@
     // show) and deeper depths walk those docs' outgoing edges
     // further out.
     if (currentScope.kind === "tag") {
-      const seedIds = new Set<string>([currentScope.nodeId]);
-      const visited = new Set(seedIds);
-      let frontier = new Set(seedIds);
-      for (let i = 0; i < graphState.depth; i++) {
-        const next = new Set<string>();
-        for (const e of edges) {
-          if (frontier.has(e.source) && !visited.has(e.target)) {
-            next.add(e.target);
-            visited.add(e.target);
-          }
-          if (frontier.has(e.target) && !visited.has(e.source)) {
-            next.add(e.source);
-            visited.add(e.source);
-          }
-        }
-        if (next.size === 0) break;
-        frontier = next;
-      }
-      // Pull each surfaced document's other @@mention / #tag / language
-      // meta-edges into scope so it renders its full first-order semantic
-      // edge set, not just the seed edge (bounded: only meta-nodes join).
-      pullMetaNeighbours(visited, nodes, edges);
-      // Re-anchor every file the lens surfaced to its directory
-      // spine so no file renders edgeless.
-      ancestorClosure(visited, edges);
-      return visited;
+      return lensClosure(nodes, edges, {
+        seedIds: [currentScope.nodeId],
+        depth: graphState.depth,
+        direction: "both",
+        metaClosure: true,
+      });
     }
     // Mention lens: same shape as the tag arm above. The backend emits
     // mention edges as `source: <file>, target: <@@Name>` (file ->
@@ -1136,32 +1116,12 @@
     // that references the handle (the backlinks the lens exists to
     // show) and deeper depths walk those docs' outgoing edges further.
     if (currentScope.kind === "mention") {
-      const seedIds = new Set<string>([currentScope.nodeId]);
-      const visited = new Set(seedIds);
-      let frontier = new Set(seedIds);
-      for (let i = 0; i < graphState.depth; i++) {
-        const next = new Set<string>();
-        for (const e of edges) {
-          if (frontier.has(e.source) && !visited.has(e.target)) {
-            next.add(e.target);
-            visited.add(e.target);
-          }
-          if (frontier.has(e.target) && !visited.has(e.source)) {
-            next.add(e.source);
-            visited.add(e.source);
-          }
-        }
-        if (next.size === 0) break;
-        frontier = next;
-      }
-      // Pull each surfaced document's other @@mention / #tag / language
-      // meta-edges into scope so it renders its full first-order semantic
-      // edge set, not just the seed edge (bounded: only meta-nodes join).
-      pullMetaNeighbours(visited, nodes, edges);
-      // Re-anchor every file the lens surfaced to its directory
-      // spine so no file renders edgeless.
-      ancestorClosure(visited, edges);
-      return visited;
+      return lensClosure(nodes, edges, {
+        seedIds: [currentScope.nodeId],
+        depth: graphState.depth,
+        direction: "both",
+        metaClosure: true,
+      });
     }
     // Contact lens. Seed is the contact file node (located by
     // its rel_path); BFS expands BIDIRECTIONALLY so the
@@ -1177,49 +1137,28 @@
         if (n.kind === "file" && n.path === relPath) seedIds.add(n.id);
       }
       if (seedIds.size === 0) return seedIds;
-      const visited = new Set(seedIds);
-      let frontier = new Set(seedIds);
-      for (let i = 0; i < graphState.depth; i++) {
-        const next = new Set<string>();
-        for (const e of edges) {
-          if (frontier.has(e.source) && !visited.has(e.target)) {
-            next.add(e.target);
-            visited.add(e.target);
-          }
-          if (frontier.has(e.target) && !visited.has(e.source)) {
-            next.add(e.source);
-            visited.add(e.source);
-          }
-        }
-        if (next.size === 0) break;
-        frontier = next;
-      }
-      // Pull each surfaced document's other @@mention / #tag / language
-      // meta-edges into scope so it renders its full first-order semantic
-      // edge set, not just the seed edge (bounded: only meta-nodes join).
-      pullMetaNeighbours(visited, nodes, edges);
-      // Re-anchor every file the lens surfaced to its directory
-      // spine so no file renders edgeless.
-      ancestorClosure(visited, edges);
-      return visited;
+      return lensClosure(nodes, edges, {
+        seedIds: [...seedIds],
+        depth: graphState.depth,
+        direction: "both",
+        metaClosure: true,
+      });
     }
     // Language lens. Seed is the language
     // bubble (node id `language:<lang>`); the lens is always
     // 1-hop (depth doesn't apply to language) so
     // the visible set is the bubble plus every direct neighbour
     // -- which by construction is every file of that language
-    // since the language node carries an edge to each.
+    // since the language node carries an edge to each. The hop is
+    // passed as a fixed 1, not the slider's depth under
+    // `languageOneHop`: language mode reads depth 0 as "max", and
+    // the lens takes its hop there too.
     if (currentScope.kind === "language") {
-      const seedId = `language:${currentScope.language}`;
-      const visited = new Set<string>([seedId]);
-      for (const e of edges) {
-        if (e.source === seedId) visited.add(e.target);
-        if (e.target === seedId) visited.add(e.source);
-      }
-      // Re-anchor every file of this language to its directory
-      // spine so no file renders edgeless.
-      ancestorClosure(visited, edges);
-      return visited;
+      return lensClosure(nodes, edges, {
+        seedIds: [`language:${currentScope.language}`],
+        depth: 1,
+        direction: "both",
+      });
     }
     // Only file scope reaches here in semantic mode:
     //   - workspace + dir handled by the filesystem-depth branch above.
@@ -1235,36 +1174,25 @@
       if (n.kind === "file" && seedPaths.includes(n.path)) seedIds.add(n.id);
     }
     if (seedIds.size === 0) return seedIds;
-    const visited = new Set(seedIds);
-    let frontier = new Set(seedIds);
     // Forward-only BFS: the walk follows edges source -> target
-    // only. Following edges in both directions
-    // (`frontier.has(e.source)` OR `frontier.has(e.target)`) would
-    // hide the "depth slider reveals forward nodes" semantic.
-    // Restricting to outgoing edges only makes the slider
-    // read as "expand from the root in the direction edges point"
-    // -- markdown links emanate from the root doc; contains edges
-    // emanate from the root directory toward its children; etc.
-    for (let i = 0; i < graphState.depth; i++) {
-      const next = new Set<string>();
-      for (const e of edges) {
-        if (frontier.has(e.source) && !visited.has(e.target)) {
-          next.add(e.target);
-          visited.add(e.target);
-        }
-      }
-      if (next.size === 0) break;
-      frontier = next;
-    }
-    // Parent-edge invariant: every in-scope file
-    // should hang off its parent directory so the user can click up
-    // through the graph. The forward-only BFS above expands DOWN from
-    // the seed; `ancestorClosure` walks the contains-edge forest the
-    // other way, UP to the workspace root. Folder-filter hiding is
-    // handled later by `hiddenFolderIds`, so we always include the
-    // chain here.
-    ancestorClosure(visited, edges);
-    return visited;
+    // only. Following edges in both directions would hide the
+    // "depth slider reveals forward nodes" semantic. Restricting to
+    // outgoing edges only makes the slider read as "expand from the
+    // root in the direction edges point" -- markdown links emanate
+    // from the root doc; contains edges emanate from the root
+    // directory toward its children; etc.
+    //
+    // Parent-edge invariant: every in-scope file should hang off its
+    // parent directory so the user can click up through the graph.
+    // The forward-only BFS expands DOWN from the seed; lensClosure's
+    // `ancestorClosure` walks the contains-edge forest the other way,
+    // UP to the workspace root. Folder-filter hiding is handled later
+    // by `hiddenFolderIds`, so the chain is always included here.
+    return lensClosure(nodes, edges, {
+      seedIds: [...seedIds],
+      depth: graphState.depth,
+      direction: "out",
+    });
   });
 
   /// File-node ids the `img` filter currently hides. Pulled out so

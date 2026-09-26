@@ -66,9 +66,9 @@ export function pullMetaNeighbours(
 /// along edges in `direction` (at most one hop with `languageOneHop`, and
 /// along contains edges alone with `containmentOnly`), the meta nodes one
 /// hop off what the walk reached when `metaClosure` is set, and every
-/// contains ancestor of all of that. It exists so the shared Rust/SPA
-/// golden fixture can exercise GraphPanel's lens rules without mounting
-/// the canvas.
+/// contains ancestor of all of that. GraphPanel's tag, mention, contact,
+/// language and file scopes run it, and the shared Rust/SPA golden fixture
+/// runs it without mounting the canvas.
 export function lensClosure(
   nodes: readonly LensNode[],
   edges: readonly LensEdge[],
