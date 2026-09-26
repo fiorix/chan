@@ -2311,7 +2311,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         }
         parker.stop().await;
     }
-    let hosted_shutdown = shut_down_hosted(&host, discovery).await;
+    let hosted_shutdown = shut_down_hosted(&state, discovery).await;
     state.startup.stop();
     state.startup.stopped();
     restore_join.context("joining workspace startup restore")?;
@@ -2346,9 +2346,10 @@ const REGISTRATION_SHUTDOWN_DRAIN: Duration = Duration::from_secs(30);
 /// such as a management mount still inside its bound, is refused and shuts
 /// its own runtime down.
 async fn shut_down_hosted(
-    host: &WorkspaceHost,
+    state: &DevserverState,
     mut discovery: Option<crate::devserver_handoff::ListenerHandle>,
 ) -> Result<(), Error> {
+    let host = &state.host;
     if let Some(listener) = discovery.as_mut() {
         listener.stop_accepting(REGISTRATION_SHUTDOWN_DRAIN).await;
     }
@@ -6470,8 +6471,9 @@ mod tests {
             .expect("the first registration never reached the handler")
             .unwrap();
 
-        let host = Arc::clone(&state.host);
-        let shutdown = tokio::spawn(async move { shut_down_hosted(&host, Some(listener)).await });
+        let stopping = Arc::clone(&state);
+        let shutdown =
+            tokio::spawn(async move { shut_down_hosted(&stopping, Some(listener)).await });
         tokio::time::timeout(Duration::from_secs(10), async {
             while state.host.is_canonical_root_mounted(&mounted_key) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -6541,7 +6543,7 @@ mod tests {
             stall.wait_entered(Duration::from_secs(10)),
             "fixture: the mount never reached its root's filesystem"
         );
-        tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state.host, None))
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state, None))
             .await
             .expect("the shutdown did not return")
             .expect("shut down");
