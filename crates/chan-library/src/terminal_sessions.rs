@@ -7243,6 +7243,37 @@ mod tests {
         assert_eq!(env_value(&env, "PATH", false), None);
     }
 
+    // On Windows portable-pty folds keys with Unicode lowercasing, so a key
+    // spelled with a KELVIN SIGN is the variable chan's own key names there.
+    #[test]
+    fn a_key_the_windows_child_folds_onto_chan_s_is_chan_s() {
+        assert!(
+            is_chan_spawn_env_key_on("CHAN_MCP_SOC\u{212A}ET", true),
+            "a key the child folds onto CHAN_MCP_SOCKET passes the validator"
+        );
+        assert!(!is_chan_spawn_env_key_on("CHAN_MCP_SOC\u{212A}ET", false));
+    }
+
+    // portable-pty keeps the later of two keys that fold alike, and the spawn
+    // applies a caller's entries in the map's order, so the child gets the
+    // value of the later spelling.
+    #[test]
+    fn the_later_of_two_spellings_is_the_windows_child_s_value() {
+        let env = BTreeMap::from([
+            ("PATH".to_string(), r"C:\first".to_string()),
+            ("Path".to_string(), r"C:\later".to_string()),
+        ]);
+        assert_eq!(
+            env_value(&env, "PATH", true).map(String::as_str),
+            Some(r"C:\later"),
+            "the child keeps the later of PATH and Path"
+        );
+        assert_eq!(
+            env_value(&env, "PATH", false).map(String::as_str),
+            Some(r"C:\first")
+        );
+    }
+
     #[test]
     fn scrollback_flattens_the_whole_ring() {
         let session = test_session_with_ring(1024);
