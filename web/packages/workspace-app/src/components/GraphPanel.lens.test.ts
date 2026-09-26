@@ -196,8 +196,9 @@ describe("the language lens", () => {
     };
   }
 
-  // Depth 0 reads as "max" in language mode and the clamp to 1 does not run
-  // there, so both ends of the slider reach the lens.
+  // Depth 0 reads as "max" in language mode. Depth 2 is past this fixture's
+  // slider (max_depth 1): it reaches the lens because the tab is built at 2
+  // and the depth clamp returns early in language mode.
   for (const depth of [0, 2]) {
     test(`takes exactly one hop in language mode at depth ${depth}`, async () => {
       serveLanguageGraph();

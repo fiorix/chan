@@ -574,12 +574,13 @@
     GraphViewNode,
     { kind: "file" | "tag" | "mention" | "language" | "folder" }
   >;
-  /// Chip toggles. `link`, `tag`, `mention` are edge-kind filters
-  /// (the visual element they govern is the edge plus any node only
-  /// reachable through edges of that kind). `img` and `folder` are
-  /// node filters: flipping them off hides every file node whose
-  /// path classifies as image / directory, along with any edge
-  /// touching one.
+  /// Chip toggles. `tag`, `mention` and `language` are edge-kind
+  /// filters: off, their edges hide, and a meta node renders only
+  /// while a visible edge still reaches it. The `mention` chip,
+  /// labelled contact, also hides contact file nodes. `img` hides
+  /// file nodes whose path classifies as an image, with the edges
+  /// touching them; `folder` hides directory nodes except those on
+  /// an in-scope file's spine (`hiddenFolderIds`).
   /// `link` is intentionally absent from the user-facing
   /// FilterKind -- link edges always render (visibility is
   /// implicit via endpoint visibility). The tab's `GraphFilters`
