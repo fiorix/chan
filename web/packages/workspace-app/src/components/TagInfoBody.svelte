@@ -8,6 +8,7 @@
   // navigate callback used when the user clicks a referencing
   // document.
 
+  import { untrack } from "svelte";
   import {
     documentsReferencing,
     ensureGraphLoaded,
@@ -56,8 +57,15 @@
   // referencing documents. ensureGraphLoaded is idempotent and
   // shared with GraphPanel / FileInfoBody, so this is essentially a
   // no-op once the user has touched any graph-aware surface.
+  //
+  // The graph loads on mount and again when a watcher event drops it (the
+  // view goes null). The load's own writes and its per-batch publishes are
+  // untracked, so they re-run nothing here and a stream that keeps failing
+  // is not restarted; the next mount or an explicit reload retries it.
+  const graphDropped = $derived(graphData.view === null);
   $effect(() => {
-    void ensureGraphLoaded();
+    void graphDropped;
+    untrack(() => void ensureGraphLoaded());
   });
 
   type FileGraphNode = Extract<GraphViewNode, { kind: "file" }>;

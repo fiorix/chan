@@ -13,6 +13,7 @@
   // generic folder). `variant` only toggles the directory action row
   // (inspector) vs. nothing (dashboard front slide).
 
+  import { untrack } from "svelte";
   import { api } from "../api/client";
   import type { InspectorPayload, ReportPrefix } from "../api/types";
   import { formatMtime, formatSize } from "../state/format";
@@ -277,8 +278,14 @@
   ///      pre-selected, matching FileInfoBody's unresolved-mention arm.
   /// Loading the graph is cheap + shared: `graphData` is a global cache,
   /// and FileInfoBody already triggers the same load for any file's refs.
+  // The graph loads on mount and again when a watcher event drops it (the
+  // view goes null). The load's own writes and its per-batch publishes are
+  // untracked, so they re-run nothing here and a stream that keeps failing
+  // is not restarted; the next mount or an explicit reload retries it.
+  const graphDropped = $derived(graphData.view === null);
   $effect(() => {
-    void ensureGraphLoaded();
+    void graphDropped;
+    untrack(() => void ensureGraphLoaded());
   });
 
   type ContactPill = {

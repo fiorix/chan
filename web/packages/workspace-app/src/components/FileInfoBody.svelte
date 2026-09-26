@@ -19,6 +19,7 @@
   // re-runs when the selected path changes ($derived dependency
   // tracking does the gating).
 
+  import { untrack } from "svelte";
   import { api, withTokenQuery } from "../api/client";
   import type {
     GraphEdge,
@@ -375,6 +376,17 @@
   }
   let backlinkReq = 0;
 
+  // The graph loads on mount and again when a watcher event drops it (the
+  // view goes null). The load's own writes and its per-batch publishes are
+  // untracked, so they re-run nothing here and a stream that keeps failing
+  // is not restarted; the next mount or an explicit reload retries it.
+  const graphDropped = $derived(graphData.view === null);
+  $effect(() => {
+    if (!showRefs || !entry || entry.is_dir) return;
+    void graphDropped;
+    untrack(() => void ensureGraphLoaded());
+  });
+
   $effect(() => {
     if (!showRefs || !entry || entry.is_dir) {
       backlinks = [];
@@ -382,7 +394,6 @@
       backlinksError = null;
       return;
     }
-    void ensureGraphLoaded();
     const req = ++backlinkReq;
     const target = entry.path;
     const controller = new AbortController();
