@@ -432,6 +432,10 @@ pub async fn api_terminal_ws(
         session_id: query.session,
         since: query.since,
         size,
+        declared_size: query
+            .cols
+            .zip(query.rows)
+            .map(|(cols, rows)| pty_size(Some(cols), Some(rows))),
         tab_name,
         tab_group,
         window_id,
@@ -649,7 +653,13 @@ pub async fn api_set_terminal_broadcast(
 struct TerminalWsOptions {
     session_id: Option<String>,
     since: Option<u64>,
+    /// The spawn size: the query's, with the defaults for a dimension it
+    /// leaves out.
     size: PtySize,
+    /// The size the client's renderer has, when the query declares both
+    /// dimensions. An attach fits a live PTY to it; a client that declares
+    /// none leaves the PTY at the size it has.
+    declared_size: Option<PtySize>,
     tab_name: Option<String>,
     tab_group: Option<String>,
     window_id: Option<String>,
@@ -879,10 +889,19 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         }
     };
     let mut shutdown_rx = state.shutdown_rx.clone();
+    // The size this socket's renderer has: the one its query declared, then
+    // each Resize frame's. A restart re-attach fits the relaunched PTY to it.
+    let mut client_size = opts.declared_size;
 
-    if send_attach_prelude(&mut socket, &state, &session, opts.size)
-        .await
-        .is_err()
+    fit_pty_to_client(&session, client_size);
+    if send_attach_prelude(
+        &mut socket,
+        &state,
+        &session,
+        client_size.unwrap_or(opts.size),
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -918,7 +937,9 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
                             Ok(ClientFrame::Resize { cols, rows }) => {
-                                session.resize(pty_size(Some(cols), Some(rows)));
+                                let size = pty_size(Some(cols), Some(rows));
+                                session.resize(size);
+                                client_size = Some(size);
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
                             Ok(ClientFrame::Cwd) => {
@@ -1107,9 +1128,15 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 {
                                     break;
                                 }
-                                if send_attach_prelude(&mut socket, &state, &session, opts.size)
-                                    .await
-                                    .is_err()
+                                fit_pty_to_client(&session, client_size);
+                                if send_attach_prelude(
+                                    &mut socket,
+                                    &state,
+                                    &session,
+                                    client_size.unwrap_or(opts.size),
+                                )
+                                .await
+                                .is_err()
                                 {
                                     break;
                                 }
@@ -1134,11 +1161,28 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
     }
 }
 
+/// Give the PTY the size the client's renderer has before the attach prelude,
+/// so the redraw nudge that ends the prelude repaints at that size, not at the
+/// size an earlier client left, and a Resize frame the client sends after
+/// `ready` finds the PTY at its size already. Only a declared size is applied,
+/// and only when its cells differ from the PTY's: a resize to the same size
+/// would still echo a `resize` frame to every attached client.
+fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
+    let Some(size) = client_size else {
+        return;
+    };
+    let current = session.size();
+    if (current.cols, current.rows) != (size.cols, size.rows) {
+        session.resize(size);
+    }
+}
+
 /// Send the post-attach prelude for `session`: the session-control frame, the
 /// retained scrollback replay, the alt-screen prelude, a redraw nudge, and the
-/// `Ready` frame. Used on first attach and on an in-place restart re-attach.
-/// Any socket send failure returns `Err(())` so the caller tears the
-/// connection down.
+/// `Ready` frame carrying `size`. Used on first attach and on an in-place
+/// restart re-attach, each after [`fit_pty_to_client`]: the PTY controller
+/// runs the resize before the nudge's size wobble. Any socket send failure
+/// returns `Err(())` so the caller tears the connection down.
 async fn send_attach_prelude(
     socket: &mut WebSocket,
     state: &AppState,

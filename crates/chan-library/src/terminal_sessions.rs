@@ -1578,6 +1578,17 @@ impl AttachHandle {
         self.session.resize(size);
     }
 
+    /// The size the session last gave its PTY: the size it was spawned or
+    /// adopted with, then each resize the controller thread applied. A resize
+    /// still queued on the controller is not in it yet.
+    pub fn size(&self) -> PtySize {
+        *self
+            .session
+            .winsize
+            .lock()
+            .expect("terminal winsize poisoned")
+    }
+
     /// Record whether a client has this session focused. Focusing resets the
     /// unseen-output counter and broadcasts the reset.
     pub fn set_focused(&self, focused: bool) {
