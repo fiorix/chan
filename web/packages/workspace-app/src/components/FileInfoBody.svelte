@@ -30,7 +30,7 @@
   } from "../api/types";
   import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
   import { isAudio, isImage, isPdf, isVideo } from "../state/fileTypes";
-  import { basename, formatMtime, formatSize } from "../state/format";
+  import { basename, formatMtime, formatSize, parentDir } from "../state/format";
   import { windowCaps } from "../state/windowCaps";
   import {
     ensureGraphLoaded,
@@ -180,9 +180,7 @@
   /// dir is already loaded or in flight.
   $effect(() => {
     if (!path || entry) return;
-    const parent = path.includes("/")
-      ? path.slice(0, path.lastIndexOf("/"))
-      : "";
+    const parent = parentDir(path);
     // A parent that could not be listed is a state, not an absence of one.
     // loadTreeDir records the failure and clears loadingDirs without ever
     // setting loadedDirs, so an effect that asked only "loaded or loading"
