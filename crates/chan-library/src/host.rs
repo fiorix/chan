@@ -2843,7 +2843,10 @@ impl WorkspaceHost {
         let path = Path::new(path);
         let target = stored_window_key(path);
         if let Ok(workspaces) = self.workspaces.read() {
-            if let Some(runtime) = workspaces.values().find(|runtime| runtime.found_by(&target)) {
+            if let Some(runtime) = workspaces
+                .values()
+                .find(|runtime| runtime.found_by(&target))
+            {
                 let connected = runtime
                     .artifacts
                     .window_presence

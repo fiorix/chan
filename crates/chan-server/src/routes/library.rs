@@ -3050,15 +3050,24 @@ mod devserver_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "on: {row}");
-        assert_eq!(row["status"], "running", "the relinked root's on answered: {row}");
+        assert_eq!(
+            row["status"], "running",
+            "the relinked root's on answered: {row}"
+        );
         assert_eq!(row["on"], true, "the relinked root's on answered: {row}");
         let (_, rows) = request(&router, "GET", "/api/library/workspaces", None).await;
         let listed = rows
             .as_array()
-            .and_then(|rows| rows.iter().find(|listed| listed["workspace_id"] == id.as_str()))
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|listed| listed["workspace_id"] == id.as_str())
+            })
             .cloned()
             .unwrap_or_default();
-        assert_eq!(listed["status"], "running", "the relinked root's list row: {rows}");
+        assert_eq!(
+            listed["status"], "running",
+            "the relinked root's list row: {rows}"
+        );
         assert_eq!(listed["on"], true, "the relinked root's list row: {rows}");
 
         std::fs::rename(holder.path().join("moved"), holder.path().join("gone")).unwrap();
@@ -3069,7 +3078,10 @@ mod devserver_route_tests {
         let (_, rows) = request(&router, "GET", "/api/library/workspaces", None).await;
         let listed = rows
             .as_array()
-            .and_then(|rows| rows.iter().find(|listed| listed["workspace_id"] == id.as_str()))
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|listed| listed["workspace_id"] == id.as_str())
+            })
             .cloned()
             .unwrap_or_default();
         assert_eq!(
@@ -3108,7 +3120,8 @@ mod devserver_route_tests {
         );
         let (_, feed) = request(&router, "GET", "/api/library/windows", None).await;
         assert!(
-            feed.to_string().contains(record["window_id"].as_str().unwrap_or("-")),
+            feed.to_string()
+                .contains(record["window_id"].as_str().unwrap_or("-")),
             "the window is missing from the feed: {feed}"
         );
     }

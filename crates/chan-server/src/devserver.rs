@@ -6013,7 +6013,11 @@ mod tests {
         restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx).await;
 
         let entries = state.workspace_entries();
-        assert_eq!(entries.len(), 1, "the relinked root lists twice: {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the relinked root lists twice: {entries:?}"
+        );
         assert!(
             entries[0].on && !entries[0].token.is_empty(),
             "the restored relinked root lists as off: {entries:?}"
