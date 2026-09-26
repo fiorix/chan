@@ -173,7 +173,8 @@ cuda = [
     "candle-transformers/cuda",
 ]
 # Test-only seams into this crate's internals (the startup-recovery pause
-# barrier) compiled for downstream test builds. This crate's own tests reach
+# barrier, and the root stall that holds one root's canonicalizations and
+# health checks) compiled for downstream test builds. This crate's own tests reach
 # them through `cfg(test)`; chan-server's tests link chan-workspace as a normal
 # dependency and cannot, so they enable this in their dev-dependency.
 # Production builds compile none of them.
