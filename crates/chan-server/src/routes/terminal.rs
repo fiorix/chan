@@ -697,13 +697,22 @@ pub(crate) fn validate_terminal_env(
     env: &BTreeMap<String, String>,
     tab_name: Option<&str>,
 ) -> Result<(), String> {
+    // chan exports the name trimmed and capped, so a restatement compares as
+    // that same name on both sides: a caller that passes the name as typed
+    // and one that passes it normalized agree about the same env.
+    let tab_name = tab_name.and_then(|name| normalize_label(name, MAX_NAME_CHARS));
     for (key, value) in env {
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
             return Err(format!("invalid terminal env key: {key:?}"));
         }
+        let restated = normalize_label(value, MAX_NAME_CHARS);
         // chan writes these itself after the caller's entries, so a caller's
         // value would never reach the child.
-        if chan_library::terminal_sessions::chan_overrides_spawn_env(key, value, tab_name) {
+        if chan_library::terminal_sessions::chan_overrides_spawn_env(
+            key,
+            restated.as_deref().unwrap_or(value),
+            tab_name.as_deref(),
+        ) {
             return Err(format!(
                 "terminal env key {key} is set by chan for every terminal and cannot be overridden"
             ));
@@ -2609,6 +2618,19 @@ mod tests {
             .expect_err("a CHAN_TAB_NAME other than the tab name is refused");
         assert!(refused.contains("CHAN_TAB_NAME"), "{refused}");
         assert!(validate_terminal_env(&spa, None).is_err());
+    }
+
+    // A restatement compares as chan exports the name, trimmed: the SPA does
+    // not trim a member's handle, the create route passes the trimmed name
+    // and a team config the handle as typed.
+    #[test]
+    fn a_restated_tab_name_compares_as_chan_exports_it() {
+        let spaced = BTreeMap::from([("CHAN_TAB_NAME".to_string(), "@@Lead ".to_string())]);
+        assert!(validate_terminal_env(&spaced, Some("@@Lead")).is_ok());
+        assert!(validate_terminal_env(&spaced, Some("@@Lead ")).is_ok());
+        let trimmed = BTreeMap::from([("CHAN_TAB_NAME".to_string(), "@@Lead".to_string())]);
+        assert!(validate_terminal_env(&trimmed, Some(" @@Lead")).is_ok());
+        assert!(validate_terminal_env(&spaced, Some("@@Worker")).is_err());
     }
 
     #[tokio::test]
