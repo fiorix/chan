@@ -13,9 +13,11 @@
 //! (network, 5xx - the roster's own 502 body is `{"error":"upstream
 //! error"}`) KEEPS the last-known roster and retries, flipping the gateway
 //! to `unreachable` only after [`ROSTER_UNREACHABLE_FAILURES`] consecutive
-//! misses; ONLY a 401 runs the disconnect cascade and clears the stored
-//! PAT. A degraded all-offline roster is never synthesized - dropping rows
-//! on a flaky upstream would close every gateway window.
+//! misses, a PAT the keychain fails to load counting as one; ONLY a 401, or
+//! a connected gateway whose stored PAT is gone, runs the disconnect cascade
+//! and clears the stored PAT. A degraded all-offline roster is never
+//! synthesized - dropping rows on a flaky upstream would close every
+//! gateway window.
 //!
 //! Sign-in is single-flight (the pending-auth slot in [`crate::auth`] is
 //! process-global latest-wins): one gateway sign-in may be in the browser
@@ -109,11 +111,12 @@ pub enum RosterFetch {
     },
     /// 304: the roster is unchanged.
     NotModified,
-    /// 401: the PAT is dead or under-scoped. The ONLY outcome that
-    /// cascades.
+    /// 401, or no stored PAT for a polled gateway: the credential is dead,
+    /// under-scoped or gone. The ONLY outcome that cascades.
     Unauthorized,
     /// Everything else (network, decode, 5xx incl. the roster's 502
-    /// upstream-error body): keep the last-known roster and retry.
+    /// upstream-error body, a keychain that cannot load the PAT): keep the
+    /// last-known roster and retry.
     Upstream(String),
 }
 
@@ -358,8 +361,8 @@ pub fn diff_rosters(old: &[RosterDevserver], new: &[RosterDevserver]) -> RosterD
 
 /// Apply one fetch outcome to a runtime. Pure over the runtime struct so
 /// the failure semantics are table-testable: upstream failures KEEP the
-/// roster and count toward unreachable; only 401 cascades; success of
-/// either flavor resets the failure counter.
+/// roster and count toward unreachable; only `Unauthorized` cascades;
+/// success of either flavor resets the failure counter.
 pub fn apply_roster_fetch(rt: &mut GatewayRuntime, fetch: RosterFetch) -> FetchEffect {
     let mut effect = FetchEffect::default();
     match fetch {
@@ -1128,30 +1131,49 @@ async fn roster_poll_tick<R: tauri::Runtime>(
 ) -> ControlFlow<()> {
     // Re-read the PAT each tick: a re-sign-in mid-poll swaps the
     // credential without restarting the loop.
-    let secret = match auth::load_gateway_pat(identity_origin) {
-        Ok(Some(pat)) => pat.secret,
-        Ok(None) | Err(_) => {
-            // No credential: the next tick retries; a cascade (which
-            // clears the PAT) also cancels this loop.
-            return ControlFlow::Continue(());
-        }
-    };
+    let loaded = auth::load_gateway_pat(identity_origin);
     let etag = {
         let runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        match runtimes.get(gateway_id) {
-            Some(rt) => rt.etag.clone(),
-            None => return ControlFlow::Break(()),
+        let Some(rt) = runtimes.get(gateway_id) else {
+            return ControlFlow::Break(());
+        };
+        // While a connect or a browser sign-in owns the runtime, a missing
+        // or failing credential is that attempt's to report: a connect
+        // clears a rejected PAT before its browser leg while this poll
+        // still runs.
+        let polled = matches!(
+            rt.status,
+            GatewayStatus::Connected | GatewayStatus::Unreachable
+        ) && !rt.pending_signin;
+        if !polled && !matches!(loaded, Ok(Some(_))) {
+            return ControlFlow::Continue(());
+        }
+        rt.etag.clone()
+    };
+    let signed_out = matches!(loaded, Ok(None));
+    let fetch = match loaded {
+        Ok(Some(pat)) => {
+            let fetch = fetch_roster(roster_url, &pat.secret, etag.as_deref()).await;
+            // A disconnect+reconnect replaced this poll while the fetch
+            // was in flight: the successor owns the runtime now, and the
+            // map-presence check below cannot tell the two polls apart -
+            // only the token can. Applying the stale fetch would clobber
+            // the successor's state.
+            if cancel.is_cancelled() {
+                return ControlFlow::Break(());
+            }
+            fetch
+        }
+        // The stored credential is gone and nothing can read the roster
+        // without one: sign out the way a rejected credential does.
+        Ok(None) => RosterFetch::Unauthorized,
+        // A keychain that cannot answer counts toward unreachable like a
+        // gateway that cannot, so the row stops claiming a fresh roster.
+        Err(error) => {
+            tracing::warn!(gateway = %gateway_id, %error, "roster poll could not load the gateway PAT");
+            RosterFetch::Upstream(error)
         }
     };
-    let fetch = fetch_roster(roster_url, &secret, etag.as_deref()).await;
-    // A disconnect+reconnect replaced this poll while the fetch
-    // was in flight: the successor owns the runtime now, and the
-    // map-presence check below cannot tell the two polls apart -
-    // only the token can. Applying the stale fetch would clobber
-    // the successor's state.
-    if cancel.is_cancelled() {
-        return ControlFlow::Break(());
-    }
     let effect = {
         let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
         match runtimes.get_mut(gateway_id) {
@@ -1165,15 +1187,18 @@ async fn roster_poll_tick<R: tauri::Runtime>(
             .map(|g| display_label(&g))
             .unwrap_or_else(|_| gateway_id.to_string());
         cascade_disconnect(app, state, gateway_id, CascadeReason::Unauthorized).await;
-        emit_notice(
-            app,
-            "error",
-            "gateway",
-            gateway_id,
-            &label,
-            "Gateway sign-in expired",
-            "the gateway rejected the stored sign-in; click Connect to sign in again",
-        );
+        let (title, message) = if signed_out {
+            (
+                "Gateway signed out",
+                "the stored sign-in is gone; click Connect to sign in again",
+            )
+        } else {
+            (
+                "Gateway sign-in expired",
+                "the gateway rejected the stored sign-in; click Connect to sign in again",
+            )
+        };
+        emit_notice(app, "error", "gateway", gateway_id, &label, title, message);
         return ControlFlow::Break(());
     }
     if effect.became_unreachable {
@@ -1218,8 +1243,8 @@ pub enum CascadeReason {
     /// The row was removed: config row is already gone, keep the PAT
     /// (a re-add reconnects without a new sign-in).
     Removed,
-    /// The roster answered 401: clear the PAT (it is dead), keep enabled
-    /// (the next connect runs the sign-in leg).
+    /// The roster answered 401, or the poll found the stored PAT gone: clear
+    /// the PAT, keep enabled (the next connect runs the sign-in leg).
     Unauthorized,
 }
 
