@@ -5622,28 +5622,33 @@ function deepestFirst(paths: readonly string[]): string[] {
 
 /// After a delete: refresh the tree (and the workspace summary where there is
 /// one), and close every file tab showing a deleted path or a path under one.
+/// The tabs close even when the refresh fails, since the paths are gone
+/// either way; the refresh's error is thrown after.
 async function settleDeleted(paths: readonly string[]): Promise<void> {
-  await Promise.all(
-    windowCaps.workspace
-      ? [refreshTree(), refreshWorkspace()]
-      : [refreshTree()],
-  );
-  const underDeleted = (p: string) =>
-    paths.some((path) => p === path || p.startsWith(`${path}/`));
-  // Snapshot (paneId, tabId) pairs to close BEFORE mutating
-  // layout, since closeTab may collapse the pane mid-iteration.
-  const toClose: Array<[string, string]> = [];
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    for (const t of allPaneTabs(node)) {
-      if (t.kind !== "file") continue;
-      if (underDeleted(t.path)) {
-        toClose.push([node.id, t.id]);
+  try {
+    await Promise.all(
+      windowCaps.workspace
+        ? [refreshTree(), refreshWorkspace()]
+        : [refreshTree()],
+    );
+  } finally {
+    const underDeleted = (p: string) =>
+      paths.some((path) => p === path || p.startsWith(`${path}/`));
+    // Snapshot (paneId, tabId) pairs to close BEFORE mutating
+    // layout, since closeTab may collapse the pane mid-iteration.
+    const toClose: Array<[string, string]> = [];
+    for (const node of Object.values(layout.nodes)) {
+      if (node.kind !== "leaf") continue;
+      for (const t of allPaneTabs(node)) {
+        if (t.kind !== "file") continue;
+        if (underDeleted(t.path)) {
+          toClose.push([node.id, t.id]);
+        }
       }
     }
-  }
-  for (const [paneId, tabId] of toClose) {
-    await closeTab(paneId, tabId, { force: true });
+    for (const [paneId, tabId] of toClose) {
+      await closeTab(paneId, tabId, { force: true });
+    }
   }
 }
 
@@ -6032,7 +6037,7 @@ export const fileOps = {
     try {
       await settleDeleted([path]);
     } catch (e) {
-      ui.status = `delete failed: ${(e as Error).message}`;
+      ui.status = `deleted "${name}"; refresh failed: ${(e as Error).message}`;
     }
     return true;
   },
@@ -6094,16 +6099,19 @@ export const fileOps = {
     const kept = refused.filter((r) => !r.gone).map((r) => r.path);
     if (kept.length === 0) fbClearSelection();
     else fbSelectSet(kept);
+    let refreshError: string | null = null;
     try {
       if (deleted.length > 0) await settleDeleted(deleted);
     } catch (e) {
-      ui.status = `delete failed: ${(e as Error).message}`;
-      return;
+      refreshError = (e as Error).message;
     }
+    // A full delete followed by a good refresh needs no status line.
     const first = refused[0];
-    if (first) {
-      ui.status = `deleted ${deleted.length} of ${targets.length}; ${first.path}: ${first.reason}`;
-    }
+    if (!first && refreshError === null) return;
+    const outcome = first
+      ? `deleted ${deleted.length} of ${targets.length}; ${first.path}: ${first.reason}`
+      : `deleted ${deleted.length}`;
+    ui.status = refreshError === null ? outcome : `${outcome}; refresh failed: ${refreshError}`;
   },
   /// Duplicate a file in-place. Reads the source via the API so any
   /// unsaved buffer in the open tab is intentionally ignored - the
