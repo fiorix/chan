@@ -1443,7 +1443,10 @@ impl WorkspaceHost {
         {
             Ok((result, key)) => (result.map_err(Error::from), key),
             Err(error) => (
-                Err(std::io::Error::other(format!("workspace root check task failed: {error}")).into()),
+                Err(
+                    std::io::Error::other(format!("workspace root check task failed: {error}"))
+                        .into(),
+                ),
                 root.clone(),
             ),
         };
@@ -3670,10 +3673,7 @@ impl WorkspaceHost {
     /// revalidating `workspace` on a thread of its own; `None` when no
     /// thread can be started.
     fn start_root_probe(&self, key: &Path, workspace: Arc<Workspace>) -> Option<Arc<RootProbe>> {
-        let mut checks = self
-            .root_probes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut checks = self.root_probes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(check) = checks.get(key) {
             return Some(Arc::clone(check));
         }
@@ -3804,9 +3804,7 @@ impl WorkspaceHost {
     fn settle_mount(&self, key: &Path, result: &Result<HostedWorkspace, Error>) {
         match result {
             Ok(_) => self.clear_mount_state_by_key(key),
-            Err(Error::Core(ChanError::WorkspaceAlreadyOpen)) => {
-                self.settle_interrupted_mount(key)
-            }
+            Err(Error::Core(ChanError::WorkspaceAlreadyOpen)) => self.settle_interrupted_mount(key),
             Err(Error::Core(ChanError::WorkspaceLocked)) => {
                 self.clear_workspace_lifecycle_by_key(key)
             }

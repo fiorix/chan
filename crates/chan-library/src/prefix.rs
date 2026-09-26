@@ -30,10 +30,7 @@ use crate::Error;
 /// gateway forwards; the hash suffix makes it unique per root, so two
 /// same-basename roots map to DISTINCT prefixes and both mount (no collision).
 pub fn allocate_workspace_prefix(root: &Path) -> Result<String, Error> {
-    workspace_prefix_for(
-        root,
-        &chan_workspace::paths::canonicalize_normalized(root),
-    )
+    workspace_prefix_for(root, &chan_workspace::paths::canonicalize_normalized(root))
 }
 
 /// [`allocate_workspace_prefix`] for a caller that has already resolved

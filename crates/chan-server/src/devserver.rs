@@ -2172,9 +2172,7 @@ async fn shut_down_hosted(
     mut discovery: Option<crate::devserver_handoff::ListenerHandle>,
 ) -> Result<(), Error> {
     if let Some(listener) = discovery.as_mut() {
-        listener
-            .stop_accepting(REGISTRATION_SHUTDOWN_DRAIN)
-            .await;
+        listener.stop_accepting(REGISTRATION_SHUTDOWN_DRAIN).await;
     }
     let draining = async {
         if let Some(listener) = discovery {
@@ -5399,14 +5397,15 @@ mod tests {
 
         let serving = Arc::clone(&state);
         let other_root = other.path().to_path_buf();
-        let response = completes_beside(
-            &stall,
-            "a serve request for another root beside a hung root's",
-            async move {
-                handle_discovery_request(&serving, 8787, register_request(&other_root)).await
-            },
-        )
-        .await;
+        let response =
+            completes_beside(
+                &stall,
+                "a serve request for another root beside a hung root's",
+                async move {
+                    handle_discovery_request(&serving, 8787, register_request(&other_root)).await
+                },
+            )
+            .await;
         assert!(
             matches!(
                 response,
@@ -5538,7 +5537,10 @@ mod tests {
         let accepted = tempfile::tempdir().expect("root registered before shutdown");
         let late = tempfile::tempdir().expect("root registered during shutdown");
         let state = devserver_with_windows(home.path()).await;
-        state.register_workspace(mounted.path()).await.expect("mount");
+        state
+            .register_workspace(mounted.path())
+            .await
+            .expect("mount");
         let mounted_key = canonical_root(mounted.path());
 
         let sock = home.path().join("register.sock");
@@ -5579,12 +5581,10 @@ mod tests {
         .await
         .expect("the tenants' shutdown never started");
 
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(10),
-            try_register_at(&sock, late.path()),
-        )
-        .await
-        .expect("the registration during shutdown did not answer");
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), try_register_at(&sock, late.path()))
+                .await
+                .expect("the registration during shutdown did not answer");
         assert!(
             !matches!(outcome, Outcome::Registered { .. }),
             "a registration arriving during shutdown was accepted: {outcome:?}"

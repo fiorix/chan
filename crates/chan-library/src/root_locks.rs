@@ -172,7 +172,10 @@ impl RootKeys {
         root: &Path,
         compute: impl FnOnce(&Path) -> PathBuf + Send + 'static,
     ) -> watch::Receiver<Option<PathBuf>> {
-        let mut in_flight = self.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // An entry whose sender is gone belongs to a computation that ended
         // without answering; it is replaced rather than joined.
         if let Some(answer) = in_flight
@@ -335,7 +338,11 @@ mod tests {
             1,
             "two callers of one spelling each computed its key"
         );
-        assert_eq!(keys.len(), 0, "a finished computation left its entry behind");
+        assert_eq!(
+            keys.len(),
+            0,
+            "a finished computation left its entry behind"
+        );
     }
 
     #[tokio::test]
@@ -354,7 +361,11 @@ mod tests {
             2,
             "a key computed earlier was served instead of asked for afresh"
         );
-        assert_eq!(keys.len(), 0, "a finished computation left its entry behind");
+        assert_eq!(
+            keys.len(),
+            0,
+            "a finished computation left its entry behind"
+        );
     }
 
     #[tokio::test]
