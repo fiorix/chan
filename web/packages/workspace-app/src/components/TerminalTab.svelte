@@ -318,6 +318,10 @@
   let missedBytes = $state(0);
   let findOpen = $state(false);
   let findQuery = $state("");
+  // Set by a session frame: this xterm shows the session up to
+  // `receivedSeq`, so a redial resumes from there. A dial that fails before
+  // its own session frame leaves the screen as it was and keeps it; only a
+  // disposed xterm clears it.
   let sawSessionControl = false;
   let pendingPromptSeed = "";
   let promptSeedSent = false;
@@ -1293,7 +1297,9 @@
         : undefined;
     const liveResumeGeneration =
       liveResumeSince !== undefined ? (serverGeneration ?? undefined) : undefined;
-    sawSessionControl = false;
+    // Whether this dial's socket has delivered a session frame yet: its first
+    // one on a reattach carries a replay of history the PTY already had.
+    let dialSawSession = false;
     pendingPromptSeed = reattaching ? "" : (tab.seedInput ?? "");
     promptSeedSent = false;
     // Try to resume from either this live xterm or a cached scrollback
@@ -1403,10 +1409,11 @@
         // frame.id that differs is a fresh shell replacing the reaped session,
         // not a same-id live resume.
         const priorId = tab.terminalSessionId;
-        const duplicateReplay = reattaching && !sawSessionControl;
+        const duplicateReplay = reattaching && !dialSawSession;
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
+        dialSawSession = true;
         sawSessionControl = true;
         // A successful attach proves the session + path healthy: reset the
         // backoff ramp.
@@ -2002,6 +2009,7 @@
     secretMasker = null;
     term?.dispose();
     term = null;
+    sawSessionControl = false;
     termWriter = null;
     ptyWrites.reset();
     mouseFilter = null;
