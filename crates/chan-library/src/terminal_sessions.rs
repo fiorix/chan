@@ -1084,6 +1084,11 @@ pub struct FdStoreRestoreReport {
     pub restored: usize,
     pub skipped: Vec<String>,
     pub skipped_sessions: Vec<FdStoreSkippedSession>,
+    /// The store names of the ring files restored sessions gave up on: one
+    /// that did not open as a ring, or one that could not be reset to mirror
+    /// the manifest's ring. The store still holds them, and activation parks
+    /// a new ring under the same name, so the caller removes them.
+    pub abandoned_ring_fds: Vec<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -12250,6 +12255,43 @@ mod tests {
             );
             assert_eq!(resumed.missed_bytes, 0);
             assert_eq!(resumed.replay.concat(), late);
+        }
+
+        // A restored session that gives up its ring file reports the file's
+        // store name for removal. The store still holds it and activation
+        // parks a new ring under the same name, so without the removal the
+        // store would hold two fds under one name and a next boot could take
+        // the broken one.
+        #[test]
+        fn a_restore_that_gives_up_its_ring_file_reports_it_for_removal() {
+            use std::os::fd::AsRawFd;
+            let registry = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            // A ring file that ends behind the manifest, so the restore resets
+            // it, over a read-only fd, so the reset fails.
+            let mut file = RingFile::create(LIVE_RING_BYTES).unwrap();
+            file.append(0, b"behind the manifest").unwrap();
+            let read_only =
+                std::fs::File::open(format!("/proc/self/fd/{}", file.shared_file().as_raw_fd()))
+                    .unwrap();
+            let (mut reset_fails, _reset_pair) =
+                ringless_import("reset-fails", 1, &numbered_lines(1000));
+            reset_fails.ring_fd = Some(read_only.into());
+            // A file too short to hold a ring.
+            let (mut adopt_fails, _adopt_pair) = ringless_import("adopt-fails", 1, b"restored");
+            adopt_fails.ring_fd = Some(tempfile::tempfile().unwrap().into());
+
+            let report = registry.restore_fdstore_sessions(vec![reset_fails, adopt_fails]);
+            assert_eq!(report.restored, 2, "skipped: {:?}", report.skipped);
+            let mut abandoned = report.abandoned_ring_fds.clone();
+            abandoned.sort();
+            assert_eq!(
+                abandoned,
+                vec![
+                    fdstore_ring_fd_name("adopt-fails", None),
+                    fdstore_ring_fd_name("reset-fails", None),
+                ],
+                "the ring files the restore gave up on are not reported for removal"
+            );
         }
 
         // A generation minted for a restore that may end behind the previous
