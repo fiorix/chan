@@ -242,6 +242,16 @@ impl RingBuffer {
         }
     }
 
+    /// Fail every one of the mirror's writes after `writes` more succeed, as
+    /// a process killed at that point would.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn kill_mirror_after(&self, writes: usize) {
+        if let Some(mirror) = self.mirror.as_ref() {
+            mirror.writes_left.set(Some(writes));
+            mirror.recover_after_failure.set(false);
+        }
+    }
+
     /// Fail one of the mirror's writes after `writes` more succeed, as a
     /// write refused for memory would, and let the ones after it succeed.
     #[cfg(all(test, target_os = "linux"))]

@@ -11610,6 +11610,17 @@ mod tests {
                     .collect()
             }
 
+            /// The ring file stored under `name`, read back as a next process
+            /// would.
+            fn stored_ring(&self, name: &str) -> (RingFile, u64) {
+                let fd = self.0.fds.lock().unwrap()[name]
+                    .try_clone()
+                    .expect("duplicate a stored fd");
+                let mut file = RingFile::adopt(fd).expect("a ring file");
+                let (end, _) = file.read().expect("a readable ring file");
+                (file, end)
+            }
+
             /// What a next process imports when the one before it died
             /// before its first manifest commit: the same published manifest
             /// and a duplicate of every fd, which the store keeps for the
@@ -12308,6 +12319,35 @@ mod tests {
                 ],
                 "the ring files the restore gave up on are not reported for removal"
             );
+        }
+
+        // A push publishes its bytes and the state they leave in one write,
+        // so a process killed at any write of it leaves a ring file whose
+        // state is the one its bytes leave. A stale alternate-screen flag
+        // beside bytes that left the alternate screen would make a fresh
+        // attach after the crash replay nothing.
+        #[test]
+        fn a_kill_at_any_write_of_a_push_leaves_the_state_beside_its_bytes() {
+            let vim = b"$ vim notes\r\n\x1b[?1049hvim's screen";
+            for writes in 0..4 {
+                let store = StoreSim::default();
+                let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+                store.serve(&registry);
+                let id = format!("killed-after-{writes}-writes");
+                let (session, _pair) = parked_session_without_a_child(&registry, &id);
+                session.record_output(vim);
+                session.ring.lock().unwrap().kill_mirror_after(writes);
+                session.record_output(b"\x1b[?1049l$ make\r\n");
+
+                let (file, end) = store.stored_ring(&fdstore_ring_fd_name(&id, None));
+                let alt_screen = file.terminal_state().expect("a state").alt_screen;
+                let holds_the_exit = end > vim.len() as u64;
+                assert_eq!(
+                    alt_screen, !holds_the_exit,
+                    "killed after {writes} writes of the push: the file ends at {end} with \
+                     alt_screen {alt_screen}"
+                );
+            }
         }
 
         // A generation minted for a restore that may end behind the previous
