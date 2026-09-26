@@ -4660,11 +4660,17 @@ impl Session {
     }
 
     /// The ring's end `seq` and its bounded replay tail, read under one ring
-    /// lock so the tail ends exactly at that `seq`.
+    /// lock so the tail ends exactly at that `seq`. A ring its file mirrors
+    /// has no tail: the file holds the whole ring and the manifest's `seq`
+    /// is only the threshold it must reach. A ring without a mirror, never
+    /// made or stopped by a failed write, keeps the tail as its fallback.
     #[cfg(target_os = "linux")]
     fn fdstore_replay_tail(&self) -> (u64, Vec<u8>) {
         let (seq, chunks) = {
             let ring = self.ring.lock().expect("terminal ring poisoned");
+            if ring.is_mirrored() {
+                return (ring.end_seq(), Vec::new());
+            }
             (ring.end_seq(), ring.snapshot_since(None).0)
         };
         let replay = chunks.concat();
@@ -11559,6 +11565,66 @@ mod tests {
                 after.mode_reassert.is_empty(),
                 "vim's mouse modes are reasserted after it quit: {:?}",
                 String::from_utf8_lossy(&after.mode_reassert)
+            );
+        }
+
+        // A manifest entry whose ring file is mirroring carries no tail: the
+        // file holds the ring. When that file is then unusable, the session
+        // restores at the manifest's seq with an empty ring, and a fresh
+        // attach reports every byte before it as missed.
+        #[test]
+        fn a_mirrored_ring_carries_no_manifest_tail() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "ring-without-a-tail";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            session.record_output(&numbered_lines(5000));
+            store.changed();
+            {
+                let published = store.0.published.lock().unwrap();
+                assert!(
+                    published[0].replay.is_empty(),
+                    "a mirrored ring carries no tail"
+                );
+                assert_eq!(published[0].meta.seq, 5000);
+            }
+            let ring_name = fdstore_ring_fd_name(id, None);
+            let ring_file =
+                File::from(store.0.fds.lock().unwrap()[&ring_name].try_clone().unwrap());
+            std::os::unix::fs::FileExt::write_all_at(&ring_file, b"NOTARING", 0).unwrap();
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let after = next.attach(id, Some(0)).unwrap();
+            assert!(after.replay.concat().is_empty());
+            assert_eq!(after.seq, 5000);
+            assert_eq!(
+                after.missed_bytes, 5000,
+                "the notice counts the lost history"
+            );
+        }
+
+        // A ring whose mirror stopped after a failed write keeps its tail in
+        // the manifest: its file ends behind the session.
+        #[test]
+        fn a_ring_whose_mirror_stopped_keeps_its_manifest_tail() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let (session, _pair) = parked_session_without_a_child(&registry, "tail-kept");
+            session.record_output(&numbered_lines(1000));
+            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session.record_output(b"after the failed write\n");
+            store.changed();
+            let published = store.0.published.lock().unwrap();
+            assert!(published[0].ring_fd_name.is_some());
+            assert!(
+                published[0].replay.ends_with(b"after the failed write\n"),
+                "a ring without a mirror carries its tail"
             );
         }
 

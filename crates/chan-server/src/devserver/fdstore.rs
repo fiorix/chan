@@ -1192,6 +1192,8 @@ mod linux {
             /// Fail only the store of this one name.
             fail_store_name: Mutex<Option<String>>,
             fail_barrier: AtomicBool,
+            /// A duplicate of every fd stored and not removed, by name.
+            fds: Mutex<HashMap<String, std::os::fd::OwnedFd>>,
         }
 
         #[derive(Clone, Default)]
@@ -1201,16 +1203,31 @@ mod linux {
             fn calls(&self) -> Vec<String> {
                 self.0.calls.lock().unwrap().clone()
             }
+
+            /// The contents of the file stored under `name`.
+            fn stored_file(&self, name: &str) -> Vec<u8> {
+                use std::io::Read;
+                let fds = self.0.fds.lock().unwrap();
+                let fd = fds.get(name).expect("a stored fd").try_clone().unwrap();
+                let mut bytes = Vec::new();
+                std::fs::File::from(fd).read_to_end(&mut bytes).unwrap();
+                bytes
+            }
         }
 
         impl StoreOps for FakeStoreOps {
-            fn store(&self, name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
+            fn store(&self, name: &str, fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
                 self.0.calls.lock().unwrap().push(format!("store:{name}"));
                 if self.0.fail_store.load(Ordering::Relaxed)
                     || self.0.fail_store_name.lock().unwrap().as_deref() == Some(name)
                 {
                     return Err(std::io::Error::other("injected store failure"));
                 }
+                self.0
+                    .fds
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), fd.try_clone_to_owned()?);
                 Ok(())
             }
 
@@ -1224,6 +1241,7 @@ mod linux {
 
             fn remove(&self, name: &str) {
                 self.0.calls.lock().unwrap().push(format!("remove:{name}"));
+                self.0.fds.lock().unwrap().remove(name);
             }
         }
 
@@ -1288,11 +1306,13 @@ mod linux {
         }
 
         /// Output the PTY emitted before a graceful restart's seal must reach
-        /// the final manifest: a reader holding a read it has not recorded
-        /// yet is exactly the window the seal must wait out, since a read
-        /// recorded after the final write reaches no manifest and no socket.
+        /// what the next process restores: a reader holding a read it has not
+        /// recorded yet is exactly the window the seal must wait out, since a
+        /// read recorded after the final write reaches no manifest and no
+        /// socket. The session's ring file holds the read, and the final
+        /// manifest, marked sealed, counts it in the `seq` the file must reach.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        async fn the_sealed_manifest_carries_a_read_the_reader_still_holds() {
+        async fn the_sealed_manifest_counts_a_read_the_reader_still_holds() {
             use axum::body::Body;
             use axum::http::{Request, StatusCode};
             use chan_library::terminal_sessions::{arm_attach_seam, AttachSeam};
@@ -1300,7 +1320,7 @@ mod linux {
             use tower::ServiceExt;
 
             let store = FakeStoreOps::default();
-            let (parker, _hook, manifest) = test_parker(store);
+            let (parker, _hook, manifest) = test_parker(store.clone());
             let host = parker.shared.host.clone();
             let windows = tempfile::tempdir().unwrap();
             host.install_window_registry(
@@ -1370,20 +1390,28 @@ mod linux {
                 serde_json::from_slice(&std::fs::read(&manifest).expect("sealed manifest"))
                     .expect("sealed json");
             let session = &sealed["sessions"][0];
-            let replay = BASE64
-                .decode(session["replay_b64"].as_str().unwrap_or_default())
-                .unwrap();
             let pid = session["meta"]["child_pid"].as_u64().expect("child pid") as i32;
             let _ = rustix::process::kill_process(
                 rustix::process::Pid::from_raw(pid).unwrap(),
                 rustix::process::Signal::KILL,
             );
+            assert_eq!(sealed["sealed"], serde_json::json!(true));
+            let ring_name = session["ring_fd_name"].as_str().expect("a ring file");
+            let ring = store.stored_file(ring_name);
             assert!(
-                String::from_utf8_lossy(&replay).contains("held-before-the-seal"),
-                "the final manifest carries output read before the seal: {:?}",
-                String::from_utf8_lossy(&replay)
+                String::from_utf8_lossy(&ring).contains("held-before-the-seal"),
+                "the ring file holds output read before the seal: {:?}",
+                String::from_utf8_lossy(&ring)
             );
-            assert_eq!(session["meta"]["seq"].as_u64(), Some(replay.len() as u64));
+            // The ring file's header: its end seq is the little-endian u64 at
+            // byte 32, after the magic, version, header length, capacity and
+            // start seq.
+            let end = u64::from_le_bytes(ring[32..40].try_into().unwrap());
+            assert_eq!(session["meta"]["seq"].as_u64(), Some(end));
+            assert!(
+                session.get("replay_b64").is_none(),
+                "a mirrored ring carries no tail"
+            );
             if let Ok(parker) = Arc::try_unwrap(parker) {
                 parker.stop().await;
             }
