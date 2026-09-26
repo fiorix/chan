@@ -2353,6 +2353,13 @@ export function setTerminalPendingGlobalName(tab: TerminalTab, pending: boolean)
   tab.pendingGlobalName = pending;
 }
 
+/// Drop a terminal's seed once it has been typed. Every connect that starts a
+/// fresh session types the seed the tab still holds, so a later fresh session
+/// in the same tab would type it again.
+export function clearTerminalSeedInput(tab: TerminalTab): void {
+  tab.seedInput = undefined;
+}
+
 /// Start tracking an in-flight Rich Prompt message: phase "sent" (the
 /// `prompt` frame went out on an open socket; no ack yet).
 export function beginPendingPrompt(tab: TerminalTab, id: string): void {

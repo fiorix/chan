@@ -72,6 +72,7 @@
     setTerminalActivity,
     setTerminalActivityPulsing,
     setTerminalPendingGlobalName,
+    clearTerminalSeedInput,
     setTerminalQueueDepth,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -1662,7 +1663,7 @@
     if (!pendingPromptSeed || promptSeedSent) return;
     promptSeedSent = true;
     const seed = ` ${pendingPromptSeed}\x01`;
-    tab.seedInput = undefined;
+    clearTerminalSeedInput(tab);
     setTimeout(() => {
       sendInput(seed);
       focusTerminal();
