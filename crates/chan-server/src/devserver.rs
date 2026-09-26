@@ -58,8 +58,8 @@ use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, Worksp
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
 use chan_library::windows::{WindowKind, WindowRegistry};
 use chan_library::{
-    allocate_workspace_prefix, registered_workspace_prefix, FileLocalColor, KeyedLocks,
-    PersistedWorkspace, WorkspaceOverlay,
+    allocate_workspace_prefix, registered_workspace_prefix, workspace_prefix_for, FileLocalColor,
+    KeyedLocks, PersistedWorkspace, WorkspaceOverlay,
 };
 
 mod fdstore;
@@ -677,6 +677,25 @@ impl StartupCoordinator {
 #[derive(Debug)]
 struct MountTimedOut;
 
+/// `bound` in whole seconds for a message, rounded up and at least one, so a
+/// bound that has lost a few milliseconds to earlier steps still reads as
+/// the bound it is.
+fn whole_seconds(bound: Duration) -> u128 {
+    bound.as_millis().div_ceil(1000).max(1)
+}
+
+/// Refuse the prefix the devserver's management API owns.
+fn reject_reserved_prefix(prefix: &str) -> Result<(), Error> {
+    if prefix == RESERVED_WORKSPACE_PREFIX {
+        return Err(Error::Config(format!(
+            "cannot mount a workspace at {prefix}: that path is reserved for the devserver \
+             management API (/api/*). Rename the workspace directory; its basename becomes \
+             the public slug."
+        )));
+    }
+    Ok(())
+}
+
 async fn time_bound_mount<T>(
     timeout: Duration,
     future: impl Future<Output = T>,
@@ -816,9 +835,26 @@ impl DevserverState {
     /// returns its existing prefix). Used by `POST workspaces` and the
     /// discovery socket; `POST .../{prefix}/on` is the explicit-toggle sibling.
     async fn register_workspace(&self, root: &Path) -> Result<String, Error> {
-        let prefix = allocate_workspace_prefix(root)?;
-        let mounted = self.mount_at(root, &prefix).await?;
-        Ok(mounted)
+        self.register_workspace_keyed(root)
+            .await
+            .map(|(prefix, _)| prefix)
+    }
+
+    /// [`register_workspace`](Self::register_workspace), also handing back
+    /// the root's canonical key for the caller's own bookkeeping.
+    ///
+    /// The key is resolved off the runtime and inside the mount bound, like
+    /// everything else the request asks of the root: a request for a root
+    /// that stopped answering waits without holding a runtime worker and
+    /// answers when the bound expires.
+    async fn register_workspace_keyed(&self, root: &Path) -> Result<(String, PathBuf), Error> {
+        let started = tokio::time::Instant::now();
+        let key = self
+            .within_mount_bound(started, root, self.host.root_key(root))
+            .await??;
+        let prefix = workspace_prefix_for(root, &key)?;
+        let mounted = self.mount_key_at(root, &key, &prefix, started).await?;
+        Ok((mounted, key))
     }
 
     /// Publish desired-on + `starting` before awaiting the bounded mount.
@@ -830,28 +866,97 @@ impl DevserverState {
     /// DIFFERENT root (two workspaces with the same basename slug), surfacing
     /// the design's "slug uniqueness within a devserver".
     async fn mount_at(&self, root: &Path, prefix: &str) -> Result<String, Error> {
-        let Some(attempt) = self.begin_mount(root, prefix)? else {
+        let started = tokio::time::Instant::now();
+        let key = self
+            .within_mount_bound(started, root, self.host.root_key(root))
+            .await??;
+        self.mount_key_at(root, &key, prefix, started).await
+    }
+
+    /// [`mount_at`](Self::mount_at) once `root` has resolved to `key`, for a
+    /// request that started at `started`. The registration and the attempt
+    /// share the one mount bound with the resolution before them, so the
+    /// request answers within it whichever step the root stops answering in;
+    /// only the wait for the prefix's attempt lock falls outside it, as for
+    /// every attempt.
+    async fn mount_key_at(
+        &self,
+        root: &Path,
+        key: &Path,
+        prefix: &str,
+        started: tokio::time::Instant,
+    ) -> Result<String, Error> {
+        reject_reserved_prefix(prefix)?;
+        let library = self.host.library().clone();
+        let registering = root.to_path_buf();
+        self.within_mount_bound(
+            started,
+            root,
+            tokio::task::spawn_blocking(move || library.register_workspace(&registering)),
+        )
+        .await?
+        .map_err(|error| {
+            Error::from(std::io::Error::other(format!(
+                "workspace registration task failed: {error}"
+            )))
+        })??;
+        let Some(attempt) = self.begin_registered_mount(root, key, prefix)? else {
             return Ok(prefix.to_string());
         };
         self.persist_state();
-        self.execute_mount_attempt(attempt, self.mount_timeout)
-            .await
+        self.execute_mount_attempt(
+            attempt,
+            self.mount_timeout.saturating_sub(started.elapsed()),
+        )
+        .await
     }
 
+    /// Run one step of a mount request that started at `started` within what
+    /// is left of the mount bound. The steps are the ones that ask `root`'s
+    /// filesystem, which is where a hung root holds the request.
+    async fn within_mount_bound<T>(
+        &self,
+        started: tokio::time::Instant,
+        root: &Path,
+        step: impl Future<Output = T>,
+    ) -> Result<T, Error> {
+        tokio::time::timeout_at(started + self.mount_timeout, step)
+            .await
+            .map_err(|_| {
+                Error::Config(format!(
+                    "mount timed out after {} seconds: {} did not answer",
+                    whole_seconds(self.mount_timeout),
+                    root.display()
+                ))
+            })
+    }
+
+    /// Register `root` and prepare its mount at `prefix` in the calling
+    /// thread, the way the tests set an attempt up; the entry points go
+    /// through [`mount_key_at`](Self::mount_key_at) instead.
+    #[cfg(test)]
     fn begin_mount(&self, root: &Path, prefix: &str) -> Result<Option<MountAttempt>, Error> {
-        if prefix == RESERVED_WORKSPACE_PREFIX {
-            return Err(Error::Config(format!(
-                "cannot mount a workspace at {prefix}: that path is reserved for the devserver \
-                 management API (/api/*). Rename the workspace directory; its basename becomes \
-                 the public slug."
-            )));
-        }
+        reject_reserved_prefix(prefix)?;
         self.host.library().register_workspace(root)?;
-        let canonical = canonical_root(root);
+        self.begin_registered_mount(root, &canonical_root(root), prefix)
+    }
+
+    /// Record desired-on for the registered root `root`, whose canonical key
+    /// is `key`, at `prefix`, and return the attempt to run, or `None` when
+    /// an equivalent attempt is already pending. Goes by stored keys and asks
+    /// no filesystem: a record stores its root's canonical key, which is
+    /// either `key` or, for a root that moved since, the stored spelling a
+    /// caller passes back as `root`.
+    fn begin_registered_mount(
+        &self,
+        root: &Path,
+        key: &Path,
+        prefix: &str,
+    ) -> Result<Option<MountAttempt>, Error> {
         let attempt = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             let mut record = match workspaces.get(prefix).cloned() {
-                Some(record) if canonical_root(&record.root) != canonical => {
+                Some(record) if record.root != key && record.root != root => {
                     return Err(Error::Config(format!(
                         "workspace prefix {prefix} already belongs to {}",
                         record.root.display()
@@ -859,19 +964,19 @@ impl DevserverState {
                 }
                 Some(mut record) => {
                     if record.phase == MountPhase::Mounted
-                        && !self.host.is_root_mounted(&record.root)
+                        && !self.host.is_canonical_root_mounted(&record.root)
                     {
                         record.turn_off();
                     }
                     record
                 }
-                None => WorkspaceRecord::prepared(canonical.clone(), prefix.to_string(), false, 0),
+                None => WorkspaceRecord::prepared(key.to_path_buf(), prefix.to_string(), false, 0),
             };
             let Some(generation) = record.begin_on() else {
                 return Ok(None);
             };
             let attempt = MountAttempt {
-                root: canonical,
+                root: key.to_path_buf(),
                 prefix: prefix.to_string(),
                 generation,
             };
@@ -879,7 +984,7 @@ impl DevserverState {
             workspaces.insert(prefix.to_string(), record);
             attempt
         };
-        self.host.mark_workspace_starting(&attempt.root);
+        self.host.mark_canonical_root_starting(&attempt.root);
         Ok(Some(attempt))
     }
 
@@ -950,7 +1055,7 @@ impl DevserverState {
                 // attempt published nothing. Any tenant at this root is another
                 // caller's, and closing it would end terminal sessions nobody
                 // asked to end.
-                let reason = format!("mount timed out after {} seconds", timeout.as_secs().max(1));
+                let reason = format!("mount timed out after {} seconds", whole_seconds(timeout));
                 self.finish_failed_attempt(&attempt, reason.clone());
                 settlement.disarm();
                 Err(Error::Config(reason))
@@ -2396,9 +2501,9 @@ async fn handle_discovery_request(
                 };
             }
             let root = Path::new(&workspace_path);
-            match state.register_workspace(root).await {
-                Ok(prefix) => {
-                    let key = canonical_root(root).to_string_lossy().into_owned();
+            match state.register_workspace_keyed(root).await {
+                Ok((prefix, key)) => {
+                    let key = key.to_string_lossy().into_owned();
                     match state.host.mint_window(WindowKind::Workspace, Some(key)) {
                         Ok(_) => crate::devserver_handoff::Response::Registered {
                             devserver_version: crate::devserver_handoff::CHAN_VERSION.to_string(),

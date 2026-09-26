@@ -30,8 +30,19 @@ use crate::Error;
 /// gateway forwards; the hash suffix makes it unique per root, so two
 /// same-basename roots map to DISTINCT prefixes and both mount (no collision).
 pub fn allocate_workspace_prefix(root: &Path) -> Result<String, Error> {
+    workspace_prefix_for(
+        root,
+        &chan_workspace::paths::canonicalize_normalized(root),
+    )
+}
+
+/// [`allocate_workspace_prefix`] for a caller that has already resolved
+/// `root` to its canonical form, which an entry point does off the runtime
+/// thread because a hung root never answers: the slug from `root` as given,
+/// the hash from `canonical`, touching no filesystem.
+pub fn workspace_prefix_for(root: &Path, canonical: &Path) -> Result<String, Error> {
     let slug = workspace_slug(root);
-    let hash = chan_workspace::paths::canonical_root_hash8(root);
+    let hash = chan_workspace::paths::canonical_path_hash8(canonical);
     sanitize_prefix(&format!("/{slug}-{hash}")).map_err(Error::Config)
 }
 

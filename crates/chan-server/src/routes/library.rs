@@ -27,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use chan_library::{allocate_workspace_prefix, registered_workspace_prefix, ServeConfig};
+use chan_library::{registered_workspace_prefix, workspace_prefix_for, ServeConfig};
 use chan_workspace::KnownWorkspace;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
@@ -1806,18 +1806,34 @@ async fn handle_add_workspace(
         Ok(addr) => addr,
         Err(resp) => return *resp,
     };
+    // Resolving and registering the root ask its filesystem, so both run
+    // off the runtime: an add of a root that stopped answering waits on the
+    // blocking pool, not on a worker every other request needs.
     let root = Path::new(&req.path);
-    let prefix = match allocate_workspace_prefix(root) {
+    let key = match state.host.root_key(root).await {
+        Ok(key) => key,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let prefix = match workspace_prefix_for(root, &key) {
         Ok(prefix) => prefix,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-    let registered = match state
-        .host
-        .library()
-        .register_workspace_with_name(root, req.label.clone())
-    {
-        Ok(ws) => ws,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    let registering = {
+        let library = state.host.library().clone();
+        let root = root.to_path_buf();
+        let label = req.label.clone();
+        tokio::task::spawn_blocking(move || library.register_workspace_with_name(&root, label))
+    };
+    let registered = match registering.await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("workspace registration task failed: {e}"),
+            )
+                .into_response()
+        }
     };
     match state
         .host
