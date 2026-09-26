@@ -25,7 +25,10 @@
 // The server later pushes `close_survey` when that parked request disappears
 // externally (timeout, cancellation, or a first reply from another window).
 // The close path clears only the matching survey id so tab-targeted and group
-// surveys do not erase each other.
+// surveys do not erase each other. `open_survey` and `close_survey` each go
+// out once, so a socket that attaches or lags is also sent `survey_sync`, the
+// surveys still open in this window, and the overlays converge on it
+// (`syncSurveys`).
 
 import {
   api,
@@ -56,10 +59,22 @@ export const surveyState = $state<{
   windowWide: SurveyEntry | null;
 }>({ byTab: {}, windowWide: null });
 
-/// Drop every survey this window shows, for a test's teardown.
+/// Ids whose reply the server accepted from this window. Survey ids are never
+/// reused, and a sync built before the reply was accepted, or an `open_survey`
+/// still buffered for this socket when it was, can list the survey again,
+/// where its buttons would only answer 404.
+const answered = new Set<string>();
+
+/// Drop every survey this window shows and every id it answered, for a test's
+/// teardown.
 export function resetSurveysForTest(): void {
   surveyState.byTab = {};
   surveyState.windowWide = null;
+  answered.clear();
+}
+
+function allSlots(): SurveySlot[] {
+  return [...Object.keys(surveyState.byTab), null];
 }
 
 function entry(slot: SurveySlot): SurveyEntry | null {
@@ -82,9 +97,15 @@ export function surveyBusy(slot: SurveySlot): boolean {
   return entry(slot)?.busy ?? false;
 }
 
-/// Raise a survey on a slot. A new survey replaces a showing one in the same
-/// slot; the server mints distinct ids. `slot` null = window-wide fallback.
+/// Raise a survey on a slot. A different survey showing there is replaced, as
+/// the later of two group surveys takes a shared window's window-wide slot.
+/// Raising is idempotent by survey id: a sync can repeat a survey the window
+/// shows, and an `open_survey` can follow a sync that listed it, so a survey
+/// showing on any slot stays as it is, its reply in flight included. A survey
+/// this window answered is dropped. `slot` null = window-wide fallback.
 export function showSurvey(spec: SurveySpec, slot: SurveySlot = null): void {
+  if (answered.has(spec.surveyId)) return;
+  if (allSlots().some((s) => entry(s)?.spec.surveyId === spec.surveyId)) return;
   if (slot === null) surveyState.windowWide = { spec, busy: false };
   else surveyState.byTab[slot] = { spec, busy: false };
 }
@@ -105,21 +126,45 @@ export function closeSurveyFromRemote(
   for (const slot of slots) {
     if (seen.has(slot)) continue;
     seen.add(slot);
-    const e = entry(slot);
-    if (e?.spec.surveyId !== surveyId) continue;
-    // A reply from THIS window is in flight (busy). Leave the slot to it: an
-    // accepted reply clears the slot itself, and a failed one applies this
-    // close, since nothing is waiting on the survey any more. A close raced
-    // against the deadline lands here, and so does an `answered_elsewhere`
-    // fanned back to the answerer when its reply carried no windowId.
-    if (e.busy) {
-      e.closed = true;
-      return undefined;
-    }
-    clear(slot);
-    return slot;
+    if (entry(slot)?.spec.surveyId !== surveyId) continue;
+    return retire(slot) ? slot : undefined;
   }
   return undefined;
+}
+
+/// Converge on a `survey_sync`: `open` lists, oldest first, the surveys still
+/// open in this window, each with the slot its target resolves to. An id this
+/// window answered is skipped, and of two entries for one slot the later wins,
+/// as the later `open_survey` does live. A slot showing any other survey is
+/// retired and each placed survey raised, so applying a list twice changes
+/// nothing.
+export function syncSurveys(open: ReadonlyArray<{ spec: SurveySpec; slot: SurveySlot }>): void {
+  const placed = new Map<SurveySlot, SurveySpec>();
+  for (const { spec, slot } of open) {
+    if (!answered.has(spec.surveyId)) placed.set(slot, spec);
+  }
+  for (const slot of allSlots()) {
+    const shown = entry(slot);
+    if (shown && placed.get(slot)?.surveyId !== shown.spec.surveyId) retire(slot);
+  }
+  for (const [slot, spec] of placed) showSurvey(spec, slot);
+}
+
+/// Take down the survey on `slot`, unless a reply from THIS window is in
+/// flight for it (busy). The slot is then left to that reply: an accepted
+/// reply clears it, and a failed one applies the close, since nothing is
+/// waiting on the survey any more. A close raced against the deadline lands
+/// here, and so does an `answered_elsewhere` fanned back to the answerer when
+/// its reply carried no windowId. Returns whether the slot was cleared.
+function retire(slot: SurveySlot): boolean {
+  const e = entry(slot);
+  if (!e) return false;
+  if (e.busy) {
+    e.closed = true;
+    return false;
+  }
+  clear(slot);
+  return true;
 }
 
 /// Clear `slot` if it still shows `surveyId`. A reply settles after its
@@ -144,6 +189,7 @@ async function send(
   e.busy = true;
   try {
     await api.surveyReply(reply);
+    answered.add(surveyId);
     release(slot, surveyId);
   } catch (err) {
     e.busy = false;

@@ -39,6 +39,7 @@ import { isTransientApiError, isWorkspaceRootMissingError } from "../api/errors"
 import {
   closeSurveyFromRemote,
   showSurvey,
+  syncSurveys,
   type SurveyCloseReason,
 } from "./survey.svelte";
 import { applySessionRoster, isFollower, showHandover, type SessionParticipant } from "./session.svelte";
@@ -1239,6 +1240,14 @@ type WindowCommandFrame =
   | {
       type: "window_command";
       window_id: string;
+      command: "survey_sync";
+      // Every survey still open in this window, oldest first, each in the
+      // `open_survey` shape; empty when none is.
+      surveys: Array<{ survey: SurveySpec; tabName?: string | null }>;
+    }
+  | {
+      type: "window_command";
+      window_id: string;
       command: "pane_query";
       request_id: string;
     }
@@ -1976,6 +1985,25 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // so it is left untouched.
     const slotHint = frame.tabName ? terminalSlotForName(frame.tabName) : undefined;
     closeSurveyFromRemote(frame.surveyId, slotHint ?? undefined);
+    return;
+  }
+  if (frame.command === "survey_sync" && Array.isArray(frame.surveys)) {
+    // The surveys the server still waits on in this window, sent to this
+    // socket on every attach and after it lagged, since `open_survey` and
+    // `close_survey` go out once and a socket that was down or behind misses
+    // them. The overlays converge on the list: one whose close never arrived
+    // goes, and one whose open never arrived is raised, on the slot its
+    // `tabName` resolves to as the open arm resolves it. Both of those frames
+    // still apply in arrival order around a sync, and the Rich Prompt
+    // composers are untouched.
+    syncSurveys(
+      frame.surveys
+        .filter((listed) => typeof listed?.survey?.surveyId === "string")
+        .map((listed) => ({
+          spec: listed.survey,
+          slot: listed.tabName ? terminalSlotForName(listed.tabName) : null,
+        })),
+    );
     return;
   }
   if (

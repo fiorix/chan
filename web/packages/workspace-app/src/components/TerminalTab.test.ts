@@ -467,7 +467,7 @@ describe("TerminalTab and the app around it", () => {
     const tab = terminalTab();
     const { target } = await renderTerminal(tab, true);
 
-    showSurvey(SURVEY, "another-terminal");
+    showSurvey({ ...SURVEY, surveyId: "survey-2" }, "another-terminal");
     await tick();
     expect(target.querySelector(".survey-overlay")).toBeNull();
 
