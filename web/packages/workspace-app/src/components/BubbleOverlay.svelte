@@ -23,6 +23,7 @@
     dismissSurvey,
     type SurveySlot,
   } from "../state/survey.svelte";
+  import { consumeKey } from "../state/shortcuts";
   import { tabFocusPulse } from "../state/tabs.svelte";
 
   let {
@@ -98,21 +99,18 @@
     if (e.key >= "1" && e.key <= "9") {
       const idx = Number(e.key) - 1;
       if (idx < s.options.length) {
-        e.preventDefault();
-        e.stopPropagation();
+        consumeKey(e);
         void pickOption(slot, idx);
       }
       return;
     }
     if (e.key === "f" || e.key === "F") {
-      e.preventDefault();
-      e.stopPropagation();
+      consumeKey(e);
       void requestFollowup(slot);
       return;
     }
     if (e.key === "x" || e.key === "X" || e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
+      consumeKey(e);
       void dismissSurvey(slot);
     }
   }
