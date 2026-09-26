@@ -236,6 +236,10 @@ pub struct AppState {
     /// One-shot guard for the awaited embedded-tenant drain that precedes a
     /// normal exit or update restart.
     pub shutdown_started: std::sync::atomic::AtomicBool,
+    /// The overlay rows the boot restore has not finished: the one it is
+    /// mounting and the ones queued behind it. The on-set snapshot keeps
+    /// them on, since none of them has been tried.
+    pub restore_pending: Mutex<Vec<String>>,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
@@ -290,6 +294,7 @@ impl AppState {
             gateway_migration: Mutex::new(None),
             quit_confirmed: std::sync::atomic::AtomicBool::new(false),
             shutdown_started: std::sync::atomic::AtomicBool::new(false),
+            restore_pending: Mutex::new(Vec::new()),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
             #[cfg(windows)]
             pending_update: Mutex::new(None),
@@ -1173,7 +1178,15 @@ fn snapshot_workspaces(state: &AppState) {
     // answering must not hold up any of them. The shared terminal tenant goes
     // by the home directory and counts for no workspace registered there.
     // `overlay.replace` sorts by path on save.
-    let rows: Vec<chan_server::PersistedWorkspace> = embedded
+    //
+    // A row the boot restore has not finished, the one it is mounting or one
+    // queued behind it, stays on while its overlay row is still on: it has
+    // not been tried, so nothing says the user wants it off, and a quit
+    // while one root holds the restore must not turn off the rows behind
+    // it. The pending set is read before the mounted one, because a row
+    // leaves it only after its mount has published.
+    let pending: Vec<String> = state.restore_pending.lock().unwrap().clone();
+    let mut rows: Vec<chan_server::PersistedWorkspace> = embedded
         .library()
         .list_workspaces()
         .into_iter()
@@ -1182,6 +1195,14 @@ fn snapshot_workspaces(state: &AppState) {
             chan_server::PersistedWorkspace::new(ws.root_path.to_string_lossy().into_owned(), true)
         })
         .collect();
+    if !pending.is_empty() {
+        let on = overlay.on_paths();
+        for path in pending {
+            if on.contains(&path) && !rows.iter().any(|row| row.path == path) {
+                rows.push(chan_server::PersistedWorkspace::new(path, true));
+            }
+        }
+    }
     tracing::info!(
         on = rows.len(),
         paths = ?rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
@@ -6626,18 +6647,26 @@ async fn restore_on_workspaces<R: tauri::Runtime>(handle: tauri::AppHandle<R>, s
         paths = ?enabled,
         "restoring the on workspaces from the overlay"
     );
+    *state.restore_pending.lock().unwrap() = enabled.clone();
     for key in enabled {
         // Boot restores persisted windows only. A workspace whose windows
         // were all closed has no record, so it stays windowless. The watcher
         // keeps hidden records hidden.
-        if let Err(e) = serve::start(
+        let restored = serve::start(
             handle.clone(),
             Arc::clone(&state),
             key.clone(),
             serve::WorkspaceOpenMode::RestoreOnly,
         )
-        .await
-        {
+        .await;
+        // The row leaves the pending set only once its mount has published
+        // or failed, so a snapshot finds it in one set or the other.
+        state
+            .restore_pending
+            .lock()
+            .unwrap()
+            .retain(|pending| pending != &key);
+        if let Err(e) = restored {
             tracing::warn!(key = %key, error = %e, "restoring enabled workspace failed");
             emit_system_notice(
                 &handle,
