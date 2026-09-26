@@ -138,7 +138,9 @@ pub struct SurveyBus {
     /// Monotonic ticket source distinguishing entries within one queue.
     next_ticket: AtomicU64,
     /// The surveys whose overlay is up, in the order they opened. At most
-    /// one per target, since only a turn's holder opens, so a scan is cheap.
+    /// one per [`SurveyQueueKey`], since only a turn's holder opens, so a scan
+    /// is cheap. Two keys can still share one SPA slot: group surveys over
+    /// different window sets both take a shared window's window-wide slot.
     open: Mutex<Vec<OpenSurvey>>,
 }
 
