@@ -524,6 +524,11 @@ pub async fn api_restart_terminal(
             },
             None => None,
         };
+        if let Some(env) = body.env.as_ref() {
+            if let Err(message) = validate_terminal_env(env, tab_name.as_deref()) {
+                return (StatusCode::BAD_REQUEST, message).into_response();
+            }
+        }
         // Three-way: outer None (no `group` field) keeps the existing
         // group; `Some(None)` (blank / "default") sets the default group;
         // `Some(Some(g))` sets group g.
@@ -690,15 +695,15 @@ pub(crate) fn normalize_terminal_command(command: &str) -> Option<String> {
 /// the terminal, the one chan exports as `CHAN_TAB_NAME`.
 pub(crate) fn validate_terminal_env(
     env: &BTreeMap<String, String>,
-    _tab_name: Option<&str>,
+    tab_name: Option<&str>,
 ) -> Result<(), String> {
-    for key in env.keys() {
+    for (key, value) in env {
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
             return Err(format!("invalid terminal env key: {key:?}"));
         }
         // chan writes these itself after the caller's entries, so a caller's
         // value would never reach the child.
-        if chan_library::terminal_sessions::is_chan_spawn_env_key(key) {
+        if chan_library::terminal_sessions::chan_overrides_spawn_env(key, value, tab_name) {
             return Err(format!(
                 "terminal env key {key} is set by chan for every terminal and cannot be overridden"
             ));

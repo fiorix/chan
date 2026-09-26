@@ -708,11 +708,14 @@ fn parse_terminal_ordinal(name: &str) -> Option<u64> {
 /// wins, and a key chan leaves unset for a spawn is removed rather than
 /// inherited from the server's own environment. Because a caller's value for
 /// one of them could never reach the child, the server refuses a request that
-/// sets one ([`is_chan_spawn_env_key`]); every other key, a caller-set
+/// sets one ([`chan_overrides_spawn_env`]); every other key, a caller-set
 /// `CHAN_AGENT` or `CHAN_HOME` included, reaches the child as given.
 pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
     "CHAN",
     "CHAN_TERMINAL",
+    // Accepted when it restates the request's own tab name, the value chan
+    // sets: the SPA's team dialog and saved team configs carry each member's
+    // handle here beside the same name.
     "CHAN_TAB_NAME",
     "CHAN_TAB_GROUP",
     "CHAN_WINDOW_ID",
@@ -727,9 +730,17 @@ pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
 ];
 
 /// Whether `key` is one chan sets for itself at spawn
-/// ([`CHAN_SPAWN_ENV_KEYS`]), which a spawn request may not set.
+/// ([`CHAN_SPAWN_ENV_KEYS`]).
 pub fn is_chan_spawn_env_key(key: &str) -> bool {
     CHAN_SPAWN_ENV_KEYS.contains(&key)
+}
+
+/// Whether chan's own entry would overwrite a caller's `key=value` in a
+/// spawn whose tab is named `tab_name`, so a request carrying it must be
+/// refused: any key on [`CHAN_SPAWN_ENV_KEYS`] except a `CHAN_TAB_NAME` that
+/// restates the tab name.
+pub fn chan_overrides_spawn_env(key: &str, value: &str, tab_name: Option<&str>) -> bool {
+    is_chan_spawn_env_key(key) && !(key == "CHAN_TAB_NAME" && Some(value) == tab_name)
 }
 
 /// chan's own entries for one spawn. It applies exactly the keys of

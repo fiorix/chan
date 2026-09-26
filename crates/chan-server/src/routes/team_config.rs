@@ -106,6 +106,12 @@ pub(crate) fn validate_team_config(config: &TeamConfig) -> Result<(), String> {
     if config.members.iter().any(|m| m.handle.trim().is_empty()) {
         return Err("every member must have a non-empty handle".into());
     }
+    // A member's env reaches the same spawn as a terminal request's, under
+    // the member's handle as its tab name.
+    for member in &config.members {
+        crate::routes::validate_terminal_env(&member.env, Some(&member.handle))
+            .map_err(|error| format!("member {}: {error}", member.handle))?;
+    }
     if let Some((rows, cols)) = team_grid_shape(config) {
         // The cap mirrors the 9-member cap above: the SPA dialog's largest
         // offered shapes are 3x3 and 1x9 / 9x1, and a stray coordinate like
