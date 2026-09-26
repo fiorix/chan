@@ -32,6 +32,7 @@
 //! user disconnected meanwhile stores the PAT but stays disconnected.
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1098,67 +1099,93 @@ fn spawn_roster_poll<R: tauri::Runtime>(
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(Duration::from_secs(ROSTER_POLL_SECS)) => {}
             }
-            // Re-read the PAT each tick: a re-sign-in mid-poll swaps the
-            // credential without restarting the loop.
-            let secret = match auth::load_gateway_pat(&identity_origin) {
-                Ok(Some(pat)) => pat.secret,
-                Ok(None) | Err(_) => {
-                    // No credential: the next tick retries; a cascade (which
-                    // clears the PAT) also cancels this loop.
-                    continue;
-                }
-            };
-            let etag = {
-                let runtimes = state.gateway_manager.runtimes.lock().unwrap();
-                match runtimes.get(&gateway_id) {
-                    Some(rt) => rt.etag.clone(),
-                    None => break,
-                }
-            };
-            let fetch = fetch_roster(&roster_url, &secret, etag.as_deref()).await;
-            // A disconnect+reconnect replaced this poll while the fetch
-            // was in flight: the successor owns the runtime now, and the
-            // map-presence check below cannot tell the two polls apart -
-            // only the token can. Applying the stale fetch would clobber
-            // the successor's state.
-            if cancel.is_cancelled() {
+            let tick = roster_poll_tick(
+                &app,
+                &state,
+                &gateway_id,
+                &identity_origin,
+                &roster_url,
+                &cancel,
+            )
+            .await;
+            if tick.is_break() {
                 break;
-            }
-            let effect = {
-                let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-                match runtimes.get_mut(&gateway_id) {
-                    Some(rt) => apply_roster_fetch(rt, fetch),
-                    None => break,
-                }
-            };
-            apply_roster_policy_diff(&state, &gateway_id, &effect.diff).await;
-            if effect.cascade {
-                let label = gateway_row(&state, &gateway_id)
-                    .map(|g| display_label(&g))
-                    .unwrap_or_else(|_| gateway_id.clone());
-                cascade_disconnect(&app, &state, &gateway_id, CascadeReason::Unauthorized).await;
-                emit_notice(
-                    &app,
-                    "error",
-                    "gateway",
-                    &gateway_id,
-                    &label,
-                    "Gateway sign-in expired",
-                    "the gateway rejected the stored sign-in; click Connect to sign in again",
-                );
-                break;
-            }
-            if effect.became_unreachable {
-                let label = gateway_row(&state, &gateway_id)
-                    .map(|g| display_label(&g))
-                    .unwrap_or_else(|_| gateway_id.clone());
-                notice_unreachable(&app, &state, &gateway_id, &label);
-            }
-            if effect.changed {
-                signal_rows_changed(&app, &state);
             }
         }
     });
+}
+
+/// One roster-poll round after the loop's sleep. `Break` ends the loop: the
+/// runtime is gone, a successor poll replaced this one, or the gateway
+/// signed out.
+async fn roster_poll_tick<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    gateway_id: &str,
+    identity_origin: &str,
+    roster_url: &str,
+    cancel: &CancellationToken,
+) -> ControlFlow<()> {
+    // Re-read the PAT each tick: a re-sign-in mid-poll swaps the
+    // credential without restarting the loop.
+    let secret = match auth::load_gateway_pat(identity_origin) {
+        Ok(Some(pat)) => pat.secret,
+        Ok(None) | Err(_) => {
+            // No credential: the next tick retries; a cascade (which
+            // clears the PAT) also cancels this loop.
+            return ControlFlow::Continue(());
+        }
+    };
+    let etag = {
+        let runtimes = state.gateway_manager.runtimes.lock().unwrap();
+        match runtimes.get(gateway_id) {
+            Some(rt) => rt.etag.clone(),
+            None => return ControlFlow::Break(()),
+        }
+    };
+    let fetch = fetch_roster(roster_url, &secret, etag.as_deref()).await;
+    // A disconnect+reconnect replaced this poll while the fetch
+    // was in flight: the successor owns the runtime now, and the
+    // map-presence check below cannot tell the two polls apart -
+    // only the token can. Applying the stale fetch would clobber
+    // the successor's state.
+    if cancel.is_cancelled() {
+        return ControlFlow::Break(());
+    }
+    let effect = {
+        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+        match runtimes.get_mut(gateway_id) {
+            Some(rt) => apply_roster_fetch(rt, fetch),
+            None => return ControlFlow::Break(()),
+        }
+    };
+    apply_roster_policy_diff(state, gateway_id, &effect.diff).await;
+    if effect.cascade {
+        let label = gateway_row(state, gateway_id)
+            .map(|g| display_label(&g))
+            .unwrap_or_else(|_| gateway_id.to_string());
+        cascade_disconnect(app, state, gateway_id, CascadeReason::Unauthorized).await;
+        emit_notice(
+            app,
+            "error",
+            "gateway",
+            gateway_id,
+            &label,
+            "Gateway sign-in expired",
+            "the gateway rejected the stored sign-in; click Connect to sign in again",
+        );
+        return ControlFlow::Break(());
+    }
+    if effect.became_unreachable {
+        let label = gateway_row(state, gateway_id)
+            .map(|g| display_label(&g))
+            .unwrap_or_else(|_| gateway_id.to_string());
+        notice_unreachable(app, state, gateway_id, &label);
+    }
+    if effect.changed {
+        signal_rows_changed(app, state);
+    }
+    ControlFlow::Continue(())
 }
 
 fn notice_unreachable<R: tauri::Runtime>(
