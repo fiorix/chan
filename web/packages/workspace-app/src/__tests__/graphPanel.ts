@@ -27,6 +27,7 @@ import type {
   GraphView,
   GraphViewEdge,
   GraphViewNode,
+  LanguageGraphResponse,
 } from "../api/types";
 import type { GraphTab, LeafNode } from "../state/tabs.svelte";
 
@@ -74,6 +75,8 @@ export const graphServer = {
   streamGate: null as Promise<void> | null,
   /// When set, a paged fsGraph request (the spine seed) waits on it.
   fsGate: null as Promise<void> | null,
+  /// What languageGraph answers for the whole language graph (language mode).
+  languageView: { nodes: [], edges: [], max_depth: 1 } as LanguageGraphResponse,
   /// What languageGraph answers for a single language's detail.
   languageDetail: null as unknown,
   graphStreamCalls: 0,
@@ -87,6 +90,7 @@ export function resetGraphServer(): void {
   graphServer.fsPageSize = null;
   graphServer.streamGate = null;
   graphServer.fsGate = null;
+  graphServer.languageView = { nodes: [], edges: [], max_depth: 1 };
   graphServer.languageDetail = null;
   graphServer.graphStreamCalls = 0;
   graphServer.languageGraphCalls = 0;
@@ -148,7 +152,7 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         if (o.language) {
           return { nodes: [], edges: [], max_depth: 1, detail: graphServer.languageDetail };
         }
-        return { nodes: [], edges: [], max_depth: 1 };
+        return graphServer.languageView;
       }),
       fsGraph: vi.fn(async (o: { path: string; depth: number; limit?: number; cursor?: string }) => {
         graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth, cursor: o.cursor });

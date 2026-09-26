@@ -17,6 +17,7 @@ vi.mock("../api/client", async (importOriginal) =>
 
 import GraphPanel from "./GraphPanel.svelte";
 import {
+  canvas,
   g,
   graphServer,
   graphTab,
@@ -136,6 +137,12 @@ describe("the mention lens", () => {
     const ids = await lens("mention:@@alice");
     expect(ids).toEqual([ROOT, "#t", "@@alice", NOTES, B].sort());
   });
+
+  test("goes one hop further per depth step, both ways", async () => {
+    const ids = await lens("mention:@@alice", 2);
+    expect(ids, "a links to b, one hop back from b").toContain(A);
+    expect(ids).toEqual([ROOT, "#t", "@@alice", NOTES, A, B].sort());
+  });
 });
 
 describe("the contact lens", () => {
@@ -147,6 +154,18 @@ describe("the contact lens", () => {
     expect(ids, "the spine").toEqual(expect.arrayContaining([NOTES, ROOT]));
     expect(ids).not.toContain(MAIN);
   });
+
+  test("goes one hop further per depth step, both ways", async () => {
+    const ids = await lens("contact:notes/a.md", 2);
+    expect(ids, "d links to c, two hops back from a").toContain(DEEP);
+    expect(ids).toEqual(
+      [ROOT, "#other", "#t", "@@alice", NOTES, NOTES_DEEP, A, B, C, DEEP].sort(),
+    );
+  });
+
+  test("shows nothing when no file is the contact", async () => {
+    expect(await lens("contact:notes/none.md")).toEqual([]);
+  });
 });
 
 describe("the language lens", () => {
@@ -154,6 +173,44 @@ describe("the language lens", () => {
     const ids = await lens("language:rust");
     expect(ids).toEqual([ROOT, SRC, MAIN, "language:rust"].sort());
   });
+
+  test("does not close over its files' other meta nodes", async () => {
+    graphServer.view.edges.push(g.edge(MAIN, "#other", "tag"));
+    const ids = await lens("language:rust");
+    expect(ids).toEqual([ROOT, SRC, MAIN, "language:rust"].sort());
+  });
+
+  // Language mode's own graph: each language linked to the directories that
+  // hold its files, as the server spells them, with src shared by both.
+  function serveLanguageGraph(): void {
+    const lang = (name: string, files: number) =>
+      ({ kind: "language", id: `language:${name}`, label: name, language: name, files, code: files }) as const;
+    const dir = (path: string) =>
+      ({ kind: "directory", id: `directory:${path}`, label: path, path, files: 1, code: 1 }) as const;
+    const edge = (name: string, path: string) =>
+      ({ source: `language:${name}`, target: `directory:${path}`, kind: "language", rank: 1, files: 1, code: 1 }) as const;
+    graphServer.languageView = {
+      max_depth: 1,
+      nodes: [lang("Rust", 1), lang("Python", 2), dir("src"), dir("scripts")],
+      edges: [edge("Rust", "src"), edge("Python", "src"), edge("Python", "scripts")],
+    };
+  }
+
+  // Depth 0 reads as "max" in language mode and the clamp to 1 does not run
+  // there, so both ends of the slider reach the lens.
+  for (const depth of [0, 2]) {
+    test(`takes exactly one hop in language mode at depth ${depth}`, async () => {
+      serveLanguageGraph();
+      await mountGraphPanel(
+        GraphPanel,
+        layout,
+        graphTab({ mode: "language", scopeId: "language:Rust", depth }),
+      );
+      const edges = canvas.props?.visibleEdges ?? [];
+      expect(edges.map((e) => e.source), "only rust's own edge").toEqual(["language:Rust"]);
+      expect(visibleIds(), "python is two hops out, through src").not.toContain("language:Python");
+    });
+  }
 });
 
 describe("a file scope", () => {
@@ -162,6 +219,12 @@ describe("a file scope", () => {
     expect(ids).toContain(B);
     expect(ids).toContain("#t");
     expect(ids, "c links to a; a backlink is not in a file's forward lens").not.toContain(C);
+  });
+
+  test("does not close over the meta nodes of what it shows", async () => {
+    const ids = await lens("file:notes/a.md");
+    expect(ids).toContain(B);
+    expect(ids, "b's mention is not one of a's forward hops").not.toContain("@@alice");
   });
 
   test("pulls the whole spine up to the root, through nested directories", async () => {
