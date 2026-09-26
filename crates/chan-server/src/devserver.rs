@@ -847,8 +847,8 @@ struct DevserverState {
     /// Persisted so a local client re-discovers the current port after a restart.
     bound_port: AtomicU16,
     /// Set once [`shut_down_hosted`] begins, before its first sweep. From
-    /// then on a save leaves the workspace overlay as it is: see
-    /// [`persist_state`](Self::persist_state).
+    /// then on a save does not read a mount missing from the host as a close
+    /// made out of band: see [`persist_state`](Self::persist_state).
     shutting_down: AtomicBool,
 }
 
@@ -1451,8 +1451,8 @@ impl DevserverState {
     /// Persist devserver state across two stores: workspace on/off into the
     /// library-owned [`WorkspaceOverlay`], and the bearer token + library id into
     /// the devserver config. So a restart comes back serving exactly what was on
-    /// and remembering what was off. Once [`shut_down_hosted`] has begun, only
-    /// the config is saved and the overlay keeps what the stop found.
+    /// and remembering what was off. Once [`shut_down_hosted`] has begun, a
+    /// Mounted record the host no longer serves keeps its desired state.
     fn persist_state(&self) {
         let _persist = self
             .persist_serial
@@ -1487,18 +1487,16 @@ impl DevserverState {
         &self,
         mounted_snapshot: impl FnOnce() -> HashSet<String>,
     ) {
-        // Once shutdown has begun the overlay keeps the state the stop found.
-        // The sweeps take every tenant out of the host, so a save from then
-        // on, such as a mount settling between or after them, would read each
-        // Mounted record as closed out of band and write it off, and the next
-        // start would restore none of them; `shutdown_all` leaves the overlay
-        // alone for the same reason. The config half below still saves, so a
-        // token rotated during the stop is not lost.
-        let overlay = if self.shutting_down.load(Ordering::Acquire) {
-            None
-        } else {
-            self.host.workspace_overlay()
-        };
+        // Once shutdown has begun the sweeps take every tenant out of the
+        // host, so a Mounted record whose prefix the host no longer serves was
+        // stopped by the shutdown, not closed out of band. A save from then on,
+        // such as a mount settling between or after the sweeps, keeps that
+        // record's desired state instead of writing it off, or the next start
+        // would restore none of them; `shutdown_all` leaves the overlay alone
+        // for the same reason. Every other change still saves: an off or a
+        // registration that lands during the stop records its intent.
+        let shutting_down = self.shutting_down.load(Ordering::Acquire);
+        let overlay = self.host.workspace_overlay();
         // Durable desired intent → the library-owned overlay store. Starting
         // and failed rows stay desired-on even though no host prefix is live.
         // Records, overlay rows and registry rows all store canonical roots,
@@ -1527,8 +1525,9 @@ impl DevserverState {
                 // from the library drops its row (a Starting row and a
                 // Forgotten tombstone stay); a Mounted row whose prefix the
                 // host does not serve was closed out of band and turns off
-                // at a newer generation. A Starting row is deliberately not
-                // mistaken for an out-of-band close.
+                // at a newer generation, except once shutdown has begun. A
+                // Starting row is deliberately not mistaken for an
+                // out-of-band close.
                 map.retain(|_, record| {
                     registered.contains(&record.root)
                         || record.phase == MountPhase::Starting
@@ -1538,7 +1537,10 @@ impl DevserverState {
                     if let Some(row) = durable.get(&record.root) {
                         record.reconcile_persisted(row, mounted.contains(&record.prefix));
                     }
-                    if record.phase == MountPhase::Mounted && !mounted.contains(&record.prefix) {
+                    if !shutting_down
+                        && record.phase == MountPhase::Mounted
+                        && !mounted.contains(&record.prefix)
+                    {
                         record.turn_off();
                     }
                 }
@@ -2363,8 +2365,8 @@ const REGISTRATION_SHUTDOWN_DRAIN: Duration = Duration::from_secs(30);
 /// publication: a mount from any other entry point that finishes after it,
 /// such as a management mount still inside its bound, is refused and shuts
 /// its own runtime down. Before any of it the devserver is marked as shutting
-/// down, so a mount settling between or after the sweeps does not rewrite the
-/// workspace overlay the stop found.
+/// down, so a save between or after the sweeps does not turn off the
+/// workspaces they stopped.
 async fn shut_down_hosted(
     state: &DevserverState,
     mut discovery: Option<crate::devserver_handoff::ListenerHandle>,
