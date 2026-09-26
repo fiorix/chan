@@ -8696,6 +8696,209 @@ is_lead = false
             .expect("handler task");
     }
 
+    /// A test state whose `/ws` broadcast holds `capacity` frames per socket,
+    /// so a test decides whether a socket can lag.
+    fn survey_ws_state(capacity: usize) -> Arc<crate::state::AppState> {
+        let mut state = crate::state::test_support::make_test_state(false);
+        Arc::get_mut(&mut state)
+            .expect("unshared test state")
+            .events_tx = broadcast::channel(capacity).0;
+        state
+    }
+
+    /// Serve the `/ws` event route over `state` on a loopback port.
+    async fn serve_ws_route(state: Arc<crate::state::AppState>) -> std::net::SocketAddr {
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(crate::routes::ws_upgrade))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind /ws route");
+        let address = listener.local_addr().expect("/ws route address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve /ws route");
+        });
+        address
+    }
+
+    type WsClient = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Attach a window's event socket the way the SPA does (`/ws?w=<id>`).
+    async fn attach_window(address: std::net::SocketAddr, window_id: &str) -> WsClient {
+        tokio_tungstenite::connect_async(format!("ws://{address}/ws?w={window_id}"))
+            .await
+            .expect("attach /ws")
+            .0
+    }
+
+    /// Read the socket until a `survey_sync` window command arrives, and fail
+    /// naming `moment` and every frame seen when none comes.
+    async fn recv_survey_sync(socket: &mut WsClient, moment: &str) -> serde_json::Value {
+        use futures::StreamExt;
+        let mut seen = Vec::new();
+        let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(message) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) =
+                    message.expect("/ws frame")
+                else {
+                    continue;
+                };
+                let frame: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if frame["type"] == "window_command" && frame["command"] == "survey_sync" {
+                    return Some(frame);
+                }
+                seen.push(frame);
+            }
+            None
+        })
+        .await;
+        match found {
+            Ok(Some(frame)) => frame,
+            _ => panic!("the socket got no survey_sync {moment}; frames seen: {seen:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_window_attaching_after_its_survey_timed_out_is_told_it_is_gone() {
+        let (_root, registry) = single_tab_registry();
+        let state = survey_ws_state(64);
+        // The window's socket while the survey is up. The window then goes
+        // away, and the socket it attaches afterwards was not subscribed when
+        // the deadline's close went out.
+        let socket_before = state.events_tx.subscribe();
+        let response = handle_survey(
+            survey_spec("expires while the window is away"),
+            Some("@@T"),
+            None,
+            0,
+            &state.events_tx,
+            &state.survey_bus,
+            Some(&registry),
+        )
+        .await;
+        assert!(matches!(response, ControlResponse::Timeout { .. }));
+        drop(socket_before);
+
+        let address = serve_ws_route(state).await;
+        let mut socket = attach_window(address, "win-a").await;
+        let sync = recv_survey_sync(&mut socket, "on attach after the timeout").await;
+        assert_eq!(sync["window_id"], "win-a");
+        assert_eq!(
+            sync["surveys"],
+            serde_json::json!([]),
+            "a timed-out survey must be absent from the attach's sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_attaching_while_its_survey_is_open_is_told_to_raise_it() {
+        let (_root, registry) = single_tab_registry();
+        let state = survey_ws_state(64);
+        let mut events = state.events_tx.subscribe();
+        let handler = tokio::spawn({
+            let state = state.clone();
+            async move {
+                handle_survey(
+                    survey_spec("still waiting"),
+                    Some("@@T"),
+                    None,
+                    600,
+                    &state.events_tx,
+                    &state.survey_bus,
+                    Some(&registry),
+                )
+                .await
+            }
+        });
+        let open = recv_command(&mut events, "open_survey").await;
+        let survey_id = open["survey"]["surveyId"]
+            .as_str()
+            .expect("server-minted id")
+            .to_string();
+
+        let address = serve_ws_route(state.clone()).await;
+        let mut socket = attach_window(address, "win-a").await;
+        let sync = recv_survey_sync(&mut socket, "on attach while the survey is open").await;
+        let surveys = sync["surveys"].as_array().expect("surveys array");
+        assert_eq!(surveys.len(), 1, "the one open survey is listed: {sync}");
+        assert_eq!(surveys[0]["survey"]["surveyId"], survey_id);
+        assert_eq!(surveys[0]["survey"]["bodyMarkdown"], "still waiting");
+        assert_eq!(surveys[0]["tabName"], "@@T");
+
+        assert!(state.survey_bus.complete_survey(
+            &survey_id,
+            SurveyReply::Option {
+                survey_id: survey_id.clone(),
+                option_index: 0,
+                option_label: "ok".into(),
+            },
+            Some("win-a".into()),
+        ));
+        assert!(matches!(
+            handler.await.expect("survey handler"),
+            ControlResponse::Ok { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_survey_answered_in_another_window_is_absent_from_a_later_attach() {
+        let (_root, registry) = empty_registry();
+        for (tab_name, window_id) in [("@@A", "win-a"), ("@@B", "win-b")] {
+            registry
+                .create(CreateOptions {
+                    size: PtySize {
+                        cols: 80,
+                        rows: 24,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                    tab_name: Some(tab_name.into()),
+                    tab_group: Some("alpha".into()),
+                    window_id: Some(window_id.into()),
+                    mcp_env: true,
+                    cwd: None,
+                    command: None,
+                    env: Default::default(),
+                    profile: None,
+                })
+                .expect("spawn survey target");
+        }
+        let registry = Arc::new(registry);
+        let state = survey_ws_state(64);
+        // win-a's socket: it sees the open and answers. win-b is away and
+        // misses the answered_elsewhere close.
+        let mut events = state.events_tx.subscribe();
+        let answer = async {
+            let open = recv_command(&mut events, "open_survey").await;
+            answer_survey(&state.survey_bus, &open, "a");
+        };
+        let (response, ()) = tokio::join!(
+            handle_survey(
+                survey_spec("answered in win-a"),
+                None,
+                Some("alpha"),
+                600,
+                &state.events_tx,
+                &state.survey_bus,
+                Some(&registry),
+            ),
+            answer,
+        );
+        assert!(matches!(response, ControlResponse::Ok { .. }));
+
+        let address = serve_ws_route(state).await;
+        let mut socket = attach_window(address, "win-b").await;
+        let sync = recv_survey_sync(&mut socket, "on attach after another window answered").await;
+        assert_eq!(sync["window_id"], "win-b");
+        assert_eq!(
+            sync["surveys"],
+            serde_json::json!([]),
+            "a survey answered elsewhere must be absent from the attach's sync"
+        );
+    }
+
     /// Await the next `open_survey` frame on the `/ws` fan-out.
     async fn recv_open_survey(rx: &mut broadcast::Receiver<String>) -> serde_json::Value {
         loop {
