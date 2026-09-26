@@ -102,6 +102,17 @@ describe("ModalShell", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  test("a press inside the panel released over the dim leaves it open", () => {
+    const onClose = vi.fn();
+    const target = render({ onClose });
+    const dialog = dialogIn(target)!;
+    dialog.querySelector("button")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    backdropIn(target)!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    // The browser fires the click at the nearest ancestor of both ends.
+    dialog.parentElement!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   test("Escape anywhere in the panel closes it and goes no further", () => {
     const onClose = vi.fn();
     const onKeydown = vi.fn();
