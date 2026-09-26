@@ -8782,5 +8782,34 @@ mod tests {
             );
             assert_eq!(resolved, Ok(desktop.other.to_string_lossy().into_owned()));
         }
+
+        /// `chan close` of one workspace is answered while another registered
+        /// root hangs. The handoff writes its `Closed` reply from what this
+        /// returns, and the CLI stops reading after three seconds.
+        #[test]
+        fn closing_a_workspace_answers_while_another_root_hangs() {
+            let (runtime, desktop) = HungRootDesktop::new();
+            let app = tauri::test::mock_app();
+            let stall = root_stall::stall(&desktop.hung);
+            let handle = runtime.handle().clone();
+            let app_handle = app.handle().clone();
+            let state = Arc::clone(&desktop.state);
+            let other = desktop.other.clone();
+            let outcome =
+                stall.finishes_beside("closing another workspace", HEALTHY_ROOT_BOUND, move || {
+                    handle.block_on(close_workspace_from_handoff(
+                        app_handle, state, other, false,
+                    ))
+                });
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+            );
+            assert_eq!(
+                desktop.on_paths(),
+                Vec::<String>::new(),
+                "the closed workspace still reads on"
+            );
+        }
     }
 }
