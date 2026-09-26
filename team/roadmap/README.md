@@ -133,6 +133,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | raised | decide |
 | [a-hung-root-keeps-reading-running][hrun] | raised | decide |
 | [a-late-http-mount-escapes-the-shutdown-sweep][lsweep] | raised | decide |
+| [the-linux-gate-runs-tests-under-a-canonical-tmpdir][ctmp] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -218,6 +219,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [rthrd]: v0.101.0/a-hung-root-takes-a-thread-per-expired-caller.md
 [hrun]: v0.101.0/a-hung-root-keeps-reading-running.md
 [lsweep]: v0.101.0/a-late-http-mount-escapes-the-shutdown-sweep.md
+[ctmp]: v0.101.0/the-linux-gate-runs-tests-under-a-canonical-tmpdir.md
 
 ## Completed
 
