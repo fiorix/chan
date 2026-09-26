@@ -10,6 +10,7 @@
 
   import JsonNode from "./JsonNode.svelte";
   import { notify } from "../state/notify.svelte";
+  import { copyTextToClipboard } from "../state/store.svelte";
 
   let {
     value,
@@ -62,12 +63,10 @@
   async function copyPath(ev: MouseEvent): Promise<void> {
     ev.preventDefault();
     ev.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(path);
-      notify(`Copied ${path}`);
-    } catch (err) {
-      notify(`Copy failed: ${(err as Error).message}`);
-    }
+    await copyTextToClipboard(path, {
+      onSuccess: () => notify(`Copied ${path}`),
+      onError: (msg) => notify(`Copy failed: ${msg}`),
+    });
   }
 
   /// Stable child entries for objects. `Object.keys` order matches
