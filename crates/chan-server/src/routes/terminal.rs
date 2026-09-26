@@ -113,10 +113,10 @@ pub struct RestartTerminalBody {
     /// Used by the team-bootstrap orchestrator to flip the host's
     /// terminal into the lead's session (e.g. `bash` -> `claude`).
     command: Option<String>,
-    /// Optional env override. Merged into the restart options' env
-    /// so the lead's CHAN_TAB_NAME and any other per-member env
-    /// land before the new PTY spawns. Existing entries with the
-    /// same key are replaced.
+    /// Optional env override, validated as a spawn's env is: a key chan
+    /// sets for itself is refused, except a `CHAN_TAB_NAME` that restates
+    /// `name`. It is merged into the restart options' env before the new
+    /// PTY spawns, an entry replacing a stored one with the same key.
     #[serde(default)]
     env: Option<std::collections::BTreeMap<String, String>>,
     /// Switch the tab to a different shell profile. Absent restarts on the

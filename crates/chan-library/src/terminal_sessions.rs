@@ -708,8 +708,14 @@ fn parse_terminal_ordinal(name: &str) -> Option<u64> {
 /// wins, and a key chan leaves unset for a spawn is removed rather than
 /// inherited from the server's own environment. Because a caller's value for
 /// one of them could never reach the child, the server refuses a request that
-/// sets one ([`chan_overrides_spawn_env`]); every other key, a caller-set
-/// `CHAN_AGENT` or `CHAN_HOME` included, reaches the child as given.
+/// sets one ([`chan_overrides_spawn_env`]). Every other key, a caller-set
+/// `CHAN_AGENT` or `CHAN_HOME` included, reaches the child as given, except
+/// where two spawn steps that also run after the caller's entries change it:
+/// when the first of `LC_ALL`, `LC_CTYPE` and `LANG` set, by the caller or
+/// else the server, names no UTF-8 codeset, `LANG` becomes `C.UTF-8` and
+/// `LC_ALL` and `LC_CTYPE` are removed, a caller's included; and on Windows
+/// the profile's PATH needs and chan's bin dir are prepended to the caller's
+/// `PATH`.
 pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
     "CHAN",
     "CHAN_TERMINAL",
@@ -746,7 +752,7 @@ pub fn chan_overrides_spawn_env(key: &str, value: &str, tab_name: Option<&str>) 
 /// chan's own entries for one spawn. It applies exactly the keys of
 /// [`CHAN_SPAWN_ENV_KEYS`], so a key chan sets is refused at validation by
 /// being on that list; setting one that is not on it is a bug the debug
-/// assertion catches in every spawn test.
+/// assertion catches in every test whose spawn sets it.
 #[derive(Debug, Default)]
 struct ChanSpawnEnv(BTreeMap<&'static str, String>);
 
@@ -3903,9 +3909,12 @@ impl Session {
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
         // chan's fixed spawn environment comes first and the caller's entries
-        // after it, so an explicit value wins over every default here; only
-        // the keys chan sets for itself (`CHAN` and the `CHAN_*` below) are
-        // applied after the caller's.
+        // after it, so an explicit value wins over every default here. Three
+        // steps run after the caller's entries: the Windows PATH layering,
+        // which prepends to a caller's `PATH`; the locale default, which
+        // replaces a locale naming no UTF-8 codeset, a caller's included,
+        // with `C.UTF-8`; and the keys chan sets for itself (`CHAN` and the
+        // `CHAN_*` below).
         clear_appimage_env(&mut cmd);
         if let Some(home) = terminal_home_dir() {
             cmd.env("HOME", &home);

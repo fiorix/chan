@@ -881,9 +881,11 @@ pub enum TerminalAction {
         /// Command to run instead of the default shell.
         #[arg(long, value_name = "COMMAND")]
         command: Option<String>,
-        /// Spawn environment entry; it wins over chan's defaults, and a key
-        /// chan sets itself (CHAN, CHAN_TAB_NAME, CHAN_MCP_* and the like) is
-        /// refused. Repeat for multiple entries.
+        /// Spawn environment entry. It wins over chan's defaults, except that
+        /// a locale naming no UTF-8 codeset is replaced by C.UTF-8 and, on
+        /// Windows, chan's bin dir is prepended to a PATH; a key chan sets
+        /// itself (CHAN, CHAN_TAB_NAME, CHAN_MCP_* and the like) is refused.
+        /// Repeat for multiple entries.
         #[arg(long, value_name = "KEY=VALUE", value_parser = parse_terminal_env)]
         env: Vec<(String, String)>,
         #[command(flatten)]
