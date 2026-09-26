@@ -43,6 +43,14 @@ function replyInFlight(slot: string | null) {
   return { answer, sent };
 }
 
+// Rename a terminal from its tab header, as the user can while its survey is
+// up: the survey's `tabName` then resolves to no terminal.
+function rename(id: string, title: string): void {
+  const pane = layout.nodes["pane-sync"] as LeafNode;
+  const tab = pane.tabs.find((t) => t.id === id);
+  if (tab) tab.title = title;
+}
+
 let notices: string[] = [];
 
 beforeEach(() => {
@@ -165,6 +173,62 @@ describe("survey_sync", () => {
     await sent;
     expect(surveyFor("term-a")).toBeNull();
     expect(notices).toEqual([expect.stringMatching(/^survey expired/)]);
+  });
+
+  test("a survey keeps the terminal it shows on after that terminal is renamed, beside a group survey", async () => {
+    await open(spec("survey-a"), "@@A");
+    rename("term-a", "@@Renamed");
+
+    await sync({ survey: spec("survey-a"), tabName: "@@A" }, { survey: spec("survey-group") });
+
+    expect(surveyFor("term-a")?.surveyId).toBe("survey-a");
+    expect(surveyFor(null)?.surveyId).toBe("survey-group");
+  });
+
+  test("a later group entry sets the one showing aside, and a sync listing it alone raises it again", async () => {
+    await open(spec("survey-early"));
+
+    await sync({ survey: spec("survey-early") }, { survey: spec("survey-late") });
+    expect(surveyFor(null)?.surveyId).toBe("survey-late");
+
+    await sync({ survey: spec("survey-early") });
+    expect(surveyFor(null)?.surveyId).toBe("survey-early");
+  });
+
+  test("an earlier group entry does not take the window-wide slot from a later one that shows", async () => {
+    await open(spec("survey-early"));
+    await open(spec("survey-late"));
+
+    await sync({ survey: spec("survey-early") }, { survey: spec("survey-late") });
+
+    expect(surveyFor(null)?.surveyId).toBe("survey-late");
+  });
+
+  test("a group survey set aside with its reply in flight is still open when that reply fails", async () => {
+    await open(spec("survey-early"));
+    const { answer, sent } = replyInFlight(null);
+
+    await sync({ survey: spec("survey-early") }, { survey: spec("survey-late") });
+    expect(surveyFor(null)?.surveyId).toBe("survey-late");
+
+    answer.reject(new TypeError("Failed to fetch"));
+    await sent;
+    expect(surveyFor(null)?.surveyId).toBe("survey-late");
+    expect(notices).toEqual([expect.stringMatching(/^survey reply failed: /)]);
+  });
+
+  test("a survey on a renamed terminal keeps its overlay when its reply in flight fails", async () => {
+    await open(spec("survey-a"), "@@A");
+    const { answer, sent } = replyInFlight("term-a");
+    rename("term-a", "@@Renamed");
+
+    await sync({ survey: spec("survey-a"), tabName: "@@A" });
+    answer.reject(new TypeError("Failed to fetch"));
+    await sent;
+
+    expect(surveyFor("term-a")?.surveyId).toBe("survey-a");
+    expect(surveyBusy("term-a")).toBe(false);
+    expect(notices).toEqual([expect.stringMatching(/^survey reply failed: /)]);
   });
 
   test("leaves the Rich Prompt composers alone", async () => {
