@@ -6,7 +6,7 @@ Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0
 
 Accepted on 2026-09-25 as the lead recommended, in one terminal restore lane with [a-restart-replays-only-the-manifest-tail](a-restart-replays-only-the-manifest-tail.md), which answers this item's two questions. Output does not refresh the manifest: the memfd-backed ring chosen for that item survives a crash, which makes a refresh moot. A resume cursor the server cannot honour, such as one ahead of a restored `seq`, gets a full replay and a visible notice, never a silent skip.
 
-The ring half landed with [a-restart-replays-only-the-manifest-tail](a-restart-replays-only-the-manifest-tail.md) on 2026-09-26; the resume half (a cursor the server cannot honour, the ring for a session restored without one, the terminal flags beside the bytes) is the crash resume order.
+The ring half landed with [a-restart-replays-only-the-manifest-tail](a-restart-replays-only-the-manifest-tail.md) on 2026-09-26; the resume half (a cursor the server cannot honour, the ring for a session restored without one, the terminal flags beside the bytes) landed later the same day.
 
 ## What was seen
 
@@ -40,3 +40,11 @@ Two questions for the owner, which the lane named. First, whether output should 
 ## Boundaries
 
 The manifest's rewrite points and the imported ring in `crates/chan-library/src/terminal_sessions.rs`, the attach's resume path (`snapshot_since` in `crates/chan-library/src/terminal_sessions/ring.rs`), and the fd store in `crates/chan-server/src/devserver/fdstore.rs`.
+
+## What shipped
+
+Landed on 2026-09-26, after the ring half. A parked session restored without a ring file gets one when parking activates, so every restored session has a ring. The ring file's header carries the alt-screen flag and the private modes, and a restore that takes its bytes from the file takes those from it too. A resume cursor the server cannot honour, such as one ahead of a restored `seq`, gets the whole ring and a `missed_bytes` count in the session frame, never a silent skip; the server tells such a cursor apart from a good one even after new output has moved the end past it. A mirrored ring's manifest entry carries no tail: at 100 sessions of 2 MiB the manifest is 108 KB where it was 17.6 MB. The replay e2e (`scripts/e2e/devserver-terminal-replay.sh`) passes its crash checks on `cli crash` and `cli cli`.
+
+The restore rules the review of that order added. A lossy restore, one that could not recover the ring exactly, so the session comes back under a new generation and a client of the old one is replayed the whole ring with a missed count, keeps its ring file marked stopped until this process has committed a manifest that carries the minted generation; a crash before that commit restores the old generation exactly, so a stale client's cursor is never honoured into a shifted replay, and a failed commit leaves the mark. The minted generation is `max(previous + 1, the wall clock in microseconds, the last mint in this process + 1)`, so two processes cannot mint alike. Activation's reconcile parks every ring-less session and commits the manifest once: the first boot after v0.100.0 with 100 sessions of 2 MiB writes 13 MB where it wrote 889 MB, and reaches ready in 1.1 s where it took 3.6 s. A ring file a restore gives up on is removed from the store at boot, before a new ring is parked under its name. A state-changing push writes the ring file's window and state in one `pwrite`, so a kill cannot leave a stale flag beside new bytes.
+
+Rollback consequence: v0.100.0 parses the new manifest, ignoring the fields it does not know and defaulting the replay tail, so a rollback to it restores every mirrored session with an empty ring and a notice of `seq` missed bytes. The tail a v0.100.0 manifest kept is gone once this release has rewritten it.

@@ -6,6 +6,8 @@ Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0
 
 Accepted on 2026-09-26 as the lead recommended: the 64 KiB reader buffer is this version's remedy for the throughput cost (one ring push and one mirror write per read instead of eight), measured before and after by the order that makes it; the mmap-backed ring is named as not taken, and the memory cost stands as measured.
 
+Measured by the order that made the buffer, on 2026-09-26: a Linux PTY master read returns about 4.3 KiB whatever the buffer, so the reads, and the ring pushes and mirror `pwrite` calls with them, fell by 2.8% and not eightfold; one terminal writing 1 GiB flat out drained at 80.4 MiB/s against 76.9 MiB/s with the 8 KiB buffer (three runs each, ranges overlapping), still below the 91.8 MiB/s measured before the ring file. The owner ruled the same day to close the item as measured: the 64 KiB buffer stays, and coalescing the output already waiting on the PTY into one push, and batching the mirror's writes, are the remedies not taken this version, beside the mmap-backed ring.
+
 ## What was seen
 
 The ring file that carries a terminal's whole ring across a restart mirrors every push into a memfd beside the in-process ring, so a full terminal costs about 2 MiB of heap and about 2 MiB of shared memory charged to the unit's memory cgroup (200 MiB of shmem at 100 full terminals, resident across restarts because the store holds the files), and one terminal writing flat out drains at about 78 MiB/s where it drained at about 92 MiB/s (14.7% lower), because each 8 KiB read costs three or four `pwrite` calls. Restore costs about 4.5 ms per full ring. The owner accepted the ring with the cost measured; the mirror was the shape that fit one order.
@@ -21,3 +23,7 @@ Two shapes, in order of size. A 64 KiB reader buffer cuts the syscall count eigh
 ## Boundaries
 
 `crates/chan-library/src/terminal_sessions/ring.rs` and the reader in `terminal_sessions.rs`; the measurement driver under `dev/v0101-team/evidence/Runtime/r1-measure.sh` is the baseline.
+
+## What shipped
+
+Landed on 2026-09-26. The two PTY reader buffers are 64 KiB; the ring, the mirror and the ring file's format are unchanged. The memory cost stands as measured above, and the throughput cost stands at the numbers in the ruling.

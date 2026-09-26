@@ -23,3 +23,7 @@ The review suggests publishing "not answering" for an overdue check. In the tick
 ## Boundaries
 
 `crates/chan-library/src/host.rs` (`probe_mounted_roots`, `reconcile_root_health`) and the health paragraph of `crates/chan-library/design.md`. The unbounded revalidation on the add and on path (`revalidate_mounted_root`, `host.rs:1328-1341`) belongs to [a-hung-root-takes-a-thread-per-expired-caller](a-hung-root-takes-a-thread-per-expired-caller.md).
+
+## What shipped
+
+Landed on 2026-09-26. A mounted root whose health check is still running at the end of a second tick's two-second budget reads `unavailable` with the reason "not answering: its health check has not returned"; one missed budget flags nothing. A check's answer is folded in whenever it lands, by the waiting tick or by the checking thread itself when it answers between ticks, so a root that is only slow clears as soon as a check answers healthy. A flagged check keeps its thread and its workspace handle until the root answers, which is the ground of [a-hung-root-takes-a-thread-per-expired-caller](a-hung-root-takes-a-thread-per-expired-caller.md).
