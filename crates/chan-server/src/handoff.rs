@@ -2754,6 +2754,46 @@ mod tests {
         );
     }
 
+    /// A request over the listener's byte cap is refused, and the client
+    /// reports that refusal although its own write fails: the listener stops
+    /// reading at the cap, writes the refusal and closes, so the rest of the
+    /// request meets a broken pipe while the refusal waits in the client's
+    /// receive buffer. The request is several times the cap, so the part the
+    /// listener never reads cannot fit in the socket's buffers and the write
+    /// cannot complete before the close.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_over_cap_request_reports_the_refusal_its_failed_write_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("cap.sock");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let _listener = start_listener(sock.clone(), move |_req| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                Response::Closed {
+                    desktop_version: CHAN_VERSION.into(),
+                }
+            }
+        })
+        .unwrap();
+        let workspace = "x".repeat(8 * MAX_HANDOFF_REQUEST_BYTES as usize);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            try_handoff_at(&sock, Path::new(&workspace)),
+        )
+        .await
+        .expect("the client did not answer");
+        match outcome {
+            Outcome::DesktopError { message } => assert!(
+                message.starts_with("invalid handoff request:"),
+                "the client reported another error: {message}"
+            ),
+            other => panic!("the client did not report the listener's refusal: {other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
     /// A listener stop owes an accepted connection its reply: it may not
     /// return while the handler is still answering, and the client still
     /// reads the reply afterwards.
