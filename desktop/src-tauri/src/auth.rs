@@ -323,6 +323,35 @@ pub(crate) fn fail_gateway_pat_load_for_test(
     GatewayPatLoadFailure(identity_origin.to_string())
 }
 
+#[cfg(test)]
+fn test_gateway_pat_absences() -> &'static Mutex<std::collections::HashSet<String>> {
+    static ABSENT: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    ABSENT.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Clears an origin-scoped missing-PAT answer when the test scope exits.
+#[cfg(test)]
+pub(crate) struct GatewayPatAbsence(String);
+
+#[cfg(test)]
+impl Drop for GatewayPatAbsence {
+    fn drop(&mut self) {
+        test_gateway_pat_absences().lock().unwrap().remove(&self.0);
+    }
+}
+
+/// Answer the PAT load with no stored PAT until the returned guard drops,
+/// including on panic, whatever the host keychain holds: a headless test
+/// host may have no credential service to report an absent entry from.
+#[cfg(test)]
+pub(crate) fn absent_gateway_pat_for_test(identity_origin: &str) -> GatewayPatAbsence {
+    test_gateway_pat_absences()
+        .lock()
+        .unwrap()
+        .insert(identity_origin.to_string());
+    GatewayPatAbsence(identity_origin.to_string())
+}
+
 pub fn load_gateway_pat(identity_origin: &str) -> Result<Option<StoredPat>, String> {
     #[cfg(test)]
     if let Some(error) = test_gateway_pat_load_errors()
@@ -331,6 +360,14 @@ pub fn load_gateway_pat(identity_origin: &str) -> Result<Option<StoredPat>, Stri
         .get(identity_origin)
     {
         return Err(error.clone());
+    }
+    #[cfg(test)]
+    if test_gateway_pat_absences()
+        .lock()
+        .unwrap()
+        .contains(identity_origin)
+    {
+        return Ok(None);
     }
     #[cfg(test)]
     if let Some(pat) = test_gateway_pats().lock().unwrap().get(identity_origin) {
@@ -357,6 +394,14 @@ pub fn clear_gateway_pat(identity_origin: &str) -> Result<(), String> {
         .unwrap()
         .remove(identity_origin)
         .is_some()
+    {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if test_gateway_pat_absences()
+        .lock()
+        .unwrap()
+        .contains(identity_origin)
     {
         return Ok(());
     }

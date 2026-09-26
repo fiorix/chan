@@ -2155,6 +2155,185 @@ mod tests {
         (dir, Arc::new(AppState::with_store(store)))
     }
 
+    /// No gateway listens here: a tick that got past the PAT load would
+    /// record a refused connection instead of the load's own error.
+    const UNUSED_ROSTER_URL: &str = "http://127.0.0.1:9/desktop/v1/devservers";
+
+    /// Install a runtime under `pat_load_test_state`'s gateway id with a
+    /// last-known roster, returning the poll token its cascade would cancel.
+    fn install_polled_runtime(
+        state: &AppState,
+        identity_origin: &str,
+        status: GatewayStatus,
+        pending_signin: bool,
+    ) -> CancellationToken {
+        let mut rt = runtime_with(vec![row("alice", "a", true)]);
+        rt.discovery.identity_origin = identity_origin.into();
+        rt.status = status;
+        rt.pending_signin = pending_signin;
+        let cancel = CancellationToken::new();
+        rt.poll_cancel = Some(cancel.clone());
+        state
+            .gateway_manager
+            .runtimes
+            .lock()
+            .unwrap()
+            .insert("gw-keychain".into(), rt);
+        cancel
+    }
+
+    #[tokio::test]
+    async fn a_pat_load_failure_on_the_roster_poll_reaches_unreachable() {
+        use tauri::Listener;
+
+        let origin = "https://keychain-failure.example.test";
+        let (_dir, state) = pat_load_test_state(origin);
+        let app = tauri::test::mock_app();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            notice_tx.send(event.payload().to_string()).unwrap();
+        });
+        let cancel = install_polled_runtime(&state, origin, GatewayStatus::Connected, false);
+        let error = "reading gateway keychain: injected poll failure";
+        let _failure = auth::fail_gateway_pat_load_for_test(origin, error);
+
+        for tick in 1..=ROSTER_UNREACHABLE_FAILURES {
+            let flow = roster_poll_tick(
+                app.handle(),
+                &state,
+                "gw-keychain",
+                origin,
+                UNUSED_ROSTER_URL,
+                &cancel,
+            )
+            .await;
+            assert!(flow.is_continue(), "tick {tick} ended the poll");
+            let view = state.gateway_manager.view("gw-keychain").unwrap();
+            assert_eq!(
+                view.last_error.as_deref(),
+                Some(error),
+                "tick {tick} recorded no failure"
+            );
+            let expected = if tick < ROSTER_UNREACHABLE_FAILURES {
+                GatewayStatus::Connected
+            } else {
+                GatewayStatus::Unreachable
+            };
+            assert_eq!(view.status, expected, "status after tick {tick}");
+            assert_eq!(view.devserver_count, 1, "the last-known roster stays served");
+        }
+        let payload = notice_rx
+            .try_recv()
+            .expect("crossing the threshold emits one notice");
+        let notice: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(notice["title"], "Gateway unreachable");
+        assert!(notice["message"].as_str().unwrap().contains(error));
+        assert_eq!(notice_rx.try_iter().count(), 0);
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_missing_pat_on_the_roster_poll_signs_a_connected_gateway_out() {
+        use tauri::Listener;
+
+        let origin = "https://keychain-missing.example.test";
+        let (_dir, state) = pat_load_test_state(origin);
+        let app = tauri::test::mock_app();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            notice_tx.send(event.payload().to_string()).unwrap();
+        });
+        let _absent = auth::absent_gateway_pat_for_test(origin);
+        for status in [GatewayStatus::Connected, GatewayStatus::Unreachable] {
+            let cancel = install_polled_runtime(&state, origin, status, false);
+            let flow = roster_poll_tick(
+                app.handle(),
+                &state,
+                "gw-keychain",
+                origin,
+                UNUSED_ROSTER_URL,
+                &cancel,
+            )
+            .await;
+            assert!(
+                flow.is_break(),
+                "a {status:?} gateway without a stored PAT kept polling"
+            );
+            assert!(
+                state.gateway_manager.view("gw-keychain").is_none(),
+                "the sign-out cascade takes a {status:?} runtime out"
+            );
+            assert!(cancel.is_cancelled());
+            let payload = notice_rx.try_recv().expect("the sign-out emits a notice");
+            let notice: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(notice["kind"], "error");
+            assert_eq!(notice["source"]["id"], "gw-keychain");
+            assert!(notice["message"]
+                .as_str()
+                .unwrap()
+                .contains("click Connect to sign in again"));
+            assert_eq!(notice_rx.try_iter().count(), 0);
+            assert!(
+                gateway_row(&state, "gw-keychain").unwrap().enabled,
+                "a sign-out keeps the gateway enabled"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_roster_poll_leaves_a_connecting_runtime_to_its_connect() {
+        use tauri::Listener;
+
+        let origin = "https://keychain-connecting.example.test";
+        let (_dir, state) = pat_load_test_state(origin);
+        let app = tauri::test::mock_app();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            notice_tx.send(event.payload().to_string()).unwrap();
+        });
+        // A rejected PAT is cleared before the browser leg while the old
+        // poll still runs, and a connect reports its own load failures.
+        for (status, pending_signin) in [
+            (GatewayStatus::Connecting, true),
+            (GatewayStatus::Connecting, false),
+            (GatewayStatus::Disconnected, false),
+        ] {
+            for failing in [false, true] {
+                let cancel = install_polled_runtime(&state, origin, status, pending_signin);
+                let _absent = (!failing).then(|| auth::absent_gateway_pat_for_test(origin));
+                let _failure = failing.then(|| {
+                    auth::fail_gateway_pat_load_for_test(origin, "injected load failure")
+                });
+                for _ in 0..ROSTER_UNREACHABLE_FAILURES {
+                    let flow = roster_poll_tick(
+                        app.handle(),
+                        &state,
+                        "gw-keychain",
+                        origin,
+                        UNUSED_ROSTER_URL,
+                        &cancel,
+                    )
+                    .await;
+                    assert!(flow.is_continue());
+                }
+                let rt = state
+                    .gateway_manager
+                    .runtimes
+                    .lock()
+                    .unwrap()
+                    .remove("gw-keychain")
+                    .expect("the poll left the runtime in place");
+                let case = format!("{status:?} pending={pending_signin} failing={failing}");
+                assert_eq!(rt.status, status, "{case}");
+                assert_eq!(rt.pending_signin, pending_signin, "{case}");
+                assert_eq!(rt.last_error, None, "{case}");
+                assert_eq!(rt.consecutive_failures, 0, "{case}");
+                assert!(!cancel.is_cancelled(), "{case}");
+                assert_eq!(notice_rx.try_iter().count(), 0, "{case}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn rejected_pat_with_busy_signin_parks_and_allows_retry() {
         let (origin, server) = spawn_gateway_stub(true).await;
