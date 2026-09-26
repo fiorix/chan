@@ -25,9 +25,12 @@ import { confirmState } from "./state/confirm.svelte";
 import { assignOverride, hydrateOverrides } from "./state/keymapOverrides.svelte";
 import {
   importContactsPanel,
+  launcherPanel,
   pathPromptState,
   promptState,
+  searchPanel,
   setCoverBlocking,
+  settingsPanel,
   workspaceWarningsDialog,
 } from "./state/store.svelte";
 import { teamDialogState } from "./state/teamDialog.svelte";
@@ -63,6 +66,9 @@ afterEach(async () => {
   workspaceWarningsDialog.open = false;
   importContactsPanel.open = false;
   closeConfirmState.open = false;
+  searchPanel.open = false;
+  launcherPanel.open = false;
+  settingsPanel.open = false;
   cancelPaneMode();
   setCoverBlocking("screensaver", false);
   hydrateOverrides(null);
@@ -161,6 +167,9 @@ describe("Ctrl+D is left alone", () => {
     ["the workspace warnings dialog", () => (workspaceWarningsDialog.open = true)],
     ["the contacts import", () => (importContactsPanel.open = true)],
     ["the desktop close prompt", () => (closeConfirmState.open = true)],
+    ["the Search overlay", () => (searchPanel.open = true)],
+    ["the command launcher", () => (launcherPanel.open = true)],
+    ["Settings", () => (settingsPanel.open = true)],
   ])("while %s is open", async (_name, open) => {
     await seed(fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" }));
     open();

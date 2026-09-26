@@ -1,16 +1,21 @@
 // @vitest-environment jsdom
 //
-// keyboardOwnedByDialog answers whether an app-root dialog is open, for the
-// chords that act on the focused pane and stand down while one is.
+// keyboardOwnedAbovePanes answers whether an overlay or an app-root dialog is
+// open over the panes, for Ctrl+D and the pane flip, which stand down while
+// one is.
 
 import { afterEach, describe, expect, test } from "vitest";
 import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState } from "./confirm.svelte";
 import {
   importContactsPanel,
-  keyboardOwnedByDialog,
+  keyboardOwnedAbovePanes,
+  launcherPanel,
   pathPromptState,
   promptState,
+  searchPanel,
+  settingsPanel,
+  syncOverlayStack,
   workspaceWarningsDialog,
 } from "./store.svelte";
 import { conflictDialog, draftCloseState } from "./tabs.svelte";
@@ -26,11 +31,15 @@ afterEach(() => {
   workspaceWarningsDialog.open = false;
   importContactsPanel.open = false;
   closeConfirmState.open = false;
+  searchPanel.open = false;
+  launcherPanel.open = false;
+  settingsPanel.open = false;
+  syncOverlayStack();
 });
 
-describe("keyboardOwnedByDialog", () => {
+describe("keyboardOwnedAbovePanes", () => {
   test("is false with no dialog open", () => {
-    expect(keyboardOwnedByDialog()).toBe(false);
+    expect(keyboardOwnedAbovePanes()).toBe(false);
   });
 
   test.each([
@@ -43,8 +52,11 @@ describe("keyboardOwnedByDialog", () => {
     ["the workspace warnings", () => (workspaceWarningsDialog.open = true)],
     ["the contacts import", () => (importContactsPanel.open = true)],
     ["the desktop close prompt", () => (closeConfirmState.open = true)],
+    ["the Search overlay", () => ((searchPanel.open = true), syncOverlayStack())],
+    ["the command launcher", () => ((launcherPanel.open = true), syncOverlayStack())],
+    ["Settings", () => ((settingsPanel.open = true), syncOverlayStack())],
   ])("is true while %s is open", (_name, open) => {
     open();
-    expect(keyboardOwnedByDialog()).toBe(true);
+    expect(keyboardOwnedAbovePanes()).toBe(true);
   });
 });

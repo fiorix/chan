@@ -61,7 +61,7 @@
     closeImportContacts,
     toggleCommandLauncher,
     appInputBlocked,
-    keyboardOwnedByDialog,
+    keyboardOwnedAbovePanes,
     setTransientStatus,
     syncOverlayStack,
     toggleBrowserSidePane,
@@ -600,14 +600,6 @@
   ///   Cmd+P (browser print) -> preventDefault wins in Chrome/Safari/Firefox.
   ///   Cmd+W / Cmd+N / Cmd+Shift+[/] / Cmd+1..9 are OS-level reserved in
   ///   browsers; native binds the VS Code-shaped chords directly.
-  ///
-  /// True when an overlay or an app-root dialog owns the keyboard. The
-  /// pane-flip command must bail here to avoid flipping a pane hidden
-  /// behind it.
-  function paneChordBlocked(): boolean {
-    return topOverlay() !== null || keyboardOwnedByDialog();
-  }
-
   function onWindowKey(e: KeyboardEvent): void {
     const meta = e.metaKey || e.ctrlKey;
     // While any full-window cover is up, swallow every global shortcut: the
@@ -728,7 +720,7 @@
       !builtInChordSuperseded("app.pane.flip")
     ) {
       e.preventDefault();
-      if (!paneChordBlocked()) flipHybrid(layout.activePaneId);
+      if (!keyboardOwnedAbovePanes()) flipHybrid(layout.activePaneId);
       return;
     }
     // Escape: pop just the topmost overlay so a stack of open
@@ -1232,9 +1224,9 @@
       e.stopPropagation();
       return;
     }
-    // An app-root dialog and the Hybrid Nav dispatcher own their own
-    // keyboard contexts; never close a tab from under them.
-    if (keyboardOwnedByDialog()) return;
+    // An overlay, an app-root dialog and the Hybrid Nav dispatcher own
+    // their own keyboard contexts; never close a tab from under them.
+    if (keyboardOwnedAbovePanes()) return;
     if (paneMode.active) return;
     const p = activePane();
     const active = activeTabInPane(p);
@@ -1309,7 +1301,7 @@
         enterPaneMode();
         return;
       case "app.pane.flip":
-        if (paneChordBlocked()) return;
+        if (keyboardOwnedAbovePanes()) return;
         flipHybrid(layout.activePaneId);
         return;
       // chan-desktop's KEY_BRIDGE_JS fires these ids on native Cmd+T /
