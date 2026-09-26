@@ -9971,6 +9971,100 @@ mod tests {
         registry.close(handle.id(), CloseReason::Explicit);
     }
 
+    // A caller that declines colour (`NO_COLOR` set, or `TERM=dumb`) gets
+    // none of chan's colour forcing, and the server's own colour keys decide
+    // nothing either way. The server's env is this test's re-invocation of
+    // its own binary, so the child half sees colour keys it inherited.
+    #[cfg(unix)]
+    #[test]
+    fn a_caller_declining_colour_gets_no_colour_forcing() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env("CHAN_COLOUR_DECLINE_CHILD", "1")
+            .env("NO_COLOR", "server")
+            .env("COLORTERM", "server")
+            .env("CLICOLOR", "server")
+            .env("CLICOLOR_FORCE", "server")
+            .env("FORCE_COLOR", "server")
+            .arg("terminal_sessions::tests::a_caller_declining_colour_gets_no_colour_forcing_child")
+            .arg("--exact")
+            .arg("--nocapture")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "a spawn's colour keys ignored the caller's choice\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    // Gated with its parent above: only that test's re-invocation of this
+    // binary makes this one do real work.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_caller_declining_colour_gets_no_colour_forcing_child() {
+        if std::env::var_os("CHAN_COLOUR_DECLINE_CHILD").is_none() {
+            return;
+        }
+        let config = test_config(4096, 4, 60);
+        let default_term = config.terminal.default_term.clone();
+        let registry = Arc::new(Registry::new(config));
+        // NO_COLOR, TERM, then the four keys chan forces colour with.
+        let colour = |caller: &[(&str, &str)], expected: String, case: &'static str| {
+            let registry = registry.clone();
+            let env = caller
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+            async move {
+                let mut handle = registry
+                    .create(CreateOptions {
+                        size: test_size(),
+                        tab_name: None,
+                        tab_group: None,
+                        window_id: None,
+                        mcp_env: false,
+                        cwd: None,
+                        command: Some(
+                            "sleep 0.1; printf 'COLOUR=<%s|%s|%s|%s|%s|%s>\\n' \"$NO_COLOR\" \
+                             \"$TERM\" \"$COLORTERM\" \"$CLICOLOR\" \"$CLICOLOR_FORCE\" \
+                             \"$FORCE_COLOR\""
+                                .into(),
+                        ),
+                        env,
+                        profile: None,
+                    })
+                    .unwrap();
+                let out = collect_until(&mut handle, &expected, Duration::from_secs(5)).await;
+                assert!(
+                    out.contains(&expected),
+                    "{case}: want {expected:?}, got {out:?}"
+                );
+                registry.close(handle.id(), CloseReason::Explicit);
+            }
+        };
+
+        colour(
+            &[("NO_COLOR", "1")],
+            format!("COLOUR=<1|{default_term}||||>"),
+            "a caller's NO_COLOR withdraws chan's colour forcing",
+        )
+        .await;
+        colour(
+            &[("TERM", "dumb")],
+            "COLOUR=<server|dumb||||>".to_string(),
+            "a caller's TERM=dumb withdraws chan's colour forcing and keeps NO_COLOR",
+        )
+        .await;
+        colour(
+            &[],
+            format!("COLOUR=<|{default_term}|truecolor|1|1|3>"),
+            "a caller that declines nothing gets chan's colour forcing",
+        )
+        .await;
+    }
+
     // POSIX printf command; not valid under the Windows default shell
     // (PowerShell). A session that inherits the tenant default records its
     // command text into the ring as a banner, and `collect_until` reads that
