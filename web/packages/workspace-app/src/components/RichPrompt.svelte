@@ -10,7 +10,11 @@
   import { onDestroy, onMount } from "svelte";
   import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
   import { EditorView, ViewPlugin, keymap } from "@codemirror/view";
-  import { indentLess, indentMore } from "@codemirror/commands";
+  import {
+    cursorLineDown,
+    indentLess,
+    indentMore,
+  } from "@codemirror/commands";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import { indentListItem, outdentListItem } from "../editor/commands/list";
   import { rewriteImagePathsForDelivery } from "../editor/deliver_images";
@@ -86,8 +90,65 @@
   let lastQueued = $state<{ id: string; text: string } | null>(null);
 
   const lockCompartment = new Compartment();
+
+  // Keys a locked card still passes to the editor: moving the caret or the
+  // selection, copying, and the composer's own recall (ArrowUp), stop
+  // (Escape) and submit (Mod-Enter), whose binding comes before the editor's
+  // fence exits and does nothing while the card is pending. ArrowDown is here
+  // for its modified forms; the plain one is handled in `lockedKeydown`.
+  const LOCKED_FREE_KEYS = new Set([
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "Escape",
+    "Shift",
+    "Control",
+    "Alt",
+    "Meta",
+  ]);
+  const LOCKED_FREE_MOD_KEYS = new Set(["a", "c", "x", "v", "enter"]);
+
+  /// A locked card's keys. readOnly stops CodeMirror's own commands, but the
+  /// editor's commands dispatch directly (list continuation, indent, marks,
+  /// quotes, the fence escapes), so a key reaches the editor's keymaps only
+  /// when it cannot edit, and the rest are consumed here.
+  function lockedKeydown(event: KeyboardEvent, view: EditorView): boolean {
+    const mod = event.ctrlKey || event.metaKey;
+    if (event.key === "ArrowDown" && !mod && !event.altKey && !event.shiftKey) {
+      // On a fence's closer the editor's ArrowDown appends a line.
+      cursorLineDown(view);
+      return true;
+    }
+    if (LOCKED_FREE_KEYS.has(event.key)) return false;
+    if (mod && LOCKED_FREE_MOD_KEYS.has(event.key.toLowerCase())) return false;
+    // A composition reaches the beforeinput guard, which seeds a fresh
+    // composer from it; no keymap binds these keys.
+    if (event.isComposing || ["Dead", "Process", "Unidentified"].includes(event.key)) {
+      return false;
+    }
+    // CodeMirror cancels the default of every key a handler here takes, so a
+    // typed key seeds the fresh composer itself rather than through
+    // beforeinput, ahead of any binding on it (`>` quotes whole lines).
+    if (!mod && !event.altKey && event.key.length === 1) {
+      startFreshComposer(view, event.key);
+      return true;
+    }
+    // Every other key is consumed, Tab included so focus stays in the
+    // composer.
+    return true;
+  }
+
   function lockExtensions(locked: boolean): Extension[] {
-    return [EditorState.readOnly.of(locked), EditorView.editable.of(true)];
+    return [
+      EditorState.readOnly.of(locked),
+      EditorView.editable.of(true),
+      locked ? Prec.highest(EditorView.domEventHandlers({ keydown: lockedKeydown })) : [],
+    ];
   }
 
   // The strip's buttons run the same actions the keymap runs, and those take
@@ -116,15 +177,7 @@
             "insertCompositionText",
           ];
           if (seeds.includes(event.inputType) && event.data) {
-            const seed = event.data;
-            enterLocalEdit();
-            view.dispatch({
-              changes: { from: 0, to: view.state.doc.length, insert: seed },
-              selection: { anchor: seed.length },
-              effects: lockCompartment.reconfigure(lockExtensions(false)),
-            });
-            scheduleWrite();
-            view.focus();
+            startFreshComposer(view, event.data);
           }
           return true;
         },
@@ -142,7 +195,8 @@
           // Tab indents (list item, else plain indent) and NEVER escapes to
           // the browser's focus nav: the composer is a chat box, not a
           // document, so Tab must stay inside it. indentMore/indentLess are
-          // the fallback that make Tab/Shift-Tab always consume off-list.
+          // the fallback that make Tab/Shift-Tab consume off-list on an
+          // editable card; a locked card consumes them in `lockedKeydown`.
           {
             key: "Tab",
             run: (v) => indentListItem(v) || indentMore(v),
@@ -159,7 +213,7 @@
   // bundle cannot move it afterwards: CodeMirror keeps an existing
   // compartment's content when the extensions around it are reconfigured. The
   // lock follows the pending phase here instead, on every way into it and out
-  // of it, so a sent card refuses keymap edits and a settled one takes input.
+  // of it; `lockExtensions` is what a locked card refuses.
   $effect(() => {
     const locked = isPending;
     promptView?.dispatch({ effects: lockCompartment.reconfigure(lockExtensions(locked)) });
@@ -283,6 +337,19 @@
     void flushWrite();
     queueMicrotask(() => editor?.focusEnd());
     return true;
+  }
+
+  /// Typing over a pending card starts a fresh, unlocked composer holding
+  /// what was typed.
+  function startFreshComposer(view: EditorView, seed: string): void {
+    enterLocalEdit();
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: seed },
+      selection: { anchor: seed.length },
+      effects: lockCompartment.reconfigure(lockExtensions(false)),
+    });
+    scheduleWrite();
+    view.focus();
   }
 
   function enterLocalEdit(): void {
