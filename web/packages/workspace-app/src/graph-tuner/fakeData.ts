@@ -17,6 +17,7 @@
 // parentXStrength) can only be tuned against a graph that has a spine.
 
 import type { GraphViewEdge, GraphViewNode } from "../api/types";
+import { basename, parentDir } from "../state/format";
 
 // The exact subset GraphCanvas accepts. Structurally identical to its
 // internal RenderedNode / RenderedEdge, so these arrays drop straight
@@ -120,12 +121,8 @@ const LANGUAGES: { name: string; label: string; exts: string[] }[] = [
 const dirId = (path: string) => `directory:${path}`;
 const fileId = (path: string) => `file:${path}`;
 const parentDirOf = (path: string): string => {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? "" : dirId(path.slice(0, slash));
-};
-const basename = (path: string) => {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? path : path.slice(slash + 1);
+  const dir = parentDir(path);
+  return dir === "" ? "" : dirId(dir);
 };
 const isDoc = (path: string) => /\.(md|txt)$/i.test(path);
 
