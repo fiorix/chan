@@ -6598,25 +6598,7 @@ fn capture_launcher_geometry(app: &tauri::AppHandle) {
 /// bridge is absent. Plain Ctrl+R is safe to claim here: the launcher hosts no
 /// terminal whose shell reverse-search it would shadow (workspace windows move
 /// reload to Ctrl+Shift+R off macOS for exactly that reason).
-const LAUNCHER_RELOAD_BRIDGE_JS: &str = r#"
-(() => {
-  function reload() {
-    const tauri = window.__TAURI__;
-    if (tauri && tauri.core && typeof tauri.core.invoke === 'function') {
-      tauri.core.invoke('reload_window').catch(() => window.location.reload());
-    } else {
-      window.location.reload();
-    }
-  }
-  window.addEventListener('keydown', (e) => {
-    if (e.key.toLowerCase() !== 'r' || e.altKey || e.shiftKey) return;
-    if (!(e.metaKey || e.ctrlKey)) return;
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    reload();
-  }, true);
-})();
-"#;
+const LAUNCHER_RELOAD_BRIDGE_JS: &str = include_str!("launcher_reload_bridge.js");
 
 enum ShutdownAction {
     Exit(i32),

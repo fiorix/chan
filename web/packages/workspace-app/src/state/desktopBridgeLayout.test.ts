@@ -15,10 +15,10 @@ import { readFileSync } from "node:fs";
 import { KEY_VECTORS, type KeyVector } from "@chan/web-shared/keyboard-vectors";
 
 const KEY_BRIDGE = readFileSync("../../../desktop/src-tauri/src/key_bridge.js", "utf8");
-const mainSource = readFileSync("../../../desktop/src-tauri/src/main.rs", "utf8");
-const RELOAD_BRIDGE = mainSource.match(
-  /const LAUNCHER_RELOAD_BRIDGE_JS: &str = r#"([\s\S]*?)"#;/,
-)![1];
+const RELOAD_BRIDGE = readFileSync(
+  "../../../desktop/src-tauri/src/launcher_reload_bridge.js",
+  "utf8",
+);
 const CONNECTING_JS = readFileSync("../../../desktop/src/connecting.js", "utf8");
 const CONNECTING_HTML = readFileSync("../../../desktop/src/connecting.html", "utf8");
 
