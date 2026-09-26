@@ -2718,7 +2718,7 @@ where
         biased;
         result = rx => {
             match result {
-                Ok((reply, _answered_by)) => {
+                Ok(reply) => {
                     // Close the overlay in every target window, the one that
                     // answered included: another SPA instance can share its
                     // window id and still shows the survey, and the answering
@@ -8440,7 +8440,6 @@ is_lead = false
                 option_index: 0,
                 option_label: "ok".into(),
             },
-            Some("win-a".into()),
         ));
 
         // The handler has not run yet. win-a answered, so the close the
@@ -8576,7 +8575,6 @@ is_lead = false
                     option_index: 0,
                     option_label: "a".into(),
                 },
-                Some("win-a".into()),
             ));
         };
         let (response, ()) = tokio::join!(
@@ -8740,7 +8738,6 @@ is_lead = false
             SurveyReply::Dismissed {
                 survey_id: survey_id.clone(),
             },
-            Some("win-a".into()),
         ));
         assert!(matches!(
             survey_bus.enqueue_turn(key),
@@ -8830,7 +8827,6 @@ is_lead = false
                 option_index: 0,
                 option_label: "ok".into(),
             },
-            Some("win-a".into()),
         ));
         let mut line = String::new();
         tokio::time::timeout(
@@ -9071,7 +9067,6 @@ is_lead = false
                 option_index: 0,
                 option_label: "ok".into(),
             },
-            Some("win-a".into()),
         ));
         assert!(matches!(
             handler.await.expect("survey handler"),
@@ -9186,7 +9181,6 @@ is_lead = false
                 option_index: 0,
                 option_label: "ok".into(),
             },
-            Some("win-a".into()),
         ));
         assert!(matches!(
             handler.await.expect("survey handler"),
@@ -9449,7 +9443,6 @@ is_lead = false
                 option_index: 0,
                 option_label: label.into(),
             },
-            Some("win-a".into()),
         ));
     }
 

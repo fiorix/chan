@@ -127,10 +127,10 @@ impl Drop for OpenSurveyGuard<'_> {
 }
 
 /// The `cs terminal survey` round-trips: a [`RoundTripBus`] of `survey-` ids
-/// over the [`SurveyReplyEnvelope`], the per-target FIFO that serializes the
+/// over the [`SurveyReply`], the per-target FIFO that serializes the
 /// surveys addressed to one overlay slot, and the record of open surveys.
 pub struct SurveyBus {
-    pending: RoundTripBus<SurveyReplyEnvelope>,
+    pending: RoundTripBus<SurveyReply>,
     /// Per-target FIFOs keyed by [`SurveyQueueKey`]. The front entry is the
     /// survey currently allowed to be open; the rest wait in arrival order.
     /// An emptied queue is removed so keys do not accumulate.
@@ -143,14 +143,6 @@ pub struct SurveyBus {
     /// different window sets both take a shared window's window-wide slot.
     open: Mutex<Vec<OpenSurvey>>,
 }
-
-/// What a completed survey delivers to the blocked control handler: the reply
-/// plus the id of the window that answered (when the SPA reports it), so the
-/// handler can exclude that window from the stale-overlay close fan-out. A
-/// window answering its own survey already dismissed its overlay locally, so
-/// re-closing it there only races that clear. `None` for the window id keeps
-/// the pre-report behavior (fan the close to every target).
-pub type SurveyReplyEnvelope = (SurveyReply, Option<String>);
 
 impl Default for SurveyBus {
     fn default() -> Self {
@@ -221,7 +213,7 @@ impl SurveyBus {
     /// Park a survey; see [`RoundTripBus::register`]. The handler stamps the
     /// id onto the outgoing [`chan_shell::SurveySpec`] so the SPA echoes it
     /// back in its reply.
-    pub fn register(&self) -> (String, oneshot::Receiver<SurveyReplyEnvelope>) {
+    pub fn register(&self) -> (String, oneshot::Receiver<SurveyReply>) {
         self.pending.register()
     }
 
@@ -304,26 +296,18 @@ impl SurveyBus {
     }
 
     /// Complete a parked survey: take its sender out of the map and fire the
-    /// oneshot with the reply and `answered_by` (the answering window's id, or
-    /// `None` when the SPA does not report it). An accepted reply also takes
-    /// the survey out of the open record in the same step, so no sync built
-    /// after it lists the survey: the handler's close skips the answering
-    /// window, and nothing would close an overlay such a sync raised there.
-    /// Returns `false` when no survey with that id is parked (it was already
-    /// answered, or the id is stale), which the reply route maps to a 404 and
-    /// which leaves the record as it is. C's `POST /api/survey/reply` is the
-    /// only caller.
-    pub fn complete_survey(
-        &self,
-        survey_id: &str,
-        reply: SurveyReply,
-        answered_by: Option<String>,
-    ) -> bool {
+    /// oneshot with the reply. An accepted reply also takes the survey out of
+    /// the open record in the same step, so no sync built after it lists the
+    /// survey. Returns `false` when no survey with that id is parked (it was
+    /// already answered, or the id is stale), which the reply route maps to a
+    /// 404 and which leaves the record as it is. `POST /api/survey/reply` is
+    /// the only caller.
+    pub fn complete_survey(&self, survey_id: &str, reply: SurveyReply) -> bool {
         // The record's lock is held across the completion, so a sync is built
         // wholly before an accepted reply or wholly after it. Lock order: the
         // record, then the pending map; nothing takes them the other way.
         let mut open = self.open.lock().expect("open surveys poisoned");
-        let accepted = self.pending.complete(survey_id, (reply, answered_by));
+        let accepted = self.pending.complete(survey_id, reply);
         if accepted {
             open.retain(|open| open.spec.survey_id != survey_id);
         }
@@ -346,14 +330,9 @@ mod tests {
                 option_index: 1,
                 option_label: "Yes".into(),
             },
-            Some("win-a".into()),
         ));
-        // The reply and the answering window round-trip to the handler.
         match rx.await.expect("reply delivered") {
-            (SurveyReply::Option { option_label, .. }, answered_by) => {
-                assert_eq!(option_label, "Yes");
-                assert_eq!(answered_by.as_deref(), Some("win-a"));
-            }
+            SurveyReply::Option { option_label, .. } => assert_eq!(option_label, "Yes"),
             other => panic!("unexpected reply: {other:?}"),
         }
     }
@@ -378,7 +357,6 @@ mod tests {
                 option_index: 0,
                 option_label: "Yes".into(),
             },
-            None,
         ));
         assert!(cancelled_rx.await.is_err());
     }

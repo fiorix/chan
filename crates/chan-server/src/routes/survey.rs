@@ -23,11 +23,10 @@ use crate::state::AppState;
 /// Body of `POST /api/survey/reply`. Internally tagged on `kind`, camelCase
 /// to match the SPA (`web/packages/workspace-app/src/api/client.ts` `SurveyReplyRequest`).
 ///
-/// `windowId` is the answering window's id (the same id the SPA matches
-/// `window_command` frames against). The server excludes that window from the
-/// stale-overlay close fan-out so a window answering its own survey does not
-/// receive an `answered_elsewhere` close racing its own local clear. Optional:
-/// a reply without it fans the close to every target.
+/// Shipped clients also send `windowId`, the answering window's id. The
+/// server does not read it, since a survey's close goes to every target
+/// window, the answering one included, and a body carrying it still parses
+/// because this type does not deny unknown fields.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SurveyReplyRequest {
@@ -36,35 +35,33 @@ pub enum SurveyReplyRequest {
         survey_id: String,
         option_index: u32,
         option_label: String,
-        #[serde(default)]
-        window_id: Option<String>,
     },
     /// The user hit [F] (follow up later): a bare signal, shaped like
     /// `Dismissed`, telling the asking agent the host will follow up in a
     /// separate prompt. No option, no payload.
     #[serde(rename = "followup", rename_all = "camelCase")]
-    Followup {
-        survey_id: String,
-        #[serde(default)]
-        window_id: Option<String>,
-    },
+    Followup { survey_id: String },
     /// The user hit Dismiss (Part C): carries only the survey id (no option),
     /// so the asking agent can tell a dismiss from an answer.
     #[serde(rename = "dismissed", rename_all = "camelCase")]
-    Dismissed {
-        survey_id: String,
-        #[serde(default)]
-        window_id: Option<String>,
-    },
+    Dismissed { survey_id: String },
 }
 
 impl SurveyReplyRequest {
-    /// The answering window's id, when the SPA reported it.
-    fn window_id(&self) -> Option<&str> {
+    /// The reply the parked survey's handler receives.
+    fn into_reply(self) -> SurveyReply {
         match self {
-            Self::Option { window_id, .. }
-            | Self::Followup { window_id, .. }
-            | Self::Dismissed { window_id, .. } => window_id.as_deref(),
+            Self::Option {
+                survey_id,
+                option_index,
+                option_label,
+            } => SurveyReply::Option {
+                survey_id,
+                option_index,
+                option_label,
+            },
+            Self::Followup { survey_id } => SurveyReply::Followup { survey_id },
+            Self::Dismissed { survey_id } => SurveyReply::Dismissed { survey_id },
         }
     }
 }
@@ -77,29 +74,9 @@ pub async fn api_survey_reply(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SurveyReplyRequest>,
 ) -> Response {
-    // The answering window, excluded from the stale-overlay close fan-out
-    // (read before the match consumes `req`).
-    let answered_by = req.window_id().map(str::to_string);
-    let reply = match req {
-        SurveyReplyRequest::Option {
-            survey_id,
-            option_index,
-            option_label,
-            ..
-        } => SurveyReply::Option {
-            survey_id,
-            option_index,
-            option_label,
-        },
-        SurveyReplyRequest::Followup { survey_id, .. } => SurveyReply::Followup { survey_id },
-        SurveyReplyRequest::Dismissed { survey_id, .. } => SurveyReply::Dismissed { survey_id },
-    };
-
+    let reply = req.into_reply();
     let survey_id = reply.survey_id().to_string();
-    if state
-        .survey_bus
-        .complete_survey(&survey_id, reply, answered_by)
-    {
+    if state.survey_bus.complete_survey(&survey_id, reply) {
         Json(serde_json::json!({})).into_response()
     } else {
         err(
@@ -112,6 +89,9 @@ pub async fn api_survey_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt;
 
     #[test]
     fn option_reply_request_deserializes_camel_case() {
@@ -122,27 +102,60 @@ mod tests {
                 survey_id,
                 option_index,
                 option_label,
-                window_id,
             } => {
                 assert_eq!(survey_id, "survey-3");
                 assert_eq!(option_index, 2);
                 assert_eq!(option_label, "Yes");
-                // Absent windowId defaults to None (fan the close to all).
-                assert!(window_id.is_none());
             }
             _ => panic!("expected option variant"),
         }
     }
 
+    /// One reply body of each kind for survey `{ID}`, open at the end so a
+    /// test can close it with or without the `windowId` shipped clients send.
+    const REPLY_BODIES: [&str; 3] = [
+        r#"{"surveyId":"{ID}","kind":"option","optionIndex":0,"optionLabel":"a""#,
+        r#"{"surveyId":"{ID}","kind":"followup""#,
+        r#"{"surveyId":"{ID}","kind":"dismissed""#,
+    ];
+
     #[test]
-    fn reply_request_carries_window_id() {
-        // The SPA reports the answering window so the server can exclude it
-        // from the stale-overlay close fan-out. camelCase `windowId` on the
-        // wire; a green compile alone would not catch a snake_case drift.
-        let json = r#"{"surveyId":"survey-7","kind":"option","optionIndex":0,
-            "optionLabel":"a","windowId":"win-a"}"#;
-        let req: SurveyReplyRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.window_id(), Some("win-a"));
+    fn a_reply_body_with_a_window_id_parses_to_the_same_reply() {
+        // Shipped SPAs and desktops send `windowId` on every reply; the field
+        // must neither fail the parse nor change the reply.
+        for body in REPLY_BODIES {
+            let body = body.replace("{ID}", "survey-7");
+            let without: SurveyReplyRequest = serde_json::from_str(&format!("{body}}}")).unwrap();
+            let with: SurveyReplyRequest =
+                serde_json::from_str(&format!(r#"{body},"windowId":"win-a"}}"#)).unwrap();
+            assert_eq!(
+                serde_json::to_value(with.into_reply()).unwrap(),
+                serde_json::to_value(without.into_reply()).unwrap(),
+                "{body} with a windowId"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_carrying_a_window_id_completes_its_survey() {
+        let state = crate::state::test_support::make_test_state(false);
+        let router = axum::Router::new()
+            .route("/api/survey/reply", axum::routing::post(api_survey_reply))
+            .with_state(state.clone());
+        for body in REPLY_BODIES {
+            let (id, rx) = state.survey_bus.register();
+            let body = body.replace("{ID}", &id);
+            let request = Request::post("/api/survey/reply")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{body},"windowId":"win-a"}}"#)))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{body}");
+            assert_eq!(
+                rx.await.expect("the reply reaches the survey").survey_id(),
+                id
+            );
+        }
     }
 
     #[test]
@@ -152,13 +165,7 @@ mod tests {
         let json = r#"{"surveyId":"survey-9","kind":"followup"}"#;
         let req: SurveyReplyRequest = serde_json::from_str(json).unwrap();
         match req {
-            SurveyReplyRequest::Followup {
-                survey_id,
-                window_id,
-            } => {
-                assert_eq!(survey_id, "survey-9");
-                assert!(window_id.is_none());
-            }
+            SurveyReplyRequest::Followup { survey_id } => assert_eq!(survey_id, "survey-9"),
             _ => panic!("expected followup variant"),
         }
     }
@@ -169,7 +176,7 @@ mod tests {
         let json = r#"{"surveyId":"survey-4","kind":"dismissed"}"#;
         let req: SurveyReplyRequest = serde_json::from_str(json).unwrap();
         match req {
-            SurveyReplyRequest::Dismissed { survey_id, .. } => assert_eq!(survey_id, "survey-4"),
+            SurveyReplyRequest::Dismissed { survey_id } => assert_eq!(survey_id, "survey-4"),
             _ => panic!("expected dismissed variant"),
         }
     }
