@@ -8,11 +8,12 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+const library = vi.hoisted(() => ({ snapshot: null as unknown }));
 vi.mock("../state/commands/install", () => ({}));
 vi.mock("../api/libraryCommand", () => ({
-  loadScopedLibrarySnapshot: vi.fn(async () => null),
+  loadScopedLibrarySnapshot: vi.fn(async () => library.snapshot),
   loadScopedWindowLiveTerminals: vi.fn(),
-  runScopedLibraryAction: vi.fn(),
+  runScopedLibraryAction: vi.fn(async () => undefined),
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
@@ -29,7 +30,9 @@ import {
 
 Element.prototype.scrollIntoView = vi.fn();
 
-const runProbe = vi.fn();
+/// Where the probe command puts focus, as a command that opens a surface does.
+let probeTarget: HTMLInputElement | null = null;
+const runProbe = vi.fn(() => probeTarget?.focus());
 registerCommands([
   {
     id: "test.focus.probe",
@@ -66,6 +69,17 @@ async function openFromOrigin(): Promise<HTMLElement> {
   return target;
 }
 
+function row(target: HTMLElement, title: string): HTMLButtonElement {
+  const found = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+    (candidate) => candidate.querySelector(".deck-result-title")?.textContent === title,
+  );
+  if (!found) {
+    const visible = [...target.querySelectorAll(".deck-result-title")].map((n) => n.textContent);
+    throw new Error(`missing row ${title}; visible: ${visible.join(", ")}`);
+  }
+  return found;
+}
+
 async function press(target: HTMLElement, key: string): Promise<void> {
   (target.querySelector('[role="dialog"]') as HTMLElement).dispatchEvent(
     new KeyboardEvent("keydown", { key, bubbles: true }),
@@ -74,6 +88,8 @@ async function press(target: HTMLElement, key: string): Promise<void> {
 }
 
 beforeEach(() => {
+  library.snapshot = null;
+  probeTarget = null;
   sessionStorage.clear();
   clearLauncherDraft();
   launcherPanel.open = false;
@@ -101,7 +117,9 @@ describe("focus when the launcher closes", () => {
     expect(document.activeElement).toBe(origin);
   });
 
-  test("running a command leaves focus off the element it opened from", async () => {
+  test("running a command leaves focus where the command put it", async () => {
+    probeTarget = document.createElement("input");
+    document.body.append(probeTarget);
     const target = await openFromOrigin();
     const input = target.querySelector(".deck-input") as HTMLInputElement;
     input.value = "probe focus";
@@ -109,6 +127,45 @@ describe("focus when the launcher closes", () => {
     await tick();
     await press(target, "Enter");
     expect(runProbe).toHaveBeenCalledOnce();
+    expect(launcherPanel.open).toBe(false);
+    expect(document.activeElement).toBe(probeTarget);
+  });
+
+  test("a window action that closes the launcher after its success card leaves focus alone", async () => {
+    library.snapshot = {
+      library_id: "lib-local-test",
+      windows: [
+        {
+          window_id: "w-notes",
+          kind: "workspace",
+          title: "notes",
+          ordinal: 2,
+          label: "notes",
+          workspace_path: "/work/notes",
+          connected: true,
+          hidden: false,
+          control: false,
+          launch_path: "/api/library/command-capabilities/cap/windows/w-notes/launch",
+        },
+      ],
+      workspaces: [],
+    };
+    // Hiding a window closes its popup, which the browser path acquires by name.
+    vi.spyOn(window, "open").mockImplementation(
+      () => ({ close: vi.fn(), focus: vi.fn(), location: { href: "" } }) as unknown as Window,
+    );
+    const target = await openFromOrigin();
+    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
+    await flush();
+    row(target, "Windows").click();
+    await flush();
+    row(target, "Window 2 [notes]").click();
+    await flush();
+    row(target, "Hide").click();
+    await flush();
+    expect(target.querySelector(".deck-operation"), "the success card").not.toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flush();
     expect(launcherPanel.open).toBe(false);
     expect(document.activeElement).not.toBe(origin);
   });
