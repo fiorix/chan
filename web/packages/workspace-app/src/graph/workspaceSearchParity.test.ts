@@ -33,7 +33,7 @@ describe("workspace search lens parity golden", () => {
   });
   for (const golden of expected.cases) {
     test(`${golden.lens} depth ${golden.depth}`, () => {
-      const actual = lensClosure(graph.nodes, graph.edges, {
+      const visible = lensClosure(graph.nodes, graph.edges, {
         seedIds: [golden.seed],
         depth: golden.depth,
         direction: golden.direction,
@@ -41,8 +41,12 @@ describe("workspace search lens parity golden", () => {
         languageOneHop: golden.language_one_hop,
         containmentOnly: golden.lens === "directory",
       });
-      expect(actual.nodeIds).toEqual(golden.visible_node_ids);
-      expect(actual.relationshipKeys).toEqual(golden.relationship_keys);
+      const relationshipKeys = graph.edges
+        .filter((edge) => visible.has(edge.source) && visible.has(edge.target))
+        .map((edge) => JSON.stringify([edge.source, edge.target, edge.kind]))
+        .sort();
+      expect([...visible].sort()).toEqual(golden.visible_node_ids);
+      expect(relationshipKeys).toEqual(golden.relationship_keys);
     });
   }
 });

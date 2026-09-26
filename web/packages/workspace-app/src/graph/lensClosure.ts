@@ -62,15 +62,18 @@ export function pullMetaNeighbours(
   }
 }
 
-/// Pure projection of GraphPanel's semantic lens rules. It exists so the
-/// shared Rust/SPA golden fixture can exercise the same forward-vs-both BFS,
-/// bounded meta closure, language one-hop cap, and containment-spine rules
-/// without mounting the canvas or changing its production data path.
+/// The node ids a semantic lens shows: the seeds, a walk of `depth` hops
+/// along edges in `direction` (at most one hop with `languageOneHop`, and
+/// along contains edges alone with `containmentOnly`), the meta nodes one
+/// hop off what the walk reached when `metaClosure` is set, and every
+/// contains ancestor of all of that. It exists so the shared Rust/SPA
+/// golden fixture can exercise GraphPanel's lens rules without mounting
+/// the canvas.
 export function lensClosure(
   nodes: readonly LensNode[],
   edges: readonly LensEdge[],
   options: LensClosureOptions,
-): { nodeIds: string[]; relationshipKeys: string[] } {
+): Set<string> {
   const visited = new Set(options.seedIds);
   let frontier = new Set(options.seedIds);
   const depth = options.languageOneHop
@@ -101,10 +104,5 @@ export function lensClosure(
 
   // Anchor every surfaced node to its directory spine.
   ancestorClosure(visited, edges);
-
-  const relationshipKeys = edges
-    .filter((edge) => visited.has(edge.source) && visited.has(edge.target))
-    .map((edge) => JSON.stringify([edge.source, edge.target, edge.kind]))
-    .sort();
-  return { nodeIds: [...visited].sort(), relationshipKeys };
+  return visited;
 }
