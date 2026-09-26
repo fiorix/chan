@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import BubbleOverlay from "./BubbleOverlay.svelte";
+import { api } from "../api/client";
 import { surveyState } from "../state/survey.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import type { SurveySpec } from "../api/client";
@@ -33,6 +34,7 @@ afterEach(() => {
   surveyState.byTab = {};
   surveyState.windowWide = null;
   tabFocusPulse.value = 0;
+  vi.restoreAllMocks();
 });
 
 describe("survey overlay", () => {
@@ -219,5 +221,34 @@ describe("survey overlay", () => {
     expect(target.querySelector(".survey-dismiss")).not.toBeNull();
     expect(target.querySelector(".survey-followup")?.textContent).toContain("Follow up");
     expect(target.querySelector(".survey-dismiss")?.textContent).toContain("Dismiss");
+  });
+});
+
+describe("the survey card's keys", () => {
+  // The card answers its keys unmodified, as the viewers do: a chord with
+  // Ctrl, Cmd or Alt held is the app's and travels on.
+  test.each([
+    ["Ctrl+X", { key: "x", code: "KeyX", ctrlKey: true }],
+    ["Cmd+F", { key: "f", code: "KeyF", metaKey: true }],
+    ["Alt+1", { key: "1", code: "Digit1", altKey: true }],
+  ])("leave %s to the app", async (_chord, init) => {
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    surveyState.windowWide = { spec: spec(), busy: false };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+    const reached = vi.fn();
+    document.addEventListener("keydown", reached);
+
+    const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    target.querySelector(".survey-card")!.dispatchEvent(event);
+    await tick();
+    document.removeEventListener("keydown", reached);
+
+    expect(reply).not.toHaveBeenCalled();
+    expect(surveyState.windowWide?.spec.surveyId).toBe("survey-1");
+    expect(event.defaultPrevented).toBe(false);
+    expect(reached).toHaveBeenCalledTimes(1);
   });
 });
