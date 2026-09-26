@@ -19,7 +19,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { fileTab, resetLayout } from "./__tests__/tabs";
 import { uiConfirm, resolveConfirm } from "./state/confirm.svelte";
-import { paneModalGuard } from "./state/paneModalGuard.svelte";
 import {
   importContactsPanel,
   resolvePathPrompt,
@@ -107,7 +106,6 @@ describe("the pane flip refuses while something covers the panes", () => {
       () => (workspaceWarningsDialog.open = false),
     ],
     ["the contacts import", () => (importContactsPanel.open = true), () => (importContactsPanel.open = false)],
-    ["a pane's own modal", () => (paneModalGuard.openCount = 1), () => (paneModalGuard.openCount = 0)],
   ];
 
   test.each(blockers)("%s", async (_name, open, close) => {

@@ -21,9 +21,6 @@
   // ConflictModal; workspaceWarningsDialog drives WorkspaceWarningsModal.
   import { conflictDialog } from "./state/tabs.svelte";
   import { currentPreferences, workspaceWarningsDialog } from "./state/store.svelte";
-  // Open-count of pane-LOCAL modals (MCP-env info) whose visibility
-  // lives in component state App.svelte can't otherwise see.
-  import { paneModalGuard } from "./state/paneModalGuard.svelte";
   import { installFileDropGuard } from "./state/fileDropGuard";
   import { toggleRichPromptForTab } from "./state/richPrompt.svelte";
   import FileBrowserSidePane from "./components/FileBrowserSidePane.svelte";
@@ -629,11 +626,7 @@
       teamDialogState.request !== null ||
       conflictDialog.open ||
       workspaceWarningsDialog.open ||
-      importContactsPanel.open ||
-      // Pane-local modals (currently MCP-env info in a terminal pane)
-      // register here while open since their visibility isn't an
-      // app-root flag.
-      paneModalGuard.openCount > 0
+      importContactsPanel.open
     );
   }
 

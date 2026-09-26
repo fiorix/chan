@@ -23,10 +23,10 @@ import "../state/commands/install";
 import { EXTENSION_KEYDOWN_MESSAGE } from "../state/extensionBridge";
 import { refreshExtensions } from "../state/extensions.svelte";
 import { assignOverride, hydrateOverrides } from "../state/keymapOverrides.svelte";
-import { paneModalGuard } from "../state/paneModalGuard.svelte";
 import { settingsPanel } from "../state/store.svelte";
 import {
   cancelPaneMode,
+  conflictDialog,
   layout,
   paneMode,
   type FileTab,
@@ -164,7 +164,7 @@ afterEach(async () => {
     settingsPanel.open = false;
     if (paneMode.active) cancelPaneMode();
     hydrateOverrides(null);
-    paneModalGuard.openCount = 0;
+    conflictDialog.open = false;
     vi.restoreAllMocks();
   }
 });
@@ -510,7 +510,7 @@ describe("Settings, pane flip and pane navigation keep their guards", () => {
 
   test("with a modal over the pane, Ctrl+` is swallowed and flips nothing", async () => {
     await mountApp();
-    paneModalGuard.openCount = 1;
+    conflictDialog.open = true;
     const side = pane().side;
     const event = press({ key: "`", code: "Backquote", ctrlKey: true });
     await settle();
