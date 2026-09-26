@@ -603,9 +603,9 @@ export type ExtensionTab = {
 /// The Dashboard carousel's slots in display order, by label. The index is
 /// the slot's identity: `carouselSlide`, `disabledSlots` and the slide
 /// commands store it, and the carousel template renders one slide per
-/// index behind its `{#if slideIndex === n}` guards, whose titles repeat
-/// these labels. The tab menu's on/off rows and the flip-back's title and
-/// dots read them from here.
+/// index in a single `{#if}` chain (About at 2, Workspace at 0, Search in
+/// its `{:else}`), whose titles repeat these labels. The tab menu's on/off
+/// rows and the flip-back's title and dots read them from here.
 export const DASHBOARD_SLOT_LABELS = ["Workspace", "Search", "About"] as const;
 
 /// Carousel slot count, shared by the on/off helpers below, the
