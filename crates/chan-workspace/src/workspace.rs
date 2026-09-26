@@ -390,10 +390,29 @@ pub enum RecoveryOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PersistedReportRefresh {
+pub(crate) enum PersistedReportRefresh {
     Settled,
     Owed,
     Refreshing,
+    /// A refresh is running and a watcher loss arrived after it was claimed.
+    /// Its scan may predate the lost events, so it settles nothing.
+    RefreshingOwedAgain,
+}
+
+/// Owe a rescan of the report, because a watcher loss left rows the warm
+/// index cannot tell apart from current ones.
+pub(crate) fn owe_persisted_report_refresh(state: &std::sync::Mutex<PersistedReportRefresh>) {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state = match *state {
+        PersistedReportRefresh::Settled | PersistedReportRefresh::Owed => {
+            PersistedReportRefresh::Owed
+        }
+        PersistedReportRefresh::Refreshing | PersistedReportRefresh::RefreshingOwedAgain => {
+            PersistedReportRefresh::RefreshingOwedAgain
+        }
+    };
 }
 
 struct PersistedReportRefreshGuard<'a> {
@@ -403,15 +422,15 @@ struct PersistedReportRefreshGuard<'a> {
 
 impl Drop for PersistedReportRefreshGuard<'_> {
     fn drop(&mut self) {
-        let next = if self.settled {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = if self.settled && *state == PersistedReportRefresh::Refreshing {
             PersistedReportRefresh::Settled
         } else {
             PersistedReportRefresh::Owed
         };
-        match self.state.lock() {
-            Ok(mut state) => *state = next,
-            Err(poisoned) => *poisoned.into_inner() = next,
-        }
     }
 }
 
@@ -885,9 +904,11 @@ pub struct Workspace {
     /// across replay, reconcile, or rebuild work; the derived-state
     /// mutation boundary remains a separate lock.
     recovery: std::sync::Mutex<RecoveryStatus>,
-    /// Open-time persisted-report refresh obligation. Claimants inspect and
-    /// update it outside the recovery-coordinator critical section.
-    persisted_report_refresh: std::sync::Mutex<PersistedReportRefresh>,
+    /// Persisted-report refresh obligation, owed at open when a report file
+    /// is present and again by a watcher loss on a warm report (the report
+    /// fan-out shares it). Claimants inspect and update it outside the
+    /// recovery-coordinator critical section.
+    persisted_report_refresh: Arc<std::sync::Mutex<PersistedReportRefresh>>,
     /// One owned startup worker. It executes the metadata-derived recovery
     /// plan off the open caller and joins on ordinary workspace teardown.
     recovery_worker: RecoveryWorker,
@@ -1200,11 +1221,11 @@ impl Workspace {
             write_serial: Arc::new(std::sync::Mutex::new(())),
             dashboard_serial: std::sync::Mutex::new(()),
             recovery: std::sync::Mutex::new(recovery),
-            persisted_report_refresh: std::sync::Mutex::new(if refresh_report {
+            persisted_report_refresh: Arc::new(std::sync::Mutex::new(if refresh_report {
                 PersistedReportRefresh::Owed
             } else {
                 PersistedReportRefresh::Settled
-            }),
+            })),
             recovery_worker: RecoveryWorker::new(),
             recovery_driver: std::sync::RwLock::new(None),
             report: Arc::new(std::sync::OnceLock::new()),
@@ -1228,7 +1249,8 @@ impl Workspace {
         self.recovery_worker.stop_and_join();
     }
 
-    /// Refresh a persisted report when the open-time recovery plan requires it.
+    /// Rescan the report when a refresh is owed: by the open-time recovery
+    /// plan over a persisted report, or by a watcher loss on a warm one.
     ///
     /// Recovery claimants call this after their pass action succeeds and before
     /// they finish the pass. A settled obligation is a no-op, a failed or
@@ -1244,7 +1266,8 @@ impl Workspace {
             match *refresh {
                 PersistedReportRefresh::Settled => return Ok(()),
                 PersistedReportRefresh::Owed => *refresh = PersistedReportRefresh::Refreshing,
-                PersistedReportRefresh::Refreshing => {
+                PersistedReportRefresh::Refreshing
+                | PersistedReportRefresh::RefreshingOwedAgain => {
                     return Err(ChanError::Io(
                         "persisted report refresh is already running".to_string(),
                     ));
@@ -4203,8 +4226,12 @@ impl Workspace {
     /// dropped, since the scan reflects the on-disk state regardless. Callers
     /// that need a warm report call `report()` / `boot()`.
     pub fn watch(self: &Arc<Self>, cb: Arc<dyn WatchCallback>) -> Result<WatchHandle> {
-        let report_fan: Arc<dyn WatchCallback> =
-            ReportFanOut::new(cb, Arc::clone(&self.report), Arc::clone(&self.write_serial));
+        let report_fan: Arc<dyn WatchCallback> = ReportFanOut::new(
+            cb,
+            Arc::clone(&self.report),
+            Arc::clone(&self.write_serial),
+            Arc::clone(&self.persisted_report_refresh),
+        );
         let fan: Arc<dyn WatchCallback> = Arc::new(ScopePolicyFanOut {
             workspace: Arc::downgrade(self),
             downstream: report_fan,
@@ -5734,6 +5761,7 @@ mod tests {
             callback,
             Arc::clone(&workspace.report),
             Arc::clone(&workspace.write_serial),
+            Arc::clone(&workspace.persisted_report_refresh),
         );
 
         let guard = workspace.write_serial.lock().unwrap();
@@ -5778,6 +5806,7 @@ mod tests {
             callback,
             Arc::clone(&workspace.report),
             Arc::clone(&workspace.write_serial),
+            Arc::clone(&workspace.persisted_report_refresh),
         );
         let listed = |workspace: &Workspace| {
             workspace
@@ -5830,6 +5859,7 @@ mod tests {
             callback,
             Arc::clone(&workspace.report),
             Arc::clone(&workspace.write_serial),
+            Arc::clone(&workspace.persisted_report_refresh),
         );
 
         // A refresh claimed before the loss arrived, whose scan may predate

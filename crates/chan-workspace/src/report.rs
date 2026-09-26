@@ -18,6 +18,7 @@ use chan_report::{CocomoParams, Index, Report, ReportOptions, Scope, UpdateOutco
 use crate::error::{ChanError, Result};
 use crate::fs_ops::{atomic_write, IndexScopePolicy};
 use crate::watch::{WatchCallback, WatchEvent, WatchKind};
+use crate::workspace::{owe_persisted_report_refresh, PersistedReportRefresh};
 
 /// Bursts of filesystem events (`git checkout`, bulk save) hit the
 /// Index in quick succession. We coalesce writes to the on-disk
@@ -167,11 +168,10 @@ impl ReportState {
                     }
                 }
                 WatchKind::ProviderError => {
-                    // The watcher itself signaled it lost events.
-                    // chan-report's Index can't tell from here
-                    // which paths got out of sync, so the right
-                    // recovery is a full rescan. Leave that to a
-                    // future explicit Workspace::rebuild_report().
+                    // The watcher lost events, and the index cannot tell
+                    // which rows they touched. `ReportFanOut` owes the
+                    // workspace a full rescan instead, which the claimant
+                    // of the recovery pass the loss requests runs.
                     return;
                 }
             }
@@ -292,10 +292,16 @@ impl Drop for ReportState {
 /// captures the current filesystem state. The user callback always sees every
 /// event. Warm report mutations take the workspace's shared derived-state
 /// serialization boundary; the user callback runs after that guard is dropped.
+///
+/// A watcher loss on a scanned report owes the workspace's persisted-report
+/// refresh before the user callback runs, so the recovery pass that callback
+/// requests rescans the report. An unscanned report owes nothing for the same
+/// reason it drops events.
 pub(crate) struct ReportFanOut {
     user_cb: Arc<dyn WatchCallback>,
     report: Arc<OnceLock<Arc<ReportState>>>,
     write_serial: Arc<Mutex<()>>,
+    refresh: Arc<Mutex<PersistedReportRefresh>>,
 }
 
 impl ReportFanOut {
@@ -303,11 +309,13 @@ impl ReportFanOut {
         user_cb: Arc<dyn WatchCallback>,
         report: Arc<OnceLock<Arc<ReportState>>>,
         write_serial: Arc<Mutex<()>>,
+        refresh: Arc<Mutex<PersistedReportRefresh>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             user_cb,
             report,
             write_serial,
+            refresh,
         })
     }
 }
@@ -319,6 +327,9 @@ impl WatchCallback for ReportFanOut {
         // pending scan reflects this file's on-disk state anyway).
         if let Some(report) = self.report.get() {
             let _serial = self.write_serial.lock().unwrap();
+            if event.kind == WatchKind::ProviderError {
+                owe_persisted_report_refresh(&self.refresh);
+            }
             report.on_event(&event);
         }
         self.user_cb.on_event(event);
