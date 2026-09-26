@@ -2353,9 +2353,9 @@ export function setTerminalPendingGlobalName(tab: TerminalTab, pending: boolean)
   tab.pendingGlobalName = pending;
 }
 
-/// Drop a terminal's seed once it has been typed. Every connect that starts a
-/// fresh session types the seed the tab still holds, so a later fresh session
-/// in the same tab would type it again.
+/// Drop a terminal's seed when its send is scheduled, before the delayed write
+/// types it. Every connect that starts a fresh session types the seed the tab
+/// still holds, so a later fresh session in the same tab would type it again.
 export function clearTerminalSeedInput(tab: TerminalTab): void {
   tab.seedInput = undefined;
 }
@@ -5410,8 +5410,9 @@ function clampSlidePreviewIndex(index: number): number {
 /// The tab's slide preview state, created on first use. The tab's own field is
 /// returned rather than the assignment's value: an assignment evaluates to the
 /// plain object assigned, not the reactive state the tab now holds. The tab sees
-/// a write through the plain object only while it has not read that field; once
-/// it has, the write misses it.
+/// a write through the plain object only until that field has a signal, which a
+/// read of the field or a write through the tab creates; after that, the write
+/// misses it.
 export function ensureTabSlidePreview(tab: FileTab): SlidePreviewTabState {
   if (!tab.slidePreview) tab.slidePreview = { open: false, index: 0, mode: "preview" };
   return tab.slidePreview;
