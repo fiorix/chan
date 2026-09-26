@@ -1,9 +1,8 @@
 <script lang="ts">
   // The chrome the app-root dialogs share: a dim backdrop over the whole
-  // window that dismisses on a click, and a centered panel beside it that
-  // swallows its own clicks. The dialog's content (title, fields, action
-  // row) and its open state are the caller's; the shell renders only while
-  // the caller shows it.
+  // window that dismisses on a click, and a centered panel beside it. The
+  // dialog's content (title, fields, action row) and its open state are the
+  // caller's; the shell renders only while the caller shows it.
 
   import { onMount, type Snippet } from "svelte";
 
@@ -76,7 +75,6 @@
     class="modal"
     style:min-width={minWidth}
     style:gap
-    onclick={(e) => e.stopPropagation()}
     onkeydown={onPanelKeydown}
     role="dialog"
     aria-modal="true"
