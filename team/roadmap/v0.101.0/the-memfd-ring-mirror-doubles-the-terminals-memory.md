@@ -1,6 +1,10 @@
 # The memfd ring mirror doubles a terminal's memory and costs peak write throughput
 
-Status: raised during v0.101.0 on 2026-09-26 by the terminal restore order of team v0101 that built the ring file (`dev/v0101-team/reports/report-Runtime-1.md`, "Cost", corrected by `reviews/review-Runtime-1.md` finding 8, in the development tree). Measured in chan-v098 under the fixed user unit.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 by the terminal restore order of team v0101 that built the ring file (`dev/v0101-team/reports/report-Runtime-1.md`, "Cost", corrected by `reviews/review-Runtime-1.md` finding 8, in the development tree). Measured in chan-v098 under the fixed user unit.
+
+## Owner ruling
+
+Accepted on 2026-09-26 as the lead recommended: the 64 KiB reader buffer is this version's remedy for the throughput cost (one ring push and one mirror write per read instead of eight), measured before and after by the order that makes it; the mmap-backed ring is named as not taken, and the memory cost stands as measured.
 
 ## What was seen
 

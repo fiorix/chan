@@ -110,12 +110,12 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-served-index-forgets-a-lone-rename][srename] | landed | GA |
 | [a-case-only-rename-leaves-a-phantom-row][casef] | landed | GA |
 | [the-apps-wake-path-outlives-its-mount][wgap] | landed | GA |
-| [a-watcher-loss-leaves-the-code-report-stale][wrep] | accepted | build |
+| [a-watcher-loss-leaves-the-code-report-stale][wrep] | landed | GA |
 | [terminal-env-overrides-are-silently-dropped][tenv] | landed | GA |
-| [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | accepted | build |
+| [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | landed | GA |
 | [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | accepted | build |
 | [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | accepted | build |
-| [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | accepted | build |
+| [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | landed | GA |
 | [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | landed | GA |
 | [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
 | [a-cut-paste-can-replace-the-first-moved-file][mvrep] | landed | GA |
@@ -138,8 +138,12 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-desktop-handoff-keys-an-absent-root][hkey] | raised | decide |
 | [one-close-reason-covers-a-parked-and-a-killed-pty][pkill] | raised | decide |
 | [a-fresh-session-under-an-old-id-keeps-the-key-protocol][kproto] | landed | GA |
-| [the-scripted-team-drops-member-env][senv] | raised | decide |
-| [the-memfd-ring-mirror-doubles-the-terminals-memory][mmap] | raised | decide |
+| [the-scripted-team-drops-member-env][senv] | accepted | build |
+| [the-memfd-ring-mirror-doubles-the-terminals-memory][mmap] | accepted | build |
+| [a-reattach-replays-before-the-pty-takes-the-clients-size][rsz] | accepted | build |
+| [a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes][psplit] | accepted | build |
+| [a-backslash-in-a-name-reads-two-ways-on-the-wire][bslash] | raised | decide |
+| [a-spawned-child-holds-a-lock-until-it-execs][lockdup] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -232,6 +236,10 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [kproto]: v0.101.0/a-fresh-session-under-an-old-id-keeps-the-key-protocol.md
 [senv]: v0.101.0/the-scripted-team-drops-member-env.md
 [mmap]: v0.101.0/the-memfd-ring-mirror-doubles-the-terminals-memory.md
+[rsz]: v0.101.0/a-reattach-replays-before-the-pty-takes-the-clients-size.md
+[psplit]: v0.101.0/a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes.md
+[bslash]: v0.101.0/a-backslash-in-a-name-reads-two-ways-on-the-wire.md
+[lockdup]: v0.101.0/a-spawned-child-holds-a-lock-until-it-execs.md
 
 ## Completed
 

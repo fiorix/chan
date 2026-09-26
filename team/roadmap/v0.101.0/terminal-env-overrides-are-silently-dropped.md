@@ -8,6 +8,8 @@ Accepted on 2026-09-25 as the lead recommended, which settles which keys chan ow
 
 The refused set is the keys chan sets or clears at spawn, held in one list beside the spawn code; `CHAN_AGENT` and `CHAN_HOME` reach the child, and a `CHAN_TAB_NAME` that restates the tab name or the member's handle is accepted, because the SPA's team dialog and saved team configs carry it by design. The lead narrowed the ruling's `CHAN_*` to that set on 2026-09-26 when the literal set proved to refuse team provisioning; the owner was told.
 
+On 2026-09-26 the owner ruled the two questions the env work raised: chan keeps replacing a locale that names no UTF-8 codeset with `C.UTF-8`, as a documented rule and not a dropped override; and chan withdraws its colour-forcing keys (`COLORTERM`, `CLICOLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`, and the removal of `NO_COLOR`) when the caller's env sets `NO_COLOR` or `TERM=dumb`. The withdrawal is a small order after the crash resume work.
+
 ## What was seen
 
 `Session::spawn` applies the per-session `opts.env` (`crates/chan-library/src/terminal_sessions.rs:3494-3496`) before the fixed spawn environment, although the comment at `:3491` says an explicit entry "still wins on last write". The code then unconditionally sets HOME (`:3497-3501`) and TERM, COLORTERM, CLICOLOR, CLICOLOR_FORCE and FORCE_COLOR (`:3542-3546`), plus the CHAN_* keys, and removes NO_COLOR, CI and CODEX_CI (`:3607-3610`). `cs terminal new --env KEY=VALUE` and `cs terminal restart --env` accept those keys; the help says "Override a spawn environment entry" (`crates/chan-shell/src/cli.rs:950-952`). `validate_terminal_env` (`crates/chan-server/src/routes/terminal.rs:689-701`) does not refuse them either, so the request succeeds while the child never sees the value.

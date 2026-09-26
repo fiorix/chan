@@ -1,6 +1,10 @@
 # The scripted team form drops every member's env
 
-Status: raised during v0.101.0 on 2026-09-26 by the independent review of the terminal env order (`dev/v0101-team/reviews/review-Runtime-2.md`, finding 4, in the development tree). A source reading against `main` at `cdd266b09`; not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 by the independent review of the terminal env order (`dev/v0101-team/reviews/review-Runtime-2.md`, finding 4, in the development tree). A source reading against `main` at `cdd266b09`; not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 as the lead recommended, as a small order on the runtime or services lane: the `--script` team form passes each member's env to the spawn as the dialog form does, pinned by a test that provisions a scripted team with a member env and reads it in the child.
 
 ## What was seen
 
