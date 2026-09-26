@@ -10633,6 +10633,54 @@ mod tests {
     /// live server nobody observed or opening a workspace a holder might own.
     /// A directory at the lock path makes the open fail deterministically.
     #[cfg(unix)]
+    /// `chan search` of a root another process holds hands the search to the
+    /// holder without asking that root's filesystem: the probe goes by the
+    /// registry row, so a held root that hangs answers as unreachable rather
+    /// than hanging the command.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_search_probes_a_held_root_by_its_registry_row() {
+        let config = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let sockets = tempfile::TempDir::new().unwrap();
+        let lib = Library::open_at(config.path().join("config.toml")).unwrap();
+        let known = lib.register_workspace(root.path()).unwrap();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let _held =
+            chan_workspace::lock::WorkspaceLock::acquire(&paths.lock, &known.root_path).unwrap();
+        let foreign = chan_workspace::lock::LockRecord {
+            pid: 1,
+            path: known.root_path.to_string_lossy().into_owned(),
+            started_at: "2000-01-01T00:00:00Z".to_string(),
+        };
+        std::fs::write(
+            paths.lock.join("writer.lock"),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+
+        const HELD_ROOT_BOUND: Duration = Duration::from_secs(30);
+        let stall = chan_workspace::paths::root_stall::stall(root.path());
+        let socket_dirs = vec![sockets.path().to_path_buf()];
+        let outcome =
+            stall.finishes_beside("chan search of a held root", HELD_ROOT_BOUND, move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(execute_workspace_search_with_dirs(
+                        &lib,
+                        &known,
+                        &WorkspaceSearchRequest::default(),
+                        Some(&socket_dirs),
+                    ))
+            });
+        match outcome {
+            Err(failure) => assert_eq!(failure.code, "served_workspace_unreachable"),
+            Ok(_) => panic!("a search of a held root with no reachable holder answered"),
+        }
+    }
+
     #[tokio::test]
     async fn workspace_search_refuses_when_the_lock_status_is_unknown() {
         let config = tempfile::TempDir::new().unwrap();
