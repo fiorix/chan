@@ -2944,6 +2944,39 @@ mod devserver_route_tests {
         assert_eq!(status, StatusCode::OK, "feed: {feed}");
     }
 
+    /// The launcher's list answers while a root another process holds hangs:
+    /// the probe behind that row's `locked` status classifies the holder from
+    /// what its lock record and the registry row store, not from the root.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launcher_list_answers_beside_a_hung_root_another_process_holds() {
+        use crate::devserver::hung_root_support::completes_beside;
+        let cfg = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let hung = tempfile::tempdir().unwrap();
+        let (host, router) = router_beside_a_hung_root(cfg.path(), &[other.path()], hung.path());
+        let _foreign = hold_foreign_lock(host.library(), hung.path());
+        let hung_path = chan_workspace::paths::canonicalize_normalized(hung.path())
+            .to_string_lossy()
+            .into_owned();
+
+        let stall = chan_workspace::paths::root_stall::stall(hung.path());
+        let listing = router.clone();
+        let (status, rows) = completes_beside(&stall, "the launcher's list", async move {
+            request(&listing, "GET", "/api/library/workspaces", None).await
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "list: {rows}");
+        assert_eq!(rows.as_array().map(Vec::len), Some(2), "list: {rows}");
+        let row = rows
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["path"] == hung_path.as_str()))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(row["status"], "locked", "the hung root's row: {rows}");
+        assert_eq!(row["on"], false, "the hung root's row: {rows}");
+    }
+
     /// A mount's bookkeeping goes by the key its request resolved: a root
     /// that answers that lookup and then stops answering holds the mount on
     /// the blocking pool, not a runtime worker, both for a first mount and

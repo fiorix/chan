@@ -7313,6 +7313,91 @@ mod tests {
         assert!(row.token.is_empty());
     }
 
+    /// The devserver's list answers, and a mount of another root completes
+    /// beside it, while a root another process holds hangs. The hung root has
+    /// a stopped record, so its row is built from that record, and reads
+    /// `locked` from what its lock record and registry row store; no row is
+    /// built while the list holds the record map that a mount takes.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn devserver_list_and_a_mount_answer_beside_a_hung_root_another_process_holds() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(other.path())
+            .expect("register the other root");
+        register_off_with_a_window(&state, hung.path()).await;
+        let _foreign = hold_foreign_lock(state.host.library(), hung.path());
+        let hung_path = canonical_root(hung.path()).to_string_lossy().into_owned();
+
+        // The mount must start only once the list has finished or reached the
+        // hung root, so that it meets whatever the list holds while it waits.
+        let stall = Arc::new(root_stall::stall(hung.path()));
+        let (event, events) = std::sync::mpsc::channel();
+        let listing = Arc::clone(&state);
+        let listed = event.clone();
+        std::thread::spawn(move || {
+            let _ = listed.send(Some(listing.workspace_entries()));
+        });
+        let watching = Arc::clone(&stall);
+        std::thread::spawn(move || {
+            if watching.wait_entered(HEALTHY_ROOT_BOUND) {
+                let _ = event.send(None);
+            }
+        });
+        let first = events
+            .recv_timeout(HEALTHY_ROOT_BOUND)
+            .expect("the list neither finished nor reached the hung root");
+
+        let serving = Arc::clone(&state);
+        let other_root = other.path().to_path_buf();
+        let response =
+            completes_beside(
+                &stall,
+                "a devserver mount of another root beside the list",
+                async move {
+                    handle_discovery_request(&serving, 8787, register_request(&other_root)).await
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the other root's serve request failed: {response:?}"
+        );
+
+        let entries = match first {
+            Some(entries) => entries,
+            None => events
+                .recv_timeout(HEALTHY_ROOT_BOUND)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the devserver's list did not finish while another root hung; calls held on the hung root: {:#?}",
+                        stall.entered()
+                    )
+                }),
+        };
+        assert_eq!(entries.len(), 2, "the list lost a row: {entries:?}");
+        let row = entries
+            .iter()
+            .find(|row| row.path == hung_path)
+            .expect("the hung root's row");
+        assert_eq!(
+            (row.status, row.on),
+            (WorkspaceStatus::Locked, false),
+            "the hung root's row"
+        );
+    }
+
     #[tokio::test]
     async fn forget_is_destructive_and_removes_from_the_host_library() {
         let _env = chan_home_env_read();
