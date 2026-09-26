@@ -1139,9 +1139,11 @@ fn register_workspace_path(library: &chan_workspace::Library, path: &str) -> Res
 /// Snapshot every currently-mounted local workspace into the library-owned
 /// workspace overlay (`~/.chan/workspaces.json`) as `on` rows, so the next boot
 /// re-serves them (the boot matrix). Off workspaces are simply absent -- the CLI
-/// registry surfaces them off. Called after each on/off toggle and on clean
-/// shutdown. Best-effort: a no-op when the embedded host / overlay is
-/// unavailable, never fatal to the toggle or the exit.
+/// registry surfaces them off. The handoff close (`chan close`, `chan workspace
+/// forget`) and the `RunEvent::Exit` arm call this; a normal quit writes its
+/// snapshot through [`snapshot_workspaces`], and a launcher toggle writes its
+/// own row through the host. Best-effort: a no-op when the embedded host /
+/// overlay is unavailable, never fatal to the close or the exit.
 ///
 /// Once a normal shutdown has begun this writes nothing. Its drain takes every
 /// tenant out of the host, so a snapshot taken after it, such as by a `chan
@@ -1174,8 +1176,8 @@ fn snapshot_workspaces(state: &AppState) {
     // live mount is what keeps a closed workspace from being persisted as `on`
     // and resurrected on the next boot. Each row is matched by the root it
     // stores against the keys the host's workspace tenants store, resolving no
-    // root: a close, a toggle and a quit all run this, and one root that stops
-    // answering must not hold up any of them. The shared terminal tenant goes
+    // root: the handoff close, a quit and the exit run this, and one root that
+    // stops answering must not hold up any of them. The shared terminal tenant goes
     // by the home directory and counts for no workspace registered there.
     // `overlay.replace` sorts by path on save.
     //

@@ -6549,8 +6549,9 @@ mod tests {
 
     /// A management mount still waiting on its root when the devserver shuts
     /// down publishes no tenant after the last shutdown sweep. The host
-    /// refuses the publication, and the runtime the mount built shuts down,
-    /// releasing the workspace, before the mount reports the refusal.
+    /// refuses it before it builds a tenant, and the workspace the mount
+    /// opened is released when the mount drops it, before the mount reports
+    /// the refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mount_that_outlives_the_shutdown_sweeps_publishes_nothing() {
         let _env = chan_home_env_read();
@@ -6598,7 +6599,7 @@ mod tests {
             .host
             .library()
             .open_workspace(late.path())
-            .expect("the refused runtime still holds the workspace");
+            .expect("the refused mount still holds the workspace");
     }
 
     /// A management mount that passed the host's first publication check
