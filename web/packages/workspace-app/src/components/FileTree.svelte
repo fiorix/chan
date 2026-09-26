@@ -1214,12 +1214,12 @@
 
   function onTreeMouseDown(e: MouseEvent): void {
     // Left button only; ignore clicks that land on a row's interactive
-    // controls (name button/span, dirty dot) - those own their own
-    // select/toggle gesture. The empty gutter and inter-row space start
-    // a band.
+    // controls (name button/span, dirty dot, expand chevron) - those own
+    // their own select/toggle gesture, and expanding a folder leaves the
+    // selection as it is. The empty gutter and inter-row space start a band.
     if (e.button !== 0) return;
     const t = e.target as HTMLElement | null;
-    if (t && t.closest(".name, .row-icon, .dirty-dot, .empty")) return;
+    if (t && t.closest(".name, .row-icon, .dirty-dot, .empty, .twirl")) return;
     // Don't start a band from a modifier-less click that is really a row
     // background click; we still allow it (it becomes a clear on mouseup
     // if no drag happens).
