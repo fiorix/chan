@@ -134,6 +134,15 @@ pub struct GatewayRuntime {
     /// (a re-click re-stamps; the stale task then no-ops).
     signin_stamp: u64,
     poll_cancel: Option<CancellationToken>,
+    /// A connect owns the runtime: set when it marks the row Connecting and
+    /// cleared when it hands the runtime to the roster poll, parks it, or
+    /// leaves it to a browser sign-in. The status cannot say this, because a
+    /// connect whose first fetch failed leaves the row Connecting with the
+    /// poll as its only driver.
+    connect_in_flight: bool,
+    /// Consecutive poll rounds whose PAT load failed, so the poll warns once
+    /// per streak and says how long it was when the load answers again.
+    pat_load_failures: u32,
 }
 
 /// The registry's projection of a runtime: the volatile GatewayEntry
@@ -666,7 +675,7 @@ pub async fn connect_gateway<R: tauri::Runtime>(
     {
         let runtimes = state.gateway_manager.runtimes.lock().unwrap();
         if let Some(existing) = runtimes.get(&gateway_id) {
-            if existing.status == GatewayStatus::Connecting && !existing.pending_signin {
+            if existing.connect_in_flight {
                 return Ok(());
             }
         }
@@ -759,6 +768,8 @@ pub async fn connect_gateway<R: tauri::Runtime>(
                 let rt = runtimes
                     .entry(gateway_id.clone())
                     .or_insert_with(|| new_runtime(discovery.clone()));
+                // The roster poll spawned below drives the runtime from here.
+                rt.connect_in_flight = false;
                 apply_roster_fetch(rt, fetch)
             };
             apply_roster_policy_diff(&state, &gateway_id, &effect.diff).await;
@@ -785,6 +796,8 @@ fn new_runtime(discovery: GatewayDiscovery) -> GatewayRuntime {
         pending_signin: false,
         signin_stamp: 0,
         poll_cancel: None,
+        connect_in_flight: false,
+        pat_load_failures: 0,
     }
 }
 
@@ -796,6 +809,7 @@ fn upsert_connecting(state: &AppState, gateway_id: &str, discovery: &GatewayDisc
     rt.discovery = discovery.clone();
     rt.status = GatewayStatus::Connecting;
     rt.pending_signin = false;
+    rt.connect_in_flight = true;
 }
 
 /// Park a runtime as disconnected with an error. A gateway that never got
@@ -821,15 +835,18 @@ fn park_failed_connect<R: tauri::Runtime>(
 ) {
     let changed = {
         let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        if let Some(rt) = runtimes
-            .get_mut(gateway_id)
-            .filter(|rt| rt.status == GatewayStatus::Connecting && !rt.pending_signin)
-        {
-            rt.status = GatewayStatus::Disconnected;
-            rt.last_error = Some(error.to_string());
-            true
-        } else {
-            false
+        match runtimes.get_mut(gateway_id) {
+            Some(rt) => {
+                rt.connect_in_flight = false;
+                if rt.status == GatewayStatus::Connecting && !rt.pending_signin {
+                    rt.status = GatewayStatus::Disconnected;
+                    rt.last_error = Some(error.to_string());
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         }
     };
     if changed {
@@ -882,6 +899,7 @@ fn signin_leg<R: tauri::Runtime>(
                 .or_insert_with(|| new_runtime(discovery.clone()));
             rt.status = GatewayStatus::Disconnected;
             rt.pending_signin = false;
+            rt.connect_in_flight = false;
             rt.last_error = Some("sign-in required - click Connect".to_string());
         }
         emit_notice(
@@ -931,6 +949,7 @@ fn signin_leg<R: tauri::Runtime>(
             .or_insert_with(|| new_runtime(discovery.clone()));
         rt.discovery = discovery.clone();
         rt.pending_signin = true;
+        rt.connect_in_flight = false;
         rt.signin_stamp = stamp;
         rt.status = GatewayStatus::Connecting;
     }
@@ -990,10 +1009,9 @@ pub async fn resume_gateway_signin<R: tauri::Runtime>(
     state: Arc<AppState>,
     gateway_id: String,
 ) {
-    // Make the parked runtime resumable FIRST - pending cleared, status
-    // Disconnected - so connect_gateway's coalesce guard (which lets a
-    // live non-pending Connecting attempt finish on its own) cannot
-    // mistake the park for an attempt in flight and dead-end the row.
+    // Clear the park first - pending cleared, status Disconnected - so the
+    // row stops showing the browser wait; the connect below marks its own
+    // attempt.
     {
         let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
         if let Some(rt) = runtimes.get_mut(&gateway_id) {
@@ -1132,27 +1150,24 @@ async fn roster_poll_tick<R: tauri::Runtime>(
     // Re-read the PAT each tick: a re-sign-in mid-poll swaps the
     // credential without restarting the loop.
     let loaded = auth::load_gateway_pat(identity_origin);
-    let etag = {
-        let runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        let Some(rt) = runtimes.get(gateway_id) else {
-            return ControlFlow::Break(());
-        };
-        // While a connect or a browser sign-in owns the runtime, a missing
-        // or failing credential is that attempt's to report: a connect
-        // clears a rejected PAT before its browser leg while this poll
-        // still runs.
-        let polled = matches!(
-            rt.status,
-            GatewayStatus::Connected | GatewayStatus::Unreachable
-        ) && !rt.pending_signin;
-        if !polled && !matches!(loaded, Ok(Some(_))) {
-            return ControlFlow::Continue(());
-        }
-        rt.etag.clone()
-    };
     let signed_out = matches!(loaded, Ok(None));
-    let fetch = match loaded {
+    let effect = match loaded {
         Ok(Some(pat)) => {
+            let etag = {
+                let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+                let Some(rt) = runtimes.get_mut(gateway_id) else {
+                    return ControlFlow::Break(());
+                };
+                if rt.pat_load_failures > 0 {
+                    tracing::info!(
+                        gateway = %gateway_id,
+                        failed_rounds = rt.pat_load_failures,
+                        "roster poll loaded the gateway PAT again"
+                    );
+                    rt.pat_load_failures = 0;
+                }
+                rt.etag.clone()
+            };
             let fetch = fetch_roster(roster_url, &pat.secret, etag.as_deref()).await;
             // A disconnect+reconnect replaced this poll while the fetch
             // was in flight: the successor owns the runtime now, and the
@@ -1162,23 +1177,45 @@ async fn roster_poll_tick<R: tauri::Runtime>(
             if cancel.is_cancelled() {
                 return ControlFlow::Break(());
             }
-            fetch
+            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+            match runtimes.get_mut(gateway_id) {
+                Some(rt) => apply_roster_fetch(rt, fetch),
+                None => return ControlFlow::Break(()),
+            }
         }
-        // The stored credential is gone and nothing can read the roster
-        // without one: sign out the way a rejected credential does.
-        Ok(None) => RosterFetch::Unauthorized,
-        // A keychain that cannot answer counts toward unreachable like a
-        // gateway that cannot, so the row stops claiming a fresh roster.
-        Err(error) => {
-            tracing::warn!(gateway = %gateway_id, %error, "roster poll could not load the gateway PAT");
-            RosterFetch::Upstream(error)
-        }
-    };
-    let effect = {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        match runtimes.get_mut(gateway_id) {
-            Some(rt) => apply_roster_fetch(rt, fetch),
-            None => return ControlFlow::Break(()),
+        // Nothing was fetched: the outcome is made up here, so it is judged
+        // and applied under one lock, by a poll whose token still stands, on
+        // a runtime no connect or browser sign-in owns. A connect clears a
+        // rejected PAT before its browser leg while this poll still runs,
+        // and reports its own load failures.
+        loaded => {
+            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+            if cancel.is_cancelled() {
+                return ControlFlow::Break(());
+            }
+            let Some(rt) = runtimes.get_mut(gateway_id) else {
+                return ControlFlow::Break(());
+            };
+            if rt.connect_in_flight || rt.pending_signin {
+                return ControlFlow::Continue(());
+            }
+            let fetch = match loaded {
+                // The stored credential is gone and nothing can read the
+                // roster without one: sign out the way a rejected credential
+                // does.
+                Ok(_) => RosterFetch::Unauthorized,
+                // A keychain that cannot answer counts toward unreachable
+                // like a gateway that cannot, so the row stops claiming a
+                // fresh roster; the streak warns once.
+                Err(error) => {
+                    rt.pat_load_failures = rt.pat_load_failures.saturating_add(1);
+                    if rt.pat_load_failures == 1 {
+                        tracing::warn!(gateway = %gateway_id, %error, "roster poll could not load the gateway PAT");
+                    }
+                    RosterFetch::Upstream(error)
+                }
+            };
+            apply_roster_fetch(rt, fetch)
         }
     };
     apply_roster_policy_diff(state, gateway_id, &effect.diff).await;
@@ -2320,10 +2357,21 @@ mod tests {
             notice_tx.send(event.payload().to_string()).unwrap();
         });
         // A rejected PAT is cleared before the browser leg while the old
-        // poll still runs, and the sign-in reports its own outcome.
-        for (status, pending_signin) in [(GatewayStatus::Connecting, true)] {
+        // poll still runs, and a connect or sign-in reports its own outcome.
+        for (status, pending_signin, connect_in_flight) in [
+            (GatewayStatus::Connecting, true, false),
+            (GatewayStatus::Connecting, false, true),
+        ] {
             for failing in [false, true] {
                 let cancel = install_polled_runtime(&state, origin, status, pending_signin);
+                state
+                    .gateway_manager
+                    .runtimes
+                    .lock()
+                    .unwrap()
+                    .get_mut("gw-keychain")
+                    .unwrap()
+                    .connect_in_flight = connect_in_flight;
                 let _absent = (!failing).then(|| auth::absent_gateway_pat_for_test(origin));
                 let _failure = failing
                     .then(|| auth::fail_gateway_pat_load_for_test(origin, "injected load failure"));
@@ -2346,7 +2394,9 @@ mod tests {
                     .unwrap()
                     .remove("gw-keychain")
                     .expect("the poll left the runtime in place");
-                let case = format!("{status:?} pending={pending_signin} failing={failing}");
+                let case = format!(
+                    "{status:?} pending={pending_signin} connect={connect_in_flight} failing={failing}"
+                );
                 assert_eq!(rt.status, status, "{case}");
                 assert_eq!(rt.pending_signin, pending_signin, "{case}");
                 assert_eq!(rt.last_error, None, "{case}");
@@ -2713,10 +2763,7 @@ mod tests {
     }
 
     /// The sign-in resume end to end: park -> callback -> roster
-    /// fetched -> poll running. The resume must make the parked runtime
-    /// resumable before re-entering connect_gateway, or the coalesce
-    /// guard reads the park as an attempt in flight and the gateway
-    /// sticks Connecting forever.
+    /// fetched -> poll running.
     #[tokio::test]
     async fn resume_after_signin_fetches_roster_and_starts_poll() {
         let (origin, server) = spawn_gateway_stub(false).await;
