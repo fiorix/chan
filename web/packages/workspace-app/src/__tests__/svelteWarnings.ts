@@ -12,11 +12,15 @@ const CODES = new Set(["ownership_invalid_mutation", "ownership_invalid_binding"
 
 /// Start listening, and return a reader of the ownership and stale-assignment
 /// warnings printed since, each as "<code>: <message>". The spy calls through,
-/// so the warning still prints.
-export function ownershipWarnings(): () => string[] {
-  const warn: MockInstance<typeof console.warn> = vi.isMockFunction(console.warn)
+/// so the warning still prints; `quiet` makes it swallow every console.warn
+/// instead, for a test that raises one on purpose. A console.warn the test
+/// already mocks is read as it is and left alone.
+export function ownershipWarnings({ quiet = false }: { quiet?: boolean } = {}): () => string[] {
+  const mocked = vi.isMockFunction(console.warn);
+  const warn: MockInstance<typeof console.warn> = mocked
     ? (console.warn as unknown as MockInstance<typeof console.warn>)
     : vi.spyOn(console, "warn");
+  if (quiet && !mocked) warn.mockImplementation(() => {});
   const from = warn.mock.calls.length;
   return () =>
     warn.mock.calls.slice(from).flatMap(([first]: unknown[]) => {
