@@ -148,15 +148,6 @@ describe("survey store", () => {
     expect(surveyFor("t1")?.surveyId).toBe("survey-a");
   });
 
-  test("remote close skips a busy (in-flight-reply) survey so the local clear wins", () => {
-    showSurvey(spec({ surveyId: "survey-a" }), "t1");
-    surveyState.byTab["t1"].busy = true;
-    // A late `answered_elsewhere` fanned back to the answering window must not
-    // clear a survey whose own reply is in flight.
-    expect(closeSurveyFromRemote("survey-a", "t1")).toBeUndefined();
-    expect(surveyFor("t1")?.surveyId).toBe("survey-a");
-  });
-
   test("x, X and Escape on the survey card dismiss it, and the button names its key", async () => {
     const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
     for (const key of ["x", "X", "Escape"]) {
@@ -206,6 +197,39 @@ describe("a reply that fails any other way", () => {
     expect(surveyFor("t1")?.surveyId).toBe("survey-7");
     expect(surveyBusy("t1")).toBe(false);
     expect(notices).toEqual([expect.stringMatching(/^survey \w+ failed: /)]);
+  });
+});
+
+describe("a close that arrives while a reply is in flight", () => {
+  // Start a reply that has not settled, then deliver the survey's close: the
+  // overlay stays up, its buttons held, until the reply settles.
+  function closeDuringReply() {
+    let answer!: { resolve: () => void; reject: (e: unknown) => void };
+    vi.spyOn(api, "surveyReply").mockReturnValue(
+      new Promise<void>((resolve, reject) => (answer = { resolve, reject })),
+    );
+    showSurvey(spec(), "t1");
+    const sent = pickOption("t1", 0);
+    expect(closeSurveyFromRemote("survey-7", "t1")).toBeUndefined();
+    expect(surveyFor("t1")?.surveyId).toBe("survey-7");
+    expect(surveyBusy("t1")).toBe(true);
+    return { answer, sent };
+  }
+
+  test("is applied when that reply fails", async () => {
+    const { answer, sent } = closeDuringReply();
+    answer.reject(new TypeError("Failed to fetch"));
+    await sent;
+    expect(surveyFor("t1")).toBeNull();
+    expect(notices).toEqual([expect.stringMatching(/^survey expired/)]);
+  });
+
+  test("is dropped when that reply is accepted, whose own clear wins", async () => {
+    const { answer, sent } = closeDuringReply();
+    answer.resolve();
+    await sent;
+    expect(surveyFor("t1")).toBeNull();
+    expect(notices).toEqual([]);
   });
 });
 
