@@ -1248,6 +1248,113 @@ mod tests {
         assert!(err.contains(&own), "got: {err}");
     }
 
+    /// Collects one line per event, `LEVEL name=value` per field, on the
+    /// calling thread while `f` runs. chan-server has plain `tracing` only.
+    fn capture_warnings<T>(f: impl FnOnce() -> T) -> (Vec<String>, T) {
+        struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Line(String);
+                impl tracing::field::Visit for Line {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        use std::fmt::Write as _;
+                        let _ = write!(self.0, " {}={value:?}", field.name());
+                    }
+                }
+                let mut line = Line(event.metadata().level().to_string());
+                event.record(&mut line);
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line.0);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = tracing::subscriber::with_default(Capture(Arc::clone(&lines)), f);
+        let lines = lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (lines, out)
+    }
+
+    // A config saved while a typed CHAN_TAB_NAME was still accepted must
+    // load, or the dialog that would heal it never opens: the read takes
+    // the member's handle instead and says so once.
+    #[test]
+    fn a_saved_tab_name_that_does_not_restate_the_handle_reads_as_the_handle() {
+        let (_cfg, _root, workspace) = test_workspace();
+        let mut saved = sample_config();
+        saved.members[0]
+            .env
+            .insert("CHAN_TAB_NAME".into(), "Custom".into());
+        workspace.create_dir("new-team-1").unwrap();
+        workspace
+            .write_text(
+                "new-team-1/config.toml",
+                &toml::to_string_pretty(&saved).unwrap(),
+            )
+            .unwrap();
+
+        let (lines, read) = capture_warnings(|| read_team_config(&workspace, "new-team-1"));
+        let read = read.expect("a saved CHAN_TAB_NAME that is not the handle refuses the read");
+        assert_eq!(
+            read.members[0].env.get("CHAN_TAB_NAME").map(String::as_str),
+            Some("@@Lead"),
+            "the member's env carries its handle"
+        );
+        assert_eq!(read.members[1].env, saved.members[1].env);
+        let warnings: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with("WARN"))
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one warning for the one member: {lines:?}"
+        );
+        assert!(
+            warnings[0].contains("new-team-1/config.toml") && warnings[0].contains("@@Lead"),
+            "the warning names the file and the member: {}",
+            warnings[0]
+        );
+    }
+
+    // The read's tolerance is for configs already on disk: saving one still
+    // refuses the key, so the next save writes the handle.
+    #[test]
+    fn a_tab_name_that_does_not_restate_the_handle_is_still_refused_on_write() {
+        let (_cfg, _root, workspace) = test_workspace();
+        let mut config = sample_config();
+        config.members[0]
+            .env
+            .insert("CHAN_TAB_NAME".into(), "Custom".into());
+        let err = write_team_config(&workspace, "new-team-1", &config, None)
+            .expect_err("a typed CHAN_TAB_NAME is refused on write");
+        assert!(
+            err.contains("CHAN_TAB_NAME") && err.contains("@@Lead"),
+            "got: {err}"
+        );
+        assert!(
+            workspace.read_text("new-team-1/config.toml").is_err(),
+            "nothing is written"
+        );
+    }
+
     #[test]
     fn agent_is_derived_from_command_in_roster_and_pokes() {
         // No stored agent field: a "claude"/"codex" command derives the agent.
