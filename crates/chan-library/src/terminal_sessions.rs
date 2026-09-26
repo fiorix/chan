@@ -4570,7 +4570,10 @@ impl Session {
         } else {
             (meta.generation, None)
         };
-        let size: PtySize = meta.size.into();
+        // The kernel holds the PTY's real size. The manifest's lags it when
+        // a resize was applied after the last manifest write, and an attach
+        // that compared against that record would skip a fit it needs.
+        let size = imported_master_size(&master_fd).unwrap_or_else(|| meta.size.into());
         let cwd = meta
             .cwd
             .clone()
@@ -6099,6 +6102,20 @@ fn restored_ring(
         );
     }
     restored
+}
+
+/// The size the kernel holds for an adopted PTY master. `None` when it cannot
+/// be read or has no cells, as for a PTY nobody sized, where the manifest's
+/// record is the better guess.
+#[cfg(target_os = "linux")]
+fn imported_master_size(master: impl AsFd) -> Option<PtySize> {
+    let size = rustix::termios::tcgetwinsize(master).ok()?;
+    (size.ws_col > 0 && size.ws_row > 0).then_some(PtySize {
+        rows: size.ws_row,
+        cols: size.ws_col,
+        pixel_width: size.ws_xpixel,
+        pixel_height: size.ws_ypixel,
+    })
 }
 
 #[cfg(target_os = "linux")]
