@@ -371,6 +371,11 @@ pub struct WorkspaceHost {
     #[cfg(test)]
     removal_hop_probe: std::sync::Mutex<Option<RemovalHopProbe>>,
     workspaces: RwLock<HashMap<String, HostedWorkspaceRuntime>>,
+    /// Set by [`shutdown_all`](Self::shutdown_all) under the `workspaces`
+    /// write guard it drains under, and read under that lock by every
+    /// publication into the map, so nothing publishes after the drain: a
+    /// mount that outlives it shuts its own runtime down instead.
+    publication_closed: std::sync::atomic::AtomicBool,
     /// Desktop integration shared by every tenant this host mounts: the
     /// window-ops channel and the title map. `DesktopBridge::default()`
     /// (no channel, empty map) when the embedder is not chan-desktop.
@@ -851,6 +856,7 @@ impl WorkspaceHost {
         Self {
             library,
             workspaces: RwLock::new(HashMap::new()),
+            publication_closed: std::sync::atomic::AtomicBool::new(false),
             desktop,
             root_locks: RootLocks::default(),
             root_probes: Arc::default(),
@@ -1439,6 +1445,9 @@ impl WorkspaceHost {
                 .workspaces
                 .read()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            if self.publication_is_closed() {
+                return Err(shutting_down_error(&root.display().to_string()));
+            }
             if workspaces.contains_key(&prefix) {
                 return Err(duplicate_prefix_error(&prefix));
             }
@@ -1521,7 +1530,9 @@ impl WorkspaceHost {
                 .workspaces
                 .write()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
-            if workspaces.contains_key(&prefix) {
+            if self.publication_is_closed() {
+                shutting_down_error(&runtime.root.display().to_string())
+            } else if workspaces.contains_key(&prefix) {
                 duplicate_prefix_error(&prefix)
             } else if workspaces
                 .values()
@@ -1628,6 +1639,9 @@ impl WorkspaceHost {
                 .workspaces
                 .read()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            if self.publication_is_closed() {
+                return Err(shutting_down_error(display_prefix(&prefix)));
+            }
             if workspaces.contains_key(&prefix) {
                 return Err(duplicate_prefix_error(&prefix));
             }
@@ -1699,6 +1713,12 @@ impl WorkspaceHost {
             .workspaces
             .write()
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        if self.publication_is_closed() {
+            drop(workspaces);
+            let refused = shutting_down_error(display_prefix(&prefix));
+            runtime.shutdown().await;
+            return Err(refused);
+        }
         if workspaces.contains_key(&prefix) {
             return Err(duplicate_prefix_error(&prefix));
         }
@@ -3411,17 +3431,41 @@ impl WorkspaceHost {
     }
 
     /// Drain every mounted tenant for normal process shutdown without changing
-    /// the persisted workspace overlay.
+    /// the persisted workspace overlay, and close the host to publication.
+    /// This is the last sweep of a host's life: it never reopens.
+    ///
+    /// A mount still running when the map is drained, from any entry point,
+    /// finds publication closed under the lock it publishes under, shuts its
+    /// runtime down the way a runtime that loses a publication race does, and
+    /// returns an error that says the host is shutting down.
+    pub async fn shutdown_all(&self) -> Result<(), Error> {
+        self.drain_tenants(true).await
+    }
+
+    /// [`shutdown_all`](Self::shutdown_all) that leaves publication open, for
+    /// a shutdown that lets work it already accepted publish before its last
+    /// sweep: the devserver drains the registrations it accepted beside this
+    /// sweep, and its `shutdown_all` then takes whatever they published.
+    pub async fn shutdown_mounted(&self) -> Result<(), Error> {
+        self.drain_tenants(false).await
+    }
+
+    /// Take every runtime out of the map and shut them down together, closing
+    /// publication under the same write guard when `close_publication` is set.
     ///
     /// Every runtime starts its bounded shutdown before this method awaits any
     /// one of them, so a stuck tenant cannot multiply the per-tenant grace by
     /// the number of workspace, shared-terminal, or control-terminal tenants.
-    pub async fn shutdown_all(&self) -> Result<(), Error> {
+    async fn drain_tenants(&self, close_publication: bool) -> Result<(), Error> {
         let runtimes: Vec<HostedWorkspaceRuntime> = {
             let mut workspaces = self
                 .workspaces
                 .write()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            if close_publication {
+                self.publication_closed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             workspaces.drain().map(|(_, runtime)| runtime).collect()
         };
         let mut shutdowns = tokio::task::JoinSet::new();
@@ -3437,6 +3481,14 @@ impl WorkspaceHost {
         }
         self.notify_window_change();
         Ok(())
+    }
+
+    /// Whether [`shutdown_all`](Self::shutdown_all) has closed the host to
+    /// publication. Its callers read it under the `workspaces` lock, where
+    /// the flag is set, so a publication lands before the drain or not at all.
+    fn publication_is_closed(&self) -> bool {
+        self.publication_closed
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Cancel any in-flight reindex on every mounted tenant.
@@ -4317,6 +4369,14 @@ fn display_prefix(prefix: &str) -> &str {
     } else {
         prefix
     }
+}
+
+/// The refusal every publication gives once the host's last shutdown sweep
+/// has begun; `what` names the root or the prefix that was not mounted.
+fn shutting_down_error(what: &str) -> Error {
+    Error::Config(format!(
+        "the workspace host is shutting down; {what} was not mounted"
+    ))
 }
 
 /// The refusal every mount path gives when `prefix` is already taken.

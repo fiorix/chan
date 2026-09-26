@@ -2341,7 +2341,10 @@ const REGISTRATION_SHUTDOWN_DRAIN: Duration = Duration::from_secs(30);
 /// going away. The registrations accepted before that finish beside the
 /// tenants' shutdown, within [`REGISTRATION_SHUTDOWN_DRAIN`]. One of them can
 /// publish its tenant after the first sweep has taken the map, so a second
-/// sweep runs once none is left in flight.
+/// sweep runs once none is left in flight, and the second sweep closes
+/// publication: a mount from any other entry point that finishes after it,
+/// such as a management mount still inside its bound, is refused and shuts
+/// its own runtime down.
 async fn shut_down_hosted(
     host: &WorkspaceHost,
     mut discovery: Option<crate::devserver_handoff::ListenerHandle>,
@@ -2354,7 +2357,7 @@ async fn shut_down_hosted(
             listener.shutdown().await;
         }
     };
-    let (hosted, ()) = tokio::join!(host.shutdown_all(), draining);
+    let (hosted, ()) = tokio::join!(host.shutdown_mounted(), draining);
     let published_late = host.shutdown_all().await;
     hosted.and(published_late)
 }
