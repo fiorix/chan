@@ -367,7 +367,7 @@ describe("the tab menu", () => {
     await render(tab);
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const remove = vi.spyOn(fileOps, "remove").mockResolvedValue(undefined);
+    const remove = vi.spyOn(fileOps, "remove").mockResolvedValue(true);
     const duplicate = vi.spyOn(fileOps, "duplicateFile").mockResolvedValue(undefined);
 
     await openMenu(tab);
