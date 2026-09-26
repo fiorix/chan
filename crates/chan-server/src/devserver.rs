@@ -5385,9 +5385,9 @@ mod tests {
     }
 
     /// Startup restore prepares every persisted row and restores the healthy
-    /// ones while one desired-on root's filesystem hangs: preparing a row
-    /// goes by the key it stores, and the hung root's attempt expires at its
-    /// bound instead of holding up the rows after it.
+    /// ones while one desired-on root's filesystem hangs: registering and
+    /// preparing a row go by the key it stores, and the hung root's attempt
+    /// expires at its bound instead of holding up the rows after it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn startup_restore_restores_other_roots_while_one_hangs() {
         let _env = chan_home_env_read();
@@ -5421,6 +5421,7 @@ mod tests {
         let stall = root_stall::stall(hung.path());
         let restoring = Arc::clone(&state);
         completes_beside(&stall, "startup restore", async move {
+            let rows = restoring.register_restore_rows(rows).await;
             let attempts = restoring.prepare_restore_rows(rows);
             assert_eq!(attempts.len(), 2, "restore dropped a desired-on row");
             let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
