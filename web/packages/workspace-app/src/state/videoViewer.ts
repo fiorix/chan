@@ -10,6 +10,7 @@
 // on a :global() block that could disappear during a refactor.
 
 import { withTokenQuery } from "../api/transport";
+import { consumeKey } from "./shortcuts";
 
 /// Open the fullscreen viewer.
 ///
@@ -70,7 +71,7 @@ export function openVideoViewer(path: string): void {
   };
   const onKey = (ev: KeyboardEvent): void => {
     if (ev.key === "Escape") {
-      ev.preventDefault();
+      consumeKey(ev);
       dismiss();
     }
   };

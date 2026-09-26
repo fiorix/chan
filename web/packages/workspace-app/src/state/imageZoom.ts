@@ -15,6 +15,7 @@
 // CM6 cutover when the `:global(.md-image-zoom)` block was dropped.
 
 import { resolveImageSrc } from "../editor/extensions/image";
+import { consumeKey } from "./shortcuts";
 
 export interface ZoomImage {
   /// Markdown-style image src (workspace-rooted, source-relative, or a
@@ -107,13 +108,13 @@ export function openImageZoom(
   };
   const onKey = (ev: KeyboardEvent): void => {
     if (ev.key === "Escape") {
-      ev.preventDefault();
+      consumeKey(ev);
       dismiss();
     } else if (multi && ev.key === "ArrowRight") {
-      ev.preventDefault();
+      consumeKey(ev);
       step(1);
     } else if (multi && ev.key === "ArrowLeft") {
-      ev.preventDefault();
+      consumeKey(ev);
       step(-1);
     }
   };

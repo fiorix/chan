@@ -14,6 +14,7 @@ import {
   AUDIO_UNSUPPORTED_MESSAGE,
   openAudioViewer,
 } from "./audioViewer";
+import { pressInPage } from "../__tests__/keys";
 
 let pauseSpy: ReturnType<typeof vi.fn<() => void>>;
 let loadSpy: ReturnType<typeof vi.fn<() => void>>;
@@ -112,5 +113,27 @@ describe("audio viewer", () => {
     expect(pressEscape().defaultPrevented).toBe(true);
 
     expectTornDown(audio);
+  });
+});
+
+describe("keys in the audio viewer", () => {
+  test("Escape closes the viewer and goes no further", () => {
+    openAudioViewer("media/tone.wav");
+
+    const { event, reachedDocument } = pressInPage({ key: "Escape" });
+
+    expect(viewer()).toBeNull();
+    expect(event.defaultPrevented).toBe(true);
+    expect(reachedDocument).toBe(false);
+  });
+
+  test("a key the viewer does not answer travels on", () => {
+    openAudioViewer("media/tone.wav");
+
+    const { event, reachedDocument } = pressInPage({ key: "ArrowDown" });
+
+    expect(viewer()).not.toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+    expect(reachedDocument).toBe(true);
   });
 });

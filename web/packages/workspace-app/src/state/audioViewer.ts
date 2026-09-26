@@ -2,6 +2,7 @@
 // provides a tokenized byte URL and lifecycle ownership for the media element.
 
 import { withTokenQuery } from "../api/transport";
+import { consumeKey } from "./shortcuts";
 
 export const AUDIO_UNSUPPORTED_MESSAGE =
   "This audio format is not supported by this browser.";
@@ -69,7 +70,7 @@ export function openAudioViewer(path: string): void {
   };
   const onKey = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
-    event.preventDefault();
+    consumeKey(event);
     dismiss();
   };
   close.addEventListener("click", (event) => {

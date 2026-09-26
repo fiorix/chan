@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, test } from "vitest";
 import { openDiagramZoom } from "./diagramZoom";
+import { pressInPage } from "../__tests__/keys";
 
 const SVG =
   '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>';
@@ -125,5 +126,39 @@ describe("openDiagramZoom", () => {
     const ev = new KeyboardEvent("keydown", { key: "0", cancelable: true });
     document.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(true);
+  });
+});
+
+describe("keys in the diagram viewer", () => {
+  test.each(["Escape", "+", "=", "-", "0", "ArrowLeft", "a", "ArrowRight", "d", "ArrowUp", "w", "ArrowDown", "s"])(
+    "%s acts in the viewer and goes no further",
+    (key) => {
+      openDiagramZoom(SVG);
+
+      const { event, reachedDocument } = pressInPage({ key });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(reachedDocument).toBe(false);
+      if (backdrop()) pressInPage({ key: "Escape" });
+    },
+  );
+
+  test("Escape closes the viewer", () => {
+    openDiagramZoom(SVG);
+
+    pressInPage({ key: "Escape" });
+
+    expect(backdrop()).toBeNull();
+  });
+
+  test("a key the viewer does not answer travels on", () => {
+    openDiagramZoom(SVG);
+
+    const { event, reachedDocument } = pressInPage({ key: "x" });
+
+    expect(backdrop()).not.toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+    expect(reachedDocument).toBe(true);
+    pressInPage({ key: "Escape" });
   });
 });

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { openImageZoom } from "./imageZoom";
 import { chanMarkdown } from "../editor/markdown/grammar";
 import { collectDocImageSrcs } from "../editor/widgets/image";
+import { pressInPage } from "../__tests__/keys";
 
 function backdrop(): HTMLElement | null {
   return document.querySelector(".md-image-zoom");
@@ -86,5 +87,36 @@ describe("collectDocImageSrcs (editor set)", () => {
     ]);
     view.destroy();
     parent.remove();
+  });
+});
+
+describe("keys in the image viewer", () => {
+  test.each(["Escape", "ArrowRight", "ArrowLeft"])("%s acts in the viewer and goes no further", (key) => {
+    openImageZoom("https://x/2.png", null, SET);
+
+    const { event, reachedDocument } = pressInPage({ key });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(reachedDocument).toBe(false);
+    if (backdrop()) pressInPage({ key: "Escape" });
+  });
+
+  test("Escape closes the viewer", () => {
+    openImageZoom("https://x/2.png", null, SET);
+
+    pressInPage({ key: "Escape" });
+
+    expect(backdrop()).toBeNull();
+  });
+
+  test("an arrow in a single-image viewer travels on", () => {
+    openImageZoom("https://x/1.png", null);
+
+    const { event, reachedDocument } = pressInPage({ key: "ArrowRight" });
+
+    expect(backdrop()).not.toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+    expect(reachedDocument).toBe(true);
+    pressInPage({ key: "Escape" });
   });
 });

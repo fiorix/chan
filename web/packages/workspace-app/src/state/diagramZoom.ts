@@ -7,6 +7,8 @@
 // arrows/WASD) rides on a layer translate. Escape or a plain backdrop
 // click dismisses; the overlay cleans itself up.
 
+import { consumeKey } from "./shortcuts";
+
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 8;
 const ZOOM_STEP = 1.2; // per button press / keypress
@@ -191,44 +193,44 @@ export function openDiagramZoom(svg: string): void {
   const onKey = (e: KeyboardEvent): void => {
     switch (e.key) {
       case "Escape":
-        e.preventDefault();
+        consumeKey(e);
         dismiss();
         break;
       case "+":
       case "=":
-        e.preventDefault();
+        consumeKey(e);
         zoom(ZOOM_STEP);
         break;
       case "-":
-        e.preventDefault();
+        consumeKey(e);
         zoom(1 / ZOOM_STEP);
         break;
       case "0":
-        e.preventDefault();
+        consumeKey(e);
         reset();
         break;
       case "ArrowLeft":
       case "a":
       case "A":
-        e.preventDefault();
+        consumeKey(e);
         pan(PAN_STEP, 0);
         break;
       case "ArrowRight":
       case "d":
       case "D":
-        e.preventDefault();
+        consumeKey(e);
         pan(-PAN_STEP, 0);
         break;
       case "ArrowUp":
       case "w":
       case "W":
-        e.preventDefault();
+        consumeKey(e);
         pan(0, PAN_STEP);
         break;
       case "ArrowDown":
       case "s":
       case "S":
-        e.preventDefault();
+        consumeKey(e);
         pan(0, -PAN_STEP);
         break;
     }
