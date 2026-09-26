@@ -36,13 +36,16 @@ import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/ap
 import { resetLayout, terminalTab } from "./__tests__/tabs";
 import { sessionWindowId } from "./api/client";
 import { teardown } from "./state/store.svelte";
-import { surveyFor, surveyState } from "./state/survey.svelte";
+import { resetSurveysForTest, surveyFor } from "./state/survey.svelte";
 
 stubAppEnvironment();
 
 const RECORDED_WINDOW = "w-f1bd954baf3e50ea";
 
-// c4-e2e-6941240: the three sockets of one run, frame for frame.
+// What three sockets of one recorded survey-reattach-ws.mjs run received, in
+// order, one entry per socket. The socket that attached after the deadline
+// went on to receive the next phase's `open_survey`, which is left out: the
+// test for that phase starts from a window that never saw it.
 const RECORDED = {
   beforeTheDeadline: [
     { type: "session_roster", participants: [{ window_id: "w-f1bd954baf3e50ea", name: "pirukidaba", role: "leader", status: "live" }], leader: "w-f1bd954baf3e50ea" },
@@ -72,8 +75,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  surveyState.byTab = {};
-  surveyState.windowWide = null;
+  resetSurveysForTest();
   // The watcher outlives an unmount; closing it here makes the next mount
   // dial its own, as a reloaded window does.
   teardown();
