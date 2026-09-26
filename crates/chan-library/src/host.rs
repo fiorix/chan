@@ -1834,7 +1834,7 @@ impl WorkspaceHost {
     #[cfg(target_os = "linux")]
     pub fn park_unparked_windowed_terminal_sessions(&self) {
         // Clone the registry handles and RELEASE the workspaces lock before
-        // parking: each park's synchronous manifest commit re-enters
+        // parking: each park's cap check re-enters
         // `fdstore_manifest_sessions`, and a recursive read on the std
         // RwLock can deadlock once a writer queues between the two reads.
         let registries: Vec<Arc<crate::terminal_sessions::Registry>> = {

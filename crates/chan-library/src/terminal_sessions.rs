@@ -625,6 +625,16 @@ pub trait FdStorePark: Send + Sync {
     /// it. `false` means NONE of the fds is stored (the implementation
     /// rolled back) and the caller must clear the provisional state.
     fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool;
+    /// [`park`](Self::park) without the manifest commit, which the caller
+    /// makes once for many parks: the activation reconcile parks every
+    /// session that needs it, then activation rewrites the manifest. Until
+    /// that commit the manifest does not name these fds, and a boot removes
+    /// the stored fds its manifest does not name, so a crash before it
+    /// restores those sessions as the previous manifest describes them. The
+    /// default parks and commits.
+    fn park_deferring_commit(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+        self.park(fds)
+    }
     /// Remove every one of `fd_names` from the store. Manifest republication
     /// may be deferred: a manifest entry without a stored fd is skipped and
     /// cleaned at the next boot, so staleness in this direction is safe.
@@ -650,8 +660,11 @@ impl FdStoreParker {
         Self(Arc::new(hook))
     }
 
-    fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
-        self.0.park(fds)
+    fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)], commit: ManifestCommit) -> bool {
+        match commit {
+            ManifestCommit::Now => self.0.park(fds),
+            ManifestCommit::Deferred => self.0.park_deferring_commit(fds),
+        }
     }
 
     fn unpark(&self, fd_names: &[&str]) {
@@ -672,6 +685,15 @@ impl std::fmt::Debug for FdStoreParker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("FdStoreParker(..)")
     }
+}
+
+/// Whether a park commits the restart manifest itself, or leaves the commit
+/// to the caller (see [`FdStorePark::park_deferring_commit`]).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestCommit {
+    Now,
+    Deferred,
 }
 
 /// A session's live fd-store reservation: the entry names plus the hook that
@@ -1771,7 +1793,9 @@ impl Registry {
     /// before the inherited-fd restore applied) and for sessions restored
     /// without a ring file (a manifest from before ring files, a partial
     /// store, a ring file that could not be made), which would otherwise
-    /// restore from the manifest's tail for as long as they live.
+    /// restore from the manifest's tail for as long as they live. Each park
+    /// stores its fds and leaves the manifest commit to the caller, which
+    /// rewrites the manifest once after the reconcile.
     #[cfg(target_os = "linux")]
     pub fn park_unparked_windowed_sessions(&self) {
         let Some(parker) = self.fd_parker() else {
@@ -1791,7 +1815,7 @@ impl Registry {
             if session.is_fdstore_parked() {
                 session.park_ring_fdstore(&parker);
             } else {
-                session.park_fdstore(&parker);
+                session.park_fdstore(&parker, ManifestCommit::Deferred);
             }
         }
     }
@@ -1808,7 +1832,7 @@ impl Registry {
         if session.window_id().is_none() {
             return;
         }
-        session.park_fdstore(&parker);
+        session.park_fdstore(&parker, ManifestCommit::Now);
     }
 
     /// Install the hook that reaps a standalone terminal's WINDOW row when its
@@ -5161,9 +5185,10 @@ impl Session {
     }
 
     /// Reserve the parked state, then store the fds and durably commit the
-    /// manifest. The reservation is made visible BEFORE the park call so the
-    /// commit's host snapshot includes this session, and rolled back if the
-    /// hook reports failure. Never called under a registry sessions lock.
+    /// manifest, or leave the commit to the caller as `commit` says. The
+    /// reservation is made visible BEFORE the park call so the commit's host
+    /// snapshot includes this session, and rolled back if the hook reports
+    /// failure. Never called under a registry sessions lock.
     ///
     /// The ring file is made here rather than at spawn, because only a
     /// parked session has a store to cross a restart in: an unparked one
@@ -5172,7 +5197,7 @@ impl Session {
     /// neither. A session whose file cannot be made parks its PTY alone and
     /// restores from the manifest's tail.
     #[cfg(target_os = "linux")]
-    fn park_fdstore(&self, parker: &FdStoreParker) {
+    fn park_fdstore(&self, parker: &FdStoreParker, commit: ManifestCommit) {
         if self.closed.load(Ordering::Relaxed) || self.is_fdstore_parked() {
             return;
         }
@@ -5229,7 +5254,7 @@ impl Session {
             fds.push((ring_name, ring_fd.as_fd()));
         }
         let names: Vec<&str> = fds.iter().map(|(name, _)| *name).collect();
-        if !parker.park(&fds) {
+        if !parker.park(&fds, commit) {
             self.stop_ring_mirror();
             self.fdstore_parked
                 .lock()
@@ -5277,8 +5302,9 @@ impl Session {
     /// Park a ring file for a session whose PTY is parked without one: create
     /// it, name it in the parked state, seed it from the live ring, then store
     /// it alone through the hook, which counts it against the store's cap and
-    /// commits the manifest. A refusal leaves the session as it was, its PTY
-    /// parked and restoring from the manifest's tail.
+    /// leaves the manifest commit to the reconcile's caller. A refusal leaves
+    /// the session as it was, its PTY parked and restoring from the manifest's
+    /// tail.
     #[cfg(target_os = "linux")]
     fn park_ring_fdstore(&self, parker: &FdStoreParker) {
         if self.closed.load(Ordering::Relaxed) || self.has_ring_file() {
@@ -5333,7 +5359,10 @@ impl Session {
             clear_ring_name();
             return;
         };
-        if !parker.park(&[(ring_name.as_str(), ring_fd.as_fd())]) {
+        if !parker.park(
+            &[(ring_name.as_str(), ring_fd.as_fd())],
+            ManifestCommit::Deferred,
+        ) {
             self.stop_ring_mirror();
             clear_ring_name();
             return;
@@ -11588,15 +11617,26 @@ mod tests {
             }
         }
 
-        impl FdStorePark for StoreSim {
-            fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+        impl StoreSim {
+            fn store(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) {
                 for (name, fd) in fds {
                     self.0.fds.lock().unwrap().insert(
                         name.to_string(),
                         fd.try_clone_to_owned().expect("duplicate a parked fd"),
                     );
                 }
+            }
+        }
+
+        impl FdStorePark for StoreSim {
+            fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+                self.store(fds);
                 self.publish();
+                true
+            }
+
+            fn park_deferring_commit(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+                self.store(fds);
                 true
             }
 

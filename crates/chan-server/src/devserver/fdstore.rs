@@ -303,8 +303,14 @@ mod linux {
         }
     }
 
-    impl FdStorePark for ParkerHook {
-        fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+    impl ParkerHook {
+        /// Cap check, `FDSTORE` per fd, barrier, then the durable manifest
+        /// commit when `commit` asks for it.
+        fn store_and_commit(
+            &self,
+            fds: &[(&str, std::os::fd::BorrowedFd<'_>)],
+            commit: bool,
+        ) -> bool {
             let Some(&(fd_name, _)) = fds.first() else {
                 return false;
             };
@@ -347,6 +353,9 @@ mod linux {
                 self.remove_all(&submitted);
                 return false;
             }
+            if !commit {
+                return true;
+            }
             // The additive commit: the fd names must be durable before the
             // spawn/restart reports success. On failure, roll the store
             // back so no stored fd is ever absent from the manifest.
@@ -356,6 +365,19 @@ mod linux {
                 return false;
             }
             true
+        }
+    }
+
+    impl FdStorePark for ParkerHook {
+        fn park(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+            self.store_and_commit(fds, true)
+        }
+
+        /// The stored fds stay stored when the caller's later commit fails:
+        /// the manifest names them at the next write that succeeds, and a
+        /// boot before one removes them as fds its manifest does not name.
+        fn park_deferring_commit(&self, fds: &[(&str, std::os::fd::BorrowedFd<'_>)]) -> bool {
+            self.store_and_commit(fds, false)
         }
 
         fn unpark(&self, fd_names: &[&str]) {
@@ -436,7 +458,9 @@ mod linux {
         /// Disabled -> Active, after [`StartupRestore::apply`]: reconcile-park
         /// every session that spawned while parking was disabled, then
         /// rewrite the manifest to the full live parked set (adopted,
-        /// reconciled, minus anything that died during boot).
+        /// reconciled, minus anything that died during boot). The reconcile's
+        /// parks store without committing, so this rewrite is activation's
+        /// one manifest commit.
         pub(crate) fn activate(&self) {
             {
                 let mut phase = self.shared.phase.lock().expect("fdstore parker poisoned");
@@ -1306,6 +1330,36 @@ mod linux {
                 "Sealed must refuse park"
             );
             assert!(!hook.adopt("chan.pty.a.3"), "Sealed must refuse adoption");
+            parker.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_deferred_park_stores_and_barriers_without_a_commit() {
+            let store = FakeStoreOps::default();
+            let (parker, hook, manifest) = test_parker(store.clone());
+            let devnull = std::fs::File::open("/dev/null").unwrap();
+            assert!(
+                !hook.park_deferring_commit(&[("chan.pty.a.1", devnull.as_fd())]),
+                "Disabled must refuse a deferred park"
+            );
+
+            parker.activate();
+            // An empty host commits by removing the file, so a manifest still
+            // on disk after the park shows it was not committed.
+            std::fs::write(&manifest, b"the previous manifest").unwrap();
+            assert!(hook.park_deferring_commit(&[("chan.pty.a.1", devnull.as_fd())]));
+            assert_eq!(
+                store.calls(),
+                vec!["store:chan.pty.a.1".to_string(), "barrier".to_string()],
+                "a deferred park is store then barrier"
+            );
+            assert_eq!(
+                std::fs::read(&manifest).unwrap(),
+                b"the previous manifest",
+                "a deferred park leaves the manifest to the caller's commit"
+            );
+            assert!(hook.park(&[("chan.pty.a.2", devnull.as_fd())]));
+            assert!(!manifest.exists(), "a park commits");
             parker.stop().await;
         }
 
