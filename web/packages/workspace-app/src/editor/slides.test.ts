@@ -292,6 +292,12 @@ chan:
     expect(source.slice(at! - "# Real title".length, at!)).toBe("# Real title");
   });
 
+  test("skips a #-looking line inside a fence indented up to three spaces", () => {
+    const source = "  ```sh\n# a shell comment\n  ```\n# Real title\n";
+    const at = firstSlideHeadingCaret(source);
+    expect(source.slice(at! - "# Real title".length, at!)).toBe("# Real title");
+  });
+
   test("documents without frontmatter land at their first heading", () => {
     expect(firstSlideHeadingCaret("# Draft\nbody\n")).toBe("# Draft".length);
   });
