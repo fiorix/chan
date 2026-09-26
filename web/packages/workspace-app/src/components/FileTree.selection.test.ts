@@ -149,6 +149,8 @@ describe("Delete on a multi-selection", () => {
 
   test("a row under a selected folder goes with the folder, once", async () => {
     const remove = vi.spyOn(api, "remove");
+    // The status line is module state another test may have written.
+    ui.status = null;
     fbSelectSet(["docs", "docs/x.md", "a.md"], "a.md");
     await pressDelete();
 
@@ -157,7 +159,7 @@ describe("Delete on a multi-selection", () => {
 
     await gone("a.md", "docs/x.md", "docs/y.md");
     expect(remove.mock.calls.map(([path]) => path).sort()).toEqual(["a.md", "docs"]);
-    expect(ui.status).not.toMatch(/^deleted /);
+    expect(ui.status).toBeNull();
   });
 });
 
