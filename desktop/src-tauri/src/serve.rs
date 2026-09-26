@@ -1817,9 +1817,18 @@ mod tests {
             .split("// On-launch self-update check")
             .next()
             .expect("boot matrix ends before update check");
+        let restore = MAIN_RS
+            .split("async fn restore_on_workspaces")
+            .nth(1)
+            .expect("the boot restore exists")
+            .split("\n}\n")
+            .next()
+            .expect("the boot restore ends");
 
-        assert!(boot.contains("serve::WorkspaceOpenMode::RestoreOnly"));
+        assert!(boot.contains("restore_on_workspaces("));
         assert!(!boot.contains("serve::WorkspaceOpenMode::OpenWindow"));
+        assert!(restore.contains("serve::WorkspaceOpenMode::RestoreOnly"));
+        assert!(!restore.contains("serve::WorkspaceOpenMode::OpenWindow"));
     }
 
     #[test]
