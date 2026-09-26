@@ -285,13 +285,25 @@ fn spawn_daemon_child(
 ) -> Result<Child> {
     let exe = crate::resolve_relaunchable_exe()?;
     let (stdout, stderr) = open_daemon_log(log_path)?;
-    let mut cmd = Command::new(&exe);
+    let mut cmd = daemon_command(&exe, addr, tunnel);
+    cmd.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
+    detach_command(&mut cmd);
+    cmd.spawn()
+        .with_context(|| format!("spawning `{}` __devserver-daemon", exe.display()))
+}
+
+/// The `__devserver-daemon` command `exe` runs for a daemon bound to `addr`,
+/// without its output files and before it is detached.
+fn daemon_command(
+    exe: &Path,
+    addr: SocketAddr,
+    tunnel: Option<chan_server::DevserverTunnel>,
+) -> Command {
+    let mut cmd = Command::new(exe);
     cmd.arg("__devserver-daemon")
         .arg(format!("--bind={}", addr.ip()))
         .arg(format!("--port={}", addr.port()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
+        .stdin(Stdio::null());
     match tunnel {
         Some(tunnel) => {
             cmd.arg(format!("--tunnel-url={}", tunnel.tunnel_url));
@@ -305,9 +317,7 @@ fn spawn_daemon_child(
             cmd.env_remove("CHAN_TUNNEL_TOKEN");
         }
     }
-    detach_command(&mut cmd);
-    cmd.spawn()
-        .with_context(|| format!("spawning `{}` __devserver-daemon", exe.display()))
+    cmd
 }
 
 /// Open `devserver.log` for the daemon child's stdout and stderr.
