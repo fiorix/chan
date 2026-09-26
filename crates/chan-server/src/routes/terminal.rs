@@ -3752,11 +3752,12 @@ mod tests {
     /// A foreground program that repaints the way a full-screen one does: its
     /// SIGWINCH handler only sets a flag, and its loop, seeing the flag,
     /// prints the size `stty` reads then, so a test sees the size the program
-    /// repaints at. The handler does nothing else because bash can stop
-    /// running a WINCH trap for good when the signal lands while that trap's
-    /// own `stty` runs; a signal during this loop's report sets the flag
-    /// again, and the next report reads the latest size. `<ARMED>` says the
-    /// trap is in place.
+    /// repaints at. The handler does nothing else because, driven on a bare
+    /// PTY through the controller's resize sequence pinned to one CPU with the
+    /// gap between signals swept, a reporter whose trap ran `stty` itself went
+    /// silent in some trials and this one in none: a signal during this loop's
+    /// report sets the flag again, and the next report reads the latest size.
+    /// `<ARMED>` says the trap is in place.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const WINCH_REPORTER: &str = r#"trap 'w=1' WINCH; printf '<ARMED>\n'; while :; do if [ -n "$w" ]; then w=; printf "<WINCH %s>\n" "$(stty size)"; fi; sleep 0.05; done"#;
 
