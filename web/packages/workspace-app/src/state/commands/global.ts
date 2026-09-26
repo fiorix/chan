@@ -100,7 +100,8 @@ async function openPathDialog(): Promise<void> {
     allowAbsolute: true,
   });
   if (target === null) {
-    if (returnFocus?.isConnected) returnFocus.focus();
+    // Handing focus back is not navigation: it must not scroll the page.
+    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     return;
   }
   const trimmed = target.trim();
