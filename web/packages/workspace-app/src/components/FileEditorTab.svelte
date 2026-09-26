@@ -312,7 +312,7 @@
 
   function restoreFromBuffer(): void {
     if (!recoveredBuffer) return;
-    tab.content = recoveredBuffer.content;
+    setTabContent(tab, recoveredBuffer.content);
     recoveredBuffer = null;
     // The restored content now diverges from disk, so the persistence
     // effect re-persists it under the current session on the next tick.
