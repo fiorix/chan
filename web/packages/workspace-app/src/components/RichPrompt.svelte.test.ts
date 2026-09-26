@@ -62,6 +62,7 @@ import {
   layout,
   registerTerminalCancelSink,
   registerTerminalPromptSink,
+  reproveRestoredPrompt,
   sendPromptToTerminal,
   type LeafNode,
   type Tab,
@@ -257,6 +258,21 @@ describe("a submit", () => {
     expect(sent).toHaveLength(1);
   });
 
+  test("a keymap edit leaves the pending card unchanged", async () => {
+    drafts.content = "careful now";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    submit(content);
+    await settle();
+
+    press(content, "Backspace");
+    press(content, "Enter");
+    await settle();
+    expect(view.state.doc.toString()).toBe("careful now");
+    expect(view.state.readOnly).toBe(true);
+  });
+
   test("a card restored while its message is still queued opens read-only", async () => {
     drafts.content = "from before the reload";
     const tab = makeTab({
@@ -265,6 +281,21 @@ describe("a submit", () => {
     });
     const { view } = await composer(tab);
     expect(view.state.readOnly).toBe(true);
+  });
+
+  test("a restored card unlocks when the server no longer holds its message", async () => {
+    drafts.content = "from before the reload";
+    const tab = makeTab({
+      richPromptDraftPath: ".Drafts/rp/draft.md",
+      pendingPrompt: { id: "p-1", phase: "queued" } as TerminalTab["pendingPrompt"],
+    });
+    const { view } = await composer(tab);
+    reproveRestoredPrompt(tab, []);
+    flushSync();
+    await settle();
+
+    expect(tab.pendingPrompt).toBeUndefined();
+    expect(view.state.readOnly).toBe(false);
   });
 
   test("typing over the card starts a fresh composer with what was typed", async () => {
@@ -309,6 +340,25 @@ describe("the card's fate", () => {
     expect(view.state.doc.toString()).toBe("might be lost");
     expect(view.state.readOnly).toBe(false);
     expect(target.querySelector(".rp-text")?.textContent).toBe("connection lost, message may still be queued");
+  });
+
+  test("a failed send restores exactly the text that was sent", async () => {
+    drafts.content = "send this";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    submit(content);
+    await settle();
+    press(content, "Backspace");
+    press(content, "Enter");
+    await settle();
+    tab.pendingPrompt = { id: sent[0]!.id!, phase: "failed" };
+    flushSync();
+    await settle();
+
+    expect(sent.map((s) => s.data)).toEqual(["send this"]);
+    expect(view.state.doc.toString()).toBe("send this");
+    expect(view.state.readOnly).toBe(false);
   });
 
   test("no answer within 5s fails the send; the queued chip shows only after 300ms", async () => {
