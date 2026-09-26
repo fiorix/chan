@@ -171,14 +171,44 @@ impl DevserverStore {
         Self { path }
     }
 
-    /// Read the persisted config, or a default when the file is absent or
-    /// unreadable. An unreadable file degrades to a fresh token + empty set
-    /// rather than refusing to start.
+    /// Read the persisted config, or a default when the file is absent,
+    /// unreadable or unparseable, so a broken file degrades to a fresh token
+    /// and library identity rather than refusing to start.
+    ///
+    /// A broken file is renamed to `<name>.unreadable-<unix seconds>` beside
+    /// itself and named in a warning before this returns: the caller's next
+    /// save would otherwise replace the only record of the library identity
+    /// the defaults re-mint, while the fd-store restore names nothing but a
+    /// library id mismatch for each parked session it then skips.
     fn load(&self) -> PersistedConfig {
-        match std::fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => PersistedConfig::default(),
+        let error = match std::fs::read(&self.path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(cfg) => return cfg,
+                Err(error) => error.to_string(),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return PersistedConfig::default();
+            }
+            Err(error) => error.to_string(),
+        };
+        let mut aside = self.path.clone().into_os_string();
+        aside.push(format!(".unreadable-{}", unix_now_secs()));
+        let aside = PathBuf::from(aside);
+        match std::fs::rename(&self.path, &aside) {
+            Ok(()) => tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                set_aside = %aside.display(),
+                "devserver config is unreadable; set it aside and starting from defaults"
+            ),
+            Err(rename_error) => tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                %rename_error,
+                "devserver config is unreadable and could not be set aside; starting from defaults, and the next save replaces it"
+            ),
         }
+        PersistedConfig::default()
     }
 
     fn save(&self, cfg: &PersistedConfig) -> std::io::Result<()> {
@@ -256,7 +286,9 @@ fn unix_now_secs() -> u64 {
 
 /// Read the persisted devserver bearer token from
 /// `~/.chan/devserver/config.json`, or `None` when it is absent, unreadable,
-/// or tokenless. The `chan devserver join --service=systemd` re-attach path
+/// or tokenless. An unreadable or unparseable file is also set aside as
+/// `config.json.unreadable-<unix seconds>`, so the devserver's next save does
+/// not replace it. The `chan devserver join --service=systemd` re-attach path
 /// prints the [`DEVSERVER_TOKEN_MARKER`] from this, since a journal-follow
 /// does not re-emit the running unit's original start line.
 pub fn persisted_devserver_token() -> Option<String> {
@@ -284,7 +316,9 @@ pub fn rotate_persisted_devserver_token() -> std::io::Result<Option<String>> {
 }
 
 /// Read the last bound TCP port the devserver recorded in
-/// `~/.chan/devserver/config.json`, or `None` when nothing is recorded (`0`).
+/// `~/.chan/devserver/config.json`, or `None` when nothing is recorded (`0`)
+/// or the file is unreadable, in which case it is set aside as
+/// [`persisted_devserver_token`] describes.
 /// The CLI's supervised management verbs dial the running service through
 /// this when its unit pins no `--port` (a listening tunnel-mode devserver
 /// binds an OS-assigned port); the record is written before the readiness
