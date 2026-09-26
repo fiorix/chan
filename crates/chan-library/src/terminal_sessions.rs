@@ -56,7 +56,7 @@ use redraw::force_redraw_with_wobble;
 use redraw::redraw_wobble_size;
 use ring::RingBuffer;
 #[cfg(target_os = "linux")]
-use ring::RingFile;
+use ring::{RingFile, TerminalState};
 
 const BROADCAST_CAP: usize = 1024;
 
@@ -969,6 +969,10 @@ pub struct FdStoreSessionImport {
     /// past that `seq`.
     pub ring_fd: Option<OwnedFd>,
     pub replay: Vec<u8>,
+    /// Whether the manifest is the seal's final write, taken once the
+    /// session's PTY reader stopped, so its `seq` is where the session
+    /// ended. A restore from any other manifest may end behind the session.
+    pub sealed_manifest: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -1332,6 +1336,17 @@ impl Drop for ChildEndedOnReturn {
     fn drop(&mut self) {
         self.0.ended.record(true);
     }
+}
+
+/// Where an attach's replay starts.
+#[derive(Debug, Clone, Copy)]
+enum Resume {
+    /// After the `since` cursor, or the whole ring for `None`.
+    Since(Option<u64>),
+    /// The whole ring, for a client of the process a lossy restore came from
+    /// whose cursor is `since`; see [`RingBuffer::snapshot_past`].
+    #[cfg(target_os = "linux")]
+    PastLossyRestore { since: u64, restored: u64 },
 }
 
 /// One client's attachment to a session: the event receiver plus the replay
@@ -2268,6 +2283,10 @@ impl Registry {
     /// (`None` replays the whole ring). `None` when the id is unknown or
     /// closed.
     pub fn attach_for_ws(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
+        self.attach_resuming(id, Resume::Since(since))
+    }
+
+    fn attach_resuming(&self, id: &str, resume: Resume) -> Option<AttachHandle> {
         let session = self
             .sessions
             .lock()
@@ -2277,7 +2296,33 @@ impl Registry {
         if session.closed.load(Ordering::Relaxed) {
             return None;
         }
-        Some(session.attach(since))
+        Some(session.attach_resuming(resume))
+    }
+
+    /// Where a client echoing `generation`, which is not live session `id`'s,
+    /// resumes. A client of the process a lossy restore came from has a
+    /// cursor that agrees with this process's numbering only up to the
+    /// restored `seq`; any other generation is stale and replays the ring.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    fn resume_other_generation(&self, id: &str, generation: u64, since: Option<u64>) -> Resume {
+        #[cfg(target_os = "linux")]
+        {
+            let lossy = self
+                .sessions
+                .lock()
+                .expect("terminal registry poisoned")
+                .get(id)
+                .and_then(|session| session.lossy_restore);
+            if let (Some(lossy), Some(since)) = (lossy, since) {
+                if lossy.generation == generation {
+                    return Resume::PastLossyRestore {
+                        since,
+                        restored: lossy.seq,
+                    };
+                }
+            }
+        }
+        Resume::Since(None)
     }
 
     #[cfg(test)]
@@ -2293,7 +2338,10 @@ impl Registry {
     /// Reattach to session `id` when it is live, re-homing it to the attaching
     /// window and placement, or else spawn a new one from `opts`. The `since`
     /// cursor is honoured when no `client_generation` is sent or when it
-    /// matches the live session; a stale generation replays from the start.
+    /// matches the live session; a stale generation replays from the start,
+    /// with a missed count when it is the generation of the process a lossy
+    /// restore came from and its cursor is past the restore. A cursor past the
+    /// ring's end also replays from the start, with a missed count.
     /// `Err(Closed)` when `id` names an explicitly closed session.
     pub fn get_or_create_for_ws(
         &self,
@@ -2316,15 +2364,15 @@ impl Registry {
             // desync). A client that is not resuming echoes NO generation -- its
             // `since` (the SPA's `Some(0)`) is honored as sent so a ring
             // overflow still surfaces via `missed_bytes`.
-            let effective_since = match client_generation {
-                Some(g) if self.session_generation(id) == Some(g) => since,
+            let resume = match client_generation {
+                Some(g) if self.session_generation(id) == Some(g) => Resume::Since(since),
                 // Echoed a generation that no longer matches (e.g. a restart it
                 // did not observe): the cached cursor is stale -> full replay.
-                Some(_) => None,
+                Some(g) => self.resume_other_generation(id, g, since),
                 // Not a resume attempt: pass `since` through unchanged.
-                None => since,
+                None => Resume::Since(since),
             };
-            if let Some(handle) = self.attach_for_ws(id, effective_since) {
+            if let Some(handle) = self.attach_resuming(id, resume) {
                 // Move invariant: re-home the session to the attaching window.
                 // A cross-window terminal move re-binds it here, so a later
                 // `close_for_window(source)` reaps only sessions still bound to
@@ -3283,12 +3331,16 @@ impl Registry {
             } else {
                 None
             };
-            let generation = meta.generation;
+            // Past the import's generation first, so one minted for a restore
+            // that may end behind its previous process differs from it.
+            self.generation_counter
+                .fetch_max(meta.generation.saturating_add(1), Ordering::Relaxed);
             let session = match Session::from_imported(
                 self.config.clone(),
                 import,
                 self.last_exit.clone(),
                 self.reader_wake.clone(),
+                || self.generation_counter.fetch_add(1, Ordering::Relaxed),
             ) {
                 Ok(session) => session,
                 Err(e) => {
@@ -3296,8 +3348,6 @@ impl Registry {
                     continue;
                 }
             };
-            self.generation_counter
-                .fetch_max(generation.saturating_add(1), Ordering::Relaxed);
             let window_id = session.window_id();
             let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
             let mut reservations = self
@@ -3693,7 +3743,14 @@ struct Session {
     /// Per-PTY-life epoch stamped at spawn (see [`Registry::generation_counter`]).
     /// A restart mints a new session under the same id with this bumped and the
     /// ring/`seq` reset, so a client compares it before trusting a `since` cursor.
+    /// A restore that may end behind the previous process bumps it too, and
+    /// keeps the old one in [`Session::lossy_restore`].
     generation: u64,
+    /// Set when this session was restored from a source that may end behind
+    /// the process that parked it, so that process's client cursors past the
+    /// restored `seq` name bytes this process never had.
+    #[cfg(target_os = "linux")]
+    lossy_restore: Option<LossyRestore>,
     workspace_root: PathBuf,
     spawn_opts: CreateOptions,
     child_pid: Option<u32>,
@@ -4047,6 +4104,8 @@ impl Session {
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
             #[cfg(target_os = "linux")]
+            lossy_restore: None,
+            #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
             #[cfg(target_os = "linux")]
             reader_wake,
@@ -4287,26 +4346,58 @@ impl Session {
         })
     }
 
+    /// Rebuild a session a previous process parked. `next_generation` mints
+    /// the generation of a restore that may end behind that process.
     #[cfg(target_os = "linux")]
     fn from_imported(
         config: RegistryConfig,
         import: FdStoreSessionImport,
         registry_last_exit: Arc<Mutex<Option<TerminalExit>>>,
         reader_wake: Arc<ReaderWake>,
+        next_generation: impl FnOnce() -> u64,
     ) -> anyhow::Result<Arc<Self>> {
         let FdStoreSessionImport {
             meta,
             master_fd,
             ring_fd,
             replay,
+            sealed_manifest,
         } = import;
-        let ring = restored_ring(
+        let manifest_state = TerminalState {
+            alt_screen: meta.alt_screen,
+            private_modes: meta
+                .private_modes
+                .iter()
+                .copied()
+                .filter(|mode| TRACKED_PRIVATE_MODES.contains(mode))
+                .collect(),
+        };
+        let RestoredRing {
+            ring,
+            state,
+            behind,
+        } = restored_ring(
             config.terminal.ring_bytes,
             &meta.session_id,
-            meta.seq,
-            &replay,
+            RestoreSource {
+                seq: meta.seq,
+                tail: &replay,
+                state: manifest_state,
+                sealed: sealed_manifest,
+            },
             ring_fd,
         );
+        // Clients of the previous process hold its generation, so a new one
+        // tells their cursors apart from this process's.
+        let (generation, lossy_restore) = if behind {
+            let restored = LossyRestore {
+                generation: meta.generation,
+                seq: ring.end_seq(),
+            };
+            (next_generation(), Some(restored))
+        } else {
+            (meta.generation, None)
+        };
         let size: PtySize = meta.size.into();
         let cwd = meta
             .cwd
@@ -4334,7 +4425,7 @@ impl Session {
             pane_id: Mutex::new(meta.pane_id.clone()),
             side: Mutex::new(meta.side),
             tab_id: Mutex::new(meta.tab_id.clone()),
-            generation: meta.generation,
+            generation,
             workspace_root: config.workspace_root.clone(),
             spawn_opts: CreateOptions {
                 size,
@@ -4366,9 +4457,9 @@ impl Session {
             winsize: Mutex::new(size),
             focused: AtomicBool::new(false),
             bytes_since_focus: AtomicU64::new(0),
-            in_alt_screen: AtomicBool::new(meta.alt_screen),
+            in_alt_screen: AtomicBool::new(state.alt_screen),
             alt_screen_tail: Mutex::new(Vec::new()),
-            private_modes: Mutex::new(meta.private_modes.into_iter().collect()),
+            private_modes: Mutex::new(state.private_modes),
             private_mode_tail: Mutex::new(Vec::new()),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
@@ -4377,6 +4468,8 @@ impl Session {
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            lossy_restore,
             #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
             #[cfg(target_os = "linux")]
@@ -4582,6 +4675,10 @@ impl Session {
     }
 
     fn attach(self: Arc<Self>, since: Option<u64>) -> AttachHandle {
+        self.attach_resuming(Resume::Since(since))
+    }
+
+    fn attach_resuming(self: Arc<Self>, resume: Resume) -> AttachHandle {
         self.attach_count.fetch_add(1, Ordering::Relaxed);
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::AttachBeforeRingLock);
@@ -4597,7 +4694,13 @@ impl Session {
             let (replay, missed_bytes) = if alt_screen {
                 (Vec::new(), 0)
             } else {
-                ring.snapshot_since(since)
+                match resume {
+                    Resume::Since(since) => ring.snapshot_since(since),
+                    #[cfg(target_os = "linux")]
+                    Resume::PastLossyRestore { since, restored } => {
+                        ring.snapshot_past(since, restored)
+                    }
+                }
             };
             (rx, alt_screen, replay, missed_bytes, ring.end_seq())
         };
@@ -5129,12 +5232,8 @@ impl Session {
     #[cfg(target_os = "linux")]
     fn start_ring_mirror(&self, file: RingFile) -> Option<Arc<File>> {
         let shared = file.shared_file();
-        match self
-            .ring
-            .lock()
-            .expect("terminal ring poisoned")
-            .mirror_into(file)
-        {
+        let mut ring = self.ring.lock().expect("terminal ring poisoned");
+        match ring.mirror_into(file, &self.terminal_state()) {
             Ok(()) => Some(shared),
             Err(error) => {
                 tracing::warn!(
@@ -5388,14 +5487,21 @@ impl Session {
             self.last_output_at
                 .store(now_unix_millis(), Ordering::Relaxed);
         }
-        self.update_alt_screen(bytes);
-        self.update_private_modes(bytes);
+        let alt_screen_changed = self.update_alt_screen(bytes);
+        let private_modes_changed = self.update_private_modes(bytes);
         self.note_dsr_query(bytes);
         // Push and broadcast under one ring lock, the lock `attach` subscribes
         // and snapshots under, so an attaching client gets this chunk once: in
         // its replay if it attaches after the push, on its receiver if before.
         let mut ring = self.ring.lock().expect("terminal ring poisoned");
         ring.push(bytes);
+        // The ring file carries the state these bytes leave beside them.
+        #[cfg(target_os = "linux")]
+        if alt_screen_changed || private_modes_changed {
+            ring.publish_state(&self.terminal_state());
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (alt_screen_changed, private_modes_changed);
         // The tab activity dot trips on the same visible text, for the same
         // reason.
         if visible > 0 && !self.focused.load(Ordering::Relaxed) {
@@ -5459,7 +5565,9 @@ impl Session {
         Some(DSR_CURSOR_REPORT)
     }
 
-    fn update_alt_screen(&self, bytes: &[u8]) {
+    /// Track the alternate screen from PTY output; true when `bytes` carried
+    /// a transition.
+    fn update_alt_screen(&self, bytes: &[u8]) -> bool {
         let mut tail = self
             .alt_screen_tail
             .lock()
@@ -5482,7 +5590,7 @@ impl Session {
 
         if matched_transition {
             tail.clear();
-            return;
+            return true;
         }
 
         if !scan.is_empty() {
@@ -5490,6 +5598,7 @@ impl Session {
             tail.clear();
             tail.extend_from_slice(&scan[scan.len() - keep..]);
         }
+        false
     }
 
     /// Track the live [`TRACKED_PRIVATE_MODES`] set by parsing DEC private-mode
@@ -5497,8 +5606,9 @@ impl Session {
     /// `h` adds each tracked param to the set, `l` removes it; a sequence split
     /// across reads is carried in `private_mode_tail`. Non-`h`/`l` finals (a
     /// DECRQM `$p` query, a report, …) are skipped without toggling. Sequences
-    /// can carry several modes at once (htop emits `\e[?1006;1000h`).
-    fn update_private_modes(&self, bytes: &[u8]) {
+    /// can carry several modes at once (htop emits `\e[?1006;1000h`). True
+    /// when `bytes` set or reset a tracked mode.
+    fn update_private_modes(&self, bytes: &[u8]) -> bool {
         let mut tail = self
             .private_mode_tail
             .lock()
@@ -5556,7 +5666,7 @@ impl Session {
         drop(tail);
 
         if changes.is_empty() {
-            return;
+            return false;
         }
         let mut modes = self
             .private_modes
@@ -5568,6 +5678,22 @@ impl Session {
             } else {
                 modes.remove(&mode);
             }
+        }
+        true
+    }
+
+    /// The alternate-screen flag and private modes as the output so far left
+    /// them. Taken under the ring lock where the ring file is written; no
+    /// path holds the private-mode lock while it takes the ring lock.
+    #[cfg(target_os = "linux")]
+    fn terminal_state(&self) -> TerminalState {
+        TerminalState {
+            alt_screen: self.in_alt_screen.load(Ordering::Relaxed),
+            private_modes: self
+                .private_modes
+                .lock()
+                .expect("terminal private modes poisoned")
+                .clone(),
         }
     }
 
@@ -5616,59 +5742,125 @@ pub(crate) fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
     fd.as_fd().try_clone_to_owned()
 }
 
+/// What a manifest entry says about a session's ring, for [`restored_ring`].
+#[cfg(target_os = "linux")]
+struct RestoreSource<'a> {
+    /// The ring's end `seq` at the manifest's write.
+    seq: u64,
+    /// The ring's tail, carried for a session whose ring file is not
+    /// mirroring; empty otherwise.
+    tail: &'a [u8],
+    /// The terminal state at the manifest's write.
+    state: TerminalState,
+    /// See [`FdStoreSessionImport::sealed_manifest`].
+    sealed: bool,
+}
+
+/// An imported session's ring, the terminal state its bytes leave, and
+/// whether the restore may end behind the process that parked it.
+#[cfg(target_os = "linux")]
+struct RestoredRing {
+    ring: RingBuffer,
+    state: TerminalState,
+    behind: bool,
+}
+
+/// A restore that may end behind the process that parked the session:
+/// the generation that process's clients hold, and the `seq` the restore
+/// ended at. Their cursors agree with this process's numbering only up to
+/// that `seq`.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LossyRestore {
+    generation: u64,
+    seq: u64,
+}
+
 /// Rebuild an imported session's ring. The ring file parked beside the PTY
 /// wins when it reads back intact and ends at or past the manifest's `seq`:
 /// it is written on every PTY read and the manifest only at park, unpark,
 /// move, rename, placement change, activation and seal, so its end is the
-/// session's real `seq` after a crash as well as after a graceful restart. Otherwise the manifest's `seq` and tail
-/// rebuild the ring: with no file (a partial store, or a manifest from before
-/// ring files), with a file that does not read back, and with one that ends
-/// behind the manifest because a write to it failed. A file that can still be
-/// used is then reset to mirror that ring; one that cannot is closed, and the
-/// store keeps it until the next boot finds it named by no manifest entry.
+/// session's real `seq` after a crash as well as after a graceful restart,
+/// and its header carries the terminal state from the same moment. Such a
+/// restore ends behind the session only when the file marks that its writer
+/// stopped mirroring after a failed write.
+///
+/// Otherwise the manifest's `seq`, tail and state rebuild the ring: with no
+/// file (a partial store, or a manifest from before ring files), with a file
+/// that does not read back, and with one that ends behind the manifest
+/// because a write to it failed. The tail is empty for a session whose file
+/// was mirroring, so the ring restarts empty at that `seq`, and a fresh
+/// attach reports the bytes before it as missed. Such a restore ends behind
+/// the session unless the manifest is the seal's final write. A file that
+/// can still be used is then reset to mirror that ring; one that cannot is
+/// closed, and the store keeps it until the next boot finds it named by no
+/// manifest entry.
 #[cfg(target_os = "linux")]
 fn restored_ring(
     capacity: usize,
     session_id: &str,
-    seq: u64,
-    tail: &[u8],
+    source: RestoreSource<'_>,
     ring_fd: Option<OwnedFd>,
-) -> RingBuffer {
-    let from_manifest = || RingBuffer::new_with_replay(capacity, seq, tail);
+) -> RestoredRing {
+    let RestoreSource {
+        seq,
+        tail,
+        state,
+        sealed,
+    } = source;
+    let from_manifest = |state: TerminalState| RestoredRing {
+        ring: RingBuffer::new_with_replay(capacity, seq, tail),
+        state,
+        behind: !sealed,
+    };
     let Some(ring_fd) = ring_fd else {
-        return from_manifest();
+        return from_manifest(state);
     };
     let mut file = match RingFile::adopt(ring_fd) {
         Ok(file) => file,
         Err(error) => {
             tracing::warn!(
                 session_id, error = %error,
-                "the parked terminal ring file cannot be used; restoring the manifest's tail"
+                "the parked terminal ring file cannot be used; restoring from the manifest"
             );
-            return from_manifest();
+            return from_manifest(state);
         }
     };
     let reason = match file.read() {
         Ok((end, bytes)) if end >= seq => {
             let mut ring = RingBuffer::new_with_replay(capacity, end, &bytes);
-            ring.continue_mirror(file);
-            return ring;
+            // A file in the stateless format leaves the state to the manifest.
+            let state = file.terminal_state().unwrap_or(state);
+            let behind = file.stopped();
+            if behind {
+                tracing::warn!(
+                    session_id,
+                    end,
+                    "the parked terminal ring file stopped mirroring before the restart; the session went on past its end"
+                );
+            }
+            ring.continue_mirror(file, &state);
+            return RestoredRing {
+                ring,
+                state,
+                behind,
+            };
         }
         Ok((end, _)) => format!("it ends at {end}, behind the manifest's seq {seq}"),
         Err(reason) => reason,
     };
     tracing::warn!(
         session_id, reason = %reason,
-        "the parked terminal ring file does not hold the ring; restoring the manifest's tail"
+        "the parked terminal ring file does not hold the ring; restoring from the manifest"
     );
-    let mut ring = from_manifest();
-    if let Err(error) = ring.mirror_into(file) {
+    let mut restored = from_manifest(state);
+    if let Err(error) = restored.ring.mirror_into(file, &restored.state) {
         tracing::warn!(
             session_id, error = %error,
             "resetting the parked terminal ring file failed; it stops mirroring"
         );
     }
-    ring
+    restored
 }
 
 #[cfg(target_os = "linux")]
@@ -6109,6 +6301,8 @@ mod tests {
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            lossy_restore: None,
             #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
             #[cfg(target_os = "linux")]
@@ -6683,6 +6877,9 @@ mod tests {
     // Which source a restored ring comes from: the parked ring file when it
     // reads back intact and ends at or past the manifest's `seq`, else the
     // manifest's `seq` and tail, with a usable file reset to mirror that ring.
+    // The terminal state comes from the same source as the bytes, and the
+    // restore may end behind the session when the file marks a stop or when
+    // the manifest wins without being the seal's final write.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_restored_ring_takes_the_ring_file_only_when_sound_and_current() {
@@ -6694,46 +6891,99 @@ mod tests {
             let fd = file.shared_file().as_fd().try_clone_to_owned().unwrap();
             (file, fd)
         };
-        let reread = |file: &RingFile| {
+        let reopen = |file: &RingFile| {
             let fd = file.shared_file().as_fd().try_clone_to_owned().unwrap();
-            RingFile::adopt(fd).unwrap().read().unwrap()
+            let mut file = RingFile::adopt(fd).unwrap();
+            let read = file.read().unwrap();
+            (read, file)
         };
+        let reread = |file: &RingFile| reopen(file).0;
         let held = |ring: &RingBuffer| ring.snapshot_since(Some(0)).0.concat();
-        // The manifest: `seq` 180 and a 30-byte tail.
+        // The manifest: `seq` 180, a 30-byte tail and the state vim left.
         let (seq, tail) = (180, &stream[150..180]);
+        let vim = TerminalState {
+            alt_screen: true,
+            private_modes: [1000, 1006].into(),
+        };
+        let restore = |fd: Option<OwnedFd>, sealed: bool| {
+            let source = RestoreSource {
+                seq,
+                tail,
+                state: vim.clone(),
+                sealed,
+            };
+            restored_ring(1024, "s", source, fd)
+        };
 
-        // The file ends past the manifest, as after a crash: the file wins.
-        let (_file, fd) = parked(&stream);
-        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
-        assert_eq!(ring.end_seq(), 200);
-        assert_eq!(held(&ring), &stream[136..]);
-        assert!(ring.is_mirrored());
+        // The file ends past the manifest, as after a crash: the file wins,
+        // with the state published beside its bytes, and ends where the
+        // session did.
+        let (mut file, fd) = parked(&stream);
+        file.publish_state(&TerminalState::default(), false)
+            .unwrap();
+        let restored = restore(Some(fd), false);
+        assert_eq!(restored.ring.end_seq(), 200);
+        assert_eq!(held(&restored.ring), &stream[136..]);
+        assert!(restored.ring.is_mirrored());
+        assert_eq!(restored.state, TerminalState::default());
+        assert!(!restored.behind);
 
         // The file ends at the manifest, as after a graceful restart.
         let (_file, fd) = parked(&stream[..180]);
-        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
-        assert_eq!(ring.end_seq(), 180);
-        assert_eq!(held(&ring), &stream[116..180]);
+        let restored = restore(Some(fd), true);
+        assert_eq!(restored.ring.end_seq(), 180);
+        assert_eq!(held(&restored.ring), &stream[116..180]);
+        assert!(!restored.behind);
+
+        // The file's writer stopped mirroring after a failed write: the file
+        // wins, the restore may end behind the session, and this process's
+        // mirroring clears the mark.
+        let (mut file, fd) = parked(&stream);
+        file.publish_state(&TerminalState::default(), true).unwrap();
+        let restored = restore(Some(fd), true);
+        assert_eq!(restored.ring.end_seq(), 200);
+        assert!(restored.behind);
+        assert!(!reopen(&file).1.stopped());
+
+        // A header in the stateless format: the bytes from the file, the
+        // state from the manifest, and the header brought to the format that
+        // carries it.
+        let (file, fd) = parked(&stream);
+        file.shared_file()
+            .write_all_at(&1u32.to_le_bytes(), 8)
+            .unwrap();
+        let restored = restore(Some(fd), false);
+        assert_eq!(restored.ring.end_seq(), 200);
+        assert_eq!(restored.state, vim);
+        assert!(!restored.behind);
+        assert_eq!(reopen(&file).1.terminal_state(), Some(vim.clone()));
 
         // The file ends behind the manifest (a write to it failed): the
         // manifest wins, and the file mirrors the manifest's ring from here.
         let (file, fd) = parked(&stream[..170]);
-        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
-        assert_eq!((ring.end_seq(), held(&ring)), (180, tail.to_vec()));
+        let restored = restore(Some(fd), false);
+        let ring = &restored.ring;
+        assert_eq!((ring.end_seq(), held(ring)), (180, tail.to_vec()));
         assert!(ring.is_mirrored());
         assert_eq!(reread(&file), (180, tail.to_vec()));
+        assert_eq!(restored.state, vim);
+        assert!(restored.behind, "a manifest that is not the final write");
 
         // The file's header cannot be trusted: the manifest wins the same way.
         let (file, fd) = parked(&stream);
         file.shared_file().write_all_at(b"NOTARING", 0).unwrap();
-        let ring = restored_ring(1024, "s", seq, tail, Some(fd));
-        assert_eq!((ring.end_seq(), held(&ring)), (180, tail.to_vec()));
+        let restored = restore(Some(fd), true);
+        let ring = &restored.ring;
+        assert_eq!((ring.end_seq(), held(ring)), (180, tail.to_vec()));
         assert_eq!(reread(&file), (180, tail.to_vec()));
+        assert!(!restored.behind, "the seal's final write");
 
         // No file beside the PTY (a partial store, an older manifest).
-        let ring = restored_ring(1024, "s", seq, tail, None);
-        assert_eq!((ring.end_seq(), held(&ring)), (180, tail.to_vec()));
+        let restored = restore(None, false);
+        let ring = &restored.ring;
+        assert_eq!((ring.end_seq(), held(ring)), (180, tail.to_vec()));
         assert!(!ring.is_mirrored());
+        assert!(restored.behind);
     }
 
     #[test]
@@ -8315,9 +8565,11 @@ mod tests {
                 master_fd,
                 ring_fd: None,
                 replay: Vec::new(),
+                sealed_manifest: true,
             },
             registry_last_exit.clone(),
             Arc::new(ReaderWake::new()),
+            || 2,
         )
         .expect("import session");
         let mut rx = session.output_tx.subscribe();
@@ -10927,6 +11179,7 @@ mod tests {
                 master_fd,
                 ring_fd: None,
                 replay: b"tail".to_vec(),
+                sealed_manifest: true,
             }]);
             assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
 
@@ -10998,6 +11251,8 @@ mod tests {
                         }),
                         meta: entry.meta,
                         replay: entry.replay,
+                        // Published at park and on changes, never by a seal.
+                        sealed_manifest: false,
                     })
                     .collect()
             }
@@ -11170,7 +11425,8 @@ mod tests {
         }
 
         /// The import of a manifest entry that names no ring file, as a
-        /// manifest from before ring files or a partial store gives: a
+        /// manifest from before ring files or a partial store gives, from a
+        /// manifest that is not the seal's final write: a
         /// windowed session over a real PTY master with no child process,
         /// ending at `tail`'s length. The returned pair keeps the slave open.
         fn ringless_import(
@@ -11208,6 +11464,7 @@ mod tests {
                 master_fd,
                 ring_fd: None,
                 replay: tail.to_vec(),
+                sealed_manifest: false,
             };
             (import, pair)
         }
@@ -11303,6 +11560,55 @@ mod tests {
                 "vim's mouse modes are reasserted after it quit: {:?}",
                 String::from_utf8_lossy(&after.mode_reassert)
             );
+        }
+
+        // A write to the ring file that fails, as one refused for memory would,
+        // stops the mirror while the session goes on, and the file marks the
+        // stop. After a crash the restore from that file knows it may end
+        // behind the session: the previous process's client, whose cursor is
+        // past the file's end, gets the whole ring and a notice, even once
+        // this process's output moves the end past that cursor.
+        #[test]
+        fn a_restore_from_a_ring_file_that_stopped_refuses_old_cursors_past_it() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "ring-file-stopped";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            let early = numbered_lines(1000);
+            session.record_output(&early);
+            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session.record_output(&b"lost ".repeat(120));
+            let attached = registry.attach(id, Some(0)).unwrap();
+            let (cursor, generation) = (attached.seq, attached.generation);
+            assert_eq!(cursor, 1600);
+            drop(attached);
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let late = b"after the restart\n".repeat(60);
+            assert!(next.inject_output(id, &late));
+            let resumed = next
+                .get_or_create_for_ws(
+                    Some(id),
+                    Some(cursor),
+                    opts(Some("w1"), None),
+                    TerminalPlacement::default(),
+                    Some(generation),
+                )
+                .unwrap();
+            let mut ring = early.clone();
+            ring.extend_from_slice(&late);
+            assert!(
+                resumed.replay.concat() == ring,
+                "the old client's cursor past the stopped file replays {} bytes, want the whole ring",
+                resumed.replay.concat().len()
+            );
+            assert_eq!(resumed.missed_bytes, 600);
+            assert_ne!(resumed.generation, generation);
         }
 
         // A restore from a manifest that is not the seal's final write may end

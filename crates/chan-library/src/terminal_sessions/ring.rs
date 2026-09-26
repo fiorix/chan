@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -93,6 +95,11 @@ impl RingBuffer {
     }
 
     pub(super) fn snapshot_since(&self, since: Option<u64>) -> (Vec<Vec<u8>>, u64) {
+        // A cursor past the end names bytes this ring never numbered: the
+        // client gets the whole ring and a missed count, never an empty replay.
+        if let Some(since) = since.filter(|since| *since > self.end_seq) {
+            return self.snapshot_past(since, self.end_seq);
+        }
         let requested = since.unwrap_or(self.start_seq);
         let replay_start = requested.max(self.start_seq);
         let missed = self.start_seq.saturating_sub(requested);
@@ -108,10 +115,31 @@ impl RingBuffer {
         (replay, missed)
     }
 
-    /// Mirror this ring into `file` from now on, first replacing what the
-    /// file holds with the bytes the ring holds now.
+    /// The whole ring, for a client whose cursor `since` agrees with this
+    /// ring's numbering only up to `bound`. The missed count is what its
+    /// notice reports. Past `bound`, that is the bytes it saw that this ring
+    /// cannot place, plus any this ring numbered after `bound` and already
+    /// dropped. At or before `bound`, it is the bytes between the cursor and
+    /// the ring's start, as an honoured cursor gets.
+    pub(super) fn snapshot_past(&self, since: u64, bound: u64) -> (Vec<Vec<u8>>, u64) {
+        let missed = if since > bound {
+            (since - bound).saturating_add(self.start_seq.saturating_sub(bound))
+        } else {
+            self.start_seq.saturating_sub(since)
+        };
+        let replay = self.chunks.iter().map(|(_, chunk)| chunk.clone()).collect();
+        (replay, missed)
+    }
+
+    /// Mirror this ring and the terminal `state` its bytes leave into
+    /// `file` from now on, first replacing what the file holds with them.
     #[cfg(target_os = "linux")]
-    pub(super) fn mirror_into(&mut self, mut file: RingFile) -> io::Result<()> {
+    pub(super) fn mirror_into(
+        &mut self,
+        mut file: RingFile,
+        state: &TerminalState,
+    ) -> io::Result<()> {
+        file.state = state.encode(false);
         file.reset(self.start_seq)?;
         for (chunk_start, chunk) in &self.chunks {
             file.append(*chunk_start, chunk)?;
@@ -121,11 +149,30 @@ impl RingBuffer {
     }
 
     /// Keep writing into a file that already holds exactly this ring's
-    /// bytes: the ring was just rebuilt from it.
+    /// bytes: the ring was just rebuilt from it. `state` is published over
+    /// the file's, which clears a stop the previous process marked and
+    /// brings an older header to the current format.
     #[cfg(target_os = "linux")]
-    pub(super) fn continue_mirror(&mut self, file: RingFile) {
+    pub(super) fn continue_mirror(&mut self, mut file: RingFile, state: &TerminalState) {
         debug_assert_eq!(file.end, self.end_seq);
+        if let Err(error) = file.publish_state(state, false) {
+            // The bytes and the window are intact, so the file keeps
+            // mirroring; the next append that fails stops it.
+            tracing::warn!(error = %error, "writing the terminal ring file's state failed");
+        }
         self.mirror = Some(file);
+    }
+
+    /// Publish the terminal `state` the ring's bytes leave, after a push
+    /// that changed it, so a next process restores it with those bytes.
+    #[cfg(target_os = "linux")]
+    pub(super) fn publish_state(&mut self, state: &TerminalState) {
+        let Some(mirror) = self.mirror.as_mut() else {
+            return;
+        };
+        if let Err(error) = mirror.publish_state(state, false) {
+            self.stop_mirror_after(error);
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -145,14 +192,94 @@ impl RingBuffer {
             return;
         };
         if let Err(error) = mirror.append(start, bytes) {
-            // The header is published last, so a failed write leaves the
-            // file ending at the last byte before it. The next process takes
-            // the file while that end is at or past the manifest's `seq`,
-            // restoring the session at that end; once a manifest rewrite
-            // records a larger `seq`, the manifest's tail wins instead.
-            tracing::warn!(error = %error, "writing the terminal ring file failed; it stops mirroring");
-            self.mirror = None;
+            self.stop_mirror_after(error);
         }
+    }
+
+    /// Stop mirroring after a failed write. The header is published last, so
+    /// the file ends at the last byte before the failure while the session
+    /// goes on past it. The stop is marked in the file where the write still
+    /// can be, so the next process knows a restore from it may end behind
+    /// the session. It takes the file while that end is at or past the
+    /// manifest's `seq`; once a manifest rewrite records a larger `seq`, the
+    /// manifest wins, with the tail it carries for a ring no longer mirrored.
+    #[cfg(target_os = "linux")]
+    fn stop_mirror_after(&mut self, error: io::Error) {
+        tracing::warn!(error = %error, "writing the terminal ring file failed; it stops mirroring");
+        if let Some(mut mirror) = self.mirror.take() {
+            let state = mirror.state;
+            if let Err(error) = mirror.write_state(TerminalState::with_stop(state)) {
+                tracing::warn!(error = %error, "marking the terminal ring file stopped failed");
+            }
+        }
+    }
+
+    /// Fail one of the mirror's writes after `writes` more succeed, as a
+    /// write refused for memory would, and let the ones after it succeed.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn fail_one_mirror_write_after(&self, writes: usize) {
+        if let Some(mirror) = self.mirror.as_ref() {
+            mirror.writes_left.set(Some(writes));
+            mirror.recover_after_failure.set(true);
+        }
+    }
+}
+
+/// The terminal state a ring's bytes leave, published in the ring file's
+/// header beside them: whether the alternate screen is up, and the tracked
+/// private modes that are on.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct TerminalState {
+    pub(super) alt_screen: bool,
+    pub(super) private_modes: BTreeSet<u16>,
+}
+
+#[cfg(target_os = "linux")]
+impl TerminalState {
+    /// The header's state region: flags, then one slot per private mode
+    /// that is on, 0 for an empty slot.
+    fn encode(&self, stopped: bool) -> [u8; layout::STATE_LEN] {
+        let mut flags = 0u16;
+        if self.alt_screen {
+            flags |= layout::FLAG_ALT_SCREEN;
+        }
+        if stopped {
+            flags |= layout::FLAG_STOPPED;
+        }
+        let mut region = [0u8; layout::STATE_LEN];
+        region[..2].copy_from_slice(&flags.to_le_bytes());
+        debug_assert!(self.private_modes.len() <= layout::MODE_SLOTS);
+        for (slot, mode) in self
+            .private_modes
+            .iter()
+            .take(layout::MODE_SLOTS)
+            .enumerate()
+        {
+            region[2 + 2 * slot..4 + 2 * slot].copy_from_slice(&mode.to_le_bytes());
+        }
+        region
+    }
+
+    /// The state in a header's region and whether it marks a stop.
+    fn decode(region: &[u8; layout::STATE_LEN]) -> (Self, bool) {
+        let flags = u16::from_le_bytes([region[0], region[1]]);
+        let private_modes = region[2..]
+            .chunks_exact(2)
+            .map(|slot| u16::from_le_bytes([slot[0], slot[1]]))
+            .filter(|mode| *mode != 0)
+            .collect();
+        let state = Self {
+            alt_screen: flags & layout::FLAG_ALT_SCREEN != 0,
+            private_modes,
+        };
+        (state, flags & layout::FLAG_STOPPED != 0)
+    }
+
+    /// An encoded region with the stop marked.
+    fn with_stop(region: [u8; layout::STATE_LEN]) -> [u8; layout::STATE_LEN] {
+        let (state, _) = Self::decode(&region);
+        state.encode(true)
     }
 }
 
@@ -161,7 +288,10 @@ impl RingBuffer {
 #[cfg(target_os = "linux")]
 mod layout {
     pub(super) const MAGIC: [u8; 8] = *b"CHANRING";
-    pub(super) const FORMAT_VERSION: u32 = 1;
+    pub(super) const FORMAT_VERSION: u32 = 2;
+    /// A header without the state region, read with the state left to the
+    /// manifest.
+    pub(super) const STATELESS_FORMAT_VERSION: u32 = 1;
     pub(super) const HEADER_LEN: u64 = 64;
     pub(super) const VERSION_AT: usize = 8;
     pub(super) const HEADER_LEN_AT: usize = 12;
@@ -169,7 +299,20 @@ mod layout {
     /// Start seq, end seq and write offset, published by one write.
     pub(super) const WINDOW_AT: usize = 24;
     pub(super) const WINDOW_LEN: usize = 24;
+    /// The terminal state, published by one write: a u16 of flags, then
+    /// [`MODE_SLOTS`] u16 private-mode slots.
+    pub(super) const STATE_AT: usize = 48;
+    pub(super) const STATE_LEN: usize = 16;
+    pub(super) const MODE_SLOTS: usize = 7;
+    pub(super) const FLAG_ALT_SCREEN: u16 = 1;
+    /// The process that wrote the file stopped mirroring after a failed
+    /// write, so the session went on past the file's end.
+    pub(super) const FLAG_STOPPED: u16 = 2;
 }
+
+// Every tracked mode that is on has a slot in the header.
+#[cfg(target_os = "linux")]
+const _: () = assert!(super::TRACKED_PRIVATE_MODES.len() <= layout::MODE_SLOTS);
 
 /// A parked session's ring as it crosses a restart: a memfd the systemd fd
 /// store keeps beside the PTY master. The byte numbered `seq` lives at data
@@ -180,7 +323,9 @@ mod layout {
 /// writes (`kill -9`, a watchdog kill). A write that would overwrite bytes
 /// the header still counts first moves the header's start past them, then
 /// writes the data, then moves the end, so the header never describes a
-/// byte that is not intact.
+/// byte that is not intact. The header also carries the [`TerminalState`]
+/// the bytes leave, republished when output changes it, so a restore takes
+/// the state from the same moment as the bytes.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(super) struct RingFile {
@@ -188,10 +333,18 @@ pub(super) struct RingFile {
     capacity: u64,
     start: u64,
     end: u64,
+    /// The state region as last written, or as [`read`](Self::read) found it.
+    state: [u8; layout::STATE_LEN],
+    /// The header's format version on disk: a file adopted from an older
+    /// process can carry the stateless one until its state is published.
+    version: u32,
     /// How many more writes succeed before one fails as a killed process's
     /// would, so a test can stop an append after any of its writes.
     #[cfg(test)]
     writes_left: std::cell::Cell<Option<usize>>,
+    /// Whether the writes after the one that fails succeed again.
+    #[cfg(test)]
+    recover_after_failure: std::cell::Cell<bool>,
 }
 
 #[cfg(target_os = "linux")]
@@ -222,8 +375,12 @@ impl RingFile {
             capacity,
             start: 0,
             end: 0,
+            state: [0; layout::STATE_LEN],
+            version: layout::FORMAT_VERSION,
             #[cfg(test)]
             writes_left: std::cell::Cell::new(None),
+            #[cfg(test)]
+            recover_after_failure: std::cell::Cell::new(false),
         };
         ring.reset(0)?;
         Ok(ring)
@@ -246,8 +403,12 @@ impl RingFile {
             capacity,
             start: 0,
             end: 0,
+            state: [0; layout::STATE_LEN],
+            version: 0,
             #[cfg(test)]
             writes_left: std::cell::Cell::new(None),
+            #[cfg(test)]
+            recover_after_failure: std::cell::Cell::new(false),
         })
     }
 
@@ -270,7 +431,7 @@ impl RingFile {
             return Err("the header has no ring magic".into());
         }
         let version = u32_at(layout::VERSION_AT);
-        if version != layout::FORMAT_VERSION {
+        if version != layout::FORMAT_VERSION && version != layout::STATELESS_FORMAT_VERSION {
             return Err(format!("format version {version} is not supported"));
         }
         let header_len = u32_at(layout::HEADER_LEN_AT);
@@ -307,10 +468,52 @@ impl RingFile {
             .map_err(|error| format!("reading the ring bytes: {error}"))?;
         self.start = start;
         self.end = end;
+        self.version = version;
+        self.state = if version == layout::STATELESS_FORMAT_VERSION {
+            [0; layout::STATE_LEN]
+        } else {
+            header[layout::STATE_AT..layout::STATE_AT + layout::STATE_LEN]
+                .try_into()
+                .unwrap()
+        };
         Ok((end, bytes))
     }
 
-    /// Rewrite the whole header for an empty ring ending at `seq`.
+    /// The terminal state the header [`read`](Self::read) carries, `None`
+    /// for a header in the stateless format.
+    pub(super) fn terminal_state(&self) -> Option<TerminalState> {
+        (self.version == layout::FORMAT_VERSION).then(|| TerminalState::decode(&self.state).0)
+    }
+
+    /// Whether the header [`read`](Self::read) marks that its writer
+    /// stopped mirroring, so the session went on past the file's end.
+    pub(super) fn stopped(&self) -> bool {
+        self.version == layout::FORMAT_VERSION && TerminalState::decode(&self.state).1
+    }
+
+    /// Publish `state` in the header, marking a stop when `stopped`.
+    pub(super) fn publish_state(&mut self, state: &TerminalState, stopped: bool) -> io::Result<()> {
+        self.write_state(state.encode(stopped))
+    }
+
+    /// Write the state region, then bring an older header's version up to
+    /// the format that has it; a process killed between the two leaves the
+    /// older header, whose reader ignores the region.
+    fn write_state(&mut self, region: [u8; layout::STATE_LEN]) -> io::Result<()> {
+        self.write_at(&region, layout::STATE_AT as u64)?;
+        self.state = region;
+        if self.version != layout::FORMAT_VERSION {
+            self.write_at(
+                &layout::FORMAT_VERSION.to_le_bytes(),
+                layout::VERSION_AT as u64,
+            )?;
+            self.version = layout::FORMAT_VERSION;
+        }
+        Ok(())
+    }
+
+    /// Rewrite the whole header for an empty ring ending at `seq`, with the
+    /// state region as last set.
     pub(super) fn reset(&mut self, seq: u64) -> io::Result<()> {
         let mut header = [0u8; layout::HEADER_LEN as usize];
         header[..8].copy_from_slice(&layout::MAGIC);
@@ -322,9 +525,11 @@ impl RingFile {
             .copy_from_slice(&self.capacity.to_le_bytes());
         header[layout::WINDOW_AT..layout::WINDOW_AT + layout::WINDOW_LEN]
             .copy_from_slice(&self.window(seq, seq));
+        header[layout::STATE_AT..layout::STATE_AT + layout::STATE_LEN].copy_from_slice(&self.state);
         self.write_at(&header, 0)?;
         self.start = seq;
         self.end = seq;
+        self.version = layout::FORMAT_VERSION;
         Ok(())
     }
 
@@ -371,6 +576,9 @@ impl RingFile {
         #[cfg(test)]
         if let Some(left) = self.writes_left.get() {
             if left == 0 {
+                if self.recover_after_failure.get() {
+                    self.writes_left.set(None);
+                }
                 return Err(io::Error::other("the process died before this write"));
             }
             self.writes_left.set(Some(left - 1));
@@ -484,7 +692,7 @@ mod tests {
     fn read_refuses_a_header_it_cannot_trust() {
         let cases: [(usize, &[u8], &str); 5] = [
             (0, b"NOTARING", "magic"),
-            (layout::VERSION_AT, &2u32.to_le_bytes(), "version"),
+            (layout::VERSION_AT, &3u32.to_le_bytes(), "version"),
             (layout::CAPACITY_AT, &32u64.to_le_bytes(), "capacity"),
             (layout::WINDOW_AT, &0u64.to_le_bytes(), "window"),
             (layout::WINDOW_AT + 16, &3u64.to_le_bytes(), "write offset"),
@@ -511,7 +719,8 @@ mod tests {
         let bytes = stream(300);
         let mut ring = RingBuffer::new(64);
         ring.push(&bytes[..100]);
-        ring.mirror_into(RingFile::create(64).unwrap()).unwrap();
+        ring.mirror_into(RingFile::create(64).unwrap(), &TerminalState::default())
+            .unwrap();
         for chunk in bytes[100..].chunks(9) {
             ring.push(chunk);
         }

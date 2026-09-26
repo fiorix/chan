@@ -82,6 +82,12 @@ mod linux {
         library_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boot_id: Option<String>,
+        /// Whether this is the seal's final write, taken once the parked
+        /// sessions' PTY readers stopped, so each `seq` is where its session
+        /// ended. Absent from a manifest written before the field, which
+        /// imports as sealed, as it always has.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed: Option<bool>,
         sessions: Vec<ManifestSession>,
     }
 
@@ -245,7 +251,7 @@ mod linux {
         /// file: no manifest is the truthful description of an empty store.
         fn write_entries_locked(
             &self,
-            _phase: &MutexGuard<'_, ParkerPhase>,
+            phase: &MutexGuard<'_, ParkerPhase>,
             entries: Vec<chan_library::terminal_sessions::FdStoreManifestEntry>,
         ) -> Result<(), String> {
             if entries.is_empty() {
@@ -256,6 +262,7 @@ mod linux {
                 version: MANIFEST_VERSION,
                 library_id: self.library_id.clone(),
                 boot_id: current_boot_id(),
+                sealed: Some(**phase == ParkerPhase::Sealed),
                 sessions: entries
                     .into_iter()
                     .map(|entry| ManifestSession {
@@ -583,6 +590,7 @@ mod linux {
             let mut imports = Vec::new();
             let mut skipped = Vec::new();
             let mut skipped_sessions = Vec::new();
+            let sealed_manifest = manifest.sealed.unwrap_or(true);
             for session in manifest.sessions {
                 let ManifestSession {
                     fd_name,
@@ -663,6 +671,7 @@ mod linux {
                     master_fd,
                     ring_fd,
                     replay,
+                    sealed_manifest,
                 });
             }
             let orphan_fd_names: Vec<String> = fd_by_name
@@ -971,6 +980,7 @@ mod linux {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
                 boot_id: None,
+                sealed: None,
                 sessions: Vec::new(),
             };
             write_manifest(&path, &manifest).unwrap();
@@ -998,6 +1008,7 @@ mod linux {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
                 boot_id: None,
+                sealed: None,
                 sessions: Vec::new(),
             };
             let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
@@ -1457,6 +1468,7 @@ mod linux {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
                 boot_id: None,
+                sealed: None,
                 sessions: Vec::new(),
             };
             let bytes = serde_json::to_vec(&manifest).unwrap();
@@ -1609,8 +1621,9 @@ mod linux {
             }
         }
 
-        /// A manifest at a fresh path naming the sessions `entries` describe.
-        fn manifest_file(entries: Vec<(&str, Option<String>)>) -> PathBuf {
+        /// A manifest at a fresh path naming the sessions `entries` describe,
+        /// with the seal's mark `sealed`.
+        fn manifest_file(entries: Vec<(&str, Option<String>)>, sealed: Option<bool>) -> PathBuf {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("fdstore-restart.json");
             std::mem::forget(dir);
@@ -1618,6 +1631,7 @@ mod linux {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
                 boot_id: None,
+                sealed,
                 sessions: entries
                     .into_iter()
                     .map(|(id, ring_fd_name)| {
@@ -1644,10 +1658,13 @@ mod linux {
         #[test]
         fn restore_claims_a_ring_only_under_its_derived_name() {
             let derived = fdstore_ring_fd_name("a", Some(7));
-            let path = manifest_file(vec![
-                ("a", Some(derived.clone())),
-                ("b", Some("chan.ring.someone-else.7".to_string())),
-            ]);
+            let path = manifest_file(
+                vec![
+                    ("a", Some(derived.clone())),
+                    ("b", Some("chan.ring.someone-else.7".to_string())),
+                ],
+                None,
+            );
             let restore = StartupRestore::from_inherited(
                 path,
                 vec![
@@ -1677,6 +1694,45 @@ mod linux {
                 ],
                 "unclaimed rings are orphans"
             );
+        }
+
+        // Every import carries whether its manifest is the seal's final write;
+        // a manifest from before the mark imports as sealed, as it always has.
+        #[test]
+        fn every_import_carries_the_manifests_seal_mark() {
+            for (sealed, want) in [(None, true), (Some(true), true), (Some(false), false)] {
+                let path = manifest_file(vec![("a", None)], sealed);
+                let restore = StartupRestore::from_inherited(
+                    path,
+                    vec![inherited(&fdstore_fd_name("a", Some(7)))],
+                );
+                assert_eq!(restore.imports.len(), 1, "{:?}", restore.skipped);
+                assert_eq!(
+                    restore.imports[0].sealed_manifest, want,
+                    "sealed {sealed:?}"
+                );
+            }
+        }
+
+        // Only the seal's final write marks the manifest sealed: a restore
+        // from any other write may end behind its sessions.
+        #[tokio::test]
+        async fn only_the_seals_write_marks_the_manifest_sealed() {
+            let (parker, _hook, manifest) = test_parker(FakeStoreOps::default());
+            let written = |phase: ParkerPhase| {
+                let mut guard = parker.shared.phase.lock().unwrap();
+                *guard = phase;
+                parker
+                    .shared
+                    .write_entries_locked(&guard, vec![manifest_entry("a", true)])
+                    .unwrap();
+                let json: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+                json["sealed"].clone()
+            };
+            assert_eq!(written(ParkerPhase::Active), serde_json::json!(false));
+            assert_eq!(written(ParkerPhase::Sealed), serde_json::json!(true));
+            parker.stop().await;
         }
 
         #[test]
@@ -1719,6 +1775,7 @@ mod linux {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
                 boot_id: None,
+                sealed: None,
                 sessions: [manifest_entry("a", true), manifest_entry("b", false)]
                     .into_iter()
                     .map(|entry| ManifestSession {

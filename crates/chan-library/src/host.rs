@@ -8611,6 +8611,7 @@ mod tests {
                     master_fd,
                     ring_fd: None,
                     replay: b"replay".to_vec(),
+                    sealed_manifest: true,
                 },
             ]);
             assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
