@@ -6350,9 +6350,13 @@ mod tests {
 
         drop(stall);
         let host = Arc::clone(&state.host);
-        tokio::task::spawn_blocking(move || host.probe_mounted_roots())
-            .await
-            .expect("a tick after the root answers");
+        tokio::time::timeout(
+            HEALTHY_ROOT_BOUND,
+            tokio::task::spawn_blocking(move || host.probe_mounted_roots()),
+        )
+        .await
+        .expect("a tick after the root answers did not finish")
+        .expect("a tick after the root answers");
         let answered = row(&state);
         assert_eq!(
             (answered.status, answered.error.as_deref()),
