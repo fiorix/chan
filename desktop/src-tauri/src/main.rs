@@ -8829,12 +8829,13 @@ mod tests {
         use super::*;
 
         /// A desktop over a fresh library with `registered` in its registry,
-        /// `mounted` among them mounted, and a workspace overlay installed.
+        /// the `mounted` ones among them mounted, and a workspace overlay
+        /// installed.
         fn desktop(
             runtime: &tokio::runtime::Runtime,
             config: &Path,
             registered: &[&Path],
-            mounted: Option<&Path>,
+            mounted: &[&Path],
         ) -> Arc<AppState> {
             let library =
                 chan_workspace::Library::open_at(config.join("config.toml")).expect("library");
@@ -8843,9 +8844,10 @@ mod tests {
             }
             let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
             embedded.install_workspace_overlay_for_tests(config.join("workspaces.json"));
-            if let Some(root) = mounted {
+            for root in mounted {
+                let stored = chan_workspace::paths::canonicalize_normalized(root);
                 runtime
-                    .block_on(embedded.open_workspace(root.to_str().expect("utf-8 root")))
+                    .block_on(embedded.open_workspace(stored.to_str().expect("utf-8 root")))
                     .expect("mount");
             }
             let state = empty_state();
@@ -8878,7 +8880,7 @@ mod tests {
             let runtime = runtime();
             let config = tempfile::tempdir().expect("config dir");
             let home = dirs::home_dir().expect("a home directory");
-            let state = desktop(&runtime, config.path(), &[&home], None);
+            let state = desktop(&runtime, config.path(), &[&home], &[]);
             runtime
                 .block_on(state.embedded().expect("embedded").open_terminal())
                 .expect("the shared terminal tenant");
@@ -8891,18 +8893,32 @@ mod tests {
         }
 
         /// A `chan close` handed off after a normal shutdown has drained the
-        /// tenants leaves the on-set the shutdown recorded. The drained host
-        /// mounts nothing, so a snapshot then would record every workspace
-        /// off and the next start would restore none of them.
+        /// tenants records only that workspace off. The drained host mounts
+        /// nothing, so a snapshot then would record every other workspace off
+        /// too, and the next start would restore none of them.
         #[test]
-        fn a_close_after_the_shutdown_drain_keeps_the_on_set() {
+        fn a_close_after_the_shutdown_drain_keeps_the_other_workspaces_on() {
             let runtime = runtime();
             let config = tempfile::tempdir().expect("config dir");
-            let root = tempfile::tempdir().expect("workspace root");
-            let state = desktop(&runtime, config.path(), &[root.path()], Some(root.path()));
+            let closed = tempfile::tempdir().expect("root closed during the drain");
+            let kept = tempfile::tempdir().expect("root left on");
+            let state = desktop(
+                &runtime,
+                config.path(),
+                &[closed.path(), kept.path()],
+                &[closed.path(), kept.path()],
+            );
             persist_workspaces(&state);
             let at_stop = on_paths(&state);
-            assert_eq!(at_stop.len(), 1, "fixture: the mounted root is on");
+            assert_eq!(at_stop.len(), 2, "fixture: both roots are on");
+            let registered = |dir: &Path| {
+                at_stop
+                    .iter()
+                    .find(|path| Path::new(path).file_name() == dir.file_name())
+                    .expect("the root's row")
+                    .clone()
+            };
+            let (closed_path, kept_path) = (registered(closed.path()), registered(kept.path()));
 
             // What `begin_normal_shutdown` does before its drain task runs.
             state
@@ -8913,7 +8929,7 @@ mod tests {
             let outcome = runtime.block_on(close_workspace_from_handoff(
                 app.handle().clone(),
                 Arc::clone(&state),
-                PathBuf::from(&at_stop[0]),
+                PathBuf::from(&closed_path),
                 false,
             ));
             assert_eq!(
@@ -8922,8 +8938,8 @@ mod tests {
             );
             assert_eq!(
                 on_paths(&state),
-                at_stop,
-                "a close after the shutdown drain rewrote the on-set"
+                [kept_path],
+                "a close after the shutdown drain turned another workspace off"
             );
         }
     }
