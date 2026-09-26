@@ -4,7 +4,7 @@
 // clicks that dismiss it and the ones that do not, and the keys and sizing a
 // dialog hands it.
 
-import { createRawSnippet, flushSync } from "svelte";
+import { createRawSnippet, flushSync, type Snippet } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ModalShell from "./ModalShell.svelte";
@@ -13,8 +13,10 @@ import {
   clickBackdrop,
   dialogIn,
   dialogName,
+  focusOrigin,
   mountDialog,
   press,
+  settle,
   unmountDialogs,
 } from "../__tests__/dialog";
 
@@ -56,6 +58,24 @@ describe("ModalShell", () => {
     expect(dialogIn(target)!.contains(backdrop)).toBe(false);
     expect(backdrop.getAttribute("aria-label")).toBe("Close");
     expect(backdrop.tabIndex).toBe(-1);
+  });
+
+  test("takes focus into the panel when it opens", async () => {
+    focusOrigin();
+    const dialog = dialogIn(render())!;
+    await settle();
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  test("leaves focus on the control its body parks it on", async () => {
+    focusOrigin();
+    const parking: Snippet = createRawSnippet(() => ({
+      render: () => `<div><h2 id="probe-title">Probe</h2><input class="field" /></div>`,
+      setup: (el) => queueMicrotask(() => el.querySelector<HTMLInputElement>(".field")!.focus()),
+    }));
+    const dialog = dialogIn(render({ children: parking }))!;
+    await settle();
+    expect(document.activeElement).toBe(dialog.querySelector(".field"));
   });
 
   test("a click on the backdrop closes and a click inside the panel does not", () => {

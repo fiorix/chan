@@ -60,6 +60,16 @@ export function press(el: Element, key: string): KeyboardEvent {
   return e;
 }
 
+/// A focused button on the body, standing in for the surface (an editor, a
+/// terminal) that held focus when the dialog opened.
+export function focusOrigin(): HTMLButtonElement {
+  const origin = document.createElement("button");
+  origin.textContent = "origin";
+  document.body.append(origin);
+  origin.focus();
+  return origin;
+}
+
 /// Let an open render and the focus work it queues finish.
 export async function settle(): Promise<void> {
   await tick();

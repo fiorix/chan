@@ -25,6 +25,7 @@ import {
   clickBackdrop,
   dialogIn,
   dialogName,
+  focusOrigin,
   mountDialog,
   settle,
   unmountDialogs,
@@ -72,6 +73,13 @@ describe("ConflictModal", () => {
     const dialog = dialogIn(target)!;
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(dialogName(dialog)).toBe("External edit detected");
+  });
+
+  test("takes focus when it opens, away from the surface behind it", async () => {
+    const target = mountDialog(ConflictModal);
+    focusOrigin();
+    await open(target);
+    expect(dialogIn(target)!.contains(document.activeElement)).toBe(true);
   });
 
   test("Reload and Overwrite run their state actions and Cancel dismisses", async () => {

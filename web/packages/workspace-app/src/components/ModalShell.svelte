@@ -5,7 +5,7 @@
   // row) and its open state are the caller's; the shell renders only while
   // the caller shows it.
 
-  import type { Snippet } from "svelte";
+  import { onMount, type Snippet } from "svelte";
 
   let {
     labelledby,
@@ -26,6 +26,13 @@
     gap?: string;
     children: Snippet;
   } = $props();
+
+  let panel: HTMLElement | undefined = $state();
+
+  // Focus enters the dialog as it opens, so keys land here rather than in
+  // the surface behind it. A body that parks focus on a control does so
+  // after it renders and moves it on from the panel.
+  onMount(() => panel?.focus());
 </script>
 
 <div class="overlay">
@@ -39,6 +46,7 @@
     onclick={onClose}
   ></button>
   <div
+    bind:this={panel}
     class="modal"
     style:min-width={minWidth}
     style:gap
