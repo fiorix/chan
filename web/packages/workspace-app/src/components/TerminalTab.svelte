@@ -2126,7 +2126,7 @@
     closeTabMenu();
     const text = scrollbackText();
     if (!text) return;
-    await navigator.clipboard?.writeText(text);
+    await writeClipboardText(text);
     focusTerminal();
   }
 
@@ -2134,7 +2134,7 @@
     closeTabMenu();
     const text = term?.getSelection() || scrollbackText();
     if (!text) return;
-    await navigator.clipboard?.writeText(text);
+    await writeClipboardText(text);
     focusTerminal();
   }
 
@@ -2174,7 +2174,7 @@
   async function copySelectionToClipboard(): Promise<void> {
     const text = term?.getSelection() ?? "";
     if (!text) return;
-    await navigator.clipboard?.writeText(text);
+    await writeClipboardText(text);
     focusTerminal();
   }
 

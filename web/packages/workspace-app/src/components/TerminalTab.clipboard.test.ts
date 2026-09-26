@@ -31,6 +31,7 @@ import {
   sentFrames,
   terminalTab,
   TerminalSocket,
+  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -108,6 +109,59 @@ describe("in a mounted terminal off the Mac", () => {
     expect(menuRow("Copy").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("terminal.copy"));
     expect(menuRow("Paste").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("terminal.paste"));
     expect(chordFor("terminal.copy")).toBe("Ctrl+Shift+C");
+  });
+});
+
+describe("on the desktop, where the webview has no Clipboard API", () => {
+  async function attachedOnDesktop() {
+    const [tab] = seatTerminals([terminalTab()]);
+    const mounted = await mountTerminal(TerminalTab, tab!);
+    await attach(TerminalSocket.all.at(-1)!);
+    const invoke = vi.fn(async (_cmd: string, _args?: unknown) => undefined);
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: { invoke } });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    return { ...mounted, invoke };
+  }
+
+  afterEach(() => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+    xterm.serialized = "";
+  });
+
+  test("Ctrl+Shift+C copies the selection through the native clipboard", async () => {
+    const { term, invoke } = await attachedOnDesktop();
+    term.selection = "selected text";
+
+    pressInTerminal(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "selected text" }),
+    );
+  });
+
+  test("the menu's Copy copies the selection through the native clipboard", async () => {
+    const { term, target, invoke } = await attachedOnDesktop();
+    term.selection = "selected text";
+
+    await openBodyMenu(target);
+    menuRow("Copy").click();
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "selected text" }),
+    );
+  });
+
+  test("the menu's Copy Scrollback copies the scrollback through the native clipboard", async () => {
+    const { target, invoke } = await attachedOnDesktop();
+    xterm.serialized = "line one\nline two";
+
+    await openBodyMenu(target);
+    menuRow("Copy Scrollback").click();
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "line one\nline two" }),
+    );
   });
 });
 
