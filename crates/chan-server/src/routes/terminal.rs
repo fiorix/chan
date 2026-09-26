@@ -3848,4 +3848,103 @@ mod tests {
         state.terminal_sessions.close(&shell, CloseReason::Explicit);
         server.abort();
     }
+
+    // A reattach at a size other than the PTY's gives the PTY the client's
+    // size before the prelude's redraw nudge, so the program's first repaint
+    // after the attach lands at the size the renderer has, and `ready` carries
+    // that size. The PTY was created at 80x24 and nobody attached since, so
+    // nothing earlier is still repainting.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reattach_at_a_new_size_resizes_the_pty_before_the_redraw() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let shell = spawn_winch_reporter(&state).await;
+        let mut socket = dial_terminal(
+            address,
+            &format!("cols=120&rows=40&session={shell}&since=0"),
+        )
+        .await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            ready_size(&frames),
+            (120, 40),
+            "ready carries the size the client declared"
+        );
+
+        let mut live = LiveFrames::default();
+        live.read_until(
+            &mut socket,
+            "the program repaints after the attach",
+            |live| !live.winch_reports().is_empty(),
+        )
+        .await;
+        assert_eq!(
+            live.resizes_before(&mut socket, (100, 30)).await,
+            vec![(120, 40), (120, 40)],
+            "the attach resizes the 80x24 PTY to the client's 120x40, then the redraw repaints at it"
+        );
+        let first = live.winch_reports()[0].clone();
+        assert!(
+            first.ends_with(" 120"),
+            "the program's first repaint after the attach reads the client's 120 columns, got {first:?}"
+        );
+
+        state.terminal_sessions.close(&shell, CloseReason::Explicit);
+        server.abort();
+    }
+
+    // An in-place restart re-attaches the socket to a PTY relaunched at the
+    // size the old one had last. The re-attach resizes it to the size this
+    // socket declared last, the query's or a later Resize frame's, before the
+    // redraw nudge, and `ready` carries that size.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_reattach_resizes_the_pty_to_the_sockets_last_size() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let id = create_quiet_terminal(&state, "sleep 600").id().to_owned();
+        let mut socket =
+            dial_terminal(address, &format!("cols=120&rows=40&session={id}&since=0")).await;
+        read_prelude(&mut socket).await;
+        let mut live = LiveFrames::default();
+        live.resizes_before(&mut socket, (110, 35)).await;
+        // Another client resizes the PTY after this socket's last Resize frame.
+        state
+            .terminal_sessions
+            .attach(&id, None)
+            .expect("session is live")
+            .resize(pty_size(Some(90), Some(30)));
+        live.read_until(&mut socket, "the other client's 90x30 echoes", |live| {
+            live.resizes.last() == Some(&(90, 30))
+        })
+        .await;
+
+        assert_eq!(
+            state
+                .terminal_sessions
+                .restart(&id, RestartOverrides::default())
+                .ok(),
+            Some(true),
+            "the session restarts in place"
+        );
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            ready_size(&frames),
+            (110, 35),
+            "the re-attach's ready carries the size the socket declared last: {:?}",
+            wire_shape(&frames)
+        );
+        assert_eq!(
+            LiveFrames::default()
+                .resizes_before(&mut socket, (100, 30))
+                .await,
+            vec![(110, 35), (110, 35)],
+            "the re-attach resizes the relaunched 90x30 PTY to the socket's 110x35, then redraws"
+        );
+
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
 }
