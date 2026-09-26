@@ -434,6 +434,9 @@ fn start_chan_service_on_free_port(
     for _ in 0..PORT_ATTEMPTS {
         let port = free_port();
         let mut cmd = sandbox.command();
+        // The launching shell stands in the scratch area, apart from the
+        // chan home the daemon should run in.
+        cmd.current_dir(sandbox.scratch.path());
         cmd.arg("devserver").arg(verb.unwrap_or("run"));
         cmd.arg("--service=chan");
         let out = cmd
@@ -560,6 +563,21 @@ fn daemon_pid(sandbox: &Sandbox) -> u32 {
         .as_u64()
         .expect("pid field") as u32
 }
+
+/// The detached daemon's working directory, read from `/proc`, is the chan
+/// home and not the directory `chan devserver` ran in.
+#[cfg(target_os = "linux")]
+fn assert_daemon_runs_in_chan_home(sandbox: &Sandbox, pid: u32) {
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).expect("the daemon's cwd");
+    let chan_home = std::fs::canonicalize(sandbox.chan_home.path()).expect("canonical chan home");
+    assert_eq!(
+        cwd, chan_home,
+        "the daemon kept the launching shell's directory"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn assert_daemon_runs_in_chan_home(_sandbox: &Sandbox, _pid: u32) {}
 
 // ---------------------------------------------------------------------------
 // Devserver management API (a thin client over the spawned binary).
@@ -1185,6 +1203,7 @@ async fn chan_service_start_status_join_restart_stop() {
     wait_devserver_up(&client, addr).await;
     let first_pid = daemon_pid(&sandbox);
     assert!(pid_alive(first_pid), "daemon pid {first_pid} should run");
+    assert_daemon_runs_in_chan_home(&sandbox, first_pid);
 
     let out = sandbox
         .command()
@@ -1250,6 +1269,7 @@ async fn chan_service_start_status_join_restart_stop() {
         pid_alive(restarted_pid),
         "restarted daemon pid {restarted_pid} should run"
     );
+    assert_daemon_runs_in_chan_home(&sandbox, restarted_pid);
 
     let out = sandbox
         .command()

@@ -640,6 +640,35 @@ mod address_tests {
     }
 }
 
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    /// The detached daemon runs in the resolved chan home, not in the
+    /// directory the launching shell stood in, so it keeps no folder or
+    /// mount of the user's busy for as long as it runs, and it is handed
+    /// that home so it resolves the one its parent waits on.
+    #[test]
+    fn the_daemon_runs_in_the_resolved_chan_home() {
+        let env = crate::test_env::ChanTestEnv::new();
+        let cmd = daemon_command(Path::new("chan"), "127.0.0.1:0".parse().unwrap(), None);
+        assert_eq!(
+            cmd.get_current_dir(),
+            Some(env.home()),
+            "the daemon keeps the launching shell's directory"
+        );
+        let chan_home = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "CHAN_HOME")
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            chan_home,
+            Some(env.home().as_os_str()),
+            "the daemon is not handed the resolved chan home"
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
