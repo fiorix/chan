@@ -2577,7 +2577,10 @@ mod tests {
         .expect("connect must finish")
         .unwrap();
         let view = state.gateway_manager.view("gw-stuck").unwrap();
-        crate::auth::test_gateway_pats().lock().unwrap().remove(&origin);
+        crate::auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .remove(&origin);
         server.abort();
         assert_eq!(
             view.status,
