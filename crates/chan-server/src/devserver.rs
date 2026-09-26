@@ -4822,6 +4822,12 @@ mod tests {
     /// so a test can read the warning an operator would find in the journal.
     /// chan-server depends on plain `tracing` only, and a subscriber crate
     /// would be a new dependency edge for one assertion.
+    ///
+    /// tracing-core computes a callsite's interest from the registering
+    /// thread's default while at most one dispatcher is registered, so a test
+    /// reaching these warnings on a thread with no capture could cache them as
+    /// never enabled for every thread. Only the tests that read a broken
+    /// config reach them, each under its own capture, so none does.
     struct CapturedLogs(Arc<Mutex<Vec<String>>>);
 
     impl tracing::Subscriber for CapturedLogs {
@@ -4869,10 +4875,9 @@ mod tests {
             .collect()
     }
 
-    /// Capture this thread's log lines. Each test that reads a broken config
-    /// installs its own capture before the first read, so no warning callsite
-    /// these tests reach is reached from a thread without one, which could
-    /// cache a "never" interest for it.
+    /// Capture this thread's log lines. A test that reads a broken config
+    /// installs it before the first read, for the reason [`CapturedLogs`]
+    /// gives.
     fn capture_logs() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let guard = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
