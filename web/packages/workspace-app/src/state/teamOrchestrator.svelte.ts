@@ -160,9 +160,9 @@ function memberPositions(
 ///
 /// `env` Records serialise back to "KEY=VALUE\n" lines;
 /// `CHAN_TAB_NAME` is dropped from the visible env field
-/// (`translateConfig` re-injects it on save, so showing it would
-/// create a duplicate on round-trip). Real estate is reconstructed
-/// from member positions.
+/// (`translateConfig` sets it to the member's handle on save, so a
+/// value shown and edited here would be overwritten). Real estate is
+/// reconstructed from member positions.
 export function wireToDialog(
   wire: TeamConfigWire,
   dir: string,
