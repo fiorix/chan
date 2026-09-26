@@ -38,8 +38,8 @@ use crate::terminal_sessions::{
 };
 use crate::windows::{PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry};
 use crate::{
-    sanitize_prefix, workspace_prefix_for, DevserverRegistry, Error, GatewayRegistry,
-    ServeConfig, ServeHandle, WorkspaceOverlay,
+    sanitize_prefix, workspace_prefix_for, DevserverRegistry, Error, GatewayRegistry, ServeConfig,
+    ServeHandle, WorkspaceOverlay,
 };
 
 const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);

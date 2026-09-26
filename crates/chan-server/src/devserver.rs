@@ -1560,7 +1560,9 @@ impl DevserverState {
                 (WorkspaceStatus::Unavailable, reason) => (WorkspaceStatus::Unavailable, reason),
                 _ => (WorkspaceStatus::Running, None),
             },
-            MountPhase::Mounted | MountPhase::Stopped => self.host.canonical_root_status(&record.root),
+            MountPhase::Mounted | MountPhase::Stopped => {
+                self.host.canonical_root_status(&record.root)
+            }
         };
         let on =
             record.desired == DesiredMount::On && record.phase == MountPhase::Mounted && mounted;
@@ -1588,7 +1590,10 @@ impl DevserverState {
     /// blocking pool, every such row at once, within one mount bound: a
     /// persisted root that stopped answering is skipped with a note instead
     /// of holding up the restore of every row after it.
-    async fn register_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<PersistedWorkspace> {
+    async fn register_restore_rows(
+        &self,
+        rows: Vec<PersistedWorkspace>,
+    ) -> Vec<PersistedWorkspace> {
         let registered = registered_root_keys(self.host.library());
         let deadline = tokio::time::Instant::now() + self.mount_timeout;
         let registering: Vec<_> = rows
@@ -5450,7 +5455,9 @@ mod tests {
         let stall = root_stall::stall(hung.path());
         let toggling = Arc::clone(&state);
         let hung_off =
-            tokio::spawn(async move { toggling.set_workspace_on(&hung_prefix, false, false).await });
+            tokio::spawn(
+                async move { toggling.set_workspace_on(&hung_prefix, false, false).await },
+            );
         let toggling = Arc::clone(&state);
         completes_beside(
             &stall,
@@ -5528,14 +5535,15 @@ mod tests {
 
         let serving = Arc::clone(&state);
         let other_root = other.path().to_path_buf();
-        let response = completes_beside(
-            &stall,
-            "a serve request for another root beside a registration held on its root",
-            async move {
-                handle_discovery_request(&serving, 8787, register_request(&other_root)).await
-            },
-        )
-        .await;
+        let response =
+            completes_beside(
+                &stall,
+                "a serve request for another root beside a registration held on its root",
+                async move {
+                    handle_discovery_request(&serving, 8787, register_request(&other_root)).await
+                },
+            )
+            .await;
         assert!(
             matches!(
                 response,
@@ -5583,7 +5591,10 @@ mod tests {
 
         let stall = root_stall::stall_matching(
             root.path(),
-            &["WorkspaceHost::open_workspace", "Workspace::revalidate_root"],
+            &[
+                "WorkspaceHost::open_workspace",
+                "Workspace::revalidate_root",
+            ],
         );
         let host = Arc::clone(&state.host);
         let launching = key.clone();

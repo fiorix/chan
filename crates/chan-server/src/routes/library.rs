@@ -671,7 +671,12 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
                 .ok()?
                 .trim_start_matches('/')
                 .to_string();
-            Some(local_launcher_row(host, &library_id, workspace_id, &workspace))
+            Some(local_launcher_row(
+                host,
+                &library_id,
+                workspace_id,
+                &workspace,
+            ))
         })
         .collect();
     rows.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
@@ -2963,7 +2968,11 @@ mod devserver_route_tests {
         );
 
         for (step, mounted) in [("a first mount", false), ("a revalidation", true)] {
-            assert_eq!(host.is_root_mounted(held.path()), mounted, "fixture: {step}");
+            assert_eq!(
+                host.is_root_mounted(held.path()),
+                mounted,
+                "fixture: {step}"
+            );
             let stall = chan_workspace::paths::root_stall::stall_after(held.path(), 1);
             let mounting = router.clone();
             let route = held_on.clone();
