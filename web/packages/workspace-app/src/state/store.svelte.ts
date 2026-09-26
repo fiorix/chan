@@ -120,6 +120,7 @@ import {
   requestCloseWindow,
   runDesktopDownload,
   runDesktopUpload,
+  writeClipboardText,
 } from "../api/desktop";
 import {
   base64ToBytes,
@@ -646,13 +647,14 @@ export function closeWorkspaceWarningsDialog(): void {
   workspaceWarningsDialog.open = false;
 }
 
-/// Shared clipboard helper. Writes `text` via the Clipboard API and
+/// Shared clipboard helper. Writes `text` through `writeClipboardText`
+/// (native on desktop, so a copy needs no user gesture there) and
 /// reports the result through the standard callbacks; callers wire it
 /// to either the workspace-warnings dialog state (legacy caller) or
 /// the global transient status pill (everyone else). Keeping the
-/// Clipboard-API plumbing in one place means the editor's right-click
-/// "Copy path", the warnings dialog, and the inspector's COPY button
-/// all share the same fallback + error shape.
+/// plumbing in one place means the editor's right-click "Copy path",
+/// the warnings dialog, and the inspector's COPY button all share the
+/// same fallback + error shape.
 export async function copyTextToClipboard(
   text: string,
   opts: {
@@ -661,10 +663,12 @@ export async function copyTextToClipboard(
   } = {},
 ): Promise<void> {
   try {
-    if (!navigator.clipboard) {
+    // writeClipboardText resolves without writing when a browser has no
+    // Clipboard API (an insecure context), so the report is made here.
+    if (!isTauriDesktop() && !navigator.clipboard) {
       throw new Error("Clipboard unavailable");
     }
-    await navigator.clipboard.writeText(text);
+    await writeClipboardText(text);
     opts.onSuccess?.();
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to copy to clipboard";
