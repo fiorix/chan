@@ -38,8 +38,10 @@ import { notify } from "./notify.svelte";
 
 /// One in-flight survey + its reply guard. `busy` gates the reply buttons so a
 /// double-click / double-keypress cannot fire two replies for the same oneshot
-/// (the second would 404, but the guard keeps the UI honest).
-type SurveyEntry = { spec: SurveySpec; busy: boolean };
+/// (the second would 404, but the guard keeps the UI honest). `closed` records
+/// a close that arrived while the reply was in flight, which that reply applies
+/// if it fails.
+type SurveyEntry = { spec: SurveySpec; busy: boolean; closed?: boolean };
 
 /// A survey's slot: a terminal tab id (per-terminal) or `null` (the window-wide
 /// fallback). The reply functions + BubbleOverlay take this so they act on
@@ -99,13 +101,15 @@ export function closeSurveyFromRemote(
     seen.add(slot);
     const e = entry(slot);
     if (e?.spec.surveyId !== surveyId) continue;
-    // Belt: a reply from THIS window is in flight (busy). The local clear on
-    // reply success will win, so ignore a late close for this survey (e.g. an
-    // `answered_elsewhere` that the server fanned back to the answerer before
-    // the reply POST resolved) rather than clear it out from under the reply.
-    // The server-side exclude (windowId on the reply) is the primary guard;
-    // this covers the case where windowId is absent.
-    if (e.busy) return undefined;
+    // A reply from THIS window is in flight (busy). Leave the slot to it: an
+    // accepted reply clears the slot itself, and a failed one applies this
+    // close, since nothing is waiting on the survey any more. A close raced
+    // against the deadline lands here, and so does an `answered_elsewhere`
+    // fanned back to the answerer when its reply carried no windowId.
+    if (e.busy) {
+      e.closed = true;
+      return undefined;
+    }
     clear(slot);
     return slot;
   }
@@ -122,7 +126,8 @@ function release(slot: SurveySlot, surveyId: string): void {
 /// until it settles. An accepted reply clears the slot. The reply route
 /// answers 404 once no survey is parked under the id (answered, timed out or
 /// cancelled), and nothing can answer that survey any more, so a 404 clears
-/// the slot too and says so. Any other failure keeps the overlay for a retry.
+/// the slot too and says so, as does any failure after the survey's close
+/// arrived. Any other failure keeps the overlay for a retry.
 async function send(
   slot: SurveySlot,
   e: SurveyEntry,
@@ -136,7 +141,7 @@ async function send(
     release(slot, surveyId);
   } catch (err) {
     e.busy = false;
-    if (err instanceof ApiError && err.status === 404) {
+    if ((err instanceof ApiError && err.status === 404) || e.closed) {
       release(slot, surveyId);
       notify("survey expired: nothing is waiting for its answer");
       return;
