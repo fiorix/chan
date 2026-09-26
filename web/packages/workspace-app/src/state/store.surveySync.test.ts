@@ -48,7 +48,7 @@ function replyInFlight(slot: string | null) {
 function rename(id: string, title: string): void {
   const pane = layout.nodes["pane-sync"] as LeafNode;
   const tab = pane.tabs.find((t) => t.id === id);
-  if (tab) tab.title = title;
+  if (tab?.kind === "terminal") tab.title = title;
 }
 
 let notices: string[] = [];
