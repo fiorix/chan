@@ -118,9 +118,12 @@ export class FakeTerminal {
   paste(data: string): void {
     this.pasted.push(data);
   }
+  /// Resize the grid; a change reaches every onResize handler, as in xterm.
   resize(cols: number, rows: number): void {
+    if (cols === this.cols && rows === this.rows) return;
     this.cols = cols;
     this.rows = rows;
+    for (const handler of this.resizeHandlers) handler({ cols, rows });
   }
   refresh(start: number, end: number): void {
     this.refreshCalls.push([start, end]);
@@ -157,13 +160,19 @@ export function fitAddonModule() {
       activate(terminal: FakeTerminal) {
         this.terminal = terminal;
       }
+      /// Fit to `xterm.fit.size`, the grid a measured host holds; with no
+      /// size set the host cannot be measured and the fit declines, as
+      /// xterm's does.
       fit() {
         xterm.fit.calls += 1;
         if (xterm.fit.failure) throw xterm.fit.failure;
         if (xterm.fit.size && this.terminal) {
-          this.terminal.cols = xterm.fit.size.cols;
-          this.terminal.rows = xterm.fit.size.rows;
+          this.terminal.resize(xterm.fit.size.cols, xterm.fit.size.rows);
         }
+      }
+      proposeDimensions() {
+        if (xterm.fit.failure) throw xterm.fit.failure;
+        return xterm.fit.size ?? undefined;
       }
     },
   };
