@@ -281,13 +281,13 @@ describe("a submit", () => {
     submit(content);
     await settle();
 
-    press(content, "Enter");
-    press(content, "Tab");
-    press(content, "Tab", { shiftKey: true });
-    press(content, "b", { ctrlKey: true });
-    press(content, "i", { ctrlKey: true });
-    await settle();
-    expect(view.state.doc.toString()).toBe("- run the tests\n- fix the lint");
+    // One key at a time: Shift-Tab undoes what Tab would have done.
+    const keys = [["Enter"], ["Tab"], ["Tab", { shiftKey: true }], ["b", { ctrlKey: true }], ["i", { ctrlKey: true }]] as const;
+    for (const [key, mods] of keys) {
+      press(content, key, mods);
+      await settle();
+      expect(view.state.doc.toString(), `${key} ${JSON.stringify(mods ?? {})}`).toBe("- run the tests\n- fix the lint");
+    }
 
     tab.pendingPrompt = { id: sent[0]!.id!, phase: "failed" };
     flushSync();
