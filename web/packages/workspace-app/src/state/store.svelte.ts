@@ -39,6 +39,7 @@ import { isTransientApiError, isWorkspaceRootMissingError } from "../api/errors"
 import {
   closeSurveyFromRemote,
   showSurvey,
+  surveyFor,
   syncSurveys,
   type SurveyCloseReason,
 } from "./survey.svelte";
@@ -4306,15 +4307,18 @@ export function topOverlay(): OverlayId | null {
 }
 
 /// True while something rendered over the panes owns the keyboard: an
-/// overlay (Search, the command launcher, Settings) or an app-root dialog
+/// overlay (Search, the command launcher, Settings), an app-root dialog
 /// (the prompt, path prompt and confirm dialogs, the draft close and file
 /// conflict dialogs, the Team Work setup, the workspace warnings, the contacts
-/// import and the desktop's close prompt). Ctrl+D and the pane flip read it
-/// and stand down rather than close or turn a tab the user cannot see. The
+/// import and the desktop's close prompt) or the window-wide survey. Ctrl+D
+/// and the pane flip read it and stand down rather than close or turn a tab
+/// the user cannot see. A survey over one terminal does not count: it covers
+/// only that terminal and leaves the rest of the window usable. The
 /// full-window covers are `appInputBlocked`'s.
 export function keyboardOwnedAbovePanes(): boolean {
   return (
     topOverlay() !== null ||
+    surveyFor(null) !== null ||
     promptState.open ||
     pathPromptState.open ||
     confirmState.open ||
