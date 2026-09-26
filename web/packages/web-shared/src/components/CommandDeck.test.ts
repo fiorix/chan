@@ -300,6 +300,14 @@ describe("CommandDeck focus on close", () => {
     expect(document.activeElement).toBe(origin);
   });
 
+  it("restores focus without scrolling the page", async () => {
+    await openFromOrigin(run());
+    const focus = vi.spyOn(origin, "focus");
+    escape();
+    await flush();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
   it("does not reach for an element that left the page", async () => {
     await openFromOrigin(run());
     const focus = vi.spyOn(origin, "focus");
