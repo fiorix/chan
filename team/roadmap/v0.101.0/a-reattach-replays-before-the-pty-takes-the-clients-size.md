@@ -21,3 +21,9 @@ Resize the session to the attach request's size (the library's `resize` exists a
 ## Boundaries
 
 `crates/chan-server/src/routes/terminal.rs` (the attach path and its test) and the resize seam in `crates/chan-library/src/terminal_sessions.rs`.
+
+## What shipped
+
+Landed on 2026-09-26. The attach route fits the PTY to the size the client declared before it sends the prelude, when that size differs from the size last requested of the PTY, so the program's first repaint after an attach is at the renderer's size; an attach that declares the PTY's own size resizes nothing. A re-attach after an in-place restart is fitted to the size its socket declared last. When two sockets fit, the later one sets the size the PTY ends at.
+
+Only a declared size is applied, and the server cannot tell a measured grid from a default: a client that dials before its fitter has measured its host gets the PTY fitted to that default until its own Resize frame arrives. The workspace app's side of that is [a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes](a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes.md). After a devserver restart the comparison can read a recorded size that lags the PTY's, which is [an-adopted-sessions-recorded-size-can-lag-its-pty](an-adopted-sessions-recorded-size-can-lag-its-pty.md).

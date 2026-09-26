@@ -21,3 +21,7 @@ Keep the drain threads' join handles in `Transcript`, and have `wait_exit` (or `
 ## Boundaries
 
 `crates/chan/tests/devserver_resilience.rs` and any sibling test harness in `crates/chan/tests` with the same drain shape; no product code. The CI red is cleared by the job's rerun, as the round's rule says, and this item makes the race impossible rather than rare.
+
+## What shipped
+
+Landed on 2026-09-26, test code only. The two harnesses that drain a child through reader threads, in `crates/chan/tests/devserver_resilience.rs` and `crates/chan/tests/revtunnel_e2e.rs`, keep the threads' handles and join them once the child has exited, within ten seconds, before any read of the transcript; a pipe still open after that fails the test with a message that says so. The startup helpers join and then look for the port-in-use line instead of polling for it.

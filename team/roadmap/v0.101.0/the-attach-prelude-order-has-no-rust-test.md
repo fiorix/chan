@@ -17,3 +17,7 @@ The attach prelude's frame order and the Resize handling are pinned by chan-serv
 ## Boundaries
 
 `crates/chan-server/src/routes/terminal.rs` tests, `web/packages/workspace-app/src/terminal/protocol.test.ts`, and its entry in `.agents/skills/webdev/SKILL.md`.
+
+## What shipped
+
+Landed on 2026-09-26. Two chan-server tests drive a real `/api/terminal/ws` socket: `the_attach_prelude_sends_its_frames_in_order_then_redraws` pins the frame order on the wire, and `a_resize_frame_resizes_the_pty` pins a Resize frame's effect on the PTY. `terminal/protocol.test.ts` is deleted with its entry in the webdev standards.

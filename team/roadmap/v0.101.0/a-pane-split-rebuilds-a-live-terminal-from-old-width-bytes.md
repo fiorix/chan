@@ -6,6 +6,8 @@ Status: accepted for v0.101.0 by the owner on 2026-09-26; raised the same day fr
 
 Accepted on 2026-09-26 as the lead recommended, in the clients lane after its ownership order and ahead of the comment pass, sequenced against the frontend lane's clipboard and keyboard order, which edits `Pane.svelte` too.
 
+The server-side resize on reattach landed on 2026-09-26 as [a-reattach-replays-before-the-pty-takes-the-clients-size](a-reattach-replays-before-the-pty-takes-the-clients-size.md); the renderer's survival across a split or a move is still to build.
+
 ## What was seen
 
 Terminals render inside each pane (`components/Pane.svelte:1864`, a keyed list per pane). When a leaf becomes a split, `Workspace.svelte` re-creates the subtree (its split children are keyed, `:82` and `:97`), and a tab moved between panes leaves one pane's list for another's; either way the `TerminalTab` component unmounts and its teardown disposes the renderer and the socket (`TerminalTab.svelte:1982`) while the PTY session survives. The replacement mounts a fresh renderer with no cursor, so it dials for the whole retained history, and the cached screen snapshot is accepted only when its geometry matches (`:1299`), which a split never gives. The history was written at the old width, so cursor-addressed output and hard wraps render wrong in the new width: the owner's host terminal showed its lines wrapped at the new width with the remainders stacked at the right edge. An ordinary tab switch keeps the terminal mounted and hidden, so only pane restructuring takes this path.

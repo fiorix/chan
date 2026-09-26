@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item. The same day the owner gave the four rulings the frontend review remainder waited on and closed the ring mirror's throughput cost as measured; one test-harness race from landing 15's CI is raised for a decision. Later that day the owner accepted the seven items then awaiting a decision, each as the lead recommended, with the shape and lane rulings recorded in their files.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item. The same day the owner gave the four rulings the frontend review remainder waited on and closed the ring mirror's throughput cost as measured; one test-harness race from landing 15's CI is raised for a decision. Later that day the owner accepted the seven items then awaiting a decision, each as the lead recommended, with the shape and lane rulings recorded in their files. Five more, raised that day by reviews and reports of the work in hand, were accepted the same evening, each as the lead recommended, and a sixth found the same way landed with its fix.
 
 **Frontend review, phased from v0.100.0**
 
@@ -56,7 +56,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [refusals-answer-in-four-shapes][refus] | accepted | build |
 | [the-team-poke-names-a-path-it-does-not-anchor][poke] | landed | GA |
 | [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | landed | GA |
-| [an-expired-survey-cannot-be-dismissed][surv] | accepted | build |
+| [an-expired-survey-cannot-be-dismissed][surv] | landed | GA |
 | [the-test-util-comments-omit-the-attach-seam][tutil] | landed | GA |
 | [the-fdstore-manifest-splits-seq-and-tail][fdsq] | landed | GA |
 | [a-mount-retry-test-races-a-wall-clock][mwclk] | landed | GA |
@@ -120,8 +120,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
 | [a-cut-paste-can-replace-the-first-moved-file][mvrep] | landed | GA |
 | [the-settings-date-format-never-saves][dfmt] | landed | GA |
-| [four-tests-still-read-source-with-node-fs][fsrd] | accepted | build |
-| [the-attach-prelude-order-has-no-rust-test][prel] | accepted | build |
+| [four-tests-still-read-source-with-node-fs][fsrd] | landed | GA |
+| [the-attach-prelude-order-has-no-rust-test][prel] | landed | GA |
 | [mounted-components-mutate-props-they-do-not-own][ownw] | landed | GA |
 | [a-sent-prompt-stays-editable-while-pending][rpro] | landed | GA |
 | [a-click-beside-a-graph-node-clears-the-selection][gring] | landed | GA |
@@ -140,11 +140,17 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-fresh-session-under-an-old-id-keeps-the-key-protocol][kproto] | landed | GA |
 | [the-scripted-team-drops-member-env][senv] | accepted | build |
 | [the-memfd-ring-mirror-doubles-the-terminals-memory][mmap] | landed | GA |
-| [a-reattach-replays-before-the-pty-takes-the-clients-size][rsz] | accepted | build |
+| [a-reattach-replays-before-the-pty-takes-the-clients-size][rsz] | landed | GA |
 | [a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes][psplit] | accepted | build |
 | [a-backslash-in-a-name-reads-two-ways-on-the-wire][bslash] | accepted | build |
 | [a-spawned-child-holds-a-lock-until-it-execs][lockdup] | accepted | build |
-| [a-resilience-transcript-is-dumped-before-its-readers-drain][tdump] | accepted | build |
+| [a-resilience-transcript-is-dumped-before-its-readers-drain][tdump] | landed | GA |
+| [co-viewers-of-a-window-keep-an-answered-survey][coview] | accepted | build |
+| [an-adopted-sessions-recorded-size-can-lag-its-pty][adsz] | accepted | build |
+| [is-root-mounted-answers-from-the-first-tenant-the-key-finds][rmfirst] | accepted | build |
+| [the-canonical-key-query-counts-the-terminal-tenant][ckterm] | accepted | build |
+| [the-linux-gate-has-no-windows-target-check][wingate] | accepted | build |
+| [an-inspector-effect-refetches-a-failing-graph-stream-without-bound][insp] | landed | GA |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -242,6 +248,12 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [bslash]: v0.101.0/a-backslash-in-a-name-reads-two-ways-on-the-wire.md
 [lockdup]: v0.101.0/a-spawned-child-holds-a-lock-until-it-execs.md
 [tdump]: v0.101.0/a-resilience-transcript-is-dumped-before-its-readers-drain.md
+[coview]: v0.101.0/co-viewers-of-a-window-keep-an-answered-survey.md
+[adsz]: v0.101.0/an-adopted-sessions-recorded-size-can-lag-its-pty.md
+[rmfirst]: v0.101.0/is-root-mounted-answers-from-the-first-tenant-the-key-finds.md
+[ckterm]: v0.101.0/the-canonical-key-query-counts-the-terminal-tenant.md
+[wingate]: v0.101.0/the-linux-gate-has-no-windows-target-check.md
+[insp]: v0.101.0/an-inspector-effect-refetches-a-failing-graph-stream-without-bound.md
 
 ## Completed
 

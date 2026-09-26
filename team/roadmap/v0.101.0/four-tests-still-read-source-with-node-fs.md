@@ -24,3 +24,7 @@ Each case is either an allowed case under the webdev standards' narrow rule, lis
 ## Boundaries
 
 The four test files, the tests that would replace them in `desktop/src-tauri` or `crates/chan-server`, and the `## Tests` section of `.agents/skills/webdev/SKILL.md`.
+
+## What shipped
+
+Landed on 2026-09-26. The key bridge, the launcher's reload bridge and the echo extension's page moved, byte for byte, out of Rust string constants into `desktop/src-tauri/src/key_bridge.js`, `desktop/src-tauri/src/launcher_reload_bridge.js` and `crates/chan-server/examples/echo-extension.html`, which the Rust includes with `include_str!`. `state/keyboardLayout.test.ts`, `state/desktopBridgeLayout.test.ts` and `state/extensionRelayLayout.test.ts` read those files as they ship and no Rust source. `editor/widgets/table.test.ts` is a listed allowed case in the webdev standards: it reads `Wysiwyg.svelte`'s stylesheet for layout that jsdom never computes, and a broken rule shows on screen.
