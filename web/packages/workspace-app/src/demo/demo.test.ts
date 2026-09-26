@@ -239,6 +239,11 @@ describe("parseMarkdown", () => {
     ]);
   });
 
+  test("a heading-looking line stays code until its own fence closes", () => {
+    const idx = parseMarkdown("~~~\n```\n# Inside\n~~~\n# Outside\n");
+    expect(idx.headings.map((h) => h.text)).toEqual(["Outside"]);
+  });
+
   test("code blocks produce no tags or links", () => {
     const idx = parseMarkdown("```\n#tag [[link]]\n```\nand `#inline [[x]]` code");
     expect(idx.tags).toEqual([]);

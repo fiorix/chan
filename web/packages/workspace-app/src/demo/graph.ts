@@ -17,6 +17,7 @@ import type {
   HeadingRow,
   ReportFileStats,
 } from "../api/types";
+import { fenceLineTracker } from "../editor/commands/fence";
 import type { MockWorkspaceStore } from "./store";
 
 /// One parsed outgoing reference, pre-resolution.
@@ -95,14 +96,10 @@ export function parseMarkdown(content: string): FileIndex {
   // Headings scan runs line-wise with a fence tracker (stripCode would drop
   // heading-looking lines inside fences anyway, but ord must count real
   // headings only, in document order).
-  let inFence = false;
+  const fence = fenceLineTracker();
   let ord = 0;
   for (const line of content.split("\n")) {
-    if (/^(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
+    if (fence(line) !== "text") continue;
     const m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
     if (!m) continue;
     headings.push({
