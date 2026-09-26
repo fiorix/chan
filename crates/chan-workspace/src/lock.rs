@@ -1040,6 +1040,77 @@ mod tests {
         );
     }
 
+    /// A probe of a root another process holds answers while that root's
+    /// filesystem hangs: the holder's record is compared with the key the
+    /// caller holds, and nothing asks the root.
+    #[cfg(unix)]
+    #[test]
+    fn foreign_lock_probe_resolves_no_root() {
+        let lock_dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let key = crate::paths::canonicalize_normalized(root.path());
+        let _held = WorkspaceLock::acquire(lock_dir.path(), &key).unwrap();
+        let foreign = LockRecord {
+            pid: 1,
+            path: key.to_string_lossy().into_owned(),
+            started_at: "2000-01-01T00:00:00Z".to_string(),
+        };
+        fs::write(
+            lock_dir.path().join(LOCK_FILE),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+
+        let stall = crate::paths::root_stall::stall(root.path());
+        let lock_path = lock_dir.path().to_path_buf();
+        let holder = stall.finishes_beside(
+            "a probe of a root another process holds",
+            std::time::Duration::from_secs(30),
+            move || probe_foreign_holder(&lock_path, &key),
+        );
+        assert_eq!(holder, ForeignHolder::Present);
+    }
+
+    /// A holder whose record names another path than the key the caller
+    /// holds, as a root whose canonical path changed since it was registered
+    /// does, is a holder the probe cannot tell is the caller's: a provably
+    /// dead one reads present, where the same record under a matching key
+    /// is actionable.
+    #[cfg(unix)]
+    #[test]
+    fn foreign_lock_probe_compares_the_record_with_the_key_as_given() {
+        let lock_dir = TempDir::new().unwrap();
+        let parent = TempDir::new().unwrap();
+        let moved = parent.path().join("moved");
+        fs::create_dir(&moved).unwrap();
+        let stored = parent.path().join("stored");
+        std::os::unix::fs::symlink(&moved, &stored).unwrap();
+        let stored_key = crate::paths::canonicalize_normalized(parent.path()).join("stored");
+        let moved_key = crate::paths::canonicalize_normalized(&moved);
+        let _held = WorkspaceLock::acquire(lock_dir.path(), &moved_key).unwrap();
+        let dead = LockRecord {
+            pid: reaped_child_pid(),
+            path: moved_key.to_string_lossy().into_owned(),
+            started_at: "2000-01-01T00:00:00Z".to_string(),
+        };
+        fs::write(
+            lock_dir.path().join(LOCK_FILE),
+            serde_json::to_vec(&dead).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            probe_foreign_holder(lock_dir.path(), &moved_key),
+            ForeignHolder::Absent,
+            "a dead holder under the key its record names is actionable"
+        );
+        assert_eq!(
+            probe_foreign_holder(lock_dir.path(), &stored_key),
+            ForeignHolder::Present,
+            "a dead holder whose record names the relinked path"
+        );
+    }
+
     #[test]
     fn stale_record_does_not_block_a_free_lock() {
         // A dead holder's record left on disk while the OS lock is free
