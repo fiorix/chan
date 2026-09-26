@@ -79,6 +79,17 @@ describe("hiding the page", () => {
     });
   });
 
+  test("writes no snapshot once a devserver shutdown has ended the session", async () => {
+    ui.terminalControl = false;
+    await attached();
+    // The screen now ends with the line the tab wrote below the session's
+    // output, which the reattach after a reload must not paint back.
+    await receive(TerminalSocket.all.at(-1)!, { type: "closed", reason: "shutdown" });
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(readTerminalSnapshot(SESSION)).toBeNull();
+  });
+
   test("writes no snapshot for a control terminal", async () => {
     ui.terminalControl = true;
     await attached();
