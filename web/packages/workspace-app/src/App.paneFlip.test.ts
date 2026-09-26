@@ -18,6 +18,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")
 
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { fileTab, resetLayout } from "./__tests__/tabs";
+import { closeConfirmState } from "./state/closeConfirm.svelte";
 import { uiConfirm, resolveConfirm } from "./state/confirm.svelte";
 import {
   importContactsPanel,
@@ -106,6 +107,7 @@ describe("the pane flip refuses while something covers the panes", () => {
       () => (workspaceWarningsDialog.open = false),
     ],
     ["the contacts import", () => (importContactsPanel.open = true), () => (importContactsPanel.open = false)],
+    ["the desktop close prompt", () => (closeConfirmState.open = true), () => (closeConfirmState.open = false)],
   ];
 
   test.each(blockers)("%s", async (_name, open, close) => {

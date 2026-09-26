@@ -155,6 +155,7 @@ import {
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
 import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
 import { chanFetch, withTokenQuery } from "../api/transport";
+import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./confirm.svelte";
 import { applyEditorToolPreferences } from "./editorTools.svelte";
 import { updateGlobalConfigSerial } from "./configWrite";
@@ -4278,10 +4279,10 @@ export function topOverlay(): OverlayId | null {
 
 /// True while an app-root dialog is open: the prompt, path prompt and
 /// confirm dialogs, the draft close and file conflict dialogs, the Team Work
-/// setup, the workspace warnings and the contacts import. A dialog renders
-/// over the panes and owns the keyboard, so the chords that act on the
-/// focused pane stand down while one is up rather than changing a pane the
-/// user cannot see.
+/// setup, the workspace warnings, the contacts import and the desktop's
+/// close prompt. A dialog renders over the panes and owns the keyboard, so
+/// the chords that act on the focused pane stand down while one is up rather
+/// than changing a pane the user cannot see.
 export function keyboardOwnedByDialog(): boolean {
   return (
     promptState.open ||
@@ -4291,7 +4292,8 @@ export function keyboardOwnedByDialog(): boolean {
     teamDialogState.request !== null ||
     conflictDialog.open ||
     workspaceWarningsDialog.open ||
-    importContactsPanel.open
+    importContactsPanel.open ||
+    closeConfirmState.open
   );
 }
 

@@ -4,6 +4,7 @@
 // chords that act on the focused pane and stand down while one is.
 
 import { afterEach, describe, expect, test } from "vitest";
+import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState } from "./confirm.svelte";
 import {
   importContactsPanel,
@@ -24,6 +25,7 @@ afterEach(() => {
   conflictDialog.open = false;
   workspaceWarningsDialog.open = false;
   importContactsPanel.open = false;
+  closeConfirmState.open = false;
 });
 
 describe("keyboardOwnedByDialog", () => {
@@ -40,6 +42,7 @@ describe("keyboardOwnedByDialog", () => {
     ["the file conflict dialog", () => (conflictDialog.open = true)],
     ["the workspace warnings", () => (workspaceWarningsDialog.open = true)],
     ["the contacts import", () => (importContactsPanel.open = true)],
+    ["the desktop close prompt", () => (closeConfirmState.open = true)],
   ])("is true while %s is open", (_name, open) => {
     open();
     expect(keyboardOwnedByDialog()).toBe(true);

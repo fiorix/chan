@@ -20,6 +20,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { boardLoaded } from "./__tests__/excalidraw";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
+import { closeConfirmState } from "./state/closeConfirm.svelte";
 import { confirmState } from "./state/confirm.svelte";
 import { assignOverride, hydrateOverrides } from "./state/keymapOverrides.svelte";
 import {
@@ -61,6 +62,7 @@ afterEach(async () => {
   conflictDialog.open = false;
   workspaceWarningsDialog.open = false;
   importContactsPanel.open = false;
+  closeConfirmState.open = false;
   cancelPaneMode();
   setCoverBlocking("screensaver", false);
   hydrateOverrides(null);
@@ -158,6 +160,7 @@ describe("Ctrl+D is left alone", () => {
     ["the file conflict dialog", () => (conflictDialog.open = true)],
     ["the workspace warnings dialog", () => (workspaceWarningsDialog.open = true)],
     ["the contacts import", () => (importContactsPanel.open = true)],
+    ["the desktop close prompt", () => (closeConfirmState.open = true)],
   ])("while %s is open", async (_name, open) => {
     await seed(fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" }));
     open();
