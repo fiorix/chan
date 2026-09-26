@@ -2122,20 +2122,32 @@
     return serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
   }
 
+  // The terminal's copies write through writeClipboardText and refocus the
+  // terminal once the write lands. The menu and the chord fire them and
+  // forget, so a failed write is logged here rather than left to reject
+  // unhandled, and focus stays where the failure left it.
+  async function copyToClipboard(text: string): Promise<void> {
+    try {
+      await writeClipboardText(text);
+    } catch (err) {
+      console.warn("terminal copy failed", err);
+      return;
+    }
+    focusTerminal();
+  }
+
   async function copyScrollback(): Promise<void> {
     closeTabMenu();
     const text = scrollbackText();
     if (!text) return;
-    await writeClipboardText(text);
-    focusTerminal();
+    await copyToClipboard(text);
   }
 
   async function copySelectionOrScrollback(): Promise<void> {
     closeTabMenu();
     const text = term?.getSelection() || scrollbackText();
     if (!text) return;
-    await writeClipboardText(text);
-    focusTerminal();
+    await copyToClipboard(text);
   }
 
   function toggleSecretMasking(): void {
@@ -2174,8 +2186,7 @@
   async function copySelectionToClipboard(): Promise<void> {
     const text = term?.getSelection() ?? "";
     if (!text) return;
-    await writeClipboardText(text);
-    focusTerminal();
+    await copyToClipboard(text);
   }
 
   function openFind(): void {

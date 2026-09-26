@@ -113,11 +113,13 @@ describe("in a mounted terminal off the Mac", () => {
 });
 
 describe("on the desktop, where the webview has no Clipboard API", () => {
-  async function attachedOnDesktop() {
+  async function attachedOnDesktop(
+    write: (cmd: string, args?: unknown) => Promise<unknown> = async () => undefined,
+  ) {
     const [tab] = seatTerminals([terminalTab()]);
     const mounted = await mountTerminal(TerminalTab, tab!);
     await attach(TerminalSocket.all.at(-1)!);
-    const invoke = vi.fn(async (_cmd: string, _args?: unknown) => undefined);
+    const invoke = vi.fn(write);
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: { invoke } });
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
     return { ...mounted, invoke };
@@ -127,6 +129,7 @@ describe("on the desktop, where the webview has no Clipboard API", () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
     xterm.serialized = "";
+    vi.restoreAllMocks();
   });
 
   test("Ctrl+Shift+C copies the selection through the native clipboard", async () => {
@@ -162,6 +165,54 @@ describe("on the desktop, where the webview has no Clipboard API", () => {
     await vi.waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "line one\nline two" }),
     );
+  });
+
+  test("the menu's Copy refocuses the terminal once the write lands", async () => {
+    const { term, target, invoke } = await attachedOnDesktop();
+    term.selection = "selected text";
+    await openBodyMenu(target);
+    const focused = term.focusCount;
+
+    menuRow("Copy").click();
+
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "selected text" }));
+    await vi.waitFor(() => expect(term.focusCount).toBe(focused + 1));
+  });
+
+  // Tauri rejects the failed command with the bare string its Result carried.
+  // The menu fires the copy and forgets it, so a failure left unhandled would
+  // be Node's unhandled rejection; the runner hears it, not jsdom's window.
+  test("the menu's Copy warns on a native write that fails with no web fallback, and leaves focus alone", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    const runner = globalThis as unknown as {
+      process: {
+        on: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+        off: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+      };
+    };
+    runner.process.on("unhandledRejection", onUnhandled);
+    try {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { term, target, invoke } = await attachedOnDesktop(async (cmd) =>
+        cmd === "write_clipboard_text" ? Promise.reject("clipboard busy") : undefined,
+      );
+      term.selection = "selected text";
+      await openBodyMenu(target);
+      const focused = term.focusCount;
+
+      menuRow("Copy").click();
+
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "selected text" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled, "no unhandled rejection").toEqual([]);
+      expect(warn).toHaveBeenCalledWith("terminal copy failed", "clipboard busy");
+      expect(term.focusCount).toBe(focused);
+    } finally {
+      runner.process.off("unhandledRejection", onUnhandled);
+    }
   });
 });
 
