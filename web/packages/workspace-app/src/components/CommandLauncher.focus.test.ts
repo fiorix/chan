@@ -80,6 +80,16 @@ function row(target: HTMLElement, title: string): HTMLButtonElement {
   return found;
 }
 
+/// Run Open with no path, which raises its path dialog, and cancel the dialog.
+async function runOpenAndCancel(): Promise<void> {
+  const open = allCommands().find((command) => command.id === "app.open.path");
+  expect(open, "the Open command is registered").toBeDefined();
+  open!.run();
+  await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
+  resolvePathPrompt(null);
+  await flush();
+}
+
 async function press(target: HTMLElement, key: string): Promise<void> {
   (target.querySelector('[role="dialog"]') as HTMLElement).dispatchEvent(
     new KeyboardEvent("keydown", { key, bubbles: true }),
@@ -179,12 +189,20 @@ describe("focus when the launcher closes", () => {
     document.body.append(field);
     field.focus();
 
-    const open = allCommands().find((command) => command.id === "app.open.path");
-    expect(open, "the Open command is registered").toBeDefined();
-    open!.run();
-    await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
-    resolvePathPrompt(null);
-    await flush();
+    await runOpenAndCancel();
     expect(document.activeElement).toBe(origin);
+  });
+
+  test("a cancelled Open hands focus back without scrolling the page", async () => {
+    await openFromOrigin();
+    closeCommandLauncher();
+    await flush();
+    const field = document.createElement("input");
+    document.body.append(field);
+    field.focus();
+    const focus = vi.spyOn(origin, "focus");
+
+    await runOpenAndCancel();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
   });
 });
