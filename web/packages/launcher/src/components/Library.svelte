@@ -458,9 +458,9 @@
 
 {#each tree.machines as node (node.kind === "local" ? "local" : node.devserver!.id)}
   {@const collapsed = isMachineCollapsed(machineKey(node))}
-  <section class="machine">
+  <section class="card machine">
     {#if node.kind === "local"}
-      <div class="machine-header">
+      <div class="card-header machine-header">
         <span class="machine-icon live" title="This machine">
           {#if hasOsIcon(hostOs)}
             <OsIcon os={hostOs} size={16} />
@@ -469,7 +469,7 @@
           {/if}
         </span>
         <span class="machine-name">This machine</span>
-        <div class="machine-actions">
+        <div class="card-actions machine-actions">
           {@render windowCountToggle(node)}
           {#if !readOnly}
             <button
@@ -496,7 +496,7 @@
       {/if}
     {:else if node.devserver}
       {@const ds = node.devserver}
-      <div class="machine-header">
+      <div class="card-header machine-header">
         {#if !readOnly && checksVisible() && !ds.gateway_id}
           <input
             class="row-check"
@@ -522,7 +522,7 @@
             {@render dsIdentity(ds, true)}
           </button>
         {/if}
-        <div class="machine-actions">
+        <div class="card-actions machine-actions">
           {@render windowCountToggle(node)}
           {#if hasDesktopBridge && connected(ds)}
             <button
@@ -608,14 +608,14 @@
           <!-- The connect handed off to a browser sign-in: narrate the wait.
                The row stays Disconnected (a muted icon); the desktop clears
                the state on the deep-link callback, its timeout, or teardown. -->
-          <p class="connect-prompt waiting">
+          <p class="card-prompt connect-prompt waiting">
             <LoaderCircle class="spin" size={14} aria-hidden="true" />
             Waiting for sign-in in your browser...
           </p>
         {:else if dsSpinning(ds)}
-          <p class="connect-prompt">Connecting…</p>
+          <p class="card-prompt connect-prompt">Connecting…</p>
         {:else}
-          <p class="connect-prompt">Not connected.</p>
+          <p class="card-prompt connect-prompt">Not connected.</p>
         {/if}
       {/if}
     {/if}
@@ -626,7 +626,7 @@
      control terminal minted at first connect, before the registry join lands).
      It empties on the next watch push once the devserver's library id resolves. -->
 {#if tree.orphans.length}
-  <section class="machine">
+  <section class="card machine">
     <div class="section-label">Connecting…</div>
     <div class="term-list">
       {#each tree.orphans as w (w.window_id)}
@@ -640,44 +640,21 @@
      the machine list (not a top-bar [+]). A devserver is dialed through the
      desktop bridge, so this is offered only where that bridge exists. -->
 {#if hasDesktopBridge}
-  <button class="add-devserver" type="button" onclick={() => openNewDialog("devserver")}>
+  <button class="add-entry add-devserver" type="button" onclick={() => openNewDialog("devserver")}>
     <Plus size={16} />
     Add devserver
   </button>
 {/if}
 
 <style>
-  /* Each machine (LOCAL or a devserver) is a contained card whose background
+  /* Each machine (LOCAL or a devserver) is a global `.card` whose background
      hosts the whole set: the header identity plus its terminal + workspace
      lists. The header is the top row; the lists sit below it as an indented peer
-     list on the same surface. The whole badge wobbles on hover. */
-  .machine {
-    position: relative;
-    margin-bottom: 0.8rem;
-    padding: 0.3rem 0.5rem 0.7rem;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: var(--bg-card);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
-    transform-origin: center;
-    transition:
-      transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
-      box-shadow 160ms ease;
-  }
-
-  /* The whole machine badge wobbles as one, including while the pointer is on
-     nested controls. Buttons keep their own hover highlights without scaling. */
-  .machine:hover {
-    transform: scale(1.015);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
-    z-index: 1;
-  }
+     list on the same surface. */
 
   /* The machine header: icon + name + status on the left, machine-level actions
      pushed to the far right. The top row of the card. */
   .machine-header {
-    display: flex;
-    align-items: center;
     gap: 0.6rem;
     padding: 0.4rem 0.2rem;
   }
@@ -773,11 +750,7 @@
   }
 
   .machine-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
     margin-left: auto;
-    flex-shrink: 0;
   }
 
   /* The connected/local content (terminals + workspaces), tucked below the
@@ -807,28 +780,6 @@
     background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
   }
 
-  .connect-prompt {
-    margin: 0.35rem 0 0 0.5rem;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.82rem;
-    color: var(--text-secondary);
-  }
-
-  /* The browser sign-in hand-off: the prompt gains the in-flight spinner
-     (global .spin) beside the text. */
-  .connect-prompt.waiting {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-  }
-
-  .empty-hint {
-    margin: 0.35rem 0 0;
-    font-size: 0.85rem;
-    line-height: 1.5;
-    color: var(--text-secondary);
-  }
-
   .empty-hint code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.85em;
@@ -849,16 +800,6 @@
     border-radius: 10px;
     background: var(--bg-elev);
     overflow: hidden;
-  }
-
-  /* Reduced-motion: keep colour/background hover cues, drop the wobble. */
-  @media (prefers-reduced-motion: reduce) {
-    .machine {
-      transition: box-shadow 160ms ease;
-    }
-    .machine:hover {
-      transform: none;
-    }
   }
 
   .ws-head {
@@ -948,38 +889,8 @@
     background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
   }
 
-  /* The decoupled add-devserver entry: a full-width dashed button under the
-     machine list, brightening to the accent on hover. */
-  .add-devserver {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    width: 100%;
-    margin-top: 1.5rem;
-    padding: 0.75rem;
-    border: 1px dashed var(--btn-border);
-    border-radius: 11px;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      border-color 160ms ease,
-      background 160ms ease,
-      color 160ms ease;
-  }
-
-  .add-devserver:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--btn-border));
-    color: var(--text);
-    background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .count-badge,
-    .add-devserver {
+    .count-badge {
       transition:
         border-color 160ms ease,
         background 160ms ease,

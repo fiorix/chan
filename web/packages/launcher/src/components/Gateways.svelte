@@ -51,8 +51,8 @@
 
 <div class="gateways-screen">
   {#each library.gateways as gw (gw.id)}
-    <section class="gateway-card">
-      <div class="gateway-header">
+    <section class="card gateway-card">
+      <div class="card-header gateway-header">
         {#if !readOnly && checksVisible()}
           <input
             class="row-check"
@@ -78,7 +78,7 @@
             <span class="gw-url" title={gw.url}>{gw.url}</span>
           </span>
         </div>
-        <div class="gateway-actions">
+        <div class="card-actions gateway-actions">
           {#if !readOnly}
             <!-- Rename is a registry write (label only; the URL is identity),
                  so it gates on the mutable surface, not the desktop bridge. -->
@@ -137,25 +137,25 @@
         <!-- The connect handed off to a browser sign-in: narrate the wait. The
              desktop clears the state on the deep-link callback, its timeout,
              or teardown. -->
-        <p class="gateway-prompt waiting">
+        <p class="card-prompt gateway-prompt waiting">
           <LoaderCircle class="spin" size={14} aria-hidden="true" />
           Waiting for sign-in in your browser...
         </p>
       {:else if spinning(gw)}
-        <p class="gateway-prompt">Connecting…</p>
+        <p class="card-prompt gateway-prompt">Connecting…</p>
       {:else if lost(gw)}
-        <p class="gateway-prompt">
+        <p class="card-prompt gateway-prompt">
           Connection lost{gw.last_error ? `: ${gw.last_error}` : "."} Retrying; the last-known
           devservers stay listed.
         </p>
       {:else if connected(gw)}
-        <p class="gateway-prompt">
+        <p class="card-prompt gateway-prompt">
           {gw.devserver_count === 0
             ? "No devservers on this gateway yet."
             : `${gw.devserver_count} devserver${gw.devserver_count === 1 ? "" : "s"} listed under Computers.`}
         </p>
       {:else}
-        <p class="gateway-prompt">
+        <p class="card-prompt gateway-prompt">
           Not connected{gw.last_error ? ` (${gw.last_error})` : "."}
         </p>
       {/if}
@@ -169,7 +169,7 @@
   {/if}
 
   {#if hasDesktopBridge}
-    <button class="add-gateway" type="button" onclick={() => openNewDialog("gateway")}>
+    <button class="add-entry add-gateway" type="button" onclick={() => openNewDialog("gateway")}>
       <Plus size={16} />
       Add gateway
     </button>
@@ -177,31 +177,9 @@
 </div>
 
 <style>
-  /* Each gateway is a contained card, the machine-badge idiom: identity header
-     over a one-line status narration. The whole badge wobbles on hover. */
-  .gateway-card {
-    position: relative;
-    margin-bottom: 0.8rem;
-    padding: 0.3rem 0.5rem 0.7rem;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: var(--bg-card);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
-    transform-origin: center;
-    transition:
-      transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
-      box-shadow 160ms ease;
-  }
-
-  .gateway-card:hover {
-    transform: scale(1.015);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
-    z-index: 1;
-  }
-
+  /* Each gateway is a global `.card`, the machine-badge idiom: identity
+     header over a one-line status narration. */
   .gateway-header {
-    display: flex;
-    align-items: center;
     gap: 0.5rem;
     padding: 0.4rem 0.25rem 0.35rem;
   }
@@ -268,70 +246,5 @@
     background: var(--danger);
     opacity: 1;
     box-shadow: 0 0 6px color-mix(in srgb, var(--danger) 70%, transparent);
-  }
-
-  .gateway-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-shrink: 0;
-  }
-
-  .gateway-prompt {
-    margin: 0.35rem 0 0 0.5rem;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.82rem;
-    color: var(--text-secondary);
-  }
-
-  /* The browser sign-in hand-off: the prompt gains the in-flight spinner
-     (global .spin) beside the text. */
-  .gateway-prompt.waiting {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-  }
-
-  .empty-hint {
-    margin: 0.35rem 0 0;
-    font-size: 0.85rem;
-    line-height: 1.5;
-    color: var(--text-secondary);
-  }
-
-  /* The dashed add entry point, mirroring the Computers screen's Add devserver. */
-  .add-gateway {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    width: 100%;
-    margin-top: 1.5rem;
-    padding: 0.75rem;
-    border: 1px dashed var(--btn-border);
-    border-radius: 11px;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      border-color 160ms ease,
-      background 160ms ease,
-      color 160ms ease;
-  }
-
-  .add-gateway:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--btn-border));
-    color: var(--text);
-    background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .gateway-card,
-    .gateway-card:hover {
-      transform: none;
-      transition: box-shadow 160ms ease;
-    }
   }
 </style>
