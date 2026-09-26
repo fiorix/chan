@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
 // The in-tree echo extension's keyboard relay, executed as shipped, against
-// Chan's side of the v2 contract. The relay's script is read out of the
-// example's source and run with an isolated frame host, so what it posts is
+// Chan's side of the v2 contract. The relay's script is read out of the page
+// the example serves and run with an isolated frame host, so what it posts is
 // what a browser would post. Each relayed message then goes through Chan's
 // own validation, which is the round trip an extension keydown takes before
 // Chan acts on it. Every shared layout vector must get the same answer from
@@ -24,11 +24,11 @@ import {
 } from "./extensionBridge";
 import { resolveEventChord } from "./shortcuts";
 
-const exampleSource = readFileSync(
-  "../../../crates/chan-server/examples/echo-extension.rs",
+const examplePage = readFileSync(
+  "../../../crates/chan-server/examples/echo-extension.html",
   "utf8",
 );
-const RELAY = [...exampleSource.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join(
+const RELAY = [...examplePage.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join(
   "\n",
 );
 
