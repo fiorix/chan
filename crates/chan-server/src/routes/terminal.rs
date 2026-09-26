@@ -2547,6 +2547,37 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("BAD_VALUE".into(), "x\0y".into());
         assert!(validate_terminal_env(&env).is_err());
+
+        // A key chan sets for itself at spawn would be overwritten, so a
+        // request that sets one is refused, naming it.
+        for key in [
+            "CHAN",
+            "CHAN_TERMINAL",
+            "CHAN_TAB_NAME",
+            "CHAN_TAB_GROUP",
+            "CHAN_WINDOW_ID",
+            "CHAN_CONTROL_SOCKET",
+            "CHAN_WORKSPACE_PATH",
+            "CHAN_WORKSPACE_NAME",
+            "CHAN_MCP_SERVER_NAME",
+            "CHAN_MCP_SOCKET",
+            "CHAN_MCP_COMMAND",
+            "CHAN_MCP_COMMAND_JSON",
+            "CHAN_MCP_SERVER_JSON",
+        ] {
+            let env = BTreeMap::from([(key.to_string(), "caller".to_string())]);
+            let refused = validate_terminal_env(&env)
+                .expect_err(&format!("{key} is chan's own and must be refused"));
+            assert!(refused.contains(key), "{key}: {refused}");
+        }
+        // Every other key reaches the child, a caller-set CHAN_ key included.
+        let env = BTreeMap::from([
+            ("CHAN_AGENT".to_string(), "codex".to_string()),
+            ("CHAN_HOME".to_string(), "/tmp/chan-home".to_string()),
+            ("TERM".to_string(), "dumb".to_string()),
+            ("NO_COLOR".to_string(), "1".to_string()),
+        ]);
+        assert!(validate_terminal_env(&env).is_ok());
     }
 
     #[tokio::test]

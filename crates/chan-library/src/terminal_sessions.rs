@@ -9309,6 +9309,69 @@ mod tests {
         );
     }
 
+    // A key chan sets for itself but not for this spawn (a windowless tab
+    // has no CHAN_WINDOW_ID, no control socket is configured, MCP env is off)
+    // is removed, not inherited from the server's own environment, as when
+    // the server itself runs in a chan terminal.
+    #[cfg(unix)]
+    #[test]
+    fn session_spawn_does_not_inherit_chan_keys_it_leaves_unset() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env("CHAN_INHERITED_KEYS_CHILD", "1")
+            .env("CHAN_WINDOW_ID", "w-the-server's-own")
+            .env("CHAN_CONTROL_SOCKET", "/run/the-server's-own.sock")
+            .env("CHAN_MCP_SOCKET", "/run/the-server's-own-mcp.sock")
+            .arg("terminal_sessions::tests::session_spawn_does_not_inherit_chan_keys_it_leaves_unset_child")
+            .arg("--exact")
+            .arg("--nocapture")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "spawned terminal inherited the server's own chan keys\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    // Gated with its parent above: only that test's re-invocation of this
+    // binary makes this one do real work.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_spawn_does_not_inherit_chan_keys_it_leaves_unset_child() {
+        if std::env::var_os("CHAN_INHERITED_KEYS_CHILD").is_none() {
+            return;
+        }
+
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        let mut handle = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some(
+                    "sleep 0.1; printf 'KEYS=<%s|%s|%s>\\n' \"$CHAN_WINDOW_ID\" \
+                     \"$CHAN_CONTROL_SOCKET\" \"$CHAN_MCP_SOCKET\""
+                        .into(),
+                ),
+                env: Default::default(),
+                profile: None,
+            })
+            .unwrap();
+
+        let expected = "KEYS=<||>";
+        let out = collect_until(&mut handle, expected, Duration::from_secs(5)).await;
+        assert!(
+            out.contains(expected),
+            "the server's own chan keys reached the terminal: {out:?}"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
     // Gated with its parent above: only that test's re-invocation of this
     // binary makes this one do real work.
     #[cfg(unix)]
@@ -9369,6 +9432,8 @@ mod tests {
             ("FORCE_COLOR", "0"),
             ("HOME", home_path.as_str()),
             ("CHAN_TERMINAL", "caller"),
+            ("CHAN_AGENT", "codex"),
+            ("CHAN_HOME", "/tmp/chan-tenv-home"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -9382,8 +9447,9 @@ mod tests {
                 mcp_env: false,
                 cwd: None,
                 command: Some(
-                    "sleep 0.1; printf 'ENV=<%s|%s|%s|%s|%s|%s|%s>\\n' \"$NO_COLOR\" \"$TERM\" \
-                     \"$CI\" \"$CODEX_CI\" \"$FORCE_COLOR\" \"$HOME\" \"$CHAN_TERMINAL\""
+                    "sleep 0.1; printf 'ENV=<%s|%s|%s|%s|%s|%s|%s|%s|%s>\\n' \"$NO_COLOR\" \"$TERM\" \
+                     \"$CI\" \"$CODEX_CI\" \"$FORCE_COLOR\" \"$HOME\" \"$CHAN_TERMINAL\" \
+                     \"$CHAN_AGENT\" \"$CHAN_HOME\""
                         .into(),
                 ),
                 env,
@@ -9391,7 +9457,8 @@ mod tests {
             })
             .unwrap();
 
-        let expected = format!("ENV=<1|dumb|true|1|0|{home_path}|{chan_terminal}>");
+        let expected =
+            format!("ENV=<1|dumb|true|1|0|{home_path}|{chan_terminal}|codex|/tmp/chan-tenv-home>");
         let out = collect_until(&mut handle, &expected, Duration::from_secs(5)).await;
         assert!(
             out.contains(&expected),
