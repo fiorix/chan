@@ -3165,9 +3165,12 @@ mod row_build_hold {
         changed: Condvar,
     }
 
-    static HOLDS: OnceLock<Mutex<Vec<(PathBuf, Arc<Hold>)>>> = OnceLock::new();
+    /// The installed holds, each with the root it holds.
+    type Holds = Vec<(PathBuf, Arc<Hold>)>;
 
-    fn holds() -> std::sync::MutexGuard<'static, Vec<(PathBuf, Arc<Hold>)>> {
+    static HOLDS: OnceLock<Mutex<Holds>> = OnceLock::new();
+
+    fn holds() -> std::sync::MutexGuard<'static, Holds> {
         HOLDS
             .get_or_init(Default::default)
             .lock()
