@@ -1,6 +1,10 @@
 # The detached devserver daemon keeps the launching shell's directory
 
-Status: raised during v0.101.0 on 2026-09-25 by the reading lane over the side-effect and error-handling lows (review line 4850 of the development ledger `dev/rust-review-lows.md`); not accepted. A source reading against `main` at `f063ddd45`.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25 by the reading lane over the side-effect and error-handling lows (review line 4850 of the development ledger `dev/rust-review-lows.md`). A source reading against `main` at `f063ddd45`.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in the lane for small server and CLI fixes with [a-watcher-loss-leaves-the-code-report-stale](a-watcher-loss-leaves-the-code-report-stale.md), [a-corrupt-devserver-config-re-mints-the-library-identity](a-corrupt-devserver-config-re-mints-the-library-identity.md), [a-scripted-reports-disable-exits-zero-having-changed-nothing](a-scripted-reports-disable-exits-zero-having-changed-nothing.md) and [a-keychain-failure-freezes-a-connected-gateways-roster](a-keychain-failure-freezes-a-connected-gateways-roster.md), landing before the split of [the-chan-cli-crate-is-one-13k-line-file](the-chan-cli-crate-is-one-13k-line-file.md) moves code in `crates/chan/src/`.
 
 ## What was seen
 

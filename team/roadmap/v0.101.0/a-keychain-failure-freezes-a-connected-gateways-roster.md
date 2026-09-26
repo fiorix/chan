@@ -1,6 +1,10 @@
 # A keychain failure freezes a connected gateway's roster without a trace
 
-Status: raised during v0.101.0 on 2026-09-25 by the reading lane over the side-effect and error-handling lows (review line 6232 of the development ledger `dev/rust-review-lows.md`); not accepted. A source reading against `main` at `f063ddd45`.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25 by the reading lane over the side-effect and error-handling lows (review line 6232 of the development ledger `dev/rust-review-lows.md`). A source reading against `main` at `f063ddd45`.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in the lane for small server and CLI fixes with [a-watcher-loss-leaves-the-code-report-stale](a-watcher-loss-leaves-the-code-report-stale.md), [a-corrupt-devserver-config-re-mints-the-library-identity](a-corrupt-devserver-config-re-mints-the-library-identity.md), [the-detached-daemon-keeps-the-launching-shells-directory](the-detached-daemon-keeps-the-launching-shells-directory.md) and [a-scripted-reports-disable-exits-zero-having-changed-nothing](a-scripted-reports-disable-exits-zero-having-changed-nothing.md). The ruling answers the item's open question: a missing PAT (`Ok(None)`) while the gateway is Connected is treated like a 401. The stored credential is gone, so the gateway shows signed out and asks to sign in, rather than keep polling with nothing.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # Frontend comments narrate history, and dead code sits beside them
 
-Status: raised for v0.101.0 from the frontend review (its Phase 4: 534 comments against the house rule and 110 stale-code findings, 13 of them filed as medium), phased out of v0.100.0 because it waits on the source-text test ruling.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 from the frontend review (its Phase 4: 534 comments against the house rule and 110 stale-code findings, 13 of them filed as medium), phased out of v0.100.0 because it waits on the source-text test ruling.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended: a frontend round beside or after [one-question-is-answered-in-many-places](one-question-is-answered-in-many-places.md) and [graph-bodies-have-no-mounted-test](graph-bodies-have-no-mounted-test.md), which touch the same files, followed by [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md). The ruling settles the three questions this item waits on. Dead code that looks reserved is deleted by default, and each exception is named. The workspace demo stays: the source-text round made its demo transport the backbone of the mounted App tests, so retiring it would cost those tests. `editor/design.md` is corrected to the shipped contract rather than the code reverted to it.
 
 ## What was seen
 

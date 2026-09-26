@@ -1,6 +1,10 @@
 # Two exact version pins hold back routine web upgrades
 
-Status: raised for v0.101.0 on the owner's instruction, 2026-09-20, from the development archive's pre-v0.68 backlog. The code claims are a source reading against `main` at `fa0df75ad`. No registry was reachable from the reading host, so what the newer releases do is unmeasured.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 on the owner's instruction, 2026-09-20, from the development archive's pre-v0.68 backlog. The code claims are a source reading against `main` at `fa0df75ad`. No registry was reachable from the reading host, so what the newer releases do is unmeasured.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended: one dependency lane takes this item and [tower-sessions-lags-and-axum-has-a-dead-feature](tower-sessions-lags-and-axum-has-a-dead-feature.md), and lands with its Nix hashes re-harvested.
 
 ## What was seen
 

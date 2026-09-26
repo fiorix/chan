@@ -1,6 +1,10 @@
 # Five families of sentences still describe code that changed under them
 
-Status: raised for v0.101.0 from the v0.99.0 fix loop's follow-ups, where each family was found by an independent review and parked as documentation work. Every site below was read against `main` at `d3de0180b`; two clauses are marked as reported and were not re-verified.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 from the v0.99.0 fix loop's follow-ups, where each family was found by an independent review and parked as documentation work. Every site below was read against `main` at `d3de0180b`; two clauses are marked as reported and were not re-verified.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, as a docs lane of its own.
 
 ## What was seen
 

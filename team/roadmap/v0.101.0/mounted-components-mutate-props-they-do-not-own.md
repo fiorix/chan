@@ -1,6 +1,10 @@
 # Mounted components mutate props they do not own
 
-Status: raised during v0.101.0 on 2026-09-25 from the second source-text test lane. Its mounted tests render components through their real parents, as the app does, and Svelte's development build warns on each line below; the lane found no test that causes a warning.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25 from the second source-text test lane. Its mounted tests render components through their real parents, as the app does, and Svelte's development build warns on each line below; the lane found no test that causes a warning.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, last in the editor and graph lane, after [a-sent-prompt-stays-editable-while-pending](a-sent-prompt-stays-editable-while-pending.md), [a-click-beside-a-graph-node-clears-the-selection](a-click-beside-a-graph-node-clears-the-selection.md) and [a-mirrored-value-focuses-an-unfocused-editor](a-mirrored-value-focuses-an-unfocused-editor.md).
 
 ## What was seen
 

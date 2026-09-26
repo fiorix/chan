@@ -1,6 +1,10 @@
 # Four tests still read source with node:fs
 
-Status: raised during v0.101.0 on 2026-09-25 from the independent review of the first source-text test lane. The four files were outside both lanes' lists by construction (the round took the files that import with `?raw`), and the webdev standards name them as known exceptions until this item decides them.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25 from the independent review of the first source-text test lane. The four files were outside both lanes' lists by construction (the round took the files that import with `?raw`), and the webdev standards name them as known exceptions until this item decides them.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in one test hygiene lane with [the-attach-prelude-order-has-no-rust-test](the-attach-prelude-order-has-no-rust-test.md), which settles the rule for `table.test.ts`: it becomes a listed allowed case under the webdev standards' narrow rule if what it reads, `Wysiwyg.svelte`'s stylesheet, ships a visible failure when broken, and otherwise its assertion is dropped.
 
 ## What was seen
 

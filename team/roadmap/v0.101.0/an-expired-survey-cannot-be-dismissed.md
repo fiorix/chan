@@ -1,6 +1,10 @@
 # A survey whose request is gone cannot be dismissed
 
-Status: raised for v0.101.0 from a defect the owner hit on v0.99.0 and reported on 2026-09-20: after a `cs terminal survey` expired its overlay stayed on screen, every click was ignored, and only a full window reload cleared it. The mechanism below is a source reading against `main` at `4afc24296`. It has not been reproduced, and which of the loss paths the owner hit is not established.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 from a defect the owner hit on v0.99.0 and reported on 2026-09-20: after a `cs terminal survey` expired its overlay stayed on screen, every click was ignored, and only a full window reload cleared it. The mechanism below is a source reading against `main` at `4afc24296`. It has not been reproduced, and which of the loss paths the owner hit is not established.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, as a lane of its own whose first step is the reproduction: a survey raised with a short `--timeout` and the window taken offline across the deadline, shown red on today's code.
 
 ## What was seen
 

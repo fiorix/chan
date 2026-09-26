@@ -1,6 +1,10 @@
 # The chan CLI crate is one 13,736-line file
 
-Status: raised for v0.101.0 on the owner's instruction, 2026-09-20, from the development archive's pre-v0.68 backlog, where the split was first deferred at 5,227 lines. The counts below were measured on `main` at `fa0df75ad`.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 on the owner's instruction, 2026-09-20, from the development archive's pre-v0.68 backlog, where the split was first deferred at 5,227 lines. The counts below were measured on `main` at `fa0df75ad`.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, keeping the owner's ruling of 2026-09-20 that the analysis comes first and the owner reads it before any code moves. The analysis lane can start at once, because it only reads and collides with no other lane. The moves start after [a-scripted-reports-disable-exits-zero-having-changed-nothing](a-scripted-reports-disable-exits-zero-having-changed-nothing.md), [the-detached-daemon-keeps-the-launching-shells-directory](the-detached-daemon-keeps-the-launching-shells-directory.md) and the `crates/chan/src/lib.rs` changes of [a-service-spawned-extension-gets-a-bare-path](a-service-spawned-extension-gets-a-bare-path.md) land.
 
 ## What was seen
 

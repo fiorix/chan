@@ -1,6 +1,10 @@
 # A failed dial makes the next terminal dial replay from zero
 
-Status: raised during v0.101.0 on 2026-09-24; not accepted. From the terminal replay lane's report for its restart e2e at `918f03694` on `v0101/terminal-replay`. Read in the code, not reproduced: the lane's reproducer, `scripts/e2e/devserver-terminal-replay.sh` with `scripts/e2e/terminal-replay-client.mjs` (landing with that lane), models the attach protocol and not the SPA, and its keep clients saw no failed dials. The code claims are a source reading against `33e12f6c7`.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-24. From the terminal replay lane's report for its restart e2e at `918f03694` on `v0101/terminal-replay`. Read in the code, not reproduced: the lane's reproducer, `scripts/e2e/devserver-terminal-replay.sh` with `scripts/e2e/terminal-replay-client.mjs` (landing with that lane), models the attach protocol and not the SPA, and its keep clients saw no failed dials. The code claims are a source reading against `33e12f6c7`.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in one small SPA lane with [a-graceful-restarts-session-save-drops-the-terminals-session-id](a-graceful-restarts-session-save-drops-the-terminals-session-id.md); both change `TerminalTab.svelte`.
 
 ## What was seen
 

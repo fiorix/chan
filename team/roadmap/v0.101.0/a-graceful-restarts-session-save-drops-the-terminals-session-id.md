@@ -1,6 +1,10 @@
 # A graceful restart's session save drops the terminal's session id
 
-Status: raised during v0.101.0 on 2026-09-25; not accepted. From the terminal replay lane's third-round report (`dev/v0101-tasks/report-term-3.md`, section 4), a source reading against that lane's tip `7783626df`; not observed in a browser.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25. From the terminal replay lane's third-round report (`dev/v0101-tasks/report-term-3.md`, section 4), a source reading against that lane's tip `7783626df`; not observed in a browser.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in one small SPA lane with [a-failed-dial-makes-the-next-replay-from-zero](a-failed-dial-makes-the-next-replay-from-zero.md); both change `TerminalTab.svelte`.
 
 ## What was seen
 

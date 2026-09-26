@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way.
 
 **Frontend review, phased from v0.100.0**
 
@@ -31,9 +31,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | --- | --- | --- |
 | [source-text-tests-pin-spelling-not-behaviour][rawt] | landed | GA |
 | [one-question-is-answered-in-many-places][dedup] | accepted | after rawt |
-| [frontend-comments-narrate-history][cmts] | raised | after rawt |
+| [frontend-comments-narrate-history][cmts] | accepted | build |
 | [hand-mirrored-contracts-have-no-gate][mirr] | landed | GA |
-| [the-frontend-review-remainder-has-no-owner][ferem] | raised | triage |
+| [the-frontend-review-remainder-has-no-owner][ferem] | accepted | analyze |
 
 **From the v0.99.0 follow-ups**
 
@@ -45,9 +45,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-non-utf8-text-file-loses-its-backlinks][nutf] | landed | GA |
 | [two-copies-to-one-free-name-can-collide][copy2] | landed | GA |
 | [a-blocking-pool-pin-passes-without-proof][bpin] | landed | GA |
-| [stale-sentences-outlive-their-code][prose] | raised | accept |
-| [a-service-spawned-extension-gets-a-bare-path][extp] | raised | accept |
-| [the-aur-check-could-ship-a-test-only-feature][aurc] | raised | accept |
+| [stale-sentences-outlive-their-code][prose] | accepted | build |
+| [a-service-spawned-extension-gets-a-bare-path][extp] | landed | GA |
+| [the-aur-check-could-ship-a-test-only-feature][aurc] | landed | GA |
 
 **Raised during v0.100.0**
 
@@ -56,7 +56,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [refusals-answer-in-four-shapes][refus] | accepted | build |
 | [the-team-poke-names-a-path-it-does-not-anchor][poke] | landed | GA |
 | [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | landed | GA |
-| [an-expired-survey-cannot-be-dismissed][surv] | raised | repro |
+| [an-expired-survey-cannot-be-dismissed][surv] | accepted | build |
 | [the-test-util-comments-omit-the-attach-seam][tutil] | landed | GA |
 | [the-fdstore-manifest-splits-seq-and-tail][fdsq] | landed | GA |
 | [a-mount-retry-test-races-a-wall-clock][mwclk] | landed | GA |
@@ -74,7 +74,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [content-search-truncation-ignores-its-window][trunc] | landed | GA |
 | [move-and-create-can-replace-a-new-file][clob] | landed | GA |
 | [the-graph-indexer-drops-renames-and-lingers][gidx] | landed | GA |
-| [the-side-effect-and-error-lows-are-unread][unread] | accepted | analyze |
+| [the-side-effect-and-error-lows-are-unread][unread] | landed | GA |
 | [the-launcher-says-off-beside-running][offrn] | landed | GA |
 | [devserver-root-probe-wiring-has-no-test][rprob] | landed | GA |
 | [page-break-scan-and-renderer-still-differ][pgres] | withdrawn | GA |
@@ -87,9 +87,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 
 | item | state | next |
 | --- | --- | --- |
-| [the-chan-cli-crate-is-one-13k-line-file][clib] | raised | analyze |
-| [two-exact-pins-hold-back-web-upgrades][pins] | raised | measure |
-| [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | raised | measure |
+| [the-chan-cli-crate-is-one-13k-line-file][clib] | accepted | analyze |
+| [two-exact-pins-hold-back-web-upgrades][pins] | accepted | build |
+| [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | accepted | build |
 | [gateway-ci-misses-root-tunnel-crate-changes][gwci] | landed | GA |
 | [the-web-bundles-still-build-on-node-20][nd22] | landed | GA |
 | [the-launcher-build-hint-cannot-run][hint] | landed | GA |
@@ -103,29 +103,30 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-revocation-aborts-the-bridge-before-its-close][revab] | landed | GA |
 | [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | landed | GA |
 | [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | landed | GA |
-| [a-restart-replays-only-the-manifest-tail][rtail] | raised | decide |
-| [a-crash-restart-restores-a-stale-manifest][crash] | raised | decide |
+| [a-restart-replays-only-the-manifest-tail][rtail] | accepted | build |
+| [a-crash-restart-restores-a-stale-manifest][crash] | accepted | build |
 | [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | landed | GA |
-| [a-failed-dial-makes-the-next-replay-from-zero][fdial] | raised | decide |
+| [a-failed-dial-makes-the-next-replay-from-zero][fdial] | accepted | build |
 | [the-served-index-forgets-a-lone-rename][srename] | landed | GA |
 | [a-case-only-rename-leaves-a-phantom-row][casef] | landed | GA |
 | [the-apps-wake-path-outlives-its-mount][wgap] | landed | GA |
-| [a-watcher-loss-leaves-the-code-report-stale][wrep] | raised | decide |
-| [terminal-env-overrides-are-silently-dropped][tenv] | raised | decide |
-| [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | raised | decide |
-| [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | raised | decide |
-| [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | raised | decide |
-| [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | raised | decide |
-| [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | raised | decide |
+| [a-watcher-loss-leaves-the-code-report-stale][wrep] | accepted | build |
+| [terminal-env-overrides-are-silently-dropped][tenv] | accepted | build |
+| [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | accepted | build |
+| [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | accepted | build |
+| [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | accepted | build |
+| [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | accepted | build |
+| [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | accepted | build |
 | [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
 | [a-cut-paste-can-replace-the-first-moved-file][mvrep] | landed | GA |
 | [the-settings-date-format-never-saves][dfmt] | landed | GA |
-| [four-tests-still-read-source-with-node-fs][fsrd] | raised | decide |
-| [the-attach-prelude-order-has-no-rust-test][prel] | raised | decide |
-| [mounted-components-mutate-props-they-do-not-own][ownw] | raised | decide |
-| [a-sent-prompt-stays-editable-while-pending][rpro] | raised | decide |
-| [a-click-beside-a-graph-node-clears-the-selection][gring] | raised | decide |
-| [a-mirrored-value-focuses-an-unfocused-editor][afoc] | raised | decide |
+| [four-tests-still-read-source-with-node-fs][fsrd] | accepted | build |
+| [the-attach-prelude-order-has-no-rust-test][prel] | accepted | build |
+| [mounted-components-mutate-props-they-do-not-own][ownw] | accepted | build |
+| [a-sent-prompt-stays-editable-while-pending][rpro] | accepted | build |
+| [a-click-beside-a-graph-node-clears-the-selection][gring] | accepted | build |
+| [a-mirrored-value-focuses-an-unfocused-editor][afoc] | accepted | build |
+| [a-started-mcp-tool-cannot-be-cancelled][mcan] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -204,6 +205,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [rpro]: v0.101.0/a-sent-prompt-stays-editable-while-pending.md
 [gring]: v0.101.0/a-click-beside-a-graph-node-clears-the-selection.md
 [afoc]: v0.101.0/a-mirrored-value-focuses-an-unfocused-editor.md
+[mcan]: v0.101.0/a-started-mcp-tool-cannot-be-cancelled.md
 
 ## Completed
 

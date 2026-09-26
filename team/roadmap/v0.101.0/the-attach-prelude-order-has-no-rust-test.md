@@ -1,6 +1,10 @@
 # The terminal attach prelude order has no Rust test
 
-Status: raised during v0.101.0 on 2026-09-25 from the second source-text test lane's second round, which traced each assertion of `terminal/protocol.test.ts` to a Rust test and found three with none.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25 from the second source-text test lane's second round, which traced each assertion of `terminal/protocol.test.ts` to a Rust test and found three with none.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in one test hygiene lane with [four-tests-still-read-source-with-node-fs](four-tests-still-read-source-with-node-fs.md).
 
 ## What was seen
 

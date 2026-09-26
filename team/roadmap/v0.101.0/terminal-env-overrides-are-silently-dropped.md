@@ -1,6 +1,10 @@
 # Terminal env overrides for TERM, HOME, NO_COLOR and CI are silently dropped
 
-Status: raised during v0.101.0 on 2026-09-25 by the reading lane over the side-effect and error-handling lows (review line 3751 of the development ledger `dev/rust-review-lows.md`); not accepted. A source reading against `main` at `f063ddd45`.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25 by the reading lane over the side-effect and error-handling lows (review line 3751 of the development ledger `dev/rust-review-lows.md`). A source reading against `main` at `f063ddd45`.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, which settles which keys chan owns: only its identity and control keys, `CHAN_*`, and validation refuses those with an error. The caller's env is applied after the fixed defaults, so every other explicit value wins, and the locale handling stays as it is. The work rides the terminal restore lane of [a-restart-replays-only-the-manifest-tail](a-restart-replays-only-the-manifest-tail.md) and [a-crash-restart-restores-a-stale-manifest](a-crash-restart-restores-a-stale-manifest.md), because all three edit `terminal_sessions.rs`.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # A mirrored value focuses an unfocused editor
 
-Status: raised during v0.101.0 on 2026-09-25 from the second source-text test lane and confirmed in code by the independent review of that lane at `main` `a83900a29`; no live window was seen doing it.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-25 from the second source-text test lane and confirmed in code by the independent review of that lane at `main` `a83900a29`; no live window was seen doing it.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in the editor and graph lane with [a-sent-prompt-stays-editable-while-pending](a-sent-prompt-stays-editable-while-pending.md) and [a-click-beside-a-graph-node-clears-the-selection](a-click-beside-a-graph-node-clears-the-selection.md); [mounted-components-mutate-props-they-do-not-own](mounted-components-mutate-props-they-do-not-own.md) comes last in that lane.
 
 ## What was seen
 

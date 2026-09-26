@@ -1,6 +1,10 @@
 # tower-sessions is held a release behind, and axum carries a feature nothing uses
 
-Status: raised for v0.101.0 on the owner's instruction, 2026-09-20, from the development archive's pre-v0.68 backlog. The code claims are a source reading against `main` at `fa0df75ad`. No registry was reachable from the reading host, so which releases exist today is unmeasured.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 on the owner's instruction, 2026-09-20, from the development archive's pre-v0.68 backlog. The code claims are a source reading against `main` at `fa0df75ad`. No registry was reachable from the reading host, so which releases exist today is unmeasured.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in one dependency lane with [two-exact-pins-hold-back-web-upgrades](two-exact-pins-hold-back-web-upgrades.md), which lands with its Nix hashes re-harvested.
 
 ## What was seen
 

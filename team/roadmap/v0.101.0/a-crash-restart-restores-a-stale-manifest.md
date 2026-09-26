@@ -1,6 +1,10 @@
 # A crash restart restores a stale sequence and tail from the manifest
 
-Status: raised during v0.101.0 on 2026-09-24; not accepted. From the terminal replay lane's restart e2e at `918f03694` on `v0101/terminal-replay`. The reproducer is `scripts/e2e/devserver-terminal-replay.sh` with `scripts/e2e/terminal-replay-client.mjs`, which land with that lane; it ran in a Linux container as root against the `chan-devserver` user unit, and the runs' logs are `dev/v0101-tasks/evidence/term/e2e-replay-918f03694.log` (restarts `cli crash`) and `dev/v0101-tasks/evidence/term/e2e-replay-cli-cli-918f03694.log` (restarts `cli cli`) in the development tree. Reproduced at that sha on the `kill -9` restart of the `cli crash` run, and at `f8ae53dcf` in `dev/v0101-tasks/evidence/term/e2e-replay-f8ae53dcf.log`; the owner ruled on 2026-09-24 that the terminal replay lane hands it off rather than fix it.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0 on 2026-09-24. From the terminal replay lane's restart e2e at `918f03694` on `v0101/terminal-replay`. The reproducer is `scripts/e2e/devserver-terminal-replay.sh` with `scripts/e2e/terminal-replay-client.mjs`, which land with that lane; it ran in a Linux container as root against the `chan-devserver` user unit, and the runs' logs are `dev/v0101-tasks/evidence/term/e2e-replay-918f03694.log` (restarts `cli crash`) and `dev/v0101-tasks/evidence/term/e2e-replay-cli-cli-918f03694.log` (restarts `cli cli`) in the development tree. Reproduced at that sha on the `kill -9` restart of the `cli crash` run, and at `f8ae53dcf` in `dev/v0101-tasks/evidence/term/e2e-replay-f8ae53dcf.log`; the owner ruled on 2026-09-24 that the terminal replay lane hands it off rather than fix it.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, in one terminal restore lane with [a-restart-replays-only-the-manifest-tail](a-restart-replays-only-the-manifest-tail.md), which answers this item's two questions. Output does not refresh the manifest: the memfd-backed ring chosen for that item survives a crash, which makes a refresh moot. A resume cursor the server cannot honour, such as one ahead of a restored `seq`, gets a full replay and a visible notice, never a silent skip.
 
 ## What was seen
 

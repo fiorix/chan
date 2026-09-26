@@ -1,6 +1,10 @@
 # The rest of the frontend review has no owner
 
-Status: raised for v0.101.0. v0.100.0 took 52 of the frontend review's 166 high and medium findings, and four sibling items here take the ones that are one piece of work each (source-text tests, repeated shapes, comments and dead code, mirrored contracts). This item is the ledger for what is left, so it does not become a second parked list. The mediums were re-verified against `main` at `d3de0180b` and all still apply; the lows were not.
+Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0. v0.100.0 took 52 of the frontend review's 166 high and medium findings, and four sibling items here take the ones that are one piece of work each (source-text tests, repeated shapes, comments and dead code, mirrored contracts). This item is the ledger for what is left, so it does not become a second parked list. The mediums were re-verified against `main` at `d3de0180b` and all still apply; the lows were not.
+
+## Owner ruling
+
+Accepted on 2026-09-25 as the lead recommended, after [frontend-comments-narrate-history](frontend-comments-narrate-history.md) in the frontend rounds. It starts with a reading lane like the one over the Rust side-effect and error-handling lows ([the-side-effect-and-error-lows-are-unread](the-side-effect-and-error-lows-are-unread.md)): a disposition for each medium finding and each bug or side-effect low, with the ruling each one waits on. Fix lanes by area follow, highest consequence first. Of the five rulings this item needs, the workspace demo is settled by [frontend-comments-narrate-history](frontend-comments-narrate-history.md)'s ruling (it stays); the owner gives the other four (graph filesystem mode, non-markdown surfaces rewriting files, how snippets cross the wire, and what a multi-selection means for destructive actions) when the reading lane reports, with its evidence in hand.
 
 ## What was seen
 
