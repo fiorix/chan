@@ -242,10 +242,44 @@ pub(crate) fn read_team_config(
     let text = workspace
         .read_text(&rel)
         .map_err(|e| format!("cannot read {rel}: {e}"))?;
-    let config = toml::from_str::<TeamConfig>(&text)
+    let mut config = toml::from_str::<TeamConfig>(&text)
         .map_err(|e| format!("invalid team config at {rel}: {e}"))?;
+    restate_saved_tab_names(&mut config, &rel);
     validate_team_config(&config)?;
     Ok(config)
+}
+
+/// Replace each member's `CHAN_TAB_NAME` that does not restate its handle
+/// with the handle, warning for each one replaced. Configs saved while a typed
+/// value was accepted carry one, and refusing the read would keep the load
+/// dialog, which drops the key, from ever healing them. The write and the
+/// spawn still refuse it, so the next save writes the handle.
+fn restate_saved_tab_names(config: &mut TeamConfig, rel: &str) {
+    use chan_library::terminal_sessions::{chan_overrides_spawn_env, is_chan_spawn_env_key};
+    for member in &mut config.members {
+        let handle = member.handle.clone();
+        for (key, value) in member.env.iter_mut() {
+            // The one key chan sets that a restated handle may carry,
+            // matched as the child's environment matches keys.
+            let tab_name_key = is_chan_spawn_env_key(key)
+                && !chan_overrides_spawn_env(key, &handle, Some(&handle));
+            if !tab_name_key {
+                continue;
+            }
+            // Compared as the spawn's validator compares it.
+            let entry = std::collections::BTreeMap::from([(key.clone(), value.clone())]);
+            if crate::routes::validate_terminal_env(&entry, Some(&handle)).is_ok() {
+                continue;
+            }
+            tracing::warn!(
+                file = rel,
+                member = %handle,
+                saved = %value,
+                "a saved team member's CHAN_TAB_NAME is not its handle; reading it as the handle"
+            );
+            *value = handle.clone();
+        }
+    }
 }
 
 pub(crate) fn write_team_config(
