@@ -4,10 +4,10 @@
 // phase, so it acts before an editor's own keymap and stops the key there:
 // CodeMirror never adds a cursor on the same press. It takes only the literal
 // Ctrl modifier, and steps aside when the user rebinds the command, when a
-// modal or pane mode owns the keyboard, in a terminal (the shell reads it as
-// EOF) and on a canvas board (its duplicate chord). Behind a full-window cover
-// it swallows the key. On an empty pane it closes the pane, or flips a
-// Hybrid pane to its other side.
+// modal, the window-wide survey or pane mode owns the keyboard, in a terminal
+// (the shell reads it as EOF) and on a canvas board (its duplicate chord).
+// Behind a full-window cover it swallows the key. On an empty pane it closes
+// the pane, or flips a Hybrid pane to its other side.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -33,6 +33,7 @@ import {
   settingsPanel,
   workspaceWarningsDialog,
 } from "./state/store.svelte";
+import { resetSurveysForTest, showSurvey } from "./state/survey.svelte";
 import { teamDialogState } from "./state/teamDialog.svelte";
 import {
   activePane,
@@ -51,6 +52,7 @@ import {
 stubAppEnvironment();
 
 const CTRL_D = { key: "d", code: "KeyD", ctrlKey: true } as const;
+const SURVEY = { surveyId: "survey-1", title: null, bodyMarkdown: "Which?", options: ["A"] };
 
 beforeEach(async () => {
   await mountApp();
@@ -69,6 +71,7 @@ afterEach(async () => {
   searchPanel.open = false;
   launcherPanel.open = false;
   settingsPanel.open = false;
+  resetSurveysForTest();
   cancelPaneMode();
   setCoverBlocking("screensaver", false);
   hydrateOverrides(null);
@@ -112,6 +115,17 @@ describe("Ctrl+D on a tab", () => {
     await settle();
     press(CTRL_D);
     await settle();
+    expect(tabIds()).toEqual([]);
+  });
+
+  test("closes a document while a survey shows over a terminal, which leaves the rest of the window usable", async () => {
+    await seed(fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" }));
+    showSurvey(SURVEY, "term-elsewhere");
+    await settle();
+
+    press(CTRL_D);
+    await settle();
+
     expect(tabIds()).toEqual([]);
   });
 
@@ -170,6 +184,7 @@ describe("Ctrl+D is left alone", () => {
     ["the Search overlay", () => (searchPanel.open = true)],
     ["the command launcher", () => (launcherPanel.open = true)],
     ["Settings", () => (settingsPanel.open = true)],
+    ["the window-wide survey", () => showSurvey(SURVEY, null)],
   ])("while %s is open", async (_name, open) => {
     await seed(fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" }));
     open();

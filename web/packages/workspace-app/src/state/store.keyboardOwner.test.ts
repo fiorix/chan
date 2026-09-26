@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
-// keyboardOwnedAbovePanes answers whether an overlay or an app-root dialog is
-// open over the panes, for Ctrl+D and the pane flip, which stand down while
-// one is.
+// keyboardOwnedAbovePanes answers whether an overlay, an app-root dialog or
+// the window-wide survey is open over the panes, for Ctrl+D and the pane flip,
+// which stand down while one is.
 
 import { afterEach, describe, expect, test } from "vitest";
 import { closeConfirmState } from "./closeConfirm.svelte";
@@ -18,6 +18,7 @@ import {
   syncOverlayStack,
   workspaceWarningsDialog,
 } from "./store.svelte";
+import { resetSurveysForTest, showSurvey } from "./survey.svelte";
 import { conflictDialog, draftCloseState } from "./tabs.svelte";
 import { teamDialogState } from "./teamDialog.svelte";
 
@@ -35,7 +36,10 @@ afterEach(() => {
   launcherPanel.open = false;
   settingsPanel.open = false;
   syncOverlayStack();
+  resetSurveysForTest();
 });
+
+const SURVEY = { surveyId: "survey-1", title: null, bodyMarkdown: "Which?", options: ["A"] };
 
 describe("keyboardOwnedAbovePanes", () => {
   test("is false with no dialog open", () => {
@@ -55,8 +59,14 @@ describe("keyboardOwnedAbovePanes", () => {
     ["the Search overlay", () => ((searchPanel.open = true), syncOverlayStack())],
     ["the command launcher", () => ((launcherPanel.open = true), syncOverlayStack())],
     ["Settings", () => ((settingsPanel.open = true), syncOverlayStack())],
+    ["the window-wide survey", () => showSurvey(SURVEY, null)],
   ])("is true while %s is open", (_name, open) => {
     open();
     expect(keyboardOwnedAbovePanes()).toBe(true);
+  });
+
+  test("is false while a survey shows only over a terminal, which leaves the rest of the window usable", () => {
+    showSurvey(SURVEY, "term-1");
+    expect(keyboardOwnedAbovePanes()).toBe(false);
   });
 });

@@ -29,6 +29,7 @@ import {
   uiPrompt,
   workspaceWarningsDialog,
 } from "./state/store.svelte";
+import { resetSurveysForTest, showSurvey } from "./state/survey.svelte";
 import { teamDialogState } from "./state/teamDialog.svelte";
 import { conflictDialog, draftCloseState, layout, type LeafNode } from "./state/tabs.svelte";
 
@@ -48,6 +49,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   settingsPanel.open = false;
+  resetSurveysForTest();
   await unmountApp();
 });
 
@@ -108,6 +110,11 @@ describe("the pane flip refuses while something covers the panes", () => {
     ],
     ["the contacts import", () => (importContactsPanel.open = true), () => (importContactsPanel.open = false)],
     ["the desktop close prompt", () => (closeConfirmState.open = true), () => (closeConfirmState.open = false)],
+    [
+      "the window-wide survey",
+      () => showSurvey({ surveyId: "survey-1", title: null, bodyMarkdown: "Which?", options: ["A"] }, null),
+      () => resetSurveysForTest(),
+    ],
   ];
 
   test.each(blockers)("%s", async (_name, open, close) => {
