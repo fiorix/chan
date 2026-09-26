@@ -63,6 +63,7 @@
     setMode,
     clearTabCaretCommand,
     setTabCaret,
+    setTabContent,
     setTabInspectorOpen,
     setTabCodeBlocksCollapsed,
     setTabOutlineOpen,
@@ -1329,7 +1330,7 @@
       >
         <Wysiwyg
           bind:this={wysiwygRef}
-          bind:value={tab.content}
+          bind:value={() => tab.content, (content) => setTabContent(tab, content)}
           autoFocus={focused}
           readonly={readOnly}
           extraExtensions={docExtensions}
@@ -1410,7 +1411,7 @@
         role="presentation"
       >
         <CsvTable
-          bind:value={tab.content}
+          bind:value={() => tab.content, (content) => setTabContent(tab, content)}
           delimiter={csvDelimiter(tab.path)}
           readonly={readOnly}
         />
@@ -1428,7 +1429,7 @@
             {active}
             content={tab.content}
             dark={effectiveHybridSurfaceTheme("editor") === "dark"}
-            onSceneChange={(json) => (tab.content = json)}
+            onSceneChange={(json) => setTabContent(tab, json)}
             session={sceneSession}
             readonly={readOnly}
           />
@@ -1446,7 +1447,7 @@
       >
         <Source
           bind:this={sourceRef}
-          bind:value={tab.content}
+          bind:value={() => tab.content, (content) => setTabContent(tab, content)}
           autoFocus={focused}
           path={tab.path}
           readonly={readOnly}

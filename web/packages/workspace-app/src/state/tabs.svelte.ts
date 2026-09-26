@@ -5296,6 +5296,10 @@ export function issueCaretCommand(tab: FileTab, from: number, to: number): void 
 export function clearTabCaretCommand(tab: FileTab): void {
   tab.caretCommand = undefined;
 }
+/// The tab's buffer, as its editor or its board reports an edit.
+export function setTabContent(tab: FileTab, content: string): void {
+  tab.content = content;
+}
 /// Rich Prompt composer caret mirror. The bubble's editor pushes every
 /// selection change here so the caret survives a bubble remount, a window
 /// reload, and a cross-window restore (serialized as SerTab.rpc alongside
