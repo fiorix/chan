@@ -11072,5 +11072,212 @@ mod tests {
                 "the restored seq counts the output written after the manifest"
             );
         }
+
+        /// The import of a manifest entry that names no ring file, as a
+        /// manifest from before ring files or a partial store gives: a
+        /// windowed session over a real PTY master with no child process,
+        /// ending at `tail`'s length. The returned pair keeps the slave open.
+        fn ringless_import(
+            id: &str,
+            generation: u64,
+            tail: &[u8],
+        ) -> (FdStoreSessionImport, portable_pty::PtyPair) {
+            let pair = native_pty_system().openpty(test_size()).unwrap();
+            let master_fd = clone_master_fd(pair.master.as_raw_fd().unwrap()).unwrap();
+            let meta = FdStoreSessionMeta {
+                tenant_prefix: "t".into(),
+                session_id: id.into(),
+                tab_name: None,
+                tab_group: None,
+                spawn_name: None,
+                spawn_group: None,
+                window_id: Some("w1".into()),
+                pane_id: None,
+                side: None,
+                tab_id: None,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+                profile: None,
+                mcp_env: false,
+                child_pid: None,
+                size: test_size().into(),
+                seq: tail.len() as u64,
+                generation,
+                alt_screen: false,
+                private_modes: Vec::new(),
+            };
+            let import = FdStoreSessionImport {
+                meta,
+                master_fd,
+                ring_fd: None,
+                replay: tail.to_vec(),
+            };
+            (import, pair)
+        }
+
+        // A session restored without a ring file (a manifest from before ring
+        // files, a partial store, a failed create) is given one when parking
+        // activates, so the restore after the next crash replays its whole
+        // ring rather than the manifest's tail.
+        #[test]
+        fn a_session_restored_without_a_ring_file_gets_one_at_activation() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "restored-without-a-ring";
+            let restored = numbered_lines(1000);
+            let (import, _pair) = ringless_import(id, 3, &restored);
+            // The store retains the PTY the previous process parked.
+            store.0.fds.lock().unwrap().insert(
+                fdstore_fd_name(id, None),
+                import.master_fd.try_clone().unwrap(),
+            );
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+
+            // Activation: the reconcile, then the manifest rewrite.
+            registry.park_unparked_windowed_sessions();
+            store.publish();
+            let ring_name = fdstore_ring_fd_name(id, None);
+            let stored_ring = store.0.fds.lock().unwrap().contains_key(&ring_name);
+
+            let late = numbered_lines(3 * FDSTORE_REPLAY_BYTES + 77);
+            for chunk in late.chunks(4096) {
+                assert!(registry.inject_output(id, chunk));
+            }
+            let mut written = restored.clone();
+            written.extend_from_slice(&late);
+            // A rename republishes the manifest; then the crash.
+            store.changed();
+            assert_eq!(registry.detach_parked_sessions(), 1);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let after = next.attach(id, Some(0)).unwrap();
+            let replay = after.replay.concat();
+            assert!(
+                replay == written,
+                "the second restore replays {} bytes of the {} the session took",
+                replay.len(),
+                written.len()
+            );
+            assert_eq!(after.missed_bytes, 0);
+            assert!(stored_ring, "activation stores {ring_name} beside the PTY");
+        }
+
+        // The alt-screen flag and the private modes travel with the ring's
+        // bytes. vim is open at the last manifest rewrite, then quits, a build
+        // prints, and the process is killed: the restore takes the bytes from
+        // the ring file, and must take the flags from the same moment, or a
+        // fresh attach replays nothing under a stale alt-screen flag.
+        #[test]
+        fn a_crash_restore_takes_the_terminal_flags_with_the_ring() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "flags-beside-the-bytes";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+
+            session.record_output(b"$ vim notes\r\n\x1b[?1049h\x1b[?1000h\x1b[?1006hvim's screen");
+            // A move republishes the manifest while vim is open.
+            store.changed();
+            session.record_output(b"\x1b[?1006l\x1b[?1000l\x1b[?1049l$ make\r\n");
+            let build = numbered_lines(FDSTORE_REPLAY_BYTES / 2);
+            for chunk in build.chunks(4096) {
+                session.record_output(chunk);
+            }
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let after = next.attach(id, Some(0)).unwrap();
+            let replay = after.replay.concat();
+            assert!(
+                replay.ends_with(&build),
+                "a fresh attach after the crash replays {} bytes, want the build output after vim quit",
+                replay.len()
+            );
+            assert!(!after.alt_screen, "vim quit before the crash");
+            assert!(
+                after.mode_reassert.is_empty(),
+                "vim's mouse modes are reasserted after it quit: {:?}",
+                String::from_utf8_lossy(&after.mode_reassert)
+            );
+        }
+
+        // A restore from a manifest that is not the seal's final write may end
+        // behind the previous process, so a client cursor from that process
+        // past the restored `seq` names bytes this process never had. That
+        // client gets the whole ring and a missed count for its notice, never
+        // an empty or shifted replay, even once new output moves the end past
+        // its cursor. A client of this process resumes as usual, and a cursor
+        // past the end gets the whole ring from any session.
+        #[test]
+        fn a_cursor_the_restore_cannot_honour_gets_the_whole_ring_and_a_notice() {
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            let id = "cursor-past-the-restore";
+            let restored = numbered_lines(1000);
+            let (import, _pair) = ringless_import(id, 5, &restored);
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let resume = |since: u64, generation: u64| {
+                registry
+                    .get_or_create_for_ws(
+                        Some(id),
+                        Some(since),
+                        opts(Some("w1"), None),
+                        TerminalPlacement::default(),
+                        Some(generation),
+                    )
+                    .unwrap()
+            };
+
+            // The previous process's client had read 500 bytes past it.
+            let ahead = resume(1500, 5);
+            assert!(
+                ahead.replay.concat() == restored,
+                "a cursor ahead of the restored seq replays {} bytes, want the whole ring",
+                ahead.replay.concat().len()
+            );
+            assert_eq!(
+                ahead.missed_bytes, 500,
+                "the notice counts the bytes past the restore"
+            );
+            drop(ahead);
+
+            let late = b"late output that moves the end past the old cursor\n".repeat(20);
+            assert!(registry.inject_output(id, &late));
+            let mut ring = restored.clone();
+            ring.extend_from_slice(&late);
+            let inside = resume(1500, 5);
+            assert!(
+                inside.replay.concat() == ring,
+                "an old cursor inside this process's numbering replays {} bytes, want the whole ring",
+                inside.replay.concat().len()
+            );
+            assert_eq!(inside.missed_bytes, 500);
+            drop(inside);
+
+            let first = registry.attach(id, Some(0)).unwrap();
+            let (cursor, generation) = (first.seq, first.generation);
+            drop(first);
+            assert!(registry.inject_output(id, b"after the reconnect\n"));
+            let resumed = resume(cursor, generation);
+            assert_eq!(resumed.replay.concat(), b"after the reconnect\n");
+            assert_eq!(resumed.missed_bytes, 0);
+            let end = resumed.seq;
+            drop(resumed);
+
+            let past = registry.attach(id, Some(end + 10)).unwrap();
+            assert_eq!(past.replay.concat().len() as u64, end);
+            assert_eq!(
+                past.missed_bytes, 10,
+                "a cursor past the end gets the whole ring"
+            );
+        }
     }
 }
