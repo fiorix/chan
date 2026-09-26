@@ -8846,6 +8846,91 @@ mod tests {
                 "the closed workspace still reads on"
             );
         }
+
+        /// A quit while the boot restore waits on a hung root keeps on every
+        /// row the restore has not finished: the one it waits on and the ones
+        /// queued behind it. None of them was tried, so nothing says the user
+        /// wants them off, and the next start restores all three.
+        #[test]
+        fn a_quit_during_a_restore_held_on_a_hung_root_keeps_its_rows_on() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let config = tempfile::tempdir().expect("config dir");
+            let dirs = [
+                tempfile::tempdir().expect("first root"),
+                tempfile::tempdir().expect("hung root"),
+                tempfile::tempdir().expect("last root"),
+            ];
+            let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
+                .expect("library");
+            let stored: Vec<String> = dirs
+                .iter()
+                .map(|dir| {
+                    library
+                        .register_workspace(dir.path())
+                        .expect("register")
+                        .root_path
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
+            embedded.install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
+            let overlay = Arc::clone(
+                embedded
+                    .workspace_overlay()
+                    .expect("the overlay is installed"),
+            );
+            for path in &stored {
+                overlay.set(path, true);
+            }
+            assert_eq!(overlay.on_paths(), stored, "fixture: the restore order");
+            let state = empty_state();
+            assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+
+            let stall = root_stall::stall(&stored[1]);
+            let app = tauri::test::mock_app();
+            let restoring = {
+                let handle = runtime.handle().clone();
+                let app_handle = app.handle().clone();
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    handle.block_on(restore_on_workspaces(app_handle, state))
+                })
+            };
+            assert!(
+                stall.wait_entered(std::time::Duration::from_secs(10)),
+                "fixture: the restore never reached the hung root"
+            );
+            let embedded = state.embedded().expect("embedded");
+            assert!(
+                embedded.is_workspace_mounted_by_key(Path::new(&stored[0])),
+                "fixture: the restore did not mount the root before the hung one"
+            );
+
+            // What `begin_normal_shutdown` does before its drain task runs.
+            state
+                .shutdown_started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            snapshot_workspaces(&state);
+            let mut on = overlay.on_paths();
+            on.sort();
+            let mut expected = stored.clone();
+            expected.sort();
+            assert_eq!(
+                on, expected,
+                "a quit during the restore turned off the rows it had not finished"
+            );
+
+            // The drain, then the root answering: the restore's remaining
+            // mounts are refused and it returns.
+            runtime.block_on(serve::stop_all(&state));
+            drop(stall);
+            restoring.join().expect("the restore thread");
+        }
     }
 
     /// What the on-set snapshot records beside the shared terminal tenant and
