@@ -290,6 +290,39 @@ describe("pointing at a node", () => {
     expect(p.onSelect).toHaveBeenLastCalledWith(null);
   });
 
+  test("a tap where hovering shows the pointer selects the node", () => {
+    const p = props();
+    const { api, canvas } = render(p);
+    // 7px out: past the drag slack, so the press starts a pan, and inside the
+    // click slack the hover reads.
+    const at = outside(api, p.nodes.map((x) => x.id), "notes/a.md", 7);
+    mouse(canvas, "mousemove", at.x, at.y);
+    flushSync();
+    expect(canvas.style.cursor).toBe("pointer");
+
+    mouse(canvas, "mousedown", at.x, at.y);
+    mouse(canvas, "mouseup", at.x, at.y);
+    expect(p.onSelect).toHaveBeenLastCalledWith("notes/a.md");
+  });
+
+  test("a double-click where hovering shows the pointer acts on the node", () => {
+    const p = props();
+    // The panel keeps the selection and acts on it when the canvas reports a
+    // double-click.
+    const actedOn: Array<string | null> = [];
+    p.onSelect = vi.fn((id: string | null) => {
+      p.selectedId = id;
+    });
+    p.onSetAsScope = vi.fn(() => {
+      actedOn.push(p.selectedId);
+    });
+    const { api, canvas } = render(p);
+    const at = outside(api, p.nodes.map((x) => x.id), "directory:notes", 7);
+
+    for (const type of ["mousedown", "mouseup", "mousedown", "mouseup", "dblclick"]) mouse(canvas, type, at.x, at.y);
+    expect(actedOn).toEqual(["directory:notes"]);
+  });
+
   test("a press just outside the disc pans the view instead of grabbing the node", () => {
     const p = props();
     const { api, canvas } = render(p);
