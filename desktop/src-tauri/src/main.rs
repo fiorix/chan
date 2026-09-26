@@ -8664,4 +8664,122 @@ mod tests {
         });
         assert!(!narrate_parked_migration(app.handle(), &state));
     }
+
+    /// The desktop paths that act on one local workspace while another
+    /// registered root's filesystem hangs under
+    /// `chan_workspace::paths::root_stall`.
+    mod hung_root {
+        use super::*;
+        use chan_workspace::paths::root_stall;
+
+        /// How long an operation that needs only healthy roots may take. Far
+        /// above any such operation's cost on a loaded host; one that waits on
+        /// the hung root never finishes, so the bound only decides how soon the
+        /// test reports it.
+        const HEALTHY_ROOT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+        /// A desktop whose library registers `hung` before `other`, so a walk
+        /// of the rows in order meets the hung root first, with `other`
+        /// mounted and a workspace overlay installed for the on-set snapshot.
+        struct HungRootDesktop {
+            state: Arc<AppState>,
+            /// The roots the two registry rows store.
+            hung: PathBuf,
+            other: PathBuf,
+            _dirs: [tempfile::TempDir; 3],
+        }
+
+        impl HungRootDesktop {
+            /// The desktop and the runtime its tenant runs on, which the
+            /// caller keeps until the desktop is dropped.
+            fn new() -> (tokio::runtime::Runtime, Self) {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("test runtime");
+                let config = tempfile::tempdir().expect("config dir");
+                let hung = tempfile::tempdir().expect("hung root");
+                let other = tempfile::tempdir().expect("other root");
+                let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
+                    .expect("library");
+                library
+                    .register_workspace(hung.path())
+                    .expect("register the hung root");
+                library
+                    .register_workspace(other.path())
+                    .expect("register the other root");
+                let stored: Vec<PathBuf> = library
+                    .list_workspaces()
+                    .into_iter()
+                    .map(|row| row.root_path)
+                    .collect();
+                assert_eq!(
+                    stored
+                        .iter()
+                        .map(|root| root.file_name())
+                        .collect::<Vec<_>>(),
+                    [hung.path().file_name(), other.path().file_name()],
+                    "fixture: the hung root lists first"
+                );
+                let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
+                embedded.install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
+                runtime
+                    .block_on(embedded.open_workspace(stored[1].to_str().expect("utf-8 root")))
+                    .expect("mount the other root");
+                let state = empty_state();
+                assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+                let desktop = Self {
+                    state,
+                    hung: stored[0].clone(),
+                    other: stored[1].clone(),
+                    _dirs: [config, hung, other],
+                };
+                (runtime, desktop)
+            }
+
+            fn on_paths(&self) -> Vec<String> {
+                self.state
+                    .embedded()
+                    .and_then(|embedded| embedded.workspace_overlay())
+                    .expect("the overlay is installed")
+                    .on_paths()
+            }
+        }
+
+        /// The on-set snapshot that a toggle, a close and a quit write reads
+        /// no root's filesystem: a registered root that hangs holds it up for
+        /// no other root and reads off.
+        #[test]
+        fn the_on_set_snapshot_does_not_wait_on_a_hung_root() {
+            let (_runtime, desktop) = HungRootDesktop::new();
+            let stall = root_stall::stall(&desktop.hung);
+            let state = Arc::clone(&desktop.state);
+            stall.finishes_beside("the on-set snapshot", HEALTHY_ROOT_BOUND, move || {
+                persist_workspaces(&state)
+            });
+            assert_eq!(
+                desktop.on_paths(),
+                [desktop.other.to_string_lossy().into_owned()],
+                "the snapshot is not the one mounted root"
+            );
+        }
+
+        /// A local workspace window's id resolves past a hung root listed
+        /// before the workspace it names.
+        #[test]
+        fn a_workspace_id_resolves_past_a_hung_root_listed_first() {
+            let (_runtime, desktop) = HungRootDesktop::new();
+            let wanted = chan_server::allocate_workspace_prefix(&desktop.other)
+                .expect("the other root's id");
+            let stall = root_stall::stall(&desktop.hung);
+            let state = Arc::clone(&desktop.state);
+            let resolved = stall.finishes_beside(
+                "resolving another workspace's id",
+                HEALTHY_ROOT_BOUND,
+                move || local_workspace_path(state.embedded().expect("embedded"), Some(wanted)),
+            );
+            assert_eq!(resolved, Ok(desktop.other.to_string_lossy().into_owned()));
+        }
+    }
 }

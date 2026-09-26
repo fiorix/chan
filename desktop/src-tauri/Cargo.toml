@@ -127,3 +127,7 @@ tauri = { workspace = true, features = ["test"] }
 # instantly instead of holding the suite for a real period; `start_paused` and
 # `tokio::time::advance` live behind tokio's own `test-util` feature.
 tokio = { workspace = true, features = ["test-util"] }
+# The hung-root tests stall one root's filesystem calls with
+# `chan_workspace::paths::root_stall`, a seam behind this feature. Features
+# enter no lockfile, so the test build gains the seam and nothing else.
+chan-workspace = { workspace = true, default-features = false, features = ["test-hooks"] }

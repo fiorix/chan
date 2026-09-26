@@ -245,6 +245,15 @@ impl EmbeddedServer {
         )
     }
 
+    /// Install a workspace overlay at `store`, which [`for_tests`](Self::for_tests)
+    /// leaves out, so a test can observe the on-set snapshot the desktop
+    /// writes there.
+    #[cfg(test)]
+    pub fn install_workspace_overlay_for_tests(&self, store: std::path::PathBuf) {
+        self.host
+            .install_workspace_overlay(Arc::new(chan_server::WorkspaceOverlay::open(store)));
+    }
+
     /// The shared window-title map the desktop writes (on window build /
     /// rename / destroy) and the server reads for `cs window list`.
     pub fn window_titles(&self) -> SharedWindowTitles {
