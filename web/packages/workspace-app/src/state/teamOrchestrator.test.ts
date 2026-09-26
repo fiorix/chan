@@ -129,16 +129,16 @@ describe("translateConfig", () => {
     expect(out.members[1].env.CHAN_TAB_NAME).toBe("@@Worker1");
   });
 
-  test("preserves user-supplied CHAN_TAB_NAME override", () => {
+  test("replaces a typed CHAN_TAB_NAME with the handle, keeping the member's other env", () => {
     const out = translateConfig(
       sample({
         members: [
-          { name: "Lead", command: "claude", env: "CHAN_TAB_NAME=Custom", isLead: true },
+          { name: "Lead", command: "claude", env: "CHAN_TAB_NAME=Custom\nFOO=bar", isLead: true },
           { name: "Worker1", command: "claude", env: "", isLead: false },
         ],
       }),
     );
-    expect(out.members[0].env.CHAN_TAB_NAME).toBe("Custom");
+    expect(out.members[0].env).toEqual({ CHAN_TAB_NAME: "@@Lead", FOO: "bar" });
   });
 
   test("tabs mode persists no member position", () => {
