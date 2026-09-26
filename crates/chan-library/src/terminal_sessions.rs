@@ -1692,9 +1692,13 @@ impl Registry {
             .clone()
     }
 
-    /// Park every live windowed session that is not parked yet: the
-    /// activation reconcile for sessions that spawned while parking was
-    /// still disabled (boot, before the inherited-fd restore applied).
+    /// Park every live windowed session that is not parked yet, and give a
+    /// parked one without a ring file its ring file: the activation reconcile
+    /// for sessions that spawned while parking was still disabled (boot,
+    /// before the inherited-fd restore applied) and for sessions restored
+    /// without a ring file (a manifest from before ring files, a partial
+    /// store, a ring file that could not be made), which would otherwise
+    /// restore from the manifest's tail for as long as they live.
     #[cfg(target_os = "linux")]
     pub fn park_unparked_windowed_sessions(&self) {
         let Some(parker) = self.fd_parker() else {
@@ -1706,12 +1710,16 @@ impl Registry {
                 .values()
                 .filter(|session| !session.closed.load(Ordering::Relaxed))
                 .filter(|session| session.window_id().is_some())
-                .filter(|session| !session.is_fdstore_parked())
+                .filter(|session| !session.is_fdstore_parked() || !session.has_ring_file())
                 .cloned()
                 .collect()
         };
         for session in candidates {
-            session.park_fdstore(&parker);
+            if session.is_fdstore_parked() {
+                session.park_ring_fdstore(&parker);
+            } else {
+                session.park_fdstore(&parker);
+            }
         }
     }
 
@@ -5021,6 +5029,94 @@ impl Session {
         // Exit/close may have LANDED without consuming the reservation yet
         // (between the closed swap and its take): converge through the
         // take-once unpark, which exactly one of the two sides wins.
+        if self.closed.load(Ordering::Relaxed)
+            || self.exit.lock().expect("session exit poisoned").is_some()
+        {
+            self.unpark_fdstore();
+        }
+    }
+
+    /// Whether the session's parked state names a ring file.
+    #[cfg(target_os = "linux")]
+    fn has_ring_file(&self) -> bool {
+        self.fdstore_parked
+            .lock()
+            .expect("terminal fdstore parked poisoned")
+            .as_ref()
+            .is_some_and(|parked| parked.ring_name.is_some())
+    }
+
+    /// Park a ring file for a session whose PTY is parked without one: create
+    /// it, name it in the parked state, seed it from the live ring, then store
+    /// it alone through the hook, which counts it against the store's cap and
+    /// commits the manifest. A refusal leaves the session as it was, its PTY
+    /// parked and restoring from the manifest's tail.
+    #[cfg(target_os = "linux")]
+    fn park_ring_fdstore(&self, parker: &FdStoreParker) {
+        if self.closed.load(Ordering::Relaxed) || self.has_ring_file() {
+            return;
+        }
+        let capacity = self.ring.lock().expect("terminal ring poisoned").capacity();
+        let file = match RingFile::create(capacity) {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(
+                    session = %self.id, error = %error,
+                    "creating the terminal ring file failed; the session keeps restoring from the manifest's tail"
+                );
+                return;
+            }
+        };
+        let ring_name = fdstore_ring_fd_name(&self.id, self.child_pid);
+        let pty_name = {
+            let mut parked = self
+                .fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned");
+            let Some(parked) = parked.as_mut().filter(|parked| parked.ring_name.is_none()) else {
+                return;
+            };
+            parked.ring_name = Some(ring_name.clone());
+            parked.name.clone()
+        };
+        // Whether the parked state still names this pair: an unpark takes it
+        // once, and a restart's new incarnation parks under other names.
+        let still_ours = || {
+            self.fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned")
+                .as_ref()
+                .is_some_and(|parked| {
+                    parked.name == pty_name && parked.ring_name.as_deref() == Some(&*ring_name)
+                })
+        };
+        let clear_ring_name = || {
+            if let Some(parked) = self
+                .fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned")
+                .as_mut()
+                .filter(|parked| parked.name == pty_name)
+            {
+                parked.ring_name = None;
+            }
+        };
+        let Some(ring_fd) = self.start_ring_mirror(file) else {
+            clear_ring_name();
+            return;
+        };
+        if !parker.park(&[(ring_name.as_str(), ring_fd.as_fd())]) {
+            self.stop_ring_mirror();
+            clear_ring_name();
+            return;
+        }
+        if !still_ours() {
+            // The unpark that consumed the parked state removed the ring's
+            // name before this store landed, so this is its only remover.
+            parker.unpark(&[ring_name.as_str()]);
+            self.stop_ring_mirror();
+            return;
+        }
         if self.closed.load(Ordering::Relaxed)
             || self.exit.lock().expect("session exit poisoned").is_some()
         {
