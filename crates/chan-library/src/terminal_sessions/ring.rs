@@ -187,6 +187,10 @@ pub(super) struct RingFile {
     capacity: u64,
     start: u64,
     end: u64,
+    /// How many more writes succeed before one fails as a killed process's
+    /// would, so a test can stop an append after any of its writes.
+    #[cfg(test)]
+    writes_left: std::cell::Cell<Option<usize>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -217,6 +221,8 @@ impl RingFile {
             capacity,
             start: 0,
             end: 0,
+            #[cfg(test)]
+            writes_left: std::cell::Cell::new(None),
         };
         ring.reset(0)?;
         Ok(ring)
@@ -239,6 +245,8 @@ impl RingFile {
             capacity,
             start: 0,
             end: 0,
+            #[cfg(test)]
+            writes_left: std::cell::Cell::new(None),
         })
     }
 
@@ -313,7 +321,7 @@ impl RingFile {
             .copy_from_slice(&self.capacity.to_le_bytes());
         header[layout::WINDOW_AT..layout::WINDOW_AT + layout::WINDOW_LEN]
             .copy_from_slice(&self.window(seq, seq));
-        self.file.write_all_at(&header, 0)?;
+        self.write_at(&header, 0)?;
         self.start = seq;
         self.end = seq;
         Ok(())
@@ -351,18 +359,26 @@ impl RingFile {
     fn write_data(&self, at: u64, bytes: &[u8]) -> io::Result<()> {
         let offset = at % self.capacity;
         let first = bytes.len().min((self.capacity - offset) as usize);
-        self.file
-            .write_all_at(&bytes[..first], layout::HEADER_LEN + offset)?;
+        self.write_at(&bytes[..first], layout::HEADER_LEN + offset)?;
         if first < bytes.len() {
-            self.file
-                .write_all_at(&bytes[first..], layout::HEADER_LEN)?;
+            self.write_at(&bytes[first..], layout::HEADER_LEN)?;
         }
         Ok(())
     }
 
+    fn write_at(&self, bytes: &[u8], at: u64) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(left) = self.writes_left.get() {
+            if left == 0 {
+                return Err(io::Error::other("the process died before this write"));
+            }
+            self.writes_left.set(Some(left - 1));
+        }
+        self.file.write_all_at(bytes, at)
+    }
+
     fn publish(&mut self, start: u64, end: u64) -> io::Result<()> {
-        self.file
-            .write_all_at(&self.window(start, end), layout::WINDOW_AT as u64)?;
+        self.write_at(&self.window(start, end), layout::WINDOW_AT as u64)?;
         self.start = start;
         self.end = end;
         Ok(())
@@ -425,36 +441,41 @@ mod tests {
         assert_eq!(reread(&file).unwrap(), (44, bytes[40..44].to_vec()));
     }
 
-    // A process can die between any two writes of an append. Whatever the
-    // next process reads must be the stream's own bytes: the header may lag
-    // the data, but never count a slot the data has already overwritten.
+    // A process can die between any two writes of an append. The test drives
+    // `append` itself and stops it after each of its writes in turn: the next
+    // process must read only the stream's own bytes, the end moving only once
+    // the append completes. The ring's next slot is 6, so a 12-byte append
+    // wraps (its data is two writes, and stopping between them is the
+    // half-written wrap) and lands on the oldest slots; a 30-byte append is
+    // longer than the ring and lands on all of them.
     #[test]
-    fn a_process_killed_inside_an_append_leaves_only_intact_bytes() {
-        let bytes = stream(16 + 30);
-        // A full ring, then a 5-byte append that lands on its oldest slots,
-        // and a 30-byte one that lands on all of them.
-        for (next, len) in [(16u64, 5usize), (16, 30)] {
-            for data_written in [false, true] {
+    fn an_append_killed_after_any_of_its_writes_leaves_only_intact_bytes() {
+        let bytes = stream(22 + 30);
+        for len in [12usize, 30] {
+            let end = 22 + len as u64;
+            let mut completed = false;
+            for writes in 0.. {
                 let mut file = RingFile::create(16).unwrap();
-                file.append(0, &bytes[..16]).unwrap();
-                let end = next + len as u64;
-                let kept_at = end - (len as u64).min(16);
-                file.retire(end - 16).unwrap();
-                if data_written {
-                    file.write_data(kept_at, &bytes[kept_at as usize..end as usize])
-                        .unwrap();
-                }
-                // Killed here, before the end is published.
+                file.append(0, &bytes[..22]).unwrap();
+                file.writes_left.set(Some(writes));
+                let appended = file.append(22, &bytes[22..end as usize]);
+                file.writes_left.set(None);
                 let (read_end, read) = reread(&file).unwrap();
                 let read_start = read_end - read.len() as u64;
-                assert_eq!(read_end, 16, "the end is published last");
                 assert_eq!(
                     read,
-                    &bytes[read_start as usize..16],
-                    "a {len}-byte append killed {} its data write",
-                    if data_written { "after" } else { "before" }
+                    &bytes[read_start as usize..read_end as usize],
+                    "a {len}-byte append stopped after {writes} writes"
                 );
+                if appended.is_ok() {
+                    assert_eq!(read_end, end, "a completed append publishes its end");
+                    assert_eq!(read.len(), 16);
+                    completed = true;
+                    break;
+                }
+                assert_eq!(read_end, 22, "the end is published last");
             }
+            assert!(completed, "the {len}-byte append completes");
         }
     }
 
