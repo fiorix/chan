@@ -12,7 +12,7 @@ import { classifyFileActions } from "../state/fileActions";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 import type { TreeEntry } from "../api/types";
 import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
-import { graphData } from "../state/graphData.svelte";
+import { graphData, invalidateGraph } from "../state/graphData.svelte";
 import type { GraphView, ReportFileStats, ReportPrefix } from "../api/types";
 
 type Entry = {
@@ -627,5 +627,56 @@ describe("the report behind the inspector", () => {
     expect(api.reportDir).not.toHaveBeenCalled();
     expect(api.reportPrefix).not.toHaveBeenCalled();
     expect(api.reportFileStream).not.toHaveBeenCalled();
+  });
+});
+
+/// A graph stream that fails on a later timer turn, every time it is asked.
+function failingStream(): Promise<GraphView> {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error("stream down")), 0));
+}
+
+describe("the shared graph load", () => {
+  // Unmount first: a body still mounted would answer the invalidation with a
+  // load of its own, which the next test would then share.
+  afterEach(() => {
+    for (const app of mounted.splice(0)) unmount(app);
+    invalidateGraph();
+  });
+
+  test("a graph stream that keeps failing is started once while the file is shown", async () => {
+    h.entries = [file("notes/a.md")];
+    vi.mocked(api.graphStream).mockImplementation(failingStream);
+    const target = await render({ path: "notes/a.md", showRefs: true });
+    await settle();
+    expect(api.graphStream).toHaveBeenCalledTimes(1);
+    expect(target.textContent).toContain("references unavailable: stream down");
+  });
+
+  test("a graph that streams in batches starts the file's backlinks once", async () => {
+    h.entries = [file("notes/a.md")];
+    const node = { kind: "file", id: "notes/a.md", label: "a.md", path: "notes/a.md" } as const;
+    vi.mocked(api.graphStream).mockImplementation(async (_scope, opts = {}) => {
+      for (let batch = 0; batch < 3; batch += 1) {
+        await new Promise((r) => setTimeout(r, 0));
+        opts.onNodes?.([node], { nodes: [node], edges: [] });
+      }
+      return { nodes: [node], edges: [] };
+    });
+    await render({ path: "notes/a.md", showRefs: true });
+    await settle();
+    expect(api.graphStream).toHaveBeenCalledTimes(1);
+    expect(api.backlinksStream).toHaveBeenCalledTimes(1);
+  });
+
+  test("an invalidated graph loads again while the file is shown", async () => {
+    // A watcher event invalidates the graph; with no browser or graph tab open
+    // nothing else reloads it for this inspector.
+    h.entries = [file("notes/a.md")];
+    vi.mocked(api.graphStream).mockResolvedValue({ nodes: [], edges: [] });
+    await render({ path: "notes/a.md", showRefs: true });
+    expect(api.graphStream).toHaveBeenCalledTimes(1);
+    invalidateGraph();
+    await settle();
+    expect(api.graphStream).toHaveBeenCalledTimes(2);
   });
 });

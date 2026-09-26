@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
 import type { GraphView, ReportPrefix } from "../api/types";
-import { graphData } from "../state/graphData.svelte";
+import { graphData, invalidateGraph } from "../state/graphData.svelte";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 
 const h = vi.hoisted(() => ({
@@ -261,5 +261,24 @@ describe("without a workspace behind the window", () => {
     expect(api.reportPrefix).not.toHaveBeenCalled();
     expect(target.textContent).not.toContain("loading report");
     expect(target.querySelector(".refs-error")).toBeNull();
+  });
+});
+
+describe("the shared graph load", () => {
+  // Unmount first: a body still mounted would answer the invalidation with a
+  // load of its own, which the next test would then share.
+  afterEach(() => {
+    for (const app of mounted.splice(0)) unmount(app);
+    invalidateGraph();
+  });
+
+  test("a graph stream that keeps failing is started once", async () => {
+    graphData.view = null;
+    vi.mocked(api.graphStream).mockImplementation(
+      () => new Promise((_, reject) => setTimeout(() => reject(new Error("stream down")), 0)),
+    );
+    await render();
+    await settle();
+    expect(api.graphStream).toHaveBeenCalledTimes(1);
   });
 });
