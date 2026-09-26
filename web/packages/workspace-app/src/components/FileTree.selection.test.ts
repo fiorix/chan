@@ -17,6 +17,7 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
 import { allCommands, commandContext } from "../state/commands";
@@ -160,6 +161,35 @@ describe("Delete on a multi-selection", () => {
     await gone("a.md", "docs/x.md", "docs/y.md");
     expect(remove.mock.calls.map(([path]) => path).sort()).toEqual(["a.md", "docs"]);
     expect(ui.status).toBeNull();
+  });
+
+  test("a selection that folds to one folder is cleared once the folder goes", async () => {
+    row("docs")!.querySelector<HTMLButtonElement>("button.twirl")!.click();
+    await vi.waitFor(() => expect(row("docs/y.md")).toBeDefined());
+    fbSelectSet(["docs", "docs/x.md", "docs/y.md"], "docs");
+    await pressDelete();
+
+    expect(await confirmMessage()).toBe('Delete directory "docs" and its 2 items?');
+    await confirm();
+
+    await gone("docs/x.md", "docs/y.md");
+    await vi.waitFor(() => expect(browserSelection.paths).toEqual([]));
+    expect(browserSelection.path).toBeNull();
+  });
+
+  test("a path already gone when its delete is sent leaves the selection", async () => {
+    const remove = api.remove;
+    vi.spyOn(api, "remove").mockImplementation((path: string) =>
+      path === "b.md" ? Promise.reject(new ApiError(404, "not found")) : remove(path),
+    );
+    fbSelectSet(["a.md", "b.md", "c.md"], "c.md");
+    await pressDelete();
+    await confirmMessage();
+    await confirm();
+
+    await gone("a.md", "c.md");
+    await vi.waitFor(() => expect(ui.status).toBe("deleted 2 of 3; b.md: not found"));
+    expect(browserSelection.paths).toEqual([]);
   });
 });
 
