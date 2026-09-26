@@ -9,18 +9,24 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 // static import still sees the mocked xterm modules.
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
+import Pane from "./Pane.svelte";
+import { api } from "../api/client";
 import type { SurveySpec } from "../api/client";
 import { openExternalUrl } from "../editor/external_links";
 import { showSurvey, surveyState } from "../state/survey.svelte";
 import {
   bumpTabFocusPulse,
+  layout,
+  type LeafNode,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
+import { ownershipWarnings } from "../__tests__/svelteWarnings";
 import {
   installTerminalDom,
   resetTerminals,
   seatTerminals,
+  TERMINAL_PANE,
   TerminalSocket,
   terminalTab,
   xterm,
@@ -215,6 +221,25 @@ describe("TerminalTab activity frames", () => {
 });
 
 describe("TerminalTab metadata settlement", () => {
+  test("a fresh unnamed terminal in a pane takes the server's next name before it dials", async () => {
+    const warnings = ownershipWarnings();
+    const next = vi.spyOn(api, "terminalNextName").mockResolvedValue("t7");
+    try {
+      const [tab] = seatTerminals([terminalTab({ pendingGlobalName: true })]);
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(Pane, { target, props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode } }));
+      await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(tab!.title).toBe("t7");
+      expect(tab!.pendingGlobalName).toBe(false);
+      expect(warnings()).toEqual([]);
+    } finally {
+      next.mockRestore();
+    }
+  });
+
   test("blur sends one pair, disables both fields, and adopts the settled ack", async () => {
     const [tab] = seatTerminals([
       terminalTab({ title: "url-name", group: "url-group" }),

@@ -21,6 +21,7 @@ import { allCommands } from "../state/commands";
 import "../state/commands/install";
 import type { MockWorkspaceStore } from "../demo/store";
 import { githubDarkHighlight, githubLightHighlight } from "../editor/highlight";
+import { ownershipWarnings } from "../__tests__/svelteWarnings";
 import {
   fileOps,
   hybridSurfaceThemes,
@@ -32,6 +33,7 @@ import {
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import {
   bumpTabFocusPulse,
+  ensureTabSlidePreview,
   layout,
   saveTab,
   type FileTab,
@@ -197,6 +199,17 @@ async function render(
   mounted.push(component);
   await settle();
   return { target, component };
+}
+
+/// Seats the tab alone in a pane and mounts the pane, the parent the app
+/// mounts a tab body under: Svelte checks prop ownership only below a parent.
+async function inPane(tab: FileTab): Promise<{ target: HTMLElement; tab: FileTab }> {
+  const live = seat(tab);
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(Pane, { target, props: { pane: layout.nodes[PANE] as LeafNode } }));
+  await settle();
+  return { target, tab: live };
 }
 
 function editorView(target: HTMLElement): EditorView {
@@ -687,6 +700,29 @@ describe("the slide chord", () => {
     expect(tab.slidePreview?.mode).toBe("play");
   });
 
+  test("the first preview state handed out is the state the tab holds", () => {
+    const tab = seat(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
+    const preview = ensureTabSlidePreview(tab);
+    expect(preview).toBe(tab.slidePreview);
+
+    // Once the tab has read a field, only a write through its own state
+    // reaches that field.
+    expect(tab.slidePreview?.index).toBe(0);
+    preview.index = 2;
+    expect(tab.slidePreview?.index).toBe(2);
+  });
+
+  test("a first Mod+Shift+Enter keeps the deck in play mode", async () => {
+    const warnings = ownershipWarnings();
+    const { target, tab } = await inPane(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
+
+    press(target.querySelector(".cm-content")!, { ctrlKey: true, shiftKey: true });
+    await settle(2);
+    expect(h.previews.map((p) => p.mode)).toEqual(["play"]);
+    expect(tab.slidePreview).toEqual({ open: true, index: 0, mode: "play" });
+    expect(warnings()).toEqual([]);
+  });
+
   test("stands down off a deck, while loading, with Alt, or on the other platform's Mod", async () => {
     const plain = seat(fileTab());
     const a = await render(plain);
@@ -897,6 +933,39 @@ describe("focus follows the active pane", () => {
   }
 });
 
+describe("an edit in a pane's editor", () => {
+  for (const mode of ["wysiwyg", "source"] as const) {
+    test(`reaches the tab from the ${mode} editor`, async () => {
+      const warnings = ownershipWarnings();
+      const { target, tab } = await inPane(fileTab({ mode }));
+      const view = editorView(target);
+
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "More.\n" } });
+      flushSync();
+      expect(tab.content).toBe(`${DOC}More.\n`);
+      expect(warnings()).toEqual([]);
+    });
+  }
+
+  test("reaches the tab from a table cell", async () => {
+    const warnings = ownershipWarnings();
+    const csv = "name,count\nfigs,1\n";
+    const { target, tab } = await inPane(
+      fileTab({ path: "notes/stock.csv", fileKind: "text", mode: "table", content: csv, saved: csv }),
+    );
+
+    target.querySelector<HTMLElement>("tbody td")!.click();
+    await settle(2);
+    const input = target.querySelector<HTMLInputElement>("tbody td input")!;
+    input.value = "plums";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle(2);
+    expect(tab.content).toBe("name,count\nplums,1\n");
+    expect(warnings()).toEqual([]);
+  });
+});
+
 describe("a canvas tab", () => {
   const BOARD = '{"type":"excalidraw","elements":[]}';
 
@@ -949,6 +1018,7 @@ describe("a canvas tab", () => {
   });
 
   test("tells the island when its tab is hidden in the pane, and takes its scene into the buffer", async () => {
+    const warnings = ownershipWarnings();
     const board = canvasTab();
     layout.nodes = {
       [PANE]: { kind: "leaf", id: PANE, tabs: [board, fileTab({ id: "doc-1" })], activeTabId: board.id },
@@ -969,6 +1039,7 @@ describe("a canvas tab", () => {
     const next = '{"type":"excalidraw","elements":[{"id":"a"}]}';
     (island.props?.onSceneChange as (json: string) => void)(next);
     expect((pane.tabs[0] as FileTab).content).toBe(next);
+    expect(warnings()).toEqual([]);
   });
 });
 

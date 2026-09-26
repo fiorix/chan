@@ -47,7 +47,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import { api } from "../api/client";
 import { allCommands } from "../state/commands";
 import "../state/commands/install";
-import { isRichPromptVisible, richPrompt } from "../state/richPrompt.svelte";
+import { isRichPromptVisible, richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { chordFor } from "../state/shortcuts";
 import {
   beginPendingPrompt,
@@ -57,6 +57,7 @@ import {
   type LeafNode,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
+import { ownershipWarnings } from "../__tests__/svelteWarnings";
 import {
   attach,
   installTerminalDom,
@@ -200,6 +201,16 @@ describe("the doors to the composer", () => {
     expect(isRichPromptVisible(tab.id)).toBe(true);
 
     expect(await openBodyMenu(target)).toContain("Hide Rich Prompt");
+  });
+
+  test("a composer opened on a terminal without a draft records the draft it creates", async () => {
+    const warnings = ownershipWarnings();
+    const { tab } = await attached();
+
+    showRichPromptForTab(tab.id);
+    await vi.waitFor(() => expect(tab.richPromptDraftPath).toBe(".Drafts/rp/draft.md"));
+    expect(api.createDraft).toHaveBeenCalledTimes(1);
+    expect(warnings()).toEqual([]);
   });
 
   test("a window without a drafts store offers no menu row", async () => {
