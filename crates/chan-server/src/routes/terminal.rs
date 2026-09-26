@@ -3761,10 +3761,14 @@ mod tests {
     const WINCH_REPORTER: &str = r#"trap 'w=1' WINCH; printf '<ARMED>\n'; while :; do if [ -n "$w" ]; then w=; printf "<WINCH %s>\n" "$(stty size)"; fi; sleep 0.05; done"#;
 
     fn create_quiet_terminal(state: &AppState, command: &str) -> AttachHandle {
+        create_terminal_at(state, command, pty_size(Some(80), Some(24)))
+    }
+
+    fn create_terminal_at(state: &AppState, command: &str, size: PtySize) -> AttachHandle {
         state
             .terminal_sessions
             .create(CreateOptions {
-                size: pty_size(Some(80), Some(24)),
+                size,
                 tab_name: None,
                 tab_group: None,
                 window_id: None,
@@ -3998,6 +4002,37 @@ mod tests {
                 .await,
             vec![(110, 35), (110, 35)],
             "the re-attach resizes the relaunched 90x30 PTY to the socket's 110x35, then redraws"
+        );
+
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    // The pane-split shape: a window re-attaching narrower than the PTY
+    // shrinks it before the redraw nudge, so the repaint lands at the size
+    // the narrower renderer has.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reattach_at_a_smaller_size_shrinks_the_pty_before_the_redraw() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let id = create_terminal_at(&state, "sleep 600", pty_size(Some(120), Some(40)))
+            .id()
+            .to_owned();
+        let mut socket =
+            dial_terminal(address, &format!("cols=60&rows=20&session={id}&since=0")).await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            ready_size(&frames),
+            (60, 20),
+            "ready carries the size the client declared"
+        );
+        assert_eq!(
+            LiveFrames::default()
+                .resizes_before(&mut socket, (100, 30))
+                .await,
+            vec![(60, 20), (60, 20)],
+            "the attach shrinks the 120x40 PTY to the client's 60x20, then the redraw repaints at it"
         );
 
         state.terminal_sessions.close(&id, CloseReason::Explicit);
