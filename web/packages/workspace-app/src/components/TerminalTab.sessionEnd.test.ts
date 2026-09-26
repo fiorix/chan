@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
 // How a terminal's session ends, as the window's saved session records it.
-// A devserver shutdown is a restart the PTY outlives, so the blob keeps the
-// session id and the reloaded window reattaches to the restored PTY; every
+// After a devserver shutdown the next process can restore the PTY, so the
+// blob keeps the session id and the reloaded window reattaches to it; every
 // other `closed` reason and a process exit drop it, and an explicit close
 // deletes the blob with its tab. A TerminalTab is mounted over the stand-in
 // xterm and attached on its socket; the assertions read the blobs the
