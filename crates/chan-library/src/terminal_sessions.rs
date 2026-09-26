@@ -10383,5 +10383,212 @@ mod tests {
             assert!(registry.close("imported-session", CloseReason::Explicit));
             assert_eq!(hook.unpark_calls(), vec![format!("unpark:{name}")]);
         }
+
+        /// A stand-in for the systemd fd store and the restart manifest file:
+        /// `park` keeps a duplicate of every fd it is handed under its store
+        /// name and publishes the manifest from a registry snapshot, as the
+        /// devserver's additive commit does. What the next process imports is
+        /// the last published manifest joined with the stored fds by name.
+        #[derive(Clone, Default)]
+        struct StoreSim(Arc<StoreSimState>);
+
+        #[derive(Default)]
+        struct StoreSimState {
+            fds: Mutex<HashMap<String, OwnedFd>>,
+            registry: Mutex<std::sync::Weak<Registry>>,
+            published: Mutex<Vec<FdStoreManifestEntry>>,
+        }
+
+        impl StoreSim {
+            fn serve(&self, registry: &Arc<Registry>) {
+                *self.0.registry.lock().unwrap() = Arc::downgrade(registry);
+                registry.install_fd_parker(FdStoreParker::new(self.clone()));
+            }
+
+            /// Rewrite the manifest from the live parked set.
+            fn publish(&self) {
+                let registry = self.0.registry.lock().unwrap().upgrade();
+                if let Some(registry) = registry {
+                    *self.0.published.lock().unwrap() = registry.fdstore_manifest_sessions("t");
+                }
+            }
+
+            /// The next process's imports, built from the last published
+            /// manifest and the fds the store retained.
+            fn imports(&self) -> Vec<FdStoreSessionImport> {
+                let mut fds = self.0.fds.lock().unwrap();
+                std::mem::take(&mut *self.0.published.lock().unwrap())
+                    .into_iter()
+                    .map(|entry| FdStoreSessionImport {
+                        master_fd: fds
+                            .remove(&entry.fd_name)
+                            .expect("the store retains every manifested PTY"),
+                        meta: entry.meta,
+                        replay: entry.replay,
+                    })
+                    .collect()
+            }
+        }
+
+        impl FdStorePark for StoreSim {
+            fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool {
+                self.0.fds.lock().unwrap().insert(
+                    fd_name.to_string(),
+                    fd.try_clone_to_owned().expect("duplicate a parked fd"),
+                );
+                self.publish();
+                true
+            }
+
+            fn unpark(&self, fd_name: &str) {
+                self.0.fds.lock().unwrap().remove(fd_name);
+            }
+
+            fn adopt(&self, _fd_name: &str) -> bool {
+                true
+            }
+
+            fn changed(&self) {
+                self.publish();
+            }
+        }
+
+        /// The live ring these tests run with: over the manifest's replay
+        /// tail and under the default 2 MiB ring.
+        const LIVE_RING_BYTES: usize = 4 * FDSTORE_REPLAY_BYTES;
+
+        /// A windowed session over a real PTY master with no child process,
+        /// registered and parked in `registry`, so every byte in its ring is
+        /// one the test recorded. The returned pair keeps the slave open.
+        fn parked_session_without_a_child(
+            registry: &Registry,
+            id: &str,
+        ) -> (Arc<Session>, portable_pty::PtyPair) {
+            let pair = native_pty_system().openpty(test_size()).unwrap();
+            let master_fd = clone_master_fd(pair.master.as_raw_fd().unwrap()).unwrap();
+            let template =
+                Arc::try_unwrap(test_agent_session(LIVE_RING_BYTES, id, None, None, None, &[]).0)
+                    .expect("a fresh test session has one owner");
+            let session = Arc::new(Session {
+                master_fd: Some(master_fd),
+                window_id: Mutex::new(Some("w1".to_string())),
+                ..template
+            });
+            registry
+                .sessions
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), session.clone());
+            registry.park_if_windowed(&session);
+            assert!(session.is_fdstore_parked());
+            (session, pair)
+        }
+
+        /// Distinct printable lines, so a replay that is short, shifted or
+        /// reordered cannot compare equal.
+        fn numbered_lines(bytes: usize) -> Vec<u8> {
+            let mut out = Vec::with_capacity(bytes + 32);
+            let mut line = 0u64;
+            while out.len() < bytes {
+                out.extend_from_slice(format!("ring line {line:08}\n").as_bytes());
+                line += 1;
+            }
+            out.truncate(bytes);
+            out
+        }
+
+        // A restart must not shorten a session's replay: a fresh attach after
+        // the import replays what the same attach replayed before it, the
+        // whole live ring, not the manifest's bounded tail.
+        #[test]
+        fn a_restore_replays_the_whole_parked_ring_not_the_manifest_tail() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "ring-over-the-tail";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+
+            let written = numbered_lines(3 * FDSTORE_REPLAY_BYTES + 123);
+            for chunk in written.chunks(4096) {
+                session.record_output(chunk);
+            }
+            let before = registry.attach(id, Some(0)).unwrap();
+            assert_eq!(before.missed_bytes, 0);
+            assert!(
+                before.replay.concat() == written,
+                "the live ring holds every byte written"
+            );
+            drop(before);
+
+            // A graceful restart: the final manifest write, then the detach.
+            store.publish();
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let after = next.attach(id, Some(0)).unwrap();
+            assert_eq!(
+                after.missed_bytes, 0,
+                "a fresh attach after the restore misses bytes the parked ring held"
+            );
+            assert_eq!(after.seq, written.len() as u64);
+            let replay = after.replay.concat();
+            assert!(
+                replay == written,
+                "the restored replay is {} bytes of the {} the parked ring held",
+                replay.len(),
+                written.len()
+            );
+        }
+
+        // Output does not refresh the manifest, so a crash restores from the
+        // manifest published at the last park, move or rename. The output
+        // the session took after that publication must still reach a fresh
+        // attach, with `seq` counting it.
+        #[test]
+        fn a_crash_restore_keeps_output_written_after_the_last_manifest() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "ring-after-the-manifest";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+
+            let early = numbered_lines(1000);
+            session.record_output(&early);
+            // A metadata change republishes the manifest mid-life, as a
+            // cross-window move does; nothing republishes it after this.
+            store.changed();
+            let late = numbered_lines(FDSTORE_REPLAY_BYTES / 2);
+            for chunk in late.chunks(4096) {
+                session.record_output(chunk);
+            }
+            let mut written = early.clone();
+            written.extend_from_slice(&late);
+
+            // The crash: no final manifest write. The store keeps the fds.
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let after = next.attach(id, Some(0)).unwrap();
+            assert_eq!(after.missed_bytes, 0);
+            let replay = after.replay.concat();
+            assert!(
+                replay == written,
+                "the crash restore replays {} bytes, the session took {} (the manifest saw {})",
+                replay.len(),
+                written.len(),
+                early.len()
+            );
+            assert_eq!(
+                after.seq,
+                written.len() as u64,
+                "the restored seq counts the output written after the manifest"
+            );
+        }
     }
 }
