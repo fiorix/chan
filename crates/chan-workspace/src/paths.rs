@@ -433,8 +433,8 @@ pub fn canonicalize_normalized(workspace_root: &Path) -> PathBuf {
 }
 
 /// Test seam: hold every canonicalization of one root, and of any path under
-/// it, until the test releases it, the way a stalled network mount holds the
-/// syscall.
+/// it, and every health revalidation of a workspace at that root, until the
+/// test releases it, the way a stalled network mount holds the syscall.
 ///
 /// Compiled for this crate's tests and for downstream test builds that enable
 /// `test-hooks`: chan-server's tests link chan-workspace as a normal
@@ -479,7 +479,8 @@ pub mod root_stall {
     }
 
     /// Stall every canonicalization of `root` and of the paths under it, by
-    /// the spelling given or by its canonical one, until the returned guard
+    /// the spelling given or by its canonical one, and every health
+    /// revalidation of a workspace rooted there, until the returned guard
     /// drops. Panics when `root` is already stalled.
     pub fn stall(root: impl Into<PathBuf>) -> RootStall {
         let root = root.into();

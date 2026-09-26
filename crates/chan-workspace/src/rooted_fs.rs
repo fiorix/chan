@@ -229,6 +229,8 @@ impl RootedFs {
     /// Returns `Ok(true)` when the handle was replaced, `Ok(false)` when the
     /// existing one is still good, and the typed root condition otherwise.
     pub(crate) fn revalidate(&self) -> Result<bool> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::paths::root_stall::stall_point(&self.root_path);
         #[cfg(unix)]
         {
             let (current_canon, current_identity) = {
