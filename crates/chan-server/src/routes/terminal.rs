@@ -713,8 +713,16 @@ pub(crate) fn validate_terminal_env(
             restated.as_deref().unwrap_or(value),
             tab_name.as_deref(),
         ) {
+            // Two of them have a flag of their own.
+            let instead = if key.eq_ignore_ascii_case("CHAN_TAB_NAME") {
+                "; name the terminal instead (cs --tab-name)"
+            } else if key.eq_ignore_ascii_case("CHAN_TAB_GROUP") {
+                "; give the terminal a group instead (cs --tab-group)"
+            } else {
+                ""
+            };
             return Err(format!(
-                "terminal env key {key} is set by chan for every terminal and cannot be overridden"
+                "terminal env key {key} is chan's own and cannot be set{instead}"
             ));
         }
     }
@@ -2599,6 +2607,17 @@ mod tests {
             let refused = validate_terminal_env(&env, Some("@@Lead"))
                 .expect_err(&format!("{key} is chan's own and must be refused"));
             assert!(refused.contains(key), "{key}: {refused}");
+            assert!(refused.contains("chan's own"), "{key}: {refused}");
+            let flag = match key {
+                "CHAN_TAB_NAME" => Some("--tab-name"),
+                "CHAN_TAB_GROUP" => Some("--tab-group"),
+                _ => None,
+            };
+            assert_eq!(
+                flag.is_some_and(|flag| refused.contains(flag)),
+                flag.is_some(),
+                "{key}: {refused}"
+            );
         }
         // Every other key reaches the child, a caller-set CHAN_ key included.
         let env = BTreeMap::from([
