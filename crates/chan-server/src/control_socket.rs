@@ -162,8 +162,9 @@ enum WindowCommand {
     },
     // Every survey still open in the target window, empty when none is: a
     // survey absent from the list has no request behind it, and one listed is
-    // still waiting for its reply. Sent to one socket, never broadcast, when a
-    // window's socket attaches.
+    // still waiting for its reply. Sent to one socket, never broadcast: when a
+    // window's socket attaches, and when its pump lagged and may have skipped
+    // an `open_survey` or `close_survey`.
     SurveySync {
         surveys: Vec<SurveySyncEntry>,
     },
@@ -2574,8 +2575,9 @@ async fn handle_survey(
 /// While its overlay is up the survey is recorded open on the bus, from before
 /// the `open_survey` push until before any `close_survey` push, and dropped on
 /// every other exit too. `open_survey` and `close_survey` are sent once each;
-/// a window whose socket was down when one went out is sent the record
-/// instead, as `survey_sync`, when it attaches.
+/// a window whose socket was down or lagged when one went out is sent the
+/// record instead, as `survey_sync`, when it attaches or its pump sees the
+/// lag.
 ///
 /// An opted-in request also waits for client EOF while queued and once open.
 /// Queued EOF only releases its turn; open EOF also cancels its bus entry and
@@ -3987,9 +3989,10 @@ fn serialize_window_command(window_id: &str, command: WindowCommand) -> Result<S
 }
 
 /// The `survey_sync` frame for `window_id`: every survey open there, oldest
-/// first. The `/ws` attach sends it to the attaching socket, so a window that
-/// had no socket when an overlay was pushed or closed learns the surveys the
-/// server still waits on there.
+/// first. The `/ws` attach sends it to the attaching socket and the pump to a
+/// socket that lagged, so a window that had no socket, or fell behind, when an
+/// overlay was pushed or closed learns the surveys the server still waits on
+/// there.
 pub(crate) fn survey_sync_frame(
     window_id: &str,
     survey_bus: &crate::survey::SurveyBus,

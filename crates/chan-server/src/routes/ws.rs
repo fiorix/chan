@@ -2,7 +2,10 @@
 //!
 //! Server -> client: the global JSON-envelope broadcast (`watch`,
 //! `progress`, `window_command`, ...) plus this socket's per-scope `fs`
-//! frames from the `ScopeRegistry`.
+//! frames from the `ScopeRegistry`. A window's socket is also sent its
+//! `survey_sync` directly, on attach and whenever its broadcast receiver
+//! lagged, since the survey overlays' one-shot open and close frames ride
+//! that broadcast.
 //!
 //! Client -> server: `sub` / `unsub` frames that add/drop this socket's
 //! per-directory scope subscriptions. The socket
@@ -218,6 +221,7 @@ pub async fn ws_upgrade(
             watch_manager,
             transfer_guard,
             window_id,
+            survey_bus,
         )
         .await;
     })
@@ -295,7 +299,8 @@ const PONG_FRAME: &str = r#"{"type":"pong"}"#;
 /// socket's inbound `sub`/`unsub` frames, until either side hangs up.
 ///
 /// Three inbound server -> client sources are merged: the global broadcast
-/// (`rx`, lagged subscribers skip ahead rather than tearing down), this
+/// (`rx`, lagged subscribers skip ahead rather than tearing down, and a
+/// window's socket is then re-sent its `survey_sync`), this
 /// socket's scoped `fs` outbox (`scope_rx`), and the shutdown signal. The
 /// fourth `select!` arm reads client text frames and routes sub/unsub to
 /// the `ScopeRegistry`. Every successful send bumps `last_activity` to keep
@@ -315,6 +320,7 @@ async fn ws_pump(
     watch_manager: Option<Arc<crate::standalone_watch::ScopedWatchManager>>,
     transfer_guard: Option<TransferGuard>,
     window_id: Option<String>,
+    survey_bus: Arc<crate::survey::SurveyBus>,
 ) {
     let (sub_id, scope_rx) = scopes.register();
     pump_loop(
@@ -328,6 +334,7 @@ async fn ws_pump(
         scope_rx,
         transfer_guard.as_ref(),
         window_id.as_deref(),
+        &survey_bus,
     )
     .await;
     // Unconditional teardown: drops every scope this socket held. The final
@@ -352,6 +359,7 @@ async fn pump_loop(
     mut scope_rx: mpsc::UnboundedReceiver<String>,
     transfer_guard: Option<&TransferGuard>,
     window_id: Option<&str>,
+    survey_bus: &crate::survey::SurveyBus,
 ) {
     let mut scope_refusal_sent = false;
     loop {
@@ -396,7 +404,19 @@ async fn pump_loop(
                     last_activity.store(now_unix_secs(), Ordering::Relaxed);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // The skipped frames may have held an `open_survey` or
+                // `close_survey` for this window, which is not sent again,
+                // so re-send the whole set; the frames still buffered were
+                // sent before it was built and stay consistent with it. An
+                // untagged socket receives no window commands.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(id) = window_id {
+                        if !send_survey_sync(socket, id, survey_bus).await {
+                            break;
+                        }
+                        last_activity.store(now_unix_secs(), Ordering::Relaxed);
+                    }
+                }
             },
             // Client -> server: sub/unsub/transfers/ping frames. A None / Err
             // means the client closed or sent garbage at the transport level;

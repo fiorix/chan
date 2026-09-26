@@ -19,13 +19,13 @@
 //! And the bus records which surveys are open: for each overlay the handler
 //! has pushed and not yet closed, the windows it went to, the tab it targets
 //! and its spec. `open_survey` and `close_survey` ride the `/ws` broadcast
-//! once each, so a window whose socket was down when one went out never gets
-//! it; the `/ws` attach sends that window the record instead (`survey_sync`),
-//! the whole set of surveys the server still waits on there. The handler
-//! holds an [`OpenSurveyGuard`] from before the open push until before the
-//! close push, so no exit path leaves a closed survey in the record, and no
-//! window synced from it can raise a survey whose close it was not
-//! subscribed for.
+//! once each, so a window whose socket was down or lagged when one went out
+//! never gets it; the `/ws` attach and a lagged socket's pump send that
+//! window the record instead (`survey_sync`), the whole set of surveys the
+//! server still waits on there. The handler holds an [`OpenSurveyGuard`] from
+//! before the open push until before the close push, so no exit path leaves a
+//! closed survey in the record, and no window synced from it can raise a
+//! survey whose close it was not subscribed for.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
