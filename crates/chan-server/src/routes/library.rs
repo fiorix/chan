@@ -2886,6 +2886,64 @@ mod devserver_route_tests {
         );
     }
 
+    /// The launcher's add resolves and registers the requested root off the
+    /// runtime, so adding a root that stopped answering holds no runtime
+    /// worker while it waits: on a runtime with one worker, another root's
+    /// on route still answers beside it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn launcher_add_of_a_hung_root_leaves_the_runtime_serving() {
+        use crate::devserver::hung_root_support::{completes_beside, HEALTHY_ROOT_BOUND};
+        let cfg = tempfile::tempdir().unwrap();
+        let registered = tempfile::tempdir().unwrap();
+        let hung = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(registered.path()).unwrap();
+        let (host, router) = mutable_router(lib);
+        let registered_id = allocate_workspace_prefix(registered.path())
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string();
+
+        let stall = chan_workspace::paths::root_stall::stall(hung.path());
+        let adding = router.clone();
+        let body = serde_json::json!({ "path": hung.path().to_string_lossy() }).to_string();
+        let add = tokio::spawn(async move {
+            request(&adding, "POST", "/api/library/workspaces", Some(&body)).await
+        });
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(10)),
+            "fixture: the add never reached its root"
+        );
+
+        let turning_on = router.clone();
+        let (status, body) = completes_beside(
+            &stall,
+            "the on route of a registered root beside the add of a hung root",
+            async move {
+                request(
+                    &turning_on,
+                    "POST",
+                    &format!("/api/library/workspaces/{registered_id}/on"),
+                    None,
+                )
+                .await
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "on: {body}");
+
+        drop(stall);
+        let (status, body) = tokio::time::timeout(HEALTHY_ROOT_BOUND, add)
+            .await
+            .expect("the add finishes once its root answers")
+            .expect("add task");
+        assert_eq!(status, StatusCode::OK, "add: {body}");
+        assert!(
+            host.is_root_mounted(hung.path()),
+            "the added root is not mounted"
+        );
+    }
+
     // Unix-only: Windows refuses to delete a tree while the tenant holds
     // handles inside it, so the replacement cannot be staged there, and
     // `RootedFs::revalidate`'s non-unix arm has no inode check to observe.

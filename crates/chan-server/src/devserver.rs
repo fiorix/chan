@@ -2907,7 +2907,7 @@ mod tests {
         );
     }
 
-    use super::hung_root_support::completes_beside;
+    use super::hung_root_support::{completes_beside, HEALTHY_ROOT_BOUND};
     use super::tunnel_test_support::{
         test_gateway_assertion, test_tunnel_assertion, test_tunnel_registration,
     };
@@ -5160,6 +5160,168 @@ mod tests {
         assert!(
             error.to_string().contains("timed out"),
             "expected the attempt's bound to expire: {error}"
+        );
+    }
+
+    /// Closes of one hung root share the blocking thread that resolves its
+    /// key, so a client retrying a close of a root that stopped answering
+    /// cannot take the blocking pool from every other root.
+    ///
+    /// The pool has one thread for the bound's own wait and one per retry. A
+    /// close that took a thread of its own per retry would leave none for the
+    /// other root's close.
+    #[test]
+    fn closes_of_a_hung_root_hold_one_blocking_thread() {
+        const RETRIES: usize = 3;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(RETRIES + 1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let hung = tempfile::tempdir().expect("hung root");
+            let other = tempfile::tempdir().expect("other root");
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            state
+                .host
+                .library()
+                .register_workspace(other.path())
+                .expect("register the other root");
+
+            let stall = root_stall::stall(hung.path());
+            let closes: Vec<_> = (0..RETRIES)
+                .map(|_| {
+                    let host = Arc::clone(&state.host);
+                    let root = hung.path().to_path_buf();
+                    tokio::spawn(async move { host.close_workspace_for_root(&root, false).await })
+                })
+                .collect();
+            // One yield lets the current-thread scheduler poll every close
+            // up to its key hop before this task blocks in the wait below.
+            tokio::task::yield_now().await;
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: no close reached the hung root"
+            );
+
+            let host = Arc::clone(&state.host);
+            let other_root = other.path().to_path_buf();
+            let outcome = completes_beside(
+                &stall,
+                "a close of another root beside retried closes of a hung root",
+                async move { host.close_workspace_for_root(&other_root, false).await },
+            )
+            .await
+            .expect("close the other root");
+            assert_eq!(outcome, WorkspaceLifecycleOutcome::NotFound);
+            assert_eq!(
+                stall.entered().len(),
+                1,
+                "each close of the hung root resolved it on a thread of its own"
+            );
+
+            drop(stall);
+            for close in closes {
+                close
+                    .await
+                    .expect("close task")
+                    .expect("the hung root's close finishes once it answers");
+            }
+        });
+    }
+
+    /// A serve request resolves its own root off the runtime, so a request
+    /// for a root that stopped answering holds no runtime worker while it
+    /// waits: on a runtime with one worker, a serve request for another root
+    /// still completes beside it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_serve_request_for_a_hung_root_leaves_the_runtime_serving() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+
+        let stall = root_stall::stall(hung.path());
+        let requesting = Arc::clone(&state);
+        let hung_root = hung.path().to_path_buf();
+        let hung_request = tokio::spawn(async move {
+            handle_discovery_request(&requesting, 8787, register_request(&hung_root)).await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the serve request never reached its root"
+        );
+
+        let serving = Arc::clone(&state);
+        let other_root = other.path().to_path_buf();
+        let response = completes_beside(
+            &stall,
+            "a serve request for another root beside a hung root's",
+            async move {
+                handle_discovery_request(&serving, 8787, register_request(&other_root)).await
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the other root's serve request failed: {response:?}"
+        );
+
+        drop(stall);
+        let response = tokio::time::timeout(HEALTHY_ROOT_BOUND, hung_request)
+            .await
+            .expect("the hung root's request finishes once it answers")
+            .expect("serve task");
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the hung root's serve request failed once it answered: {response:?}"
+        );
+    }
+
+    /// A serve request for a root that stopped answering answers at the
+    /// mount bound: resolving and registering the requested root fall inside
+    /// that bound, not before it starts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_serve_request_for_a_hung_root_answers_at_its_bound() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        Arc::get_mut(&mut state)
+            .expect("fixture: an unshared state")
+            .mount_timeout = Duration::from_millis(500);
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+            "lib-test".into(),
+        );
+        complete_test_startup(&state).await;
+
+        let stall = root_stall::stall(hung.path());
+        let requesting = Arc::clone(&state);
+        let hung_root = hung.path().to_path_buf();
+        let response = completes_beside(&stall, "a serve request for a hung root", async move {
+            handle_discovery_request(&requesting, 8787, register_request(&hung_root)).await
+        })
+        .await;
+        match response {
+            crate::devserver_handoff::Response::Error { message } => assert!(
+                message.contains("timed out"),
+                "expected the mount bound to expire: {message}"
+            ),
+            other => panic!("a serve request for a hung root did not fail: {other:?}"),
+        }
+        assert!(
+            !state.host.is_canonical_root_mounted(&canonical_root(hung.path())),
+            "the hung root is mounted"
         );
     }
 
