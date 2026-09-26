@@ -105,7 +105,9 @@ describe("the card chrome", () => {
   it("gives the empty gateway list the empty hint and both screens the add entry", () => {
     library.gateways = [];
     const gateways = render(Gateways);
-    expect(gateways.querySelector("p.empty-hint")?.textContent).toContain("No gateways yet");
+    const hint = [...gateways.querySelectorAll("p")].find((p) => p.textContent?.includes("No gateways yet"));
+    expect(hint, "the empty gateway list's line").toBeTruthy();
+    expect([...hint!.classList]).toContain("empty-hint");
     expect([...buttonNamed(gateways, "Add gateway").classList]).toContain("add-entry");
     unmount(app!);
     target!.remove();
