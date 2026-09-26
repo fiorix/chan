@@ -3997,6 +3997,149 @@ mod tests {
         server.abort();
     }
 
+    /// Each side's socket buffer in the restart race test, small and fixed
+    /// (setting it turns the kernel's autotuning off), so an output much larger
+    /// than both cannot be written until the client reads it.
+    const SMALL_SOCKET_BUFFER: u32 = 64 * 1024;
+
+    /// Serve `/api/terminal/ws` from a listener whose accepted sockets inherit
+    /// a [`SMALL_SOCKET_BUFFER`] send buffer.
+    async fn serve_terminal_route_with_small_buffers(
+        state: Arc<AppState>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
+        socket
+            .set_send_buffer_size(SMALL_SOCKET_BUFFER)
+            .expect("small send buffer");
+        socket
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("bind terminal route");
+        let listener = socket.listen(16).expect("listen terminal route");
+        let address = listener.local_addr().expect("terminal route address");
+        let app = axum::Router::new()
+            .route("/api/terminal/ws", axum::routing::get(api_terminal_ws))
+            .with_state(state);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve terminal route");
+        });
+        (address, server)
+    }
+
+    /// Dial a terminal socket over a connection whose receive buffer is
+    /// [`SMALL_SOCKET_BUFFER`].
+    async fn dial_terminal_with_small_buffer(
+        address: std::net::SocketAddr,
+        query: &str,
+    ) -> TerminalClient {
+        let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
+        socket
+            .set_recv_buffer_size(SMALL_SOCKET_BUFFER)
+            .expect("small receive buffer");
+        let stream = socket
+            .connect(address)
+            .await
+            .expect("connect terminal route");
+        tokio_tungstenite::client_async(
+            format!("ws://{address}/api/terminal/ws?{query}"),
+            tokio_tungstenite::MaybeTlsStream::Plain(stream),
+        )
+        .await
+        .expect("connect terminal socket")
+        .0
+    }
+
+    // Two windows co-view a terminal and an in-place restart re-attaches both.
+    // Each re-attach fits the relaunched PTY to its own size, so the PTY must
+    // end at the size of the socket that fitted last, the size its `ready`
+    // names. The test fixes the order: both sockets are blocked sending an
+    // output their clients have not read, and each is released only when the
+    // test reads it, the first before the second. It also holds the PTY
+    // controller busy with redraws, so the first socket's resize is still
+    // queued, not applied, when the second socket fits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_last_socket_to_fit_after_a_restart_sets_the_pty_size() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route_with_small_buffers(state.clone()).await;
+        let id = create_quiet_terminal(&state, "sleep 600").id().to_owned();
+        let mut first = dial_terminal_with_small_buffer(
+            address,
+            &format!("cols=100&rows=30&session={id}&since=0"),
+        )
+        .await;
+        read_prelude(&mut first).await;
+        let mut second = dial_terminal_with_small_buffer(
+            address,
+            &format!("cols=120&rows=40&session={id}&since=0"),
+        )
+        .await;
+        read_prelude(&mut second).await;
+        // The second socket's resize and redraw both echo 120x40 once the
+        // controller has run them, so the PTY is at 120x40 for the restart.
+        LiveFrames::default()
+            .read_until(&mut second, "the second socket's 120x40 settles", |live| {
+                live.resizes
+                    .iter()
+                    .filter(|size| **size == (120, 40))
+                    .count()
+                    >= 2
+            })
+            .await;
+
+        assert!(state
+            .terminal_sessions
+            .inject_output(&id, &vec![b'x'; 1024 * 1024]));
+        assert_eq!(
+            state
+                .terminal_sessions
+                .restart(&id, RestartOverrides::default())
+                .ok(),
+            Some(true),
+            "the session restarts in place"
+        );
+        let mut relaunched = state
+            .terminal_sessions
+            .attach(&id, None)
+            .expect("the relaunched session is live");
+        for _ in 0..20 {
+            relaunched.request_redraw();
+        }
+
+        let first_frames = read_prelude(&mut first).await;
+        assert_eq!(ready_size(&first_frames), (100, 30));
+        let second_frames = read_prelude(&mut second).await;
+        assert_eq!(ready_size(&second_frames), (120, 40));
+
+        // The echo of this input comes after every PTY command queued before
+        // it, so the last resize event before it is the size the PTY ends at.
+        relaunched.send_input(b"__FITTED__");
+        let mut last_size = None;
+        let mut output = String::new();
+        let deadline = Instant::now() + PROBE_BUDGET;
+        while !output.contains("__FITTED__") {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, relaunched.rx.recv()).await {
+                Ok(Ok(SessionEvent::Resize(size))) => last_size = Some((size.cols, size.rows)),
+                Ok(Ok(SessionEvent::Output(data))) => {
+                    output.push_str(&String::from_utf8_lossy(&data))
+                }
+                Ok(Ok(_)) => {}
+                other => panic!("the input's echo never came: {other:?}; output {output:?}"),
+            }
+        }
+        assert_eq!(
+            last_size,
+            Some((120, 40)),
+            "the PTY ends at 120x40, the size of the socket that fitted last and the size its ready names"
+        );
+
+        drop(relaunched);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
     // A client whose query declares no size says nothing about its renderer,
     // so its attach leaves the PTY at the size it has instead of shrinking it
     // to the spawn defaults.
