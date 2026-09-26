@@ -21,7 +21,14 @@ import {
   overwriteConflictedTab,
   reloadConflictedTab,
 } from "../state/tabs.svelte";
-import { clickBackdrop, dialogIn, mountDialog, settle, unmountDialogs } from "../__tests__/dialog";
+import {
+  clickBackdrop,
+  dialogIn,
+  dialogName,
+  mountDialog,
+  settle,
+  unmountDialogs,
+} from "../__tests__/dialog";
 
 function button(target: HTMLElement, label: string): HTMLButtonElement {
   const found = [...target.querySelectorAll("button")].find((b) => b.textContent === label);
@@ -57,6 +64,14 @@ describe("ConflictModal", () => {
     const target = mountDialog(ConflictModal);
     await open(target);
     expect(dialogIn(target)!.querySelector("code")!.textContent).toBe("notes/today.md");
+  });
+
+  test("is a modal dialog named by its title", async () => {
+    const target = mountDialog(ConflictModal);
+    await open(target);
+    const dialog = dialogIn(target)!;
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialogName(dialog)).toBe("External edit detected");
   });
 
   test("Reload and Overwrite run their state actions and Cancel dismisses", async () => {

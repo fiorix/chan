@@ -8,12 +8,15 @@
   import type { Snippet } from "svelte";
 
   let {
+    labelledby,
     onClose,
     onKeydown,
     minWidth,
     gap,
     children,
   }: {
+    // The id of the caller's title element, which names the dialog.
+    labelledby: string;
     onClose: () => void;
     // Keys the dialog answers wherever focus sits inside the panel.
     onKeydown?: (e: KeyboardEvent) => void;
@@ -35,6 +38,8 @@
     onclick={(e) => e.stopPropagation()}
     onkeydown={onKeydown}
     role="dialog"
+    aria-modal="true"
+    aria-labelledby={labelledby}
     tabindex="-1"
   >
     {@render children()}

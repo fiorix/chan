@@ -39,8 +39,8 @@
 </script>
 
 {#if conflictDialog.open}
-  <ModalShell onClose={dismissConflict} minWidth="380px">
-    <div class="title">External edit detected</div>
+  <ModalShell labelledby="conflict-title" onClose={dismissConflict} minWidth="380px">
+    <div id="conflict-title" class="title">External edit detected</div>
     <div class="body">
       <p>
         <code>{conflictDialog.path}</code> changed on disk since you opened it.

@@ -39,8 +39,8 @@
 </script>
 
 {#if promptState.open}
-  <ModalShell onClose={cancel} minWidth="340px">
-    <div class="title">{promptState.title}</div>
+  <ModalShell labelledby="prompt-title" onClose={cancel} minWidth="340px">
+    <div id="prompt-title" class="title">{promptState.title}</div>
     <input
       bind:this={inputEl}
       bind:value

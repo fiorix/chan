@@ -27,7 +27,7 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import PathPromptModal from "./PathPromptModal.svelte";
-import { clickBackdrop, dialogIn, press } from "../__tests__/dialog";
+import { clickBackdrop, dialogIn, dialogName, press } from "../__tests__/dialog";
 import {
   resolvePathPrompt,
   tree,
@@ -299,6 +299,16 @@ describe("the text selected when the dialog opens", () => {
   test("a move selects the whole path", async () => {
     const input = await openWith({ kind: "file", mode: "move", defaultValue: "docs/old.md", sourcePath: "docs/old.md" });
     expect([input.selectionStart, input.selectionEnd]).toEqual([0, 11]);
+  });
+});
+
+describe("the dialog itself", () => {
+  test("is modal and named by its title", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "docs/new.md");
+    const dialog = dialogIn(target)!;
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialogName(dialog)).toBe("path");
   });
 });
 

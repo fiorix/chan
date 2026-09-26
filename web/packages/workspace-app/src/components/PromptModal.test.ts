@@ -10,6 +10,7 @@ import { resolvePrompt, uiPrompt } from "../state/store.svelte";
 import {
   clickBackdrop,
   dialogIn,
+  dialogName,
   mountDialog,
   press,
   settle,
@@ -59,6 +60,14 @@ describe("PromptModal", () => {
     expect(input(target).value).toBe("old.md");
     expect(document.activeElement).toBe(input(target));
     expect([input(target).selectionStart, input(target).selectionEnd]).toEqual([0, 6]);
+  });
+
+  test("is a modal dialog named by its title", async () => {
+    const target = mountDialog(PromptModal);
+    await open(target);
+    const dialog = dialogIn(target)!;
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialogName(dialog)).toBe("Rename");
   });
 
   test("OK answers the typed value and Cancel answers null", async () => {

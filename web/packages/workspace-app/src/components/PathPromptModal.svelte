@@ -636,8 +636,8 @@
 </script>
 
 {#if pathPromptState.open}
-  <ModalShell onClose={cancel} minWidth="420px" gap="0.55rem">
-    <div class="title">{pathPromptState.title}</div>
+  <ModalShell labelledby="path-prompt-title" onClose={cancel} minWidth="420px" gap="0.55rem">
+    <div id="path-prompt-title" class="title">{pathPromptState.title}</div>
     {#if pathPromptState.notice}
       <div class="notice">{pathPromptState.notice}</div>
     {/if}

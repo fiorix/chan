@@ -8,14 +8,27 @@ import { createRawSnippet, flushSync } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ModalShell from "./ModalShell.svelte";
-import { clickBackdrop, dialogIn, mountDialog, press, unmountDialogs } from "../__tests__/dialog";
+import {
+  clickBackdrop,
+  dialogIn,
+  dialogName,
+  mountDialog,
+  press,
+  unmountDialogs,
+} from "../__tests__/dialog";
 
 const body = createRawSnippet(() => ({
-  render: () => `<p class="body-probe"><button type="button">Inside</button></p>`,
+  render: () =>
+    `<div><h2 id="probe-title">Probe</h2><p class="body-probe"><button type="button">Inside</button></p></div>`,
 }));
 
 function render(props: Record<string, unknown> = {}): HTMLElement {
-  const target = mountDialog(ModalShell, { onClose: () => {}, children: body, ...props });
+  const target = mountDialog(ModalShell, {
+    labelledby: "probe-title",
+    onClose: () => {},
+    children: body,
+    ...props,
+  });
   flushSync();
   return target;
 }
@@ -27,6 +40,12 @@ describe("ModalShell", () => {
     const target = render();
     const dialog = dialogIn(target)!;
     expect(dialog.querySelector(".body-probe button")?.textContent).toBe("Inside");
+  });
+
+  test("is a modal dialog named by the title its body marks", () => {
+    const dialog = dialogIn(render())!;
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialogName(dialog)).toBe("Probe");
   });
 
   test("a click on the backdrop closes and a click inside the panel does not", () => {

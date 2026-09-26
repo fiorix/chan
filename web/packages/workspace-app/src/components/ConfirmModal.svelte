@@ -34,8 +34,8 @@
 </script>
 
 {#if confirmState.open}
-  <ModalShell onClose={cancel} onKeydown={onKey} minWidth="360px">
-    <div class="title">{confirmState.title}</div>
+  <ModalShell labelledby="confirm-title" onClose={cancel} onKeydown={onKey} minWidth="360px">
+    <div id="confirm-title" class="title">{confirmState.title}</div>
     {#if confirmState.message}
       <div class="message">{confirmState.message}</div>
     {/if}

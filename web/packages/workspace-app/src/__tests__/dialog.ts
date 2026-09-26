@@ -27,6 +27,18 @@ export function dialogIn(target: HTMLElement): HTMLElement | null {
   return target.querySelector<HTMLElement>('[role="dialog"]');
 }
 
+/// The name a screen reader announces for `dialog`: the text of the elements
+/// its `aria-labelledby` points at, or null when it names none.
+export function dialogName(dialog: HTMLElement): string | null {
+  const ids = dialog.getAttribute("aria-labelledby");
+  if (!ids) return null;
+  return ids
+    .split(/\s+/)
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ")
+    .trim();
+}
+
 /// Click the dim area around the panel.
 export function clickBackdrop(target: HTMLElement): void {
   dialogIn(target)!.parentElement!.click();

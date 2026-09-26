@@ -10,6 +10,7 @@ import { resolveConfirm, uiConfirm } from "../state/confirm.svelte";
 import {
   clickBackdrop,
   dialogIn,
+  dialogName,
   mountDialog,
   press,
   settle,
@@ -55,6 +56,14 @@ describe("ConfirmModal", () => {
     expect(dialog.textContent).toContain("It moves to the trash.");
     expect(document.activeElement).toBe(button(target, "Delete"));
     expect(button(target, "Keep")).toBeTruthy();
+  });
+
+  test("is a modal dialog named by its title", async () => {
+    const target = mountDialog(ConfirmModal);
+    await open(target);
+    const dialog = dialogIn(target)!;
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialogName(dialog)).toBe("Delete notes.md?");
   });
 
   test("the confirm button answers true and the cancel button false", async () => {
