@@ -3770,16 +3770,34 @@ impl Session {
         let mut cmd = command_builder(profile, opts.command.as_deref());
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
-        // Ahead of the per-session overrides so an explicit `env` entry still
-        // wins on last write.
+        // chan's fixed spawn environment comes first and the caller's entries
+        // after it, so an explicit value wins over every default here; only
+        // the keys chan sets for itself (`CHAN` and the `CHAN_*` below) are
+        // applied after the caller's.
         clear_appimage_env(&mut cmd);
-        for (key, value) in &opts.env {
-            cmd.env(key, value);
-        }
         if let Some(home) = terminal_home_dir() {
             cmd.env("HOME", &home);
             #[cfg(windows)]
             cmd.env("USERPROFILE", home);
+        }
+        // Spawn-time TERM comes from settings. The value lives in
+        // `TerminalConfig::default_term`; the SPA can
+        // override the default via the Settings panel, and the change
+        // takes effect on newly-spawned terminals (existing PTYs keep
+        // whatever TERM they were started with).
+        cmd.env("TERM", config.terminal.default_term.as_str());
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("CLICOLOR", "1");
+        cmd.env("CLICOLOR_FORCE", "1");
+        cmd.env("FORCE_COLOR", "3");
+        // What the server process inherited decides neither colour, CI
+        // detection nor systemd supervision for the child.
+        cmd.env_remove("NO_COLOR");
+        cmd.env_remove("CI");
+        cmd.env_remove("CODEX_CI");
+        chan_systemd::scrub_child_supervision_env(|key| cmd.env_remove(key));
+        for (key, value) in &opts.env {
+            cmd.env(key, value);
         }
         // Windows: prepend the chan bin dir (`%LOCALAPPDATA%\chan\bin`) so
         // the `chan` / `cs` shims resolve in whichever shell the resolver
@@ -3816,16 +3834,6 @@ impl Session {
                 }
             }
         }
-        // Spawn-time TERM comes from settings. The value lives in
-        // `TerminalConfig::default_term`; the SPA can
-        // override the default via the Settings panel, and the change
-        // takes effect on newly-spawned terminals (existing PTYs keep
-        // whatever TERM they were started with).
-        cmd.env("TERM", config.terminal.default_term.as_str());
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("CLICOLOR", "1");
-        cmd.env("CLICOLOR_FORCE", "1");
-        cmd.env("FORCE_COLOR", "3");
         // GUI-launched servers (notably chan-desktop on macOS) frequently
         // inherit an empty locale, so `less` and `vim` fall back to the
         // POSIX/C codeset and render multibyte UTF-8 (e.g. an em dash) as raw
@@ -3886,10 +3894,6 @@ impl Session {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| workspace_path.into_owned());
         cmd.env("CHAN_WORKSPACE_NAME", &workspace_name);
-        cmd.env_remove("NO_COLOR");
-        cmd.env_remove("CI");
-        cmd.env_remove("CODEX_CI");
-        chan_systemd::scrub_child_supervision_env(|key| cmd.env_remove(key));
 
         let mut child = pair.slave.spawn_command(cmd)?;
         let child_pid = child.process_id();
