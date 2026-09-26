@@ -5606,6 +5606,40 @@ function uploadNameReason(name: string): string | null {
   return null;
 }
 
+/// Whether `path` is a directory in the loaded tree: its own entry says so, or
+/// an entry sits under it.
+function isTreeDirectory(path: string): boolean {
+  const prefix = `${path}/`;
+  return tree.entries.some((e) => (e.path === path && e.is_dir) || e.path.startsWith(prefix));
+}
+
+/// After a delete: refresh the tree (and the workspace summary where there is
+/// one), and close every file tab showing a deleted path or a path under one.
+async function settleDeleted(paths: readonly string[]): Promise<void> {
+  await Promise.all(
+    windowCaps.workspace
+      ? [refreshTree(), refreshWorkspace()]
+      : [refreshTree()],
+  );
+  const underDeleted = (p: string) =>
+    paths.some((path) => p === path || p.startsWith(`${path}/`));
+  // Snapshot (paneId, tabId) pairs to close BEFORE mutating
+  // layout, since closeTab may collapse the pane mid-iteration.
+  const toClose: Array<[string, string]> = [];
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of allPaneTabs(node)) {
+      if (t.kind !== "file") continue;
+      if (underDeleted(t.path)) {
+        toClose.push([node.id, t.id]);
+      }
+    }
+  }
+  for (const [paneId, tabId] of toClose) {
+    await closeTab(paneId, tabId, { force: true });
+  }
+}
+
 export const fileOps = {
   downloadPath(path: string, isDir: boolean, root?: TransferRoot): void {
     const link = document.createElement("a");
@@ -5983,30 +6017,62 @@ export const fileOps = {
       // a directory delete) so a later file reusing the path never restores a
       // ghost position.
       clearCaretsUnder(path);
-      await Promise.all(
-        windowCaps.workspace
-          ? [refreshTree(), refreshWorkspace()]
-          : [refreshTree()],
-      );
-      const underDeleted = (p: string) =>
-        p === path || p.startsWith(`${path}/`);
-      // Snapshot (paneId, tabId) pairs to close BEFORE mutating
-      // layout, since closeTab may collapse the pane mid-iteration.
-      const toClose: Array<[string, string]> = [];
-      for (const node of Object.values(layout.nodes)) {
-        if (node.kind !== "leaf") continue;
-        for (const t of allPaneTabs(node)) {
-          if (t.kind !== "file") continue;
-          if (underDeleted(t.path)) {
-            toClose.push([node.id, t.id]);
-          }
-        }
-      }
-      for (const [paneId, tabId] of toClose) {
-        await closeTab(paneId, tabId, { force: true });
-      }
+      await settleDeleted([path]);
     } catch (e) {
       ui.status = `delete failed: ${(e as Error).message}`;
+    }
+  },
+  /// Delete a multi-selection behind one confirm that names the count; a
+  /// single path is `remove`, with the confirm that names it. A path under a
+  /// selected directory goes with the directory rather than on its own. A
+  /// refused delete does not stop the rest: the status line says how many
+  /// went and names the first refusal, and the selection keeps the paths that
+  /// were refused. A delete of every path clears the selection.
+  async removeSelection(paths: readonly string[]): Promise<void> {
+    const unique = [...new Set(paths)];
+    const targets = unique.filter((p) => !unique.some((q) => p.startsWith(`${q}/`)));
+    if (targets.length === 0) return;
+    if (targets.length === 1) {
+      const path = targets[0]!;
+      await this.remove(path, isTreeDirectory(path));
+      return;
+    }
+    const dirs = targets.filter(isTreeDirectory).length;
+    const what =
+      dirs === 0
+        ? `${targets.length} files`
+        : `${targets.length} items, including ${dirs === 1 ? "1 directory and everything in it" : `${dirs} directories and everything in them`}`;
+    const ok = await uiConfirm({
+      title: windowCaps.workspace ? "Delete" : "Permanently delete",
+      message: windowCaps.workspace
+        ? `Delete ${what}?`
+        : `Permanently delete ${what}? This cannot be undone.`,
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
+    const deleted: string[] = [];
+    const refused: Array<{ path: string; reason: string }> = [];
+    for (const path of targets) {
+      try {
+        await api.remove(path);
+        clearCaretsUnder(path);
+        deleted.push(path);
+      } catch (e) {
+        refused.push({ path, reason: (e as Error).message });
+      }
+    }
+    if (refused.length === 0) fbClearSelection();
+    else fbSelectSet(refused.map((r) => r.path));
+    try {
+      if (deleted.length > 0) await settleDeleted(deleted);
+    } catch (e) {
+      ui.status = `delete failed: ${(e as Error).message}`;
+      return;
+    }
+    const first = refused[0];
+    if (first) {
+      ui.status = `deleted ${deleted.length} of ${targets.length}; ${first.path}: ${first.reason}`;
     }
   },
   /// Duplicate a file in-place. Reads the source via the API so any

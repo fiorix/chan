@@ -194,6 +194,11 @@ function renameSelection(): void {
 }
 
 function deleteSelection(): void {
+  const paths = selectedPaths();
+  if (paths.length > 1) {
+    void fileOps.removeSelection(paths);
+    return;
+  }
   const sel = activeSelection();
   if (sel) void fileOps.remove(sel.path, sel.isDir);
 }

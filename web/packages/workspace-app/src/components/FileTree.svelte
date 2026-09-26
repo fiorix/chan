@@ -801,8 +801,15 @@
       input.value = "";
     }
   }
+  /// Delete from the key or the row menu. A row inside a multi-selection
+  /// deletes the whole selection, the way a drag of it moves the whole
+  /// selection; any other row is deleted alone.
   async function remove(path: string, isDir: boolean): Promise<void> {
-    await fileOps.remove(path, isDir);
+    if (browserSelection.paths.length > 1 && browserSelection.paths.includes(path)) {
+      await fileOps.removeSelection(browserSelection.paths);
+    } else {
+      await fileOps.remove(path, isDir);
+    }
     menu = null;
   }
 
@@ -1029,7 +1036,8 @@
         moveToLast();
         break;
       // Backspace (Mac "delete") and forward-Delete both trigger
-      // removal. The destructive uiConfirm in fileOps.remove is the
+      // removal, of the whole selection when the cursor row is part of a
+      // multi-selection. The destructive uiConfirm in fileOps is the
       // safety gate; without it we'd want to keep this unbound.
       case "Backspace":
       case "Delete": {

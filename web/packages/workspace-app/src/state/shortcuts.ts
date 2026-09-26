@@ -120,9 +120,10 @@ export const SHORTCUTS: readonly Shortcut[] = [
     escapeTerminal: true,
   },
   // File-browser destructive delete. Bare Backspace (the Mac "delete"
-  // key) or forward-Delete removes the selected entry; the dispatch
+  // key) or forward-Delete removes the selected entries; the dispatch
   // source is FileTree's `onTreeKeydown`, with the uiConfirm in
-  // `fileOps.remove` as the safety gate. Recorded here so the FB
+  // `fileOps.remove` and `fileOps.removeSelection` as the safety gate.
+  // Recorded here so the FB
   // selection-menu hint reads the chord from the central store
   // (`chordFor`) and it ports across web/native. No modifier, so it
   // never escapes the terminal (`chordFromEvent` ignores modifierless
