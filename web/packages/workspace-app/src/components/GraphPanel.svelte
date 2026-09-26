@@ -90,6 +90,7 @@
     relativeDepth,
     shallowestFileDepth,
   } from "../graph/depth";
+  import { ancestorClosure } from "../graph/containmentSpine";
   import { pullMetaNeighbours } from "../graph/lensClosure";
   import { ancestorsExpanded } from "../graph/pathVisibility";
 
@@ -1013,39 +1014,6 @@
   /// children should show; the scope root ("") is always expanded.
   const expandedDirs = $derived(graphState.expanded ?? { "": true });
 
-  /// Pull every in-scope node's directory spine up to the workspace
-  /// root. `contains` edges point parent -> child (directory -> file
-  /// and directory -> subdirectory), so a node's ancestors sit
-  /// UPSTREAM of it: add the `source` of every contains edge whose
-  /// `target` is already in scope, iterating to a fixed point. The
-  /// contains subgraph is a forest (one parent per node) so this
-  /// settles in O(depth) passes.
-  ///
-  /// The tag / contact / language lenses BFS only along semantic
-  /// edges (tag / mention / language), so their file nodes used to
-  /// render with no edge up to a directory ("edgeless files"). The
-  /// spine already ships in the unified /api/graph payload (the
-  /// filesystem layer emits the contains edges to root); this just
-  /// re-includes it in the lens's visible set so every file lands on
-  /// its spine, matching the workspace / file-scope shape. Folder-
-  /// filter hiding is still handled later by `hiddenFolderIds`.
-  function pullContainsSpine(visited: Set<string>): void {
-    let pulled = true;
-    while (pulled) {
-      pulled = false;
-      for (const e of edges) {
-        if (
-          e.kind === "contains" &&
-          visited.has(e.target) &&
-          !visited.has(e.source)
-        ) {
-          visited.add(e.source);
-          pulled = true;
-        }
-      }
-    }
-  }
-
   const scopedNodeIds = $derived.by<Set<string> | null>(() => {
     if (!currentScope) return null;
     // Semantic-mode workspace + dir scope renders the
@@ -1157,7 +1125,7 @@
       pullMetaNeighbours(visited, nodes, edges);
       // Re-anchor every file the lens surfaced to its directory
       // spine so no file renders edgeless.
-      pullContainsSpine(visited);
+      ancestorClosure(visited, edges);
       return visited;
     }
     // Mention lens: same shape as the tag arm above. The backend emits
@@ -1192,7 +1160,7 @@
       pullMetaNeighbours(visited, nodes, edges);
       // Re-anchor every file the lens surfaced to its directory
       // spine so no file renders edgeless.
-      pullContainsSpine(visited);
+      ancestorClosure(visited, edges);
       return visited;
     }
     // Contact lens. Seed is the contact file node (located by
@@ -1232,7 +1200,7 @@
       pullMetaNeighbours(visited, nodes, edges);
       // Re-anchor every file the lens surfaced to its directory
       // spine so no file renders edgeless.
-      pullContainsSpine(visited);
+      ancestorClosure(visited, edges);
       return visited;
     }
     // Language lens. Seed is the language
@@ -1250,7 +1218,7 @@
       }
       // Re-anchor every file of this language to its directory
       // spine so no file renders edgeless.
-      pullContainsSpine(visited);
+      ancestorClosure(visited, edges);
       return visited;
     }
     // Only file scope reaches here in semantic mode:
@@ -1291,11 +1259,11 @@
     // Parent-edge invariant: every in-scope file
     // should hang off its parent directory so the user can click up
     // through the graph. The forward-only BFS above expands DOWN from
-    // the seed; `pullContainsSpine` walks the contains-edge forest the
+    // the seed; `ancestorClosure` walks the contains-edge forest the
     // other way, UP to the workspace root. Folder-filter hiding is
     // handled later by `hiddenFolderIds`, so we always include the
     // chain here.
-    pullContainsSpine(visited);
+    ancestorClosure(visited, edges);
     return visited;
   });
 
@@ -1331,8 +1299,8 @@
   /// to the graph, so the folder chip must NOT hide them -- hiding them is what
   /// rendered file nodes "loose". Computed only when the folder chip is off
   /// (when on, nothing is hidden so the spine is moot). Seeds from in-scope
-  /// files and walks `contains` upward, mirroring `pullContainsSpine`'s "no file
-  /// renders edgeless" invariant. Keyed off in-scope (not chip-visible) files
+  /// files and walks `contains` upward with the lenses' `ancestorClosure`, for
+  /// the same "no file renders edgeless" invariant. Keyed off in-scope (not chip-visible) files
   /// deliberately: keeping a directory whose only files are chip-filtered is
   /// harmless declutter, whereas dropping a spine directory re-introduces loose
   /// files (the safe direction is to over-keep anchors).
@@ -1348,22 +1316,7 @@
         onSpine.add(n.id);
       }
     }
-    // `contains` = directory(source) -> child(target); pull each source whose
-    // target is already on the spine until no more ancestors are reachable.
-    let pulled = true;
-    while (pulled) {
-      pulled = false;
-      for (const e of edges) {
-        if (
-          e.kind === "contains" &&
-          onSpine.has(e.target) &&
-          !onSpine.has(e.source)
-        ) {
-          onSpine.add(e.source);
-          pulled = true;
-        }
-      }
-    }
+    ancestorClosure(onSpine, edges);
     for (const n of nodes) {
       if (n.kind === "folder" && onSpine.has(n.id)) ids.add(n.id);
     }

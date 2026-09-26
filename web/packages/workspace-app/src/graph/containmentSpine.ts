@@ -1,5 +1,6 @@
-/// Walk the `contains` parent chain from a selected node up to the
-/// workspace root, for the focus-on-select spotlight.
+/// Walk the `contains` parent chain up to the workspace root: from one
+/// selected node for the focus-on-select spotlight, and from every node of
+/// a visible set so no file renders without its directory spine.
 ///
 /// `contains` edges run parent directory -> child (directory -> file or
 /// directory -> subdirectory), so every file, directory, and contact
@@ -46,4 +47,25 @@ export function containmentSpine(
     cur = parent;
   }
   return { nodes, edges };
+}
+
+/// Add to `visited`, in place, every `contains` ancestor of a node already
+/// in it, up to the workspace root. Repeats to a fixed point, so a nested
+/// chain is pulled in whatever order its edges arrive; the contains
+/// subgraph is a forest, so that takes O(depth) passes, and `visited` only
+/// grows, so a malformed cycle still ends.
+export function ancestorClosure(
+  visited: Set<string>,
+  edges: readonly { source: string; target: string; kind?: string }[],
+): void {
+  let pulled = true;
+  while (pulled) {
+    pulled = false;
+    for (const e of edges) {
+      if (e.kind === "contains" && visited.has(e.target) && !visited.has(e.source)) {
+        visited.add(e.source);
+        pulled = true;
+      }
+    }
+  }
 }

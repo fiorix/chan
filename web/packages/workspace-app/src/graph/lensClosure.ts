@@ -1,3 +1,5 @@
+import { ancestorClosure } from "./containmentSpine";
+
 /// Structural node / edge shapes the lens closure needs. GraphPanel's
 /// RenderedNode / RenderedEdge satisfy these by structure, so the helper
 /// stays decoupled from the component's larger types.
@@ -97,22 +99,8 @@ export function lensClosure(
 
   if (options.metaClosure) pullMetaNeighbours(visited, nodes, edges);
 
-  // `contains` runs parent -> child. Pull ancestors repeatedly, exactly like
-  // GraphPanel's pullContainsSpine, so every surfaced file stays anchored.
-  let pulled = true;
-  while (pulled) {
-    pulled = false;
-    for (const edge of edges) {
-      if (
-        edge.kind === "contains" &&
-        visited.has(edge.target) &&
-        !visited.has(edge.source)
-      ) {
-        visited.add(edge.source);
-        pulled = true;
-      }
-    }
-  }
+  // Anchor every surfaced node to its directory spine.
+  ancestorClosure(visited, edges);
 
   const relationshipKeys = edges
     .filter((edge) => visited.has(edge.source) && visited.has(edge.target))

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  ancestorClosure,
   containmentParents,
   containmentSpine,
   spineEdgeKey,
@@ -63,5 +64,33 @@ describe("containment spine", () => {
     const { nodes } = containmentSpine("a", looped);
     // Walks a -> b, then stops (b's parent a is already seen).
     expect([...nodes]).toEqual(["b"]);
+  });
+});
+
+describe("ancestor closure", () => {
+  test("pulls a deep file's whole chain, with its edges listed root first", () => {
+    // Root-first order is the slow one for an upward walk: each pass can
+    // add only the parent of what the previous pass added.
+    const visited = new Set(["projects/deep/notes.md"]);
+    ancestorClosure(visited, edges);
+    expect([...visited].sort()).toEqual(
+      ["", "directory:projects", "directory:projects/deep", "projects/deep/notes.md"].sort(),
+    );
+  });
+
+  test("walks only contains edges", () => {
+    // notes.md links to alpha.md and mentions @@Bob; neither makes it a parent.
+    const visited = new Set(["projects/alpha.md", "@@Bob"]);
+    ancestorClosure(visited, edges);
+    expect([...visited].sort()).toEqual(["@@Bob", "projects/alpha.md"]);
+  });
+
+  test("a containment cycle cannot loop forever", () => {
+    const visited = new Set(["a"]);
+    ancestorClosure(visited, [
+      { source: "a", target: "b", kind: "contains" },
+      { source: "b", target: "a", kind: "contains" },
+    ]);
+    expect([...visited].sort()).toEqual(["a", "b"]);
   });
 });
