@@ -1542,12 +1542,16 @@
         // fail any in-flight prompt so the bubble unlocks with its text.
         setTerminalQueueDepth(tab, 0);
         failPendingPrompt(tab);
-        // The cached scrollback snapshot is keyed by this now-dead session id;
-        // drop it so a closed terminal does not hold cache budget (a future
-        // session gets a fresh id, so it would never be reused anyway).
+        // Drop the scrollback snapshot cached for this session id so a closed
+        // terminal holds no cache budget. A shutdown keeps the id below, and
+        // the reattach after the reload then asks for a full replay.
         if (tab.terminalSessionId) clearTerminalSnapshot(tab.terminalSessionId);
         clearTerminalMetadataSink();
-        clearTerminalSession(tab);
+        // A devserver shutdown keeps the id, so every later save still names
+        // the session and the reloaded window reattaches to the PTY the next
+        // process restores; the server answers an id it no longer has with a
+        // fresh shell. Every other reason ended the session.
+        if (frame.reason !== "shutdown") clearTerminalSession(tab);
         if (frame.reason === "explicit") {
           // The user (or another window / `cs terminal close`) deleted this
           // terminal. Under Option A the dead tab vanishes automatically; if
@@ -1603,8 +1607,8 @@
       setTerminalQueueDepth(tab, 0);
       // A transient dial failure never strands a resumable session: the id
       // survives so an offline/sleep window can still reattach the persisted
-      // remote session on reconnect. Only the server's explicit `closed` /
-      // `exit` frames clear the session id.
+      // remote session on reconnect. Only the server's `exit` frame and a
+      // `closed` frame for any reason but a shutdown clear the session id.
       if (status !== "exited") status = "closed";
       // Heal: redial with capped backoff through the reattach path. An exited
       // session stays down (the server ended it; the tab shows its exit
@@ -1736,6 +1740,9 @@
     // CHAN_DEVSERVER_TOKEN= marker the desktop re-scrapes. The rule lives
     // in windowModeAllowsSnapshot so it is unit-testable without a mount.
     if (!windowModeAllowsSnapshot({ terminalControl: ui.terminalControl })) return;
+    // An ended session's screen closes with the line this tab wrote below the
+    // PTY's output, so it is no snapshot of the session.
+    if (status === "exited") return;
     const sessionId = tab.terminalSessionId;
     if (!term || !serialize || !sessionId || serverGeneration === null) return;
     // Never throw out of a pagehide/beforeunload handler: this fires globally
