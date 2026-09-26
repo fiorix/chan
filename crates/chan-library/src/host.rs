@@ -3619,9 +3619,9 @@ impl WorkspaceHost {
     /// lock for that root.
     ///
     /// Every mounted root is checked at once, each on a thread of its own,
-    /// and the tick waits at most [`ROOT_HEALTH_PROBE_BUDGET`] for the
-    /// answers, so one root whose filesystem hangs delays no other root's
-    /// row. A check that has not answered keeps its thread, and the
+    /// and the tick waits at most two seconds (`ROOT_HEALTH_PROBE_BUDGET`)
+    /// for the answers, so one root whose filesystem hangs delays no other
+    /// root's row. A check that has not answered keeps its thread, and the
     /// workspace it holds, until the root answers; the next tick waits on
     /// that check again rather than starting another beside it.
     ///
