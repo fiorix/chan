@@ -8921,6 +8921,89 @@ is_lead = false
         }
     }
 
+    /// Read the socket until a `command` window command arrives, and fail
+    /// naming `moment` and every frame seen when none comes.
+    async fn recv_socket_command(
+        socket: &mut WsClient,
+        command: &str,
+        moment: &str,
+    ) -> serde_json::Value {
+        use futures::StreamExt;
+        let mut seen = Vec::new();
+        let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(message) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) =
+                    message.expect("/ws frame")
+                else {
+                    continue;
+                };
+                let frame: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if frame["type"] == "window_command" && frame["command"] == command {
+                    return Some(frame);
+                }
+                seen.push(frame);
+            }
+            None
+        })
+        .await;
+        match found {
+            Ok(Some(frame)) => frame,
+            _ => panic!("the socket got no {command} {moment}; frames seen: {seen:?}"),
+        }
+    }
+
+    // Two SPA instances can share one window id, co-viewers of that window. A
+    // survey raised there shows in both, so when one instance answers, the
+    // other must be told it closed. The close reaches the answering instance
+    // too, where the client's close by id finds nothing left to clear.
+    #[tokio::test]
+    async fn every_co_viewer_of_the_answering_window_is_told_the_survey_closed() {
+        let (_root, registry) = single_tab_registry();
+        let state = survey_ws_state(64);
+        let address = serve_ws_route(state.clone()).await;
+        let mut answering = attach_window(address, "win-a").await;
+        let mut co_viewer = attach_window(address, "win-a").await;
+        // Each socket's attach sync is built after it subscribed to the
+        // broadcast, so both are subscribed before the survey opens.
+        recv_survey_sync(&mut answering, "on the answering instance's attach").await;
+        recv_survey_sync(&mut co_viewer, "on the co-viewer's attach").await;
+
+        let mut events = state.events_tx.subscribe();
+        let answer = async {
+            let open = recv_command(&mut events, "open_survey").await;
+            answer_survey(&state.survey_bus, &open, "ok");
+            open["survey"]["surveyId"]
+                .as_str()
+                .expect("server-minted id")
+                .to_string()
+        };
+        let (response, survey_id) = tokio::join!(
+            handle_survey(
+                survey_spec("answered by one of two co-viewers"),
+                Some("@@T"),
+                None,
+                30,
+                &state.events_tx,
+                &state.survey_bus,
+                Some(&registry),
+            ),
+            answer,
+        );
+        assert!(matches!(response, ControlResponse::Ok { .. }));
+
+        let close = recv_socket_command(
+            &mut co_viewer,
+            "close_survey",
+            "on the co-viewer after the other instance of win-a answered",
+        )
+        .await;
+        assert_eq!(close["surveyId"], survey_id.as_str());
+        assert_eq!(close["reason"], "answered_elsewhere");
+        let own =
+            recv_socket_command(&mut answering, "close_survey", "on the answering instance").await;
+        assert_eq!(own["surveyId"], survey_id.as_str());
+    }
+
     #[tokio::test]
     async fn a_window_attaching_after_its_survey_timed_out_is_told_it_is_gone() {
         let (_root, registry) = single_tab_registry();
