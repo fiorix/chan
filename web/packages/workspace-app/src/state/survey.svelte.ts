@@ -33,6 +33,7 @@ import {
   type SurveySpec,
   type SurveyReplyRequest,
 } from "../api/client";
+import { ApiError } from "../api/errors";
 import { notify } from "./notify.svelte";
 
 /// One in-flight survey + its reply guard. `busy` gates the reply buttons so a
@@ -111,6 +112,39 @@ export function closeSurveyFromRemote(
   return undefined;
 }
 
+/// Clear `slot` if it still shows `surveyId`. A reply settles after its
+/// await, and by then a later survey may have taken the slot.
+function release(slot: SurveySlot, surveyId: string): void {
+  if (entry(slot)?.spec.surveyId === surveyId) clear(slot);
+}
+
+/// Post `reply` for the survey `e` shows on `slot`, holding the slot busy
+/// until it settles. An accepted reply clears the slot. The reply route
+/// answers 404 once no survey is parked under the id (answered, timed out or
+/// cancelled), and nothing can answer that survey any more, so a 404 clears
+/// the slot too and says so. Any other failure keeps the overlay for a retry.
+async function send(
+  slot: SurveySlot,
+  e: SurveyEntry,
+  reply: SurveyReplyRequest,
+  failure: string,
+): Promise<void> {
+  const surveyId = e.spec.surveyId;
+  e.busy = true;
+  try {
+    await api.surveyReply(reply);
+    release(slot, surveyId);
+  } catch (err) {
+    e.busy = false;
+    if (err instanceof ApiError && err.status === 404) {
+      release(slot, surveyId);
+      notify("survey expired: nothing is waiting for its answer");
+      return;
+    }
+    notify(`${failure}: ${(err as Error).message ?? err}`);
+  }
+}
+
 /// Reply with the option at `index` (0-based; the overlay numbers them
 /// [1]..[N]) for the survey on `slot`. The chosen label round-trips to the
 /// blocked CLI's stdout.
@@ -119,7 +153,6 @@ export async function pickOption(slot: SurveySlot, index: number): Promise<void>
   if (!e || e.busy) return;
   const label = e.spec.options[index];
   if (label === undefined) return;
-  e.busy = true;
   const reply: SurveyReplyRequest = {
     surveyId: e.spec.surveyId,
     kind: "option",
@@ -127,13 +160,7 @@ export async function pickOption(slot: SurveySlot, index: number): Promise<void>
     optionLabel: label,
     windowId: sessionWindowId(),
   };
-  try {
-    await api.surveyReply(reply);
-    clear(slot);
-  } catch (err) {
-    e.busy = false;
-    notify(`survey reply failed: ${(err as Error).message ?? err}`);
-  }
+  await send(slot, e, reply, "survey reply failed");
 }
 
 /// Reply with [F] for the survey on `slot`. F is standard on every survey,
@@ -143,19 +170,12 @@ export async function pickOption(slot: SurveySlot, index: number): Promise<void>
 export async function requestFollowup(slot: SurveySlot): Promise<void> {
   const e = entry(slot);
   if (!e || e.busy) return;
-  e.busy = true;
   const reply: SurveyReplyRequest = {
     surveyId: e.spec.surveyId,
     kind: "followup",
     windowId: sessionWindowId(),
   };
-  try {
-    await api.surveyReply(reply);
-    clear(slot);
-  } catch (err) {
-    e.busy = false;
-    notify(`survey followup failed: ${(err as Error).message ?? err}`);
-  }
+  await send(slot, e, reply, "survey followup failed");
 }
 
 /// Dismiss the survey on `slot`. A dismiss sends a distinct "dismissed" reply
@@ -165,17 +185,10 @@ export async function requestFollowup(slot: SurveySlot): Promise<void> {
 export async function dismissSurvey(slot: SurveySlot): Promise<void> {
   const e = entry(slot);
   if (!e || e.busy) return;
-  e.busy = true;
   const reply: SurveyReplyRequest = {
     surveyId: e.spec.surveyId,
     kind: "dismissed",
     windowId: sessionWindowId(),
   };
-  try {
-    await api.surveyReply(reply);
-    clear(slot);
-  } catch (err) {
-    e.busy = false;
-    notify(`survey dismiss failed: ${(err as Error).message ?? err}`);
-  }
+  await send(slot, e, reply, "survey dismiss failed");
 }
