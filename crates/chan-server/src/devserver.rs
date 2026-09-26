@@ -6506,6 +6506,60 @@ mod tests {
         );
     }
 
+    /// A management mount still waiting on its root when the devserver shuts
+    /// down publishes no tenant after the last shutdown sweep. The host
+    /// refuses the publication, and the runtime the mount built shuts down,
+    /// releasing the workspace, before the mount reports the refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mount_that_outlives_the_shutdown_sweeps_publishes_nothing() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let late = tempfile::tempdir().expect("root mounting at shutdown");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = allocate_workspace_prefix(late.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(late.path(), &prefix)
+            .expect("prepare the mount")
+            .expect("a fresh attempt");
+
+        let stall = root_stall::stall(late.path());
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount never reached its root's filesystem"
+        );
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state.host, None))
+            .await
+            .expect("the shutdown did not return")
+            .expect("shut down");
+
+        drop(stall);
+        let mounted = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount did not settle once its root answered")
+            .expect("mount task");
+        assert_eq!(
+            state.host.mounted_prefixes().expect("prefixes"),
+            Vec::<String>::new(),
+            "a mount published after the last shutdown sweep: {mounted:?}"
+        );
+        let refused = mounted.expect_err("the late mount reported success");
+        assert!(
+            refused.to_string().contains("shutting down"),
+            "the refusal does not say the host is shutting down: {refused}"
+        );
+        state
+            .host
+            .library()
+            .open_workspace(late.path())
+            .expect("the refused runtime still holds the workspace");
+    }
+
     /// A registered root whose path now resolves elsewhere, restored after a
     /// devserver restart from the path its overlay row stores, lists as on
     /// with its token, and as stopped once closed: its record and its
