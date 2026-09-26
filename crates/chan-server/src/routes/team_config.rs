@@ -1228,12 +1228,18 @@ mod tests {
             .env
             .insert("CHAN_AGENT".into(), "codex".into());
         assert!(validate_team_config(&config).is_ok());
+        // The SPA restates each member's own handle as CHAN_TAB_NAME, as the
+        // sample's lead does: accepted.
+        let own = config.members[1].handle.clone();
         config.members[1]
             .env
-            .insert("CHAN_TAB_NAME".into(), "renamed".into());
-        let err = validate_team_config(&config).expect_err("CHAN_TAB_NAME is chan's own");
+            .insert("CHAN_TAB_NAME".into(), own.clone());
+        assert!(validate_team_config(&config).is_ok());
+        let other = config.members[0].handle.clone();
+        config.members[1].env.insert("CHAN_TAB_NAME".into(), other);
+        let err = validate_team_config(&config).expect_err("another member's handle is refused");
         assert!(err.contains("CHAN_TAB_NAME"), "got: {err}");
-        assert!(err.contains(&config.members[1].handle), "got: {err}");
+        assert!(err.contains(&own), "got: {err}");
     }
 
     #[test]

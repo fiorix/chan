@@ -1381,7 +1381,7 @@ where
             if let Err(message) = require_connected_window(session_registry, &window_id) {
                 return ControlResponse::Error { message };
             }
-            let (command, env) = match terminal_spawn_overrides(command, env) {
+            let (command, env) = match terminal_spawn_overrides(command, env, tab_name.as_deref()) {
                 Ok(overrides) => overrides,
                 Err(message) => return ControlResponse::Error { message },
             };
@@ -4484,6 +4484,7 @@ const WRITE_QUEUE_CAP_MSG: usize = 100;
 fn terminal_spawn_overrides(
     command: Option<String>,
     env: BTreeMap<String, String>,
+    tab_name: Option<&str>,
 ) -> Result<(Option<String>, BTreeMap<String, String>), String> {
     let command = match command {
         Some(command) => Some(
@@ -4492,7 +4493,7 @@ fn terminal_spawn_overrides(
         ),
         None => None,
     };
-    crate::routes::validate_terminal_env(&env)?;
+    crate::routes::validate_terminal_env(&env, tab_name)?;
     Ok((command, env))
 }
 
@@ -4512,7 +4513,7 @@ fn term_restart(
     if tab_name.is_none() && tab_group.is_none() {
         return Err("term restart needs a tab name and/or group selector".into());
     }
-    let (command, env) = terminal_spawn_overrides(command, env)?;
+    let (command, env) = terminal_spawn_overrides(command, env, tab_name)?;
     let restarted = registry
         .restart_matching(
             tab_name,

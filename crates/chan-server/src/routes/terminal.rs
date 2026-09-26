@@ -471,7 +471,7 @@ pub async fn api_create_terminal(
         Some(command) => command,
         None => return (StatusCode::BAD_REQUEST, "terminal command is required").into_response(),
     };
-    if let Err(message) = validate_terminal_env(&body.env) {
+    if let Err(message) = validate_terminal_env(&body.env, Some(&name)) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
     let opts = CreateOptions {
@@ -686,7 +686,12 @@ pub(crate) fn normalize_terminal_command(command: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-pub(crate) fn validate_terminal_env(env: &BTreeMap<String, String>) -> Result<(), String> {
+/// Check a spawn request's env. `tab_name` is the name the request gives
+/// the terminal, the one chan exports as `CHAN_TAB_NAME`.
+pub(crate) fn validate_terminal_env(
+    env: &BTreeMap<String, String>,
+    _tab_name: Option<&str>,
+) -> Result<(), String> {
     for key in env.keys() {
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
             return Err(format!("invalid terminal env key: {key:?}"));
@@ -739,7 +744,11 @@ fn terminal_query_spawn_overrides(query: &TerminalQuery) -> Result<SpawnOverride
             .map_err(|e| format!("invalid terminal env: {e}"))?,
         None => BTreeMap::new(),
     };
-    validate_terminal_env(&env)?;
+    let tab_name = query
+        .tab_name
+        .as_deref()
+        .and_then(|name| normalize_label(name, MAX_NAME_CHARS));
+    validate_terminal_env(&env, tab_name.as_deref())?;
     Ok(SpawnOverrides {
         command,
         env,
@@ -2547,13 +2556,13 @@ mod tests {
     fn validate_terminal_env_rejects_bad_keys_and_values() {
         let mut env = BTreeMap::new();
         env.insert("OK".into(), "1".into());
-        assert!(validate_terminal_env(&env).is_ok());
+        assert!(validate_terminal_env(&env, None).is_ok());
         env.insert("BAD=KEY".into(), "x".into());
-        assert!(validate_terminal_env(&env).is_err());
+        assert!(validate_terminal_env(&env, None).is_err());
 
         let mut env = BTreeMap::new();
         env.insert("BAD_VALUE".into(), "x\0y".into());
-        assert!(validate_terminal_env(&env).is_err());
+        assert!(validate_terminal_env(&env, None).is_err());
 
         // A key chan sets for itself at spawn would be overwritten, so a
         // request that sets one is refused, naming it.
@@ -2573,7 +2582,7 @@ mod tests {
             "CHAN_MCP_SERVER_JSON",
         ] {
             let env = BTreeMap::from([(key.to_string(), "caller".to_string())]);
-            let refused = validate_terminal_env(&env)
+            let refused = validate_terminal_env(&env, Some("@@Lead"))
                 .expect_err(&format!("{key} is chan's own and must be refused"));
             assert!(refused.contains(key), "{key}: {refused}");
         }
@@ -2584,7 +2593,17 @@ mod tests {
             ("TERM".to_string(), "dumb".to_string()),
             ("NO_COLOR".to_string(), "1".to_string()),
         ]);
-        assert!(validate_terminal_env(&env).is_ok());
+        assert!(validate_terminal_env(&env, None).is_ok());
+
+        // The SPA's team launch restates the member's handle as
+        // CHAN_TAB_NAME beside the same `name`: chan sets that very value,
+        // so it is accepted. Any other value is refused like the rest.
+        let spa = BTreeMap::from([("CHAN_TAB_NAME".to_string(), "@@Lead".to_string())]);
+        assert!(validate_terminal_env(&spa, Some("@@Lead")).is_ok());
+        let refused = validate_terminal_env(&spa, Some("@@Worker"))
+            .expect_err("a CHAN_TAB_NAME other than the tab name is refused");
+        assert!(refused.contains("CHAN_TAB_NAME"), "{refused}");
+        assert!(validate_terminal_env(&spa, None).is_err());
     }
 
     #[tokio::test]
@@ -2709,6 +2728,50 @@ mod tests {
             out.contains("restart-one"),
             "missing restarted output: {out:?}"
         );
+        state
+            .terminal_sessions
+            .close(&session, CloseReason::Explicit);
+    }
+
+    // A restart's env reaches the same spawn as a create's, so a key chan
+    // sets for itself is refused there too, while a CHAN_TAB_NAME that
+    // restates the restart's name is accepted.
+    #[tokio::test]
+    async fn api_restart_terminal_refuses_a_chan_key_in_its_env() {
+        let state = crate::state::test_support::make_test_state(false);
+        let response = api_create_terminal(
+            State(state.clone()),
+            Ok(Json(create_terminal_body("sleep 5"))),
+        )
+        .await;
+        let json = response_json(response).await;
+        let session = json["session"].as_str().expect("session id").to_string();
+        let restart = |value: &str| RestartTerminalBody {
+            name: Some("@@Second".into()),
+            group: None,
+            window_id: None,
+            command: None,
+            env: Some(BTreeMap::from([(
+                "CHAN_TAB_NAME".to_string(),
+                value.to_string(),
+            )])),
+            profile: None,
+        };
+
+        let response = api_restart_terminal(
+            State(state.clone()),
+            AxumPath(session.clone()),
+            Some(Json(restart("@@Other"))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = api_restart_terminal(
+            State(state.clone()),
+            AxumPath(session.clone()),
+            Some(Json(restart("@@Second"))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
         state
             .terminal_sessions
             .close(&session, CloseReason::Explicit);
