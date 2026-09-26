@@ -9115,6 +9115,126 @@ is_lead = false
         ));
     }
 
+    /// Each side's socket buffer in the sustained-lag test, small and fixed
+    /// (setting it turns the kernel's autotuning off), so a frame much larger
+    /// than both cannot be written until the client reads it.
+    const SMALL_SOCKET_BUFFER: u32 = 64 * 1024;
+
+    /// Serve the `/ws` event route over `state` from a listener whose accepted
+    /// sockets inherit a [`SMALL_SOCKET_BUFFER`] send buffer.
+    async fn serve_ws_route_with_small_buffers(
+        state: Arc<crate::state::AppState>,
+    ) -> std::net::SocketAddr {
+        let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
+        socket
+            .set_send_buffer_size(SMALL_SOCKET_BUFFER)
+            .expect("small send buffer");
+        socket
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("bind /ws route");
+        let listener = socket.listen(16).expect("listen /ws route");
+        let address = listener.local_addr().expect("/ws route address");
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(crate::routes::ws_upgrade))
+            .with_state(state);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve /ws route");
+        });
+        address
+    }
+
+    /// Attach a window's event socket over a connection whose receive buffer
+    /// is [`SMALL_SOCKET_BUFFER`].
+    async fn attach_window_with_small_buffer(
+        address: std::net::SocketAddr,
+        window_id: &str,
+    ) -> WsClient {
+        let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
+        socket
+            .set_recv_buffer_size(SMALL_SOCKET_BUFFER)
+            .expect("small receive buffer");
+        let stream = socket.connect(address).await.expect("connect /ws");
+        tokio_tungstenite::client_async(
+            format!("ws://{address}/ws?w={window_id}"),
+            tokio_tungstenite::MaybeTlsStream::Plain(stream),
+        )
+        .await
+        .expect("attach /ws")
+        .0
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_keeps_lagging_still_gets_its_broadcast_frames() {
+        use futures::StreamExt;
+        let state = survey_ws_state(2);
+        // A body far larger than both socket buffers: no survey_sync can be
+        // written until the client reads it, so the frames broadcast while
+        // one is being sent overrun the pump's receiver again.
+        let (survey_id, _reply_rx) = state.survey_bus.register();
+        let spec = SurveySpec {
+            survey_id: survey_id.clone(),
+            ..survey_spec(&"x".repeat(1 << 20))
+        };
+        let _open = state
+            .survey_bus
+            .record_open(&["win-a".into()], Some("@@T"), &spec);
+        let address = serve_ws_route_with_small_buffers(state.clone()).await;
+        let mut socket = attach_window_with_small_buffer(address, "win-a").await;
+        recv_survey_sync(&mut socket, "on attach").await;
+
+        // A burst the pump cannot read between (see the lag test above), then
+        // traffic that keeps coming: two frames every time the runtime polls
+        // the broadcaster, for as long as the test reads.
+        for n in 0..3 {
+            let _ = state
+                .events_tx
+                .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#));
+        }
+        let broadcaster = tokio::spawn({
+            let events_tx = state.events_tx.clone();
+            async move {
+                for n in 3u64.. {
+                    let _ = events_tx.send(format!(r#"{{"type":"lag_filler","n":{n}}}"#));
+                    if n % 2 == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let (mut syncs, mut fillers) = (0u64, 0u64);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while syncs + fillers < 6 {
+                let message = socket.next().await.expect("/ws open").expect("/ws frame");
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(&text).expect("json frame");
+                if frame["command"] == "survey_sync" {
+                    syncs += 1;
+                } else if frame["type"] == "lag_filler" {
+                    fillers += 1;
+                }
+            }
+        })
+        .await
+        .expect("six frames within ten seconds");
+        let elapsed = started.elapsed();
+        broadcaster.abort();
+        assert!(
+            fillers > 0 && syncs <= 1 + elapsed.as_secs(),
+            "a socket that keeps lagging got {syncs} survey_sync and {fillers} broadcast \
+             frames in its first six frames over {elapsed:?}: it must get the buffered \
+             broadcast frames between syncs, and at most one sync a second"
+        );
+
+        // The lags after the first sync each owe one; it goes out once the
+        // interval ends, so the window still converges after the episode.
+        let owed = recv_survey_sync(&mut socket, "after the lag episode").await;
+        assert_eq!(owed["surveys"][0]["survey"]["surveyId"], survey_id);
+    }
+
     /// The ids `survey_bus` reports open in `window_id`.
     fn open_survey_ids(survey_bus: &crate::survey::SurveyBus, window_id: &str) -> Vec<String> {
         survey_bus
