@@ -5303,6 +5303,81 @@ mod tests {
         );
     }
 
+    /// The devserver's list answers while a registered root's filesystem
+    /// hangs: the hung root has a record, an off row and a window, and comes
+    /// first in the registry, so every row the list builds meets it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn devserver_list_answers_while_another_root_hangs() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(other.path())
+            .expect("register the other root");
+        register_off_with_a_window(&state, hung.path()).await;
+
+        let stall = root_stall::stall(hung.path());
+        let listing = Arc::clone(&state);
+        let entries = completes_beside(&stall, "the devserver's list", async move {
+            listing.workspace_entries()
+        })
+        .await;
+        assert_eq!(entries.len(), 2, "the list lost a row: {entries:?}");
+    }
+
+    /// Startup restore prepares every persisted row and restores the healthy
+    /// ones while one desired-on root's filesystem hangs: preparing a row
+    /// goes by the key it stores, and the hung root's attempt expires at its
+    /// bound instead of holding up the rows after it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn startup_restore_restores_other_roots_while_one_hangs() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let other = tempfile::tempdir().expect("other root");
+        let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        Arc::get_mut(&mut state)
+            .expect("fixture: an unshared state")
+            .mount_timeout = Duration::from_millis(500);
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+            "lib-test".into(),
+        );
+        for root in [hung.path(), other.path()] {
+            state
+                .host
+                .library()
+                .register_workspace(root)
+                .expect("register");
+        }
+        let rows: Vec<PersistedWorkspace> = [hung.path(), other.path()]
+            .into_iter()
+            .map(|root| PersistedWorkspace {
+                path: canonical_root(root).to_string_lossy().into_owned(),
+                desired_on: true,
+                generation: 1,
+            })
+            .collect();
+
+        let stall = root_stall::stall(hung.path());
+        let restoring = Arc::clone(&state);
+        completes_beside(&stall, "startup restore", async move {
+            let attempts = restoring.prepare_restore_rows(rows);
+            assert_eq!(attempts.len(), 2, "restore dropped a desired-on row");
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            restore_prepared_workspaces(restoring, attempts, shutdown_rx).await;
+        })
+        .await;
+        assert!(
+            state.host.is_root_mounted(other.path()),
+            "the other root was not restored"
+        );
+    }
+
     /// Closes of one hung root share the blocking thread that resolves its
     /// key, so a client retrying a close of a root that stopped answering
     /// cannot take the blocking pool from every other root.

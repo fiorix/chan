@@ -2902,6 +2902,35 @@ mod devserver_route_tests {
         );
     }
 
+    /// The launcher's list and the window feed answer while a registered
+    /// root's filesystem hangs. The hung root comes first in the registry and
+    /// has an off row and a window record, so building its list row and
+    /// deciding whether its window is live both meet it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launcher_list_and_window_feed_answer_while_another_root_hangs() {
+        use crate::devserver::hung_root_support::completes_beside;
+        let cfg = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let hung = tempfile::tempdir().unwrap();
+        let (_host, router) = router_beside_a_hung_root(cfg.path(), &[other.path()], hung.path());
+
+        let stall = chan_workspace::paths::root_stall::stall(hung.path());
+        let listing = router.clone();
+        let (status, rows) = completes_beside(&stall, "the launcher's list", async move {
+            request(&listing, "GET", "/api/library/workspaces", None).await
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "list: {rows}");
+        assert_eq!(rows.as_array().map(Vec::len), Some(2), "list: {rows}");
+        let feeding = router.clone();
+        let (status, feed) = completes_beside(&stall, "the window feed", async move {
+            request(&feeding, "GET", "/api/library/windows", None).await
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "feed: {feed}");
+    }
+
     /// The launcher's add resolves and registers the requested root off the
     /// runtime, so adding a root that stopped answering holds no runtime
     /// worker while it waits: on a runtime with one worker, another root's
