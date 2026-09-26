@@ -1137,7 +1137,25 @@ fn register_workspace_path(library: &chan_workspace::Library, path: &str) -> Res
 /// registry surfaces them off. Called after each on/off toggle and on clean
 /// shutdown. Best-effort: a no-op when the embedded host / overlay is
 /// unavailable, never fatal to the toggle or the exit.
+///
+/// Once a normal shutdown has begun this writes nothing. Its drain takes every
+/// tenant out of the host, so a snapshot taken after it, such as by a `chan
+/// close` handed off meanwhile, would record every workspace off and the next
+/// boot would re-serve none of them. `begin_normal_shutdown` writes the stop's
+/// own snapshot through [`snapshot_workspaces`] before the drain starts.
 fn persist_workspaces(state: &AppState) {
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    snapshot_workspaces(state);
+}
+
+/// [`persist_workspaces`] without the shutdown check, for the snapshot a
+/// normal shutdown writes before it drains the tenants.
+fn snapshot_workspaces(state: &AppState) {
     let Some(embedded) = state.embedded() else {
         return;
     };
@@ -6641,7 +6659,7 @@ fn begin_normal_shutdown(
         return Err(action);
     }
     state.quit_confirmed.store(true, Ordering::SeqCst);
-    persist_workspaces(&state);
+    snapshot_workspaces(&state);
     tauri::async_runtime::spawn(async move {
         serve::stop_all(&state).await;
         match action {
