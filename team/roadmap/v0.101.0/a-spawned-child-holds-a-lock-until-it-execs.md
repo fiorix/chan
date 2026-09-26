@@ -2,6 +2,10 @@
 
 Status: raised during v0.101.0 on 2026-09-26 by the services lane's hung-root order (`dev/v0101-team/reports/report-Services-4.md`, "Loops", in the development tree), whose gate loops found the existing lock tests racing 25 times in 2000 runs, and confirmed by the independent review of that order (`reviews/review-Services-4.md`, finding 3), which traced the paths. A source reading against `main` at `cdd266b09`.
 
+## Owner ruling
+
+Accepted on 2026-09-26 as the lead recommended: the lock descriptor is opened close-on-exec and the spawn is kept from duplicating it, with the flake measured on the one-CPU rig before and after; the services lane owns the lock side and coordinates the spawn change with the runtime lane. It also retires the lock tests' measured flake (20 of 2000 at landing 17).
+
 ## What was seen
 
 A child spawned by the process (a terminal, a probe helper) holds a duplicate of every descriptor the process has open from the fork until it execs, the workspace lock file included. `flock` belongs to the open file description, so the parent's close does not release the lock while that duplicate lives, and a probe, an `acquire` or the reopen handoff's `is_free` that runs in that window reads the lock as held by nobody it can name. In the test suite the window is a few milliseconds and shows as a one-in-eighty flake at `lock.rs:763` and `:775`; in production the same shape needs a terminal spawn beside a lock close, which is plausible and unmeasured. This is the descriptor-inheritance class the desktop liveness probe met in v0.93.0 (`team/roadmap/done/the-desktop-liveness-probe-test-is-load-sensitive-and-unexplained.md`), where the fix was structural.

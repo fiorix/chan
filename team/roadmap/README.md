@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item. The same day the owner gave the four rulings the frontend review remainder waited on and closed the ring mirror's throughput cost as measured; one test-harness race from landing 15's CI is raised for a decision.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item. The same day the owner gave the four rulings the frontend review remainder waited on and closed the ring mirror's throughput cost as measured; one test-harness race from landing 15's CI is raised for a decision. Later that day the owner accepted the seven items then awaiting a decision, each as the lead recommended, with the shape and lane rulings recorded in their files.
 
 **Frontend review, phased from v0.100.0**
 
@@ -133,18 +133,18 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | accepted | build |
 | [a-hung-root-keeps-reading-running][hrun] | landed | GA |
 | [a-late-http-mount-escapes-the-shutdown-sweep][lsweep] | accepted | build |
-| [the-linux-gate-runs-tests-under-a-canonical-tmpdir][ctmp] | raised | decide |
-| [a-relinked-root-window-nests-outside-its-row][rnest] | raised | decide |
-| [the-desktop-handoff-keys-an-absent-root][hkey] | raised | decide |
-| [one-close-reason-covers-a-parked-and-a-killed-pty][pkill] | raised | decide |
+| [the-linux-gate-runs-tests-under-a-canonical-tmpdir][ctmp] | accepted | build |
+| [a-relinked-root-window-nests-outside-its-row][rnest] | accepted | build |
+| [the-desktop-handoff-keys-an-absent-root][hkey] | accepted | build |
+| [one-close-reason-covers-a-parked-and-a-killed-pty][pkill] | accepted | build |
 | [a-fresh-session-under-an-old-id-keeps-the-key-protocol][kproto] | landed | GA |
 | [the-scripted-team-drops-member-env][senv] | accepted | build |
 | [the-memfd-ring-mirror-doubles-the-terminals-memory][mmap] | landed | GA |
 | [a-reattach-replays-before-the-pty-takes-the-clients-size][rsz] | accepted | build |
 | [a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes][psplit] | accepted | build |
-| [a-backslash-in-a-name-reads-two-ways-on-the-wire][bslash] | raised | decide |
-| [a-spawned-child-holds-a-lock-until-it-execs][lockdup] | raised | decide |
-| [a-resilience-transcript-is-dumped-before-its-readers-drain][tdump] | raised | decide |
+| [a-backslash-in-a-name-reads-two-ways-on-the-wire][bslash] | accepted | build |
+| [a-spawned-child-holds-a-lock-until-it-execs][lockdup] | accepted | build |
+| [a-resilience-transcript-is-dumped-before-its-readers-drain][tdump] | accepted | build |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md

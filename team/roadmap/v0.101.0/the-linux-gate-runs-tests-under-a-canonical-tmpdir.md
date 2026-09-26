@@ -2,6 +2,10 @@
 
 Status: raised during v0.101.0 on 2026-09-26 from the main CI run on landing 13 (run 36224062159: `make ci-macos` and `make ci-windows` red on `off_filters_windows_from_feed_but_preserves_them_for_on_restore`, every Linux job green) and the order that reproduced it on Linux (`dev/v0101-team/reports/report-Services-1.md` in the development tree). A source reading against `main` at `1566b06d0`, reproduced on Linux with `TMPDIR` pointing at a symlink.
 
+## Owner ruling
+
+Accepted on 2026-09-26 as the lead recommended: the five assertions become exact, and a symlinked-`TMPDIR` run of the chan-library and chan-server suites is added as a `ci-linux` job only, so `make pre-push` does not grow; the landing record says which arm proves which crate. The services lane's.
+
 ## What was seen
 
 The full gate and `make ci-linux` run the Rust suites under a temp directory whose spelling is already canonical, so a test that stores a temp path's raw spelling where production stores a canonical key passes on Linux and fails on macOS, where `/var` is a symlink to `/private/var`, and on Windows, where the runner's temp path most likely has a short spelling (the log prints no path). Landing 13 carried five such tests, one in chan-library and four in chan-server, green through the full gate. The chan-library test was red on both other arms. The four chan-server tests were never run there: on macOS cargo stopped at the red chan-library binary, and the Windows arm runs chan-server only through the six tests named in `CHAN_SERVER_WINDOWS_TESTS` in the Makefile, so nothing proves them on Windows at all. On Linux, `TMPDIR=/tmp/link` with `/tmp/link -> /tmp/real` reproduces all five. With those five fixed to mint the root the registry stores, the same run exposes five more tests that pass only because the message they check contains the raw spelling as a substring of the canonical one (`/private/var/x` contains `/var/x`; `/tmp/real/x` does not contain `/tmp/link/x`), at `1566b06d0`:

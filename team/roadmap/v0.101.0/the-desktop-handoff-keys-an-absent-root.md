@@ -2,6 +2,10 @@
 
 Status: raised during v0.101.0 on 2026-09-26 by the independent review of a test-only order (`dev/v0101-team/reviews/review-Services-1.md`, finding 4, in the development tree), which found it older than that order's range and unreachable from shipped senders. A source reading against `main` at `1566b06d0`; not reproduced.
 
+## Owner ruling
+
+Accepted on 2026-09-26 as the lead recommended: the key is computed after `register_workspace_path` has created the directory, or the record is keyed from the row that call returns; red first with an absent path. The services lane's, with the relinked-root nesting item.
+
 ## What was seen
 
 The desktop's CLI handoff computes `canonical_key(&path)` for the requested root (`desktop/src-tauri/src/main.rs:2889`) before `register_workspace_path` may create the directory (`main.rs:1124-1125`). For a path that does not exist at arrival, the key is the lexical fallback (`crates/chan-workspace/src/paths.rs:431`), and `serve::start` mints the window record with that spelling (`desktop/src-tauri/src/serve.rs:112`). Since the feed matches records lexically against the runtime's stored keys (`crates/chan-library/src/host.rs:2103`), such a record is hidden and the desktop opens nothing. Before that change the feed canonicalized each record at read time, so the record resolved once the directory existed. The shipped CLI creates the root (`crates/chan/src/lib.rs:3927`) before it hands off (`:3944`), so only a race between the two or a client that does not create the root reaches this.

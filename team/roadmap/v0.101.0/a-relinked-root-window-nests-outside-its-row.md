@@ -2,6 +2,10 @@
 
 Status: raised during v0.101.0 on 2026-09-26 by the independent review of a test-only order (`dev/v0101-team/reviews/review-Services-1.md`, finding 3, in the development tree), which found it older than that order's range. A source reading against `main` at `1566b06d0`; not reproduced.
 
+## Owner ruling
+
+Accepted on 2026-09-26 as the lead recommended, with the smaller shape: every mint site stores the registry row's root, the handoff and desktop sites looking the row up by the key they already hold; red first with a relinked root minted through the devserver handoff. The services lane's, paired with the absent-root handoff item since both touch the desktop's handoff mint.
+
 ## What was seen
 
 The window feed matches a record's stored root against either of two keys the runtime holds, its canonical root or the registry row's root it was opened at (`found_by`, `crates/chan-library/src/host.rs:589-590`), so a record minted with either spelling is in the feed. The launcher nests a window under its workspace row by string equality with the row's `root_path` (`web/packages/launcher/src/lib/machineTree.ts:52-55`, `:106`; the row's path comes from the registry at `crates/chan-server/src/routes/library.rs:704-707`). Two mint sites store the canonical key of the caller's path rather than the row's root: the devserver handoff (`crates/chan-server/src/devserver.rs:2610-2611`, keyed at `:854-859`) and the desktop's window paths (`desktop/src-tauri/src/window_ops.rs:163-170`, `main.rs:2889`, `:2904`, `serve.rs:112`). For a root whose spelling has been relinked since the row was stored (a row at `/home/u/proj` after `/home/u` became a symlink to `/data/u`), those sites store `/data/u/proj`: the window is in the feed and sits outside its workspace row. The window route and the command action store the row's root and nest correctly. `crates/chan-library/design.md`'s sentence that a record's path is the one the launcher nests it under holds only for those two.

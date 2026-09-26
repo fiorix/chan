@@ -2,6 +2,10 @@
 
 Status: raised during v0.101.0 on 2026-09-26 by the independent review of the frontend dedup order that unified `parentDir` and `basename` (`dev/v0101-team/reviews/review-Frontend-4.md`, finding 5, in the development tree). A source reading against `main` at `cdd266b09`; not reproduced.
 
+## Owner ruling
+
+Accepted on 2026-09-26 as the lead recommended, with the raw name as the one spelling: `\` is a legal character in a POSIX name and the one-level listing already keeps it, so the recursive walks and the index keys stop rewriting it on Unix, pinned by a Unix-only test that lists, walks, searches and graphs a workspace holding `a\b.md`; the SPA's `basename` copies then fold onto that one rule in the frontend dedup rounds. The Rust half is the services lane's, the fold the frontend lane's.
+
 ## What was seen
 
 On Unix a file may be named `a\b.md`. chan-workspace keeps that raw name in the one-level listing (`crates/chan-workspace/src/rooted_fs.rs:864`) and rewrites `\` to `/` in the recursive walks and the index keys on every platform (`crates/chan-workspace/src/fs_ops.rs:841`, `:876`, `:1950`, `:1990`). The SPA therefore receives `a\b.md` from `/api/fs` and `a/b.md` from the tree walk, search and the graph for one file, and its own `basename` helpers disagree with each other on the same name (`state/format.ts` splits on `\`, seven kept copies do not). No single client-side rule can make the name read the same on every surface while the server sends two spellings.
