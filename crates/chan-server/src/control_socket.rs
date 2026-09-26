@@ -2718,15 +2718,15 @@ where
         biased;
         result = rx => {
             match result {
-                Ok((reply, answered_by)) => {
-                    // Close the STALE overlay in the other target windows, but NOT the
-                    // one that answered: it already dismissed its overlay via the
-                    // reply, so an `answered_elsewhere` close there only races that
-                    // local clear (a spurious saved-draft dialog + composer hide).
+                Ok((reply, _answered_by)) => {
+                    // Close the overlay in every target window, the one that
+                    // answered included: another SPA instance can share its
+                    // window id and still shows the survey, and the answering
+                    // instance, whose reply already cleared its own overlay,
+                    // finds nothing left to close by that id.
                     send_survey_close_commands(
                         open,
                         &windows,
-                        answered_by.as_deref(),
                         &survey_id,
                         tab_name,
                         SurveyCloseReason::AnsweredElsewhere,
@@ -2744,7 +2744,6 @@ where
                     send_survey_close_commands(
                         open,
                         &windows,
-                        None,
                         &survey_id,
                         tab_name,
                         SurveyCloseReason::Cancelled,
@@ -2761,7 +2760,6 @@ where
             send_survey_close_commands(
                 open,
                 &windows,
-                None,
                 &survey_id,
                 tab_name,
                 SurveyCloseReason::Cancelled,
@@ -2779,7 +2777,6 @@ where
             send_survey_close_commands(
                 open,
                 &windows,
-                None,
                 &survey_id,
                 tab_name,
                 SurveyCloseReason::TimedOut,
@@ -2792,18 +2789,16 @@ where
     }
 }
 
-/// Push `close_survey` for `survey_id` to each of `windows` but `exclude`,
-/// once, over the `/ws` broadcast. It takes the survey's open record and
-/// drops it first (after a reply, `complete_survey` already took the survey
-/// out): a socket subscribed before this point receives the close, and one
-/// that attaches after it is synced without the survey, so no window the
-/// close goes to misses both. `exclude`, the window that answered, gets
-/// neither: its own reply cleared its overlay, and no sync built after the
-/// reply lists the survey.
+/// Push `close_survey` for `survey_id` to each of `windows`, once, over the
+/// `/ws` broadcast. It takes the survey's open record and drops it first
+/// (after a reply, `complete_survey` already took the survey out): a socket
+/// subscribed before this point receives the close, and one that attaches
+/// after it is synced without the survey, so no window misses both. After a
+/// reply the close goes to the answering window too, since every SPA
+/// instance sharing that window id shows the survey.
 fn send_survey_close_commands(
     open: crate::survey::OpenSurveyGuard<'_>,
     windows: &[String],
-    exclude: Option<&str>,
     survey_id: &str,
     tab_name: Option<&str>,
     reason: SurveyCloseReason,
@@ -2811,10 +2806,6 @@ fn send_survey_close_commands(
 ) {
     drop(open);
     for window_id in windows {
-        // Skip the answering window: it closed its own overlay via the reply.
-        if Some(window_id.as_str()) == exclude {
-            continue;
-        }
         let _ = send_window_command(
             window_id,
             WindowCommand::CloseSurvey {
@@ -8534,11 +8525,11 @@ is_lead = false
     }
 
     #[tokio::test]
-    async fn answered_survey_excludes_the_answering_window_from_close_fanout() {
-        // Regression (S-A): a group survey open in win-a + win-b, answered in
-        // win-a. The stale-overlay close must reach win-b ONLY. Fanning
-        // `answered_elsewhere` back to the answerer races its own reply-clear
-        // and pops a spurious saved-draft dialog + hides its composer there.
+    async fn an_answered_survey_closes_in_every_target_window() {
+        // A group survey open in win-a and win-b, answered in win-a. The
+        // close reaches both: win-b's overlay is stale, and another instance
+        // of win-a may show it too, while the answering instance finds
+        // nothing left to close by that id.
         let (_root, registry) = empty_registry();
         for (tab_name, window_id) in [("@@A", "win-a"), ("@@B", "win-b")] {
             registry
@@ -8614,17 +8605,19 @@ is_lead = false
                 closes.push(frame);
             }
         }
+        let mut windows = closes
+            .iter()
+            .map(|frame| frame["window_id"].as_str().expect("window id"))
+            .collect::<Vec<_>>();
+        windows.sort_unstable();
         assert_eq!(
-            closes.len(),
-            1,
-            "the answered close reaches only the non-answering window"
+            windows,
+            ["win-a", "win-b"],
+            "the answered close reaches every target window, the answering one included"
         );
-        assert_eq!(closes[0]["window_id"], "win-b");
-        assert_eq!(closes[0]["reason"], "answered_elsewhere");
-        assert!(
-            closes.iter().all(|frame| frame["window_id"] != "win-a"),
-            "the answering window must be excluded from the close fan-out"
-        );
+        assert!(closes
+            .iter()
+            .all(|frame| frame["reason"] == "answered_elsewhere"));
     }
 
     /// A registry holding one live session named `@@T` owned by `win-a`,
