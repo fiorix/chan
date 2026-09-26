@@ -6611,6 +6611,9 @@ mod tests {
             .begin_mount(late.path(), &prefix)
             .expect("prepare the mount")
             .expect("a fresh attempt");
+        // The late mount's desired-on row, saved before its attempt runs as
+        // `mount_key_at` saves it.
+        state.persist_state();
         let overlay = || {
             state
                 .host
@@ -6652,6 +6655,83 @@ mod tests {
             overlay(),
             at_stop,
             "a save after the shutdown sweeps rewrote the overlay"
+        );
+    }
+
+    /// The overlay's rows as (root, desired on), sorted by root.
+    fn overlay_intents(state: &DevserverState) -> Vec<(PathBuf, bool)> {
+        let mut rows: Vec<(PathBuf, bool)> = state
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries()
+            .into_iter()
+            .map(|row| (PathBuf::from(row.path), row.desired_on))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// An off whose save lands after shutdown began records the workspace
+    /// off and leaves every other workspace as the stop found it, so the
+    /// next start restores the others and not this one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_off_saved_after_shutdown_begins_reads_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let closed = tempfile::tempdir().expect("root turned off during the stop");
+        let kept = tempfile::tempdir().expect("root left on");
+        let state = devserver_with_windows(home.path()).await;
+        let closed_prefix = state
+            .register_workspace(closed.path())
+            .await
+            .expect("mount");
+        state.register_workspace(kept.path()).await.expect("mount");
+
+        // What `shut_down_hosted` does first.
+        state.shutting_down.store(true, Ordering::Release);
+        state
+            .set_workspace_on(&closed_prefix, false, false)
+            .await
+            .expect("turn off");
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state, None))
+            .await
+            .expect("the shutdown did not return")
+            .expect("shut down");
+
+        let mut expected = vec![
+            (canonical_root(closed.path()), false),
+            (canonical_root(kept.path()), true),
+        ];
+        expected.sort();
+        assert_eq!(
+            overlay_intents(&state),
+            expected,
+            "an off saved after shutdown began did not read off"
+        );
+    }
+
+    /// A registration whose desired-on save lands after shutdown began is
+    /// recorded on, so the next start restores the workspace it mounted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registration_saved_after_shutdown_begins_reads_on() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("root registered during the stop");
+        let state = devserver_with_windows(home.path()).await;
+
+        // What `shut_down_hosted` does first.
+        state.shutting_down.store(true, Ordering::Release);
+        state.register_workspace(root.path()).await.expect("mount");
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state, None))
+            .await
+            .expect("the shutdown did not return")
+            .expect("shut down");
+
+        assert_eq!(
+            overlay_intents(&state),
+            [(canonical_root(root.path()), true)],
+            "a registration saved after shutdown began did not read on"
         );
     }
 
