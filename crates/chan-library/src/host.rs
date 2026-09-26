@@ -2012,6 +2012,9 @@ impl WorkspaceHost {
             report
                 .skipped_sessions
                 .extend(tenant_report.skipped_sessions);
+            report
+                .abandoned_ring_fds
+                .extend(tenant_report.abandoned_ring_fds);
         }
         if report.restored > 0 {
             self.notify_window_change();

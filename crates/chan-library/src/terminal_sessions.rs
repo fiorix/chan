@@ -3442,6 +3442,7 @@ impl Registry {
             // session this process spawns later never repeats either.
             self.generation_counter
                 .fetch_max(meta.generation.saturating_add(1), Ordering::Relaxed);
+            let had_ring_file = import.ring_fd.is_some();
             let session = match Session::from_imported(
                 self.config.clone(),
                 import,
@@ -3460,6 +3461,19 @@ impl Registry {
                     continue;
                 }
             };
+            // A restore mirrors into the ring file it was handed unless it
+            // gave the file up, which the store still holds.
+            if had_ring_file
+                && !session
+                    .ring
+                    .lock()
+                    .expect("terminal ring poisoned")
+                    .is_mirrored()
+            {
+                report
+                    .abandoned_ring_fds
+                    .push(fdstore_ring_fd_name(&id, meta.child_pid));
+            }
             let window_id = session.window_id();
             let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
             let mut reservations = self
@@ -5979,8 +5993,10 @@ struct LossyRestore {
 /// attach reports the bytes before it as missed. Such a restore ends behind
 /// the session unless the manifest is the seal's final write. A file that
 /// can still be used is then reset to mirror that ring, marked stopped when
-/// the restore may end behind; one that cannot is closed, and the store
-/// keeps it until the next boot finds it named by no manifest entry.
+/// the restore may end behind; one that cannot is closed, and the restore
+/// reports its store name for removal
+/// ([`FdStoreRestoreReport::abandoned_ring_fds`]), since activation parks a
+/// new ring under the same name.
 #[cfg(target_os = "linux")]
 fn restored_ring(
     capacity: usize,

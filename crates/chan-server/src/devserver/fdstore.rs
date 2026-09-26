@@ -759,6 +759,7 @@ mod linux {
             } = self;
 
             let mut restored = 0usize;
+            let mut abandoned_ring_fds = Vec::new();
             if manifest_library_id.as_deref() != Some(state.library_id.as_str()) {
                 for import in imports {
                     push_skipped_session(
@@ -775,6 +776,7 @@ mod linux {
                 restored = report.restored;
                 skipped.extend(report.skipped);
                 skipped_sessions.extend(report.skipped_sessions);
+                abandoned_ring_fds = report.abandoned_ring_fds;
             }
 
             if !orphan_fd_names.is_empty() {
@@ -790,13 +792,16 @@ mod linux {
                     .cleanup_skipped_fdstore_sessions(&skipped_sessions),
             );
 
-            // Remove exactly the fds that will NOT live on: orphans plus
-            // every skipped session's deterministic names, its PTY and its
-            // ring file. Restored sessions keep their entries. (A skipped
+            // Remove exactly the fds that will NOT live on: orphans, every
+            // skipped session's deterministic names, its PTY and its ring
+            // file, and the ring files restored sessions gave up on, which
+            // activation replaces under the same name. Restored sessions keep
+            // their other entries. (A skipped
             // session whose fd was already cleaned at take(), or that parked
             // no ring file, gets a harmless FDSTOREREMOVE for a name the
             // store does not hold.)
-            let invalid_fd_names = fds_to_remove(orphan_fd_names, &skipped_sessions);
+            let invalid_fd_names =
+                fds_to_remove(orphan_fd_names, &skipped_sessions, abandoned_ring_fds);
             if !invalid_fd_names.is_empty() {
                 chan_systemd::fdstore_remove_many(invalid_fd_names.iter().map(String::as_str));
             }
@@ -869,8 +874,10 @@ mod linux {
     fn fds_to_remove(
         orphan_fd_names: Vec<String>,
         skipped_sessions: &[FdStoreSkippedSession],
+        abandoned_ring_fds: Vec<String>,
     ) -> Vec<String> {
         let mut names = orphan_fd_names;
+        names.extend(abandoned_ring_fds);
         names.extend(skipped_sessions.iter().flat_map(|session| {
             [
                 fdstore_fd_name(&session.session_id, session.child_pid),
@@ -1830,7 +1837,7 @@ mod linux {
                 child_pid: Some(42),
                 reason: "test".into(),
             };
-            let names = fds_to_remove(vec!["chan.ring.orphan.1".into()], &[skipped]);
+            let names = fds_to_remove(vec!["chan.ring.orphan.1".into()], &[skipped], Vec::new());
             assert_eq!(
                 names,
                 vec![
@@ -1839,6 +1846,15 @@ mod linux {
                     fdstore_ring_fd_name("s", Some(42)),
                 ]
             );
+        }
+
+        /// A ring file a restored session gave up on is removed before
+        /// activation parks a new ring under its name.
+        #[test]
+        fn a_ring_file_a_restore_gave_up_on_is_removed() {
+            let given_up = fdstore_ring_fd_name("s", Some(42));
+            let names = fds_to_remove(Vec::new(), &[], vec![given_up.clone()]);
+            assert_eq!(names, vec![given_up]);
         }
 
         #[test]
