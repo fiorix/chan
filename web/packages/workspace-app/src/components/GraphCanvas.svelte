@@ -41,7 +41,11 @@
   import { fileBucket } from "../state/kinds";
   import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
   import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
-  import { containmentSpine, spineEdgeKey } from "../graph/containmentSpine";
+  import {
+    containmentParents,
+    containmentSpine,
+    spineEdgeKey,
+  } from "../graph/containmentSpine";
 
   type RenderedEdgeKind =
     | "link"
@@ -556,7 +560,9 @@
 
   function rebuildAdjacency(): void {
     adjacency = new Map();
-    containsParent = new Map();
+    // `edges` keeps string ids: forceLink resolves node refs only on the
+    // sim's own copies in `dEdges`.
+    containsParent = containmentParents(edges);
     backlinks = new Map();
     maxBacklinks = 0;
     for (const e of edges) {
@@ -566,10 +572,6 @@
       let b = adjacency.get(e.target);
       if (!b) { b = new Set(); adjacency.set(e.target, b); }
       b.add(e.source);
-      // `contains` runs parent dir -> child; edge endpoints are still
-      // string ids at rebuild time (before the force sim swaps in node
-      // refs), matching the adjacency keys above.
-      if (e.kind === "contains") containsParent.set(e.target, e.source);
       const c = (backlinks.get(e.target) ?? 0) + 1;
       backlinks.set(e.target, c);
       if (c > maxBacklinks) maxBacklinks = c;
