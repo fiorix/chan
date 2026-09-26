@@ -19,7 +19,8 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 
 import TerminalTab from "./TerminalTab.svelte";
 import { api } from "../api/client";
-import { __testReadLayoutReloadSnapshot } from "../state/store.svelte";
+import { __testReadLayoutReloadSnapshot, scheduleSessionSave } from "../state/store.svelte";
+import { setRichPromptHeight, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
@@ -77,7 +78,7 @@ function persisted(): string[] | "deleted" {
 /// Mount a terminal attached to a session of its own and let the save the
 /// attach schedules land. A fresh id per test keeps the store's on-disk
 /// dedupe from swallowing the write.
-async function attachedSession(): Promise<{ id: string; socket: TerminalSocket }> {
+async function attachedSession(): Promise<{ id: string; socket: TerminalSocket; tab: TerminalTabState }> {
   const id = `sess-end-${++sessions}`;
   const [tab] = seatTerminals([terminalTab()]);
   await mountTerminal(TerminalTab, tab!);
@@ -85,17 +86,27 @@ async function attachedSession(): Promise<{ id: string; socket: TerminalSocket }
   await attach(socket, { id, generation: 1, seq: 0 });
   await vi.advanceTimersByTimeAsync(SETTLE_MS);
   expect(persisted(), "the blob after the attach").toEqual([id]);
-  return { id, socket };
+  return { id, socket, tab: tab! };
 }
 
 describe("a devserver shutdown", () => {
-  test("keeps the session id in the window's blob and its reload snapshot", async () => {
-    const { id, socket } = await attachedSession();
+  test("keeps the session id in the window's blob, its reload snapshot and every later save", async () => {
+    const { id, socket, tab } = await attachedSession();
     await receive(socket, { type: "closed", reason: "shutdown" });
     await vi.advanceTimersByTimeAsync(SETTLE_MS);
 
     expect(persisted(), "the blob a reload reads").toEqual([id]);
     expect(tsids(__testReadLayoutReloadSnapshot()), "the same-tab reload snapshot").toEqual([id]);
+
+    // The frame leaves the blob as the attach wrote it, so the store's dedupe
+    // writes nothing for it. A later change to the layout, saved the way the
+    // app's layout effect saves it, is written, and still names the session.
+    const saved = writes.length;
+    setRichPromptHeight(tab, 160);
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    expect(writes.length, "a save after the frame").toBeGreaterThan(saved);
+    expect(persisted(), "the blob after that save").toEqual([id]);
   });
 });
 
