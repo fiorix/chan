@@ -4533,7 +4533,11 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
-fn emit_system_notice(app: &tauri::AppHandle, level: &str, message: impl Into<String>) {
+fn emit_system_notice<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    level: &str,
+    message: impl Into<String>,
+) {
     let _ = app.emit(
         SYSTEM_NOTICE,
         serde_json::json!({ "level": level, "message": message.into() }),
@@ -5528,41 +5532,7 @@ fn main() {
                         tracing::warn!(error = %e, "mounting the shared terminal tenant on boot failed");
                     }
                 }
-                // Re-serve each workspace that was on at the last clean shutdown,
-                // read from the library-owned workspace overlay. Serial so
-                // concurrent opens can't race the shared embedded host; on a
-                // failure surface a notice and leave it off (the key drops out of
-                // the overlay on the next clean shutdown).
-                let enabled: Vec<String> = state_for_restore
-                    .embedded()
-                    .and_then(|embedded| embedded.workspace_overlay())
-                    .map(|overlay| overlay.on_paths())
-                    .unwrap_or_default();
-                tracing::info!(
-                    restoring = enabled.len(),
-                    paths = ?enabled,
-                    "restoring the on workspaces from the overlay"
-                );
-                for key in enabled {
-                    // Boot restores persisted windows only. A workspace whose
-                    // windows were all closed has no record, so it stays
-                    // windowless. The watcher keeps hidden records hidden.
-                    if let Err(e) = serve::start(
-                        handle.clone(),
-                        Arc::clone(&state_for_restore),
-                        key.clone(),
-                        serve::WorkspaceOpenMode::RestoreOnly,
-                    )
-                    .await
-                    {
-                        tracing::warn!(key = %key, error = %e, "restoring enabled workspace failed");
-                        emit_system_notice(
-                            &handle,
-                            "warning",
-                            format!("Could not re-open workspace {key}: {e}"),
-                        );
-                    }
-                }
+                restore_on_workspaces(handle, Arc::clone(&state_for_restore)).await;
                 // First-open rule (library-owned): the very first time this local
                 // library is opened with an empty registry, mint one boot terminal
                 // and persist a marker. Once set, an emptied registry never
@@ -6639,6 +6609,43 @@ enum ShutdownAction {
         update: tauri_plugin_updater::Update,
         bytes: Vec<u8>,
     },
+}
+
+/// Re-serve each workspace that was on at the last clean shutdown, read from
+/// the library-owned workspace overlay. Serial so concurrent opens can't race
+/// the shared embedded host; on a failure surface a notice and leave it off
+/// (the key drops out of the overlay on the next clean shutdown).
+async fn restore_on_workspaces<R: tauri::Runtime>(handle: tauri::AppHandle<R>, state: Arc<AppState>) {
+    let enabled: Vec<String> = state
+        .embedded()
+        .and_then(|embedded| embedded.workspace_overlay())
+        .map(|overlay| overlay.on_paths())
+        .unwrap_or_default();
+    tracing::info!(
+        restoring = enabled.len(),
+        paths = ?enabled,
+        "restoring the on workspaces from the overlay"
+    );
+    for key in enabled {
+        // Boot restores persisted windows only. A workspace whose windows
+        // were all closed has no record, so it stays windowless. The watcher
+        // keeps hidden records hidden.
+        if let Err(e) = serve::start(
+            handle.clone(),
+            Arc::clone(&state),
+            key.clone(),
+            serve::WorkspaceOpenMode::RestoreOnly,
+        )
+        .await
+        {
+            tracing::warn!(key = %key, error = %e, "restoring enabled workspace failed");
+            emit_system_notice(
+                &handle,
+                "warning",
+                format!("Could not re-open workspace {key}: {e}"),
+            );
+        }
+    }
 }
 
 /// Start the one normal-exit drain. Snapshot the mounted overlay before any
