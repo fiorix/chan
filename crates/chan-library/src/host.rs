@@ -677,6 +677,8 @@ struct RootProbeState {
     done: bool,
     /// Ticks whose budget ran out while the check was still running.
     missed: u32,
+    /// Ticks waiting on the check right now.
+    waiting: u32,
 }
 
 /// What one probe tick learned from a root's health check.
@@ -691,27 +693,35 @@ enum RootProbeWait {
 }
 
 impl RootProbe {
-    fn answer(&self, outcome: Result<bool, ChanError>) {
+    /// Hand the check's outcome to a tick waiting on it, or back to the
+    /// checking thread when no tick is: an answer that lands after every tick
+    /// that joined the check has returned is the thread's to fold in.
+    fn answer(&self, outcome: Result<bool, ChanError>) -> Option<Result<bool, ChanError>> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.outcome = Some(outcome);
         state.done = true;
+        if state.waiting == 0 {
+            return Some(outcome);
+        }
+        state.outcome = Some(outcome);
         self.answered.notify_all();
+        None
     }
 
     /// Wait until `deadline` for the check's outcome.
     fn wait_until(&self, deadline: Instant) -> RootProbeWait {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        loop {
+        state.waiting += 1;
+        let wait = loop {
             if let Some(outcome) = state.outcome.take() {
-                return RootProbeWait::Answered(outcome);
+                break RootProbeWait::Answered(outcome);
             }
             if state.done {
-                return RootProbeWait::Taken;
+                break RootProbeWait::Taken;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 state.missed += 1;
-                return RootProbeWait::Overdue {
+                break RootProbeWait::Overdue {
                     missed: state.missed,
                 };
             }
@@ -720,7 +730,9 @@ impl RootProbe {
                 .wait_timeout(state, remaining)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
-        }
+        };
+        state.waiting -= 1;
+        wait
     }
 }
 
@@ -3748,11 +3760,14 @@ impl WorkspaceHost {
     /// workspace it holds, until the root answers; the next tick waits on
     /// that check again rather than starting another beside it. A check still
     /// running when a second tick's budget runs out marks its root
-    /// unavailable as not answering, until a check answers.
+    /// unavailable as not answering. A check's answer is folded in whenever
+    /// it lands: by the tick waiting on it, or, when it answers after every
+    /// tick that joined it has returned, by the checking thread itself, so a
+    /// root that is only slow clears as soon as a check answers healthy.
     ///
-    /// Returns the number of roots whose handle was refreshed. Blocking: the
-    /// caller runs it off the async runtime.
-    pub fn probe_mounted_roots(&self) -> usize {
+    /// Returns the number of roots whose handle a tick refreshed. Blocking:
+    /// the caller runs it off the async runtime.
+    pub fn probe_mounted_roots(self: &Arc<Self>) -> usize {
         let mounted: Vec<(PathBuf, PathBuf, Arc<Workspace>)> = {
             let Ok(workspaces) = self.workspaces.read() else {
                 return 0;
@@ -3772,7 +3787,7 @@ impl WorkspaceHost {
         let checks: Vec<(PathBuf, PathBuf, Arc<RootProbe>)> = mounted
             .into_iter()
             .filter_map(|(root, key, workspace)| {
-                let check = self.start_root_probe(&key, workspace)?;
+                let check = self.start_root_probe(&root, &key, workspace)?;
                 Some((root, key, check))
             })
             .collect();
@@ -3785,7 +3800,7 @@ impl WorkspaceHost {
                 // keeps what the last answered check published. A check that
                 // runs through the next tick's budget too belongs to a root
                 // that has stopped answering, and its row stops reading
-                // running until a check answers.
+                // running until a check answers healthy.
                 RootProbeWait::Overdue { missed } if missed >= ROOT_HEALTH_MISSED_TICKS => {
                     Err(ChanError::RootUnavailable {
                         path: root.clone(),
@@ -3806,8 +3821,14 @@ impl WorkspaceHost {
 
     /// The health check in flight for the root keyed `key`, or a new one
     /// revalidating `workspace` on a thread of its own; `None` when no
-    /// thread can be started.
-    fn start_root_probe(&self, key: &Path, workspace: Arc<Workspace>) -> Option<Arc<RootProbe>> {
+    /// thread can be started. `root` is the root the runtime was opened at,
+    /// which the checking thread names when it folds in a late answer.
+    fn start_root_probe(
+        self: &Arc<Self>,
+        root: &Path,
+        key: &Path,
+        workspace: Arc<Workspace>,
+    ) -> Option<Arc<RootProbe>> {
         let mut checks = self.root_probes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(check) = checks.get(key) {
             return Some(Arc::clone(check));
@@ -3815,6 +3836,8 @@ impl WorkspaceHost {
         let check = Arc::new(RootProbe::default());
         let running = Arc::clone(&check);
         let entries = Arc::clone(&self.root_probes);
+        let host = Arc::downgrade(self);
+        let root = root.to_path_buf();
         let owned = key.to_path_buf();
         // The map's mutex is held across the spawn, so the thread cannot
         // finish and look for its entry before the entry is inserted.
@@ -3832,7 +3855,11 @@ impl WorkspaceHost {
                         checks.remove(&owned);
                     }
                 }
-                running.answer(outcome);
+                if let Some(outcome) = running.answer(outcome) {
+                    if let Some(host) = host.upgrade() {
+                        let _ = host.reconcile_root_health(&root, &owned, outcome);
+                    }
+                }
             });
         match spawned {
             Ok(_) => {
