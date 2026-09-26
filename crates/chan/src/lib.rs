@@ -2288,7 +2288,9 @@ async fn cmd_ps(json: bool) -> Result<()> {
     let lib = library()?;
     let mut rows = Vec::new();
     for ws in lib.list_workspaces() {
-        let lock_dir = lib.workspace_paths_for(&ws.root_path).map(|p| p.lock);
+        // By the row's metadata key, so one root that has stopped answering
+        // holds up no other row.
+        let lock_dir = Some(lib.workspace_paths_for_row(&ws).lock);
         let served = lock_dir
             .as_deref()
             .map(|d| !chan_workspace::lock::is_free(d))
@@ -7717,12 +7719,10 @@ async fn execute_workspace_search_with_dirs(
     request: &WorkspaceSearchRequest,
     socket_dirs: Option<&[PathBuf]>,
 ) -> std::result::Result<WorkspaceSearchResult, WorkspaceExecutionFailure> {
-    let paths =
-        lib.workspace_paths_for(&known.root_path)
-            .ok_or_else(|| WorkspaceExecutionFailure {
-                code: "workspace_open_failed",
-                message: "registered workspace has no sidecar path".into(),
-            })?;
+    // The row's own paths, so the probe asks nothing of the root: a root
+    // another process holds is searched through that holder even when its
+    // filesystem has stopped answering.
+    let paths = lib.workspace_paths_for_row(known);
     // A holder the probe observed is searched through its live server. When
     // the probe established nothing, neither a live server nor a free local
     // workspace is known, so refuse rather than query one or open the other.
