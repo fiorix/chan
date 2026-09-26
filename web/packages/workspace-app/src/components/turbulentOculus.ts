@@ -1,4 +1,4 @@
-import { FULLSCREEN_TRIANGLE, compileShader, uniformLocation } from "./webglProgram";
+import { FULLSCREEN_TRIANGLE, linkProgram, uniformLocation } from "./webglProgram";
 
 // Original Twigl source from Yohei Nishitsuji's #つぶやきGLSL post:
 // https://x.com/YoheiNishitsuji/status/2081184095376441620
@@ -59,35 +59,7 @@ export interface TurbulentOculusRenderer {
 export function createTurbulentOculusRenderer(
   gl: WebGL2RenderingContext,
 ): TurbulentOculusRenderer {
-  const vertexShader = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-  let fragmentShader: WebGLShader;
-  try {
-    fragmentShader = compileShader(
-      gl,
-      gl.FRAGMENT_SHADER,
-      TURBULENT_OCULUS_FRAGMENT_SHADER,
-    );
-  } catch (error) {
-    gl.deleteShader(vertexShader);
-    throw error;
-  }
-
-  const program = gl.createProgram();
-  if (!program) {
-    gl.deleteShader(vertexShader);
-    gl.deleteShader(fragmentShader);
-    throw new Error("could not allocate shader program");
-  }
-  gl.attachShader(program, vertexShader);
-  gl.attachShader(program, fragmentShader);
-  gl.linkProgram(program);
-  gl.deleteShader(vertexShader);
-  gl.deleteShader(fragmentShader);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const detail = gl.getProgramInfoLog(program) || "unknown link error";
-    gl.deleteProgram(program);
-    throw new Error(detail);
-  }
+  const program = linkProgram(gl, VERTEX_SHADER, TURBULENT_OCULUS_FRAGMENT_SHADER);
 
   const buffer = gl.createBuffer();
   if (!buffer) {
