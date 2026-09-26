@@ -8818,9 +8818,22 @@ mod tests {
             assert_eq!(resolved, Ok(desktop.other.to_string_lossy().into_owned()));
         }
 
+        /// How long the CLI waits for the handoff's `Closed` reply: past it,
+        /// `chan close` and `chan workspace forget` take the desktop for gone
+        /// and fall back to the control socket.
+        fn cli_reply_bound() -> std::time::Duration {
+            chan_server::handoff::Request::CloseWorkspace {
+                protocol: 0,
+                cli_version: String::new(),
+                workspace_path: String::new(),
+                remove: false,
+            }
+            .reply_budget()
+        }
+
         /// `chan close` of one workspace is answered while another registered
         /// root hangs. The handoff writes its `Closed` reply from what this
-        /// returns, and the CLI stops reading after three seconds.
+        /// returns, within the CLI's wait for it.
         #[test]
         fn closing_a_workspace_answers_while_another_root_hangs() {
             let (runtime, desktop) = HungRootDesktop::new();
@@ -8831,7 +8844,7 @@ mod tests {
             let state = Arc::clone(&desktop.state);
             let other = desktop.other.clone();
             let outcome =
-                stall.finishes_beside("closing another workspace", HEALTHY_ROOT_BOUND, move || {
+                stall.finishes_beside("closing another workspace", cli_reply_bound(), move || {
                     handle.block_on(close_workspace_from_handoff(
                         app_handle, state, other, false,
                     ))
@@ -8845,6 +8858,48 @@ mod tests {
                 Vec::<String>::new(),
                 "the closed workspace still reads on"
             );
+        }
+
+        /// `chan workspace forget` of one workspace is answered while another
+        /// registered root hangs, and asks that root nothing: the removal
+        /// finds the registry row by the path it stores.
+        #[test]
+        fn forgetting_a_workspace_answers_while_another_root_hangs() {
+            let (runtime, desktop) = HungRootDesktop::new();
+            let app = tauri::test::mock_app();
+            let stall = root_stall::stall(&desktop.hung);
+            let handle = runtime.handle().clone();
+            let app_handle = app.handle().clone();
+            let state = Arc::clone(&desktop.state);
+            let other = desktop.other.clone();
+            let outcome = stall.finishes_beside(
+                "forgetting another workspace",
+                cli_reply_bound(),
+                move || {
+                    handle.block_on(close_workspace_from_handoff(
+                        app_handle, state, other, true,
+                    ))
+                },
+            );
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+            );
+            assert_eq!(
+                stall.entered(),
+                Vec::<String>::new(),
+                "the forget asked the hung root"
+            );
+            let registered: Vec<PathBuf> = desktop
+                .state
+                .embedded()
+                .expect("embedded")
+                .library()
+                .list_workspaces()
+                .into_iter()
+                .map(|row| row.root_path)
+                .collect();
+            assert_eq!(registered, [desktop.hung.clone()], "the forget left its row");
         }
 
         /// A quit while the boot restore waits on a hung root keeps on every
