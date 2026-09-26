@@ -3116,8 +3116,12 @@ mod tests {
         // THREE routings: macOS plain Cmd+W (!shift branch), the
         // Linux/Windows Ctrl+Shift+W (shift branch), and the
         // Linux/Windows Ctrl+Alt+W window close (alt branch).
-        let close_invoke = concat!("invokeIpc(e, 'request_close", "_window')");
-        assert_eq!(SERVE_RS.matches(close_invoke).count(), 3);
+        assert_eq!(
+            KEY_BRIDGE_JS
+                .matches("invokeIpc(e, 'request_close_window')")
+                .count(),
+            3
+        );
         assert!(KEY_BRIDGE_JS.contains("location.pathname.endsWith('/connecting.html')"));
         const CONNECTING_JS: &str = include_str!("../../src/connecting.js");
         assert!(CONNECTING_JS.contains("request_close_window"));
