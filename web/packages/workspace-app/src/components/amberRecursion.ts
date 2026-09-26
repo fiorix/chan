@@ -1,3 +1,5 @@
+import { FULLSCREEN_TRIANGLE, compileShader, uniformLocation } from "./webglProgram";
+
 // Original Twigl source from Yohei Nishitsuji's #つぶやきGLSL post:
 // https://x.com/YoheiNishitsuji/status/2078117522638004265
 
@@ -64,33 +66,6 @@ export interface AmberRecursionRenderer {
     exposure: number,
   ): void;
   destroy(): void;
-}
-
-function compileShader(
-  gl: WebGL2RenderingContext,
-  type: number,
-  source: string,
-): WebGLShader {
-  const shader = gl.createShader(type);
-  if (!shader) throw new Error("could not allocate shader");
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const detail = gl.getShaderInfoLog(shader) || "unknown compile error";
-    gl.deleteShader(shader);
-    throw new Error(detail);
-  }
-  return shader;
-}
-
-function uniformLocation(
-  gl: WebGL2RenderingContext,
-  program: WebGLProgram,
-  name: string,
-): WebGLUniformLocation {
-  const location = gl.getUniformLocation(program, name);
-  if (location === null) throw new Error(`missing shader uniform ${name}`);
-  return location;
 }
 
 export function createAmberRecursionRenderer(
@@ -160,7 +135,7 @@ export function createAmberRecursionRenderer(
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
   gl.bufferData(
     gl.ARRAY_BUFFER,
-    new Float32Array([-1, -1, 3, -1, -1, 3]),
+    new Float32Array(FULLSCREEN_TRIANGLE),
     gl.STATIC_DRAW,
   );
   gl.disable(gl.BLEND);

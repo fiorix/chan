@@ -1,3 +1,5 @@
+import { FULLSCREEN_TRIANGLE, linkProgram, uniformLocation } from "./webglProgram";
+
 const TAU = Math.PI * 2;
 
 // Motion adapted from Hisadan's Processing sketch and continuation:
@@ -193,66 +195,6 @@ export interface SixfoldVortexRenderer {
   destroy(): void;
 }
 
-function compileShader(
-  gl: WebGL2RenderingContext,
-  type: number,
-  source: string,
-): WebGLShader {
-  const shader = gl.createShader(type);
-  if (!shader) throw new Error("could not allocate shader");
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const detail = gl.getShaderInfoLog(shader) || "unknown compile error";
-    gl.deleteShader(shader);
-    throw new Error(detail);
-  }
-  return shader;
-}
-
-function linkProgram(
-  gl: WebGL2RenderingContext,
-  vertexSource: string,
-  fragmentSource: string,
-): WebGLProgram {
-  const vertexShader = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
-  let fragmentShader: WebGLShader;
-  try {
-    fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
-  } catch (error) {
-    gl.deleteShader(vertexShader);
-    throw error;
-  }
-
-  const program = gl.createProgram();
-  if (!program) {
-    gl.deleteShader(vertexShader);
-    gl.deleteShader(fragmentShader);
-    throw new Error("could not allocate shader program");
-  }
-  gl.attachShader(program, vertexShader);
-  gl.attachShader(program, fragmentShader);
-  gl.linkProgram(program);
-  gl.deleteShader(vertexShader);
-  gl.deleteShader(fragmentShader);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const detail = gl.getProgramInfoLog(program) || "unknown link error";
-    gl.deleteProgram(program);
-    throw new Error(detail);
-  }
-  return program;
-}
-
-function uniformLocation(
-  gl: WebGL2RenderingContext,
-  program: WebGLProgram,
-  name: string,
-): WebGLUniformLocation {
-  const location = gl.getUniformLocation(program, name);
-  if (location === null) throw new Error(`missing shader uniform ${name}`);
-  return location;
-}
-
 interface SixfoldVortexTrailTarget {
   texture: WebGLTexture;
   framebuffer: WebGLFramebuffer;
@@ -365,7 +307,7 @@ export function createSixfoldVortexRenderer(
   gl.bindBuffer(gl.ARRAY_BUFFER, triangleBuffer);
   gl.bufferData(
     gl.ARRAY_BUFFER,
-    new Float32Array([-1, -1, 3, -1, -1, 3]),
+    new Float32Array(FULLSCREEN_TRIANGLE),
     gl.STATIC_DRAW,
   );
   gl.disable(gl.BLEND);
