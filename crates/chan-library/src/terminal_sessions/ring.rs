@@ -133,13 +133,17 @@ impl RingBuffer {
 
     /// Mirror this ring and the terminal `state` its bytes leave into
     /// `file` from now on, first replacing what the file holds with them.
+    /// `stopped` marks the file as a stopped mirror's would be, which a
+    /// restore that may end behind its previous process keeps until
+    /// [`clear_stop_mark`](Self::clear_stop_mark).
     #[cfg(target_os = "linux")]
     pub(super) fn mirror_into(
         &mut self,
         mut file: RingFile,
         state: &TerminalState,
+        stopped: bool,
     ) -> io::Result<()> {
-        file.state = state.encode(false);
+        file.state = state.encode(stopped);
         file.reset(self.start_seq)?;
         for (chunk_start, chunk) in &self.chunks {
             file.append(*chunk_start, chunk)?;
@@ -150,12 +154,19 @@ impl RingBuffer {
 
     /// Keep writing into a file that already holds exactly this ring's
     /// bytes: the ring was just rebuilt from it. `state` is published over
-    /// the file's, which clears a stop the previous process marked and
-    /// brings an older header to the current format.
+    /// the file's, which brings an older header to the current format, with
+    /// the stop mark set as `stopped` says: a restore that may end behind
+    /// its previous process keeps a stop that process marked until
+    /// [`clear_stop_mark`](Self::clear_stop_mark).
     #[cfg(target_os = "linux")]
-    pub(super) fn continue_mirror(&mut self, mut file: RingFile, state: &TerminalState) {
+    pub(super) fn continue_mirror(
+        &mut self,
+        mut file: RingFile,
+        state: &TerminalState,
+        stopped: bool,
+    ) {
         debug_assert_eq!(file.end, self.end_seq);
-        if let Err(error) = file.publish_state(state, false) {
+        if let Err(error) = file.publish_state(state, stopped) {
             // The bytes and the window are intact, so the file keeps
             // mirroring; the next append that fails stops it.
             tracing::warn!(error = %error, "writing the terminal ring file's state failed");
@@ -164,14 +175,31 @@ impl RingBuffer {
     }
 
     /// Publish the terminal `state` the ring's bytes leave, after a push
-    /// that changed it, so a next process restores it with those bytes.
+    /// that changed it, so a next process restores it with those bytes. A
+    /// stop mark the file carries stays.
     #[cfg(target_os = "linux")]
     pub(super) fn publish_state(&mut self, state: &TerminalState) {
         let Some(mirror) = self.mirror.as_mut() else {
             return;
         };
-        if let Err(error) = mirror.publish_state(state, false) {
+        let stopped = mirror.stopped();
+        if let Err(error) = mirror.publish_state(state, stopped) {
             self.stop_mirror_after(error);
+        }
+    }
+
+    /// Take the stop mark off the file this ring mirrors into, keeping its
+    /// state: the restore that kept the mark has made its generation
+    /// durable, so a next process may read the file as exact. A failed
+    /// write leaves the mark, which only makes the next restore lossy.
+    #[cfg(target_os = "linux")]
+    pub(super) fn clear_stop_mark(&mut self) {
+        let Some(mirror) = self.mirror.as_mut().filter(|mirror| mirror.stopped()) else {
+            return;
+        };
+        let (state, _) = TerminalState::decode(&mirror.state);
+        if let Err(error) = mirror.publish_state(&state, false) {
+            tracing::warn!(error = %error, "clearing the terminal ring file's stop mark failed");
         }
     }
 
@@ -485,8 +513,9 @@ impl RingFile {
         (self.version == layout::FORMAT_VERSION).then(|| TerminalState::decode(&self.state).0)
     }
 
-    /// Whether the header [`read`](Self::read) marks that its writer
-    /// stopped mirroring, so the session went on past the file's end.
+    /// Whether the header marks that its writer stopped mirroring, so the
+    /// session went on past the file's end, as [`read`](Self::read) found it
+    /// or as last written.
     pub(super) fn stopped(&self) -> bool {
         self.version == layout::FORMAT_VERSION && TerminalState::decode(&self.state).1
     }
@@ -719,8 +748,12 @@ mod tests {
         let bytes = stream(300);
         let mut ring = RingBuffer::new(64);
         ring.push(&bytes[..100]);
-        ring.mirror_into(RingFile::create(64).unwrap(), &TerminalState::default())
-            .unwrap();
+        ring.mirror_into(
+            RingFile::create(64).unwrap(),
+            &TerminalState::default(),
+            false,
+        )
+        .unwrap();
         for chunk in bytes[100..].chunks(9) {
             ring.push(chunk);
         }

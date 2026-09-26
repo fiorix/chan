@@ -3348,6 +3348,26 @@ impl Registry {
             .collect()
     }
 
+    /// `entries`, a snapshot [`Self::fdstore_manifest_sessions`] took for
+    /// any tenant, is the committed manifest: the sessions of `tenant_prefix`
+    /// it names have their generation durable.
+    #[cfg(target_os = "linux")]
+    pub fn fdstore_manifest_committed(
+        &self,
+        tenant_prefix: &str,
+        entries: &[FdStoreManifestEntry],
+    ) {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.meta.tenant_prefix == tenant_prefix)
+        {
+            if let Some(session) = sessions.get(&entry.meta.session_id) {
+                session.fdstore_manifest_committed(entry.meta.generation);
+            }
+        }
+    }
+
     /// Adopt the sessions a previous process parked in the systemd fd store,
     /// reporting each one skipped and why.
     #[cfg(target_os = "linux")]
@@ -4361,6 +4381,22 @@ impl Session {
         Ok(session)
     }
 
+    /// A manifest carrying `generation` for this session was committed. A
+    /// restore that may end behind its previous process keeps the stop mark
+    /// on its ring file while only the previous generation is durable, so a
+    /// process that dies before this commit leaves the next restore lossy
+    /// too; once this process's generation is durable, a next restore from
+    /// the file can be exact.
+    #[cfg(target_os = "linux")]
+    fn fdstore_manifest_committed(&self, generation: u64) {
+        if self.lossy_restore.is_some() && generation == self.generation {
+            self.ring
+                .lock()
+                .expect("terminal ring poisoned")
+                .clear_stop_mark();
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn fdstore_manifest_entry(&self, tenant_prefix: &str) -> Option<FdStoreManifestEntry> {
         if self.closed.load(Ordering::Relaxed) {
@@ -5317,7 +5353,7 @@ impl Session {
     fn start_ring_mirror(&self, file: RingFile) -> Option<Arc<File>> {
         let shared = file.shared_file();
         let mut ring = self.ring.lock().expect("terminal ring poisoned");
-        match ring.mirror_into(file, &self.terminal_state()) {
+        match ring.mirror_into(file, &self.terminal_state(), false) {
             Ok(()) => Some(shared),
             Err(error) => {
                 tracing::warn!(
@@ -5866,8 +5902,10 @@ struct LossyRestore {
 /// move, rename, placement change, activation and seal, so its end is the
 /// session's real `seq` after a crash as well as after a graceful restart,
 /// and its header carries the terminal state from the same moment. Such a
-/// restore ends behind the session only when the file marks that its writer
-/// stopped mirroring after a failed write.
+/// restore ends behind the session only when the file is marked stopped: by
+/// a writer that stopped mirroring after a failed write, or by a restore
+/// that might have ended behind its own previous process and had not yet
+/// committed a manifest carrying the generation it minted.
 ///
 /// Otherwise the manifest's `seq`, tail and state rebuild the ring: with no
 /// file (a partial store, or a manifest from before ring files), with a file
@@ -5876,9 +5914,9 @@ struct LossyRestore {
 /// was mirroring, so the ring restarts empty at that `seq`, and a fresh
 /// attach reports the bytes before it as missed. Such a restore ends behind
 /// the session unless the manifest is the seal's final write. A file that
-/// can still be used is then reset to mirror that ring; one that cannot is
-/// closed, and the store keeps it until the next boot finds it named by no
-/// manifest entry.
+/// can still be used is then reset to mirror that ring, marked stopped when
+/// the restore may end behind; one that cannot is closed, and the store
+/// keeps it until the next boot finds it named by no manifest entry.
 #[cfg(target_os = "linux")]
 fn restored_ring(
     capacity: usize,
@@ -5923,7 +5961,7 @@ fn restored_ring(
                     "the parked terminal ring file stopped mirroring before the restart; the session went on past its end"
                 );
             }
-            ring.continue_mirror(file, &state);
+            ring.continue_mirror(file, &state, behind);
             return RestoredRing {
                 ring,
                 state,
@@ -5938,7 +5976,10 @@ fn restored_ring(
         "the parked terminal ring file does not hold the ring; restoring from the manifest"
     );
     let mut restored = from_manifest(state);
-    if let Err(error) = restored.ring.mirror_into(file, &restored.state) {
+    if let Err(error) = restored
+        .ring
+        .mirror_into(file, &restored.state, restored.behind)
+    {
         tracing::warn!(
             session_id, error = %error,
             "resetting the parked terminal ring file failed; it stops mirroring"
@@ -6963,7 +7004,8 @@ mod tests {
     // manifest's `seq` and tail, with a usable file reset to mirror that ring.
     // The terminal state comes from the same source as the bytes, and the
     // restore may end behind the session when the file marks a stop or when
-    // the manifest wins without being the seal's final write.
+    // the manifest wins without being the seal's final write. Such a restore
+    // leaves the file marked stopped until its generation is committed.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_restored_ring_takes_the_ring_file_only_when_sound_and_current() {
@@ -7020,14 +7062,14 @@ mod tests {
         assert!(!restored.behind);
 
         // The file's writer stopped mirroring after a failed write: the file
-        // wins, the restore may end behind the session, and this process's
-        // mirroring clears the mark.
+        // wins, the restore may end behind the session, and the file keeps
+        // the mark while this process mirrors into it.
         let (mut file, fd) = parked(&stream);
         file.publish_state(&TerminalState::default(), true).unwrap();
         let restored = restore(Some(fd), true);
         assert_eq!(restored.ring.end_seq(), 200);
         assert!(restored.behind);
-        assert!(!reopen(&file).1.stopped());
+        assert!(reopen(&file).1.stopped());
 
         // A header in the stateless format: the bytes from the file, the
         // state from the manifest, and the header brought to the format that
@@ -7052,6 +7094,10 @@ mod tests {
         assert_eq!(reread(&file), (180, tail.to_vec()));
         assert_eq!(restored.state, vim);
         assert!(restored.behind, "a manifest that is not the final write");
+        assert!(
+            reopen(&file).1.stopped(),
+            "the reset keeps the restore marked"
+        );
 
         // The file's header cannot be trusted: the manifest wins the same way.
         let (file, fd) = parked(&stream);
@@ -7061,6 +7107,7 @@ mod tests {
         assert_eq!((ring.end_seq(), held(ring)), (180, tail.to_vec()));
         assert_eq!(reread(&file), (180, tail.to_vec()));
         assert!(!restored.behind, "the seal's final write");
+        assert!(!reopen(&file).1.stopped());
 
         // No file beside the PTY (a partial store, an older manifest).
         let restored = restore(None, false);
@@ -11431,11 +11478,14 @@ mod tests {
                 registry.install_fd_parker(FdStoreParker::new(self.clone()));
             }
 
-            /// Rewrite the manifest from the live parked set.
+            /// Rewrite the manifest from the live parked set, and tell the
+            /// registry it is committed, as the devserver's writes do.
             fn publish(&self) {
                 let registry = self.0.registry.lock().unwrap().upgrade();
                 if let Some(registry) = registry {
-                    *self.0.published.lock().unwrap() = registry.fdstore_manifest_sessions("t");
+                    let entries = registry.fdstore_manifest_sessions("t");
+                    registry.fdstore_manifest_committed("t", &entries);
+                    *self.0.published.lock().unwrap() = entries;
                 }
             }
 
@@ -12016,6 +12066,57 @@ mod tests {
                 ring.len()
             );
             assert_eq!(resumed.missed_bytes, 600);
+        }
+
+        // The mark a lossy restore keeps comes off once a manifest carrying
+        // the generation it minted is committed: the restore after the next
+        // crash reads the file as exact, and a client of the lossy restore
+        // resumes under the generation it holds, with nothing missed.
+        #[test]
+        fn a_committed_manifest_takes_a_lossy_restores_mark_off() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "stopped-then-committed";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            session.record_output(&numbered_lines(1000));
+            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session.record_output(&b"lost ".repeat(120));
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let lossy = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&lossy);
+            let report = lossy.restore_fdstore_sessions(store.imports_keeping());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert!(lossy.inject_output(id, b"served after the lossy restore\n"));
+            let attached = lossy.attach(id, Some(0)).unwrap();
+            let (cursor, generation) = (attached.seq, attached.generation);
+            drop(attached);
+            // Activation's commit, then output, then the crash.
+            store.publish();
+            let late = b"after the commit\n".repeat(10);
+            assert!(lossy.inject_output(id, &late));
+            assert_eq!(lossy.detach_parked_sessions(), 1);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let resumed = next
+                .get_or_create_for_ws(
+                    Some(id),
+                    Some(cursor),
+                    opts(Some("w1"), None),
+                    TerminalPlacement::default(),
+                    Some(generation),
+                )
+                .unwrap();
+            assert_eq!(
+                resumed.generation, generation,
+                "the restore after the commit is lossy again, so the committed generation's clients lose their cursor"
+            );
+            assert_eq!(resumed.missed_bytes, 0);
+            assert_eq!(resumed.replay.concat(), late);
         }
 
         // A generation minted for a restore that may end behind the previous

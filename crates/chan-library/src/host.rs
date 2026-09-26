@@ -1802,6 +1802,32 @@ impl WorkspaceHost {
             .collect()
     }
 
+    /// `entries`, the snapshot [`Self::fdstore_manifest_sessions`] gave, is
+    /// now the committed restart manifest: every tenant's sessions it names
+    /// have their generation durable.
+    #[cfg(target_os = "linux")]
+    pub fn fdstore_manifest_committed(&self, entries: &[FdStoreManifestEntry]) {
+        // The same release-before-calling as the reconcile below: the caller
+        // may run inside a manifest write, which reads this lock itself.
+        let registries: Vec<(String, Arc<crate::terminal_sessions::Registry>)> = {
+            let Ok(workspaces) = self.workspaces.read() else {
+                return;
+            };
+            workspaces
+                .values()
+                .map(|runtime| {
+                    (
+                        runtime.handle.prefix.clone(),
+                        runtime.artifacts.terminal_sessions.clone(),
+                    )
+                })
+                .collect()
+        };
+        for (prefix, registry) in registries {
+            registry.fdstore_manifest_committed(&prefix, entries);
+        }
+    }
+
     /// Activation reconcile: park every live windowed unparked session in
     /// every tenant. Covers sessions spawned while the parker was still
     /// disabled during boot.

@@ -264,17 +264,21 @@ mod linux {
                 boot_id: current_boot_id(),
                 sealed: Some(**phase == ParkerPhase::Sealed),
                 sessions: entries
-                    .into_iter()
+                    .iter()
                     .map(|entry| ManifestSession {
-                        fd_name: entry.fd_name,
-                        ring_fd_name: entry.ring_fd_name,
+                        fd_name: entry.fd_name.clone(),
+                        ring_fd_name: entry.ring_fd_name.clone(),
                         child_start_time: entry.meta.child_pid.and_then(process_start_time),
-                        meta: entry.meta,
+                        meta: entry.meta.clone(),
                         replay_b64: BASE64.encode(&entry.replay),
                     })
                     .collect(),
             };
-            write_manifest(&self.manifest_path, &manifest)
+            write_manifest(&self.manifest_path, &manifest)?;
+            // The generations these entries carry are durable now, which a
+            // restore that may end behind its previous process waits for.
+            self.host.fdstore_manifest_committed(&entries);
+            Ok(())
         }
 
         fn write_if_active(&self) {
