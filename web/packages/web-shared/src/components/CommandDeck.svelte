@@ -101,7 +101,8 @@
       pointerIndex = null;
       void tick().then(() => input?.focus());
     } else if (!isOpen && wasOpen) {
-      if (!closingRun && returnFocus && document.contains(returnFocus)) returnFocus.focus();
+      // Handing focus back is not navigation: it must not scroll the page.
+      if (!closingRun && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
       returnFocus = null;
     }
     wasOpen = isOpen;
