@@ -2852,6 +2852,12 @@ pub(crate) mod hung_root_support {
     /// filesystem call cannot also pin the bound, and return its output; panic
     /// naming `what` and the calls `stall` holds if it does not finish within
     /// [`HEALTHY_ROOT_BOUND`].
+    ///
+    /// The bound is a blocking-pool thread's timed wait, not a runtime timer.
+    /// A worker that fires a timer runs the task it wakes, and if that task
+    /// then blocks on the hung root, no worker is left parked on the timer
+    /// driver: a `tokio::time` bound would never fire, and the test would hang
+    /// instead of failing.
     pub(crate) async fn completes_beside<F>(
         stall: &RootStall,
         what: &str,
@@ -2861,10 +2867,19 @@ pub(crate) mod hung_root_support {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let task = tokio::spawn(operation);
-        match tokio::time::timeout(HEALTHY_ROOT_BOUND, task).await {
-            Ok(joined) => joined.expect("operation task"),
-            Err(_) => panic!(
+        let (done, finished) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            let _ = done.send(operation.await);
+        });
+        let waited = tokio::task::spawn_blocking(move || finished.recv_timeout(HEALTHY_ROOT_BOUND))
+            .await
+            .expect("bound task");
+        match waited {
+            Ok(output) => output,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{what} panicked")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
                 "{what} did not finish while another root hung; calls held on the hung root: {:#?}",
                 stall.entered()
             ),
