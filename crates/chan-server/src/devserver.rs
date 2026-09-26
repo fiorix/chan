@@ -1656,6 +1656,8 @@ impl DevserverState {
     /// Build the wire [`WorkspaceEntry`] for a registered workspace record: an
     /// off row reports `on:false` with an empty token; an on row its live token.
     fn entry_from_record(&self, record: &WorkspaceRecord) -> WorkspaceEntry {
+        #[cfg(test)]
+        row_build_hold::point(&record.root);
         let mounted = self.host.is_canonical_root_mounted(&record.root);
         let (status, error) = match &record.phase {
             MountPhase::Starting => (WorkspaceStatus::Starting, None),
@@ -3141,6 +3143,105 @@ pub(crate) mod tunnel_test_support {
             chan_tunnel_proto::gateway_assertion::HEADER_NAME,
             test_gateway_assertion(&test_tunnel_assertion(), TEST_AUD, caller),
         )
+    }
+}
+
+/// Test seam: hold a devserver row build for one root until the test lets
+/// go, so a test can show which locks a row build runs under.
+#[cfg(test)]
+mod row_build_hold {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Hold {
+        /// (a row build has entered, the test has let go)
+        state: Mutex<(bool, bool)>,
+        changed: Condvar,
+    }
+
+    static HOLDS: OnceLock<Mutex<Vec<(PathBuf, Arc<Hold>)>>> = OnceLock::new();
+
+    fn holds() -> std::sync::MutexGuard<'static, Vec<(PathBuf, Arc<Hold>)>> {
+        HOLDS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Holds every row build for `root` until it drops.
+    pub(super) struct RowBuildHold {
+        root: PathBuf,
+        hold: Arc<Hold>,
+    }
+
+    pub(super) fn hold(root: &Path) -> RowBuildHold {
+        let hold = Arc::new(Hold::default());
+        holds().push((root.to_path_buf(), Arc::clone(&hold)));
+        RowBuildHold {
+            root: root.to_path_buf(),
+            hold,
+        }
+    }
+
+    impl RowBuildHold {
+        /// Wait up to `timeout` for a row build to reach the hold; true when
+        /// one has.
+        pub(super) fn wait_entered(&self, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            let mut state = self
+                .hold
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            while !state.0 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return false;
+                }
+                state = self
+                    .hold
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            true
+        }
+    }
+
+    impl Drop for RowBuildHold {
+        fn drop(&mut self) {
+            holds().retain(|(root, hold)| !(root == &self.root && Arc::ptr_eq(hold, &self.hold)));
+            let mut state = self
+                .hold
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.1 = true;
+            self.hold.changed.notify_all();
+        }
+    }
+
+    /// Hold the calling thread while a hold for `root` is installed.
+    pub(super) fn point(root: &Path) {
+        let Some(hold) = holds()
+            .iter()
+            .find(|(held, _)| held == root)
+            .map(|(_, hold)| Arc::clone(hold))
+        else {
+            return;
+        };
+        let mut state = hold.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0 = true;
+        hold.changed.notify_all();
+        while !state.1 {
+            state = hold
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
     }
 }
 
@@ -7512,6 +7613,116 @@ mod tests {
             (WorkspaceStatus::Locked, false),
             "the hung root's row"
         );
+    }
+
+    /// Wait up to [`HEALTHY_ROOT_BOUND`] for a serve request for `root`
+    /// through the discovery entry point, which takes the record map.
+    async fn serve_request_within_bound(
+        state: &Arc<DevserverState>,
+        root: &Path,
+        what: &str,
+    ) -> crate::devserver_handoff::Response {
+        let (done, finished) = std::sync::mpsc::channel();
+        let serving = Arc::clone(state);
+        let root = root.to_path_buf();
+        tokio::spawn(async move {
+            let _ =
+                done.send(handle_discovery_request(&serving, 8787, register_request(&root)).await);
+        });
+        let what = what.to_string();
+        tokio::task::spawn_blocking(move || {
+            finished
+                .recv_timeout(HEALTHY_ROOT_BOUND)
+                .unwrap_or_else(|_| panic!("{what} did not finish"))
+        })
+        .await
+        .expect("bound task")
+    }
+
+    /// A mount of another root completes while the devserver's list is held
+    /// in a row build: the list builds no row while it holds the record map
+    /// a mount takes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mount_completes_beside_a_list_held_in_a_row_build() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let held = tempfile::tempdir().expect("held root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(other.path())
+            .expect("register the other root");
+        register_off_with_a_window(&state, held.path()).await;
+
+        let hold = row_build_hold::hold(&canonical_root(held.path()));
+        let listing = Arc::clone(&state);
+        let list = std::thread::spawn(move || listing.workspace_entries());
+        assert!(
+            hold.wait_entered(HEALTHY_ROOT_BOUND),
+            "fixture: the list never built the held row"
+        );
+        let response = serve_request_within_bound(
+            &state,
+            other.path(),
+            "a mount of another root beside a list held in a row build",
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the other root's serve request failed: {response:?}"
+        );
+        drop(hold);
+        assert_eq!(list.join().expect("list").len(), 2);
+    }
+
+    /// A mount of another root completes while an off toggle is held in the
+    /// row it answers with: that row is built after the record map is
+    /// released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mount_completes_beside_an_off_toggle_held_in_its_row_build() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let held = tempfile::tempdir().expect("held root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(other.path())
+            .expect("register the other root");
+        register_off_with_a_window(&state, held.path()).await;
+        let held_prefix = allocate_workspace_prefix(held.path()).expect("prefix");
+
+        let hold = row_build_hold::hold(&canonical_root(held.path()));
+        let toggling = Arc::clone(&state);
+        let toggle =
+            tokio::spawn(
+                async move { toggling.set_workspace_on(&held_prefix, false, false).await },
+            );
+        assert!(
+            hold.wait_entered(HEALTHY_ROOT_BOUND),
+            "fixture: the off toggle never built its row"
+        );
+        let response = serve_request_within_bound(
+            &state,
+            other.path(),
+            "a mount of another root beside an off toggle held in its row build",
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the other root's serve request failed: {response:?}"
+        );
+        drop(hold);
+        toggle.await.expect("toggle").expect("turn off");
     }
 
     #[tokio::test]
