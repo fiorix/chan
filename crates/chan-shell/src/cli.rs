@@ -885,7 +885,9 @@ pub enum TerminalAction {
         /// a locale naming no UTF-8 codeset is replaced by C.UTF-8 and, on
         /// Windows, chan's bin dir is prepended to a PATH; a key chan sets
         /// itself (CHAN, CHAN_TAB_NAME, CHAN_MCP_* and the like) is refused.
-        /// Repeat for multiple entries.
+        /// NO_COLOR, or TERM=dumb, also stops chan forcing colour with
+        /// COLORTERM, CLICOLOR, CLICOLOR_FORCE and FORCE_COLOR. Repeat for
+        /// multiple entries.
         #[arg(long, value_name = "KEY=VALUE", value_parser = parse_terminal_env)]
         env: Vec<(String, String)>,
         #[command(flatten)]
