@@ -123,6 +123,19 @@ describe("PromptModal", () => {
     expect(document.activeElement).toBe(origin);
   });
 
+  test("a caller that moves focus once it has its answer keeps that focus", async () => {
+    const target = mountDialog(PromptModal);
+    focusOrigin();
+    const next = document.createElement("button");
+    document.body.append(next);
+    const { answer } = await open(target);
+    const followed = answer.then(() => next.focus());
+    button(target, "Cancel").click();
+    await followed;
+    await settle();
+    expect(document.activeElement).toBe(next);
+  });
+
   test("a click on the backdrop cancels and a click inside the panel does not", async () => {
     const target = mountDialog(PromptModal);
     const { answer } = await open(target);
