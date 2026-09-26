@@ -768,7 +768,7 @@
 
   $effect(() => {
     const before = view?.state.doc.toString();
-    sync.applyExternal(view, value);
+    sync.applyExternal(view, value, { focus: autoFocus });
     // Only (re)place the caret when an EXTERNAL value change actually
     // applied content (the async file load), not on the keystroke echo
     // that writes `value` back from the live doc. Re-running on a keystroke
