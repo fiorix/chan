@@ -3822,47 +3822,6 @@ export function toggleSettings(): void {
 // Open + scope picker state, plus a `depth` knob for how far the
 // file/group scopes expand into their neighbors in the link graph.
 
-/** Edge-kind / node-kind chip toggles on the graph. `link`, `tag`,
- *  `mention` are edge-kind filters (their edges plus any node only
- *  reachable through filtered-out edges drop). `img` is a node
- *  filter that hides every file node classified as an image. Lifted
- *  out of GraphPanel so the URL hash can round-trip the exact
- *  filter set. */
-export type GraphFilters = {
-  link: boolean;
-  tag: boolean;
-  mention: boolean;
-  language: boolean;
-  img: boolean;
-  /// Directory NODE filter, applicable to filesystem graph mode where
-  /// directory nodes are emitted by the backend. Frontend-only toggle
-  /// - hides directory nodes (and edges touching them) without
-  /// changing the backend request. Per request.md, directories as
-  /// nodes often crowd a whole-workspace graph; the toggle lets the
-  /// user collapse them for a cleaner view.
-  folder: boolean;
-  /// FileBucket toggles. Markdown chip hides file nodes with
-  /// `classifyFile === "doc"` (.md / .txt); source chip hides file
-  /// nodes with `classifyFile === "source"` (any recognized code /
-  /// config extension). Binary file nodes don't have their own chip
-  /// (they ride the absence of a more specific classification and
-  /// always render). Mirrors the SPA-side file-class
-  /// classification scheme; consumes the same `classifyFile` helper.
-  markdown: boolean;
-  source: boolean;
-};
-
-export const DEFAULT_GRAPH_FILTERS: GraphFilters = {
-  link: true,
-  tag: true,
-  mention: true,
-  language: true,
-  img: true,
-  folder: true,
-  markdown: true,
-  source: true,
-};
-
 /// Incremented by watcher events while the graph overlay is open.
 /// GraphPanel consumes this as a lightweight reload signal and
 /// debounces the actual `/api/graph` request locally. `paths` carries

@@ -32,8 +32,8 @@ import {
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { fileBucket } from "../state/kinds";
-import { DEFAULT_GRAPH_FILTERS } from "../state/store.svelte";
 import {
+  DEFAULT_GRAPH_FILTERS,
   graphLinkFor,
   layout,
   openGraphInActivePane,

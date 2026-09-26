@@ -503,10 +503,8 @@ export type GraphFilters = {
   language: boolean;
   img: boolean;
   folder: boolean;
-  /// FileBucket toggles - mirrors the `GraphFilters` shape in
-  /// `state/store.svelte.ts`. Both files declare a local `GraphFilters`
-  /// (one for the per-tab state here, one for the overlay state in
-  /// store); they stay in lockstep when extended.
+  /// FileBucket toggles: the markdown and source chips hide the file
+  /// nodes the shared `fileBucket` (state/kinds.ts) puts in each bucket.
   markdown: boolean;
   source: boolean;
 };
@@ -1828,7 +1826,7 @@ export type OpenGraphOptions = Partial<
   side?: PaneSide;
 };
 
-const DEFAULT_GRAPH_FILTERS: GraphFilters = {
+export const DEFAULT_GRAPH_FILTERS: GraphFilters = {
   link: true,
   tag: true,
   mention: true,

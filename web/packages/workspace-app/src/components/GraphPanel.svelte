@@ -582,9 +582,10 @@
   /// touching one.
   /// `link` is intentionally absent from the user-facing
   /// FilterKind -- link edges always render (visibility is
-  /// implicit via endpoint visibility). The `link` slot on
-  /// `GraphFilters` (store.svelte.ts) stays for URL-hash
-  /// back-compat but isn't consumed here.
+  /// implicit via endpoint visibility). The tab's `GraphFilters`
+  /// (tabs.svelte.ts) keeps a `link` slot this panel never reads;
+  /// `encodeGraphTabFilters` still writes it into the layout hash,
+  /// the saved session and `chan://graph` links.
   /// `markdown` + `source` FileBucket toggles, default ON. The
   /// shared `fileBucket` (state/kinds.ts) dispatches file nodes into
   /// the markdown / source / binary buckets client-side:
@@ -1326,8 +1327,9 @@
     // sense because link visibility
     // is implicit (an edge renders iff both endpoints render under
     // the current node-type filters + depth). The `link` slot on
-    // `GraphFilters` stays for wire-format / URL-hash back-compat
-    // but is no longer consumed by the UI.
+    // the tab's `GraphFilters` (tabs.svelte.ts) is never read here;
+    // `encodeGraphTabFilters` still round-trips it through the
+    // layout hash, the saved session and `chan://graph` links.
     if (kind === "link") return true;
     return show[kind];
   }
