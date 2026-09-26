@@ -41,7 +41,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | --- | --- | --- |
 | [an-admitted-tunnel-outlives-its-connection][tunl] | landed | GA |
 | [a-stalled-reader-parks-a-pool-thread][stall] | landed | GA |
-| [one-root-blocks-every-other-mount][rlock] | raised | accept |
+| [one-root-blocks-every-other-mount][rlock] | landed | GA |
 | [a-non-utf8-text-file-loses-its-backlinks][nutf] | landed | GA |
 | [two-copies-to-one-free-name-can-collide][copy2] | landed | GA |
 | [a-blocking-pool-pin-passes-without-proof][bpin] | landed | GA |
