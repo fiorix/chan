@@ -89,6 +89,15 @@ describe("R4: Tab never escapes the Rich Prompt composer", () => {
     expect(view.state.doc.toString()).not.toBe(before); // indent inserted
   });
 
+  test("Tab and Shift-Tab on a pending card are consumed and leave its text", async () => {
+    const view = await mountRP(makeTab({ pendingPrompt: { id: "p-1", phase: "queued" } }), "plain paragraph text");
+    view.dispatch({ selection: { anchor: 5 } });
+    expect(press(view, "Tab")).toBe(true);
+    expect(press(view, "Tab", { shiftKey: true })).toBe(true);
+    await tick();
+    expect(view.state.doc.toString()).toBe("plain paragraph text");
+  });
+
   test("Shift-Tab on a plain line is also consumed (never escapes)", async () => {
     const view = await mountRP(makeTab(), "plain paragraph text");
     view.dispatch({ selection: { anchor: 5 } });
