@@ -691,6 +691,13 @@ pub(crate) fn validate_terminal_env(env: &BTreeMap<String, String>) -> Result<()
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
             return Err(format!("invalid terminal env key: {key:?}"));
         }
+        // chan writes these itself after the caller's entries, so a caller's
+        // value would never reach the child.
+        if chan_library::terminal_sessions::is_chan_spawn_env_key(key) {
+            return Err(format!(
+                "terminal env key {key} is set by chan for every terminal and cannot be overridden"
+            ));
+        }
     }
     for value in env.values() {
         if value.contains('\0') {

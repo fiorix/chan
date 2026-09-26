@@ -45,9 +45,9 @@ pub use platform::prime_windows_shell;
 #[cfg(unix)]
 pub use platform::user_shell;
 use platform::{
-    clear_appimage_env, clear_mcp_env, command_builder, locale_selects_utf8,
+    clear_appimage_env, command_builder, locale_selects_utf8, mcp_env,
     openpty_absorbing_transient_refusal, path_inside_root, process_cwd,
-    reject_terminal_spawn_if_fd_pressure, set_mcp_env, terminal_home_dir,
+    reject_terminal_spawn_if_fd_pressure, terminal_home_dir,
 };
 #[cfg(test)]
 use platform::{fd_headroom_allows, TERMINAL_SESSION_FD_ESTIMATE};
@@ -701,6 +701,62 @@ fn parse_terminal_ordinal(name: &str) -> Option<u64> {
         .parse::<u64>()
         .ok()
         .filter(|&n| n >= 1)
+}
+
+/// The spawn environment keys chan sets for itself. A spawn writes them only
+/// by iterating this list, after the caller's entries, so chan's value
+/// wins, and a key chan leaves unset for a spawn is removed rather than
+/// inherited from the server's own environment. Because a caller's value for
+/// one of them could never reach the child, the server refuses a request that
+/// sets one ([`is_chan_spawn_env_key`]); every other key, a caller-set
+/// `CHAN_AGENT` or `CHAN_HOME` included, reaches the child as given.
+pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
+    "CHAN",
+    "CHAN_TERMINAL",
+    "CHAN_TAB_NAME",
+    "CHAN_TAB_GROUP",
+    "CHAN_WINDOW_ID",
+    "CHAN_CONTROL_SOCKET",
+    "CHAN_WORKSPACE_PATH",
+    "CHAN_WORKSPACE_NAME",
+    "CHAN_MCP_SERVER_NAME",
+    "CHAN_MCP_SOCKET",
+    "CHAN_MCP_COMMAND",
+    "CHAN_MCP_COMMAND_JSON",
+    "CHAN_MCP_SERVER_JSON",
+];
+
+/// Whether `key` is one chan sets for itself at spawn
+/// ([`CHAN_SPAWN_ENV_KEYS`]), which a spawn request may not set.
+pub fn is_chan_spawn_env_key(key: &str) -> bool {
+    CHAN_SPAWN_ENV_KEYS.contains(&key)
+}
+
+/// chan's own entries for one spawn. It applies exactly the keys of
+/// [`CHAN_SPAWN_ENV_KEYS`], so a key chan sets is refused at validation by
+/// being on that list; setting one that is not on it is a bug the debug
+/// assertion catches in every spawn test.
+#[derive(Debug, Default)]
+struct ChanSpawnEnv(BTreeMap<&'static str, String>);
+
+impl ChanSpawnEnv {
+    fn set(&mut self, key: &'static str, value: impl Into<String>) {
+        debug_assert!(
+            is_chan_spawn_env_key(key),
+            "{key} is set at spawn but missing from CHAN_SPAWN_ENV_KEYS"
+        );
+        self.0.insert(key, value.into());
+    }
+
+    /// Set every listed key this spawn has a value for and remove the rest.
+    fn apply(&self, cmd: &mut portable_pty::CommandBuilder) {
+        for key in CHAN_SPAWN_ENV_KEYS {
+            match self.0.get(key) {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            }
+        }
+    }
 }
 
 /// Broadcast group default. A terminal with no explicit group belongs to
@@ -3847,9 +3903,9 @@ impl Session {
             cmd.env_remove("LC_ALL");
             cmd.env_remove("LC_CTYPE");
         }
-        cmd.env("CHAN", "1");
-        clear_mcp_env(&mut cmd);
-        cmd.env(
+        let mut chan_env = ChanSpawnEnv::default();
+        chan_env.set("CHAN", "1");
+        chan_env.set(
             "CHAN_TERMINAL",
             if config.terminal.ghostty {
                 "ghostty"
@@ -3859,12 +3915,14 @@ impl Session {
         );
         if opts.mcp_env {
             if let Some(socket_path) = config.mcp_socket_path.as_deref() {
-                set_mcp_env(&mut cmd, socket_path);
+                for (key, value) in mcp_env(socket_path).into_iter().flatten() {
+                    chan_env.set(key, value);
+                }
             }
         }
         let spawn_name = opts.tab_name.clone();
         if let Some(tab_name) = spawn_name.as_deref() {
-            cmd.env("CHAN_TAB_NAME", tab_name);
+            chan_env.set("CHAN_TAB_NAME", tab_name);
         }
         // Every terminal has a well-defined group, so $CHAN_TAB_GROUP is
         // always set (default when unset) -- an agent can read it
@@ -3873,27 +3931,30 @@ impl Session {
             .tab_group
             .clone()
             .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string());
-        cmd.env("CHAN_TAB_GROUP", &spawn_group);
+        chan_env.set("CHAN_TAB_GROUP", spawn_group.as_str());
         let window_id = opts.window_id.clone();
         if let Some(window_id) = window_id.as_deref() {
-            cmd.env("CHAN_WINDOW_ID", window_id);
+            chan_env.set("CHAN_WINDOW_ID", window_id);
         }
-        if let Some(socket_path) = config.control_socket_path.as_deref() {
-            if let Some(socket) = socket_path.to_str() {
-                cmd.env("CHAN_CONTROL_SOCKET", socket);
-            }
+        if let Some(socket) = config
+            .control_socket_path
+            .as_deref()
+            .and_then(|path| path.to_str())
+        {
+            chan_env.set("CHAN_CONTROL_SOCKET", socket);
         }
         // Served-workspace identity for the terminal and any agents it spawns.
         // No user-managed workspace name exists; the label derives from the root
         // path basename, matching how the UI labels a workspace.
         let workspace_path = config.workspace_root.to_string_lossy();
-        cmd.env("CHAN_WORKSPACE_PATH", workspace_path.as_ref());
+        chan_env.set("CHAN_WORKSPACE_PATH", workspace_path.as_ref());
         let workspace_name = config
             .workspace_root
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| workspace_path.into_owned());
-        cmd.env("CHAN_WORKSPACE_NAME", &workspace_name);
+        chan_env.set("CHAN_WORKSPACE_NAME", workspace_name);
+        chan_env.apply(&mut cmd);
 
         let mut child = pair.slave.spawn_command(cmd)?;
         let child_pid = child.process_id();

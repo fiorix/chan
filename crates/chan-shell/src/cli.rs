@@ -881,7 +881,9 @@ pub enum TerminalAction {
         /// Command to run instead of the default shell.
         #[arg(long, value_name = "COMMAND")]
         command: Option<String>,
-        /// Spawn environment entry. Repeat for multiple entries.
+        /// Spawn environment entry; it wins over chan's defaults, and a key
+        /// chan sets itself (CHAN, CHAN_TAB_NAME, CHAN_MCP_* and the like) is
+        /// refused. Repeat for multiple entries.
         #[arg(long, value_name = "KEY=VALUE", value_parser = parse_terminal_env)]
         env: Vec<(String, String)>,
         #[command(flatten)]
@@ -947,7 +949,9 @@ pub enum TerminalAction {
         /// Run this command after restart instead of the original command.
         #[arg(long, value_name = "COMMAND")]
         command: Option<String>,
-        /// Override a spawn environment entry. Repeat for multiple entries.
+        /// Override a spawn environment entry; a key chan sets itself (CHAN,
+        /// CHAN_TAB_NAME, CHAN_MCP_* and the like) is refused. Repeat for
+        /// multiple entries.
         #[arg(long, value_name = "KEY=VALUE", value_parser = parse_terminal_env)]
         env: Vec<(String, String)>,
     },

@@ -395,16 +395,12 @@ fn resolve_windows_shell() -> ShellProfile {
     default_profile("cmd", "Command Prompt", comspec, ShellKind::Cmd)
 }
 
-pub(crate) fn set_mcp_env(cmd: &mut CommandBuilder, socket_path: &std::path::Path) {
-    let Some(socket) = socket_path.to_str() else {
-        return;
-    };
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let Some(exe) = exe.to_str() else {
-        return;
-    };
+/// The MCP discovery entries a spawn with MCP env opted in hands its child,
+/// or `None` when the socket path or chan's own executable path is not UTF-8.
+pub(super) fn mcp_env(socket_path: &std::path::Path) -> Option<[(&'static str, String); 5]> {
+    let socket = socket_path.to_str()?;
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.to_str()?;
     let argv_json = serde_json::json!([exe, "__mcp-proxy", socket]).to_string();
     let server_json = serde_json::json!({
         "name": "chan",
@@ -412,29 +408,13 @@ pub(crate) fn set_mcp_env(cmd: &mut CommandBuilder, socket_path: &std::path::Pat
         "args": ["__mcp-proxy", socket],
     })
     .to_string();
-
-    cmd.env("CHAN_MCP_SERVER_NAME", "chan");
-    cmd.env("CHAN_MCP_SOCKET", socket);
-    cmd.env("CHAN_MCP_COMMAND", format!("{exe} __mcp-proxy {socket}"));
-    cmd.env("CHAN_MCP_COMMAND_JSON", argv_json);
-    cmd.env("CHAN_MCP_SERVER_JSON", server_json);
-}
-
-pub(super) fn clear_mcp_env(cmd: &mut CommandBuilder) {
-    for key in [
-        "CHAN_MCP_SERVER_NAME",
-        "CHAN_MCP_SOCKET",
-        "CHAN_MCP_COMMAND",
-        "CHAN_MCP_COMMAND_JSON",
-        "CHAN_MCP_SERVER_JSON",
-        "CHAN_TAB_GROUP",
-        "CHAN_WINDOW_ID",
-        "CHAN_CONTROL_SOCKET",
-        "CHAN_WORKSPACE_NAME",
-        "CHAN_WORKSPACE_PATH",
-    ] {
-        cmd.env_remove(key);
-    }
+    Some([
+        ("CHAN_MCP_SERVER_NAME", "chan".to_string()),
+        ("CHAN_MCP_SOCKET", socket.to_string()),
+        ("CHAN_MCP_COMMAND", format!("{exe} __mcp-proxy {socket}")),
+        ("CHAN_MCP_COMMAND_JSON", argv_json),
+        ("CHAN_MCP_SERVER_JSON", server_json),
+    ])
 }
 
 /// Keys the AppImage runtime and linuxdeploy's GTK hook invent whose value
