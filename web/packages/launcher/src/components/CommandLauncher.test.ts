@@ -723,3 +723,20 @@ describe("Computers command deck", () => {
     expect(result("Close")).toBeTruthy();
   });
 });
+
+describe("focus around the deck", () => {
+  it("hands focus back to the control it opened from when dismissed", async () => {
+    const control = document.createElement("button");
+    document.body.append(control);
+    control.focus();
+    openCommandLauncher("computers");
+    flushSync();
+    await flushPromises();
+    expect(document.activeElement, "the deck takes focus").toBe(target.querySelector(".deck-input"));
+
+    await key("Escape");
+    await flushPromises();
+    expect(document.activeElement).toBe(control);
+    control.remove();
+  });
+});
