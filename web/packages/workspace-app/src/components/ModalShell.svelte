@@ -62,8 +62,8 @@
 </script>
 
 <div class="overlay">
-  <!-- A pointer target only: the dialog's own buttons are the keyboard's
-       way out, so the backdrop stays out of the tab order. -->
+  <!-- A pointer target only: Escape and the dialog's own buttons are the
+       keyboard's way out, so the backdrop stays out of the tab order. -->
   <button
     class="backdrop"
     type="button"
