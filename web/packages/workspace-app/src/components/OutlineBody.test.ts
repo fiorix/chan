@@ -28,6 +28,11 @@ describe("OutlineBody", () => {
     expect(outlineRows("# One\ntext\n## Two\n")).toEqual(["One", "Two"]);
   });
 
+  test("closes a list item's fence at the item's content column", () => {
+    const content = "# Setup\n- ```sh\n  make\n  ```\n# Usage\n```sh\n# a comment\n```\n# Last\n";
+    expect(outlineRows(content)).toEqual(["Setup", "Usage", "Last"]);
+  });
+
   test("reads a tab-indented backtick run as indented code, not a fence", () => {
     expect(outlineRows("# A\n\n\t```\n\n# B\n")).toEqual(["A", "B"]);
   });

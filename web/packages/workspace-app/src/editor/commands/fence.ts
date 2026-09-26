@@ -53,31 +53,63 @@ export type FenceLine = "fence" | "code" | "text";
 /// The string face of the fence question. Feed the returned function every
 /// line of a document in order and it classifies each one. A fence opens on
 /// a run of three or more backticks or tildes behind at most three spaces
-/// (a tab there makes the line indented code), and only a run of the same
-/// character at least as long closes it, so a ``` line inside a ~~~ block or
-/// a ```` block is code. Each call starts a fresh document.
+/// (a tab there makes the line indented code), or right after a list item's
+/// marker, and only a run of the same character at least as long closes it,
+/// so a ``` line inside a ~~~ block or a ```` block is code. A fence opened
+/// on a list item's marker line belongs to the item: its closer sits at the
+/// item's content column, and a line indented less than that column ends the
+/// item and the fence with it. Each call starts a fresh document.
 export function fenceLineTracker(): (line: string) => FenceLine {
-  let fence: string | null = null;
+  // The open fence's run, and the column its lines are indented from: 0 at
+  // the top level, the content column for a fence on a list marker line.
+  let fence: { run: string; column: number } | null = null;
   return (line) => {
-    const marker = fenceMarker(line);
+    if (fence && fence.column > 0 && line.trim() !== "" && indentOf(line) < fence.column) {
+      fence = null;
+    }
     if (fence) {
-      if (marker && marker[0] === fence[0] && marker.length >= fence.length) {
+      const run = fenceRun(line, fence.column);
+      if (run && run[0] === fence.run[0] && run.length >= fence.run.length) {
         fence = null;
         return "fence";
       }
       return "code";
     }
-    if (marker) {
-      fence = marker;
+    const run = fenceRun(line, 0);
+    if (run) {
+      fence = { run, column: 0 };
+      return "fence";
+    }
+    const item = LIST_ITEM_FENCE.exec(line);
+    if (item) {
+      fence = { run: item[4]!, column: item[1]!.length + item[2]!.length + item[3]!.length };
       return "fence";
     }
     return "text";
   };
 }
 
-/// The fence marker (a run of 3+ backticks or tildes) that opens/closes a code
-/// block on `line`, or null. Only leading indentation may precede it.
-function fenceMarker(line: string): string | null {
-  const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-  return m ? m[1] : null;
+// A list item's marker line whose content is a fence run: the marker's
+// indent, the marker (-, *, + or a number with . or ), then one to four
+// spaces to the content column, where the run starts.
+const LIST_ITEM_FENCE = /^( {0,3})([-*+]|\d{1,9}[.)])( {1,4})(`{3,}|~{3,})/;
+
+/// The run of 3+ backticks or tildes that opens or closes a fence on
+/// `line`, or null. Only up to three spaces past `column` may precede it.
+function fenceRun(line: string, column: number): string | null {
+  const spaces = /^ */.exec(line)![0].length;
+  if (spaces < column || spaces > column + 3) return null;
+  return /^(`{3,}|~{3,})/.exec(line.slice(spaces))?.[1] ?? null;
+}
+
+/// The column where `line`'s content starts, a tab advancing to the next
+/// multiple of four as CommonMark counts it.
+function indentOf(line: string): number {
+  let column = 0;
+  for (const ch of line) {
+    if (ch === " ") column += 1;
+    else if (ch === "\t") column += 4 - (column % 4);
+    else break;
+  }
+  return column;
 }
