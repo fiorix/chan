@@ -851,17 +851,20 @@ where
     payload.push(b'\n');
     let mut sent = false;
     let io = async {
-        stream.write_all(&payload).await?;
-        stream.flush().await?;
-        sent = true;
-        let mut reader = BufReader::new(stream);
+        let written = async {
+            stream.write_all(&payload).await?;
+            stream.flush().await
+        }
+        .await;
+        sent = written.is_ok();
         let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
+        let read = BufReader::new(&mut stream).read_line(&mut line).await;
+        crate::handoff::reply_after_write::<Response>(written, read, line)
     };
     match tokio::time::timeout(reply_budget, io).await {
-        // A line is only read after the request was sent, so an empty or
-        // unparseable one is a lost reply.
+        // A line read after a failed write is kept only when it parses (the
+        // refusal the listener wrote before closing), so an empty or
+        // unparseable line is a lost reply to a request that was sent.
         Ok(Ok(line)) => serde_json::from_str(&line)
             .map(EndpointReply::Response)
             .unwrap_or(EndpointReply::Lost),

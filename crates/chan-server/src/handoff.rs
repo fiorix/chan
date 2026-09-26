@@ -987,27 +987,66 @@ async fn connect_endpoint(socket_path: &Path, timeout: Duration) -> Option<tokio
         .ok()
 }
 
+/// Write one request line and read one reply line.
+///
+/// A listener refuses a request it will not take, such as one over its byte
+/// cap, by writing its refusal and closing the connection without reading
+/// the rest. The write then fails with a broken pipe while the refusal
+/// already waits in the receive buffer, so a failed write still reads one
+/// line, and a reply that parses as `T` answers the request.
+#[cfg(any(unix, windows))]
+pub(crate) async fn exchange_line<T, R, W>(
+    read: R,
+    write: &mut W,
+    payload: &[u8],
+) -> std::io::Result<String>
+where
+    T: serde::de::DeserializeOwned,
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let written = async {
+        write.write_all(payload).await?;
+        write.flush().await
+    }
+    .await;
+    let mut line = String::new();
+    let read = BufReader::new(read).read_line(&mut line).await;
+    reply_after_write::<T>(written, read, line)
+}
+
+/// The reply to a request line, from the outcome of its write and of the
+/// read of one line that followed: the line after a complete write, and
+/// after a failed one only a line that parses as `T`, the answer the peer
+/// gave before it closed. The write's error stands otherwise.
+#[cfg(any(unix, windows))]
+pub(crate) fn reply_after_write<T: serde::de::DeserializeOwned>(
+    written: std::io::Result<()>,
+    read: std::io::Result<usize>,
+    line: String,
+) -> std::io::Result<String> {
+    match written {
+        Ok(()) => read.map(|_| line),
+        Err(_) if serde_json::from_str::<T>(&line).is_ok() => Ok(line),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(unix)]
 async fn request_endpoint(
     socket_path: &Path,
     req: &Request,
     budget: Duration,
 ) -> Result<String, EndpointError> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
     let stream = connect_endpoint(socket_path, CONNECT_TIMEOUT)
         .await
         .ok_or(EndpointError::NoDesktop)?;
     let mut payload = serde_json::to_vec(req).map_err(|_| EndpointError::NoDesktop)?;
     payload.push(b'\n');
     let (read, mut write) = stream.into_split();
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut line = String::new();
-        BufReader::new(read).read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
+    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     match tokio::time::timeout(budget, io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => Ok(line),
         Ok(_) => Err(EndpointError::NoDesktop),
@@ -1141,7 +1180,6 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
 /// timed response / parse as the unix arm.
 #[cfg(windows)]
 pub async fn try_handoff(workspace_path: &Path) -> Outcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     // Win32 ERROR_PIPE_BUSY: all instances are busy; retry briefly.
@@ -1178,14 +1216,7 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
     payload.push(b'\n');
 
     let (read, mut write) = tokio::io::split(client);
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
+    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
         _ => return Outcome::NoDesktop,
@@ -1263,7 +1294,6 @@ async fn try_close_workspace_at(
 /// once; a momentarily-busy pipe gets a short bounded retry).
 #[cfg(windows)]
 pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -1299,14 +1329,7 @@ pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome
     payload.push(b'\n');
 
     let (read, mut write) = tokio::io::split(client);
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
+    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
         _ => return Outcome::NoDesktop,
@@ -1399,7 +1422,6 @@ async fn try_open_devserver_at(
 /// once; a momentarily-busy pipe gets a short bounded retry).
 #[cfg(windows)]
 pub async fn try_open_devserver(url: &str, name: Option<&str>, script: Option<&str>) -> Outcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -1436,14 +1458,7 @@ pub async fn try_open_devserver(url: &str, name: Option<&str>, script: Option<&s
     payload.push(b'\n');
 
     let (read, mut write) = tokio::io::split(client);
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
+    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
         _ => return Outcome::NoDesktop,
@@ -1504,7 +1519,6 @@ async fn try_devserver_control_at(socket_path: &Path, req: Request) -> Devserver
 /// bounded `ERROR_PIPE_BUSY` retry the other verbs use.
 #[cfg(windows)]
 pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -1535,14 +1549,7 @@ pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
     payload.push(b'\n');
 
     let (read, mut write) = tokio::io::split(client);
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
+    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     let line = match tokio::time::timeout(budget, io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
         Ok(_) => return DevserverControlOutcome::NoDesktop,
@@ -1662,7 +1669,6 @@ pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
 /// pipe name so a test can drive it against its own listener.
 #[cfg(windows)]
 async fn try_upgrade_at(socket_path: &Path, check_only: bool) -> UpgradeOutcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     // Win32 ERROR_PIPE_BUSY: all instances are busy; retry briefly.
@@ -1695,14 +1701,7 @@ async fn try_upgrade_at(socket_path: &Path, check_only: bool) -> UpgradeOutcome 
     payload.push(b'\n');
 
     let (read, mut write) = tokio::io::split(client);
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
+    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     // Same read window as the unix arm: `check_only` hits the network on the
     // desktop side.
     let line = match tokio::time::timeout(Duration::from_secs(15), io).await {
