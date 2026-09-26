@@ -185,11 +185,16 @@ store_count() {
     printf '%s' "$n"
 }
 
-assert_store() {
-    local want="$1" why="$2" got
+# Every parked session stores two fds: its PTY master and its ring file.
+FDS_PER_SESSION=2
+
+assert_store() { # parked-sessions why
+    local sessions="$1" why="$2" want got
+    want=$((sessions * FDS_PER_SESSION))
     got="$(store_count)"
-    [ "$got" = "$want" ] || fail "fd store count $got, want $want ($why)"
-    log "store count $got as expected ($why)"
+    [ "$got" = "$want" ] \
+        || fail "fd store count $got, want $want for $sessions parked sessions ($why)"
+    log "store count $got as expected for $sessions parked sessions ($why)"
 }
 
 ready() { curl -fsS -m 2 "$BASE/api/devserver/info" >/dev/null 2>&1; }
