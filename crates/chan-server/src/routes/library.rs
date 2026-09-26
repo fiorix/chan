@@ -3428,7 +3428,7 @@ mod devserver_route_tests {
         let store = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
-        lib.register_workspace(workspace.path()).unwrap();
+        let row = lib.register_workspace(workspace.path()).unwrap();
         let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
         host.install_window_registry(
             Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
@@ -3441,10 +3441,13 @@ mod devserver_route_tests {
         )
         .await
         .expect("mount workspace");
+        // The record stores the registry row's root, as the window route does;
+        // the tempdir's own spelling is only an alias of it wherever the temp
+        // path is not canonical.
         let record = host
             .mint_window(
                 chan_library::windows::WindowKind::Workspace,
-                Some(workspace.path().to_string_lossy().into_owned()),
+                Some(row.root_path.to_string_lossy().into_owned()),
             )
             .expect("mint workspace window");
         let router = launcher_router(host.clone(), None, None);

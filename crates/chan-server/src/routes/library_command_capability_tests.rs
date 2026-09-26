@@ -61,7 +61,7 @@ async fn fixture() -> Fixture {
     let store = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let library = Library::open_at(config.path().join("config.toml")).unwrap();
-    library.register_workspace(workspace.path()).unwrap();
+    let row = library.register_workspace(workspace.path()).unwrap();
     let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
     host.install_window_registry(
         Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
@@ -75,10 +75,13 @@ async fn fixture() -> Fixture {
     )
     .await
     .expect("mount invoking workspace");
+    // The record stores the registry row's root, as the window route does;
+    // the tempdir's own spelling is only an alias of it wherever the temp
+    // path is not canonical.
     let record = host
         .mint_window_with_origin(
             WindowKind::Workspace,
-            Some(workspace.path().to_string_lossy().into_owned()),
+            Some(row.root_path.to_string_lossy().into_owned()),
             WindowOrigin::Browser,
         )
         .expect("mint invoking window");
@@ -160,7 +163,7 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
     // A second valid tenant token passes the broad surface gate, but must not
     // authorize the invoking window from the first tenant.
     let other = tempfile::tempdir().unwrap();
-    fixture
+    let other_row = fixture
         .host
         .library()
         .register_workspace(other.path())
@@ -178,7 +181,7 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
         .host
         .mint_window_with_origin(
             WindowKind::Workspace,
-            Some(other.path().to_string_lossy().into_owned()),
+            Some(other_row.root_path.to_string_lossy().into_owned()),
             WindowOrigin::Browser,
         )
         .unwrap();
