@@ -1355,12 +1355,16 @@ impl DevserverState {
     }
 
     /// The current [`WorkspaceEntry`] for `prefix`, or `None` when no
-    /// workspace is registered there.
+    /// workspace is registered there. The record is copied out of the map
+    /// before its row is built, as the list's rows are.
     fn entry_for(&self, prefix: &str) -> Option<WorkspaceEntry> {
-        let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-        workspaces
+        let record = self
+            .workspaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get(prefix)
-            .map(|record| self.entry_from_record(record))
+            .cloned()?;
+        Some(self.entry_from_record(&record))
     }
 
     /// Forget the workspace at `prefix`: unmount it if on, then drop the
