@@ -22,6 +22,7 @@
   // outline). Cheap; no debounce needed.
 
   import { Eye, Play } from "lucide-svelte";
+  import { fenceLineTracker } from "../editor/commands/fence";
   import { groupHeadingsBySlides, parseSlidesSpec } from "../editor/slides";
 
   let {
@@ -66,23 +67,11 @@
 
   function parseHeadings(src: string): Heading[] {
     const out: Heading[] = [];
-    let inFence = false;
-    let fenceMarker = "";
+    const fence = fenceLineTracker();
     const lines = src.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? "";
-      const fence = line.match(/^(```+|~~~+)/);
-      if (fence) {
-        if (!inFence) {
-          inFence = true;
-          fenceMarker = fence[1] ?? "";
-        } else if (line.startsWith(fenceMarker)) {
-          inFence = false;
-          fenceMarker = "";
-        }
-        continue;
-      }
-      if (inFence) continue;
+      if (fence(line) !== "text") continue;
       const m = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
       if (!m) continue;
       out.push({
