@@ -8679,9 +8679,10 @@ mod tests {
         /// test reports it.
         const HEALTHY_ROOT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
-        /// A desktop whose library registers `hung` before `other`, so a walk
-        /// of the rows in order meets the hung root first, with `other`
-        /// mounted and a workspace overlay installed for the on-set snapshot.
+        /// A desktop with `other` mounted and `hung` registered after it. The
+        /// registry lists the latest registration first, so a walk of the
+        /// rows in order meets the hung root first. A workspace overlay is
+        /// installed for the on-set snapshot.
         struct HungRootDesktop {
             state: Arc<AppState>,
             /// The roots the two registry rows store.
@@ -8704,12 +8705,19 @@ mod tests {
                 let other = tempfile::tempdir().expect("other root");
                 let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
                     .expect("library");
+                let other_root = library
+                    .register_workspace(other.path())
+                    .expect("register the other root")
+                    .root_path;
+                let embedded =
+                    runtime.block_on(embedded::EmbeddedServer::for_tests(library.clone()));
+                embedded.install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
+                runtime
+                    .block_on(embedded.open_workspace(other_root.to_str().expect("utf-8 root")))
+                    .expect("mount the other root");
                 library
                     .register_workspace(hung.path())
                     .expect("register the hung root");
-                library
-                    .register_workspace(other.path())
-                    .expect("register the other root");
                 let stored: Vec<PathBuf> = library
                     .list_workspaces()
                     .into_iter()
@@ -8723,11 +8731,6 @@ mod tests {
                     [hung.path().file_name(), other.path().file_name()],
                     "fixture: the hung root lists first"
                 );
-                let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
-                embedded.install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
-                runtime
-                    .block_on(embedded.open_workspace(stored[1].to_str().expect("utf-8 root")))
-                    .expect("mount the other root");
                 let state = empty_state();
                 assert!(state.embedded.set(embedded).is_ok(), "fresh state");
                 let desktop = Self {
