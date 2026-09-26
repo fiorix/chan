@@ -2566,18 +2566,39 @@ pub(crate) mod log_capture {
         }
     }
 
+    /// This thread's capture, installed until it drops.
+    pub(crate) struct Installed {
+        _default: tracing::subscriber::DefaultGuard,
+        _registered: tracing::Dispatch,
+    }
+
     impl Lines {
         /// Collect this thread's events until the guard drops. A
         /// `#[tokio::test]` runs on a current-thread runtime, so an async
         /// test's events stay on the thread that installed it.
-        pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
-            tracing::subscriber::set_default(
+        ///
+        /// While at most one dispatcher is registered, tracing-core computes
+        /// a callsite's interest from the default of whichever thread
+        /// registers it first, so a test that reaches a callsite first on a
+        /// thread with no capture caches it as never enabled for every
+        /// thread. A second registered dispatcher, held as long as the
+        /// capture, makes registration consult every registered dispatcher
+        /// instead, and the rebuild after it corrects a callsite another
+        /// thread published in the meantime.
+        pub(crate) fn install(&self) -> Installed {
+            let default = tracing::subscriber::set_default(
                 tracing_subscriber::fmt()
                     .with_writer(self.clone())
                     .with_ansi(false)
                     .with_max_level(tracing::Level::INFO)
                     .finish(),
-            )
+            );
+            let registered = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            tracing::callsite::rebuild_interest_cache();
+            Installed {
+                _default: default,
+                _registered: registered,
+            }
         }
 
         /// The captured `WARN` lines, in order.
