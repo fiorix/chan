@@ -3,9 +3,7 @@ import { shortcutLetter } from "@chan/web-shared/keyboard";
 import { chordFromEvent, shouldEscapeTerminal } from "./shortcuts";
 import { readFileSync } from "node:fs";
 
-const desktopSource = readFileSync("../../../desktop/src-tauri/src/serve.rs", "utf8");
-
-const bridge = desktopSource.match(/const KEY_BRIDGE_JS: &str = r#"([\s\S]*?)"#;/)![1];
+const bridge = readFileSync("../../../desktop/src-tauri/src/key_bridge.js", "utf8");
 
 afterEach(() => vi.unstubAllGlobals());
 

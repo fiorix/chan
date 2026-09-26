@@ -14,8 +14,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { KEY_VECTORS, type KeyVector } from "@chan/web-shared/keyboard-vectors";
 
-const serveSource = readFileSync("../../../desktop/src-tauri/src/serve.rs", "utf8");
-const KEY_BRIDGE = serveSource.match(/const KEY_BRIDGE_JS: &str = r#"([\s\S]*?)"#;/)![1];
+const KEY_BRIDGE = readFileSync("../../../desktop/src-tauri/src/key_bridge.js", "utf8");
 const mainSource = readFileSync("../../../desktop/src-tauri/src/main.rs", "utf8");
 const RELOAD_BRIDGE = mainSource.match(
   /const LAUNCHER_RELOAD_BRIDGE_JS: &str = r#"([\s\S]*?)"#;/,
