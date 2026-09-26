@@ -4610,6 +4610,124 @@ mod tests {
         }
     }
 
+    /// Collects one `LEVEL name=value` line per event on the calling thread,
+    /// so a test can read the warning an operator would find in the journal.
+    /// chan-server depends on plain `tracing` only, and a subscriber crate
+    /// would be a new dependency edge for one assertion.
+    struct CapturedLogs(Arc<Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for CapturedLogs {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Line(String);
+            impl tracing::field::Visit for Line {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write as _;
+                    let _ = write!(self.0, " {}={value:?}", field.name());
+                }
+            }
+            let mut line = Line(event.metadata().level().to_string());
+            event.record(&mut line);
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(line.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Every case runs in this one test, under one capture: the warning's
+    /// callsite is then reached from no other thread, which could otherwise
+    /// cache a "never" interest for it before this subscriber registers.
+    #[test]
+    fn an_unreadable_config_is_set_aside_before_the_first_save() {
+        fn set_aside(dir: &Path) -> Vec<PathBuf> {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(OsStr::to_str)
+                        .and_then(|name| name.strip_prefix("config.json.unreadable-"))
+                        .is_some_and(|secs| secs.parse::<u64>().is_ok())
+                })
+                .collect()
+        }
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let warnings_naming = |path: &Path| {
+            let lines = lines.lock().unwrap();
+            let path = path.display().to_string();
+            lines
+                .iter()
+                .filter(|line| line.starts_with("WARN") && line.contains(&path))
+                .count()
+        };
+        let _capture = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
+
+        let missing = tempfile::tempdir().unwrap();
+        let path = missing.path().join("config.json");
+        let loaded = DevserverStore::at(path.clone()).load();
+        assert_eq!(loaded.library_id, "");
+        assert_eq!(warnings_naming(&path), 0, "a missing config is not a fault");
+        assert!(set_aside(missing.path()).is_empty());
+
+        let garbage = b"{\"devserver_token\": \"tok";
+        let unparseable = tempfile::tempdir().unwrap();
+        let path = unparseable.path().join("config.json");
+        std::fs::write(&path, garbage).unwrap();
+        let store = DevserverStore::at(path.clone());
+        let loaded = store.load();
+        assert_eq!(loaded.devserver_token, "");
+        assert_eq!(loaded.library_id, "");
+        assert_eq!(loaded.port, 0);
+        assert_eq!(
+            warnings_naming(&path),
+            1,
+            "one warning must name the unparseable config: {:?}",
+            lines.lock().unwrap()
+        );
+        store
+            .save(&PersistedConfig {
+                library_id: "lib-fresh".into(),
+                ..PersistedConfig::default()
+            })
+            .unwrap();
+        let aside = set_aside(unparseable.path());
+        assert_eq!(aside.len(), 1, "the unparseable config was not set aside");
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), garbage);
+        assert_eq!(store.load().library_id, "lib-fresh");
+
+        // A read error rather than a parse error: the path is a directory.
+        let unreadable = tempfile::tempdir().unwrap();
+        let path = unreadable.path().join("config.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("evidence"), b"kept").unwrap();
+        let store = DevserverStore::at(path.clone());
+        assert_eq!(store.load().library_id, "");
+        assert_eq!(
+            warnings_naming(&path),
+            1,
+            "one warning must name the unreadable config: {:?}",
+            lines.lock().unwrap()
+        );
+        store.save(&PersistedConfig::default()).unwrap();
+        let aside = set_aside(unreadable.path());
+        assert_eq!(aside.len(), 1, "the unreadable config was not set aside");
+        assert_eq!(std::fs::read(aside[0].join("evidence")).unwrap(), b"kept");
+    }
+
     #[test]
     fn simultaneous_store_saves_do_not_collide() {
         let dir = tempfile::tempdir().unwrap();
