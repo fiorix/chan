@@ -6256,6 +6256,52 @@ mod tests {
         );
     }
 
+    /// A flagged root whose check answers healthy after every tick waiting on
+    /// it has returned clears as the check answers. A root that is only slow
+    /// misses each tick's budget and answers between ticks, so an answer left
+    /// for the next tick's fresh check, which misses again, would never be
+    /// read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_late_healthy_answer_clears_a_root_that_stopped_answering() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("root");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = state.register_workspace(root.path()).await.expect("mount");
+        let row = |state: &DevserverState| {
+            state
+                .workspace_entries()
+                .into_iter()
+                .find(|entry| entry.prefix == prefix)
+                .expect("the root's row")
+        };
+
+        let stall = root_stall::stall(root.path());
+        for what in ["a first health probe tick", "a second health probe tick"] {
+            let host = Arc::clone(&state.host);
+            stall.finishes_beside(what, HEALTHY_ROOT_BOUND, move || {
+                host.probe_mounted_roots()
+            });
+        }
+        assert_eq!(
+            row(&state).status,
+            WorkspaceStatus::Unavailable,
+            "fixture: the root reads not answering"
+        );
+
+        let changed = state.host.library_change_notify();
+        let notified = changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        stall.release_held();
+        let cleared = tokio::time::timeout(HEALTHY_ROOT_BOUND, notified).await;
+        let answered = row(&state);
+        assert!(
+            cleared.is_ok() && answered.status == WorkspaceStatus::Running,
+            "a late healthy answer did not clear the row: {answered:?}"
+        );
+    }
+
     /// The devserver's shutdown takes no new registration: the discovery
     /// listener closes before the tenants are shut down, so a registration
     /// that arrives during shutdown is refused rather than mounted into a
