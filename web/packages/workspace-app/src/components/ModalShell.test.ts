@@ -61,6 +61,16 @@ describe("ModalShell", () => {
     expect(backdrop.tabIndex).toBe(-1);
   });
 
+  // jsdom does no hit-testing and applies no component CSS, so this pins the
+  // structure the stacking rests on: both are positioned with no z-index, and
+  // the later one paints on top. The browser smoke's dialog clicks prove the
+  // real pointer hit.
+  test("puts the panel after its backdrop, so the panel paints over it", () => {
+    const target = render();
+    const order = backdropIn(target)!.compareDocumentPosition(dialogIn(target)!);
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING, "the panel follows the backdrop").toBeTruthy();
+  });
+
   test("takes focus into the panel when it opens", async () => {
     focusOrigin();
     const dialog = dialogIn(render())!;
