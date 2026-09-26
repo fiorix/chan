@@ -336,7 +336,7 @@ pub fn devserver_handoff_opt_out() -> bool {
 #[cfg(any(unix, windows))]
 pub struct ListenerHandle {
     socket_path: PathBuf,
-    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    stop: Option<tokio::sync::oneshot::Sender<StopAccepting>>,
     accept_loop: Option<tokio::task::JoinHandle<()>>,
     #[cfg(unix)]
     _stable_lock: std::fs::File,
@@ -353,16 +353,39 @@ impl ListenerHandle {
     }
 }
 
+/// What the accept loop is told when it stops: how long the connections it
+/// accepted get to deliver their replies, and where to say that the
+/// listener is closed.
+#[cfg(any(unix, windows))]
+struct StopAccepting {
+    drain: Duration,
+    closed: tokio::sync::oneshot::Sender<()>,
+}
+
 #[cfg(any(unix, windows))]
 impl ListenerHandle {
-    /// Stop accepting, give the connections already accepted up to 75
-    /// seconds (`REGISTER_REPLY_TIMEOUT`, the longest a registration client
-    /// waits for its reply) to deliver their replies, abort any still
-    /// running, then unlink the socket.
-    pub async fn shutdown(mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+    /// Refuse new registrations from now on; returns once the listener is
+    /// closed. The connections already accepted keep running, with up to
+    /// `drain` to deliver their replies, which [`shutdown`](Self::shutdown)
+    /// waits for.
+    pub async fn stop_accepting(&mut self, drain: Duration) {
+        let Some(stop) = self.stop.take() else {
+            return;
+        };
+        let (closed, listener_closed) = tokio::sync::oneshot::channel();
+        if stop.send(StopAccepting { drain, closed }).is_ok() {
+            let _ = listener_closed.await;
         }
+    }
+
+    /// Stop accepting, unless [`stop_accepting`](Self::stop_accepting)
+    /// already did, giving the connections already accepted up to 75
+    /// seconds (`REGISTER_REPLY_TIMEOUT`, the longest a registration client
+    /// waits for its reply) to deliver their replies; wait for them, abort
+    /// any still running once their drain bound passes, then unlink the
+    /// socket.
+    pub async fn shutdown(mut self) {
+        self.stop_accepting(REGISTER_REPLY_TIMEOUT).await;
         if let Some(accept_loop) = self.accept_loop.take() {
             if let Err(error) = accept_loop.await {
                 tracing::warn!(%error, "devserver registration accept loop did not stop cleanly");
@@ -429,13 +452,21 @@ where
     let handler = std::sync::Arc::new(handler);
     let peer_uid = std::sync::Arc::new(peer_uid);
     let owner_uid = effective_uid();
-    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<StopAccepting>();
     let accept_loop = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
+        let mut drain = REGISTER_REPLY_TIMEOUT;
+        let mut closed = None;
         loop {
             let accepted = tokio::select! {
                 biased;
-                _ = &mut stopped => break,
+                stop = &mut stopped => {
+                    if let Ok(stop) = stop {
+                        drain = stop.drain;
+                        closed = Some(stop.closed);
+                    }
+                    break;
+                }
                 _ = connections.join_next(), if !connections.is_empty() => continue,
                 accepted = listener.accept() => accepted,
             };
@@ -473,7 +504,10 @@ where
         }
         // Closing the listener refuses new peers while accepted ones finish.
         drop(listener);
-        crate::handoff::drain_connections(connections, REGISTER_REPLY_TIMEOUT).await;
+        if let Some(closed) = closed {
+            let _ = closed.send(());
+        }
+        crate::handoff::drain_connections(connections, drain).await;
     });
 
     Ok(ListenerHandle {
@@ -504,13 +538,21 @@ where
         .create(&pipe_name)?;
 
     let handler = std::sync::Arc::new(handler);
-    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<StopAccepting>();
     let accept_loop = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
+        let mut drain = REGISTER_REPLY_TIMEOUT;
+        let mut closed = None;
         loop {
             let connected = tokio::select! {
                 biased;
-                _ = &mut stopped => break,
+                stop = &mut stopped => {
+                    if let Ok(stop) = stop {
+                        drain = stop.drain;
+                        closed = Some(stop.closed);
+                    }
+                    break;
+                }
                 _ = connections.join_next(), if !connections.is_empty() => continue,
                 connected = next.connect() => connected,
             };
@@ -537,7 +579,10 @@ where
         // Closing the idle instance refuses new clients while accepted ones
         // finish.
         drop(next);
-        crate::handoff::drain_connections(connections, REGISTER_REPLY_TIMEOUT).await;
+        if let Some(closed) = closed {
+            let _ = closed.send(());
+        }
+        crate::handoff::drain_connections(connections, drain).await;
     });
 
     Ok(ListenerHandle {
@@ -753,6 +798,18 @@ pub async fn try_register_devserver(instance: &Instance, workspace_path: &Path) 
         workspace_path: workspace_path.display().to_string(),
     };
     registration_outcome(request_endpoint(&instance.endpoint, &request).await)
+}
+
+/// [`try_register_devserver`] at a bare endpoint, for a test that runs a
+/// listener outside the discovery directory.
+#[cfg(all(test, unix))]
+pub(crate) async fn try_register_at(endpoint: &Path, workspace_path: &Path) -> Outcome {
+    let request = Request::RegisterWorkspace {
+        protocol: PROTOCOL_VERSION,
+        cli_version: CHAN_VERSION.into(),
+        workspace_path: workspace_path.display().to_string(),
+    };
+    registration_outcome(request_endpoint(endpoint, &request).await)
 }
 
 #[cfg(any(unix, windows))]
