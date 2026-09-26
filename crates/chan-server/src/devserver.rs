@@ -723,6 +723,9 @@ struct DevserverState {
     /// must not hold up another prefix's attempt. Taken before the host's
     /// root lock; the lock order is stated on the host's root locks.
     mount_attempt_locks: KeyedLocks<String>,
+    /// How long one mount attempt may take, [`WORKSPACE_MOUNT_TIMEOUT`]
+    /// outside the tests that expire one on purpose.
+    mount_timeout: Duration,
     startup: Arc<StartupCoordinator>,
     store: DevserverStore,
     /// Orders persisted snapshot capture and publication across both stores.
@@ -831,7 +834,7 @@ impl DevserverState {
             return Ok(prefix.to_string());
         };
         self.persist_state();
-        self.execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+        self.execute_mount_attempt(attempt, self.mount_timeout)
             .await
     }
 
@@ -1593,7 +1596,7 @@ async fn restore_prepared_workspaces(
         }
         let mut restore = Box::pin(state.execute_mount_attempt(
             attempt.clone(),
-            std::cmp::min(WORKSPACE_MOUNT_TIMEOUT, remaining),
+            std::cmp::min(state.mount_timeout, remaining),
         ));
         tokio::select! {
             result = &mut restore => {
@@ -1838,6 +1841,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         host_label: config.host_label,
         workspaces: Mutex::new(HashMap::new()),
         mount_attempt_locks: KeyedLocks::default(),
+        mount_timeout: WORKSPACE_MOUNT_TIMEOUT,
         startup: Arc::new(StartupCoordinator::new()),
         store,
         persist_serial: Mutex::new(()),
@@ -4651,6 +4655,7 @@ mod tests {
                 host_label: "test".into(),
                 workspaces: Mutex::new(HashMap::new()),
                 mount_attempt_locks: KeyedLocks::default(),
+                mount_timeout: WORKSPACE_MOUNT_TIMEOUT,
                 startup: Arc::new(StartupCoordinator::new()),
                 store: DevserverStore::at(home.path().join("devserver").join("config.json")),
                 persist_serial: Mutex::new(()),
@@ -4866,6 +4871,7 @@ mod tests {
             host_label: "test".into(),
             workspaces: Mutex::new(HashMap::new()),
             mount_attempt_locks: KeyedLocks::default(),
+            mount_timeout: WORKSPACE_MOUNT_TIMEOUT,
             startup: Arc::new(StartupCoordinator::new()),
             store: DevserverStore::at(home.join("devserver").join("config.json")),
             persist_serial: Mutex::new(()),
@@ -5890,6 +5896,7 @@ mod tests {
             host_label: "test".into(),
             workspaces: Mutex::new(HashMap::new()),
             mount_attempt_locks: KeyedLocks::default(),
+            mount_timeout: WORKSPACE_MOUNT_TIMEOUT,
             startup: Arc::new(StartupCoordinator::new()),
             store: DevserverStore::at(home.path().join("devserver").join("config.json")),
             persist_serial: Mutex::new(()),
