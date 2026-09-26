@@ -5990,8 +5990,9 @@ export const fileOps = {
   ///
   /// Prompts via uiConfirm with destructive styling. For directories
   /// the message includes the descendant count so the user sees the
-  /// blast radius before confirming.
-  async remove(path: string, isDir = false): Promise<void> {
+  /// blast radius before confirming. Resolves true once the path is
+  /// deleted.
+  async remove(path: string, isDir = false): Promise<boolean> {
     const name = path.split("/").pop() ?? path;
     let message: string;
     if (isDir) {
@@ -6017,17 +6018,23 @@ export const fileOps = {
       confirmLabel: "Delete",
       destructive: true,
     });
-    if (!ok) return;
+    if (!ok) return false;
     try {
       await api.remove(path);
-      // Drop the persisted caret for the deleted file (and its descendants on
-      // a directory delete) so a later file reusing the path never restores a
-      // ghost position.
-      clearCaretsUnder(path);
+    } catch (e) {
+      ui.status = `delete failed: ${(e as Error).message}`;
+      return false;
+    }
+    // Drop the persisted caret for the deleted file (and its descendants on
+    // a directory delete) so a later file reusing the path never restores a
+    // ghost position.
+    clearCaretsUnder(path);
+    try {
       await settleDeleted([path]);
     } catch (e) {
       ui.status = `delete failed: ${(e as Error).message}`;
     }
+    return true;
   },
   /// Delete a multi-selection behind one confirm that names the count. In a
   /// workspace each delete moves a whole subtree to the trash, so a path under
@@ -6038,8 +6045,8 @@ export const fileOps = {
   /// with all its contents empties and then goes, and one that still holds an
   /// unselected path is refused. A refused delete does not stop the rest: the
   /// status line says how many went and names the first refusal, and the
-  /// selection keeps the paths that were refused. A delete of every path
-  /// clears the selection.
+  /// selection keeps the paths that were refused, less any the server no
+  /// longer has. A delete of every path clears the selection.
   async removeSelection(paths: readonly string[]): Promise<void> {
     const unique = [...new Set(paths)];
     const targets = windowCaps.workspace
@@ -6048,7 +6055,7 @@ export const fileOps = {
     if (targets.length === 0) return;
     if (targets.length === 1) {
       const path = targets[0]!;
-      await this.remove(path, isTreeDirectory(path));
+      if (await this.remove(path, isTreeDirectory(path))) fbClearSelection();
       return;
     }
     const dirs = targets.filter(isTreeDirectory).length;
@@ -6071,18 +6078,22 @@ export const fileOps = {
     });
     if (!ok) return;
     const deleted: string[] = [];
-    const refused: Array<{ path: string; reason: string }> = [];
+    const refused: Array<{ path: string; reason: string; gone: boolean }> = [];
     for (const path of targets) {
       try {
         await api.remove(path);
         clearCaretsUnder(path);
         deleted.push(path);
       } catch (e) {
-        refused.push({ path, reason: (e as Error).message });
+        const gone = e instanceof ApiError && e.status === 404;
+        refused.push({ path, reason: (e as Error).message, gone });
       }
     }
-    if (refused.length === 0) fbClearSelection();
-    else fbSelectSet(refused.map((r) => r.path));
+    // A path the server no longer has is not left selected: it is not in
+    // the tree either.
+    const kept = refused.filter((r) => !r.gone).map((r) => r.path);
+    if (kept.length === 0) fbClearSelection();
+    else fbSelectSet(kept);
     try {
       if (deleted.length > 0) await settleDeleted(deleted);
     } catch (e) {
