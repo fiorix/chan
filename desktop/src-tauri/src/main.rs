@@ -8821,4 +8821,109 @@ mod tests {
             );
         }
     }
+
+    /// What the on-set snapshot records beside the shared terminal tenant and
+    /// after a normal shutdown has drained the tenants.
+    mod on_set {
+        use super::*;
+
+        /// A desktop over a fresh library with `registered` in its registry,
+        /// `mounted` among them mounted, and a workspace overlay installed.
+        fn desktop(
+            runtime: &tokio::runtime::Runtime,
+            config: &Path,
+            registered: &[&Path],
+            mounted: Option<&Path>,
+        ) -> Arc<AppState> {
+            let library =
+                chan_workspace::Library::open_at(config.join("config.toml")).expect("library");
+            for root in registered {
+                library.register_workspace(root).expect("register");
+            }
+            let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
+            embedded.install_workspace_overlay_for_tests(config.join("workspaces.json"));
+            if let Some(root) = mounted {
+                runtime
+                    .block_on(embedded.open_workspace(root.to_str().expect("utf-8 root")))
+                    .expect("mount");
+            }
+            let state = empty_state();
+            assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+            state
+        }
+
+        fn on_paths(state: &AppState) -> Vec<String> {
+            state
+                .embedded()
+                .and_then(|embedded| embedded.workspace_overlay())
+                .expect("the overlay is installed")
+                .on_paths()
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime")
+        }
+
+        /// The shared terminal tenant goes by the home directory. A workspace
+        /// registered there that is off stays out of the snapshot while that
+        /// tenant is up: only a workspace tenant counts as the workspace
+        /// mounted.
+        #[test]
+        fn the_terminal_tenant_leaves_a_home_workspace_off() {
+            let runtime = runtime();
+            let config = tempfile::tempdir().expect("config dir");
+            let home = dirs::home_dir().expect("a home directory");
+            let state = desktop(&runtime, config.path(), &[&home], None);
+            runtime
+                .block_on(state.embedded().expect("embedded").open_terminal())
+                .expect("the shared terminal tenant");
+            persist_workspaces(&state);
+            assert_eq!(
+                on_paths(&state),
+                Vec::<String>::new(),
+                "the terminal tenant put the home workspace in the on-set"
+            );
+        }
+
+        /// A `chan close` handed off after a normal shutdown has drained the
+        /// tenants leaves the on-set the shutdown recorded. The drained host
+        /// mounts nothing, so a snapshot then would record every workspace
+        /// off and the next start would restore none of them.
+        #[test]
+        fn a_close_after_the_shutdown_drain_keeps_the_on_set() {
+            let runtime = runtime();
+            let config = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("workspace root");
+            let state = desktop(&runtime, config.path(), &[root.path()], Some(root.path()));
+            persist_workspaces(&state);
+            let at_stop = on_paths(&state);
+            assert_eq!(at_stop.len(), 1, "fixture: the mounted root is on");
+
+            // What `begin_normal_shutdown` does before its drain task runs.
+            state
+                .shutdown_started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            runtime.block_on(serve::stop_all(&state));
+            let app = tauri::test::mock_app();
+            let outcome = runtime.block_on(close_workspace_from_handoff(
+                app.handle().clone(),
+                Arc::clone(&state),
+                PathBuf::from(&at_stop[0]),
+                false,
+            ));
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound)
+            );
+            assert_eq!(
+                on_paths(&state),
+                at_stop,
+                "a close after the shutdown drain rewrote the on-set"
+            );
+        }
+    }
 }
