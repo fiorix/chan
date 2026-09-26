@@ -5498,6 +5498,65 @@ mod tests {
         assert_eq!(settled, prefix);
     }
 
+    /// A serve request registers its root on the blocking pool: a root that
+    /// answers the request's key and then stops answering holds the
+    /// registration there, not a runtime worker, so on a runtime with one
+    /// worker a serve request for another root still completes beside it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_serve_request_whose_root_hangs_after_its_key_registers_off_the_runtime() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("root that stops answering");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+
+        let stall = root_stall::stall_after(hung.path(), 1);
+        let requesting = Arc::clone(&state);
+        let hung_root = hung.path().to_path_buf();
+        let hung_request = tokio::spawn(async move {
+            handle_discovery_request(&requesting, 8787, register_request(&hung_root)).await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the serve request never reached its root after the key"
+        );
+        assert!(
+            stall.entered()[0].contains("register_workspace"),
+            "fixture: the held call is not the registration: {:#?}",
+            stall.entered()
+        );
+
+        let serving = Arc::clone(&state);
+        let other_root = other.path().to_path_buf();
+        let response = completes_beside(
+            &stall,
+            "a serve request for another root beside a registration held on its root",
+            async move {
+                handle_discovery_request(&serving, 8787, register_request(&other_root)).await
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the other root's serve request failed: {response:?}"
+        );
+        drop(stall);
+        let response = tokio::time::timeout(HEALTHY_ROOT_BOUND, hung_request)
+            .await
+            .expect("the held request finishes once its root answers")
+            .expect("serve task");
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the held root's serve request failed once it answered: {response:?}"
+        );
+    }
+
     /// Closes of one hung root share the blocking thread that resolves its
     /// key, so a client retrying a close of a root that stopped answering
     /// cannot take the blocking pool from every other root.

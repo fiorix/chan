@@ -2935,6 +2935,62 @@ mod devserver_route_tests {
         assert_eq!(status, StatusCode::OK, "feed: {feed}");
     }
 
+    /// A mount's bookkeeping goes by the key its request resolved: a root
+    /// that answers that lookup and then stops answering holds the mount on
+    /// the blocking pool, not a runtime worker, both for a first mount and
+    /// for the revalidation of a root already mounted. On a runtime with one
+    /// worker, another root's on route still answers beside each.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_mount_whose_root_hangs_after_its_key_holds_no_worker() {
+        use crate::devserver::hung_root_support::{completes_beside, HEALTHY_ROOT_BOUND};
+        let cfg = tempfile::tempdir().unwrap();
+        let held = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(held.path()).unwrap();
+        lib.register_workspace(other.path()).unwrap();
+        let (host, router) = mutable_router(lib);
+        let id = |root: &std::path::Path| {
+            allocate_workspace_prefix(root)
+                .unwrap()
+                .trim_start_matches('/')
+                .to_string()
+        };
+        let (held_on, other_on) = (
+            format!("/api/library/workspaces/{}/on", id(held.path())),
+            format!("/api/library/workspaces/{}/on", id(other.path())),
+        );
+
+        for (step, mounted) in [("a first mount", false), ("a revalidation", true)] {
+            assert_eq!(host.is_root_mounted(held.path()), mounted, "fixture: {step}");
+            let stall = chan_workspace::paths::root_stall::stall_after(held.path(), 1);
+            let mounting = router.clone();
+            let route = held_on.clone();
+            let held_request =
+                tokio::spawn(async move { request(&mounting, "POST", &route, None).await });
+            assert!(
+                stall.wait_entered(std::time::Duration::from_secs(10)),
+                "fixture: {step} never reached its root after the key"
+            );
+            let turning_on = router.clone();
+            let route = other_on.clone();
+            let (status, body) = completes_beside(
+                &stall,
+                &format!("another root's on route beside {step} held on its root"),
+                async move { request(&turning_on, "POST", &route, None).await },
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{step}: other on: {body}");
+            drop(stall);
+            let (status, body) = tokio::time::timeout(HEALTHY_ROOT_BOUND, held_request)
+                .await
+                .expect("the held mount finishes once its root answers")
+                .expect("on task");
+            assert_eq!(status, StatusCode::OK, "{step}: held on: {body}");
+        }
+    }
+
     /// The launcher's add resolves and registers the requested root off the
     /// runtime, so adding a root that stopped answering holds no runtime
     /// worker while it waits: on a runtime with one worker, another root's
