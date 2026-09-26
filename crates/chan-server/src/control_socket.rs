@@ -8425,6 +8425,43 @@ is_lead = false
         );
     }
 
+    #[test]
+    fn a_reply_takes_its_survey_out_of_every_later_sync() {
+        let bus = crate::survey::SurveyBus::new();
+        let (survey_id, _reply_rx) = bus.register();
+        let spec = SurveySpec {
+            survey_id: survey_id.clone(),
+            ..survey_spec("answered in win-a")
+        };
+        // The handler's record, held as the handler holds it until the reply
+        // wakes it.
+        let _open = bus.record_open(&["win-a".into(), "win-b".into()], None, &spec);
+        assert!(bus.complete_survey(
+            &survey_id,
+            SurveyReply::Option {
+                survey_id: survey_id.clone(),
+                option_index: 0,
+                option_label: "ok".into(),
+            },
+            Some("win-a".into()),
+        ));
+
+        // The handler has not run yet. win-a answered, so the close the
+        // handler sends skips it: a sync that still listed the survey would
+        // raise it there with nothing left to close it.
+        for window_id in ["win-a", "win-b"] {
+            let sync: Value = serde_json::from_str(
+                &survey_sync_frame(window_id, &bus).expect("encode survey_sync"),
+            )
+            .expect("json frame");
+            assert_eq!(
+                sync["surveys"],
+                serde_json::json!([]),
+                "{window_id}'s sync lists a survey whose reply was accepted: {sync}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn group_survey_timeout_closes_each_target_window() {
         let (_root, registry) = empty_registry();
