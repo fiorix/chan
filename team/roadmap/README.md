@@ -103,29 +103,29 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-revocation-aborts-the-bridge-before-its-close][revab] | landed | GA |
 | [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | landed | GA |
 | [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | landed | GA |
-| [a-restart-replays-only-the-manifest-tail][rtail] | accepted | build |
+| [a-restart-replays-only-the-manifest-tail][rtail] | landed | GA |
 | [a-crash-restart-restores-a-stale-manifest][crash] | accepted | build |
 | [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | landed | GA |
-| [a-failed-dial-makes-the-next-replay-from-zero][fdial] | accepted | build |
+| [a-failed-dial-makes-the-next-replay-from-zero][fdial] | landed | GA |
 | [the-served-index-forgets-a-lone-rename][srename] | landed | GA |
 | [a-case-only-rename-leaves-a-phantom-row][casef] | landed | GA |
 | [the-apps-wake-path-outlives-its-mount][wgap] | landed | GA |
 | [a-watcher-loss-leaves-the-code-report-stale][wrep] | accepted | build |
-| [terminal-env-overrides-are-silently-dropped][tenv] | accepted | build |
+| [terminal-env-overrides-are-silently-dropped][tenv] | landed | GA |
 | [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | accepted | build |
 | [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | accepted | build |
 | [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | accepted | build |
 | [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | accepted | build |
-| [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | accepted | build |
+| [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | landed | GA |
 | [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
 | [a-cut-paste-can-replace-the-first-moved-file][mvrep] | landed | GA |
 | [the-settings-date-format-never-saves][dfmt] | landed | GA |
 | [four-tests-still-read-source-with-node-fs][fsrd] | accepted | build |
 | [the-attach-prelude-order-has-no-rust-test][prel] | accepted | build |
-| [mounted-components-mutate-props-they-do-not-own][ownw] | accepted | build |
-| [a-sent-prompt-stays-editable-while-pending][rpro] | accepted | build |
-| [a-click-beside-a-graph-node-clears-the-selection][gring] | accepted | build |
-| [a-mirrored-value-focuses-an-unfocused-editor][afoc] | accepted | build |
+| [mounted-components-mutate-props-they-do-not-own][ownw] | landed | GA |
+| [a-sent-prompt-stays-editable-while-pending][rpro] | landed | GA |
+| [a-click-beside-a-graph-node-clears-the-selection][gring] | landed | GA |
+| [a-mirrored-value-focuses-an-unfocused-editor][afoc] | landed | GA |
 | [a-started-mcp-tool-cannot-be-cancelled][mcan] | accepted | build |
 | [the-writer-lock-probe-waits-on-a-hung-root][wlock] | accepted | build |
 | [a-hung-root-stalls-desktop-close-and-quit][dquit] | accepted | build |
@@ -137,6 +137,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-relinked-root-window-nests-outside-its-row][rnest] | raised | decide |
 | [the-desktop-handoff-keys-an-absent-root][hkey] | raised | decide |
 | [one-close-reason-covers-a-parked-and-a-killed-pty][pkill] | raised | decide |
+| [a-fresh-session-under-an-old-id-keeps-the-key-protocol][kproto] | landed | GA |
+| [the-scripted-team-drops-member-env][senv] | raised | decide |
+| [the-memfd-ring-mirror-doubles-the-terminals-memory][mmap] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -226,6 +229,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [rnest]: v0.101.0/a-relinked-root-window-nests-outside-its-row.md
 [hkey]: v0.101.0/the-desktop-handoff-keys-an-absent-root.md
 [pkill]: v0.101.0/one-close-reason-covers-a-parked-and-a-killed-pty.md
+[kproto]: v0.101.0/a-fresh-session-under-an-old-id-keeps-the-key-protocol.md
+[senv]: v0.101.0/the-scripted-team-drops-member-env.md
+[mmap]: v0.101.0/the-memfd-ring-mirror-doubles-the-terminals-memory.md
 
 ## Completed
 

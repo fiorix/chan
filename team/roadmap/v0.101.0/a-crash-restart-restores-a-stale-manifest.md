@@ -6,6 +6,8 @@ Status: accepted for v0.101.0 by the owner on 2026-09-25; raised during v0.101.0
 
 Accepted on 2026-09-25 as the lead recommended, in one terminal restore lane with [a-restart-replays-only-the-manifest-tail](a-restart-replays-only-the-manifest-tail.md), which answers this item's two questions. Output does not refresh the manifest: the memfd-backed ring chosen for that item survives a crash, which makes a refresh moot. A resume cursor the server cannot honour, such as one ahead of a restored `seq`, gets a full replay and a visible notice, never a silent skip.
 
+The ring half landed with [a-restart-replays-only-the-manifest-tail](a-restart-replays-only-the-manifest-tail.md) on 2026-09-26; the resume half (a cursor the server cannot honour, the ring for a session restored without one, the terminal flags beside the bytes) is the crash resume order.
+
 ## What was seen
 
 The fd-store manifest is rewritten on park, move, rename and unpark, never on output. After `kill -9` the new process restores the `seq` and replay tail of the last rewrite, which in the e2e was the activation after the previous restart. A fresh view loses the history written since:
