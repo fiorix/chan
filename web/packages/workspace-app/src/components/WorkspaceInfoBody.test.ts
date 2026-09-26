@@ -281,4 +281,13 @@ describe("the shared graph load", () => {
     await settle();
     expect(api.graphStream).toHaveBeenCalledTimes(1);
   });
+
+  test("an invalidated graph loads again while the body is shown", async () => {
+    vi.mocked(api.graphStream).mockResolvedValue({ nodes: [], edges: [] });
+    await render();
+    expect(api.graphStream).not.toHaveBeenCalled();
+    invalidateGraph();
+    await settle();
+    expect(api.graphStream).toHaveBeenCalledTimes(1);
+  });
 });

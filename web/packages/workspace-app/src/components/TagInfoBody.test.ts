@@ -45,4 +45,16 @@ describe("the shared graph load", () => {
     expect(api.graphStream).toHaveBeenCalledTimes(1);
     expect(target.textContent).toContain("references unavailable: stream down");
   });
+
+  test("an invalidated graph loads again while the body is shown", async () => {
+    vi.mocked(api.graphStream).mockResolvedValue({ nodes: [], edges: [] });
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(TagInfoBody, { target, props: { nodeId: "#x", label: "#x", kind: "tag" } }));
+    await settle();
+    expect(api.graphStream).toHaveBeenCalledTimes(1);
+    invalidateGraph();
+    await settle();
+    expect(api.graphStream).toHaveBeenCalledTimes(2);
+  });
 });
