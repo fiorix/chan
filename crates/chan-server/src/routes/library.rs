@@ -3462,24 +3462,24 @@ mod devserver_route_tests {
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let (_, feed) = request(&router, "GET", "/api/library/windows", None).await;
-        let row = feed
+        let listed = feed
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["window_id"] == record.window_id)
+            .find(|window| window["window_id"] == record.window_id)
             .expect("window in feed");
-        assert_eq!(row["label"], "release checks");
+        assert_eq!(listed["label"], "release checks");
 
         let (status, _) = request(&router, "PUT", &uri, Some(r#"{"label":"   "}"#)).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let (_, feed) = request(&router, "GET", "/api/library/windows", None).await;
-        let row = feed
+        let listed = feed
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["window_id"] == record.window_id)
+            .find(|window| window["window_id"] == record.window_id)
             .unwrap();
-        assert!(row.get("label").is_none(), "an empty label is omitted");
+        assert!(listed.get("label").is_none(), "an empty label is omitted");
 
         let too_long = "x".repeat(chan_library::windows::MAX_WINDOW_LABEL_CHARS + 1);
         let body = serde_json::json!({ "label": too_long }).to_string();
