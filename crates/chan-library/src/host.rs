@@ -3572,6 +3572,22 @@ impl WorkspaceHost {
         self.hosted_for_key(key).ok().flatten().is_some()
     }
 
+    /// [`is_root_mounted`](Self::is_root_mounted) for a caller holding a key
+    /// the host stores, such as a registry row's root: true iff a workspace
+    /// tenant goes by `key`, its canonical root or the root it was opened at.
+    /// Answered from those stored keys, touching no filesystem. Only a tenant
+    /// holding a workspace counts, so the shared terminal tenant, which goes
+    /// by the home directory, never reads as a workspace registered there
+    /// being mounted.
+    pub fn is_workspace_mounted_by_key(&self, key: &Path) -> bool {
+        let Ok(workspaces) = self.workspaces.read() else {
+            return false;
+        };
+        workspaces
+            .values()
+            .any(|runtime| runtime.found_by(key) && runtime.artifacts.cell.workspace().is_some())
+    }
+
     /// The canonical root of the runtime `key` names (by its canonical root
     /// or by the root it was opened at), the key the host keys that mount's
     /// lifecycle row by; `None` when nothing mounted goes by `key`.
@@ -6619,6 +6635,46 @@ mod tests {
             .expect("close")
             .completed());
         assert!(host.live_workspace(root.path()).is_none());
+    }
+
+    /// A workspace answers by the root its registry row stores, and the
+    /// shared terminal tenant, which goes by the home directory, answers for
+    /// no workspace registered there, as `is_root_mounted` answers.
+    #[tokio::test]
+    async fn only_a_workspace_tenant_mounts_a_workspace_by_key() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let home = dirs::home_dir().expect("a home directory");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        lib.register_workspace(&home)
+            .expect("register the home directory");
+        let stored = |dir: &Path| {
+            lib.list_workspaces()
+                .into_iter()
+                .map(|row| row.root_path)
+                .find(|stored| stored.file_name() == dir.file_name())
+                .expect("the row")
+        };
+        let (root_key, home_key) = (stored(root.path()), stored(&home));
+        let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
+        host.open_terminal_session(serve_config("/terminal"), None, None)
+            .await
+            .expect("the shared terminal tenant");
+        assert!(!host.is_workspace_mounted_by_key(&root_key));
+
+        host.open_registered_workspace(root.path(), serve_config("/workspace"))
+            .await
+            .expect("open");
+        assert!(host.is_workspace_mounted_by_key(&root_key));
+        assert!(
+            !host.is_root_mounted(&home),
+            "fixture: the terminal tenant reads as the home workspace mounted"
+        );
+        assert!(
+            !host.is_workspace_mounted_by_key(&home_key),
+            "the terminal tenant reads as the home workspace mounted"
+        );
     }
 
     #[tokio::test]

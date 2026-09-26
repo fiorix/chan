@@ -1150,15 +1150,16 @@ fn persist_workspaces(state: &AppState) {
     // control-socket `chan close`) leaves no desktop-side trace, so reading the
     // live mount is what keeps a closed workspace from being persisted as `on`
     // and resurrected on the next boot. Each row is matched by the root it
-    // stores against the keys the host's runtimes store, resolving no root: a
-    // close, a toggle and a quit all run this, and one root that stops
-    // answering must not hold up any of them. `overlay.replace` sorts by path
-    // on save.
+    // stores against the keys the host's workspace tenants store, resolving no
+    // root: a close, a toggle and a quit all run this, and one root that stops
+    // answering must not hold up any of them. The shared terminal tenant goes
+    // by the home directory and counts for no workspace registered there.
+    // `overlay.replace` sorts by path on save.
     let rows: Vec<chan_server::PersistedWorkspace> = embedded
         .library()
         .list_workspaces()
         .into_iter()
-        .filter(|ws| embedded.is_canonical_root_mounted(&ws.root_path))
+        .filter(|ws| embedded.is_workspace_mounted_by_key(&ws.root_path))
         .map(|ws| {
             chan_server::PersistedWorkspace::new(ws.root_path.to_string_lossy().into_owned(), true)
         })

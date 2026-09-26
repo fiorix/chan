@@ -341,13 +341,13 @@ impl EmbeddedServer {
         self.host.is_root_mounted(root)
     }
 
-    /// True iff a runtime goes by `key`, its canonical root or the registry
-    /// row's root it was opened at, under any prefix. Answered from the keys
-    /// the host stores, touching no filesystem, so the workspace-overlay
-    /// snapshot can ask it of every registered row without waiting on a root
-    /// that has stopped answering.
-    pub fn is_canonical_root_mounted(&self, key: &std::path::Path) -> bool {
-        self.host.is_canonical_root_mounted(key)
+    /// True iff a workspace tenant goes by `key`, its canonical root or the
+    /// registry row's root it was opened at, under any prefix. Answered from
+    /// the keys the host stores, touching no filesystem, so the
+    /// workspace-overlay snapshot can ask it of every registered row without
+    /// waiting on a root that has stopped answering.
+    pub fn is_workspace_mounted_by_key(&self, key: &std::path::Path) -> bool {
+        self.host.is_workspace_mounted_by_key(key)
     }
 
     pub async fn close_workspace_root(
