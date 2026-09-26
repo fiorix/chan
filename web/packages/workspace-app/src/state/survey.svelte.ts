@@ -77,6 +77,10 @@ function allSlots(): SurveySlot[] {
   return [...Object.keys(surveyState.byTab), null];
 }
 
+function shows(surveyId: string): boolean {
+  return allSlots().some((slot) => entry(slot)?.spec.surveyId === surveyId);
+}
+
 function entry(slot: SurveySlot): SurveyEntry | null {
   return slot === null ? surveyState.windowWide : (surveyState.byTab[slot] ?? null);
 }
@@ -105,7 +109,7 @@ export function surveyBusy(slot: SurveySlot): boolean {
 /// this window answered is dropped. `slot` null = window-wide fallback.
 export function showSurvey(spec: SurveySpec, slot: SurveySlot = null): void {
   if (answered.has(spec.surveyId)) return;
-  if (allSlots().some((s) => entry(s)?.spec.surveyId === spec.surveyId)) return;
+  if (shows(spec.surveyId)) return;
   if (slot === null) surveyState.windowWide = { spec, busy: false };
   else surveyState.byTab[slot] = { spec, busy: false };
 }
@@ -133,21 +137,29 @@ export function closeSurveyFromRemote(
 }
 
 /// Converge on a `survey_sync`: `open` lists, oldest first, the surveys still
-/// open in this window, each with the slot its target resolves to. An id this
-/// window answered is skipped, and of two entries for one slot the later wins,
-/// as the later `open_survey` does live. A slot showing any other survey is
-/// retired and each placed survey raised, so applying a list twice changes
-/// nothing.
+/// open in this window, each with the slot its target resolves to now. An id
+/// this window answered is skipped. A slot showing a survey the list leaves
+/// out is retired. A listed survey the window shows keeps the slot it shows
+/// on, since its `tabName` can stop resolving to its terminal when the
+/// terminal is renamed. Each listed survey the window does not show is raised
+/// on its slot unless a later listed survey shows there, as the later
+/// `open_survey` wins live; an earlier one it displaces is set aside, not
+/// closed, and a later sync raises it again once the slot is free of later
+/// entries. Applying a list twice changes nothing.
 export function syncSurveys(open: ReadonlyArray<{ spec: SurveySpec; slot: SurveySlot }>): void {
-  const placed = new Map<SurveySlot, SurveySpec>();
-  for (const { spec, slot } of open) {
-    if (!answered.has(spec.surveyId)) placed.set(slot, spec);
-  }
+  const listed = open.filter(({ spec }) => !answered.has(spec.surveyId));
+  const order = new Map(listed.map(({ spec }, index) => [spec.surveyId, index]));
   for (const slot of allSlots()) {
     const shown = entry(slot);
-    if (shown && placed.get(slot)?.surveyId !== shown.spec.surveyId) retire(slot);
+    if (shown && !order.has(shown.spec.surveyId)) retire(slot);
   }
-  for (const [slot, spec] of placed) showSurvey(spec, slot);
+  listed.forEach(({ spec, slot }, index) => {
+    if (shows(spec.surveyId)) return;
+    const occupant = entry(slot);
+    const occupantIndex = occupant ? order.get(occupant.spec.surveyId) : undefined;
+    if (occupantIndex !== undefined && occupantIndex > index) return;
+    showSurvey(spec, slot);
+  });
 }
 
 /// Take down the survey on `slot`, unless a reply from THIS window is in
