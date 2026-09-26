@@ -1,5 +1,6 @@
-// Small formatting and path helpers with one definition each, so a size,
-// a time or a path segment reads the same on every surface that shows it.
+// Small formatting helpers (a byte size, a file time) and path helpers
+// (`parentDir`, `basename`), each defined once for the callers that share
+// its rule.
 
 /** Human-friendly byte size (B / KB / MB / GB). One decimal at all
  *  scales above bytes; bytes are rendered as integers. */
