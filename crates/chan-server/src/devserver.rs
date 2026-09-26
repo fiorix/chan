@@ -6184,6 +6184,70 @@ mod tests {
         );
     }
 
+    /// A mounted root whose health check stops answering reads `unavailable`,
+    /// with a reason that says the root is not answering, once the check has
+    /// missed two ticks' budgets in a row. One missed budget flags nothing, so
+    /// a root that is only slow keeps its row; the check answering healthy
+    /// clears it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mounted_root_that_stops_answering_reads_unavailable_after_two_ticks() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("root");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = state.register_workspace(root.path()).await.expect("mount");
+        let row = |state: &DevserverState| {
+            state
+                .workspace_entries()
+                .into_iter()
+                .find(|entry| entry.prefix == prefix)
+                .expect("the root's row")
+        };
+        let tick = |what: &str, stall: &root_stall::RootStall| {
+            let host = Arc::clone(&state.host);
+            stall.finishes_beside(what, HEALTHY_ROOT_BOUND, move || host.probe_mounted_roots());
+        };
+
+        let stall = root_stall::stall(root.path());
+        tick("a first health probe tick", &stall);
+        assert!(
+            stall.wait_entered(HEALTHY_ROOT_BOUND),
+            "fixture: the health check never reached the stalled root"
+        );
+        let first = row(&state);
+        assert_eq!(
+            (first.status, first.error.as_deref()),
+            (WorkspaceStatus::Running, None),
+            "one missed budget flagged the root: {first:?}"
+        );
+        tick("a second health probe tick", &stall);
+        let second = row(&state);
+        assert_eq!(
+            second.status,
+            WorkspaceStatus::Unavailable,
+            "a root whose check missed two budgets in a row: {second:?}"
+        );
+        assert!(
+            second
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not answering")),
+            "the reason must say the root is not answering: {second:?}"
+        );
+
+        drop(stall);
+        let host = Arc::clone(&state.host);
+        tokio::task::spawn_blocking(move || host.probe_mounted_roots())
+            .await
+            .expect("a tick after the root answers");
+        let answered = row(&state);
+        assert_eq!(
+            (answered.status, answered.error.as_deref()),
+            (WorkspaceStatus::Running, None),
+            "a check that answered healthy did not clear the row: {answered:?}"
+        );
+    }
+
     /// The devserver's shutdown takes no new registration: the discovery
     /// listener closes before the tenants are shut down, so a registration
     /// that arrives during shutdown is refused rather than mounted into a
