@@ -273,6 +273,63 @@ describe("a submit", () => {
     expect(view.state.readOnly).toBe(true);
   });
 
+  test("no editing key reaches a pending list card, and a failed send restores what was sent", async () => {
+    drafts.content = "- run the tests\n- fix the lint";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    submit(content);
+    await settle();
+
+    press(content, "Enter");
+    press(content, "Tab");
+    press(content, "Tab", { shiftKey: true });
+    press(content, "b", { ctrlKey: true });
+    press(content, "i", { ctrlKey: true });
+    await settle();
+    expect(view.state.doc.toString()).toBe("- run the tests\n- fix the lint");
+
+    tab.pendingPrompt = { id: sent[0]!.id!, phase: "failed" };
+    flushSync();
+    await settle();
+    expect(view.state.doc.toString()).toBe(sent[0]!.data);
+  });
+
+  test("the fence escapes do not reach a pending card", async () => {
+    drafts.content = "run this\n```\nls\n```";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    // On the closer, the doc's last line: where both escapes append a line.
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    submit(content);
+    await settle();
+
+    press(content, "ArrowDown");
+    submit(content);
+    await settle();
+    expect(view.state.doc.toString()).toBe("run this\n```\nls\n```");
+    expect(sent).toHaveLength(1);
+  });
+
+  test("a pending card still moves the caret, and a typed key starts a fresh composer with it", async () => {
+    drafts.content = "careful now";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    submit(content);
+    await settle();
+    view.dispatch({ selection: { anchor: 0 } });
+
+    press(content, "ArrowRight");
+    expect(view.state.selection.main.head).toBe(1);
+    // `>` over whole lines is also the editor's quote command.
+    view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    press(content, ">");
+    await settle();
+    expect(view.state.doc.toString()).toBe(">");
+    expect(view.state.readOnly).toBe(false);
+    expect(tab.pendingPrompt).toBeUndefined();
+  });
+
   test("a card restored while its message is still queued opens read-only", async () => {
     drafts.content = "from before the reload";
     const tab = makeTab({
