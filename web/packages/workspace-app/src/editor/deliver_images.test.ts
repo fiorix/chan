@@ -73,6 +73,13 @@ describe("rewriteImagePathsForDelivery", () => {
 
   // ---- C2: robustness (regex -> parser) ----
 
+  test("rewrites a ref after a tab-indented backtick run, which opens no fence", () => {
+    const md = "\t```\n![](./y.png#w=1) real";
+    expect(rewriteImagePathsForDelivery(md, draft, root)).toBe(
+      "\t```\n/home/u/ws/.Drafts/abc123/y.png real",
+    );
+  });
+
   test("does NOT rewrite a ref inside a fenced code block", () => {
     const md = "before\n```\n![](./x.png#w=1)\n```\n![](./y.png#w=1) real";
     const out = rewriteImagePathsForDelivery(md, draft, root);

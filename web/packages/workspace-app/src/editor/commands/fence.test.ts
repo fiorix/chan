@@ -59,6 +59,10 @@ describe("fenceLineTracker", () => {
     ]);
   });
 
+  test("a tab or other non-space whitespace before a run is not fence indent", () => {
+    expect(classify(["\t```", "x", "\u00a0```", "y"])).toEqual(["text", "text", "text", "text"]);
+  });
+
   test("an unclosed fence holds every later line as code", () => {
     expect(classify(["```", "a", "", "# b"])).toEqual(["fence", "code", "code", "code"]);
   });

@@ -28,6 +28,10 @@ describe("OutlineBody", () => {
     expect(outlineRows("# One\ntext\n## Two\n")).toEqual(["One", "Two"]);
   });
 
+  test("reads a tab-indented backtick run as indented code, not a fence", () => {
+    expect(outlineRows("# A\n\n\t```\n\n# B\n")).toEqual(["A", "B"]);
+  });
+
   test("leaves out a #-looking line inside a fence indented up to three spaces", () => {
     expect(outlineRows("# One\n  ```sh\n# a shell comment\n  ```\n## Two\n")).toEqual([
       "One",

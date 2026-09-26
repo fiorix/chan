@@ -52,10 +52,10 @@ export type FenceLine = "fence" | "code" | "text";
 
 /// The string face of the fence question. Feed the returned function every
 /// line of a document in order and it classifies each one. A fence opens on
-/// a run of three or more backticks or tildes behind at most three
-/// whitespace characters, and only a run of the same character at least
-/// as long closes it, so a ``` line inside a ~~~ block or a ```` block is
-/// code. Each call starts a fresh document.
+/// a run of three or more backticks or tildes behind at most three spaces
+/// (a tab there makes the line indented code), and only a run of the same
+/// character at least as long closes it, so a ``` line inside a ~~~ block or
+/// a ```` block is code. Each call starts a fresh document.
 export function fenceLineTracker(): (line: string) => FenceLine {
   let fence: string | null = null;
   return (line) => {
@@ -78,6 +78,6 @@ export function fenceLineTracker(): (line: string) => FenceLine {
 /// The fence marker (a run of 3+ backticks or tildes) that opens/closes a code
 /// block on `line`, or null. Only leading indentation may precede it.
 function fenceMarker(line: string): string | null {
-  const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+  const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
   return m ? m[1] : null;
 }
