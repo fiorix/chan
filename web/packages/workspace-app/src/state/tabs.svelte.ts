@@ -5321,8 +5321,13 @@ function clampSlidePreviewIndex(index: number): number {
   if (!Number.isFinite(index)) return 0;
   return Math.max(0, Math.floor(index));
 }
+/// The tab's slide preview state, created on first use. The tab's own field is
+/// returned rather than the assignment's value: an assignment evaluates to the
+/// plain object assigned, not the reactive state the tab now holds, and a write
+/// through the plain object misses the tab.
 export function ensureTabSlidePreview(tab: FileTab): SlidePreviewTabState {
-  return (tab.slidePreview ??= { open: false, index: 0, mode: "preview" });
+  if (!tab.slidePreview) tab.slidePreview = { open: false, index: 0, mode: "preview" };
+  return tab.slidePreview;
 }
 export function setTabSlidePreviewOpen(tab: FileTab, open: boolean): void {
   ensureTabSlidePreview(tab).open = open;
