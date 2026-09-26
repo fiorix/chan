@@ -1430,12 +1430,14 @@
         receivedSeq = frame.seq;
         // A fresh shell replacing this tab's session (frame.id changed) starts
         // with the xterm still holding a dead TUI's negotiated input modes.
-        // Reset mouse tracking (including the 1015 urxvt format) and exit the
-        // alt-screen before any replay so that leftover state does not leak
-        // into the new shell. A same-id live resume keeps the running
-        // program's modes untouched (mirrors the keyboard-protocol reset above,
-        // which fires only on a fresh spawn).
+        // Reset mouse tracking (including the 1015 urxvt format), exit the
+        // alt-screen and drop the keyboard protocol before any replay so that
+        // leftover state does not leak into the new shell. The protocol is
+        // reset in place, since the installed parser and key handlers hold
+        // that object. A same-id live resume keeps the running program's
+        // modes untouched, as the start does for a reattach.
         if (frame.id !== priorId) {
+          ensureTerminalKeyboardProtocol(tab, true);
           writeParsedPtyOutput(
             new TextEncoder().encode(
               "\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l",
