@@ -33,6 +33,7 @@ import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import {
   bumpTabFocusPulse,
   layout,
+  saveTab,
   type FileTab,
   type LeafNode,
 } from "../state/tabs.svelte";
@@ -855,6 +856,45 @@ describe("focus follows the active pane", () => {
     expect(rightFocused, "the right editor never took focus").toEqual([]);
     expect(hosts["pane-left"]!.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
   });
+
+  for (const mode of ["wysiwyg", "source"] as const) {
+    test(`a save mirrored into a ${mode} editor in another pane leaves focus where it was`, async () => {
+      // A live doc session carries a save to a sibling as an update and the
+      // mirror skips it; with sessions off the save is mirrored.
+      localStorage.setItem("chan.docsync", "0");
+      const left = fileTab({ id: "left-file" });
+      const right = fileTab({ id: "right-file", mode });
+      layout.nodes = {
+        root: { kind: "split", id: "root", direction: "row", ratio: 0.5, a: "pane-left", b: "pane-right" },
+        "pane-left": { kind: "leaf", id: "pane-left", tabs: [left], activeTabId: left.id },
+        "pane-right": { kind: "leaf", id: "pane-right", tabs: [right], activeTabId: right.id },
+      } as typeof layout.nodes;
+      layout.rootId = "root";
+      layout.activePaneId = "pane-left";
+      const hosts: Record<string, HTMLElement> = {};
+      for (const id of ["pane-left", "pane-right"]) {
+        const target = document.createElement("div");
+        document.body.append(target);
+        mounted.push(mount(Pane, { target, props: { pane: layout.nodes[id] as LeafNode } }));
+        hosts[id] = target;
+      }
+      await settle();
+      bumpTabFocusPulse();
+      await settle(2);
+      const typing = editorView(hosts["pane-left"]!);
+      const sibling = editorView(hosts["pane-right"]!);
+      expect(typing.hasFocus, "the left editor is the one being typed in").toBe(true);
+
+      typing.dispatch({ changes: { from: typing.state.doc.length, insert: "More.\n" } });
+      flushSync();
+      await saveTab((layout.nodes["pane-left"] as LeafNode).tabs[0]!);
+      await settle();
+
+      expect(sibling.state.doc.toString(), "the save reached the sibling").toBe(`${DOC}More.\n`);
+      expect(sibling.hasFocus).toBe(false);
+      expect(typing.hasFocus).toBe(true);
+    });
+  }
 });
 
 describe("a canvas tab", () => {
