@@ -354,6 +354,21 @@ describe("CommandDeck focus on close", () => {
     newer.resolve();
   });
 
+  it("hands focus back on Escape after the host's success failed", async () => {
+    await openFromOrigin(run({ awaitResult: true, dismissImmediatelyOnSuccess: true }), {
+      onChoose: async () => {},
+      onSuccess: () => {
+        throw new Error("save failed");
+      },
+    });
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-operation")?.textContent, "the error card").toContain("save failed");
+    escape();
+    await flush();
+    expect(document.activeElement).toBe(origin);
+  });
+
   it("leaves focus where it is when the success card's timer closes the deck", async () => {
     await openFromOrigin(run({ awaitResult: true }), { onChoose: async () => {}, onSuccess: close });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
