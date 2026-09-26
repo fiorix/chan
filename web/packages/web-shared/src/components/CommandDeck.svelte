@@ -217,8 +217,13 @@
   function succeed(item: DeckItem): void {
     const run = {};
     closingRun = run;
-    onSuccess?.(item);
-    if (open && closingRun === run) closingRun = null;
+    try {
+      onSuccess?.(item);
+    } finally {
+      // Still open: the host kept the deck up, or its handler threw and the
+      // error card is showing, so the next close is a dismissal.
+      if (open && closingRun === run) closingRun = null;
+    }
   }
 
   async function execute(item: DeckItem): Promise<void> {
