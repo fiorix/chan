@@ -11,6 +11,7 @@ import {
   clickBackdrop,
   dialogIn,
   dialogName,
+  focusOrigin,
   mountDialog,
   press,
   recordDocumentKeys,
@@ -101,6 +102,16 @@ describe("ConfirmModal", () => {
     reached.stop();
     await expect(answer).resolves.toBe(false);
     expect(reached.keys, "keys that reached the document").toEqual([]);
+  });
+
+  test("closing returns focus to where it was when the confirm opened", async () => {
+    const target = mountDialog(ConfirmModal);
+    const origin = focusOrigin();
+    const { answer } = await open(target);
+    button(target, "Keep").click();
+    await answer;
+    await settle();
+    expect(document.activeElement).toBe(origin);
   });
 
   test("a click on the backdrop cancels and a click inside the panel does not", async () => {

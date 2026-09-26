@@ -11,6 +11,7 @@ import {
   clickBackdrop,
   dialogIn,
   dialogName,
+  focusOrigin,
   mountDialog,
   press,
   recordDocumentKeys,
@@ -110,6 +111,16 @@ describe("PromptModal", () => {
     await settle();
     expect(answered, "Escape on the Cancel button answers null").toBeNull();
     expect(reached.keys, "keys that reached the document").toEqual([]);
+  });
+
+  test("closing returns focus to where it was when the prompt opened", async () => {
+    const target = mountDialog(PromptModal);
+    const origin = focusOrigin();
+    const { answer } = await open(target);
+    button(target, "Cancel").click();
+    await answer;
+    await settle();
+    expect(document.activeElement).toBe(origin);
   });
 
   test("a click on the backdrop cancels and a click inside the panel does not", async () => {

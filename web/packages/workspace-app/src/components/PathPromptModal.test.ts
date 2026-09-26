@@ -31,6 +31,7 @@ import {
   clickBackdrop,
   dialogIn,
   dialogName,
+  focusOrigin,
   press,
   recordDocumentKeys,
 } from "../__tests__/dialog";
@@ -335,6 +336,16 @@ describe("dismissal", () => {
     reached.stop();
     await expect(promise).resolves.toBeNull();
     expect(reached.keys, "keys that reached the document").toEqual([]);
+  });
+
+  test("closing returns focus to where it was when the dialog opened", async () => {
+    const target = mountModal();
+    const origin = focusOrigin();
+    const { promise } = await openDialog(target, { kind: "file", mode: "create" }, "docs/new.md");
+    target.querySelector<HTMLButtonElement>(".actions .cancel")!.click();
+    await promise;
+    await settle();
+    expect(document.activeElement).toBe(origin);
   });
 
   test("a click on the backdrop answers null and a click inside the panel does not", async () => {

@@ -30,10 +30,22 @@
 
   let panel: HTMLElement | undefined = $state();
 
+  // The element that held focus when the dialog opened, read before the
+  // panel takes it. Closing hands focus back, so the caret returns to the
+  // surface that asked (a terminal, an editor) with no click. A target the
+  // answer removed (a closed tab, a restarted terminal) is skipped.
+  const active = document.activeElement;
+  const returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
+
   // Focus enters the dialog as it opens, so keys land here rather than in
   // the surface behind it. A body that parks focus on a control does so
   // after it renders and moves it on from the panel.
-  onMount(() => panel?.focus());
+  onMount(() => {
+    panel?.focus();
+    return () => {
+      if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    };
+  });
 
   // Escape closes this dialog and goes no further. App's document-level
   // handler answers Escape too, by closing the topmost overlay, and must

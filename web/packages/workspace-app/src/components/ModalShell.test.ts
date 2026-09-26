@@ -4,7 +4,7 @@
 // clicks that dismiss it and the ones that do not, and the keys and sizing a
 // dialog hands it.
 
-import { createRawSnippet, flushSync, type Snippet } from "svelte";
+import { createRawSnippet, flushSync, mount, unmount, type Snippet } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ModalShell from "./ModalShell.svelte";
@@ -77,6 +77,20 @@ describe("ModalShell", () => {
     const dialog = dialogIn(render({ children: parking }))!;
     await settle();
     expect(document.activeElement).toBe(dialog.querySelector(".field"));
+  });
+
+  test("returns focus to where it was when it opened, once it closes", async () => {
+    const origin = focusOrigin();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const shell = mount(ModalShell, {
+      target,
+      props: { labelledby: "probe-title", onClose: () => {}, children: body },
+    });
+    await settle();
+    expect(document.activeElement, "the open dialog holds focus").not.toBe(origin);
+    await unmount(shell);
+    expect(document.activeElement).toBe(origin);
   });
 
   test("a click on the backdrop closes and a click inside the panel does not", () => {

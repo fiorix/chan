@@ -109,6 +109,15 @@ describe("ConflictModal", () => {
     expect(reached.keys, "keys that reached the document").toEqual([]);
   });
 
+  test("closing returns focus to where it was when the dialog opened", async () => {
+    const target = mountDialog(ConflictModal);
+    const origin = focusOrigin();
+    await open(target);
+    button(target, "Cancel").click();
+    await settle();
+    expect(document.activeElement).toBe(origin);
+  });
+
   test("a click on the backdrop dismisses and a click inside the panel does not", async () => {
     const target = mountDialog(ConflictModal);
     await open(target);
