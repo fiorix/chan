@@ -5362,9 +5362,11 @@ mod tests {
 
         let store = tempfile::tempdir().expect("store dir");
         let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
-        // The record stores the registry row's root, as every mint site does:
-        // the tempdir's own spelling is only an alias of it wherever the temp
-        // path is not canonical, as on macOS behind the `/var` symlink.
+        // Every mint site stores a root the workspace's runtime goes by, its
+        // canonical root or the registry row's root, and the feed matches it
+        // lexically; this record stores the row's root. The tempdir's own
+        // spelling is only an alias of it wherever the temp path is not
+        // canonical, as on macOS behind the `/var` symlink.
         let ws = registry.create(
             WindowKind::Workspace,
             Some(row.root_path.to_string_lossy().into_owned()),
