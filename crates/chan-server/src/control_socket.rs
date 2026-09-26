@@ -9014,6 +9014,64 @@ is_lead = false
         );
     }
 
+    #[tokio::test]
+    async fn a_socket_that_lags_while_its_survey_is_open_is_synced_again() {
+        let (_root, registry) = single_tab_registry();
+        // Each socket's receiver holds two frames, so a burst of three sent
+        // before the pump reads overruns it: its next receive is `Lagged`.
+        let state = survey_ws_state(2);
+        let mut events = state.events_tx.subscribe();
+        let handler = tokio::spawn({
+            let state = state.clone();
+            async move {
+                handle_survey(
+                    survey_spec("open while the window falls behind"),
+                    Some("@@T"),
+                    None,
+                    600,
+                    &state.events_tx,
+                    &state.survey_bus,
+                    Some(&registry),
+                )
+                .await
+            }
+        });
+        let open = recv_command(&mut events, "open_survey").await;
+        let survey_id = open["survey"]["surveyId"].as_str().unwrap().to_string();
+        let address = serve_ws_route(state.clone()).await;
+        let mut socket = attach_window(address, "win-a").await;
+        let attached = recv_survey_sync(&mut socket, "on attach").await;
+        assert_eq!(attached["surveys"][0]["survey"]["surveyId"], survey_id);
+
+        // The runtime is single-threaded and nothing here awaits, so the
+        // pump cannot read between these sends: its receiver overruns.
+        for n in 0..3 {
+            let _ = state
+                .events_tx
+                .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#));
+        }
+        let resynced = recv_survey_sync(&mut socket, "after the socket lagged").await;
+        assert_eq!(resynced["window_id"], "win-a");
+        let surveys = resynced["surveys"].as_array().expect("surveys array");
+        assert_eq!(surveys.len(), 1, "the open survey is re-sent: {resynced}");
+        assert_eq!(surveys[0]["survey"]["surveyId"], survey_id);
+        assert_eq!(surveys[0]["tabName"], "@@T");
+
+        assert!(state.survey_bus.complete_survey(
+            &survey_id,
+            SurveyReply::Option {
+                survey_id: survey_id.clone(),
+                option_index: 0,
+                option_label: "ok".into(),
+            },
+            Some("win-a".into()),
+        ));
+        assert!(matches!(
+            handler.await.expect("survey handler"),
+            ControlResponse::Ok { .. }
+        ));
+    }
+
     /// The ids `survey_bus` reports open in `window_id`.
     fn open_survey_ids(survey_bus: &crate::survey::SurveyBus, window_id: &str) -> Vec<String> {
         survey_bus
