@@ -6609,10 +6609,10 @@ mod tests {
             .expect("prepare the mount")
             .expect("a fresh attempt");
 
-        let stall = root_stall::stall_matching(
-            late.path(),
-            &["workspace::Workspace::ensure_root_available"],
-        );
+        // The root check after the build resolves the runtime's key on the
+        // blocking pool; hold that call and no other.
+        let post_build_check = "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+        let stall = root_stall::stall_matching(late.path(), &[post_build_check]);
         let mounting = Arc::clone(&state);
         let mount = tokio::spawn(async move {
             mounting
@@ -6622,12 +6622,6 @@ mod tests {
         assert!(
             stall.wait_entered(Duration::from_secs(10)),
             "fixture: the mount never reached its root check after the build"
-        );
-        let held = stall.entered();
-        assert!(
-            held.iter()
-                .all(|chain| chain.contains("WorkspaceHost::open_workspace")),
-            "fixture: the stall held a call outside the check after the build: {held:#?}"
         );
         tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state, None))
             .await
