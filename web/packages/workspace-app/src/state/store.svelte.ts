@@ -54,6 +54,8 @@ import {
   buildSplitGrid,
   closePane,
   closeTab,
+  conflictDialog,
+  draftCloseState,
   hasAnyTab,
   hasBrowserTab,
   cancelMissingFileCheck,
@@ -153,7 +155,7 @@ import {
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
 import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
 import { chanFetch, withTokenQuery } from "../api/transport";
-import { uiConfirm } from "./confirm.svelte";
+import { confirmState, uiConfirm } from "./confirm.svelte";
 import { applyEditorToolPreferences } from "./editorTools.svelte";
 import { updateGlobalConfigSerial } from "./configWrite";
 import {
@@ -4272,6 +4274,25 @@ export function overlayDepth(id: OverlayId): number {
 export function topOverlay(): OverlayId | null {
   const n = overlayStack.ids.length;
   return n === 0 ? null : overlayStack.ids[n - 1];
+}
+
+/// True while an app-root dialog is open: the prompt, path prompt and
+/// confirm dialogs, the draft close and file conflict dialogs, the Team Work
+/// setup, the workspace warnings and the contacts import. A dialog renders
+/// over the panes and owns the keyboard, so the chords that act on the
+/// focused pane stand down while one is up rather than changing a pane the
+/// user cannot see.
+export function keyboardOwnedByDialog(): boolean {
+  return (
+    promptState.open ||
+    pathPromptState.open ||
+    confirmState.open ||
+    draftCloseState.open ||
+    teamDialogState.request !== null ||
+    conflictDialog.open ||
+    workspaceWarningsDialog.open ||
+    importContactsPanel.open
+  );
 }
 
 /// Close one overlay by id. Mirrors the per-shell `close()` callbacks

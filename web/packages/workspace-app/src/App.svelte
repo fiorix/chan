@@ -16,11 +16,7 @@
   import WorkspaceWarningsModal from "./components/WorkspaceWarningsModal.svelte";
   import TeamDialog from "./components/TeamDialog.svelte";
   import { teamDialogState, openTeamDialog } from "./state/teamDialog.svelte";
-  // Modal-visibility flags read by paneChordBlocked() so the pane-flip command
-  // never flips a pane hidden behind a dialog. conflictDialog drives
-  // ConflictModal; workspaceWarningsDialog drives WorkspaceWarningsModal.
-  import { conflictDialog } from "./state/tabs.svelte";
-  import { currentPreferences, workspaceWarningsDialog } from "./state/store.svelte";
+  import { currentPreferences } from "./state/store.svelte";
   import { installFileDropGuard } from "./state/fileDropGuard";
   import { toggleRichPromptForTab } from "./state/richPrompt.svelte";
   import FileBrowserSidePane from "./components/FileBrowserSidePane.svelte";
@@ -67,6 +63,7 @@
     closeImportContacts,
     toggleCommandLauncher,
     appInputBlocked,
+    keyboardOwnedByDialog,
     setTransientStatus,
     syncOverlayStack,
     toggleBrowserSidePane,
@@ -608,26 +605,11 @@
   ///   Cmd+W / Cmd+N / Cmd+Shift+[/] / Cmd+1..9 are OS-level reserved in
   ///   browsers; native binds the VS Code-shaped chords directly.
   ///
-  /// True when a modal or search overlay owns the keyboard. The pane-flip
-  /// command must bail here to avoid flipping a pane hidden behind a dialog.
+  /// True when an overlay or an app-root dialog owns the keyboard. The
+  /// pane-flip command must bail here to avoid flipping a pane hidden
+  /// behind it.
   function paneChordBlocked(): boolean {
-    return (
-      topOverlay() !== null ||
-      promptState.open ||
-      pathPromptState.open ||
-      confirmState.open ||
-      draftCloseState.open ||
-      // Anything else rendered OVER the pane owns the keyboard too: the
-      // Team Work setup dialog, the file-conflict modal, and the
-      // workspace-warnings modal. Each mirrors that modal's own render
-      // condition so the guard tracks exactly when it's on screen.
-      // Flipping behind any of these would toggle a pane the user can't
-      // see.
-      teamDialogState.request !== null ||
-      conflictDialog.open ||
-      workspaceWarningsDialog.open ||
-      importContactsPanel.open
-    );
+    return topOverlay() !== null || keyboardOwnedByDialog();
   }
 
   function onWindowKey(e: KeyboardEvent): void {
