@@ -3508,4 +3508,344 @@ mod tests {
         state.terminal_sessions.close(&id, CloseReason::Explicit);
         server.abort();
     }
+
+    /// Serve `/api/terminal/ws` for `state` on a loopback port.
+    async fn serve_terminal_route(
+        state: Arc<AppState>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new()
+            .route("/api/terminal/ws", axum::routing::get(api_terminal_ws))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind terminal route");
+        let address = listener.local_addr().expect("terminal route address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve terminal route");
+        });
+        (address, server)
+    }
+
+    async fn dial_terminal(address: std::net::SocketAddr, query: &str) -> TerminalClient {
+        let (socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/terminal/ws?{query}"))
+                .await
+                .expect("connect terminal socket");
+        socket
+    }
+
+    async fn send_resize(socket: &mut TerminalClient, (cols, rows): (u64, u64)) {
+        use futures::SinkExt;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({ "type": "resize", "cols": cols, "rows": rows }).to_string(),
+            ))
+            .await
+            .expect("send a Resize frame");
+    }
+
+    /// One frame off a terminal socket: a control frame, or terminal bytes.
+    #[derive(Debug)]
+    enum WireFrame {
+        Control(serde_json::Value),
+        Bytes(Vec<u8>),
+    }
+
+    impl WireFrame {
+        fn control_type(&self) -> Option<&str> {
+            match self {
+                Self::Control(frame) => frame["type"].as_str(),
+                Self::Bytes(_) => None,
+            }
+        }
+    }
+
+    /// A frame list as an assertion reads it: control frames by type, terminal
+    /// bytes by content.
+    fn wire_shape(frames: &[WireFrame]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|frame| match frame {
+                WireFrame::Control(frame) => frame["type"].as_str().unwrap_or("?").to_string(),
+                WireFrame::Bytes(bytes) => format!("bytes {:?}", String::from_utf8_lossy(bytes)),
+            })
+            .collect()
+    }
+
+    /// Every frame of an attach prelude, `ready` included, in wire order.
+    async fn read_prelude(socket: &mut TerminalClient) -> Vec<WireFrame> {
+        use futures::StreamExt;
+        let mut frames = Vec::new();
+        loop {
+            let message = tokio::time::timeout(PROBE_BUDGET, socket.next())
+                .await
+                .expect("attach prelude arrives")
+                .expect("socket stays open through the prelude")
+                .expect("prelude frame");
+            let frame = match message {
+                tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                    WireFrame::Bytes(data.to_vec())
+                }
+                tokio_tungstenite::tungstenite::Message::Text(text) => {
+                    WireFrame::Control(serde_json::from_str(&text).expect("json control frame"))
+                }
+                _ => continue,
+            };
+            let ready = frame.control_type() == Some("ready");
+            frames.push(frame);
+            if ready {
+                return frames;
+            }
+        }
+    }
+
+    fn ready_size(frames: &[WireFrame]) -> (u64, u64) {
+        let Some(WireFrame::Control(ready)) = frames.last() else {
+            panic!("a prelude ends with ready: {:?}", wire_shape(frames));
+        };
+        (
+            ready["cols"].as_u64().expect("ready cols"),
+            ready["rows"].as_u64().expect("ready rows"),
+        )
+    }
+
+    /// What a socket reads after `ready`: each `resize` echo's size in order,
+    /// and the terminal bytes.
+    #[derive(Default)]
+    struct LiveFrames {
+        resizes: Vec<(u64, u64)>,
+        bytes: Vec<u8>,
+    }
+
+    impl LiveFrames {
+        /// Read live frames until `done` holds. A wait that runs out fails
+        /// naming `what` and everything read so far.
+        async fn read_until(
+            &mut self,
+            socket: &mut TerminalClient,
+            what: &str,
+            done: impl Fn(&Self) -> bool,
+        ) {
+            use futures::StreamExt;
+            let deadline = Instant::now() + PROBE_BUDGET;
+            while !done(self) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let message = match tokio::time::timeout(remaining, socket.next()).await {
+                    Ok(Some(Ok(message))) => message,
+                    Ok(Some(Err(error))) => self.fail(what, &format!("the socket failed: {error}")),
+                    Ok(None) => self.fail(what, "the socket closed"),
+                    Err(_) => self.fail(what, &format!("nothing more within {PROBE_BUDGET:?}")),
+                };
+                match message {
+                    tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                        self.bytes.extend_from_slice(&data);
+                    }
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        let frame: serde_json::Value =
+                            serde_json::from_str(&text).expect("json control frame");
+                        if frame["type"] == "resize" {
+                            self.resizes.push((
+                                frame["cols"].as_u64().expect("resize cols"),
+                                frame["rows"].as_u64().expect("resize rows"),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn fail(&self, what: &str, why: &str) -> ! {
+            panic!(
+                "{what}: {why}; resize echoes {:?}, terminal output {:?}",
+                self.resizes,
+                String::from_utf8_lossy(&self.bytes)
+            );
+        }
+
+        /// Send a Resize frame to `size` (distinct from every size the test
+        /// expects before it) and read until its echo; return the echoes read
+        /// before that one. The session's one PTY controller runs its commands
+        /// in order and the socket reads client frames only after the prelude,
+        /// so those are exactly the attach's: its resize, when it makes one,
+        /// then the redraw nudge's.
+        async fn resizes_before(
+            &mut self,
+            socket: &mut TerminalClient,
+            size: (u64, u64),
+        ) -> Vec<(u64, u64)> {
+            send_resize(socket, size).await;
+            self.read_until(
+                socket,
+                &format!("the Resize frame to {}x{} echoes", size.0, size.1),
+                |live| live.resizes.last() == Some(&size),
+            )
+            .await;
+            self.resizes[..self.resizes.len() - 1].to_vec()
+        }
+
+        /// What the WINCH reporter printed, in order: `stty size`, rows then
+        /// columns.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        fn winch_reports(&self) -> Vec<String> {
+            String::from_utf8_lossy(&self.bytes)
+                .split("<WINCH ")
+                .skip(1)
+                .filter_map(|rest| rest.split_once('>').map(|(size, _)| size.to_string()))
+                .collect()
+        }
+    }
+
+    /// A foreground program that prints the size `stty` reads each time a
+    /// SIGWINCH reaches it, so a test sees the size the program repaints at.
+    /// `<ARMED>` says the trap is in place.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const WINCH_REPORTER: &str = r#"trap 'printf "<WINCH %s>\n" "$(stty size)"' WINCH; printf '<ARMED>\n'; while :; do sleep 0.05; done"#;
+
+    fn create_quiet_terminal(state: &AppState, command: &str) -> AttachHandle {
+        state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some(command.into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn terminal")
+    }
+
+    /// Spawn the WINCH reporter at 80x24 with nobody attached, once its trap
+    /// is armed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn spawn_winch_reporter(state: &AppState) -> String {
+        let mut spawned = create_quiet_terminal(state, WINCH_REPORTER);
+        let out = collect_until(&mut spawned, "<ARMED>", PROBE_BUDGET).await;
+        assert!(
+            out.contains("<ARMED>"),
+            "the WINCH reporter never armed its trap: {out:?}"
+        );
+        spawned.id().to_owned()
+    }
+
+    // The attach prelude on the wire: the session frame, the retained replay,
+    // the alt-screen prelude, the private-mode re-assert, then `ready`, and
+    // the redraw nudge's repaint after it (the socket reads session events only
+    // once the prelude is sent). The replay is empty in the alt screen, so one
+    // session carries the replay and another the alt-screen prelude. A socket
+    // declaring the size the PTY already has resizes nothing.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_attach_prelude_sends_its_frames_in_order_then_redraws() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+
+        let shell = spawn_winch_reporter(&state).await;
+        assert!(state.terminal_sessions.inject_output(&shell, b"\x1b[?1h"));
+        assert!(state
+            .terminal_sessions
+            .inject_output(&shell, b"__RETAINED__\n"));
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={shell}&since=0")).await;
+        let frames = read_prelude(&mut socket).await;
+        let shape = wire_shape(&frames);
+        let Some(WireFrame::Control(session)) = frames.first() else {
+            panic!("the prelude opens with the session frame: {shape:?}");
+        };
+        assert_eq!(
+            session["type"], "session",
+            "the prelude opens with the session frame: {shape:?}"
+        );
+        let bytes: Vec<&[u8]> = frames[1..frames.len() - 1]
+            .iter()
+            .map(|frame| match frame {
+                WireFrame::Bytes(bytes) => bytes.as_slice(),
+                WireFrame::Control(_) => {
+                    panic!("only terminal bytes sit between the session frame and ready: {shape:?}")
+                }
+            })
+            .collect();
+        assert_eq!(
+            bytes.last().copied(),
+            Some(&b"\x1b[?1h"[..]),
+            "the private-mode re-assert follows the replay as the last bytes before ready: {shape:?}"
+        );
+        let seq = usize::try_from(session["seq"].as_u64().expect("session seq")).expect("seq");
+        let whole = state
+            .terminal_sessions
+            .attach(&shell, Some(0))
+            .expect("session is live");
+        let ring = whole.replay.concat();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes[..bytes.len() - 1].concat()),
+            String::from_utf8_lossy(&ring[..seq]),
+            "the replay after the session frame is everything the session printed: {shape:?}"
+        );
+        assert_eq!(ready_size(&frames), (80, 24));
+        let mut live = LiveFrames::default();
+        assert_eq!(
+            live.resizes_before(&mut socket, (81, 25)).await,
+            vec![(80, 24)],
+            "a socket declaring the PTY's own size resizes nothing: the one echo is the redraw's"
+        );
+
+        let alt = create_quiet_terminal(&state, "sleep 600").id().to_owned();
+        assert!(state
+            .terminal_sessions
+            .inject_output(&alt, b"__HISTORY__\n"));
+        assert!(state
+            .terminal_sessions
+            .inject_output(&alt, b"\x1b[?1049h\x1b[?1000h"));
+        let mut alt_socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={alt}&since=0")).await;
+        let alt_frames = read_prelude(&mut alt_socket).await;
+        assert_eq!(
+            wire_shape(&alt_frames),
+            wire_shape(&[
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(ALT_SCREEN_ATTACH_PRELUDE.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1000h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ]),
+            "in the alt screen the prelude is the session frame, the alt-screen prelude, then the re-assert"
+        );
+
+        drop(whole);
+        state.terminal_sessions.close(&shell, CloseReason::Explicit);
+        state.terminal_sessions.close(&alt, CloseReason::Explicit);
+        server.abort();
+    }
+
+    // A Resize frame resizes the PTY: the session echoes the new size and the
+    // foreground program reads it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resize_frame_resizes_the_pty() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let shell = spawn_winch_reporter(&state).await;
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={shell}&since=0")).await;
+        read_prelude(&mut socket).await;
+
+        let mut live = LiveFrames::default();
+        live.resizes_before(&mut socket, (132, 43)).await;
+        live.read_until(
+            &mut socket,
+            "the program reads the Resize frame's 132x43",
+            |live| live.winch_reports().iter().any(|size| size == "43 132"),
+        )
+        .await;
+
+        state.terminal_sessions.close(&shell, CloseReason::Explicit);
+        server.abort();
+    }
 }
