@@ -886,8 +886,9 @@ pub enum TerminalAction {
         /// Windows, chan's bin dir is prepended to a PATH; a key chan sets
         /// itself (CHAN, CHAN_TAB_NAME, CHAN_MCP_* and the like) is refused.
         /// NO_COLOR, or TERM=dumb, also stops chan forcing colour with
-        /// COLORTERM, CLICOLOR, CLICOLOR_FORCE and FORCE_COLOR. Repeat for
-        /// multiple entries.
+        /// COLORTERM, CLICOLOR, CLICOLOR_FORCE and FORCE_COLOR; any of those
+        /// the server inherited still passes through, and KEY= empties it.
+        /// Repeat for multiple entries.
         #[arg(long, value_name = "KEY=VALUE", value_parser = parse_terminal_env)]
         env: Vec<(String, String)>,
         #[command(flatten)]

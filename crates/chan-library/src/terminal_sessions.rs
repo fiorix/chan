@@ -4048,25 +4048,20 @@ impl Session {
         // whatever TERM they were started with).
         cmd.env("TERM", config.terminal.default_term.as_str());
         // chan forces colour unless the caller declines it with a
-        // `NO_COLOR` of any value or with `TERM=dumb`. Then none of the four
-        // forcing keys is set, the server's own are removed as well, and a
-        // `NO_COLOR` the server inherited is kept, since it only asks for
-        // less.
-        let colour_forcing = [
-            ("COLORTERM", "truecolor"),
-            ("CLICOLOR", "1"),
-            ("CLICOLOR_FORCE", "1"),
-            ("FORCE_COLOR", "3"),
-        ];
+        // `NO_COLOR` of any value or with `TERM=dumb`. Then chan sets none of
+        // the four forcing keys and keeps `NO_COLOR`, and the forcing keys
+        // the server inherited pass through as any inherited key does: a
+        // caller who wants one gone sets it empty.
         let colour_declined = env_value(&opts.env, "NO_COLOR", ENV_KEYS_IGNORE_CASE).is_some()
             || env_value(&opts.env, "TERM", ENV_KEYS_IGNORE_CASE)
                 .is_some_and(|term| term == "dumb");
-        if colour_declined {
-            for (key, _) in colour_forcing {
-                cmd.env_remove(key);
-            }
-        } else {
-            for (key, value) in colour_forcing {
+        if !colour_declined {
+            for (key, value) in [
+                ("COLORTERM", "truecolor"),
+                ("CLICOLOR", "1"),
+                ("CLICOLOR_FORCE", "1"),
+                ("FORCE_COLOR", "3"),
+            ] {
                 cmd.env(key, value);
             }
             cmd.env_remove("NO_COLOR");
