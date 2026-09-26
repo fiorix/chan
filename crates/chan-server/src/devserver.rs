@@ -6570,6 +6570,68 @@ mod tests {
             .expect("the refused runtime still holds the workspace");
     }
 
+    /// A mount that settles after the shutdown sweeps leaves the overlay as
+    /// it was when the stop began. The sweeps take every tenant out of the
+    /// host, so a save from then on would read each workspace that was on as
+    /// closed out of band and write it off, and the next start would restore
+    /// none of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mount_settling_after_the_shutdown_sweeps_keeps_the_overlay() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let kept = tempfile::tempdir().expect("root mounted before the stop");
+        let late = tempfile::tempdir().expect("root mounting at shutdown");
+        let state = devserver_with_windows(home.path()).await;
+        state.register_workspace(kept.path()).await.expect("mount");
+        let prefix = allocate_workspace_prefix(late.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(late.path(), &prefix)
+            .expect("prepare the mount")
+            .expect("a fresh attempt");
+        let overlay = || {
+            state
+                .host
+                .workspace_overlay()
+                .expect("the overlay is installed")
+                .entries()
+        };
+        let at_stop = overlay();
+        assert!(
+            at_stop.iter().any(|row| {
+                Path::new(&row.path) == canonical_root(kept.path()) && row.desired_on
+            }),
+            "fixture: the mounted root is not on in the overlay: {at_stop:?}"
+        );
+
+        let stall = root_stall::stall(late.path());
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount never reached its root's filesystem"
+        );
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, shut_down_hosted(&state, None))
+            .await
+            .expect("the shutdown did not return")
+            .expect("shut down");
+        drop(stall);
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount did not settle once its root answered")
+            .expect("mount task")
+            .expect_err("a mount published after the last shutdown sweep");
+
+        assert_eq!(
+            overlay(),
+            at_stop,
+            "a save after the shutdown sweeps rewrote the overlay"
+        );
+    }
+
     /// A registered root whose path now resolves elsewhere, restored after a
     /// devserver restart from the path its overlay row stores, lists as on
     /// with its token, and as stopped once closed: its record and its
