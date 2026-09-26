@@ -6,7 +6,6 @@ import { ApiError } from "../api/errors";
 import BubbleOverlay from "../components/BubbleOverlay.svelte";
 import { setNotifyHandler } from "./notify.svelte";
 import {
-  surveyState,
   showSurvey,
   surveyFor,
   surveyBusy,
@@ -14,6 +13,7 @@ import {
   pickOption,
   requestFollowup,
   dismissSurvey,
+  resetSurveysForTest,
   type SurveySlot,
 } from "./survey.svelte";
 
@@ -49,8 +49,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  surveyState.byTab = {};
-  surveyState.windowWide = null;
+  resetSurveysForTest();
   vi.restoreAllMocks();
 });
 

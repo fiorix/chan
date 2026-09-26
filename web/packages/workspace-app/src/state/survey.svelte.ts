@@ -56,6 +56,12 @@ export const surveyState = $state<{
   windowWide: SurveyEntry | null;
 }>({ byTab: {}, windowWide: null });
 
+/// Drop every survey this window shows, for a test's teardown.
+export function resetSurveysForTest(): void {
+  surveyState.byTab = {};
+  surveyState.windowWide = null;
+}
+
 function entry(slot: SurveySlot): SurveyEntry | null {
   return slot === null ? surveyState.windowWide : (surveyState.byTab[slot] ?? null);
 }
