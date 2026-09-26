@@ -43,14 +43,16 @@ describe("copyTextToClipboard", () => {
     expect(onSuccess).toHaveBeenCalledOnce();
   });
 
+  // Tauri rejects a failed command with the bare string its Result carried, so
+  // the report is the helper's own message.
   test("on the desktop, reports a failed native write that has no Clipboard API to fall back on", async () => {
-    setDesktopBridge(async () => Promise.reject(new Error("not allowed")));
+    setDesktopBridge(async () => Promise.reject("not allowed"));
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const { onSuccess, onError } = await copy("notes/a.md");
 
     expect(onSuccess).not.toHaveBeenCalled();
-    expect(onError).toHaveBeenCalledWith("not allowed");
+    expect(onError).toHaveBeenCalledWith("Failed to copy to clipboard");
   });
 
   test("in a browser, writes through the Clipboard API", async () => {

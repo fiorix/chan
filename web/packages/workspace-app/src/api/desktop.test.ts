@@ -92,6 +92,8 @@ describe("tauriInvoke", () => {
   });
 });
 
+// The desktop's write_clipboard_text returns Result<(), String>, and Tauri
+// rejects a failed command with that bare string.
 describe("writeClipboardText", () => {
   afterEach(() => {
     clearTauriGlobals();
@@ -100,7 +102,7 @@ describe("writeClipboardText", () => {
   });
 
   test("falls back to the Clipboard API when the native write fails", async () => {
-    setTauriInternals(async () => Promise.reject(new Error("not allowed")));
+    setTauriInternals(async () => Promise.reject("not allowed"));
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -111,10 +113,10 @@ describe("writeClipboardText", () => {
   });
 
   test("fails with the native error when there is no Clipboard API to fall back on", async () => {
-    setTauriInternals(async () => Promise.reject(new Error("not allowed")));
+    setTauriInternals(async () => Promise.reject("not allowed"));
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await expect(writeClipboardText("hello")).rejects.toThrow("not allowed");
+    await expect(writeClipboardText("hello")).rejects.toBe("not allowed");
   });
 });
 
