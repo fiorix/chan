@@ -2035,7 +2035,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // bound TCP address, so their configured port (possibly zero) is their
     // local selector identity.
     let discovery_port = local_addr.unwrap_or(config.addr).port();
-    let _discovery = start_discovery_listener(state.clone(), discovery_port);
+    let discovery = start_discovery_listener(state.clone(), discovery_port);
 
     // Tunnel mode: also hand the SAME app to chan-tunnel-client, which registers
     // ONE devserver and forwards inbound substreams into it, publishing every
@@ -2136,7 +2136,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         }
         parker.stop().await;
     }
-    let hosted_shutdown = host.shutdown_all().await;
+    let hosted_shutdown = shut_down_hosted(&host, discovery).await;
     state.startup.stop();
     state.startup.stopped();
     restore_join.context("joining workspace startup restore")?;
@@ -2149,6 +2149,41 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     serve_join?;
     extension_runtime.shutdown().await;
     Ok(())
+}
+
+/// How long the devserver's shutdown gives the registrations it accepted
+/// before it stopped accepting to deliver their replies. The wait runs beside
+/// the tenants' own shutdown, not ahead of it, and the two together must fit
+/// systemd's default 90 second stop timeout (the unit sets none) with room
+/// left for the rest of the shutdown. A registration still mounting when it
+/// passes is aborted, and its client reports the reply as lost.
+const REGISTRATION_SHUTDOWN_DRAIN: Duration = Duration::from_secs(30);
+
+/// Shut the hosted tenants down while taking no new registration.
+///
+/// The discovery listener stops accepting first, so a registration that
+/// arrives during shutdown is refused rather than mounted into a host that is
+/// going away. The registrations accepted before that finish beside the
+/// tenants' shutdown, within [`REGISTRATION_SHUTDOWN_DRAIN`]. One of them can
+/// publish its tenant after the first sweep has taken the map, so a second
+/// sweep runs once none is left in flight.
+async fn shut_down_hosted(
+    host: &WorkspaceHost,
+    mut discovery: Option<crate::devserver_handoff::ListenerHandle>,
+) -> Result<(), Error> {
+    if let Some(listener) = discovery.as_mut() {
+        listener
+            .stop_accepting(REGISTRATION_SHUTDOWN_DRAIN)
+            .await;
+    }
+    let draining = async {
+        if let Some(listener) = discovery {
+            listener.shutdown().await;
+        }
+    };
+    let (hosted, ()) = tokio::join!(host.shutdown_all(), draining);
+    let published_late = host.shutdown_all().await;
+    hosted.and(published_late)
 }
 
 fn start_registry_reload_watcher(
@@ -5484,6 +5519,99 @@ mod tests {
             stall.entered().len(),
             1,
             "a later tick started another check of the hung root"
+        );
+    }
+
+    /// The devserver's shutdown takes no new registration: the discovery
+    /// listener closes before the tenants are shut down, so a registration
+    /// that arrives during shutdown is refused rather than mounted into a
+    /// host that is going away. A registration accepted before still gets
+    /// its reply, and the tenant it publishes after the tenants' shutdown
+    /// began is shut down too.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registration_during_shutdown_is_refused_and_none_is_left_running() {
+        use crate::devserver_handoff::{start_listener, try_register_at, Outcome};
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let mounted = tempfile::tempdir().expect("mounted root");
+        let accepted = tempfile::tempdir().expect("root registered before shutdown");
+        let late = tempfile::tempdir().expect("root registered during shutdown");
+        let state = devserver_with_windows(home.path()).await;
+        state.register_workspace(mounted.path()).await.expect("mount");
+        let mounted_key = canonical_root(mounted.path());
+
+        let sock = home.path().join("register.sock");
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let entered_tx = Mutex::new(Some(entered_tx));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let serving = Arc::clone(&state);
+        let answering = Arc::clone(&release);
+        let listener = start_listener(sock.clone(), move |request| {
+            let entered = entered_tx.lock().unwrap().take();
+            let state = Arc::clone(&serving);
+            let release = Arc::clone(&answering);
+            async move {
+                if let Some(entered) = entered {
+                    let _ = entered.send(());
+                    let _permit = release.acquire().await.unwrap();
+                }
+                handle_discovery_request(&state, 0, request).await
+            }
+        })
+        .expect("listener");
+        let client_sock = sock.clone();
+        let accepted_root = accepted.path().to_path_buf();
+        let first =
+            tokio::spawn(async move { try_register_at(&client_sock, &accepted_root).await });
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .expect("the first registration never reached the handler")
+            .unwrap();
+
+        let host = Arc::clone(&state.host);
+        let shutdown = tokio::spawn(async move { shut_down_hosted(&host, Some(listener)).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while state.host.is_canonical_root_mounted(&mounted_key) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the tenants' shutdown never started");
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            try_register_at(&sock, late.path()),
+        )
+        .await
+        .expect("the registration during shutdown did not answer");
+        assert!(
+            !matches!(outcome, Outcome::Registered { .. }),
+            "a registration arriving during shutdown was accepted: {outcome:?}"
+        );
+        assert!(
+            !shutdown.is_finished(),
+            "the shutdown returned while an accepted registration still owed its reply"
+        );
+
+        release.add_permits(1);
+        let first = tokio::time::timeout(Duration::from_secs(30), first)
+            .await
+            .expect("the first registration did not answer")
+            .expect("client task");
+        assert!(
+            matches!(first, Outcome::Registered { .. }),
+            "a registration accepted before shutdown lost its reply: {first:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(30), shutdown)
+            .await
+            .expect("the shutdown did not return")
+            .expect("shutdown task")
+            .expect("shut down");
+        assert_eq!(
+            state.host.mounted_prefixes().expect("prefixes"),
+            Vec::<String>::new(),
+            "a tenant published during shutdown was left running"
         );
     }
 
