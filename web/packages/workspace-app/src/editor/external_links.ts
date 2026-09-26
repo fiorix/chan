@@ -3,7 +3,7 @@ import type { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
 import { notify } from "../state/notify.svelte";
-import { openGraphFromLink } from "../state/store.svelte";
+import { copyTextToClipboard, openGraphFromLink } from "../state/store.svelte";
 import { GRAPH_LINK_PREFIX } from "../state/tabs.svelte";
 
 type SyntaxNode = ReturnType<ReturnType<typeof syntaxTree>["resolveInner"]>;
@@ -57,14 +57,12 @@ async function tryTauriOpen(w: TauriWindow, url: string): Promise<boolean> {
 /// shell, pollute its session, and defeat "external".
 async function copyAndNotifyFailure(url: string): Promise<void> {
   let copied = false;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(url);
+  await copyTextToClipboard(url, {
+    onSuccess: () => {
       copied = true;
-    }
-  } catch (err) {
-    console.warn("openExternalUrl: clipboard write failed", err);
-  }
+    },
+    onError: (msg) => console.warn("openExternalUrl: clipboard write failed", msg),
+  });
   notify(
     copied
       ? "Couldn't open link in browser - URL copied to clipboard"

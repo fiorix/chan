@@ -158,6 +158,26 @@ describe("openExternalUrl no-default-browser fallback", () => {
     ]);
   });
 
+  test("copies the URL natively where the webview has no Clipboard API", async () => {
+    const invoke = vi.fn(async (cmd: string) => {
+      if (cmd === "plugin:opener|open_url") throw new Error("no app found");
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: { invoke },
+    });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    const notifications: string[] = [];
+    setNotifyHandler((msg) => notifications.push(msg));
+
+    await expect(openExternalUrl("https://example.com")).resolves.toBe(false);
+
+    expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "https://example.com" });
+    expect(notifications).toEqual([
+      "Couldn't open link in browser - URL copied to clipboard",
+    ]);
+  });
+
   test("does not fall back to window.open inside the Tauri webview", async () => {
     const openUrl = vi.fn().mockRejectedValue(new Error("no app found"));
     Object.defineProperty(window, "__TAURI__", {
