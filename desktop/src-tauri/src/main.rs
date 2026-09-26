@@ -9075,8 +9075,15 @@ mod tests {
             let config = tempfile::tempdir().expect("config dir");
             let home = dirs::home_dir().expect("a home directory");
             let state = desktop(&runtime, config.path(), &[&home], &[]);
+            // The tenant's layouts and drafts go under the test's own chan
+            // home, not the user's.
             runtime
-                .block_on(state.embedded().expect("embedded").open_terminal())
+                .block_on(
+                    state
+                        .embedded()
+                        .expect("embedded")
+                        .open_terminal_in(config.path().to_path_buf()),
+                )
                 .expect("the shared terminal tenant");
             persist_workspaces(&state);
             assert_eq!(

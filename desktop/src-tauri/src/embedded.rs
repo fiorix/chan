@@ -394,6 +394,13 @@ impl EmbeddedServer {
     /// held across the mount so two simultaneous first-opens can't both try to
     /// mount `/terminal`.
     pub async fn open_terminal(&self) -> Result<String, String> {
+        self.open_terminal_in(chan_workspace::paths::config_dir())
+            .await
+    }
+
+    /// [`open_terminal`](Self::open_terminal) with the tenant's on-disk
+    /// state, the per-window layouts and the draft store, under `chan_home`.
+    pub(crate) async fn open_terminal_in(&self, chan_home: std::path::PathBuf) -> Result<String, String> {
         const PREFIX: &str = "/terminal";
         let mut cached = self.terminal_url.lock().await;
         if let Some(url) = cached.as_ref() {
@@ -403,7 +410,7 @@ impl EmbeddedServer {
         // by `?w=<window_id>`) so it restores across a desktop relaunch -- with
         // fresh shells, since the PTYs don't survive. Best-effort: if the dir
         // can't be made the tenant falls back to its in-memory layout store.
-        let session_dir = local_terminal_session_dir().await;
+        let session_dir = local_terminal_session_dir(&chan_home).await;
         let hosted = self
             .host
             .open_terminal_session(
@@ -413,7 +420,7 @@ impl EmbeddedServer {
                 // chan home itself (`~/.chan/Drafts`); a same-machine
                 // devserver keeps a disjoint store under its own
                 // `~/.chan/devserver/` state dir.
-                Some(chan_workspace::paths::config_dir()),
+                Some(chan_home),
             )
             .await
             .map_err(|e| format!("opening the shared embedded terminal tenant: {e}"))?;
@@ -691,13 +698,14 @@ fn map_open_error(key: &str, e: chan_server::Error) -> String {
 }
 
 /// On-disk dir for the standalone `/terminal` tenant's per-window layout blobs
-/// (`~/.chan/terminal-sessions`, created on first use). Routed through
-/// `chan_workspace::paths::config_dir` (the single config-dir authority) so a
-/// `CHAN_HOME` override isolates a smoke instance and an unset override resolves
-/// to `~/.chan/terminal-sessions`. `None` only if the dir can't be created -- the
-/// tenant then keeps layout in-memory (it just won't persist across relaunch).
-async fn local_terminal_session_dir() -> Option<std::path::PathBuf> {
-    let dir = chan_workspace::paths::config_dir().join("terminal-sessions");
+/// (`terminal-sessions` under `chan_home`, created on first use). The desktop
+/// passes `chan_workspace::paths::config_dir` (the single config-dir authority)
+/// so a `CHAN_HOME` override isolates a smoke instance and an unset override
+/// resolves to `~/.chan/terminal-sessions`. `None` only if the dir can't be
+/// created -- the tenant then keeps layout in-memory (it just won't persist
+/// across relaunch).
+async fn local_terminal_session_dir(chan_home: &Path) -> Option<std::path::PathBuf> {
+    let dir = chan_home.join("terminal-sessions");
     // `tokio::fs` keeps the dir-create off the runtime thread:
     // `open_terminal` is async, so a blocking `std::fs::create_dir_all` would
     // stall the event loop.
