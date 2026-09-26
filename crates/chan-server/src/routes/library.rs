@@ -3000,6 +3000,117 @@ mod devserver_route_tests {
         }
     }
 
+    /// A registered root whose path now resolves elsewhere (its parent was
+    /// moved and a symlink put in its place), with a router over its
+    /// library: the registry row still stores the path it was registered
+    /// at, which is what the launcher lists, groups windows under and turns
+    /// on, while the mounted runtime is keyed by where that path resolves.
+    #[cfg(unix)]
+    fn relinked_root_router(
+        cfg: &std::path::Path,
+        holder: &std::path::Path,
+    ) -> (Arc<WorkspaceHost>, axum::Router, String) {
+        let parent = holder.join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let lib = Library::open_at(cfg.join("config.toml")).unwrap();
+        lib.register_workspace(&parent.join("ws")).unwrap();
+        let stored = lib.list_workspaces()[0].root_path.clone();
+        let (host, router) = mutable_router(lib);
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(cfg.join("windows.json"))),
+            "lib-test".into(),
+        );
+        let moved = holder.join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &parent).unwrap();
+        let id = super::registered_workspace_prefix(&stored)
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string();
+        (host, router, id)
+    }
+
+    /// A relinked root turned on from the launcher reads `running` with
+    /// `on: true`, in the on route's answer and in the list, and a degraded
+    /// state the health probe publishes for its mount shows on that row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_turned_on_reads_running() {
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let (host, router, id) = relinked_root_router(cfg.path(), holder.path());
+
+        let (status, row) = request(
+            &router,
+            "POST",
+            &format!("/api/library/workspaces/{id}/on"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "on: {row}");
+        assert_eq!(row["status"], "running", "the relinked root's on answered: {row}");
+        assert_eq!(row["on"], true, "the relinked root's on answered: {row}");
+        let (_, rows) = request(&router, "GET", "/api/library/workspaces", None).await;
+        let listed = rows
+            .as_array()
+            .and_then(|rows| rows.iter().find(|listed| listed["workspace_id"] == id.as_str()))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(listed["status"], "running", "the relinked root's list row: {rows}");
+        assert_eq!(listed["on"], true, "the relinked root's list row: {rows}");
+
+        std::fs::rename(holder.path().join("moved"), holder.path().join("gone")).unwrap();
+        let probing = Arc::clone(&host);
+        tokio::task::spawn_blocking(move || probing.probe_mounted_roots())
+            .await
+            .unwrap();
+        let (_, rows) = request(&router, "GET", "/api/library/workspaces", None).await;
+        let listed = rows
+            .as_array()
+            .and_then(|rows| rows.iter().find(|listed| listed["workspace_id"] == id.as_str()))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            listed["status"], "unavailable",
+            "the probe's degraded state did not reach the relinked root's row: {rows}"
+        );
+    }
+
+    /// A window opened in a relinked root through the launcher's path nests
+    /// under that root's row: its record stores the path the row lists.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_window_opened_in_a_relinked_root_nests_under_its_row() {
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let (_host, router, id) = relinked_root_router(cfg.path(), holder.path());
+        let (status, row) = request(
+            &router,
+            "POST",
+            &format!("/api/library/workspaces/{id}/on"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "on: {row}");
+
+        let body = serde_json::json!({
+            "kind": "workspace",
+            "workspace_path": row["path"],
+        })
+        .to_string();
+        let (status, record) = request(&router, "POST", "/api/library/windows", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "mint: {record}");
+        assert_eq!(
+            record["workspace_path"], row["path"],
+            "the window does not nest under its workspace's row"
+        );
+        let (_, feed) = request(&router, "GET", "/api/library/windows", None).await;
+        assert!(
+            feed.to_string().contains(record["window_id"].as_str().unwrap_or("-")),
+            "the window is missing from the feed: {feed}"
+        );
+    }
+
     /// The launcher's add resolves and registers the requested root off the
     /// runtime, so adding a root that stopped answering holds no runtime
     /// worker while it waits: on a runtime with one worker, another root's

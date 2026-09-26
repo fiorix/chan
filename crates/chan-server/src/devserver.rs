@@ -5964,6 +5964,48 @@ mod tests {
         );
     }
 
+    /// A registered root whose path now resolves elsewhere, restored after a
+    /// devserver restart from the path its overlay row stores, lists as on
+    /// with its token: its record and its runtime name it by different
+    /// spellings of one directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_restored_after_a_restart_lists_on() {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("mkdir");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register");
+        let stored = state.host.library().list_workspaces()[0].root_path.clone();
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).expect("move the parent");
+        symlink(&moved, &parent).expect("link the old parent");
+
+        let rows = vec![PersistedWorkspace {
+            path: stored.to_string_lossy().into_owned(),
+            desired_on: true,
+            generation: 1,
+        }];
+        let rows = state.register_restore_rows(rows).await;
+        let attempts = state.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx).await;
+
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "the relinked root lists twice: {entries:?}");
+        assert!(
+            entries[0].on && !entries[0].token.is_empty(),
+            "the restored relinked root lists as off: {entries:?}"
+        );
+    }
+
     /// A registered root that moved under a symlink still mounts through the
     /// devserver. Its registry row caches the old spelling until the serve
     /// request's registration re-resolves it, and the attempt's intent check
