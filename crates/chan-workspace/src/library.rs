@@ -15,8 +15,8 @@ use crate::fs_ops::WalkFilter;
 use crate::lock::WorkspaceLock;
 use crate::paths;
 use crate::registry::{
-    config_declares_index_excluded_dirs, current_default_index_excluded_dirs,
-    index_excluded_dirs_is_stock_default, KnownWorkspace, Registry,
+    canonical_form, config_declares_index_excluded_dirs, current_default_index_excluded_dirs,
+    index_excluded_dirs_is_stock_default, KnownWorkspace, Registry, RootMatch,
 };
 use crate::workspace::Workspace;
 
@@ -67,6 +67,9 @@ struct LibraryInner {
     /// In-memory registry. Persisted to `config_path` on every
     /// mutation. The Mutex serializes registry writes so
     /// `register_workspace` calls from concurrent threads don't race.
+    /// It is never held across a filesystem call on a workspace root:
+    /// every lookup is matched first by `match_root`, and the
+    /// holder only re-checks that match against the rows and edits them.
     registry: Mutex<Registry>,
     /// Directory-name blocklist for indexing walks. Loaded from
     /// the registry config so CLI and desktop share the same noise
@@ -209,7 +212,8 @@ impl Library {
         // before this mutex risks applying an older on-disk snapshot after the
         // writer has already saved and updated memory.
         let mut registry_guard = self.inner.registry.lock().unwrap();
-        let registry = Registry::load_from(&self.inner.config_path)?;
+        let mut registry = Registry::load_from(&self.inner.config_path)?;
+        registry.keep_cached_canonical_paths(&registry_guard);
         let walk_filter = Arc::new(WalkFilter::new(registry.index_excluded_dirs.clone()));
         *registry_guard = registry;
         *self.inner.walk_filter.lock().unwrap() = walk_filter;
@@ -236,8 +240,9 @@ impl Library {
         if !root.exists() {
             return Err(ChanError::WorkspaceRootMissing(root.to_path_buf()));
         }
+        let found = self.match_root(root, false);
         let mut reg = self.inner.registry.lock().unwrap();
-        let idx = reg.touch(root);
+        let idx = reg.touch_matched(&found);
         if let Some(name) = display_name {
             let name = name.trim();
             reg.workspaces[idx].display_name = (!name.is_empty()).then(|| name.to_string());
@@ -277,7 +282,14 @@ impl Library {
         // don't want to wipe state for a path the user never
         // registered with this Library, just in case it collides
         // with an unrelated cached entry from an earlier install.
-        let registered = self.inner.registry.lock().unwrap().find(root).is_some();
+        let found = self.match_root(root, false);
+        let registered = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .find_matched(&found)
+            .is_some();
         if !registered {
             return Ok(false);
         }
@@ -289,9 +301,10 @@ impl Library {
     /// callers do `register_workspace` first if needed (CLI does both
     /// in one shot for the "point at a directory and go" path).
     pub fn open_workspace(&self, root: &Path) -> Result<Arc<Workspace>> {
+        let found = self.match_root(root, false);
         let reg = self.inner.registry.lock().unwrap();
         let entry = reg
-            .find(root)
+            .find_matched(&found)
             .ok_or_else(|| ChanError::WorkspaceNotRegistered(root.to_path_buf()))?
             .clone();
         drop(reg);
@@ -406,12 +419,13 @@ impl Library {
         // not the current filesystem path. An unregistered root has
         // no key in the registry, so there is nothing for this
         // Library to wipe.
+        let found = self.match_root(root, false);
         let Some(metadata_key) = self
             .inner
             .registry
             .lock()
             .unwrap()
-            .find(root)
+            .find_matched(&found)
             .map(|e| e.metadata_key.clone())
         else {
             return Ok(ResetReport { removed_entries: 0 });
@@ -451,8 +465,9 @@ impl Library {
         // the opposite order. _lock is dropped at the end of the
         // function after the registry write completes.
         if matches!(mode, ResetMode::Everything) {
+            let found = self.match_root(root, true);
             let mut reg = self.inner.registry.lock().unwrap();
-            if reg.remove(root) {
+            if reg.remove_matched(&found) {
                 reg.save_to(&self.inner.config_path)?;
             }
         }
@@ -485,12 +500,14 @@ impl Library {
             return Err(ChanError::WorkspaceRootMissing(new.to_path_buf()));
         }
         self.refuse_if_live(old)?;
+        let old_found = self.match_root(old, false);
+        let new_found = self.match_root(new, false);
         let mut reg = self.inner.registry.lock().unwrap();
-        let Some(old_entry) = reg.find(old) else {
+        let Some(old_entry) = reg.find_matched(&old_found) else {
             return Ok(false);
         };
         let old_metadata_key = old_entry.metadata_key.clone();
-        if let Some(existing) = reg.find(new) {
+        if let Some(existing) = reg.find_matched(&new_found) {
             if existing.metadata_key != old_metadata_key {
                 return Err(ChanError::WorkspaceAlreadyRegistered(new.to_path_buf()));
             }
@@ -498,7 +515,7 @@ impl Library {
             // this workspace, e.g. an idempotent retry after a partial
             // move. Drop through to set_path.
         }
-        let ok = reg.set_path(old, new);
+        let ok = reg.set_path_matched(&old_found, new_found.canonical().to_path_buf());
         if ok {
             reg.save_to(&self.inner.config_path)?;
         }
@@ -511,12 +528,31 @@ impl Library {
     /// directly so the registry stays the only source of truth for
     /// "which metadata key is this path."
     pub fn workspace_paths_for(&self, root: &Path) -> Option<paths::WorkspacePaths> {
+        let found = self.match_root(root, false);
         let reg = self.inner.registry.lock().unwrap();
-        let entry = reg.find(root)?;
+        let entry = reg.find_matched(&found)?;
         Some(paths::workspace_paths_for_metadata_key_in(
             &self.inner.chan_home,
             &entry.metadata_key,
         ))
+    }
+
+    /// Match `root` against the registry without holding its mutex across
+    /// any filesystem call: `root` is canonicalized, the rows a stale cache
+    /// could hide it behind are copied out under the mutex, and those roots
+    /// are re-resolved, each within a bounded wait, after it is released. The
+    /// caller takes the mutex again and applies the match, which re-checks
+    /// it against the rows as they are then. `every_row` makes every row
+    /// whose cached path differs a candidate, as a removal needs.
+    fn match_root(&self, root: &Path, every_row: bool) -> RootMatch {
+        let canonical = canonical_form(root);
+        let candidates = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .alias_candidates(&canonical, every_row);
+        RootMatch::resolve(canonical, &candidates)
     }
 
     /// Reclaim metadata directories whose key no longer appears in

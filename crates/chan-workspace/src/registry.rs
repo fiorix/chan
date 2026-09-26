@@ -7,6 +7,7 @@
 // app.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -229,14 +230,11 @@ pub struct KnownWorkspace {
 }
 
 impl KnownWorkspace {
-    /// Cached canonical path; falls back to a stat if the cache
-    /// hasn't been primed, e.g. an entry constructed by tests
-    /// outside the Registry.
-    fn canonical(&self) -> PathBuf {
-        if let Some(p) = &self.canonical_path {
-            return p.clone();
-        }
-        paths::canonicalize_normalized(&self.root_path)
+    /// The canonical path this row last resolved to, without touching the
+    /// filesystem: refreshed whenever the row is touched, and `root_path`,
+    /// which is written canonical, until then.
+    pub fn cached_canonical_path(&self) -> &Path {
+        self.canonical_path.as_deref().unwrap_or(&self.root_path)
     }
 }
 
@@ -258,18 +256,35 @@ impl Registry {
             message: e.to_string(),
         })?;
         reg.transfer = reg.transfer.validate()?;
-        // Prime the canonical-path cache once at load. Comparisons
-        // are then pure and don't re-canonicalize per call. Failure
-        // here is non-fatal: an entry whose workspace root is missing or
-        // asleep stays comparable lexically. A root an older Windows build
-        // stored with the `\\?\` verbatim prefix is normalized here, since
-        // `touch` rewrites `root_path` only on insert and every consumer
-        // prints it as stored.
+        // Prime the canonical-path cache from the stored root, which
+        // `touch` wrote canonical, rather than from the filesystem: a
+        // load must not wait on a registered root whose mount has
+        // stalled. A row whose root has moved under a symlink since is
+        // still found, by the alias probe a lookup runs when no cached
+        // path matches. A root an older Windows build stored with the
+        // `\\?\` verbatim prefix is normalized here, since `touch`
+        // rewrites `root_path` only on insert and every consumer prints
+        // it as stored.
         for d in &mut reg.workspaces {
             d.root_path = paths::strip_verbatim_prefix(&d.root_path);
-            d.canonical_path = Some(paths::canonicalize_normalized(&d.root_path));
+            d.canonical_path = Some(d.root_path.clone());
         }
         Ok(reg)
+    }
+
+    /// Carry over the canonical paths `previous` had resolved for the rows
+    /// this registry shares with it, so a reload keeps what earlier lookups
+    /// learned without touching any root.
+    pub(crate) fn keep_cached_canonical_paths(&mut self, previous: &Registry) {
+        for row in &mut self.workspaces {
+            if let Some(known) = previous
+                .workspaces
+                .iter()
+                .find(|known| known.root_path == row.root_path)
+            {
+                row.canonical_path = known.canonical_path.clone();
+            }
+        }
     }
 
     pub fn save(&self) -> Result<()> {
@@ -285,14 +300,7 @@ impl Registry {
     /// possible. Matches by canonical path so symlink wiggles don't
     /// create duplicate registry entries.
     pub fn find(&self, root: &Path) -> Option<&KnownWorkspace> {
-        let target = canonicalize_or_keep(root);
-        match self.workspaces.iter().position(|d| d.canonical() == target) {
-            Some(i) => Some(&self.workspaces[i]),
-            None => self
-                .workspaces
-                .iter()
-                .find(|d| fresh_canonical(d) == target),
-        }
+        self.find_matched(&self.match_root(root, false))
     }
 
     /// Touch-or-append the workspace entry, then sort most-recent first.
@@ -302,28 +310,8 @@ impl Registry {
     /// opening the same canonical path reuses the same metadata
     /// directory.
     pub fn touch(&mut self, root: &Path) -> usize {
-        let canonical = canonicalize_or_keep(root);
-        let now = Utc::now();
-        let idx = position_match(&self.workspaces, &canonical);
-        if let Some(i) = idx {
-            self.workspaces[i].last_seen_at = now;
-            // Refresh the cache: a relinked workspace would otherwise
-            // keep the stale canonical, then the next touch wouldn't
-            // find it on the fast path.
-            self.workspaces[i].canonical_path = Some(canonical.clone());
-        } else {
-            self.workspaces.push(KnownWorkspace {
-                root_path: canonical.clone(),
-                metadata_key: paths::metadata_key_for_root(&canonical),
-                created_at: now,
-                last_seen_at: now,
-                display_name: None,
-                canonical_path: Some(canonical.clone()),
-            });
-        }
-        self.workspaces
-            .sort_by_key(|d| std::cmp::Reverse(d.last_seen_at));
-        position_match(&self.workspaces, &canonical).unwrap_or(0)
+        let found = self.match_root(root, false);
+        self.touch_matched(&found)
     }
 
     /// Update the `root_path` of an existing registry row,
@@ -331,25 +319,113 @@ impl Registry {
     /// directory. Used by `Library::move_workspace` to record an `mv` of
     /// the workspace directory without moving chan-managed state.
     pub fn set_path(&mut self, old: &Path, new: &Path) -> bool {
-        let old_canon = canonicalize_or_keep(old);
-        let Some(i) = position_match(&self.workspaces, &old_canon) else {
-            return false;
-        };
-        let new_canon = canonicalize_or_keep(new);
-        self.workspaces[i].root_path = new_canon.clone();
-        self.workspaces[i].last_seen_at = Utc::now();
-        self.workspaces[i].canonical_path = Some(new_canon);
-        true
+        let old = self.match_root(old, false);
+        self.set_path_matched(&old, canonical_form(new))
     }
 
     /// Remove a registry entry. Does not delete the directory or the
     /// per-workspace metadata on disk; the caller decides whether to
     /// purge that separately.
     pub fn remove(&mut self, root: &Path) -> bool {
-        let canonical = canonicalize_or_keep(root);
-        let before = self.workspaces.len();
+        let found = self.match_root(root, true);
+        self.remove_matched(&found)
+    }
+
+    /// [`RootMatch::resolve`] against this registry's rows.
+    fn match_root(&self, root: &Path, every_row: bool) -> RootMatch {
+        let canonical = canonical_form(root);
+        let candidates = self.alias_candidates(&canonical, every_row);
+        RootMatch::resolve(canonical, &candidates)
+    }
+
+    /// The rows a lookup of `canonical` has to re-resolve, by their stored
+    /// root: none when a row's cached canonical path is `canonical`, unless
+    /// `every_row` asks for every row whose cached path is not, as a removal
+    /// does to drop a stale alias beside the cached match.
+    pub(crate) fn alias_candidates(&self, canonical: &Path, every_row: bool) -> Vec<PathBuf> {
+        if !every_row
+            && self
+                .workspaces
+                .iter()
+                .any(|d| d.cached_canonical_path() == canonical)
+        {
+            return Vec::new();
+        }
         self.workspaces
-            .retain(|d| d.canonical() != canonical && fresh_canonical(d) != canonical);
+            .iter()
+            .filter(|d| d.cached_canonical_path() != canonical)
+            .map(|d| d.root_path.clone())
+            .collect()
+    }
+
+    /// Index of the row `found` names: the row whose cached canonical path
+    /// is its canonical form, else the first of its aliases. Pure, so it
+    /// re-checks a match computed without the registry against the rows as
+    /// they are now.
+    fn position_matched(&self, found: &RootMatch) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|d| d.cached_canonical_path() == found.canonical)
+            .or_else(|| {
+                self.workspaces
+                    .iter()
+                    .position(|d| found.aliases.contains(&d.root_path))
+            })
+    }
+
+    /// [`find`](Self::find) for a match computed beforehand.
+    pub(crate) fn find_matched(&self, found: &RootMatch) -> Option<&KnownWorkspace> {
+        self.position_matched(found).map(|i| &self.workspaces[i])
+    }
+
+    /// [`touch`](Self::touch) for a match computed beforehand. Touches no
+    /// root: a new row's metadata key hashes the canonical form the match
+    /// already holds.
+    pub(crate) fn touch_matched(&mut self, found: &RootMatch) -> usize {
+        let now = Utc::now();
+        if let Some(i) = self.position_matched(found) {
+            self.workspaces[i].last_seen_at = now;
+            // Refresh the cache: a relinked workspace would otherwise
+            // keep the stale canonical, then the next touch wouldn't
+            // find it on the fast path.
+            self.workspaces[i].canonical_path = Some(found.canonical.clone());
+        } else {
+            self.workspaces.push(KnownWorkspace {
+                root_path: found.canonical.clone(),
+                metadata_key: paths::metadata_key_for_canonical(&found.canonical),
+                created_at: now,
+                last_seen_at: now,
+                display_name: None,
+                canonical_path: Some(found.canonical.clone()),
+            });
+        }
+        self.workspaces
+            .sort_by_key(|d| std::cmp::Reverse(d.last_seen_at));
+        self.workspaces
+            .iter()
+            .position(|d| d.cached_canonical_path() == found.canonical)
+            .unwrap_or(0)
+    }
+
+    /// [`set_path`](Self::set_path) for a match of the old path computed
+    /// beforehand and the new path's canonical form.
+    pub(crate) fn set_path_matched(&mut self, old: &RootMatch, new_canonical: PathBuf) -> bool {
+        let Some(i) = self.position_matched(old) else {
+            return false;
+        };
+        self.workspaces[i].root_path = new_canonical.clone();
+        self.workspaces[i].last_seen_at = Utc::now();
+        self.workspaces[i].canonical_path = Some(new_canonical);
+        true
+    }
+
+    /// [`remove`](Self::remove) for a match computed beforehand with every
+    /// row as a candidate: drops the cached match and every alias.
+    pub(crate) fn remove_matched(&mut self, found: &RootMatch) -> bool {
+        let before = self.workspaces.len();
+        self.workspaces.retain(|d| {
+            d.cached_canonical_path() != found.canonical && !found.aliases.contains(&d.root_path)
+        });
         self.workspaces.len() != before
     }
 }
@@ -358,27 +434,160 @@ impl Registry {
 /// prefix stripped) so a path keys and compares identically across processes.
 /// Used for the per-call target path; entries cache their own canonical form on
 /// insert / load.
-fn canonicalize_or_keep(root: &Path) -> PathBuf {
+pub(crate) fn canonical_form(root: &Path) -> PathBuf {
     paths::canonicalize_normalized(root)
 }
 
-/// Re-canonicalize an entry's `root_path` ignoring its cache. Used
-/// as the slow-path fallback when the cached canonical doesn't match
-/// the target.
-fn fresh_canonical(d: &KnownWorkspace) -> PathBuf {
-    paths::canonicalize_normalized(&d.root_path)
+/// What a lookup of one path matches, computed without the registry: the
+/// path's canonical form, and the registered roots that re-resolve to that
+/// form although their cached canonical path says otherwise.
+///
+/// A row's cached path goes stale when its root moves under a symlink; the
+/// aliases are how such a row is still found rather than registered twice.
+/// Finding them means asking the filesystem about other workspaces' roots,
+/// which is why a match is computed before the caller takes the registry's
+/// mutex, and why each of those roots gets a bounded time to answer.
+#[derive(Debug)]
+pub(crate) struct RootMatch {
+    canonical: PathBuf,
+    aliases: Vec<PathBuf>,
 }
 
-/// Index of the workspace whose canonical, cached then fresh, matches
-/// `canonical`. Centralises lookup so touch / find / remove behave
-/// consistently.
-fn position_match(workspaces: &[KnownWorkspace], canonical: &Path) -> Option<usize> {
-    if let Some(i) = workspaces.iter().position(|d| d.canonical() == *canonical) {
-        return Some(i);
+impl RootMatch {
+    /// Re-resolve `candidates`, the stored roots of the rows a stale cache
+    /// could hide `canonical` behind, and keep those that now resolve to it.
+    pub(crate) fn resolve(canonical: PathBuf, candidates: &[PathBuf]) -> Self {
+        let aliases = alias_probe::fresh_canonicals(candidates, ALIAS_PROBE_BUDGET)
+            .into_iter()
+            .zip(candidates)
+            .filter(|(fresh, _)| fresh.as_deref() == Some(canonical.as_path()))
+            .map(|(_, root)| root.clone())
+            .collect();
+        Self { canonical, aliases }
     }
-    workspaces
-        .iter()
-        .position(|d| fresh_canonical(d) == *canonical)
+
+    /// The looked-up path's canonical form.
+    pub(crate) fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+}
+
+/// How long one lookup waits for the roots it re-resolves. A registered
+/// root that has not answered by then is taken not to be the one looked up:
+/// the looked-up path has just resolved, and a root that cannot is not the
+/// same directory in any case that matters, while waiting on it would let
+/// one stalled mount hold up the registration, open and removal of every
+/// other workspace.
+const ALIAS_PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Bounded, shared re-resolution of registered roots.
+mod alias_probe {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+    use std::time::{Duration, Instant};
+
+    use crate::paths;
+
+    /// One root's re-resolution in flight, shared by every lookup that asks
+    /// for that root while it runs.
+    #[derive(Default)]
+    struct Probe {
+        resolved: Mutex<Option<PathBuf>>,
+        done: Condvar,
+    }
+
+    impl Probe {
+        fn wait_until(&self, deadline: Instant) -> Option<PathBuf> {
+            let mut resolved = self.resolved.lock().unwrap_or_else(PoisonError::into_inner);
+            loop {
+                if let Some(path) = resolved.as_ref() {
+                    return Some(path.clone());
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                resolved = self
+                    .done
+                    .wait_timeout(resolved, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+        }
+    }
+
+    static IN_FLIGHT: OnceLock<Mutex<HashMap<PathBuf, Arc<Probe>>>> = OnceLock::new();
+
+    fn in_flight() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Arc<Probe>>> {
+        IN_FLIGHT
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Re-resolve every root in `roots` at once and wait at most `budget`
+    /// for the answers, `None` for a root that has not answered by then.
+    ///
+    /// Each root resolves on a thread of its own, joined by any lookup that
+    /// asks for the same root while it runs, so one hung root holds at most
+    /// one thread however many lookups meet it, and a later lookup waits on
+    /// that thread instead of starting another.
+    pub(super) fn fresh_canonicals(roots: &[PathBuf], budget: Duration) -> Vec<Option<PathBuf>> {
+        let probes: Vec<Option<Arc<Probe>>> = roots.iter().map(|root| start(root)).collect();
+        let deadline = Instant::now() + budget;
+        probes
+            .iter()
+            .map(|probe| probe.as_ref().and_then(|probe| probe.wait_until(deadline)))
+            .collect()
+    }
+
+    /// The probe in flight for `root`, or a new one on a thread of its own;
+    /// `None` when no thread can be started.
+    fn start(root: &Path) -> Option<Arc<Probe>> {
+        let mut probes = in_flight();
+        if let Some(probe) = probes.get(root) {
+            return Some(Arc::clone(probe));
+        }
+        let probe = Arc::new(Probe::default());
+        let running = Arc::clone(&probe);
+        let owned = root.to_path_buf();
+        // The map lock is held across the spawn, so the thread cannot
+        // finish and look for its entry before the entry is inserted.
+        let spawned = std::thread::Builder::new()
+            .name("chan-root-probe".into())
+            .spawn(move || {
+                let resolved = paths::canonicalize_normalized(&owned);
+                {
+                    let mut probes = in_flight();
+                    if probes
+                        .get(&owned)
+                        .is_some_and(|probe| Arc::ptr_eq(probe, &running))
+                    {
+                        probes.remove(&owned);
+                    }
+                }
+                *running
+                    .resolved
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(resolved);
+                running.done.notify_all();
+            });
+        match spawned {
+            Ok(_) => {
+                probes.insert(root.to_path_buf(), Arc::clone(&probe));
+                Some(probe)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    root = %root.display(),
+                    %error,
+                    "could not start a registry alias probe",
+                );
+                None
+            }
+        }
+    }
 }
 
 pub(crate) fn config_declares_index_excluded_dirs(path: &Path) -> bool {

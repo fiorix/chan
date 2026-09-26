@@ -379,7 +379,12 @@ pub fn workspaces_dir() -> PathBuf {
 /// 8-hex suffix is a deterministic hash of the same canonical path
 /// string, preventing collisions between similar slugs.
 pub fn metadata_key_for_root(workspace_root: &Path) -> String {
-    let canonical = canonicalize_normalized(workspace_root);
+    metadata_key_for_canonical(&canonicalize_normalized(workspace_root))
+}
+
+/// [`metadata_key_for_root`] of a path that is already canonical, without
+/// touching the filesystem.
+pub(crate) fn metadata_key_for_canonical(canonical: &Path) -> String {
     let canonical_s = canonical.as_os_str().to_string_lossy();
     let slug = metadata_slug(&canonical_s);
     format!("{slug}-{}", canonical_hash8(&canonical_s))
