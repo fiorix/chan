@@ -608,14 +608,23 @@ export type ExtensionTab = {
 /// dots read them from here.
 export const DASHBOARD_SLOT_LABELS = ["Workspace", "Search", "About"] as const;
 
-/// Carousel slot count, shared by the on/off helpers below and the
-/// restore-time clamp, so the helpers can reason about "the last enabled
-/// slot" without importing the component.
+/// Carousel slot count, shared by the on/off helpers below, the
+/// restore-time clamp and the carousel's own navigation, so the helpers
+/// can reason about "the last enabled slot" without importing the
+/// component.
 export const DASHBOARD_SLOT_COUNT = DASHBOARD_SLOT_LABELS.length;
 
-/// Whether slide `i` is currently shown for this Dashboard tab.
-export function dashboardSlotEnabled(tab: DashboardTab, i: number): boolean {
-  return !(tab.disabledSlots ?? []).includes(i);
+/// What the slot walks read: the switched-off slot indices. A DashboardTab
+/// is one; the carousel, which holds only the set as a prop, passes
+/// `{ disabledSlots }`.
+type DashboardSlotSet = { readonly disabledSlots?: readonly number[] };
+
+/// Whether slide `i` is currently shown.
+export function dashboardSlotEnabled(
+  slots: DashboardSlotSet,
+  i: number,
+): boolean {
+  return !(slots.disabledSlots ?? []).includes(i);
 }
 
 /// Toggle slide `i` on/off. Refuses to disable the last enabled slot so
@@ -636,19 +645,30 @@ export function toggleDashboardSlot(tab: DashboardTab, i: number): void {
 
 /// First enabled slide index. Falls back to 0, which the min-one-enabled
 /// invariant makes unreachable.
-export function firstEnabledSlot(tab: DashboardTab): number {
+export function firstEnabledSlot(slots: DashboardSlotSet): number {
   for (let i = 0; i < DASHBOARD_SLOT_COUNT; i++) {
-    if (dashboardSlotEnabled(tab, i)) return i;
+    if (dashboardSlotEnabled(slots, i)) return i;
   }
   return 0;
 }
 
 /// Next enabled slide index after `from`, wrapping. Used by the carousel
 /// auto-rotate + arrow nav so they step over disabled slots.
-export function nextEnabledSlot(tab: DashboardTab, from: number): number {
+export function nextEnabledSlot(slots: DashboardSlotSet, from: number): number {
   for (let step = 1; step <= DASHBOARD_SLOT_COUNT; step++) {
     const cand = (from + step) % DASHBOARD_SLOT_COUNT;
-    if (dashboardSlotEnabled(tab, cand)) return cand;
+    if (dashboardSlotEnabled(slots, cand)) return cand;
+  }
+  return from;
+}
+
+/// Previous enabled slide index before `from`, wrapping and skipping
+/// disabled slots: the backward twin of `nextEnabledSlot`, for the
+/// carousel's arrow nav and the "Previous slide" command.
+export function prevEnabledSlot(slots: DashboardSlotSet, from: number): number {
+  for (let step = 1; step <= DASHBOARD_SLOT_COUNT; step++) {
+    const cand = (from - step + DASHBOARD_SLOT_COUNT) % DASHBOARD_SLOT_COUNT;
+    if (dashboardSlotEnabled(slots, cand)) return cand;
   }
   return from;
 }

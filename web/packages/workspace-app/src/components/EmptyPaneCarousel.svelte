@@ -43,7 +43,15 @@
     revealPathInBrowser,
     openFsGraphForDirectory,
   } from "../state/store.svelte";
-  import { layout, openTerminalInPane } from "../state/tabs.svelte";
+  import {
+    DASHBOARD_SLOT_COUNT,
+    dashboardSlotEnabled,
+    firstEnabledSlot,
+    layout,
+    nextEnabledSlot,
+    openTerminalInPane,
+    prevEnabledSlot,
+  } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { indexingCache } from "../state/indexingStatus.svelte";
   import GraphCanvas from "./GraphCanvas.svelte";
@@ -319,39 +327,29 @@
     autoRotate = true,
   }: Props = $props();
 
-  const slideCount = 3;
-  function slotEnabled(i: number): boolean {
-    return !disabledSlots.includes(i);
-  }
+  // The slot walks in state/tabs read the switched-off set from a
+  // `disabledSlots` field, the way a tab carries it; this carousel has
+  // only the prop.
+  const slots = $derived({ disabledSlots });
   /// Enabled slide indices in order; backs the pagination dots so a
   /// disabled slot never gets a dot to click.
   const enabledSlots = $derived(
-    Array.from({ length: slideCount }, (_, i) => i).filter(slotEnabled),
+    Array.from({ length: DASHBOARD_SLOT_COUNT }, (_, i) => i).filter((i) =>
+      dashboardSlotEnabled(slots, i),
+    ),
   );
-  function firstEnabled(): number {
-    return enabledSlots[0] ?? 0;
-  }
-  function nextEnabled(from: number): number {
-    for (let step = 1; step <= slideCount; step++) {
-      const cand = (from + step) % slideCount;
-      if (slotEnabled(cand)) return cand;
-    }
-    return from;
-  }
-  function prevEnabled(from: number): number {
-    for (let step = 1; step <= slideCount; step++) {
-      const cand = (from - step + slideCount) % slideCount;
-      if (slotEnabled(cand)) return cand;
-    }
-    return from;
-  }
   // Clamp the controlled cursor to range, then off any disabled slot to
   // the first enabled one. Keeping the name `slideIndex` lets the
   // template read the current slot unchanged; it is a derived view of the
   // prop now, not local state, so there is nothing to keep in sync.
   const slideIndex = $derived.by(() => {
-    const clamped = Math.min(Math.max(0, Math.floor(slide)), slideCount - 1);
-    return slotEnabled(clamped) ? clamped : firstEnabled();
+    const clamped = Math.min(
+      Math.max(0, Math.floor(slide)),
+      DASHBOARD_SLOT_COUNT - 1,
+    );
+    return dashboardSlotEnabled(slots, clamped)
+      ? clamped
+      : firstEnabledSlot(slots);
   });
   let hovering = $state(false);
   let focused = $state(false);
@@ -376,7 +374,7 @@
     void disabledSlots;
     if (paused) return;
     const handle = window.setInterval(() => {
-      onSlideChange?.(nextEnabled(slideIndex));
+      onSlideChange?.(nextEnabledSlot(slots, slideIndex));
     }, 5000);
     return () => window.clearInterval(handle);
   });
@@ -400,14 +398,17 @@
   }
 
   function prev(): void {
-    onSlideChange?.(prevEnabled(slideIndex));
+    onSlideChange?.(prevEnabledSlot(slots, slideIndex));
   }
   function next(): void {
-    onSlideChange?.(nextEnabled(slideIndex));
+    onSlideChange?.(nextEnabledSlot(slots, slideIndex));
   }
   function goTo(i: number): void {
-    if (!slotEnabled(i)) return;
-    onSlideChange?.(((i % slideCount) + slideCount) % slideCount);
+    if (!dashboardSlotEnabled(slots, i)) return;
+    onSlideChange?.(
+      ((i % DASHBOARD_SLOT_COUNT) + DASHBOARD_SLOT_COUNT) %
+        DASHBOARD_SLOT_COUNT,
+    );
   }
   function onKeyDown(e: KeyboardEvent): void {
     if (e.key === "ArrowLeft") {

@@ -8,11 +8,11 @@
 import { registerCommands, onSurface, type Command } from "../commands";
 import { scheduleSessionSave, setHybridSurfaceTheme } from "../store.svelte";
 import {
-  DASHBOARD_SLOT_COUNT,
   activeDashboardTab,
   dashboardSlotEnabled,
   firstEnabledSlot,
   nextEnabledSlot,
+  prevEnabledSlot,
   type DashboardTab,
 } from "../tabs.svelte";
 
@@ -23,17 +23,6 @@ function onDashboard(fn: (tab: DashboardTab) => void): () => void {
     const tab = activeDashboardTab();
     if (tab) fn(tab);
   };
-}
-
-/// Previous enabled carousel slot, wrapping and skipping disabled slots.
-/// nextEnabledSlot is exported for the forward walk; only the launcher's
-/// "Previous slide" needs the reverse, so it lives here.
-function prevEnabledSlot(tab: DashboardTab, from: number): number {
-  for (let step = 1; step <= DASHBOARD_SLOT_COUNT; step++) {
-    const cand = (from - step + DASHBOARD_SLOT_COUNT) % DASHBOARD_SLOT_COUNT;
-    if (dashboardSlotEnabled(tab, cand)) return cand;
-  }
-  return from;
 }
 
 /// A jump-to-slot command, offered whenever a dashboard is the active
