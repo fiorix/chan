@@ -33,7 +33,7 @@ use std::ffi::OsStr;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -846,6 +846,10 @@ struct DevserverState {
     /// The actual bound TCP port (`local_addr().port()`); `0` until bound.
     /// Persisted so a local client re-discovers the current port after a restart.
     bound_port: AtomicU16,
+    /// Set once [`shut_down_hosted`] begins, before its first sweep. From
+    /// then on a save leaves the workspace overlay as it is: see
+    /// [`persist_state`](Self::persist_state).
+    shutting_down: AtomicBool,
 }
 
 /// Makes startup tracking cancellation-safe for request-owned mount futures.
@@ -1447,7 +1451,8 @@ impl DevserverState {
     /// Persist devserver state across two stores: workspace on/off into the
     /// library-owned [`WorkspaceOverlay`], and the bearer token + library id into
     /// the devserver config. So a restart comes back serving exactly what was on
-    /// and remembering what was off.
+    /// and remembering what was off. Once [`shut_down_hosted`] has begun, only
+    /// the config is saved and the overlay keeps what the stop found.
     fn persist_state(&self) {
         let _persist = self
             .persist_serial
@@ -1482,13 +1487,25 @@ impl DevserverState {
         &self,
         mounted_snapshot: impl FnOnce() -> HashSet<String>,
     ) {
+        // Once shutdown has begun the overlay keeps the state the stop found.
+        // The sweeps take every tenant out of the host, so a save from then
+        // on, such as a mount settling between or after them, would read each
+        // Mounted record as closed out of band and write it off, and the next
+        // start would restore none of them; `shutdown_all` leaves the overlay
+        // alone for the same reason. The config half below still saves, so a
+        // token rotated during the stop is not lost.
+        let overlay = if self.shutting_down.load(Ordering::Acquire) {
+            None
+        } else {
+            self.host.workspace_overlay()
+        };
         // Durable desired intent → the library-owned overlay store. Starting
         // and failed rows stay desired-on even though no host prefix is live.
         // Records, overlay rows and registry rows all store canonical roots,
         // so they are joined by those stored keys: a save runs on every
         // mount, toggle and removal, and must not wait on the filesystem of
         // any root, least of all one whose mount has stalled.
-        if let Some(overlay) = self.host.workspace_overlay() {
+        if let Some(overlay) = overlay {
             let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
                 .entries()
                 .into_iter()
@@ -2127,6 +2144,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         store,
         persist_serial: Mutex::new(()),
         bound_port: AtomicU16::new(0),
+        shutting_down: AtomicBool::new(false),
     });
 
     // Mount the per-library SHARED terminal tenant before serving, so
@@ -2344,11 +2362,14 @@ const REGISTRATION_SHUTDOWN_DRAIN: Duration = Duration::from_secs(30);
 /// sweep runs once none is left in flight, and the second sweep closes
 /// publication: a mount from any other entry point that finishes after it,
 /// such as a management mount still inside its bound, is refused and shuts
-/// its own runtime down.
+/// its own runtime down. Before any of it the devserver is marked as shutting
+/// down, so a mount settling between or after the sweeps does not rewrite the
+/// workspace overlay the stop found.
 async fn shut_down_hosted(
     state: &DevserverState,
     mut discovery: Option<crate::devserver_handoff::ListenerHandle>,
 ) -> Result<(), Error> {
+    state.shutting_down.store(true, Ordering::Release);
     let host = &state.host;
     if let Some(listener) = discovery.as_mut() {
         listener.stop_accepting(REGISTRATION_SHUTDOWN_DRAIN).await;
@@ -5294,6 +5315,7 @@ mod tests {
                 store: DevserverStore::at(home.path().join("devserver").join("config.json")),
                 persist_serial: Mutex::new(()),
                 bound_port: AtomicU16::new(0),
+                shutting_down: AtomicBool::new(false),
             });
             complete_test_startup(&state).await;
 
@@ -5510,6 +5532,7 @@ mod tests {
             store: DevserverStore::at(home.join("devserver").join("config.json")),
             persist_serial: Mutex::new(()),
             bound_port: AtomicU16::new(0),
+            shutting_down: AtomicBool::new(false),
         })
     }
 
@@ -7432,6 +7455,7 @@ mod tests {
             store: DevserverStore::at(home.path().join("devserver").join("config.json")),
             persist_serial: Mutex::new(()),
             bound_port: AtomicU16::new(0),
+            shutting_down: AtomicBool::new(false),
         });
         complete_test_startup(&state).await;
 
