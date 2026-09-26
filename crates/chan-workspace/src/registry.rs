@@ -457,7 +457,7 @@ impl RootMatch {
     /// Re-resolve `candidates`, the stored roots of the rows a stale cache
     /// could hide `canonical` behind, and keep those that now resolve to it.
     pub(crate) fn resolve(canonical: PathBuf, candidates: &[PathBuf]) -> Self {
-        let aliases = alias_probe::fresh_canonicals(candidates, ALIAS_PROBE_BUDGET)
+        let aliases = alias_probe::fresh_canonicals(candidates, alias_probe::budget())
             .into_iter()
             .zip(candidates)
             .filter(|(fresh, _)| fresh.as_deref() == Some(canonical.as_path()))
@@ -479,6 +479,17 @@ impl RootMatch {
 /// one stalled mount hold up the registration, open and removal of every
 /// other workspace.
 const ALIAS_PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Run `lookups` with this thread's registry lookups waiting `budget` for the
+/// roots they re-resolve, so a test can hold a lookup inside that wait for as
+/// long as it needs to observe what the lookup holds meanwhile.
+#[cfg(test)]
+pub(crate) fn with_alias_probe_budget<T>(budget: Duration, lookups: impl FnOnce() -> T) -> T {
+    alias_probe::BUDGET.with(|cell| cell.set(Some(budget)));
+    let out = lookups();
+    alias_probe::BUDGET.with(|cell| cell.set(None));
+    out
+}
 
 /// Bounded, shared re-resolution of registered roots.
 mod alias_probe {
@@ -518,6 +529,21 @@ mod alias_probe {
     }
 
     static IN_FLIGHT: OnceLock<Mutex<HashMap<PathBuf, Arc<Probe>>>> = OnceLock::new();
+
+    #[cfg(test)]
+    thread_local! {
+        pub(super) static BUDGET: std::cell::Cell<Option<Duration>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// How long a lookup on this thread waits for the roots it re-resolves.
+    pub(super) fn budget() -> Duration {
+        #[cfg(test)]
+        if let Some(budget) = BUDGET.with(std::cell::Cell::get) {
+            return budget;
+        }
+        super::ALIAS_PROBE_BUDGET
+    }
 
     fn in_flight() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Arc<Probe>>> {
         IN_FLIGHT

@@ -1443,9 +1443,11 @@ mod tests {
     }
 
     /// While one registered root hangs, registering a new root does not hold
-    /// the registry: a lookup of another registered root and the reload a
-    /// registry watcher runs answer while the registration waits, and the
-    /// registration itself finishes.
+    /// the registry. The registration's wait on the hung root is stretched past
+    /// this test's bound, so a lookup of another registered root and the reload
+    /// a registry watcher runs answer within the bound only when the
+    /// registration waits without the registry's mutex. The registration
+    /// finishes once the hung root answers.
     #[test]
     fn a_hung_root_does_not_hold_the_registry() {
         const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1458,7 +1460,14 @@ mod tests {
         let stall = crate::paths::root_stall::stall(hung.path());
         let registering = lib.clone();
         let fresh_root = fresh.path().to_path_buf();
-        let registration = std::thread::spawn(move || registering.register_workspace(&fresh_root));
+        let (registered_tx, registration) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = crate::registry::with_alias_probe_budget(
+                std::time::Duration::from_secs(3600),
+                || registering.register_workspace(&fresh_root),
+            );
+            let _ = registered_tx.send(outcome);
+        });
         assert!(
             stall.wait_entered(std::time::Duration::from_secs(10)),
             "fixture: registering a new root never consulted the hung root"
@@ -1478,10 +1487,11 @@ mod tests {
                 reloading.reload_registry()
             })
             .expect("reload");
-        stall
-            .finishes_beside("registering a new root", BOUND, move || {
-                registration.join().expect("registration thread")
-            })
+
+        drop(stall);
+        registration
+            .recv_timeout(BOUND)
+            .expect("the registration finishes once the hung root answers")
             .expect("register the new root");
         assert_eq!(lib.list_workspaces().len(), 3);
     }
