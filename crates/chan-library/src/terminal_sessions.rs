@@ -9342,6 +9342,60 @@ mod tests {
         registry.close(handle.id(), CloseReason::Explicit);
     }
 
+    // A caller's explicit env entry reaches the child over chan's spawn
+    // defaults (TERM, HOME, the colour keys, the NO_COLOR / CI removal),
+    // while a key chan sets for itself keeps chan's value.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_env_overrides_win_over_the_spawn_defaults() {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path().to_string_lossy().into_owned();
+        let config = test_config(4096, 4, 60);
+        let chan_terminal = if config.terminal.ghostty {
+            "ghostty"
+        } else {
+            "xterm"
+        };
+        let registry = Arc::new(Registry::new(config));
+        let env = [
+            ("NO_COLOR", "1"),
+            ("TERM", "dumb"),
+            ("CI", "true"),
+            ("CODEX_CI", "1"),
+            ("FORCE_COLOR", "0"),
+            ("HOME", home_path.as_str()),
+            ("CHAN_TERMINAL", "caller"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let mut handle = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some(
+                    "sleep 0.1; printf 'ENV=<%s|%s|%s|%s|%s|%s|%s>\\n' \"$NO_COLOR\" \"$TERM\" \
+                     \"$CI\" \"$CODEX_CI\" \"$FORCE_COLOR\" \"$HOME\" \"$CHAN_TERMINAL\""
+                        .into(),
+                ),
+                env,
+                profile: None,
+            })
+            .unwrap();
+
+        let expected = format!("ENV=<1|dumb|true|1|0|{home_path}|{chan_terminal}>");
+        let out = collect_until(&mut handle, &expected, Duration::from_secs(5)).await;
+        assert!(
+            out.contains(&expected),
+            "the child's env does not carry the caller's entries: want {expected:?}, got {out:?}"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
     // POSIX printf command; not valid under the Windows default shell
     // (PowerShell). A session that inherits the tenant default records its
     // command text into the ring as a banner, and `collect_until` reads that
