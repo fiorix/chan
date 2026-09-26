@@ -42,6 +42,7 @@ import {
   reopenClosedTab,
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
+import { parentDir } from "../format";
 import { terminalFromHereTarget } from "../../terminal/fromHere";
 
 type BrowserSelection = {
@@ -78,11 +79,6 @@ function activeSelection(): BrowserSelection | null {
   const path = selectedPath();
   if (!path) return null;
   return { path, isDir: entryFor(path)?.is_dir ?? false };
-}
-
-function parentDir(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash <= 0 ? "" : path.slice(0, slash);
 }
 
 function targetDirFromSelection(): string {

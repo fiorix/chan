@@ -32,6 +32,7 @@ import {
   type FileTab,
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
+import { parentDir } from "../format";
 import { terminalFromHereTarget } from "../../terminal/fromHere";
 import { stripTrailingWhitespaceText } from "../../editor/tools";
 
@@ -47,11 +48,6 @@ function onFile(fn: (tab: FileTab) => void): () => void {
 
 /// Parent directory of a workspace-relative path (empty at the root),
 /// used by the editor command launcher's "Copy path to parent directory".
-function parentDir(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash <= 0 ? "" : path.slice(0, slash);
-}
-
 registerCommands([
   {
     id: "app.editor.surfaceTheme.light",

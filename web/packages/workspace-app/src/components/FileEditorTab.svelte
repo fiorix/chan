@@ -40,6 +40,7 @@
   } from "lucide-svelte";
   import { chordFor, currentOS } from "../state/shortcuts";
   import { windowCaps } from "../state/windowCaps";
+  import { parentDir } from "../state/format";
   import { builtInChordSuperseded } from "../state/keymapOverrides.svelte";
   import FindBar from "./FindBar.svelte";
   import Inspector from "./Inspector.svelte";
@@ -608,11 +609,6 @@
     if (paneId) void closeTab(paneId, tab.id);
   }
 
-  function parentPath(path: string): string {
-    const slash = path.lastIndexOf("/");
-    return slash < 0 ? "" : path.slice(0, slash);
-  }
-
   /// In-menu inline rename (an editable Name input in the
   /// right-click menu). Commits on Enter + blur, NOT every keystroke
   /// (file rename is destructive + cross-tree, can't fire on each
@@ -899,7 +895,7 @@
     // the FB-navigation flow so the user can pick the moved file
     // manually.
     if (await attemptInPlaceReopen(tab.id)) return;
-    const parent = parentPath(tab.path);
+    const parent = parentDir(tab.path);
     beginMissingFileReopen(tab.id);
     revealPathInBrowser(parent || tab.path, { inspectorOpen: true });
     ui.status = "Choose the moved file in Files to re-open this tab";

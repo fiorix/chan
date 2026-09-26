@@ -9,6 +9,7 @@
   import { syntaxTree } from "@codemirror/language";
   import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
   import { currentPreferences, workspace, effectiveHybridSurfaceTheme } from "../state/store.svelte";
+  import { parentDir } from "../state/format";
   import {
     createValueSync,
     findField,
@@ -326,9 +327,7 @@
   }
 
   function dirOf(p: string | null): string | null {
-    if (!p) return null;
-    const idx = p.lastIndexOf("/");
-    return idx <= 0 ? null : p.slice(0, idx);
+    return p ? parentDir(p) || null : null;
   }
 
   /// Lazy context for the rich copy / paste path: the editing path, its

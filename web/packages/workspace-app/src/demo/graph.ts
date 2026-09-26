@@ -18,6 +18,7 @@ import type {
   ReportFileStats,
 } from "../api/types";
 import { fenceLineTracker } from "../editor/commands/fence";
+import { parentDir } from "../state/format";
 import type { MockWorkspaceStore } from "./store";
 
 /// One parsed outgoing reference, pre-resolution.
@@ -38,11 +39,6 @@ type FileIndex = {
 /// Resolved edge in the raw (backlinks) shape plus the resolution the
 /// /api/links snapshot wants.
 type ResolvedEdge = GraphEdge & { wiki: boolean; missing: boolean };
-
-function parentOf(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i < 0 ? "" : path.slice(0, i);
-}
 
 function baseName(path: string): string {
   const i = path.lastIndexOf("/");
@@ -223,7 +219,7 @@ export class DemoGraph {
 
   /// All resolved outgoing edges of one file, raw shape.
   #fileEdges(path: string, idx: FileIndex): ResolvedEdge[] {
-    const dir = parentOf(path);
+    const dir = parentDir(path);
     const edges: ResolvedEdge[] = [];
     for (const link of idx.links) {
       const resolved = this.resolve(link.target, dir, link.wiki);
@@ -293,14 +289,14 @@ export class DemoGraph {
         code: 0,
       });
       if (p === "") return;
-      const parent = parentOf(p);
+      const parent = parentDir(p);
       ensureDir(parent);
       pushEdge({ source: dirId(parent), target: id, kind: "contains" });
     };
 
     ensureDir("");
     for (const e of this.#store.entries()) {
-      const parent = parentOf(e.path);
+      const parent = parentDir(e.path);
       ensureDir(parent);
       if (e.kind === "media") {
         nodes.set(e.path, { kind: "media", id: e.path, label: baseName(e.path), path: e.path });

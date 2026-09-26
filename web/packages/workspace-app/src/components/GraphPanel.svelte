@@ -58,6 +58,7 @@
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
   import { type ScopeOption } from "../state/scope.svelte";
+  import { parentDir } from "../state/format";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
   import { tabMenu, openTabMenu, closeTabMenu } from "../state/tabMenu.svelte";
@@ -294,11 +295,6 @@
 
   /// Workspace-relative parent directory of a path ("" for a top-level
   /// entry).
-  function parentDirOf(path: string): string {
-    const i = path.lastIndexOf("/");
-    return i < 0 ? "" : path.slice(0, i);
-  }
-
   function renderedDirectoryId(path: string): string {
     return filesystemMode ? path : directoryNodeId(path);
   }
@@ -309,7 +305,7 @@
   ): Promise<void> {
     await tick();
     const ids = new Set<string>([renderedDirectoryId(path)]);
-    if (path) ids.add(renderedDirectoryId(parentDirOf(path)));
+    if (path) ids.add(renderedDirectoryId(parentDir(path)));
     for (const id of visibleNodeIds) {
       if (!before.has(id)) ids.add(id);
     }
@@ -319,7 +315,7 @@
   /// True once at least one child of `dir` is in the loaded spine, so a
   /// re-expand can show it without another fetch.
   function dirChildrenLoaded(dir: string): boolean {
-    return fsNodes.some((n) => n.path !== dir && parentDirOf(n.path) === dir);
+    return fsNodes.some((n) => n.path !== dir && parentDir(n.path) === dir);
   }
 
   /// Merge a single-directory fs-graph batch into the accumulated spine

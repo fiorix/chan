@@ -28,6 +28,7 @@
   import { portal } from "./portal";
   import type { TreeEntry } from "../api/types";
   import { isEditableText } from "../state/fileTypes";
+  import { parentDir } from "../state/format";
   import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor } from "../state/kinds";
   import { windowCaps } from "../state/windowCaps";
@@ -900,11 +901,6 @@
 
   /// Walk to the parent directory of `path`. Returns "" for top-level
   /// rows; the caller decides whether to act on root selection.
-  function parentOf(path: string): string {
-    const i = path.lastIndexOf("/");
-    return i === -1 ? "" : path.slice(0, i);
-  }
-
   function findFirstChildOf(path: string): string | null {
     const rows = visibleRows;
     const idx = rows.findIndex((r) => r.path === path);
@@ -1004,7 +1000,7 @@
           setExpanded(curRow.path, false);
         } else {
           e.preventDefault();
-          const parent = parentOf(curRow.path);
+          const parent = parentDir(curRow.path);
           if (parent) {
             fbSelectSingle(parent);
             queueScrollIntoView(parent);
@@ -1054,7 +1050,7 @@
     if (!cur) return "";
     const row = visibleRows.find((r) => r.path === cur);
     if (row?.isDir) return cur;
-    return parentOf(cur);
+    return parentDir(cur);
   }
 
   /// Paste the clipboard into the resolved target dir, then select the
@@ -1482,9 +1478,9 @@
         aria-selected={browserSelection.path === node.path}
         draggable="true"
         ondragstart={(e) => onFileDragStart(e, node.path, false)}
-        ondragover={(e) => onRowDragOver(e, parentOf(node.path))}
-        ondragleave={() => onRowDragLeave(parentOf(node.path))}
-        ondrop={(e) => onRowDrop(e, parentOf(node.path))}
+        ondragover={(e) => onRowDragOver(e, parentDir(node.path))}
+        ondragleave={() => onRowDragLeave(parentDir(node.path))}
+        ondrop={(e) => onRowDrop(e, parentDir(node.path))}
         title={fullPath(node.path) + (contact ? " (contact)" : editable ? "" : " (view-only)")}
         use:trackRow={node.path}
       >

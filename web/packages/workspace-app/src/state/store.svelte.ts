@@ -132,6 +132,7 @@ import {
   preserveExtension,
   proposeDefaultFilename,
 } from "./pathValidate";
+import { parentDir } from "./format";
 import { setNotifyHandler } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
 import { defaultScopeId } from "./scope.svelte";
@@ -2879,11 +2880,6 @@ function fileBrowserDraftsPathReason(path: string): string | null {
   return "Drafts are saved or discarded from editor tabs";
 }
 
-function parentDir(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash > 0 ? path.slice(0, slash) : "";
-}
-
 function nearestLoadedParentDir(path: string): string | null {
   let dir = parentDir(path);
   for (;;) {
@@ -4199,7 +4195,7 @@ export function resolveSpawnContext(): SpawnContext {
     case "terminal":
       return { dir: tab.cwd?.trim() ?? "" };
     case "file":
-      return { dir: parentDirOf(tab.path), file: tab.path };
+      return { dir: parentDir(tab.path), file: tab.path };
     case "browser":
       return resolveBrowserSpawnContext();
     case "graph":
@@ -4215,11 +4211,6 @@ export function resolveSpawnContext(): SpawnContext {
   }
 }
 
-function parentDirOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash > 0 ? path.slice(0, slash) : "";
-}
-
 function resolveBrowserSpawnContext(): SpawnContext {
   const sel = browserSelection.path;
   if (!sel) return { dir: "" };
@@ -4229,13 +4220,13 @@ function resolveBrowserSpawnContext(): SpawnContext {
   // treating it as a file so we still get a useful parent dir.
   const entry = tree.entries.find((e) => e.path === sel);
   if (entry?.is_dir) return { dir: sel };
-  return { dir: parentDirOf(sel), file: sel };
+  return { dir: parentDir(sel), file: sel };
 }
 
 function resolveGraphSpawnContext(scopeId: string): SpawnContext {
   if (scopeId.startsWith("file:")) {
     const file = scopeId.slice("file:".length);
-    return { dir: parentDirOf(file), file };
+    return { dir: parentDir(file), file };
   }
   if (scopeId.startsWith("dir:")) {
     return { dir: scopeId.slice("dir:".length) };

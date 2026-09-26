@@ -6,15 +6,12 @@
 // tab-opening state.
 
 import { isAudio, isImage, isPdf, isVideo } from "./fileTypes";
+import { parentDir } from "./format";
 import { openAudioViewer } from "./audioViewer";
 import { openImageZoom, type ZoomImage } from "./imageZoom";
 import { openPdfViewer } from "./pdfViewer";
 import { openVideoViewer } from "./videoViewer";
 import { tree } from "./store.svelte";
-
-function parentDir(p: string): string {
-  return p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
-}
 
 /// Images that sit in the SAME directory as `p`, in the file tree's
 /// display order. Backs the fullscreen viewer's prev/next when the

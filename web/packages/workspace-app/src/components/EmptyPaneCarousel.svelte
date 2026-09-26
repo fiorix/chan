@@ -52,6 +52,7 @@
     openTerminalInPane,
     prevEnabledSlot,
   } from "../state/tabs.svelte";
+  import { parentDir } from "../state/format";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { indexingCache } from "../state/indexingStatus.svelte";
   import GraphCanvas from "./GraphCanvas.svelte";
@@ -167,12 +168,6 @@
     return slash < 0 ? path : path.slice(slash + 1);
   }
 
-  function parentPath(path: string): string {
-    const slash = path.lastIndexOf("/");
-    if (slash <= 0) return "";
-    return path.slice(0, slash);
-  }
-
   /// Folder-node id matching chan-server's `directory_node_id`
   /// convention: workspace root is the empty string, every other
   /// directory uses `directory:<workspace-relative path>`. This
@@ -231,7 +226,7 @@
     const edges: CanvasEdge[] = [];
     for (const n of data.nodes) {
       if (n.path === "") continue;
-      const parent = parentPath(n.path);
+      const parent = parentDir(n.path);
       if (!known.has(parent)) continue;
       edges.push({
         source: directoryId(parent),

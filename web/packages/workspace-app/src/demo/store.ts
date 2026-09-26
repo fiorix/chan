@@ -11,12 +11,8 @@ import type {
   MoveResponse,
   TreeEntry,
 } from "../api/types";
+import { parentDir } from "../state/format";
 import type { MockFileEntry, MockWorkspaceData } from "./data";
-
-function parentOf(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i < 0 ? "" : path.slice(0, i);
-}
 
 function baseName(path: string): string {
   const i = path.lastIndexOf("/");
@@ -61,12 +57,12 @@ export class MockWorkspaceStore {
       return b;
     };
     for (const path of this.#files.keys()) {
-      bucket(parentOf(path)).files.add(path);
-      let dir = parentOf(path);
+      bucket(parentDir(path)).files.add(path);
+      let dir = parentDir(path);
       while (dir !== "") {
         this.#dirs.add(dir);
-        bucket(parentOf(dir)).dirs.add(dir);
-        dir = parentOf(dir);
+        bucket(parentDir(dir)).dirs.add(dir);
+        dir = parentDir(dir);
       }
     }
   }
@@ -158,7 +154,7 @@ export class MockWorkspaceStore {
       if (!this.#children.has(path)) {
         this.#children.set(path, { dirs: new Set(), files: new Set() });
       }
-      const b = this.#children.get(parentOf(path));
+      const b = this.#children.get(parentDir(path));
       if (b) b.dirs.add(path);
       return;
     }
