@@ -188,11 +188,18 @@ function release(slot: SurveySlot, surveyId: string): void {
   if (entry(slot)?.spec.surveyId === surveyId) clear(slot);
 }
 
+/// Whether the reply route refused a reply because no survey is parked under
+/// its id (answered, timed out or cancelled). The route's 404 carries its own
+/// text; a gateway answers a bare 404 when the devserver's tunnel is down or
+/// an authorization is cancelled, which says nothing about the survey.
+function refusedAsUnknown(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404 && err.message.includes("no survey parked");
+}
+
 /// Post `reply` for the survey `e` shows on `slot`, holding the slot busy
-/// until it settles. An accepted reply clears the slot. The reply route
-/// answers 404 once no survey is parked under the id (answered, timed out or
-/// cancelled), and nothing can answer that survey any more, so a 404 clears
-/// the slot too and says so, as does any failure after the server closed the
+/// until it settles. An accepted reply clears the slot. Nothing can answer a
+/// survey the reply route refuses as unknown, so that refusal clears the slot
+/// too and says so, as does any failure after the server closed the
 /// survey during the reply. Any other failure keeps the overlay for a retry,
 /// or, when a sync set the survey aside meanwhile, says it is still open: the
 /// next sync that lists it with its slot free raises it again.
@@ -210,7 +217,7 @@ async function send(
     release(slot, surveyId);
   } catch (err) {
     e.busy = false;
-    if ((err instanceof ApiError && err.status === 404) || e.closed) {
+    if (refusedAsUnknown(err) || e.closed) {
       release(slot, surveyId);
       notify("survey expired: nothing is waiting for its answer");
       return;
