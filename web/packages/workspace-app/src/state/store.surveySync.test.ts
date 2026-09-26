@@ -214,7 +214,7 @@ describe("survey_sync", () => {
     answer.reject(new TypeError("Failed to fetch"));
     await sent;
     expect(surveyFor(null)?.surveyId).toBe("survey-late");
-    expect(notices).toEqual([expect.stringMatching(/^survey reply failed: /)]);
+    expect(notices).toEqual([expect.stringMatching(/^survey reply failed: .*; the survey is still open$/)]);
   });
 
   test("a survey on a renamed terminal keeps its overlay when its reply in flight fails", async () => {
