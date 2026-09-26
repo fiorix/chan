@@ -27,6 +27,7 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import PathPromptModal from "./PathPromptModal.svelte";
+import { clickBackdrop, dialogIn, press } from "../__tests__/dialog";
 import {
   resolvePathPrompt,
   tree,
@@ -298,5 +299,30 @@ describe("the text selected when the dialog opens", () => {
   test("a move selects the whole path", async () => {
     const input = await openWith({ kind: "file", mode: "move", defaultValue: "docs/old.md", sourcePath: "docs/old.md" });
     expect([input.selectionStart, input.selectionEnd]).toEqual([0, 11]);
+  });
+});
+
+describe("dismissal", () => {
+  test("Escape in the input answers null", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(target, { kind: "file", mode: "create" }, "docs/new.md");
+    const escape = press(target.querySelector("input")!, "Escape");
+    await expect(promise).resolves.toBeNull();
+    expect(escape.defaultPrevented).toBe(true);
+  });
+
+  test("a click on the backdrop answers null and a click inside the panel does not", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(target, { kind: "file", mode: "create" }, "docs/new.md");
+    let settled = false;
+    void promise.then(() => (settled = true));
+
+    statusRow(target).click();
+    await settle();
+    expect(settled, "a click inside the panel leaves the dialog open").toBe(false);
+    expect(dialogIn(target)).not.toBeNull();
+
+    clickBackdrop(target);
+    await expect(promise).resolves.toBeNull();
   });
 });
