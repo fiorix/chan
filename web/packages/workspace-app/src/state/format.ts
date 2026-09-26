@@ -1,6 +1,5 @@
-// Small formatting helpers shared by the file browser and graph
-// details pane. They were duplicated in multiple places before this
-// module existed; centralizing keeps the displayed units consistent.
+// Small formatting and path helpers with one definition each, so a size,
+// a time or a path segment reads the same on every surface that shows it.
 
 /** Human-friendly byte size (B / KB / MB / GB). One decimal at all
  *  scales above bytes; bytes are rendered as integers. */
@@ -28,4 +27,13 @@ export function formatMtime(seconds: number | null): string {
 export function basename(path: string): string {
   const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/// Workspace-relative parent directory of `path`. Returns "" for paths
+/// at the workspace root (no parent) and for the empty string. Directories
+/// follow the same rule as files; the caller decides whether to
+/// treat the empty parent as "workspace scope" or skip.
+export function parentDir(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
 }

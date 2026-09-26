@@ -8,7 +8,7 @@
 // (`file:<path>`, `dir:<path>`, `tag:<id>`, `language:<lang>`, ...);
 // GraphPanel's `synthesizeScope` turns that id back into a typed
 // ScopeOption and `graphTitle` renders it. `defaultScopeId` picks the
-// id matching what is in front of the user; `scopeKey` / `parentDir` /
+// id matching what is in front of the user; `scopeKey` and
 // `visibleFilePaths` are small path helpers used by the graph open
 // paths.
 //
@@ -122,15 +122,6 @@ export type ScopeOption =
 /// detect "the same group as before" across layout shuffles.
 export function scopeKey(paths: readonly string[]): string {
   return [...paths].sort().join("|");
-}
-
-/// Workspace-relative parent directory of `path`. Returns "" for paths
-/// at the workspace root (no parent) and for the empty string. Directories
-/// follow the same rule as files; the caller decides whether to
-/// treat the empty parent as "workspace scope" or skip.
-export function parentDir(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i === -1 ? "" : path.slice(0, i);
 }
 
 /// Paths for every file tab currently active in any leaf pane.
