@@ -787,6 +787,17 @@ export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
   return registryCommandId(chord, true) !== null;
 }
 
+/// Take a key for the handler that answered it: prevent its default and stop
+/// it there. A surface that owns its keys from a capture-phase listener on
+/// the document (the slide player, the media viewers) calls this for each key
+/// it acts on, so the key reaches neither the editor or terminal behind it
+/// nor the app's window handler, whose Escape would also close the overlay
+/// beneath the surface.
+export function consumeKey(e: KeyboardEvent): void {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
 /// Whether a command on this client holds `chord`: a user override, or a
 /// registry chord no override has replaced.
 function chordClaimed(chord: Chord): boolean {

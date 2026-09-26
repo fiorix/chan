@@ -7,6 +7,7 @@
 // preview discards the hydration completion promises by design.
 
 import { isTauriDesktop, setWindowFullscreen } from "../api/desktop";
+import { consumeKey } from "./shortcuts";
 import {
   contentStyle,
   cssNumber,
@@ -327,20 +328,20 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
     if (viewerAboveSlides()) return;
     switch (event.key) {
       case "Escape":
-        consume(event);
+        consumeKey(event);
         dismiss();
         break;
       case "Backspace":
       case "ArrowUp":
       case "ArrowLeft":
-        consume(event);
+        consumeKey(event);
         step(-1);
         break;
       case " ":
       case "Spacebar":
       case "ArrowDown":
       case "ArrowRight":
-        consume(event);
+        consumeKey(event);
         step(1);
         break;
     }
@@ -355,11 +356,6 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
   if (state.mode === "play") requestSlideFullscreen(backdrop);
   backdrop.focus({ preventScroll: true });
   return { update, close: dismiss };
-}
-
-function consume(event: KeyboardEvent): void {
-  event.preventDefault();
-  event.stopPropagation();
 }
 
 /// Whether an image/diagram viewer overlay is open above the slide
