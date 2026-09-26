@@ -402,6 +402,18 @@ describe("search endpoints", () => {
     expect(res.hits[0].snippet).toContain("Tagged #demo");
   });
 
+  test("search/content names the heading after a mixed fence", async () => {
+    const content = ["# First", "~~~", "```", "~~~", "# Second", "zebra"].join("\n");
+    const data = fixture();
+    data.files.push({ path: "fences.md", kind: "document", size: content.length, mtime: 100, content });
+    const st = new MockWorkspaceStore(data);
+    const f = createDemoFetch(st, new DemoGraph(st), new MockReports([]));
+    const res = (await (await f("/api/search/content?q=zebra&limit=5")).json()) as {
+      hits: Array<{ path: string; heading: string }>;
+    };
+    expect(res.hits.map((h) => [h.path, h.heading])).toEqual([["fences.md", "Second"]]);
+  });
+
   test("mentions serves @@ labels from the corpus", async () => {
     const f = setup();
     const rows = (await (await f("/api/mentions?q=al&limit=5")).json()) as Array<{

@@ -10,6 +10,7 @@ import type {
   LinkTarget,
   SearchHit,
 } from "../api/types";
+import { fenceLineTracker } from "../editor/commands/fence";
 import type { DemoGraph } from "./graph";
 import type { MockWorkspaceStore } from "./store";
 
@@ -88,15 +89,11 @@ export function linkTargets(graph: DemoGraph, q: string, limit: number): LinkTar
 /// Nearest heading at or above `line` (0-based), as the hit's breadcrumb.
 function headingFor(graph: DemoGraph, path: string, line: number, lines: string[]): string {
   let best = "";
-  let inFence = false;
+  const fence = fenceLineTracker();
   let ord = -1;
   const rows = graph.headings(path);
   for (let i = 0; i <= line && i < lines.length; i++) {
-    if (/^(```|~~~)/.test(lines[i])) {
-      inFence = !inFence;
-      continue;
-    }
-    if (!inFence && /^#{1,6}\s/.test(lines[i])) ord++;
+    if (fence(lines[i]) === "text" && /^#{1,6}\s/.test(lines[i])) ord++;
   }
   if (ord >= 0 && ord < rows.length) best = rows[ord].text;
   return best;
