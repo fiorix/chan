@@ -132,9 +132,9 @@ function paneHolding(el: HTMLElement): string | null {
 }
 
 /// The host terminal that ran `cs terminal team new`, live in the seed pane,
-/// with an unpositioned team spawned over it and the host selected again, as
-/// the owner's screen had it. Returns what survives or not: the host's
-/// element, its renderer and its dials.
+/// with an unpositioned team spawned over it and the host selected again.
+/// Returns what survives or not: the host's element, its renderer and its
+/// dials.
 async function hostUnderTeam(): Promise<{ root: HTMLElement; term: FakeTerminal; dials: Dial[] }> {
   const dials = recordDials();
   resetLayout([terminalTab({ id: HOST, title: "host", terminalSessionId: HOST_SESSION })]);
