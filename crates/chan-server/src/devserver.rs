@@ -6735,6 +6735,26 @@ mod tests {
         );
     }
 
+    /// A mount the stopping host refuses answers 503, so a caller can tell
+    /// a devserver that is going away from a bad request.
+    #[tokio::test]
+    async fn a_mount_refused_by_a_stopping_host_answers_503() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("root mounted after the stop");
+        let state = devserver_with_windows(home.path()).await;
+        shut_down_hosted(&state, None).await.expect("shut down");
+
+        let response = handle_open(
+            State(Arc::clone(&state)),
+            Json(OpenWorkspaceRequest {
+                path: root.path().to_string_lossy().into_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     /// A registered root whose path now resolves elsewhere, restored after a
     /// devserver restart from the path its overlay row stores, lists as on
     /// with its token, and as stopped once closed: its record and its
