@@ -25,6 +25,7 @@
   import { hideRichPromptForTab } from "../state/richPrompt.svelte";
   import {
     beginPendingPrompt,
+    clearPendingPrompt,
     failPendingPrompt,
     sendCancelToTerminal,
     sendPromptToTerminal,
@@ -272,7 +273,7 @@
     if (!loaded) return;
     clearPendingTimers();
     pendingChipVisible = false;
-    tab.pendingPrompt = undefined;
+    clearPendingPrompt(tab);
     if (phase === "delivered") {
       content = "";
       void flushWrite();
@@ -361,7 +362,7 @@
     }
     pendingChipVisible = false;
     transientNote = null;
-    tab.pendingPrompt = undefined;
+    clearPendingPrompt(tab);
   }
 
   function scheduleWrite(): void {

@@ -2420,6 +2420,12 @@ export function failPendingPrompt(tab: TerminalTab): void {
   tab.pendingPrompt = { ...pending, phase: "failed" };
 }
 
+/// Stop tracking the prompt: the composer consumed its final phase, or the
+/// user took the text back to edit it.
+export function clearPendingPrompt(tab: TerminalTab): void {
+  tab.pendingPrompt = undefined;
+}
+
 export function clearTerminalSession(tab: TerminalTab): void {
   if (tab.terminalMetadataPending) {
     tab.terminalMetadataPending = undefined;
