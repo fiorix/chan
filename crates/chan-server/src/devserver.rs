@@ -5304,6 +5304,7 @@ mod tests {
             "lib-test".into(),
         );
         complete_test_startup(&state).await;
+        let hung_key = canonical_root(hung.path());
 
         let stall = root_stall::stall(hung.path());
         let requesting = Arc::clone(&state);
@@ -5320,7 +5321,7 @@ mod tests {
             other => panic!("a serve request for a hung root did not fail: {other:?}"),
         }
         assert!(
-            !state.host.is_canonical_root_mounted(&canonical_root(hung.path())),
+            !state.host.is_canonical_root_mounted(&hung_key),
             "the hung root is mounted"
         );
     }
