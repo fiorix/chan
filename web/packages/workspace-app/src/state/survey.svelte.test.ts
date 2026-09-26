@@ -1,8 +1,10 @@
 import { flushSync, mount, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { api, type SurveySpec } from "../api/client";
+import { ApiError } from "../api/errors";
 import BubbleOverlay from "../components/BubbleOverlay.svelte";
+import { setNotifyHandler } from "./notify.svelte";
 import {
   surveyState,
   showSurvey,
@@ -12,6 +14,7 @@ import {
   pickOption,
   requestFollowup,
   dismissSurvey,
+  type SurveySlot,
 } from "./survey.svelte";
 
 // The survey store holds active surveys keyed by slot (a terminal tab id, or
@@ -27,6 +30,23 @@ function spec(over: Partial<SurveySpec> = {}): SurveySpec {
     ...over,
   };
 }
+
+// The three replies an overlay sends, each for the survey on `slot`.
+const REPLIES: Array<[string, (slot: SurveySlot) => Promise<void>]> = [
+  ["an option", (slot) => pickOption(slot, 0)],
+  ["the follow-up", (slot) => requestFollowup(slot)],
+  ["Dismiss", (slot) => dismissSurvey(slot)],
+];
+
+// What the reply route answers once no survey is parked under the id.
+const REFUSED = new ApiError(404, "no survey parked with id survey-7 (already answered or stale)");
+
+let notices: string[] = [];
+
+beforeEach(() => {
+  notices = [];
+  setNotifyHandler((message) => notices.push(message));
+});
 
 afterEach(() => {
   surveyState.byTab = {};
@@ -161,20 +181,48 @@ describe("survey store", () => {
     ]);
   });
 
-  test("a failed dismiss keeps the survey up and clears busy", async () => {
-    vi.spyOn(api, "surveyReply").mockRejectedValue(new Error("boom"));
-    showSurvey(spec(), "t1");
-    await dismissSurvey("t1");
-    expect(surveyFor("t1")).not.toBeNull();
-    expect(surveyBusy("t1")).toBe(false);
-  });
+});
 
-  test("a failed reply keeps the survey up and clears busy", async () => {
-    vi.spyOn(api, "surveyReply").mockRejectedValue(new Error("boom"));
+describe("a reply the server refuses as unknown", () => {
+  test.each(REPLIES)("to %s clears the slot and says the survey expired", async (_reply, send) => {
+    vi.spyOn(api, "surveyReply").mockRejectedValue(REFUSED);
     showSurvey(spec(), "t1");
-    await pickOption("t1", 0);
-    // Still showing so the user can retry; not wedged in busy.
-    expect(surveyFor("t1")).not.toBeNull();
+    await send("t1");
+    expect(surveyFor("t1")).toBeNull();
+    expect(notices).toEqual([expect.stringMatching(/^survey expired/)]);
+  });
+});
+
+describe("a reply that fails any other way", () => {
+  test.each(
+    REPLIES.flatMap(([reply, send]) => [
+      [reply, "the network", new TypeError("Failed to fetch"), send] as const,
+      [reply, "a server error", new ApiError(500, "boom"), send] as const,
+    ]),
+  )("to %s through %s keeps the survey up for a retry", async (_reply, _failure, error, send) => {
+    vi.spyOn(api, "surveyReply").mockRejectedValue(error);
+    showSurvey(spec(), "t1");
+    await send("t1");
+    expect(surveyFor("t1")?.surveyId).toBe("survey-7");
     expect(surveyBusy("t1")).toBe(false);
+    expect(notices).toEqual([expect.stringMatching(/^survey \w+ failed: /)]);
+  });
+});
+
+describe("a reply that settles after another survey took its slot", () => {
+  test.each([
+    ["is accepted", (answer: { resolve: () => void; reject: (e: unknown) => void }) => answer.resolve()],
+    ["is refused", (answer: { resolve: () => void; reject: (e: unknown) => void }) => answer.reject(REFUSED)],
+  ])("leaves that survey up when it %s", async (_outcome, settle) => {
+    let answer!: { resolve: () => void; reject: (e: unknown) => void };
+    vi.spyOn(api, "surveyReply").mockReturnValue(
+      new Promise<void>((resolve, reject) => (answer = { resolve, reject })),
+    );
+    showSurvey(spec({ surveyId: "survey-a" }), null);
+    const sent = dismissSurvey(null);
+    showSurvey(spec({ surveyId: "survey-b" }), null);
+    settle(answer);
+    await sent;
+    expect(surveyFor(null)?.surveyId).toBe("survey-b");
   });
 });
