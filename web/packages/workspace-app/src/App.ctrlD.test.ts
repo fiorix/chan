@@ -22,11 +22,19 @@ import { boardLoaded } from "./__tests__/excalidraw";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { confirmState } from "./state/confirm.svelte";
 import { assignOverride, hydrateOverrides } from "./state/keymapOverrides.svelte";
-import { pathPromptState, promptState, setCoverBlocking } from "./state/store.svelte";
+import {
+  importContactsPanel,
+  pathPromptState,
+  promptState,
+  setCoverBlocking,
+  workspaceWarningsDialog,
+} from "./state/store.svelte";
+import { teamDialogState } from "./state/teamDialog.svelte";
 import {
   activePane,
   cancelPaneMode,
   clearRecentlyClosedTabsForTest,
+  conflictDialog,
   draftCloseState,
   enterPaneMode,
   layout,
@@ -49,6 +57,10 @@ afterEach(async () => {
   pathPromptState.open = false;
   confirmState.open = false;
   draftCloseState.open = false;
+  teamDialogState.request = null;
+  conflictDialog.open = false;
+  workspaceWarningsDialog.open = false;
+  importContactsPanel.open = false;
   cancelPaneMode();
   setCoverBlocking("screensaver", false);
   hydrateOverrides(null);
@@ -142,6 +154,10 @@ describe("Ctrl+D is left alone", () => {
     ["a path prompt", () => (pathPromptState.open = true)],
     ["a confirm", () => (confirmState.open = true)],
     ["the draft close dialog", () => (draftCloseState.open = true)],
+    ["the Team Work dialog", () => (teamDialogState.request = { leadTabId: "doc", leadPaneId: layout.activePaneId })],
+    ["the file conflict dialog", () => (conflictDialog.open = true)],
+    ["the workspace warnings dialog", () => (workspaceWarningsDialog.open = true)],
+    ["the contacts import", () => (importContactsPanel.open = true)],
   ])("while %s is open", async (_name, open) => {
     await seed(fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" }));
     open();

@@ -43,11 +43,9 @@
     discardWindowSession,
     fileOps,
     openGraphWithContext,
-    pathPromptState,
     noteDraftCreated,
     persistLayoutToHash,
     schedulePersistStateToHash,
-    promptState,
     reconnectWatcher,
     refreshWorkspace,
     refreshTree,
@@ -72,7 +70,6 @@
     ui,
     watchSystemTheme,
   } from "./state/store.svelte";
-  import { confirmState } from "./state/confirm.svelte";
   import { windowModeAllowsCommand } from "./state/windowMode";
   import { initWindowTitle } from "./state/windowTitle";
   import {
@@ -89,7 +86,6 @@
     consumeLastMovedOutSession,
     cancelPaneMode,
     commitPaneMode,
-    draftCloseState,
     enterPaneMode,
     isWindowFullyReadOnly,
     layout,
@@ -1232,11 +1228,9 @@
       e.stopPropagation();
       return;
     }
-    // In-house modals + the Hybrid Nav dispatcher own their
-    // own keyboard contexts; never close a tab from under them.
-    if (promptState.open || pathPromptState.open || confirmState.open || draftCloseState.open) {
-      return;
-    }
+    // An app-root dialog and the Hybrid Nav dispatcher own their own
+    // keyboard contexts; never close a tab from under them.
+    if (keyboardOwnedByDialog()) return;
     if (paneMode.active) return;
     const p = activePane();
     const active = activeTabInPane(p);
