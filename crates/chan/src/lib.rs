@@ -12037,6 +12037,47 @@ mod tests {
         );
     }
 
+    // The unit every install before the two-fd store carries: the current
+    // shape at FileDescriptorStoreMax=512. It must be rewritten at 1024 and
+    // reloaded, and a second pass must find it current.
+    #[tokio::test]
+    async fn an_installed_unit_at_the_512_store_maximum_migrates() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let desired = chan_systemd::DevserverUnit::new(
+            "/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787",
+        );
+        let rendered = desired.render();
+        assert!(rendered.contains("\nFileDescriptorStoreMax=1024\n"));
+        let installed =
+            rendered.replace("FileDescriptorStoreMax=1024", "FileDescriptorStoreMax=512");
+        std::fs::write(&path, &installed).expect("seed the installed unit");
+
+        let update =
+            write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
+        assert!(update.changed, "a 512 unit is migrated, not refused");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rendered);
+        let mut control = FakeDevserverSystemdControl {
+            active: true,
+            ..Default::default()
+        };
+        activate_devserver_unit(&update, true, true, &mut control)
+            .await
+            .expect("activate migrated unit");
+        assert_eq!(
+            systemd_commands(&control),
+            [
+                "daemon-reload",
+                "enable chan-devserver.service",
+                "restart chan-devserver.service",
+            ]
+        );
+
+        let repeat =
+            write_rendered_devserver_unit(&path, &desired, false).expect("classify current unit");
+        assert!(!repeat.changed, "the migrated unit is current");
+    }
+
     #[tokio::test]
     async fn known_legacy_devserver_systemd_unit_migrates_idempotently() {
         let dir = tempfile::tempdir().expect("unit dir");
