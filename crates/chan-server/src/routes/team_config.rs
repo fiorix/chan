@@ -1389,6 +1389,29 @@ mod tests {
         );
     }
 
+    // Only the tab-name key is read as the handle: any other entry the
+    // validator refuses is refused on read too, here a NUL in an ordinary
+    // key's value, which the handle would otherwise have passed for.
+    #[test]
+    fn a_saved_config_with_another_refused_entry_is_still_refused_on_read() {
+        let (_cfg, _root, workspace) = test_workspace();
+        let mut saved = sample_config();
+        saved.members[1]
+            .env
+            .insert("EDITOR".into(), "vi\u{0}m".into());
+        workspace.create_dir("new-team-1").unwrap();
+        workspace
+            .write_text(
+                "new-team-1/config.toml",
+                &toml::to_string_pretty(&saved).unwrap(),
+            )
+            .unwrap();
+
+        let err = read_team_config(&workspace, "new-team-1")
+            .expect_err("a NUL in a saved member's env value is refused on read");
+        assert!(err.contains("contains NUL"), "got: {err}");
+    }
+
     #[test]
     fn agent_is_derived_from_command_in_roster_and_pokes() {
         // No stored agent field: a "claude"/"codex" command derives the agent.
