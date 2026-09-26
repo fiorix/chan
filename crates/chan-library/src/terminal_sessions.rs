@@ -11516,6 +11516,8 @@ mod tests {
             fds: Mutex<HashMap<String, OwnedFd>>,
             registry: Mutex<std::sync::Weak<Registry>>,
             published: Mutex<Vec<FdStoreManifestEntry>>,
+            /// How many manifests were published.
+            commits: AtomicUsize,
         }
 
         impl StoreSim {
@@ -11529,6 +11531,7 @@ mod tests {
             fn publish(&self) {
                 let registry = self.0.registry.lock().unwrap().upgrade();
                 if let Some(registry) = registry {
+                    self.0.commits.fetch_add(1, Ordering::Relaxed);
                     let entries = registry.fdstore_manifest_sessions("t");
                     registry.fdstore_manifest_committed("t", &entries);
                     *self.0.published.lock().unwrap() = entries;
@@ -11794,6 +11797,50 @@ mod tests {
                 sealed_manifest: false,
             };
             (import, pair)
+        }
+
+        // Activation gives every session restored without a ring file its
+        // ring file and commits the manifest once. The first boot after an
+        // upgrade restores every session that way, and a commit per session
+        // rewrote the manifest, with every tail not yet dropped, once each.
+        #[test]
+        fn activation_commits_the_manifest_once_for_every_session_without_a_ring_file() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let mut imports = Vec::new();
+            let mut pairs = Vec::new();
+            for n in 0..3 {
+                let id = format!("restored-without-a-ring-{n}");
+                let (import, pair) = ringless_import(&id, 1, b"restored");
+                // The store retains the PTY the previous process parked.
+                store.0.fds.lock().unwrap().insert(
+                    fdstore_fd_name(&id, None),
+                    import.master_fd.try_clone().unwrap(),
+                );
+                imports.push(import);
+                pairs.push(pair);
+            }
+            let report = registry.restore_fdstore_sessions(imports);
+            assert_eq!(report.restored, 3, "skipped: {:?}", report.skipped);
+
+            // Activation: the reconcile, then the manifest rewrite.
+            let before = store.0.commits.load(Ordering::Relaxed);
+            registry.park_unparked_windowed_sessions();
+            store.publish();
+            let commits = store.0.commits.load(Ordering::Relaxed) - before;
+            assert_eq!(
+                commits, 1,
+                "activation committed the manifest {commits} times for three sessions without a ring file, want once"
+            );
+            let published = store.0.published.lock().unwrap();
+            let fds = store.0.fds.lock().unwrap();
+            for entry in published.iter() {
+                let ring_name = entry.ring_fd_name.as_deref().expect("a ring file named");
+                assert!(fds.contains_key(ring_name), "{ring_name} is stored");
+                assert!(entry.replay.is_empty(), "a mirrored ring carries no tail");
+            }
+            assert_eq!(published.len(), 3);
         }
 
         // A session restored without a ring file (a manifest from before ring
