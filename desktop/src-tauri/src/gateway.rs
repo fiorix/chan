@@ -2220,7 +2220,10 @@ mod tests {
                 GatewayStatus::Unreachable
             };
             assert_eq!(view.status, expected, "status after tick {tick}");
-            assert_eq!(view.devserver_count, 1, "the last-known roster stays served");
+            assert_eq!(
+                view.devserver_count, 1,
+                "the last-known roster stays served"
+            );
         }
         let payload = notice_rx
             .try_recv()
@@ -2301,9 +2304,8 @@ mod tests {
             for failing in [false, true] {
                 let cancel = install_polled_runtime(&state, origin, status, pending_signin);
                 let _absent = (!failing).then(|| auth::absent_gateway_pat_for_test(origin));
-                let _failure = failing.then(|| {
-                    auth::fail_gateway_pat_load_for_test(origin, "injected load failure")
-                });
+                let _failure = failing
+                    .then(|| auth::fail_gateway_pat_load_for_test(origin, "injected load failure"));
                 for _ in 0..ROSTER_UNREACHABLE_FAILURES {
                     let flow = roster_poll_tick(
                         app.handle(),

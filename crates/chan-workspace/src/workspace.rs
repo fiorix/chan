@@ -5794,7 +5794,9 @@ mod tests {
         // The pass the loss requests, claimed and run the way chan-server's
         // recovery coordinator runs it.
         let required = workspace.request_recovery(RecoveryAction::FullRebuild);
-        let pass = workspace.begin_recovery().expect("the loss's pass is pending");
+        let pass = workspace
+            .begin_recovery()
+            .expect("the loss's pass is pending");
         assert_eq!(pass.generation, required);
         workspace
             .run_full_rebuild_pass(
