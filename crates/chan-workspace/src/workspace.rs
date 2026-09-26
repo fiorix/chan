@@ -5879,6 +5879,40 @@ mod tests {
         );
     }
 
+    /// A watcher loss during a refresh keeps the refresh exclusive: a second
+    /// caller is refused while the first still runs, rather than starting a
+    /// rescan beside it.
+    #[test]
+    fn a_watcher_loss_during_a_report_refresh_keeps_it_exclusive() {
+        let (_cfg, _root, workspace) = fixture();
+        await_recovery_ready(&workspace);
+        workspace.report().unwrap();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let callback: Arc<dyn crate::WatchCallback> =
+            Arc::new(ChannelWatchCallback(std::sync::Mutex::new(event_tx)));
+        let fan = ReportFanOut::new(
+            callback,
+            Arc::clone(&workspace.report),
+            Arc::clone(&workspace.write_serial),
+            Arc::clone(&workspace.persisted_report_refresh),
+        );
+
+        *workspace.persisted_report_refresh.lock().unwrap() = PersistedReportRefresh::Refreshing;
+        let refresh = PersistedReportRefreshGuard {
+            state: &workspace.persisted_report_refresh,
+            settled: false,
+        };
+        fan.on_event(crate::WatchEvent::loss(workspace.generation()));
+        let second = workspace.refresh_persisted_report_if_owed();
+        assert!(
+            second
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("already running")),
+            "a second refresh started beside the first after a watcher loss: {second:?}"
+        );
+        drop(refresh);
+    }
+
     #[test]
     fn serialize_queries_and_file_streams_remain_lock_free() {
         let (_cfg, _root, workspace) = fixture();
