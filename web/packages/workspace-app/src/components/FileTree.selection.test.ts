@@ -21,8 +21,8 @@ import { ApiError } from "../api/errors";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
 import { allCommands, commandContext } from "../state/commands";
-import { browserSelection, fbSelectSet, fbSelectSingle, ui } from "../state/store.svelte";
-import { openBrowserInActivePane } from "../state/tabs.svelte";
+import { browserSelection, fbSelectSet, fbSelectSingle, fileOps, ui } from "../state/store.svelte";
+import { allPaneTabs, layout, openBrowserInActivePane, openInActivePane } from "../state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -84,6 +84,15 @@ async function exists(path: string): Promise<boolean> {
   return api.read(path).then(
     () => true,
     () => false,
+  );
+}
+
+/// The paths of every open file tab.
+function openFilePaths(): string[] {
+  return Object.values(layout.nodes).flatMap((node) =>
+    node.kind === "leaf"
+      ? allPaneTabs(node).flatMap((tab) => (tab.kind === "file" ? [tab.path] : []))
+      : [],
   );
 }
 
@@ -190,6 +199,38 @@ describe("Delete on a multi-selection", () => {
     await gone("a.md", "c.md");
     await vi.waitFor(() => expect(ui.status).toBe("deleted 2 of 3; b.md: not found"));
     expect(browserSelection.paths).toEqual([]);
+  });
+});
+
+describe("a tree refresh that fails after the deletes", () => {
+  test("keeps the count of what went, adds the refresh error and closes the deleted tabs", async () => {
+    await openInActivePane("a.md");
+    await vi.waitFor(() => expect(openFilePaths()).toContain("a.md"));
+    // The file tab now covers the tree, so the delete goes to fileOps as the
+    // tree's Delete would send it.
+    fbSelectSet(["a.md", "b.md", "c.md"], "c.md");
+    void fileOps.removeSelection(browserSelection.paths);
+    await confirmMessage();
+    vi.spyOn(api, "list").mockRejectedValue(new Error("listing down"));
+    await confirm();
+
+    await gone("a.md", "b.md", "c.md");
+    await vi.waitFor(() => expect(ui.status).toBe("deleted 3; refresh failed: listing down"));
+    expect(openFilePaths()).not.toContain("a.md");
+  });
+
+  test("after a single row's delete says the row went and closes its tab", async () => {
+    await openInActivePane("a.md");
+    await vi.waitFor(() => expect(openFilePaths()).toContain("a.md"));
+    fbSelectSingle("a.md");
+    void fileOps.remove("a.md");
+    await confirmMessage();
+    vi.spyOn(api, "list").mockRejectedValue(new Error("listing down"));
+    await confirm();
+
+    await gone("a.md");
+    await vi.waitFor(() => expect(ui.status).toBe('deleted "a.md"; refresh failed: listing down'));
+    expect(openFilePaths()).not.toContain("a.md");
   });
 });
 
