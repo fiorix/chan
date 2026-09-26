@@ -5359,6 +5359,14 @@ export function setTabInspectorOpen(tab: FileTab, open: boolean): void {
 export function setTabOutlineOpen(tab: FileTab, open: boolean): void {
   tab.outlineOpen = open;
 }
+/// The tab's own details and outline panel widths, set by a drag of the
+/// panel's edge; without them the panels use the shared widths.
+export function setTabInspectorWidth(tab: FileTab, width: number): void {
+  tab.inspectorWidth = width;
+}
+export function setTabOutlineWidth(tab: FileTab, width: number): void {
+  tab.outlineWidth = width;
+}
 function clampSlidePreviewIndex(index: number): number {
   if (!Number.isFinite(index)) return 0;
   return Math.max(0, Math.floor(index));

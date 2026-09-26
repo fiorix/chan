@@ -66,8 +66,10 @@
     setTabCaret,
     setTabContent,
     setTabInspectorOpen,
+    setTabInspectorWidth,
     setTabCodeBlocksCollapsed,
     setTabOutlineOpen,
+    setTabOutlineWidth,
     setTabSlidePreviewIndex,
     setTabSlidePreviewMode,
     setTabSlidePreviewOpen,
@@ -1293,7 +1295,7 @@
         side="left"
         bind:width={
           () => tab.outlineWidth ?? paneWidths.outline,
-          (v) => (tab.outlineWidth = v)
+          (v) => setTabOutlineWidth(tab, v)
         }
         onResize={persistPaneWidths}
         onClose={() => setTabOutlineOpen(tab, false)}
@@ -1487,7 +1489,7 @@
         title="Details"
         bind:width={
           () => tab.inspectorWidth ?? paneWidths.inspector,
-          (v) => (tab.inspectorWidth = v)
+          (v) => setTabInspectorWidth(tab, v)
         }
         onResize={persistPaneWidths}
         onClose={() => setTabInspectorOpen(tab, false)}
