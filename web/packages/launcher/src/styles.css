@@ -3,6 +3,12 @@
    app so the launcher reads as the same product; dark is the default, light
    is opted into via `data-theme="light"` on the document element.
 
+   Two entries load this sheet: the launcher's main.ts, and the marketing
+   site's launcher demo (marketing/src/launcher-demo.ts), which the manual
+   page and the demo embed template mount inside the site's own markup, with
+   `:root` and `body` rewritten to the demo frame at build time. There, the
+   site's rules meet these ones.
+
    This sheet owns the primitives. A component adds modifiers and layout on
    top of one but never redeclares a primitive's box, so a primitive changes
    here once and every element that wears it follows. */
@@ -327,7 +333,7 @@ body {
 
 /* The trailing action cluster of a row or a card header. */
 .row-actions,
-.card-actions {
+.content .card-actions {
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -387,11 +393,17 @@ body {
 
 /* ---- Cards (the machine and gateway badges) --------------------------- */
 
+/* Every card rule is scoped under `.content`, App's <main>, which holds both
+   card lists. The extra class keeps these rules at the (0,2,0) the cards'
+   component-scoped rules had, so an ancestor rule on a page that embeds this
+   sheet cannot outrank them: the marketing manual page's `.manual-block p`
+   colour, at (0,1,1), would otherwise repaint a card's hint text. */
+
 /* A contained card: an identity header over its content or a one-line status
    narration. The whole badge wobbles on hover as one, including while the
    pointer is on nested controls; buttons keep their own hover highlights
    without scaling. */
-.card {
+.content .card {
   position: relative;
   margin-bottom: 0.8rem;
   padding: 0.3rem 0.5rem 0.7rem;
@@ -405,7 +417,7 @@ body {
     box-shadow 160ms ease;
 }
 
-.card:hover {
+.content .card:hover {
   transform: scale(1.015);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
   z-index: 1;
@@ -413,7 +425,7 @@ body {
 
 /* The card's top row: identity on the left, `.card-actions` on the right.
    Each card sets its own gap and padding. */
-.card-header {
+.content .card-header {
   display: flex;
   align-items: center;
 }
@@ -421,21 +433,21 @@ body {
 /* A status line under the card header. `.waiting` is the browser sign-in
    hand-off: the line gains the in-flight spinner (global .spin) beside the
    text. */
-.card-prompt {
+.content .card-prompt {
   margin: 0.35rem 0 0 0.5rem;
   padding: 0.5rem 0.75rem;
   font-size: 0.82rem;
   color: var(--text-secondary);
 }
 
-.card-prompt.waiting {
+.content .card-prompt.waiting {
   display: flex;
   align-items: center;
   gap: 0.45rem;
 }
 
 /* The line a card list shows when it has nothing to list. */
-.empty-hint {
+.content .empty-hint {
   margin: 0.35rem 0 0;
   font-size: 0.85rem;
   line-height: 1.5;
@@ -444,7 +456,7 @@ body {
 
 /* The dashed add entry under a card list (Add devserver, Add gateway): a
    full-width button brightening toward the accent on hover. */
-.add-entry {
+.content .add-entry {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -465,7 +477,7 @@ body {
     color 160ms ease;
 }
 
-.add-entry:hover {
+.content .add-entry:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--btn-border));
   color: var(--text);
   background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
@@ -473,11 +485,11 @@ body {
 
 /* Reduced-motion: keep the shadow hover cue, drop the wobble. */
 @media (prefers-reduced-motion: reduce) {
-  .card {
+  .content .card {
     transition: box-shadow 160ms ease;
   }
 
-  .card:hover {
+  .content .card:hover {
     transform: none;
   }
 }
