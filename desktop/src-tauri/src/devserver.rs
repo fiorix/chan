@@ -2575,16 +2575,25 @@ pub(crate) mod log_capture {
                 tracing_subscriber::fmt()
                     .with_writer(self.clone())
                     .with_ansi(false)
-                    .with_max_level(tracing::Level::WARN)
+                    .with_max_level(tracing::Level::INFO)
                     .finish(),
             )
         }
 
         /// The captured `WARN` lines, in order.
         pub(crate) fn warnings(&self) -> Vec<String> {
+            self.at(" WARN ")
+        }
+
+        /// The captured `INFO` lines, in order.
+        pub(crate) fn infos(&self) -> Vec<String> {
+            self.at(" INFO ")
+        }
+
+        fn at(&self, level: &str) -> Vec<String> {
             String::from_utf8_lossy(&self.0.lock().unwrap())
                 .lines()
-                .filter(|line| line.contains(" WARN "))
+                .filter(|line| line.contains(level))
                 .map(str::to_owned)
                 .collect()
         }

@@ -2320,12 +2320,8 @@ mod tests {
             notice_tx.send(event.payload().to_string()).unwrap();
         });
         // A rejected PAT is cleared before the browser leg while the old
-        // poll still runs, and a connect reports its own load failures.
-        for (status, pending_signin) in [
-            (GatewayStatus::Connecting, true),
-            (GatewayStatus::Connecting, false),
-            (GatewayStatus::Disconnected, false),
-        ] {
+        // poll still runs, and the sign-in reports its own outcome.
+        for (status, pending_signin) in [(GatewayStatus::Connecting, true)] {
             for failing in [false, true] {
                 let cancel = install_polled_runtime(&state, origin, status, pending_signin);
                 let _absent = (!failing).then(|| auth::absent_gateway_pat_for_test(origin));
@@ -2359,6 +2355,161 @@ mod tests {
                 assert_eq!(notice_rx.try_iter().count(), 0, "{case}");
             }
         }
+    }
+
+    /// A runtime no connect or sign-in is driving is the poll's, whatever its
+    /// status reads: a connect whose first fetch failed leaves it Connecting
+    /// with the poll as its only driver, and an expired sign-in leaves it
+    /// Disconnected beside the poll an earlier connect started.
+    #[tokio::test]
+    async fn the_roster_poll_drives_a_runtime_no_attempt_owns() {
+        let origin = "https://keychain-unowned.example.test";
+        let (_dir, state) = pat_load_test_state(origin);
+        let app = tauri::test::mock_app();
+        let error = "reading gateway keychain: injected poll failure";
+        let _failure = auth::fail_gateway_pat_load_for_test(origin, error);
+        for status in [GatewayStatus::Connecting, GatewayStatus::Disconnected] {
+            let cancel = install_polled_runtime(&state, origin, status, false);
+            for _ in 0..ROSTER_UNREACHABLE_FAILURES {
+                let flow = roster_poll_tick(
+                    app.handle(),
+                    &state,
+                    "gw-keychain",
+                    origin,
+                    UNUSED_ROSTER_URL,
+                    &cancel,
+                )
+                .await;
+                assert!(flow.is_continue());
+            }
+            let view = state.gateway_manager.view("gw-keychain").unwrap();
+            assert_eq!(
+                (view.status, view.last_error.as_deref()),
+                (GatewayStatus::Unreachable, Some(error)),
+                "a {status:?} runtime no attempt owns"
+            );
+        }
+    }
+
+    /// A poll replaced while its PAT load was in flight applies nothing to
+    /// the runtime its successor owns: neither a load failure nor a missing
+    /// credential.
+    #[tokio::test]
+    async fn a_cancelled_poll_applies_no_pat_load_outcome() {
+        use tauri::Listener;
+
+        let origin = "https://keychain-cancelled.example.test";
+        let (_dir, state) = pat_load_test_state(origin);
+        let app = tauri::test::mock_app();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            notice_tx.send(event.payload().to_string()).unwrap();
+        });
+        for failing in [true, false] {
+            let cancel = install_polled_runtime(&state, origin, GatewayStatus::Connected, false);
+            cancel.cancel();
+            let _absent = (!failing).then(|| auth::absent_gateway_pat_for_test(origin));
+            let _failure =
+                failing.then(|| auth::fail_gateway_pat_load_for_test(origin, "injected failure"));
+            let flow = roster_poll_tick(
+                app.handle(),
+                &state,
+                "gw-keychain",
+                origin,
+                UNUSED_ROSTER_URL,
+                &cancel,
+            )
+            .await;
+            let case = if failing {
+                "a load failure"
+            } else {
+                "a missing PAT"
+            };
+            let rt = state
+                .gateway_manager
+                .runtimes
+                .lock()
+                .unwrap()
+                .remove("gw-keychain");
+            let rt = rt.unwrap_or_else(|| panic!("a cancelled poll signed out on {case}"));
+            assert_eq!(
+                (rt.status, rt.consecutive_failures, rt.last_error),
+                (GatewayStatus::Connected, 0, None),
+                "a cancelled poll applied {case}"
+            );
+            assert!(
+                flow.is_break(),
+                "a cancelled poll kept polling after {case}"
+            );
+            assert_eq!(notice_rx.try_iter().count(), 0, "{case}");
+        }
+    }
+
+    /// A keychain that keeps failing warns once for the streak, not every
+    /// round, and the first round that loads the PAT again logs one info
+    /// line with how many rounds failed.
+    #[tokio::test]
+    async fn the_roster_poll_warns_once_per_pat_load_failure_streak() {
+        let origin = "https://keychain-streak.example.test";
+        let (_dir, state) = pat_load_test_state(origin);
+        let app = tauri::test::mock_app();
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let cancel = install_polled_runtime(&state, origin, GatewayStatus::Connected, false);
+        let tick = || {
+            roster_poll_tick(
+                app.handle(),
+                &state,
+                "gw-keychain",
+                origin,
+                UNUSED_ROSTER_URL,
+                &cancel,
+            )
+        };
+        let failure = auth::fail_gateway_pat_load_for_test(origin, "injected streak failure");
+        for _ in 0..ROSTER_UNREACHABLE_FAILURES {
+            assert!(tick().await.is_continue());
+        }
+        let warned = lines
+            .warnings()
+            .into_iter()
+            .filter(|line| line.contains("could not load the gateway PAT"))
+            .count();
+        assert_eq!(
+            warned,
+            1,
+            "a failing streak warns once: {:?}",
+            lines.warnings()
+        );
+
+        drop(failure);
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.into(),
+            auth::StoredPat {
+                id: "streak".into(),
+                secret: "test-secret".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        for _ in 0..2 {
+            assert!(tick().await.is_continue());
+        }
+        auth::test_gateway_pats().lock().unwrap().remove(origin);
+        let recovered: Vec<String> = lines
+            .infos()
+            .into_iter()
+            .filter(|line| line.contains("loaded the gateway PAT again"))
+            .collect();
+        assert_eq!(
+            recovered.len(),
+            1,
+            "the first round that loads the PAT again logs once: {recovered:?}"
+        );
+        assert!(
+            recovered[0].contains(&format!("failed_rounds={ROSTER_UNREACHABLE_FAILURES}")),
+            "the recovery line names the streak's length: {recovered:?}"
+        );
     }
 
     #[tokio::test]
