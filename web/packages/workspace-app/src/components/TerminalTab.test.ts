@@ -120,7 +120,10 @@ describe("TerminalTab initial fit", () => {
     expect(query.get("rows")).toBe("41");
   });
 
-  test("still dials when the initial fit cannot measure the host", async () => {
+  // A size on the dial fits the live PTY before the attach replay, so the
+  // dial declares only a grid the fitter measured; xterm's 80x24 default is
+  // not one.
+  test("dials without a size when the initial fit throws on the host", async () => {
     xterm.fit.failure = new Error("host is not measurable");
     globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
 
@@ -129,8 +132,18 @@ describe("TerminalTab initial fit", () => {
     expect(xterm.fit.calls).toBe(1);
     expect(TerminalSocket.all).toHaveLength(1);
     const query = new URL(TerminalSocket.all[0].url, "http://chan.test").searchParams;
-    expect(query.get("cols")).toBe("80");
-    expect(query.get("rows")).toBe("24");
+    expect([query.get("cols"), query.get("rows")]).toEqual([null, null]);
+  });
+
+  test("dials without a size when the initial fit declines an unsettled host", async () => {
+    globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
+
+    await renderTerminal(terminalTab({ terminalSessionId: "session-live" }), true);
+
+    expect(xterm.fit.calls).toBe(1);
+    const query = new URL(TerminalSocket.all[0].url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")]).toEqual([null, null]);
+    expect(query.get("session")).toBe("session-live");
   });
 });
 

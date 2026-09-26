@@ -51,14 +51,30 @@ describe("terminal resize helpers", () => {
     ).toEqual({ cols: 2, rows: 1 });
   });
 
-  test("runs fit and reports the current terminal size", () => {
+  test("runs fit, reports the current terminal size, and says the grid was measured", () => {
     const details: string[] = [];
     const fit = vi.fn();
-    expect(runTerminalFit({ fit }, { cols: 80, rows: 24 }, (detail) => details.push(detail))).toBe(
-      true,
-    );
+    const proposeDimensions = () => ({ cols: 80, rows: 24 });
+    expect(
+      runTerminalFit({ fit, proposeDimensions }, { cols: 80, rows: 24 }, (detail) => details.push(detail)),
+    ).toBe(true);
     expect(fit).toHaveBeenCalledTimes(1);
     expect(details).toEqual(["80x24"]);
+  });
+
+  test("says the grid was not measured when the fitter declines the host", () => {
+    const fit = vi.fn();
+    expect(runTerminalFit({ fit, proposeDimensions: () => undefined }, { cols: 80, rows: 24 }, () => {})).toBe(
+      false,
+    );
+    expect(fit).toHaveBeenCalledTimes(1);
+  });
+
+  test("says the grid was not measured when a detached or hidden host proposes no finite grid", () => {
+    // xterm's fitter reads the host's computed size, which a detached or
+    // display:none host does not have, and proposes NaN.
+    const proposeDimensions = () => ({ cols: Number.NaN, rows: Number.NaN });
+    expect(runTerminalFit({ fit: vi.fn(), proposeDimensions }, { cols: 80, rows: 24 }, () => {})).toBe(false);
   });
 
   test("absorbs fit exceptions while layout settles", () => {
@@ -68,6 +84,7 @@ describe("terminal resize helpers", () => {
           fit() {
             throw new Error("not measurable");
           },
+          proposeDimensions: () => ({ cols: 80, rows: 24 }),
         },
         { cols: 80, rows: 24 },
         () => {},

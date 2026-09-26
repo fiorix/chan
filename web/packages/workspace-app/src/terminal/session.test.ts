@@ -12,6 +12,13 @@ describe("terminalWsPath", () => {
     ).toBe("/api/terminal/ws?cols=100&rows=31&tab_name=Terminal");
   });
 
+  test("declares no size when the caller has no measured grid", () => {
+    expect(terminalWsPath({ tabName: "Terminal" })).toBe("/api/terminal/ws?tab_name=Terminal");
+    expect(terminalWsPath({ tabName: "Terminal", sessionId: "term_abc" })).toBe(
+      "/api/terminal/ws?tab_name=Terminal&session=term_abc&since=0",
+    );
+  });
+
   test("reattach always requests the full ring (since=0)", () => {
     // `since` is the CONSTANT 0, not a byte cursor: a reattach always
     // feeds a fresh empty xterm, and explicit 0 (vs absent) makes the
