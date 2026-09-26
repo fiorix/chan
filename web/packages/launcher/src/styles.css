@@ -9,9 +9,14 @@
    `:root` and `body` rewritten to the demo frame at build time. There, the
    site's rules meet these ones.
 
-   This sheet owns the primitives. A component adds modifiers and layout on
-   top of one but never redeclares a primitive's box, so a primitive changes
-   here once and every element that wears it follows. */
+   This sheet owns the primitives it defines. Library and Gateways wear the
+   card primitives below; their own rules add spacing on top (a header's gap
+   and padding, one margin) and style the parts inside a card, never the
+   primitive's box. Two surfaces draw a box of their own instead, which a change here does not
+   reach: TopBar's scoped `.icon-btn` redeclares the whole button (a 6px
+   radius and `--text`, against this sheet's 7px and `--text-secondary`), and
+   the update modal's footer in App.svelte styles its own `.primary` and
+   `.secondary` buttons rather than wearing `.btn`. */
 
 :root {
   --bg: #1c1c1e;
