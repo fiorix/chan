@@ -494,8 +494,12 @@ mod linux {
 
     impl StartupRestore {
         pub(crate) fn take() -> Self {
-            let manifest_path = manifest_path();
-            let named_fds = chan_systemd::take_listen_fds();
+            Self::from_inherited(manifest_path(), chan_systemd::take_listen_fds())
+        }
+
+        /// Pair the fds a restart handed down with the manifest at
+        /// `manifest_path`.
+        fn from_inherited(manifest_path: PathBuf, named_fds: Vec<chan_systemd::NamedFd>) -> Self {
             // Every chan name, PTY masters and ring files alike, for the
             // paths that clean up whatever was inherited. Only a PTY name
             // parses to a child pid, so a ring name never authorizes a signal.
@@ -755,13 +759,7 @@ mod linux {
             // session whose fd was already cleaned at take(), or that parked
             // no ring file, gets a harmless FDSTOREREMOVE for a name the
             // store does not hold.)
-            let mut invalid_fd_names: Vec<String> = orphan_fd_names;
-            invalid_fd_names.extend(skipped_sessions.iter().flat_map(|session| {
-                [
-                    fdstore_fd_name(&session.session_id, session.child_pid),
-                    fdstore_ring_fd_name(&session.session_id, session.child_pid),
-                ]
-            }));
+            let invalid_fd_names = fds_to_remove(orphan_fd_names, &skipped_sessions);
             if !invalid_fd_names.is_empty() {
                 chan_systemd::fdstore_remove_many(invalid_fd_names.iter().map(String::as_str));
             }
@@ -829,6 +827,20 @@ mod linux {
         chan_workspace::paths::config_dir()
             .join("devserver")
             .join("fdstore-restart.json")
+    }
+
+    fn fds_to_remove(
+        orphan_fd_names: Vec<String>,
+        skipped_sessions: &[FdStoreSkippedSession],
+    ) -> Vec<String> {
+        let mut names = orphan_fd_names;
+        names.extend(skipped_sessions.iter().flat_map(|session| {
+            [
+                fdstore_fd_name(&session.session_id, session.child_pid),
+                fdstore_ring_fd_name(&session.session_id, session.child_pid),
+            ]
+        }));
+        names
     }
 
     pub(crate) fn child_pid_from_name(name: &str) -> Option<u32> {
@@ -1588,6 +1600,115 @@ mod linux {
                 "an unreadable unit falls back to the smaller maximum chan has rendered"
             );
             assert_eq!(resolve_store_max(Some("junk"), || None), 512);
+        }
+
+        fn inherited(name: &str) -> chan_systemd::NamedFd {
+            chan_systemd::NamedFd {
+                name: name.to_string(),
+                fd: std::fs::File::open("/dev/null").unwrap().into(),
+            }
+        }
+
+        /// A manifest at a fresh path naming the sessions `entries` describe.
+        fn manifest_file(entries: Vec<(&str, Option<String>)>) -> PathBuf {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fdstore-restart.json");
+            std::mem::forget(dir);
+            let manifest = RestartManifest {
+                version: MANIFEST_VERSION,
+                library_id: "lib-test".into(),
+                boot_id: None,
+                sessions: entries
+                    .into_iter()
+                    .map(|(id, ring_fd_name)| {
+                        let entry = manifest_entry(id, false);
+                        ManifestSession {
+                            fd_name: entry.fd_name,
+                            ring_fd_name,
+                            meta: entry.meta,
+                            child_start_time: None,
+                            replay_b64: String::new(),
+                        }
+                    })
+                    .collect(),
+            };
+            write_manifest(&path, &manifest).unwrap();
+            path
+        }
+
+        // The restore hands a session the ring file named after its own
+        // metadata, and nothing else: a ring the manifest names under some
+        // other name, or that no entry names, is an orphan the boot removes.
+        // (/dev/null stands in for a PTY master: it has no tty index, so the
+        // liveness check passes it.)
+        #[test]
+        fn restore_claims_a_ring_only_under_its_derived_name() {
+            let derived = fdstore_ring_fd_name("a", Some(7));
+            let path = manifest_file(vec![
+                ("a", Some(derived.clone())),
+                ("b", Some("chan.ring.someone-else.7".to_string())),
+            ]);
+            let restore = StartupRestore::from_inherited(
+                path,
+                vec![
+                    inherited(&fdstore_fd_name("a", Some(7))),
+                    inherited(&derived),
+                    inherited(&fdstore_fd_name("b", Some(7))),
+                    inherited("chan.ring.someone-else.7"),
+                    inherited(&fdstore_ring_fd_name("unnamed", Some(9))),
+                ],
+            );
+            let ring_of = |id: &str| {
+                restore
+                    .imports
+                    .iter()
+                    .find(|import| import.meta.session_id == id)
+                    .map(|import| import.ring_fd.is_some())
+            };
+            assert_eq!(ring_of("a"), Some(true), "the derived name is claimed");
+            assert_eq!(ring_of("b"), Some(false), "a foreign name is not claimed");
+            let mut orphans = restore.orphan_fd_names.clone();
+            orphans.sort();
+            assert_eq!(
+                orphans,
+                vec![
+                    "chan.ring.someone-else.7".to_string(),
+                    fdstore_ring_fd_name("unnamed", Some(9)),
+                ],
+                "unclaimed rings are orphans"
+            );
+        }
+
+        #[test]
+        fn a_skipped_session_loses_its_ring_file_with_its_pty() {
+            let skipped = FdStoreSkippedSession {
+                tenant_prefix: "/t".into(),
+                session_id: "s".into(),
+                window_id: None,
+                child_pid: Some(42),
+                reason: "test".into(),
+            };
+            let names = fds_to_remove(vec!["chan.ring.orphan.1".into()], &[skipped]);
+            assert_eq!(
+                names,
+                vec![
+                    "chan.ring.orphan.1".to_string(),
+                    fdstore_fd_name("s", Some(42)),
+                    fdstore_ring_fd_name("s", Some(42)),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_ring_name_authorizes_no_signal() {
+            assert_eq!(
+                child_pid_from_name(&fdstore_fd_name("s", Some(42))),
+                Some(42)
+            );
+            assert_eq!(
+                child_pid_from_name(&fdstore_ring_fd_name("s", Some(42))),
+                None
+            );
         }
 
         #[test]
