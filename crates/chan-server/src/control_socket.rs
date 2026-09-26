@@ -160,11 +160,12 @@ enum WindowCommand {
         #[serde(rename = "tabName", skip_serializing_if = "Option::is_none")]
         tab_name: Option<String>,
     },
-    // Every survey still open in the target window, empty when none is: a
-    // survey absent from the list has no request behind it, and one listed is
-    // still waiting for its reply. Sent to one socket, never broadcast: when a
-    // window's socket attaches, and when its pump lagged and may have skipped
-    // an `open_survey` or `close_survey`.
+    // Every survey still open in the target window when the frame is built,
+    // empty when none is: a survey absent from the list has no request behind
+    // it, and one listed may have closed since (its reply then answers 404).
+    // Sent to one socket, never broadcast: when a window's socket attaches,
+    // and when its pump lagged and may have skipped an `open_survey` or
+    // `close_survey`.
     SurveySync {
         surveys: Vec<SurveySyncEntry>,
     },
@@ -2686,9 +2687,11 @@ where
     let (survey_id, rx) = survey_bus.register();
     spec.survey_id = survey_id.clone();
     // Record the survey as open BEFORE pushing its overlay, so a window that
-    // attaches too late for the push below is synced it on attach. Every
+    // attaches too late for the push below is synced it on attach. An
+    // accepted reply takes the survey out at once (`complete_survey`). Every
     // close below hands this record to `send_survey_close_commands`, which
-    // drops it before the close goes out; any other exit drops it on return.
+    // drops it before the close goes out; the fan-out failure below drops it
+    // on return, and an aborted handler with its future.
     let open = survey_bus.record_open(&windows, tab_name, &spec);
     // Fan the overlay out to every owning window. First reply wins; later
     // ones find the id already removed and no-op. A send failure is fatal
