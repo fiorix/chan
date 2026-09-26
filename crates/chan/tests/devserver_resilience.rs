@@ -106,18 +106,54 @@ impl Sandbox {
 #[derive(Clone)]
 struct Transcript {
     lines: Arc<Mutex<Vec<String>>>,
+    /// The drain threads, joined once the child has exited so a read after
+    /// the exit sees every line the child wrote.
+    readers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
+
+/// How long the drain threads may take to reach EOF after the child has
+/// exited. The child's pipes close with it, so they finish at once unless a
+/// process it started still holds a pipe, which fails the test rather than
+/// letting it read a partial transcript.
+const READERS_AFTER_EXIT: Duration = Duration::from_secs(10);
 
 impl Transcript {
     fn capture(child: &mut Child) -> Self {
         let lines = Arc::new(Mutex::new(Vec::new()));
+        let mut readers = Vec::new();
         if let Some(out) = child.stdout.take() {
-            drain(out, lines.clone());
+            readers.push(drain(out, lines.clone()));
         }
         if let Some(err) = child.stderr.take() {
-            drain(err, lines.clone());
+            readers.push(drain(err, lines.clone()));
         }
-        Self { lines }
+        Self {
+            lines,
+            readers: Arc::new(Mutex::new(readers)),
+        }
+    }
+
+    /// Join the drain threads. Call only once the child has exited: until
+    /// then its pipes stay open and the readers never finish.
+    async fn join_readers(&self) {
+        let deadline = Instant::now() + READERS_AFTER_EXIT;
+        while !self
+            .readers
+            .lock()
+            .unwrap()
+            .iter()
+            .all(std::thread::JoinHandle::is_finished)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the child exited but its output pipes stayed open for {READERS_AFTER_EXIT:?}: \
+                 a process it started still holds them"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        for reader in self.readers.lock().unwrap().drain(..) {
+            reader.join().expect("a transcript reader panicked");
+        }
     }
 
     fn find(&self, needle: &str) -> Option<String> {
@@ -148,14 +184,17 @@ impl Transcript {
     }
 }
 
-fn drain<R: std::io::Read + Send + 'static>(reader: R, lines: Arc<Mutex<Vec<String>>>) {
+fn drain<R: std::io::Read + Send + 'static>(
+    reader: R,
+    lines: Arc<Mutex<Vec<String>>>,
+) -> std::thread::JoinHandle<()> {
     use std::io::BufRead;
     std::thread::spawn(move || {
         let buf = std::io::BufReader::new(reader);
         for line in buf.lines().map_while(Result::ok) {
             lines.lock().unwrap().push(line);
         }
-    });
+    })
 }
 
 /// A spawned server process plus its captured output. Dropping it always
@@ -265,13 +304,8 @@ async fn start_devserver_in(
         }
         let exited = server.child.try_wait().expect("try_wait devserver");
         if exited.is_some() {
-            // The drain threads publish asynchronously, so the child's last
-            // words can still be in flight when its exit is observed.
-            let port_taken = server
-                .out
-                .wait_for(PORT_IN_USE, Duration::from_secs(2))
-                .await
-                .is_some();
+            server.out.join_readers().await;
+            let port_taken = server.out.find(PORT_IN_USE).is_some();
             let dump = server.out.dump();
             return if port_taken {
                 Startup::PortInUse(dump)
@@ -477,12 +511,18 @@ fn pid_alive(pid: u32) -> bool {
 
 /// Wait up to `timeout` for `server` to exit, returning its status and how
 /// long it took. `None` means it was still running at the deadline (the
-/// caller's `Drop` then force-kills it).
+/// caller's `Drop` then force-kills it). On an exit the transcript's readers
+/// are joined first, so it holds everything the child wrote; the elapsed time
+/// is taken at the exit, before that join.
 async fn wait_exit(server: &mut Server, timeout: Duration) -> Option<(ExitStatus, Duration)> {
     let start = Instant::now();
     loop {
         match server.child.try_wait().expect("try_wait") {
-            Some(status) => return Some((status, start.elapsed())),
+            Some(status) => {
+                let elapsed = start.elapsed();
+                server.out.join_readers().await;
+                return Some((status, elapsed));
+            }
             None if start.elapsed() >= timeout => return None,
             None => tokio::time::sleep(Duration::from_millis(50)).await,
         }
