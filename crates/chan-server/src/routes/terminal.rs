@@ -1161,19 +1161,26 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
     }
 }
 
-/// Give the PTY the size the client's renderer has before the attach prelude,
-/// so the redraw nudge that ends the prelude repaints at that size, not at the
-/// size an earlier client left, and a Resize frame the client sends after
-/// `ready` finds the PTY at its size already. Only a declared size is applied,
-/// and only when its cells differ from the PTY's: a resize to the same size
-/// would still echo a `resize` frame to every attached client.
+/// Give the PTY the size the client declared before the attach prelude, so
+/// the redraw nudge that ends the prelude repaints at that size, not at the
+/// size an earlier client left. The SPA also sends a Resize frame when its
+/// socket opens, which this route reads only after the prelude; by then the
+/// PTY has its size already.
+///
+/// Only a declared size is applied, and only when its cells differ from the
+/// size last requested of the PTY (a resize to the same size would still echo
+/// a `resize` frame to every attached client). Comparing with the last
+/// request rather than the applied size is what makes the later of two
+/// fitting sockets, such as two windows re-attaching after a restart, the one
+/// whose size the PTY ends at.
+///
+/// The server applies what the client declares and cannot tell a measured
+/// grid from a provisional one: a client whose fitter could not measure its
+/// host yet and dials with its defaults gets the PTY fitted to those defaults
+/// here, then back when its measured Resize frame arrives.
 fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
-    let Some(size) = client_size else {
-        return;
-    };
-    let current = session.size();
-    if (current.cols, current.rows) != (size.cols, size.rows) {
-        session.resize(size);
+    if let Some(size) = client_size {
+        session.fit(size);
     }
 }
 
@@ -4148,16 +4155,18 @@ mod tests {
         let _gate = pty_test_lock();
         let state = crate::state::test_support::make_test_state(false);
         let (address, server) = serve_terminal_route(state.clone()).await;
-        let spawned = create_quiet_terminal(&state, "sleep 600");
+        let mut spawned = create_quiet_terminal(&state, "sleep 600");
         let id = spawned.id().to_owned();
         spawned.resize(pty_size(Some(90), Some(30)));
+        // The controller echoes a resize once it has applied it.
         let deadline = Instant::now() + PROBE_BUDGET;
-        while (spawned.size().cols, spawned.size().rows) != (90, 30) {
-            assert!(
-                Instant::now() < deadline,
-                "the PTY never took 90x30 within {PROBE_BUDGET:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, spawned.rx.recv()).await {
+                Ok(Ok(SessionEvent::Resize(size))) if (size.cols, size.rows) == (90, 30) => break,
+                Ok(Ok(_)) => {}
+                other => panic!("the PTY never took 90x30: {other:?}"),
+            }
         }
 
         let mut socket = dial_terminal(address, &format!("session={id}&since=0")).await;

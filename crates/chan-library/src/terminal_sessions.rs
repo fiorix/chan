@@ -1578,15 +1578,13 @@ impl AttachHandle {
         self.session.resize(size);
     }
 
-    /// The size the session last gave its PTY: the size it was spawned or
-    /// adopted with, then each resize the controller thread applied. A resize
-    /// still queued on the controller is not in it yet.
-    pub fn size(&self) -> PtySize {
-        *self
-            .session
-            .winsize
-            .lock()
-            .expect("terminal winsize poisoned")
+    /// Resize the PTY to `size` unless the size last asked of it has the
+    /// same cells, and say whether a resize was queued. The comparison is
+    /// with the last request, not the size the controller has applied, and
+    /// the check and the queueing hold one lock, so when two callers fit the
+    /// PTY the later caller's size is the size it ends at.
+    pub fn fit(&self, size: PtySize) -> bool {
+        self.session.fit(size)
     }
 
     /// Record whether a client has this session focused. Focusing resets the
@@ -3928,6 +3926,11 @@ struct Session {
     /// `attach_count > 0`.
     detached_at: AtomicI64,
     winsize: Mutex<PtySize>,
+    /// The size last asked of the PTY: its spawn or adoption size, then each
+    /// resize as it is queued on the controller, which applies it later
+    /// (`winsize`). A fit compares against this and queues under its lock,
+    /// so of two fits the later one's size is the size the PTY ends at.
+    requested_size: Mutex<PtySize>,
     focused: AtomicBool,
     bytes_since_focus: AtomicU64,
     in_alt_screen: AtomicBool,
@@ -4242,6 +4245,7 @@ impl Session {
             attach_count: AtomicUsize::new(0),
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(opts.size),
+            requested_size: Mutex::new(opts.size),
             focused: AtomicBool::new(false),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
@@ -4623,6 +4627,7 @@ impl Session {
             attach_count: AtomicUsize::new(0),
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(size),
+            requested_size: Mutex::new(size),
             focused: AtomicBool::new(false),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(state.alt_screen),
@@ -5157,7 +5162,25 @@ impl Session {
     }
 
     fn resize(&self, size: PtySize) {
+        let mut requested = self
+            .requested_size
+            .lock()
+            .expect("terminal requested size poisoned");
+        *requested = size;
         let _ = self.command_tx.send(PtyCommand::Resize(size));
+    }
+
+    fn fit(&self, size: PtySize) -> bool {
+        let mut requested = self
+            .requested_size
+            .lock()
+            .expect("terminal requested size poisoned");
+        if (requested.cols, requested.rows) == (size.cols, size.rows) {
+            return false;
+        }
+        *requested = size;
+        let _ = self.command_tx.send(PtyCommand::Resize(size));
+        true
     }
 
     fn set_focused(&self, focused: bool) {
@@ -6503,6 +6526,7 @@ mod tests {
             attach_count: AtomicUsize::new(0),
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(test_size()),
+            requested_size: Mutex::new(test_size()),
             focused: AtomicBool::new(false),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
