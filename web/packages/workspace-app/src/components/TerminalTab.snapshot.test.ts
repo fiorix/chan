@@ -18,12 +18,14 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
+import { WS_RECONNECT_BACKOFF_MAX_MS } from "../api/transport";
 import { ui } from "../state/store.svelte";
 import { readTerminalSnapshot, writeTerminalSnapshot } from "../terminal/snapshotCache";
 import {
   attach,
   installTerminalDom,
   mountTerminal,
+  output,
   receive,
   resetTerminals,
   seatTerminals,
@@ -43,6 +45,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Before resetTerminals, which puts back the requestAnimationFrame
+  // stand-in that uninstalling the fake clock removes.
+  vi.useRealTimers();
   resetTerminals();
   ui.terminalControl = startControl;
   localStorage.clear();
@@ -174,4 +179,28 @@ describe("resuming a reattach", () => {
       generation: "2",
     });
   });
+
+  for (const cached of [false, true]) {
+    test(`a dial that fails before its session frame leaves the next one on the live cursor${cached ? ", over a cached snapshot" : ""}`, async () => {
+      vi.useFakeTimers();
+      if (cached) writeTerminalSnapshot(SESSION, SNAPSHOT);
+      const [tab] = seatTerminals([terminalTab()]);
+      await mountTerminal(TerminalTab, tab!);
+      const first = TerminalSocket.all.at(-1)!;
+      await attach(first, { id: SESSION, generation: 2, seq: 10 });
+      await receive(first, { type: "ready", cols: 80, rows: 24 });
+      await output(first, "hello");
+
+      // A crash restart's window: the socket drops, and the redial is
+      // refused before any server answers it.
+      first.close();
+      await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+      TerminalSocket.all.at(-1)!.failDial();
+      await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+
+      expect(TerminalSocket.all, "one redial after each close").toHaveLength(3);
+      expect(xterm.terminals, "the xterm that shows the screen").toHaveLength(1);
+      expect(dialed(TerminalSocket.all[2]!)).toEqual({ since: "15", generation: "2" });
+    });
+  }
 });

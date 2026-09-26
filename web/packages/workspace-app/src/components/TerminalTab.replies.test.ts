@@ -16,6 +16,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
+import { WS_RECONNECT_BACKOFF_MAX_MS } from "../api/transport";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import {
   attach,
@@ -36,6 +37,9 @@ installTerminalDom();
 const CPR = "\x1b[12;1R";
 
 afterEach(() => {
+  // Before resetTerminals, which puts back the requestAnimationFrame
+  // stand-in that uninstalling the fake clock removes.
+  vi.useRealTimers();
   resetTerminals();
 });
 
@@ -71,6 +75,20 @@ describe("answers xterm generates while parsing output", () => {
     await output(socket, "\x1b[6n");
 
     expect(frames(socket, "input")).toEqual([]);
+  });
+
+  test("an answer to history replayed on a redial of a live terminal is dropped", async () => {
+    vi.useFakeTimers();
+    const { term, socket: first } = await attached();
+    first.close();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+    const redial = TerminalSocket.all.at(-1)!;
+    expect(redial, "the redial").not.toBe(first);
+    await attach(redial, { id: "sess-1" });
+    term.replyDuringWrite = CPR;
+    await output(redial, "\x1b[6n");
+
+    expect(frames(redial, "input")).toEqual([]);
   });
 
   test("typing reaches the PTY and, with broadcast on, the broadcast group", async () => {
