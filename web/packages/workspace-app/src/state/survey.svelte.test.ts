@@ -183,6 +183,19 @@ describe("a reply the server refuses as unknown", () => {
   });
 });
 
+describe("a 404 without the reply route's refusal", () => {
+  // A gateway answers a bare 404 when the devserver's tunnel is down or an
+  // authorization is cancelled; the survey may still be parked.
+  test("keeps the survey up for a retry", async () => {
+    vi.spyOn(api, "surveyReply").mockRejectedValue(new ApiError(404, "not found"));
+    showSurvey(spec(), "t1");
+    await dismissSurvey("t1");
+    expect(surveyFor("t1")?.surveyId).toBe("survey-7");
+    expect(surveyBusy("t1")).toBe(false);
+    expect(notices).toEqual(["survey dismiss failed: not found"]);
+  });
+});
+
 describe("a reply that fails any other way", () => {
   test.each(
     REPLIES.flatMap(([reply, send]) => [
