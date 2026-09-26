@@ -1,5 +1,8 @@
 export type FitLike = {
   fit(): void;
+  /// The grid the host would hold. Nothing, or NaN from a host with no
+  /// computed size, while the host cannot be measured.
+  proposeDimensions(): { cols: number; rows: number } | null | undefined;
 };
 
 export type SizedTerminal = {
@@ -31,6 +34,10 @@ export function proposeGhosttyDimensions(
   };
 }
 
+/// Fit `term` to its host and say whether the host was measured. A detached or
+/// hidden host, or one whose cell metrics are not known yet, has no grid: the
+/// fitter declines it and the terminal keeps the grid it had. A throw is
+/// absorbed the same way while layout settles.
 export function runTerminalFit(
   fit: FitLike | null,
   term: SizedTerminal | null,
@@ -39,7 +46,8 @@ export function runTerminalFit(
   try {
     fit?.fit();
     if (term) onStatusDetail(`${term.cols}x${term.rows}`);
-    return true;
+    const grid = fit?.proposeDimensions();
+    return Boolean(grid && Number.isFinite(grid.cols) && Number.isFinite(grid.rows));
   } catch {
     return false;
   }

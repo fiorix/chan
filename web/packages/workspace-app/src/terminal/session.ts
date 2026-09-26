@@ -1,8 +1,11 @@
 import { usesStandaloneFiles } from "../api/client";
 
 export type TerminalWsPathOpts = {
-  cols: number;
-  rows: number;
+  /// The grid the renderer measured on its host. The server fits a live PTY
+  /// to a declared size before the attach replay, so a caller with no
+  /// measured grid omits both and the PTY keeps its size.
+  cols?: number;
+  rows?: number;
   tabName: string;
   tabGroup?: string | null;
   windowId?: string | null;
@@ -29,11 +32,12 @@ export type TerminalWsPathOpts = {
 };
 
 export function terminalWsPath(opts: TerminalWsPathOpts): string {
-  const params = new URLSearchParams({
-    cols: String(opts.cols),
-    rows: String(opts.rows),
-    tab_name: opts.tabName,
-  });
+  const params = new URLSearchParams();
+  if (opts.cols !== undefined && opts.rows !== undefined) {
+    params.set("cols", String(opts.cols));
+    params.set("rows", String(opts.rows));
+  }
+  params.set("tab_name", opts.tabName);
   // Only non-default groups go on the wire; the server defaults the
   // per-session tab_group to "default" when absent, keeping the common
   // case's URL short.

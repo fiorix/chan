@@ -315,6 +315,10 @@
   let receivedSeq = 0;
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  // Whether a fit has measured this xterm's grid on its host. Until one has,
+  // the grid is the renderer's default, which the dial must not declare: a
+  // declared size fits the live PTY before the attach replay.
+  let gridMeasured = false;
   let status = $state<"closed" | "connecting" | "connected" | "exited">("closed");
   let statusDetail = $state("");
   let missedBytes = $state(0);
@@ -380,11 +384,7 @@
   // macOS display/system sleep in WKWebView; the detector catches it off the
   // wall clock instead.
   let disposeWakeGap: (() => void) | null = null;
-  const trailingFit = createTrailingFitScheduler(() => {
-    runTerminalFit(fit, term, (detail) => {
-      statusDetail = detail;
-    });
-  });
+  const trailingFit = createTrailingFitScheduler(fitToHost);
   // While output arrives at an unfocused terminal the unseen-output
   // dot pulses; this timer flips it solid once output has been quiet
   // for ACTIVITY_PULSE_QUIET_MS.
@@ -983,26 +983,30 @@
       // not to the host, so a narrower grid just moves the content it covers.
       // This FitLike keeps upstream's measurement and clamp behavior over the
       // whole content box.
+      const proposeGhosttyGrid = () => {
+        const metrics = ghosttyTerm.renderer?.getMetrics();
+        if (!metrics) return null;
+        const style = window.getComputedStyle(terminalHost);
+        return proposeGhosttyDimensions(
+          {
+            width: terminalHost.clientWidth,
+            height: terminalHost.clientHeight,
+          },
+          {
+            top: Number.parseInt(style.getPropertyValue("padding-top")) || 0,
+            right:
+              Number.parseInt(style.getPropertyValue("padding-right")) || 0,
+            bottom:
+              Number.parseInt(style.getPropertyValue("padding-bottom")) || 0,
+            left: Number.parseInt(style.getPropertyValue("padding-left")) || 0,
+          },
+          metrics,
+        );
+      };
       fit = {
+        proposeDimensions: proposeGhosttyGrid,
         fit() {
-          const metrics = ghosttyTerm.renderer?.getMetrics();
-          if (!metrics) return;
-          const style = window.getComputedStyle(terminalHost);
-          const proposed = proposeGhosttyDimensions(
-            {
-              width: terminalHost.clientWidth,
-              height: terminalHost.clientHeight,
-            },
-            {
-              top: Number.parseInt(style.getPropertyValue("padding-top")) || 0,
-              right:
-                Number.parseInt(style.getPropertyValue("padding-right")) || 0,
-              bottom:
-                Number.parseInt(style.getPropertyValue("padding-bottom")) || 0,
-              left: Number.parseInt(style.getPropertyValue("padding-left")) || 0,
-            },
-            metrics,
-          );
+          const proposed = proposeGhosttyGrid();
           if (
             !proposed ||
             (proposed.cols === ghosttyTerm.cols &&
@@ -1203,10 +1207,9 @@
     resizeObserver.observe(host);
     // Measure before dialing so a fresh PTY starts at the renderer's real
     // grid. A hidden or unsettled host can make the fitter decline or throw;
-    // runTerminalFit absorbs that and the connection still uses the defaults.
-    runTerminalFit(fit, term, (detail) => {
-      statusDetail = detail;
-    });
+    // runTerminalFit absorbs that and the dial then declares no size.
+    gridMeasured = false;
+    fitToHost();
     // This xterm is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
     // carried-over cursor would make the server skip everything the
@@ -1338,8 +1341,8 @@
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const path = withTokenQuery(
       terminalWsPath({
-        cols: term.cols,
-        rows: term.rows,
+        cols: gridMeasured ? term.cols : undefined,
+        rows: gridMeasured ? term.rows : undefined,
         tabName: terminalTabName(tab),
         tabGroup: terminalTabGroup(tab),
         windowId: sessionWindowId(),
@@ -1953,12 +1956,15 @@
     return true;
   }
 
-  function queueFit(): void {
-    requestAnimationFrame(() => {
-      runTerminalFit(fit, term, (detail) => {
-        statusDetail = detail;
-      });
+  function fitToHost(): void {
+    const measured = runTerminalFit(fit, term, (detail) => {
+      statusDetail = detail;
     });
+    if (measured) gridMeasured = true;
+  }
+
+  function queueFit(): void {
+    requestAnimationFrame(fitToHost);
     // Trailing-edge fit. ResizeObserver sometimes misses or swallows
     // the FINAL resize event of a drag gesture (a browser quirk: the
     // observer batches and can collapse intermediate sizes when the
