@@ -60,6 +60,14 @@ use ring::{RingFile, TerminalState};
 
 const BROADCAST_CAP: usize = 1024;
 
+/// The most one PTY read takes. Each read is one ring push and, while the
+/// ring is mirrored into its file, one append there, two to four `pwrite`
+/// calls whatever its size, so fewer, larger reads cost fewer calls. How
+/// much a read returns is the PTY's to decide: under a writer running flat
+/// out a Linux master returns about 4 KiB at a time and seldom 8 KiB or
+/// more, so this lifts the cap rather than setting the size.
+const PTY_READ_BYTES: usize = 64 * 1024;
+
 /// Explicitly closed session ids remembered for reattach refusal. They live in
 /// memory only, so a server restart forgets them; the bound keeps a
 /// long-running server's memory flat while covering far more closes than a
@@ -4208,7 +4216,7 @@ impl Session {
                     let _running = running;
                     #[cfg(target_os = "linux")]
                     let mut wait = ReaderWait::default();
-                    let mut buf = [0u8; 8192];
+                    let mut buf = vec![0u8; PTY_READ_BYTES];
                     loop {
                         #[cfg(target_os = "linux")]
                         if !session.reader_may_read(&mut wait) {
@@ -4557,7 +4565,7 @@ impl Session {
                 .spawn(move || {
                     let _running = running;
                     let mut wait = ReaderWait::default();
-                    let mut buf = [0u8; 8192];
+                    let mut buf = vec![0u8; PTY_READ_BYTES];
                     loop {
                         if !session.reader_may_read(&mut wait) {
                             break;
