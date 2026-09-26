@@ -925,8 +925,8 @@
 
   /// Forgiving-clicks: separate drag-detect from click-to-select hit
   /// radii. The drag/pan disambiguation uses a tight 4px slack (so
-  /// clicking on empty canvas near a node still reads as "pan", not
-  /// "grab"). The click-to-select tap uses a wider 10px slack so
+  /// dragging on empty canvas near a node still pans rather than
+  /// grabbing it). The click-to-select tap uses a wider 10px slack so
   /// users don't need to zoom in to register clicks on small nodes,
   /// matching the typical UX pattern
   /// `hitRadius = strokeRadius + 8-12px`. Same `pickNode` covers
@@ -1536,8 +1536,12 @@
     } else if (panStart) {
       panStart = null;
       if (!moved) {
-        // Background tap clears selection.
-        onSelect(null);
+        // A press past the drag slack but inside the click slack starts a
+        // pan, and the hover there already shows the pointer, so a still
+        // release selects that node; a tap on empty canvas clears the
+        // selection.
+        const tapped = pickNode(p.x, p.y, PICK_SLACK_CLICK_PX);
+        onSelect(tapped ? tapped.id : null);
       }
     }
     downAt = null;
