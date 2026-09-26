@@ -50,6 +50,15 @@ const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 /// root answers in microseconds, a network root's in milliseconds; two
 /// seconds is far above either and far below the probe's cadence.
 const ROOT_HEALTH_PROBE_BUDGET: Duration = Duration::from_secs(2);
+/// How many ticks in a row a mounted root's health check may run through the
+/// probe budget before its row reads unavailable. One missed budget can be a
+/// root that is only slow; a check still running when the next tick's budget
+/// runs out, a probe interval later, belongs to a root that has stopped
+/// answering.
+const ROOT_HEALTH_MISSED_TICKS: u32 = 2;
+/// The reason a mounted root's row shows while its health check has run
+/// through [`ROOT_HEALTH_MISSED_TICKS`] budgets without answering.
+const ROOT_NOT_ANSWERING: &str = "not answering: its health check has not returned";
 const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[cfg(test)]
@@ -657,31 +666,58 @@ impl Drop for WorkspaceCloseGuard<'_> {
 /// that wait on it.
 #[derive(Default)]
 struct RootProbe {
-    outcome: Mutex<Option<Result<bool, ChanError>>>,
+    state: Mutex<RootProbeState>,
     answered: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct RootProbeState {
+    outcome: Option<Result<bool, ChanError>>,
+    /// The check has answered, whether or not a tick has taken its outcome.
+    done: bool,
+    /// Ticks whose budget ran out while the check was still running.
+    missed: u32,
+}
+
+/// What one probe tick learned from a root's health check.
+enum RootProbeWait {
+    /// The check answered with this outcome.
+    Answered(Result<bool, ChanError>),
+    /// The tick's budget ran out with the check still running; `missed`
+    /// counts the ticks, this one included, whose budget it has run through.
+    Overdue { missed: u32 },
+    /// The check answered and another tick took its outcome.
+    Taken,
 }
 
 impl RootProbe {
     fn answer(&self, outcome: Result<bool, ChanError>) {
-        *self.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.outcome = Some(outcome);
+        state.done = true;
         self.answered.notify_all();
     }
 
-    /// The check's outcome once it answers, or `None` when it has not by
-    /// `deadline` (or another tick already took it).
-    fn wait_until(&self, deadline: Instant) -> Option<Result<bool, ChanError>> {
-        let mut outcome = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
+    /// Wait until `deadline` for the check's outcome.
+    fn wait_until(&self, deadline: Instant) -> RootProbeWait {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if let Some(answered) = outcome.take() {
-                return Some(answered);
+            if let Some(outcome) = state.outcome.take() {
+                return RootProbeWait::Answered(outcome);
+            }
+            if state.done {
+                return RootProbeWait::Taken;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return None;
+                state.missed += 1;
+                return RootProbeWait::Overdue {
+                    missed: state.missed,
+                };
             }
-            outcome = self
+            state = self
                 .answered
-                .wait_timeout(outcome, remaining)
+                .wait_timeout(state, remaining)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
@@ -3710,7 +3746,9 @@ impl WorkspaceHost {
     /// for the answers, so one root whose filesystem hangs delays no other
     /// root's row. A check that has not answered keeps its thread, and the
     /// workspace it holds, until the root answers; the next tick waits on
-    /// that check again rather than starting another beside it.
+    /// that check again rather than starting another beside it. A check still
+    /// running when a second tick's budget runs out marks its root
+    /// unavailable as not answering, until a check answers.
     ///
     /// Returns the number of roots whose handle was refreshed. Blocking: the
     /// caller runs it off the async runtime.
@@ -3741,10 +3779,20 @@ impl WorkspaceHost {
         let deadline = Instant::now() + ROOT_HEALTH_PROBE_BUDGET;
         let mut refreshed = 0;
         for (root, key, check) in checks {
-            // A root that has not answered keeps whatever the last check
-            // that did answer published.
-            let Some(outcome) = check.wait_until(deadline) else {
-                continue;
+            let outcome = match check.wait_until(deadline) {
+                RootProbeWait::Answered(outcome) => outcome,
+                // One missed budget can be a root that is only slow, so it
+                // keeps what the last answered check published. A check that
+                // runs through the next tick's budget too belongs to a root
+                // that has stopped answering, and its row stops reading
+                // running until a check answers.
+                RootProbeWait::Overdue { missed } if missed >= ROOT_HEALTH_MISSED_TICKS => {
+                    Err(ChanError::RootUnavailable {
+                        path: root.clone(),
+                        reason: ROOT_NOT_ANSWERING.to_string(),
+                    })
+                }
+                RootProbeWait::Overdue { .. } | RootProbeWait::Taken => continue,
             };
             if self
                 .reconcile_root_health(&root, &key, outcome)
@@ -3806,12 +3854,15 @@ impl WorkspaceHost {
     /// overlay and hand the outcome back unchanged.
     ///
     /// Shared by the health probe and by the mount path's pre-check so both
-    /// publish the same `mount_state` for the same condition. A reachable root
-    /// clears the overlay; every failure over a root that is still mounted
-    /// records [`MountState::Unavailable`] with the reason the launcher row
-    /// shows, so a tenant whose root is unreachable, gone or replaced stops
-    /// reporting `running` everywhere at once. Nothing here tears a tenant
-    /// down: a mount goes away only through the host's close paths.
+    /// publish the same `mount_state` for the same condition; the probe also
+    /// folds in a check that has run through two ticks' budgets, as a
+    /// [`ChanError::RootUnavailable`] that says the root is not answering. A
+    /// reachable root clears the overlay; every failure over a root that is
+    /// still mounted records [`MountState::Unavailable`] with the reason the
+    /// launcher row shows, so a tenant whose root is unreachable, gone,
+    /// replaced or not answering stops reporting `running` everywhere at
+    /// once. Nothing here tears a tenant down: a mount goes away only through
+    /// the host's close paths.
     ///
     /// The terminal conditions share the recoverable one's state because the
     /// same evidence clears both. On unix that evidence is identity:
