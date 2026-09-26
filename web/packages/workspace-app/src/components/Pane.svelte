@@ -78,6 +78,7 @@
 
   import EmptyPaneWelcome from "./EmptyPaneWelcome.svelte";
   import ExtensionTab from "./ExtensionTab.svelte";
+  import FailureCard from "./FailureCard.svelte";
   import FileEditorTab from "./FileEditorTab.svelte";
   import DashboardTab from "./DashboardTab.svelte";
   import FileBrowserSurface from "./FileBrowserSurface.svelte";
@@ -1971,24 +1972,16 @@
     {/each}
 
     {#snippet failed(error, reset)}
-      <div class="pane-failed" role="alert">
-        <p class="pane-failed-title">This pane could not be drawn.</p>
-        <p class="pane-failed-detail">
-          {error instanceof Error ? error.message : String(error)}
-        </p>
-        <p class="pane-failed-hint">
-          The other panes are unaffected. Try again redraws this pane; if it
-          fails again, close the tab below and try once more.
-        </p>
-        <div class="pane-failed-actions">
-          <button onclick={() => reset()}>Try again</button>
-          {#if active}
-            <button onclick={() => void closeTab(pane.id, active.id)}>
-              Close {tabLabel(active, browserCtxFor(active))}
-            </button>
-          {/if}
-        </div>
-      </div>
+      <FailureCard
+        title="This pane could not be drawn."
+        {error}
+        hint="The other panes are unaffected. Try again redraws this pane; if it fails again, close the tab below and try once more."
+        onRetry={reset}
+        closeLabel={active ? tabLabel(active, browserCtxFor(active)) : undefined}
+        onClose={() => {
+          if (active) void closeTab(pane.id, active.id);
+        }}
+      />
     {/snippet}
     </svelte:boundary>
   </div>
@@ -2004,21 +1997,14 @@
      the strip switches to it. -->
 {#snippet tabFailed(t: Tab, error: unknown, reset: () => void)}
   <div class="tab-failed" class:offscreen={!isLiveActive(t)}>
-    <div class="pane-failed" role="alert">
-      <p class="pane-failed-title">This tab could not be drawn.</p>
-      <p class="pane-failed-detail">
-        {error instanceof Error ? error.message : String(error)}
-      </p>
-      <p class="pane-failed-hint">
-        The pane's other tabs still work, and so does every other pane.
-      </p>
-      <div class="pane-failed-actions">
-        <button onclick={() => reset()}>Try again</button>
-        <button onclick={() => void closeTab(pane.id, t.id)}>
-          Close {tabLabel(t, browserCtxFor(t))}
-        </button>
-      </div>
-    </div>
+    <FailureCard
+      title="This tab could not be drawn."
+      {error}
+      hint="The pane's other tabs still work, and so does every other pane."
+      onRetry={reset}
+      closeLabel={tabLabel(t, browserCtxFor(t))}
+      onClose={() => void closeTab(pane.id, t.id)}
+    />
   </div>
 {/snippet}
 
@@ -2033,41 +2019,6 @@
 
   .tab-failed.offscreen {
     display: none;
-  }
-
-  /* Sits where the tab bodies would be, so a failure reads as this pane's
-     own rather than as the window having lost it. */
-  .pane-failed {
-    margin: auto;
-    max-width: min(32rem, calc(100% - 2rem));
-    padding: 1rem 1.15rem;
-    border-radius: 10px;
-    background: var(--bg-card);
-    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
-    color: var(--text);
-  }
-
-  .pane-failed-title {
-    margin: 0 0 0.35rem;
-    font-weight: 600;
-  }
-
-  .pane-failed-detail {
-    margin: 0 0 0.5rem;
-    color: var(--text-secondary);
-    font-size: 0.85rem;
-    overflow-wrap: anywhere;
-  }
-
-  .pane-failed-hint {
-    margin: 0 0 0.75rem;
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-  }
-
-  .pane-failed-actions {
-    display: flex;
-    gap: 0.5rem;
   }
 
   .pane {
