@@ -58,7 +58,8 @@ use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, Worksp
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
 use chan_library::windows::{WindowKind, WindowRegistry};
 use chan_library::{
-    allocate_workspace_prefix, FileLocalColor, KeyedLocks, PersistedWorkspace, WorkspaceOverlay,
+    allocate_workspace_prefix, registered_workspace_prefix, FileLocalColor, KeyedLocks,
+    PersistedWorkspace, WorkspaceOverlay,
 };
 
 mod fdstore;
@@ -1369,7 +1370,7 @@ impl DevserverState {
             seen.insert(ws.root_path.clone());
             if let Some(entry) = by_root.get(&ws.root_path) {
                 entries.push(entry.clone());
-            } else if let Ok(prefix) = allocate_workspace_prefix(&ws.root_path) {
+            } else if let Ok(prefix) = registered_workspace_prefix(&ws.root_path) {
                 entries.push(self.off_row(prefix, &ws.root_path));
             }
         }
@@ -1389,15 +1390,17 @@ impl DevserverState {
 
     /// Resolve a route prefix back to a host-library workspace root for a
     /// prefix that names a library workspace the devserver is NOT serving (so
-    /// it is absent from `self.workspaces`). Matches on the stable
-    /// [`allocate_workspace_prefix`] mapping.
+    /// it is absent from `self.workspaces`). Matches on the stable prefix
+    /// mapping, computed from each row's stored canonical root
+    /// ([`registered_workspace_prefix`]) so resolving one root never waits on
+    /// another root's filesystem.
     fn library_root_for_prefix(&self, prefix: &str) -> Option<PathBuf> {
         self.host
             .library()
             .list_workspaces()
             .into_iter()
             .map(|ws| ws.root_path)
-            .find(|root| allocate_workspace_prefix(root).ok().as_deref() == Some(prefix))
+            .find(|root| registered_workspace_prefix(root).ok().as_deref() == Some(prefix))
     }
 
     /// The off-state row for a library workspace the devserver is not serving

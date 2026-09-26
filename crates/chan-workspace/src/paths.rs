@@ -400,8 +400,17 @@ pub(crate) fn metadata_key_for_canonical(canonical: &Path) -> String {
 /// chan-library), so the keyed pathspec `/{basename-slug}-{8hex}` is unique
 /// even across two same-basename workspaces.
 pub fn canonical_root_hash8(workspace_root: &Path) -> String {
-    let canonical = canonicalize_normalized(workspace_root);
-    canonical_hash8(&canonical.as_os_str().to_string_lossy())
+    canonical_path_hash8(&canonicalize_normalized(workspace_root))
+}
+
+/// [`canonical_root_hash8`] of a path that is already canonical, such as a
+/// registry row's stored root, without touching the filesystem.
+pub fn canonical_path_hash8(canonical: &Path) -> String {
+    canonical_hash8(
+        &strip_verbatim_prefix(canonical)
+            .as_os_str()
+            .to_string_lossy(),
+    )
 }
 
 /// Canonicalize `workspace_root`, stripping any Windows `\\?\` verbatim

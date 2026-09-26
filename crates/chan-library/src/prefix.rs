@@ -35,6 +35,17 @@ pub fn allocate_workspace_prefix(root: &Path) -> Result<String, Error> {
     sanitize_prefix(&format!("/{slug}-{hash}")).map_err(Error::Config)
 }
 
+/// The prefix [`allocate_workspace_prefix`] gives a registered workspace,
+/// computed from the canonical root its registry row stores (`root_path`)
+/// instead of resolving that root again. Listing, resolving and naming one
+/// workspace by prefix then never waits on the filesystem of another, which
+/// a stalled network mount would otherwise make every lookup do.
+pub fn registered_workspace_prefix(stored_root: &Path) -> Result<String, Error> {
+    let slug = workspace_slug(stored_root);
+    let hash = chan_workspace::paths::canonical_path_hash8(stored_root);
+    sanitize_prefix(&format!("/{slug}-{hash}")).map_err(Error::Config)
+}
+
 /// Sanitize a path's final component into a legible `[a-z0-9-]` slug for a
 /// prefix: lowercase, non-alphanumerics to `-`, collapsed and trimmed, length
 /// capped, with a fallback for an empty result.
@@ -99,6 +110,21 @@ mod tests {
         let a = allocate_workspace_prefix(&root).expect("prefix a");
         let b = allocate_workspace_prefix(&root).expect("prefix b");
         assert_eq!(a, b);
+    }
+
+    /// A registered root's stored canonical path names the prefix
+    /// [`allocate_workspace_prefix`] gives it, so the two agree without the
+    /// former touching the filesystem.
+    #[test]
+    fn a_stored_root_names_the_prefix_its_root_allocates() {
+        let parent = tempfile::tempdir().expect("parent");
+        let root = parent.path().join("Notes Dir");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let stored = chan_workspace::paths::canonicalize_normalized(&root);
+        assert_eq!(
+            registered_workspace_prefix(&stored).expect("stored prefix"),
+            allocate_workspace_prefix(&root).expect("allocated prefix"),
+        );
     }
 
     /// Two workspaces that share a basename but live under different parents key

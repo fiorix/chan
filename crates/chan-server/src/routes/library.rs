@@ -27,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use chan_library::{allocate_workspace_prefix, ServeConfig};
+use chan_library::{allocate_workspace_prefix, registered_workspace_prefix, ServeConfig};
 use chan_workspace::KnownWorkspace;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
@@ -667,7 +667,7 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
         .list_workspaces()
         .into_iter()
         .filter_map(|workspace| {
-            let workspace_id = allocate_workspace_prefix(&workspace.root_path)
+            let workspace_id = registered_workspace_prefix(&workspace.root_path)
                 .ok()?
                 .trim_start_matches('/')
                 .to_string();
@@ -1714,9 +1714,12 @@ fn require_mutable(state: &LauncherState) -> Result<SocketAddr, Box<Response>> {
 
 /// Resolve a launcher `workspace_id` (the route prefix without its leading slash)
 /// to `(prefix, registration)` against the live host library, or `None` when no
-/// registered workspace maps to it. Mirrors the devserver's stable
-/// `allocate_workspace_prefix` mapping. Handlers that answer with a row take the
-/// registration, which carries the label, rather than scanning the library again.
+/// registered workspace maps to it. Mirrors the devserver's stable prefix
+/// mapping, computed from each row's stored canonical root
+/// ([`registered_workspace_prefix`]) the way the list names it, so resolving one
+/// root never waits on another root's filesystem. Handlers that answer with a
+/// row take the registration, which carries the label, rather than scanning the
+/// library again.
 fn resolve_registered_workspace(
     host: &WorkspaceHost,
     id: &str,
@@ -1726,7 +1729,7 @@ fn resolve_registered_workspace(
         .list_workspaces()
         .into_iter()
         .find(|ws| {
-            allocate_workspace_prefix(&ws.root_path).ok().as_deref() == Some(prefix.as_str())
+            registered_workspace_prefix(&ws.root_path).ok().as_deref() == Some(prefix.as_str())
         })
         .map(|ws| (prefix, ws))
 }
