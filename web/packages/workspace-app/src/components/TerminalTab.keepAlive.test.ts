@@ -20,7 +20,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { FakeTerminal, xterm } from "../__tests__/xterm";
-import { resetLayout, terminalTab } from "../__tests__/tabs";
+import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { sessionWindowId } from "../api/client";
 import { setSocketFactory } from "../api/transport";
 import { demoSocketFactory } from "../demo/socket";
@@ -30,10 +30,12 @@ import {
   closePane,
   closeTab,
   flipHybrid,
+  layout,
   moveTab,
   selectTabInPane,
   setActivePane,
   splitPane,
+  type LeafNode,
 } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -250,6 +252,27 @@ describe("a terminal the pane tree rebuilds", () => {
       pane: paneHolding(root),
       refocused: term.focusCount > focusesBefore,
     }).toEqual({ sameElement: true, sameRenderer: true, hostDialsSince: ["0"], pane: SEED_PANE, refocused: true });
+  });
+
+  test("sends nothing and keeps the keyboard when another pane's tabs change", async () => {
+    const { term, dials } = await hostUnderTeam();
+    const other = splitPane(SEED_PANE, "row")!;
+    await settle();
+    setActivePane(SEED_PANE);
+    await settle();
+    await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
+    const [dial] = hostDials(dials);
+    const sentBefore = dial!.sent.length;
+    const focusesBefore = term.focusCount;
+
+    (layout.nodes[other] as LeafNode).tabs.push(fileTab({ id: "elsewhere", path: "README.md" }));
+    await settle();
+    await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
+
+    expect({
+      sent: dial!.sent.slice(sentBefore).map((frame) => frame.type),
+      refocused: term.focusCount > focusesBefore,
+    }).toEqual({ sent: [], refocused: false });
   });
 
   test("is torn down and leaves its pane when its tab closes", async () => {
