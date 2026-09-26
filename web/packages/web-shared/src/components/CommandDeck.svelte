@@ -60,10 +60,10 @@
   let wasOpen = false;
   // Where focus goes back to when the deck closes, captured as it opens.
   let returnFocus: HTMLElement | null = null;
-  // The run that may close the deck: a plain item while the host handles it,
-  // an awaited one while the host takes its success. A close it causes leaves
-  // focus where the command put it; any other close (Escape, the backdrop,
-  // the host hiding the deck) hands focus back.
+  // The run in flight: a plain item while the host handles it, an awaited
+  // one while the host takes its success. A close while a run is in flight
+  // leaves focus where it is, whatever closed the deck; any other close
+  // (Escape, the backdrop, the host hiding the deck) hands focus back.
   let closingRun: object | null = null;
   let confirmKeyReleased = true;
   // Whoever holds the operation card owns it: a preparation between its start
