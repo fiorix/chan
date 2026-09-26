@@ -287,8 +287,8 @@ mod unsupported;
 #[cfg(target_os = "linux")]
 pub use linux::{
     fdstore, fdstore_remove_many, notify_barrier, notify_ready, notify_watchdog,
-    pty_master_has_live_slave, scrub_child_supervision_env, take_listen_fds, watchdog_interval,
-    NamedFd,
+    own_unit_fdstore_max, pty_master_has_live_slave, scrub_child_supervision_env, take_listen_fds,
+    watchdog_interval, NamedFd,
 };
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::{

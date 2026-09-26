@@ -70,9 +70,11 @@ mod linux {
     const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
     /// Bound on the seal's wait for the parked sessions' PTY readers to stop.
     const READER_STOP_WAIT: Duration = Duration::from_secs(2);
-    /// The canonical unit's FileDescriptorStoreMax, the cap fallback where
-    /// the manager does not export `$FDSTORE`.
-    const UNIT_FDSTORE_MAX: usize = chan_systemd::DEVSERVER_FDSTORE_MAX;
+    /// The cap where the manager exports no `$FDSTORE` and the unit's own
+    /// value cannot be read: the smaller maximum chan units have rendered,
+    /// since a unit only `chan devserver start|restart` rewrites may still
+    /// carry it after an upgrade.
+    const FALLBACK_FDSTORE_MAX: usize = 512;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct RestartManifest {
@@ -193,15 +195,17 @@ mod linux {
     }
 
     /// The service's fd-store ceiling from the manager's exported `$FDSTORE`,
-    /// else from `installed`, the unit's own configured value.
+    /// else from `installed`, the unit's own configured value, else
+    /// [`FALLBACK_FDSTORE_MAX`].
     fn resolve_store_max(
         exported: Option<&str>,
-        _installed: impl FnOnce() -> Option<usize>,
+        installed: impl FnOnce() -> Option<usize>,
     ) -> usize {
         exported
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|max| *max > 0)
-            .unwrap_or(UNIT_FDSTORE_MAX)
+            .or_else(|| installed().filter(|max| *max > 0))
+            .unwrap_or(FALLBACK_FDSTORE_MAX)
     }
 
     /// The fds `entries` keep in the store: a PTY master each, and a ring
@@ -377,7 +381,10 @@ mod linux {
             // Systemd exports the service's actual store ceiling as
             // `$FDSTORE`; older managers do not, so fall back to the value
             // the canonical unit renderer configures.
-            let store_max = resolve_store_max(std::env::var("FDSTORE").ok().as_deref(), || None);
+            let store_max = resolve_store_max(
+                std::env::var("FDSTORE").ok().as_deref(),
+                chan_systemd::own_unit_fdstore_max,
+            );
             Self::install_at(
                 host,
                 library_id,
@@ -1208,7 +1215,7 @@ mod linux {
                 "lib-test".into(),
                 manifest.clone(),
                 Box::new(store),
-                UNIT_FDSTORE_MAX,
+                chan_systemd::DEVSERVER_FDSTORE_MAX,
             );
             let hook = ParkerHook(parker.shared.clone());
             (parker, hook, manifest)

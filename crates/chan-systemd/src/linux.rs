@@ -145,6 +145,41 @@ pub fn fdstore_remove_many<'a>(names: impl IntoIterator<Item = &'a str>) {
     }
 }
 
+/// The `FileDescriptorStoreMax` of the user service this process runs in,
+/// as its manager reports it (`systemctl --user show`), for a manager that
+/// exports no `$FDSTORE`. `None` when the process is in no service or the
+/// manager does not answer. It runs `systemctl` and waits for it.
+pub fn own_unit_fdstore_max() -> Option<usize> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let unit = service_unit_from_cgroup(&cgroup)?;
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            unit,
+            "--property=FileDescriptorStoreMax",
+            "--value",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// The service unit a cgroup v2 membership names: the innermost `.service`
+/// component of its path.
+fn service_unit_from_cgroup(cgroup: &str) -> Option<&str> {
+    cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?
+        .rsplit('/')
+        .find(|component| component.ends_with(".service"))
+}
+
 pub fn pty_master_has_live_slave(fd: BorrowedFd<'_>) -> Result<bool> {
     let Some(tty_index) = pty_master_tty_index(fd)? else {
         return Ok(true);
@@ -267,6 +302,25 @@ fn own_pidfdid() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_service_unit_is_the_innermost_service_in_the_cgroup_path() {
+        let cgroup =
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/chan-devserver.service\n";
+        assert_eq!(
+            super::service_unit_from_cgroup(cgroup),
+            Some("chan-devserver.service")
+        );
+        assert_eq!(
+            super::service_unit_from_cgroup("0::/user.slice/user-1000.slice/session-3.scope\n"),
+            None,
+            "a process in no service has no unit to ask"
+        );
+        assert_eq!(
+            super::service_unit_from_cgroup("12:pids:/x.service\n"),
+            None
+        );
+    }
+
     use super::*;
 
     use std::ffi::{OsStr, OsString};
