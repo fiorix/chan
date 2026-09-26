@@ -5613,6 +5613,13 @@ function isTreeDirectory(path: string): boolean {
   return tree.entries.some((e) => (e.path === path && e.is_dir) || e.path.startsWith(prefix));
 }
 
+/// `paths` ordered so every path comes before the directories that hold it
+/// (deepest first; the sort is stable, so paths at one depth keep their order).
+function deepestFirst(paths: readonly string[]): string[] {
+  const depth = (path: string) => path.split("/").length;
+  return [...paths].sort((a, b) => depth(b) - depth(a));
+}
+
 /// After a delete: refresh the tree (and the workspace summary where there is
 /// one), and close every file tab showing a deleted path or a path under one.
 async function settleDeleted(paths: readonly string[]): Promise<void> {
@@ -6022,15 +6029,22 @@ export const fileOps = {
       ui.status = `delete failed: ${(e as Error).message}`;
     }
   },
-  /// Delete a multi-selection behind one confirm that names the count; a
-  /// single path is `remove`, with the confirm that names it. A path under a
-  /// selected directory goes with the directory rather than on its own. A
-  /// refused delete does not stop the rest: the status line says how many
-  /// went and names the first refusal, and the selection keeps the paths that
-  /// were refused. A delete of every path clears the selection.
+  /// Delete a multi-selection behind one confirm that names the count. In a
+  /// workspace each delete moves a whole subtree to the trash, so a path under
+  /// a selected directory goes with the directory rather than on its own, and
+  /// a single path left is `remove`, with the confirm that names it. Without
+  /// a workspace the route deletes only a file or an empty directory, so every
+  /// selected path is a target, deleted deepest first: a directory selected
+  /// with all its contents empties and then goes, and one that still holds an
+  /// unselected path is refused. A refused delete does not stop the rest: the
+  /// status line says how many went and names the first refusal, and the
+  /// selection keeps the paths that were refused. A delete of every path
+  /// clears the selection.
   async removeSelection(paths: readonly string[]): Promise<void> {
     const unique = [...new Set(paths)];
-    const targets = unique.filter((p) => !unique.some((q) => p.startsWith(`${q}/`)));
+    const targets = windowCaps.workspace
+      ? unique.filter((p) => !unique.some((q) => p.startsWith(`${q}/`)))
+      : deepestFirst(unique);
     if (targets.length === 0) return;
     if (targets.length === 1) {
       const path = targets[0]!;
@@ -6038,10 +6052,15 @@ export const fileOps = {
       return;
     }
     const dirs = targets.filter(isTreeDirectory).length;
-    const what =
+    const count =
       dirs === 0
         ? `${targets.length} files`
-        : `${targets.length} items, including ${dirs === 1 ? "1 directory and everything in it" : `${dirs} directories and everything in them`}`;
+        : `${targets.length} items, including ${dirs === 1 ? "1 directory" : `${dirs} directories`}`;
+    // Only a workspace delete takes a directory's contents with it.
+    const what =
+      windowCaps.workspace && dirs > 0
+        ? `${count} and everything in ${dirs === 1 ? "it" : "them"}`
+        : count;
     const ok = await uiConfirm({
       title: windowCaps.workspace ? "Delete" : "Permanently delete",
       message: windowCaps.workspace
