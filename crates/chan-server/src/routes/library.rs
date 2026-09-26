@@ -2906,6 +2906,7 @@ mod devserver_route_tests {
     /// runtime, so adding a root that stopped answering holds no runtime
     /// worker while it waits: on a runtime with one worker, another root's
     /// on route still answers beside it.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn launcher_add_of_a_hung_root_leaves_the_runtime_serving() {
         use crate::devserver::hung_root_support::{completes_beside, HEALTHY_ROOT_BOUND};
