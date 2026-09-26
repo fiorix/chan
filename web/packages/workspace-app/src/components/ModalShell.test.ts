@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ModalShell from "./ModalShell.svelte";
 import {
+  backdropIn,
   clickBackdrop,
   dialogIn,
   dialogName,
@@ -46,6 +47,15 @@ describe("ModalShell", () => {
     const dialog = dialogIn(render())!;
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(dialogName(dialog)).toBe("Probe");
+  });
+
+  test("its backdrop is a button beside the panel, named Close and out of the tab order", () => {
+    const target = render();
+    const backdrop = backdropIn(target)!;
+    expect(backdrop, "a backdrop button beside the dialog").not.toBeNull();
+    expect(dialogIn(target)!.contains(backdrop)).toBe(false);
+    expect(backdrop.getAttribute("aria-label")).toBe("Close");
+    expect(backdrop.tabIndex).toBe(-1);
   });
 
   test("a click on the backdrop closes and a click inside the panel does not", () => {

@@ -39,9 +39,17 @@ export function dialogName(dialog: HTMLElement): string | null {
     .trim();
 }
 
+/// The dim backdrop under the open dialog: a button of its own beside the
+/// panel, never an element around it. Null when there is none.
+export function backdropIn(target: HTMLElement): HTMLButtonElement | null {
+  return dialogIn(target)?.parentElement?.querySelector<HTMLButtonElement>(":scope > button") ?? null;
+}
+
 /// Click the dim area around the panel.
 export function clickBackdrop(target: HTMLElement): void {
-  dialogIn(target)!.parentElement!.click();
+  const backdrop = backdropIn(target);
+  if (!backdrop) throw new Error("no backdrop button beside the dialog");
+  backdrop.click();
 }
 
 /// Press `key` on `el` as the browser delivers it: a bubbling, cancelable
