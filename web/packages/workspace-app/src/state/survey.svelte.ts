@@ -42,8 +42,9 @@ import { notify } from "./notify.svelte";
 /// One in-flight survey + its reply guard. `busy` gates the reply buttons so a
 /// double-click / double-keypress cannot fire two replies for the same oneshot
 /// (the second would 404, but the guard keeps the UI honest). `closed` records
-/// a close that arrived while the reply was in flight, which that reply applies
-/// if it fails.
+/// that the server closed the survey while the reply was in flight, by a
+/// `close_survey` or a sync that leaves it out, which that reply applies if it
+/// fails. A survey a sync sets aside is still open and is never marked.
 type SurveyEntry = { spec: SurveySpec; busy: boolean; closed?: boolean };
 
 /// A survey's slot: a terminal tab id (per-terminal) or `null` (the window-wide
@@ -162,12 +163,14 @@ export function syncSurveys(open: ReadonlyArray<{ spec: SurveySpec; slot: Survey
   });
 }
 
-/// Take down the survey on `slot`, unless a reply from THIS window is in
-/// flight for it (busy). The slot is then left to that reply: an accepted
+/// Take down the survey on `slot`, which the server has closed: a
+/// `close_survey` named it or a sync left it out. If a reply from THIS window
+/// is in flight for it (busy), the slot is left to that reply: an accepted
 /// reply clears it, and a failed one applies the close, since nothing is
 /// waiting on the survey any more. A close raced against the deadline lands
 /// here, and so does an `answered_elsewhere` fanned back to the answerer when
-/// its reply carried no windowId. Returns whether the slot was cleared.
+/// its reply carried no windowId. A survey a sync sets aside is still open and
+/// never comes here. Returns whether the slot was cleared.
 function retire(slot: SurveySlot): boolean {
   const e = entry(slot);
   if (!e) return false;
@@ -189,8 +192,10 @@ function release(slot: SurveySlot, surveyId: string): void {
 /// until it settles. An accepted reply clears the slot. The reply route
 /// answers 404 once no survey is parked under the id (answered, timed out or
 /// cancelled), and nothing can answer that survey any more, so a 404 clears
-/// the slot too and says so, as does any failure after the survey's close
-/// arrived. Any other failure keeps the overlay for a retry.
+/// the slot too and says so, as does any failure after the server closed the
+/// survey during the reply. Any other failure keeps the overlay for a retry,
+/// or, when a sync set the survey aside meanwhile, says it is still open: the
+/// next sync that lists it with its slot free raises it again.
 async function send(
   slot: SurveySlot,
   e: SurveyEntry,
@@ -210,7 +215,8 @@ async function send(
       notify("survey expired: nothing is waiting for its answer");
       return;
     }
-    notify(`${failure}: ${(err as Error).message ?? err}`);
+    const aside = entry(slot)?.spec.surveyId !== surveyId;
+    notify(`${failure}: ${(err as Error).message ?? err}${aside ? "; the survey is still open" : ""}`);
   }
 }
 
