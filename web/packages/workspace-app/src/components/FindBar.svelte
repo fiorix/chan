@@ -13,7 +13,14 @@
 
   import { onDestroy, tick } from "svelte";
   import { MAX_FIND_MATCHES, type FindAdapter, type FindRange } from "../editor/find";
-  import { closeFind, type FindState } from "../state/tabs.svelte";
+  import {
+    closeFind,
+    setFindCaseSensitive,
+    setFindCurrentIndex,
+    setFindQuery,
+    setFindResults,
+    type FindState,
+  } from "../state/tabs.svelte";
 
   let {
     find,
@@ -75,9 +82,7 @@
     const prev = find.matches;
     const prevIdx = find.currentIndex;
     const next = adapter.scan(find.query, { caseSensitive: find.caseSensitive });
-    find.matches = next;
-    find.truncated = next.length >= MAX_FIND_MATCHES;
-    find.currentIndex = reanchorIndex(prevIdx, prev, next);
+    setFindResults(find, next, reanchorIndex(prevIdx, prev, next), next.length >= MAX_FIND_MATCHES);
     adapter.highlightAll(next, find.currentIndex);
     if (find.currentIndex >= 0) adapter.scrollIntoView(find.currentIndex);
   }
@@ -108,9 +113,7 @@
       // Empty query clears the highlight layer without touching
       // currentIndex (next typed char resumes near where it was).
       if (find.matches.length > 0) {
-        find.matches = [];
-        find.currentIndex = -1;
-        find.truncated = false;
+        setFindResults(find, [], -1, false);
         adapter.clearHighlights();
       }
       return;
@@ -157,14 +160,14 @@
   function goNext(): void {
     const n = find.matches.length;
     if (n === 0) return;
-    find.currentIndex = (Math.max(0, find.currentIndex) + 1) % n;
+    setFindCurrentIndex(find, (Math.max(0, find.currentIndex) + 1) % n);
     adapter?.placeCursor(find.currentIndex);
   }
   function goPrev(): void {
     const n = find.matches.length;
     if (n === 0) return;
     const cur = find.currentIndex < 0 ? 0 : find.currentIndex;
-    find.currentIndex = (cur - 1 + n) % n;
+    setFindCurrentIndex(find, (cur - 1 + n) % n);
     adapter?.placeCursor(find.currentIndex);
   }
   function close(): void {
@@ -186,7 +189,7 @@
   }
 
   function onCaseToggle(): void {
-    find.caseSensitive = !find.caseSensitive;
+    setFindCaseSensitive(find, !find.caseSensitive);
   }
 
   // Counter label. "10000+" when truncated; "0 of 0" with red
@@ -211,7 +214,7 @@
   <div class="find-row">
     <input
       bind:this={inputEl}
-      bind:value={find.query}
+      bind:value={() => find.query, (query) => setFindQuery(find, query)}
       onkeydown={onKeydown}
       class="find-input"
       class:no-matches={noMatches}

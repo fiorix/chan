@@ -1484,6 +1484,29 @@ export function closeFind(tabId: string): void {
   found.tab.find.truncated = false;
 }
 
+/// The find bar's writes to the tab's find state. The bar computes each value
+/// (the rescan, the re-anchored index, the stepping) but the state is the
+/// tab's, so it lands here rather than on the bar's prop.
+export function setFindQuery(find: FindState, query: string): void {
+  find.query = query;
+}
+export function setFindCaseSensitive(find: FindState, on: boolean): void {
+  find.caseSensitive = on;
+}
+export function setFindResults(
+  find: FindState,
+  matches: FindRange[],
+  currentIndex: number,
+  truncated: boolean,
+): void {
+  find.matches = matches;
+  find.currentIndex = currentIndex;
+  find.truncated = truncated;
+}
+export function setFindCurrentIndex(find: FindState, index: number): void {
+  find.currentIndex = index;
+}
+
 /// Active file tab of the focused pane, or null if the pane is
 /// empty / its active tab isn't a file tab. Used by the host-
 /// driven command bridge (App.svelte runCommand) so app.find.*
