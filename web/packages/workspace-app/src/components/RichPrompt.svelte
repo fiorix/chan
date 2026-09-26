@@ -155,6 +155,16 @@
 
   const editorExtensions = $derived(richPromptExtensions(isPending));
 
+  // The bundle seeds the lock when the view is built, but reconfiguring the
+  // bundle cannot move it afterwards: CodeMirror keeps an existing
+  // compartment's content when the extensions around it are reconfigured. The
+  // lock follows the pending phase here instead, on every way into it and out
+  // of it, so a sent card refuses keymap edits and a settled one takes input.
+  $effect(() => {
+    const locked = isPending;
+    promptView?.dispatch({ effects: lockCompartment.reconfigure(lockExtensions(locked)) });
+  });
+
   const queuedCount = $derived(
     Math.max(tab.queueDepth ?? 0, isPending && pendingChipVisible ? 1 : 0),
   );
