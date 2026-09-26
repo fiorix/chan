@@ -3991,4 +3991,39 @@ mod tests {
         state.terminal_sessions.close(&id, CloseReason::Explicit);
         server.abort();
     }
+
+    // A client whose query declares no size says nothing about its renderer,
+    // so its attach leaves the PTY at the size it has instead of shrinking it
+    // to the spawn defaults.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_attach_that_declares_no_size_leaves_the_pty_alone() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let spawned = create_quiet_terminal(&state, "sleep 600");
+        let id = spawned.id().to_owned();
+        spawned.resize(pty_size(Some(90), Some(30)));
+        let deadline = Instant::now() + PROBE_BUDGET;
+        while (spawned.size().cols, spawned.size().rows) != (90, 30) {
+            assert!(
+                Instant::now() < deadline,
+                "the PTY never took 90x30 within {PROBE_BUDGET:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let mut socket = dial_terminal(address, &format!("session={id}&since=0")).await;
+        read_prelude(&mut socket).await;
+        assert_eq!(
+            LiveFrames::default()
+                .resizes_before(&mut socket, (100, 30))
+                .await,
+            vec![(90, 30)],
+            "an attach with no declared size resizes nothing: the one echo is the redraw's"
+        );
+
+        drop(spawned);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
 }
