@@ -80,9 +80,10 @@ export function memberHandle(member: TeamMemberDraft, autoPrefix: boolean): stri
 /// Translate the SPA's camelCase `TeamDialogConfig` into the
 /// snake_case `TeamConfigWire` shape persisted to the team's
 /// config.toml. `created_at` is the call time (ISO 8601 UTC). Each member's env
-/// is parsed into a Record; `CHAN_TAB_NAME=<handle>` is auto-injected
-/// unless the user supplied an override (the per-tab env var IS the
-/// agent's identity inside the PTY).
+/// is parsed into a Record and `CHAN_TAB_NAME=<handle>` is set in it, replacing
+/// any value the user typed: the per-tab env var IS the agent's identity inside
+/// the PTY, and the server refuses a member env whose `CHAN_TAB_NAME` is not the
+/// member's handle.
 ///
 /// Real estate round-trips through the per-member `position`
 /// (row/col) field that chan-team.toml already carries: a member in
@@ -99,9 +100,7 @@ export function translateConfig(config: TeamDialogConfig): TeamConfigWire {
   const members: TeamMemberWire[] = config.members.map((m, idx) => {
     const env = parseEnvLines(m.env);
     const handle = memberHandle(m, config.autoPrefix);
-    if (!Object.prototype.hasOwnProperty.call(env, "CHAN_TAB_NAME")) {
-      env.CHAN_TAB_NAME = handle;
-    }
+    env.CHAN_TAB_NAME = handle;
     const member: TeamMemberWire = {
       handle,
       command: m.command,
