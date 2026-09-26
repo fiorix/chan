@@ -211,6 +211,12 @@ impl DevserverStore {
         PersistedConfig::default()
     }
 
+    /// The devserver's own read of the config at start, the one caller whose
+    /// next save replaces the file.
+    fn load_for_start(&self) -> PersistedConfig {
+        self.load()
+    }
+
     fn save(&self, cfg: &PersistedConfig) -> std::io::Result<()> {
         let bytes = serialize_persisted_config(cfg)?;
         crate::atomic_file::write(&self.path, &bytes, Some(0o600))
@@ -1974,7 +1980,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     let fdstore_restore = fdstore::StartupRestore::take();
 
     let store = DevserverStore::at(devserver_config_path());
-    let mut persisted = store.load();
+    let mut persisted = store.load_for_start();
     if resolve_boot_token(&mut persisted, unix_now_secs()) == BootToken::RotatedByAge {
         eprintln!(
             "chan devserver: NOTE: bearer token was older than {} days; rotated -- \
@@ -4712,7 +4718,7 @@ mod tests {
 
         let missing = tempfile::tempdir().unwrap();
         let path = missing.path().join("config.json");
-        let loaded = DevserverStore::at(path.clone()).load();
+        let loaded = DevserverStore::at(path.clone()).load_for_start();
         assert_eq!(loaded.library_id, "");
         assert_eq!(warnings_naming(&path), 0, "a missing config is not a fault");
         assert!(set_aside(missing.path()).is_empty());
@@ -4722,7 +4728,7 @@ mod tests {
         let path = unparseable.path().join("config.json");
         std::fs::write(&path, garbage).unwrap();
         let store = DevserverStore::at(path.clone());
-        let loaded = store.load();
+        let loaded = store.load_for_start();
         assert_eq!(loaded.devserver_token, "");
         assert_eq!(loaded.library_id, "");
         assert_eq!(loaded.port, 0);
@@ -4749,7 +4755,7 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("evidence"), b"kept").unwrap();
         let store = DevserverStore::at(path.clone());
-        assert_eq!(store.load().library_id, "");
+        assert_eq!(store.load_for_start().library_id, "");
         assert_eq!(
             warnings_naming(&path),
             1,
