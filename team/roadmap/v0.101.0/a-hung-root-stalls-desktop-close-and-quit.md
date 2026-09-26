@@ -1,0 +1,23 @@
+# The desktop waits on every registered root to close a workspace, open a window or quit
+
+Status: raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 3). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md): the review notes that the lane's brief named the desktop's close, and the lane changed nothing under `desktop/`. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## What was seen
+
+Three desktop paths resolve every registered root on the way to acting on one, so one hung root C stalls them for every other root.
+
+- **Close.** `close_workspace_from_handoff` in `desktop/src-tauri/src/main.rs` (`:2964-2995`) closes the root through the embedded host and then calls `persist_workspaces` (`:2989`). That filters every registered row by `embedded.is_root_mounted(&ws.root_path)` (`:1153-1161`), which goes through `WorkspaceHost::is_root_mounted`, `live_workspace` and `canonical_key` and canonicalizes each root (`crates/chan-library/src/host.rs:3425-3427`, `:3406-3408`, `:4105-4109`). It runs on the Tauri runtime worker that serves the handoff connection (the listener's dispatch, `main.rs:5282-5345`). With C hung, `chan close B` closes B but the `Closed` reply is never written: the CLI gives up after its 3 s read timeout (`crates/chan-server/src/handoff.rs:965`, `:1285-1287`) and falls through to the control-socket path (`crates/chan/src/lib.rs:2503-2519`), the desktop never emits `SERVES_CHANGED` (`main.rs:2990`), and each such close parks one more runtime worker until C answers.
+- **New window.** `create_library_window` (`main.rs:4335-4357`) resolves a local workspace id in `local_workspace_path` (`:4284-4305`), which calls `chan_server::allocate_workspace_prefix` on each registered root in list order until one matches (`:4291-4302`), and that canonicalizes the root (`crates/chan-library/src/prefix.rs:32-34`). A hung root listed before the wanted one stalls the command. The lane added `registered_workspace_prefix` (`prefix.rs:51-55`), which hashes the stored root instead, but chan-server re-exports only `allocate_workspace_prefix` (`crates/chan-server/src/lib.rs:198`).
+- **Quit.** `begin_normal_shutdown` runs `persist_workspaces` synchronously before it spawns the drain (`main.rs:6642-6655`). Its callers are the run-event callback's `ExitRequested` arm (`:5621-5638`), `request_quit` (`:6700-6733`), and the restart and update-install paths (`:3134`, `:3154`, `:3242`, `:3441`, `:3465`); the `RunEvent::Exit` arm calls `persist_workspaces` itself when no drain started (`:5646-5651`). The run-event callback (`app.run`, `:5611`) runs on the event loop's thread, so a quit from it waits there on C, and the drain that stops the tenants never starts.
+
+## Desired contract
+
+Closing a workspace, opening a window of a workspace and quitting never wait on the filesystem of a root the operation does not act on: the on-set snapshot and the id resolution go by the keys the registry and the host store.
+
+## What to do
+
+The review gives no fix beyond raising the item. A suggestion: have `persist_workspaces` ask by stored key through `WorkspaceHost::is_canonical_root_mounted` (`host.rs:3434-3436`), which answers from the runtimes' stored keys (the embedded wrapper exposes only `is_root_mounted`, `desktop/src-tauri/src/embedded.rs:328-333`), and have `local_workspace_path` hash the stored root with `registered_workspace_prefix`, re-exported next to `allocate_workspace_prefix`. Both compare stored keys with canonical ones, which is where the lane's relinked-root regression lives (review finding 1, fixed in the lane before it lands), so build on that fix. The stall seam is behind `test-hooks`, which no desktop build enables (review Q5, and `desktop/src-tauri/Cargo.toml` at the sha), so a red test in the desktop needs that feature in its dev-dependencies; the alternative is a test at the host level for the helpers the desktop calls.
+
+## Boundaries
+
+`desktop/src-tauri/src/main.rs` (`persist_workspaces`, `close_workspace_from_handoff`, `local_workspace_path`, `begin_normal_shutdown`), `desktop/src-tauri/src/embedded.rs` (the host wrappers), `crates/chan-server/src/lib.rs` (the re-export), and, for a red test, the dev-dependencies in `desktop/src-tauri/Cargo.toml`. The desktop's leaked handoff listener (`main.rs:5255-5282`, leaked at `:5480`), which the review lists as causing no stall, is not part of this item.

@@ -127,6 +127,12 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-click-beside-a-graph-node-clears-the-selection][gring] | accepted | build |
 | [a-mirrored-value-focuses-an-unfocused-editor][afoc] | accepted | build |
 | [a-started-mcp-tool-cannot-be-cancelled][mcan] | raised | decide |
+| [the-writer-lock-probe-waits-on-a-hung-root][wlock] | raised | decide |
+| [a-hung-root-stalls-desktop-close-and-quit][dquit] | raised | decide |
+| [one-hung-root-holds-up-the-whole-restore][rseq] | raised | decide |
+| [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | raised | decide |
+| [a-hung-root-keeps-reading-running][hrun] | raised | decide |
+| [a-late-http-mount-escapes-the-shutdown-sweep][lsweep] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -206,6 +212,12 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [gring]: v0.101.0/a-click-beside-a-graph-node-clears-the-selection.md
 [afoc]: v0.101.0/a-mirrored-value-focuses-an-unfocused-editor.md
 [mcan]: v0.101.0/a-started-mcp-tool-cannot-be-cancelled.md
+[wlock]: v0.101.0/the-writer-lock-probe-waits-on-a-hung-root.md
+[dquit]: v0.101.0/a-hung-root-stalls-desktop-close-and-quit.md
+[rseq]: v0.101.0/one-hung-root-holds-up-the-whole-restore.md
+[rthrd]: v0.101.0/a-hung-root-takes-a-thread-per-expired-caller.md
+[hrun]: v0.101.0/a-hung-root-keeps-reading-running.md
+[lsweep]: v0.101.0/a-late-http-mount-escapes-the-shutdown-sweep.md
 
 ## Completed
 
