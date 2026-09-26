@@ -12,6 +12,7 @@
 // inside fenced or inline code are left as written (they are content, not a
 // pasted attachment).
 
+import { fenceLineTracker } from "./commands/fence";
 import { parseImageSrc } from "./extensions/image";
 import { decodePercent, normalizeHref } from "./links";
 
@@ -30,31 +31,13 @@ export function rewriteImagePathsForDelivery(
   const root = workspaceRoot.replace(/\/+$/, "");
 
   // Skip fenced code blocks line by line; inside a fence nothing is rewritten.
-  let fence: string | null = null;
+  const fence = fenceLineTracker();
   return text
     .split("\n")
-    .map((line) => {
-      const marker = fenceMarker(line);
-      if (fence) {
-        if (marker && marker[0] === fence[0] && marker.length >= fence.length) {
-          fence = null;
-        }
-        return line;
-      }
-      if (marker) {
-        fence = marker;
-        return line;
-      }
-      return rewriteLineOutsideCode(line, sourceDir, root);
-    })
+    .map((line) =>
+      fence(line) === "text" ? rewriteLineOutsideCode(line, sourceDir, root) : line,
+    )
     .join("\n");
-}
-
-/// The fence marker (a run of 3+ backticks or tildes) that opens/closes a code
-/// block on `line`, or null. Only leading indentation may precede it.
-function fenceMarker(line: string): string | null {
-  const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
-  return m ? m[1] : null;
 }
 
 /// Rewrite image refs in a single non-fence line, skipping inline code spans
