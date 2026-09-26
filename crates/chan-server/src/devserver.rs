@@ -5980,8 +5980,8 @@ mod tests {
 
     /// A registered root whose path now resolves elsewhere, restored after a
     /// devserver restart from the path its overlay row stores, lists as on
-    /// with its token: its record and its runtime name it by different
-    /// spellings of one directory.
+    /// with its token, and as stopped once closed: its record and its
+    /// runtime name it by different spellings of one directory.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_relinked_root_restored_after_a_restart_lists_on() {
@@ -6017,6 +6017,22 @@ mod tests {
         assert!(
             entries[0].on && !entries[0].token.is_empty(),
             "the restored relinked root lists as off: {entries:?}"
+        );
+
+        // Closed out of band, the row settles to stopped: nothing the
+        // restore published under the stored root outlives the mount.
+        let prefix = entries[0].prefix.clone();
+        state
+            .host
+            .close_workspace(&prefix, true)
+            .await
+            .expect("close out of band");
+        state.persist_state();
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries[0].status,
+            WorkspaceStatus::Stopped,
+            "a starting row outlived the restored mount: {entries:?}"
         );
     }
 
