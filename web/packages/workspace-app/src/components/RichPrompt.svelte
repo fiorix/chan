@@ -29,6 +29,7 @@
     sendCancelToTerminal,
     sendPromptToTerminal,
     setRichPromptCaret,
+    setRichPromptDraftPath,
     setRichPromptHeight,
     tabFocusPulse,
     type TerminalTab,
@@ -428,7 +429,7 @@
   async function ensureDraft(): Promise<string> {
     if (tab.richPromptDraftPath) return tab.richPromptDraftPath;
     const { path } = await api.createDraft();
-    tab.richPromptDraftPath = path;
+    setRichPromptDraftPath(tab, path);
     try {
       await api.write(path, "");
     } catch {

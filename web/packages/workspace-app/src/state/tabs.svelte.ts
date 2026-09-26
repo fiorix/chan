@@ -5300,6 +5300,11 @@ export function clearTabCaretCommand(tab: FileTab): void {
 export function setTabContent(tab: FileTab, content: string): void {
   tab.content = content;
 }
+/// The draft file a terminal's Rich Prompt composer edits, recorded when the
+/// composer creates it.
+export function setRichPromptDraftPath(tab: TerminalTab, path: string): void {
+  tab.richPromptDraftPath = path;
+}
 /// Rich Prompt composer caret mirror. The bubble's editor pushes every
 /// selection change here so the caret survives a bubble remount, a window
 /// reload, and a cross-window restore (serialized as SerTab.rpc alongside
