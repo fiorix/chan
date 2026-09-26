@@ -192,6 +192,18 @@ mod linux {
         parked_including_candidate <= store_max
     }
 
+    /// The service's fd-store ceiling from the manager's exported `$FDSTORE`,
+    /// else from `installed`, the unit's own configured value.
+    fn resolve_store_max(
+        exported: Option<&str>,
+        _installed: impl FnOnce() -> Option<usize>,
+    ) -> usize {
+        exported
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|max| *max > 0)
+            .unwrap_or(UNIT_FDSTORE_MAX)
+    }
+
     /// The fds `entries` keep in the store: a PTY master each, and a ring
     /// file beside it where the session has one. One session's fds are one
     /// park decision, so a session never parks its PTY without its ring.
@@ -365,11 +377,7 @@ mod linux {
             // Systemd exports the service's actual store ceiling as
             // `$FDSTORE`; older managers do not, so fall back to the value
             // the canonical unit renderer configures.
-            let store_max = std::env::var("FDSTORE")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|max| *max > 0)
-                .unwrap_or(UNIT_FDSTORE_MAX);
+            let store_max = resolve_store_max(std::env::var("FDSTORE").ok().as_deref(), || None);
             Self::install_at(
                 host,
                 library_id,
@@ -1549,6 +1557,30 @@ mod linux {
                 !park_within_cap(stored_fd_count(&entries), 4),
                 "a store with room for the PTY but not its ring refuses both"
             );
+        }
+
+        // A manager that exports no `$FDSTORE` may run a unit an upgrade left at
+        // 512, since only `chan devserver start|restart` rewrites it. The cap
+        // must be that unit's value, or the manager rejects fds the precheck
+        // passed while the manifest names them.
+        #[test]
+        fn without_fdstore_the_cap_is_the_installed_units_value() {
+            let max = resolve_store_max(None, || Some(512));
+            let ringed: Vec<_> = (0..257)
+                .map(|i| manifest_entry(&format!("s{i}"), true))
+                .collect();
+            assert!(park_within_cap(stored_fd_count(&ringed[..256]), max));
+            assert!(
+                !park_within_cap(stored_fd_count(&ringed), max),
+                "the 257th ringed park must be refused at the precheck under a 512 unit"
+            );
+            assert_eq!(resolve_store_max(Some("1024"), || Some(512)), 1024);
+            assert_eq!(
+                resolve_store_max(None, || None),
+                512,
+                "an unreadable unit falls back to the smaller maximum chan has rendered"
+            );
+            assert_eq!(resolve_store_max(Some("junk"), || None), 512);
         }
 
         #[test]

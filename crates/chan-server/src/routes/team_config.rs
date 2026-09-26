@@ -1218,6 +1218,24 @@ mod tests {
         assert!(err.contains("capped at 9 panes"), "got: {err}");
     }
 
+    // A member's env reaches the same spawn a terminal request does, so a key
+    // chan sets for itself is refused there too, naming the key and the
+    // member, while a caller-set CHAN_AGENT stays accepted.
+    #[test]
+    fn validate_refuses_a_member_env_key_chan_sets_for_itself() {
+        let mut config = sample_config();
+        config.members[1]
+            .env
+            .insert("CHAN_AGENT".into(), "codex".into());
+        assert!(validate_team_config(&config).is_ok());
+        config.members[1]
+            .env
+            .insert("CHAN_TAB_NAME".into(), "renamed".into());
+        let err = validate_team_config(&config).expect_err("CHAN_TAB_NAME is chan's own");
+        assert!(err.contains("CHAN_TAB_NAME"), "got: {err}");
+        assert!(err.contains(&config.members[1].handle), "got: {err}");
+    }
+
     #[test]
     fn agent_is_derived_from_command_in_roster_and_pokes() {
         // No stored agent field: a "claude"/"codex" command derives the agent.
