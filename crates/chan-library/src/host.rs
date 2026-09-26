@@ -5931,7 +5931,11 @@ mod tests {
             host.open_terminal_session_with_command(serve_config("/terminal"), None, None)
                 .await,
         );
-        assert_eq!(builder.built(), 0, "a terminal built a tenant after the sweep");
+        assert_eq!(
+            builder.built(),
+            0,
+            "a terminal built a tenant after the sweep"
+        );
     }
 
     /// A terminal tenant built across the last shutdown sweep is refused at

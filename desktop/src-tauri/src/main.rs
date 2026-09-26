@@ -6638,7 +6638,10 @@ enum ShutdownAction {
 /// the library-owned workspace overlay. Serial so concurrent opens can't race
 /// the shared embedded host; on a failure surface a notice and leave it off
 /// (the key drops out of the overlay on the next clean shutdown).
-async fn restore_on_workspaces<R: tauri::Runtime>(handle: tauri::AppHandle<R>, state: Arc<AppState>) {
+async fn restore_on_workspaces<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    state: Arc<AppState>,
+) {
     let enabled: Vec<String> = state
         .embedded()
         .and_then(|embedded| embedded.workspace_overlay())
@@ -8907,9 +8910,7 @@ mod tests {
                 "forgetting another workspace",
                 cli_reply_bound(),
                 move || {
-                    handle.block_on(close_workspace_from_handoff(
-                        app_handle, state, other, true,
-                    ))
+                    handle.block_on(close_workspace_from_handoff(app_handle, state, other, true))
                 },
             );
             assert_eq!(
@@ -8930,7 +8931,11 @@ mod tests {
                 .into_iter()
                 .map(|row| row.root_path)
                 .collect();
-            assert_eq!(registered, [desktop.hung.clone()], "the forget left its row");
+            assert_eq!(
+                registered,
+                [desktop.hung.clone()],
+                "the forget left its row"
+            );
         }
 
         /// A quit while the boot restore waits on a hung root keeps on every

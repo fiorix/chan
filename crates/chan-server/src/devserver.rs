@@ -6620,7 +6620,8 @@ mod tests {
 
         // The root check after the build resolves the runtime's key on the
         // blocking pool; hold that call and no other.
-        let post_build_check = "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+        let post_build_check =
+            "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
         let stall = root_stall::stall_matching(late.path(), &[post_build_check]);
         let mounting = Arc::clone(&state);
         let mount = tokio::spawn(async move {

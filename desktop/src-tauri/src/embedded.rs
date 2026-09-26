@@ -400,7 +400,10 @@ impl EmbeddedServer {
 
     /// [`open_terminal`](Self::open_terminal) with the tenant's on-disk
     /// state, the per-window layouts and the draft store, under `chan_home`.
-    pub(crate) async fn open_terminal_in(&self, chan_home: std::path::PathBuf) -> Result<String, String> {
+    pub(crate) async fn open_terminal_in(
+        &self,
+        chan_home: std::path::PathBuf,
+    ) -> Result<String, String> {
         const PREFIX: &str = "/terminal";
         let mut cached = self.terminal_url.lock().await;
         if let Some(url) = cached.as_ref() {
