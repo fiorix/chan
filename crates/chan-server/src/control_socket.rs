@@ -160,6 +160,13 @@ enum WindowCommand {
         #[serde(rename = "tabName", skip_serializing_if = "Option::is_none")]
         tab_name: Option<String>,
     },
+    // Every survey still open in the target window, empty when none is: a
+    // survey absent from the list has no request behind it, and one listed is
+    // still waiting for its reply. Sent to one socket, never broadcast, when a
+    // window's socket attaches.
+    SurveySync {
+        surveys: Vec<SurveySyncEntry>,
+    },
     // `cs pane` layout query: the server asks the window for its current
     // tab/pane layout. The SPA reads its `layout` and POSTs the snapshot to
     // `POST /api/window/reply` echoing `request_id`, which fires the parked
@@ -261,6 +268,16 @@ enum WindowCommand {
         devserver_port: u16,
         half_close: bool,
     },
+}
+
+/// One open survey in a [`WindowCommand::SurveySync`], in the shape
+/// `open_survey` pushed it: the spec under `survey`, and `tabName` when the
+/// survey targets one terminal (absent for a group survey's window-wide slot).
+#[derive(Debug, Serialize)]
+struct SurveySyncEntry {
+    survey: SurveySpec,
+    #[serde(rename = "tabName", skip_serializing_if = "Option::is_none")]
+    tab_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -2554,6 +2571,12 @@ async fn handle_survey(
 /// still queued; it then leaves the queue without ever opening an overlay. A
 /// target already at capacity is refused with an explicit queue-full response.
 ///
+/// While its overlay is up the survey is recorded open on the bus, from before
+/// the `open_survey` push until before any `close_survey` push, and dropped on
+/// every other exit too. `open_survey` and `close_survey` are sent once each;
+/// a window whose socket was down when one went out is sent the record
+/// instead, as `survey_sync`, when it attaches.
+///
 /// An opted-in request also waits for client EOF while queued and once open.
 /// Queued EOF only releases its turn; open EOF also cancels its bus entry and
 /// closes its overlays. The open select polls the reply first, but that poll
@@ -2660,6 +2683,11 @@ where
     // registered.
     let (survey_id, rx) = survey_bus.register();
     spec.survey_id = survey_id.clone();
+    // Record the survey as open BEFORE pushing its overlay, so a window that
+    // attaches too late for the push below is synced it on attach. Every
+    // close below hands this record to `send_survey_close_commands`, which
+    // drops it before the close goes out; any other exit drops it on return.
+    let open = survey_bus.record_open(&windows, tab_name, &spec);
     // Fan the overlay out to every owning window. First reply wins; later
     // ones find the id already removed and no-op. A send failure is fatal
     // (the SPA will never see the overlay), so cancel and report it.
@@ -2691,6 +2719,7 @@ where
                     // reply, so an `answered_elsewhere` close there only races that
                     // local clear (a spurious saved-draft dialog + composer hide).
                     send_survey_close_commands(
+                        open,
                         &windows,
                         answered_by.as_deref(),
                         &survey_id,
@@ -2708,6 +2737,7 @@ where
                 Err(_) => {
                     survey_bus.cancel(&survey_id);
                     send_survey_close_commands(
+                        open,
                         &windows,
                         None,
                         &survey_id,
@@ -2724,6 +2754,7 @@ where
         _ = &mut *client_eof => {
             survey_bus.cancel(&survey_id);
             send_survey_close_commands(
+                open,
                 &windows,
                 None,
                 &survey_id,
@@ -2741,6 +2772,7 @@ where
         _ = tokio::time::sleep_until(deadline) => {
             survey_bus.cancel(&survey_id);
             send_survey_close_commands(
+                open,
                 &windows,
                 None,
                 &survey_id,
@@ -2755,7 +2787,13 @@ where
     }
 }
 
+/// Push `close_survey` for `survey_id` to each of `windows` but `exclude`,
+/// once, over the `/ws` broadcast. It takes the survey's open record and
+/// drops it first: a socket subscribed before this point receives the close,
+/// and one that attaches after it is synced without the survey, so no window
+/// misses both.
 fn send_survey_close_commands(
+    open: crate::survey::OpenSurveyGuard<'_>,
     windows: &[String],
     exclude: Option<&str>,
     survey_id: &str,
@@ -2763,6 +2801,7 @@ fn send_survey_close_commands(
     reason: SurveyCloseReason,
     events_tx: &broadcast::Sender<String>,
 ) {
+    drop(open);
     for window_id in windows {
         // Skip the answering window: it closed its own overlay via the reply.
         if Some(window_id.as_str()) == exclude {
@@ -3945,6 +3984,22 @@ fn serialize_window_command(window_id: &str, command: WindowCommand) -> Result<S
         command,
     };
     serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))
+}
+
+/// The `survey_sync` frame for `window_id`: every survey open there, oldest
+/// first. The `/ws` attach sends it to the attaching socket, so a window that
+/// had no socket when an overlay was pushed or closed learns the surveys the
+/// server still waits on there.
+pub(crate) fn survey_sync_frame(
+    window_id: &str,
+    survey_bus: &crate::survey::SurveyBus,
+) -> Result<String, String> {
+    let surveys = survey_bus
+        .open_for_window(window_id)
+        .into_iter()
+        .map(|(survey, tab_name)| SurveySyncEntry { survey, tab_name })
+        .collect();
+    serialize_window_command(window_id, WindowCommand::SurveySync { surveys })
 }
 
 /// The `terminal_broadcast` frame for `POST /api/terminals/{session}/broadcast`,
@@ -8315,6 +8370,58 @@ is_lead = false
         assert!(without_tab.get("tabName").is_none());
     }
 
+    #[test]
+    fn survey_sync_frame_lists_open_surveys_in_the_open_survey_shape() {
+        let bus = crate::survey::SurveyBus::new();
+        let spec = |survey_id: &str| SurveySpec {
+            survey_id: survey_id.into(),
+            title: Some("Pick".into()),
+            body_markdown: "pick one".into(),
+            options: vec!["a".into(), "b".into()],
+        };
+        let _tab = bus.record_open(&["win-a".into()], Some("@@Probe"), &spec("sid-1"));
+        let _group = bus.record_open(&["win-a".into(), "win-b".into()], None, &spec("sid-2"));
+
+        let frame: Value =
+            serde_json::from_str(&survey_sync_frame("win-a", &bus).expect("encode survey_sync"))
+                .expect("json frame");
+        // The `/ws` pump reads the target off the frame's prefix.
+        assert_eq!(frame["type"], "window_command");
+        assert_eq!(frame["window_id"], "win-a");
+        assert_eq!(frame["command"], "survey_sync");
+        let surveys = frame["surveys"].as_array().expect("surveys array");
+        assert_eq!(surveys.len(), 2);
+        assert_eq!(surveys[0]["survey"]["surveyId"], "sid-1");
+        assert_eq!(surveys[0]["survey"]["bodyMarkdown"], "pick one");
+        assert_eq!(
+            surveys[0]["survey"]["options"],
+            serde_json::json!(["a", "b"])
+        );
+        assert_eq!(surveys[0]["tabName"], "@@Probe");
+        assert!(
+            surveys[0].get("tab_name").is_none(),
+            "wire field must be camelCase tabName, not tab_name"
+        );
+        assert_eq!(surveys[1]["survey"]["surveyId"], "sid-2");
+        assert!(
+            surveys[1].get("tabName").is_none(),
+            "a group survey's entry omits tabName, as its open_survey does"
+        );
+
+        // A window with nothing open still gets the frame, with an empty list:
+        // the empty set is what closes a stale overlay.
+        let empty: Value =
+            serde_json::from_str(&survey_sync_frame("win-c", &bus).expect("encode survey_sync"))
+                .expect("json frame");
+        assert_eq!(empty["command"], "survey_sync");
+        assert_eq!(empty["surveys"], serde_json::json!([]));
+        let raw = survey_sync_frame("win-c", &bus).unwrap();
+        assert!(
+            raw.starts_with(r#"{"type":"window_command","window_id":"win-c","#),
+            "the frame keeps the prefix the /ws pump filters on: {raw}"
+        );
+    }
+
     #[tokio::test]
     async fn group_survey_timeout_closes_each_target_window() {
         let (_root, registry) = empty_registry();
@@ -8560,6 +8667,10 @@ is_lead = false
             .as_str()
             .expect("survey id")
             .to_string();
+        assert_eq!(
+            open_survey_ids(&survey_bus, "win-a"),
+            vec![survey_id.clone()]
+        );
         let key = crate::survey::survey_queue_key(&["win-a".into()], Some("@@T"));
         let queued_probe = match survey_bus.enqueue_turn(key.clone()) {
             crate::survey::SurveyTurn::Wait(guard, _) => guard,
@@ -8581,6 +8692,10 @@ is_lead = false
         let close = recv_command(&mut events, "close_survey").await;
         assert_eq!(close["surveyId"], survey_id);
         assert_eq!(close["reason"], "cancelled");
+        assert!(
+            open_survey_ids(&survey_bus, "win-a").is_empty(),
+            "the EOF close leaves the open record"
+        );
         assert!(!survey_bus.complete_survey(
             &survey_id,
             SurveyReply::Dismissed {
@@ -8897,6 +9012,112 @@ is_lead = false
             serde_json::json!([]),
             "a survey answered elsewhere must be absent from the attach's sync"
         );
+    }
+
+    /// The ids `survey_bus` reports open in `window_id`.
+    fn open_survey_ids(survey_bus: &crate::survey::SurveyBus, window_id: &str) -> Vec<String> {
+        survey_bus
+            .open_for_window(window_id)
+            .into_iter()
+            .map(|(spec, _)| spec.survey_id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_survey_whose_reply_sender_drops_leaves_the_open_record() {
+        let (_root, registry) = single_tab_registry();
+        let events_tx: broadcast::Sender<String> = broadcast::channel(16).0;
+        let mut events = events_tx.subscribe();
+        let survey_bus = Arc::new(crate::survey::SurveyBus::new());
+        let handler = tokio::spawn({
+            let (events_tx, survey_bus) = (events_tx.clone(), survey_bus.clone());
+            async move {
+                handle_survey(
+                    survey_spec("cancelled under its handler"),
+                    Some("@@T"),
+                    None,
+                    600,
+                    &events_tx,
+                    &survey_bus,
+                    Some(&registry),
+                )
+                .await
+            }
+        });
+        let open = recv_command(&mut events, "open_survey").await;
+        let survey_id = open["survey"]["surveyId"].as_str().unwrap().to_string();
+        assert_eq!(
+            open_survey_ids(&survey_bus, "win-a"),
+            vec![survey_id.clone()]
+        );
+
+        // Dropping the parked sender is the teardown the handler's
+        // sender-dropped arm answers.
+        survey_bus.cancel(&survey_id);
+        match handler.await.expect("survey handler") {
+            ControlResponse::Error { message } => {
+                assert_eq!(message, "survey cancelled before a reply")
+            }
+            other => panic!("expected the cancelled error, got {other:?}"),
+        }
+        let close = recv_command(&mut events, "close_survey").await;
+        assert_eq!(close["reason"], "cancelled");
+        assert!(open_survey_ids(&survey_bus, "win-a").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_aborted_survey_handler_leaves_the_open_record() {
+        let (_root, registry) = single_tab_registry();
+        let events_tx: broadcast::Sender<String> = broadcast::channel(16).0;
+        let mut events = events_tx.subscribe();
+        let survey_bus = Arc::new(crate::survey::SurveyBus::new());
+        let handler = tokio::spawn({
+            let (events_tx, survey_bus) = (events_tx.clone(), survey_bus.clone());
+            async move {
+                handle_survey(
+                    survey_spec("its connection task is aborted"),
+                    Some("@@T"),
+                    None,
+                    600,
+                    &events_tx,
+                    &survey_bus,
+                    Some(&registry),
+                )
+                .await
+            }
+        });
+        let open = recv_command(&mut events, "open_survey").await;
+        let survey_id = open["survey"]["surveyId"].as_str().unwrap().to_string();
+        assert_eq!(open_survey_ids(&survey_bus, "win-a"), vec![survey_id]);
+
+        // An unmount aborts a parked handler; its future is dropped with no
+        // exit arm run.
+        handler.abort();
+        assert!(handler.await.expect_err("aborted").is_cancelled());
+        assert!(open_survey_ids(&survey_bus, "win-a").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_survey_whose_open_push_fails_leaves_no_open_record() {
+        let (_root, registry) = single_tab_registry();
+        // No `/ws` subscriber at all: the open push fails.
+        let events_tx: broadcast::Sender<String> = broadcast::channel(16).0;
+        let survey_bus = Arc::new(crate::survey::SurveyBus::new());
+        let response = handle_survey(
+            survey_spec("nobody is connected"),
+            Some("@@T"),
+            None,
+            600,
+            &events_tx,
+            &survey_bus,
+            Some(&registry),
+        )
+        .await;
+        match response {
+            ControlResponse::Error { message } => assert_eq!(message, NO_WINDOW_CONNECTED),
+            other => panic!("expected the no-window error, got {other:?}"),
+        }
+        assert!(open_survey_ids(&survey_bus, "win-a").is_empty());
     }
 
     /// Await the next `open_survey` frame on the `/ws` fan-out.

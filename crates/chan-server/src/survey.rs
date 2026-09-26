@@ -15,12 +15,23 @@
 //! [`VecDeque`]; each caller's [`SurveyTurnGuard`] releases its slot on drop
 //! (reply, timeout, cancellation, or EOF from an opted-in client), promoting
 //! the next survey in arrival order.
+//!
+//! And the bus records which surveys are open: for each overlay the handler
+//! has pushed and not yet closed, the windows it went to, the tab it targets
+//! and its spec. `open_survey` and `close_survey` ride the `/ws` broadcast
+//! once each, so a window whose socket was down when one went out never gets
+//! it; the `/ws` attach sends that window the record instead (`survey_sync`),
+//! the whole set of surveys the server still waits on there. The handler
+//! holds an [`OpenSurveyGuard`] from before the open push until before the
+//! close push, so no exit path leaves a closed survey in the record, and no
+//! window synced from it can raise a survey whose close it was not
+//! subscribed for.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use chan_shell::SurveyReply;
+use chan_shell::{SurveyReply, SurveySpec};
 use tokio::sync::oneshot;
 
 use crate::round_trip_bus::RoundTripBus;
@@ -85,9 +96,33 @@ impl Drop for SurveyTurnGuard<'_> {
     }
 }
 
+/// One survey whose overlay is up: the windows its `open_survey` went to, the
+/// tab it targets (`None` for a group survey, which takes the window-wide
+/// slot) and the spec as pushed, id stamped.
+struct OpenSurvey {
+    windows: Vec<String>,
+    tab_name: Option<String>,
+    spec: SurveySpec,
+}
+
+/// RAII record of one open survey. Dropping it takes the survey out of what
+/// [`SurveyBus::open_for_window`] reports, so every exit of the blocked
+/// handler (reply, sender dropped, client EOF, deadline, a failed push, or the
+/// handler's future dropped) leaves the record.
+pub(crate) struct OpenSurveyGuard<'a> {
+    bus: &'a SurveyBus,
+    survey_id: String,
+}
+
+impl Drop for OpenSurveyGuard<'_> {
+    fn drop(&mut self) {
+        self.bus.forget_open(&self.survey_id);
+    }
+}
+
 /// The `cs terminal survey` round-trips: a [`RoundTripBus`] of `survey-` ids
-/// over the [`SurveyReplyEnvelope`], plus the per-target FIFO that serializes
-/// the surveys addressed to one overlay slot.
+/// over the [`SurveyReplyEnvelope`], the per-target FIFO that serializes the
+/// surveys addressed to one overlay slot, and the record of open surveys.
 pub struct SurveyBus {
     pending: RoundTripBus<SurveyReplyEnvelope>,
     /// Per-target FIFOs keyed by [`SurveyQueueKey`]. The front entry is the
@@ -96,6 +131,9 @@ pub struct SurveyBus {
     queues: Mutex<HashMap<SurveyQueueKey, VecDeque<QueuedTurn>>>,
     /// Monotonic ticket source distinguishing entries within one queue.
     next_ticket: AtomicU64,
+    /// The surveys whose overlay is up, in the order they opened. At most
+    /// one per target, since only a turn's holder opens, so a scan is cheap.
+    open: Mutex<Vec<OpenSurvey>>,
 }
 
 /// What a completed survey delivers to the blocked control handler: the reply
@@ -118,7 +156,57 @@ impl SurveyBus {
             pending: RoundTripBus::new("survey-"),
             queues: Mutex::new(HashMap::new()),
             next_ticket: AtomicU64::new(0),
+            open: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Record `spec` (its id already stamped) as open in `windows` for
+    /// `tab_name` until the returned guard drops. The handler takes it before
+    /// it pushes `open_survey`, so a window that attaches too late for that
+    /// push is synced the survey instead, and drops it before it pushes
+    /// `close_survey`, so a window that attaches too late for the close is
+    /// synced without it.
+    pub(crate) fn record_open(
+        &self,
+        windows: &[String],
+        tab_name: Option<&str>,
+        spec: &SurveySpec,
+    ) -> OpenSurveyGuard<'_> {
+        self.open
+            .lock()
+            .expect("open surveys poisoned")
+            .push(OpenSurvey {
+                windows: windows.to_vec(),
+                tab_name: tab_name.map(str::to_string),
+                spec: spec.clone(),
+            });
+        OpenSurveyGuard {
+            bus: self,
+            survey_id: spec.survey_id.clone(),
+        }
+    }
+
+    /// The surveys open in `window_id`, oldest first, each as the spec its
+    /// `open_survey` carried and the tab it targets: what a `survey_sync` for
+    /// that window lists.
+    pub(crate) fn open_for_window(&self, window_id: &str) -> Vec<(SurveySpec, Option<String>)> {
+        self.open
+            .lock()
+            .expect("open surveys poisoned")
+            .iter()
+            .filter(|open| open.windows.iter().any(|window| window == window_id))
+            .map(|open| (open.spec.clone(), open.tab_name.clone()))
+            .collect()
+    }
+
+    /// Remove one open survey (the [`OpenSurveyGuard`] drop path).
+    fn forget_open(&self, survey_id: &str) {
+        // Guard drop keeps the record's cleanup available after a panicking
+        // writer, like `finish_turn`.
+        self.open
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|open| open.spec.survey_id != survey_id);
     }
 
     /// Park a survey; see [`RoundTripBus::register`]. The handler stamps the
@@ -272,6 +360,62 @@ mod tests {
             None,
         ));
         assert!(cancelled_rx.await.is_err());
+    }
+
+    fn spec(survey_id: &str) -> SurveySpec {
+        SurveySpec {
+            survey_id: survey_id.into(),
+            title: None,
+            body_markdown: format!("body of {survey_id}"),
+            options: vec!["ok".into()],
+        }
+    }
+
+    fn open_ids(bus: &SurveyBus, window_id: &str) -> Vec<(String, Option<String>)> {
+        bus.open_for_window(window_id)
+            .into_iter()
+            .map(|(spec, tab_name)| (spec.survey_id, tab_name))
+            .collect()
+    }
+
+    #[test]
+    fn open_surveys_are_listed_per_window_oldest_first_until_their_guard_drops() {
+        let bus = SurveyBus::new();
+        let windows = |ids: &[&str]| ids.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let tab = bus.record_open(&windows(&["win-a"]), Some("@@T"), &spec("survey-1"));
+        let group = bus.record_open(&windows(&["win-a", "win-b"]), None, &spec("survey-2"));
+
+        assert_eq!(
+            open_ids(&bus, "win-a"),
+            vec![
+                ("survey-1".to_string(), Some("@@T".to_string())),
+                ("survey-2".to_string(), None),
+            ],
+            "win-a holds both, in the order they opened"
+        );
+        assert_eq!(
+            open_ids(&bus, "win-b"),
+            vec![("survey-2".to_string(), None)]
+        );
+        assert!(
+            open_ids(&bus, "win-c").is_empty(),
+            "no survey targets win-c"
+        );
+        let listed = bus.open_for_window("win-b");
+        assert_eq!(listed[0].0.body_markdown, "body of survey-2");
+
+        // Whatever ended it (reply, cancel, deadline, a dropped handler), the
+        // guard's drop is what takes a survey out of later syncs, and only
+        // that survey.
+        drop(tab);
+        assert_eq!(
+            open_ids(&bus, "win-a"),
+            vec![("survey-2".to_string(), None)]
+        );
+        drop(group);
+        assert!(open_ids(&bus, "win-a").is_empty());
+        assert!(open_ids(&bus, "win-b").is_empty());
+        assert!(bus.open.lock().unwrap().is_empty(), "no record leaks");
     }
 
     fn key(windows: &[&str], tab: Option<&str>) -> SurveyQueueKey {

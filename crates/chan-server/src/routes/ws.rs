@@ -151,6 +151,7 @@ pub async fn ws_upgrade(
     let session_registry = state.session_registry.clone();
     let session_events_tx = state.events_tx.clone();
     let pending_commands = state.pending_window_commands.clone();
+    let survey_bus = state.survey_bus.clone();
     let window_id = q.w.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
     ws.on_upgrade(move |mut socket| async move {
         // RAII presence ref: held across the pump so EVERY exit path
@@ -198,6 +199,15 @@ pub async fn ws_upgrade(
                     return;
                 }
             }
+            // The surveys still open in this window, sent even when there are
+            // none: an `open_survey` or `close_survey` pushed while the window
+            // had no socket is gone from the broadcast. It is built after this
+            // socket subscribed (`rx` above): a close pushed after the
+            // subscribe reaches the pump, and one pushed before it had already
+            // taken its survey out of the set.
+            if !send_survey_sync(&mut socket, id, &survey_bus).await {
+                return;
+            }
         }
         ws_pump(
             socket,
@@ -211,6 +221,23 @@ pub async fn ws_upgrade(
         )
         .await;
     })
+}
+
+/// Send `window_id`'s `survey_sync` to this socket alone. Returns `false`
+/// when the socket is gone. A frame that fails to encode is logged and
+/// skipped, since the socket itself is still good.
+async fn send_survey_sync(
+    socket: &mut WebSocket,
+    window_id: &str,
+    survey_bus: &crate::survey::SurveyBus,
+) -> bool {
+    match crate::control_socket::survey_sync_frame(window_id, survey_bus) {
+        Ok(frame) => socket.send(Message::text(frame)).await.is_ok(),
+        Err(error) => {
+            tracing::warn!(window_id, %error, "skipped a /ws survey_sync");
+            true
+        }
+    }
 }
 
 /// Client -> server frame. `sub`/`unsub` add/drop this socket's directory
