@@ -3409,8 +3409,8 @@ impl Registry {
             } else {
                 None
             };
-            // Past the import's generation first, so one minted for a restore
-            // that may end behind its previous process differs from it.
+            // Past the import's generation, and past one minted for it, so a
+            // session this process spawns later never repeats either.
             self.generation_counter
                 .fetch_max(meta.generation.saturating_add(1), Ordering::Relaxed);
             let session = match Session::from_imported(
@@ -3418,7 +3418,12 @@ impl Registry {
                 import,
                 self.last_exit.clone(),
                 self.reader_wake.clone(),
-                || self.generation_counter.fetch_add(1, Ordering::Relaxed),
+                || {
+                    let minted = mint_lossy_generation(meta.generation);
+                    self.generation_counter
+                        .fetch_max(minted.saturating_add(1), Ordering::Relaxed);
+                    minted
+                },
             ) {
                 Ok(session) => session,
                 Err(e) => {
@@ -5876,6 +5881,31 @@ struct RestoreSource<'a> {
     sealed: bool,
 }
 
+/// The generation of a restore that may end behind the process that parked
+/// it: past `previous`, the generation that process's clients hold, and
+/// never one another process minted. A process that dies before committing
+/// a manifest with the generation it minted leaves the next one to restore
+/// the same manifest, so a mint from `previous` alone would repeat; the
+/// floor is the wall clock in microseconds, since such processes run one
+/// after another, and each mint in a process is past the last. It stays
+/// under 2^53, which the SPA holds exactly as a number, until the year 2255.
+#[cfg(target_os = "linux")]
+fn mint_lossy_generation(previous: u64) -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
+        });
+    let floor = previous.saturating_add(1).max(clock);
+    let last = LAST
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            Some(floor.max(last.saturating_add(1)))
+        })
+        .unwrap_or_else(|last| last);
+    floor.max(last.saturating_add(1))
+}
+
 /// An imported session's ring, the terminal state its bytes leave, and
 /// whether the restore may end behind the process that parked it.
 #[cfg(target_os = "linux")]
@@ -6964,6 +6994,22 @@ mod tests {
         let (replay, missed) = ring.snapshot_since(Some(0));
         assert_eq!(missed, 3);
         assert_eq!(replay.concat(), b"def");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_lossy_generation_passes_the_previous_one_and_the_clock_and_never_repeats() {
+        let clock = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        let first = mint_lossy_generation(5);
+        let second = mint_lossy_generation(5);
+        assert!(first >= clock, "{first} is behind the clock's {clock}");
+        assert!(second > first, "{second} repeats or precedes {first}");
+        let ahead = clock + 3_600_000_000;
+        assert!(mint_lossy_generation(ahead) > ahead);
+        assert!(clock < 1 << 53, "the SPA cannot hold {clock} exactly");
     }
 
     #[test]
