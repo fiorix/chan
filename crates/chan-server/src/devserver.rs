@@ -5557,6 +5557,89 @@ mod tests {
         );
     }
 
+    /// A mount attempt that waits inside its bound on its root's lock while
+    /// the launcher mounts that root, and then runs past the bound, leaves
+    /// the launcher's tenant alone: it stays mounted and its row reads
+    /// running. The root was not mounted when the attempt began, so an
+    /// expiry that trusted what the attempt saw then would undo a tenant
+    /// the attempt never opened.
+    ///
+    /// The launcher's mount is held in its last check of the root, inside
+    /// the root's lock, until the attempt has resolved the root and waits
+    /// on that lock; then the mount publishes, and the attempt, finding the
+    /// root mounted, is held revalidating it until its bound expires.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_attempt_expiring_after_the_launcher_mounts_its_root_leaves_that_tenant() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("root");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = allocate_workspace_prefix(root.path()).expect("prefix");
+        let key = canonical_root(root.path());
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare the mount")
+            .expect("a fresh attempt");
+
+        let stall = root_stall::stall_matching(
+            root.path(),
+            &["WorkspaceHost::open_workspace", "Workspace::revalidate_root"],
+        );
+        let host = Arc::clone(&state.host);
+        let launching = key.clone();
+        let config = tenant_config(state.addr, &prefix);
+        let launcher = tokio::spawn(async move {
+            host.open_or_get_registered_workspace(&launching, config)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the launcher's mount never reached its last check of the root"
+        );
+        let resolved = stall.passed();
+        let attempting = Arc::clone(&state);
+        let expiring = tokio::spawn(async move {
+            attempting
+                .execute_mount_attempt(attempt, Duration::from_secs(3))
+                .await
+        });
+        assert!(
+            stall.wait_passed(resolved + 1, Duration::from_secs(10)),
+            "fixture: the attempt never resolved its root inside its bound"
+        );
+
+        stall.release_held();
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, launcher)
+            .await
+            .expect("the launcher's mount finishes")
+            .expect("launcher task")
+            .expect("the launcher mounts the root");
+        let error = tokio::time::timeout(HEALTHY_ROOT_BOUND, expiring)
+            .await
+            .expect("the attempt finishes")
+            .expect("attempt task")
+            .expect_err("the attempt runs past its bound");
+        assert!(
+            error.to_string().contains("timed out"),
+            "expected the attempt's bound to expire: {error}"
+        );
+        assert_eq!(
+            stall.entered().len(),
+            2,
+            "fixture: the attempt did not expire revalidating the launcher's mount: {:#?}",
+            stall.entered()
+        );
+        assert!(
+            state.host.is_canonical_root_mounted(&key),
+            "the expired attempt closed a tenant it did not open"
+        );
+        assert_eq!(
+            state.host.canonical_root_status(&key).0,
+            WorkspaceStatus::Running,
+            "the expired attempt marked a tenant it did not open"
+        );
+    }
+
     /// Closes of one hung root share the blocking thread that resolves its
     /// key, so a client retrying a close of a root that stopped answering
     /// cannot take the blocking pool from every other root.
