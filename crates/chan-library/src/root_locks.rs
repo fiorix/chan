@@ -1,5 +1,6 @@
 //! Lifecycle locks keyed by what they serialize: a workspace's canonical root
-//! for the host, a mount prefix for the devserver.
+//! for the host, a mount prefix for the devserver. Also the computation of
+//! the canonical key a root lock is taken under, one per spelling in flight.
 //!
 //! A mount, close or remove holds its root's lock across the workspace open,
 //! the tenant build, the release budget and the filesystem hops behind them,
@@ -10,10 +11,10 @@
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// One asynchronous mutex per key, so the calls on one key serialize with
 /// each other and never with another key's.
@@ -130,13 +131,97 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// lock, and nothing that holds a root lock takes a prefix lock.
 pub(crate) type RootLocks = KeyedLocks<PathBuf>;
 
+/// The canonical keys of workspace roots, each computed on the blocking pool
+/// by one computation per spelled path in flight.
+///
+/// A key asks the root's filesystem, and a hung network mount never answers.
+/// A caller that asks for a spelling whose computation is still running
+/// waits on that computation instead of starting another, so however often
+/// clients retry requests for a hung root, that root holds one blocking
+/// thread and the rest of the pool stays free for every other root's key,
+/// open and probe. A small executor of its own would not keep that promise:
+/// one hung root's retries fill its few threads and then every other root's
+/// key waits behind them.
+///
+/// A computation drops its entry when it finishes, so a later caller asks
+/// the filesystem afresh; a caller that gives up leaves the computation to
+/// finish on its own. The entry map's mutex is a leaf, held only to look up,
+/// insert or remove an entry.
+#[derive(Default)]
+pub(crate) struct RootKeys {
+    in_flight: Arc<Mutex<HashMap<PathBuf, watch::Receiver<Option<PathBuf>>>>>,
+}
+
+impl RootKeys {
+    /// The key `compute` gives `root`, computed on the blocking pool by this
+    /// call or by the computation already in flight for the same spelling.
+    /// `None` when that computation ended without an answer (it panicked, or
+    /// the runtime is shutting down).
+    pub(crate) async fn key(
+        &self,
+        root: &Path,
+        compute: impl FnOnce(&Path) -> PathBuf + Send + 'static,
+    ) -> Option<PathBuf> {
+        let mut answer = self.join_or_start(root, compute);
+        let key = answer.wait_for(Option::is_some).await.ok()?;
+        key.clone()
+    }
+
+    fn join_or_start(
+        &self,
+        root: &Path,
+        compute: impl FnOnce(&Path) -> PathBuf + Send + 'static,
+    ) -> watch::Receiver<Option<PathBuf>> {
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
+        // An entry whose sender is gone belongs to a computation that ended
+        // without answering; it is replaced rather than joined.
+        if let Some(answer) = in_flight
+            .get(root)
+            .filter(|answer| answer.has_changed().is_ok())
+        {
+            return answer.clone();
+        }
+        let (publish, answer) = watch::channel(None);
+        in_flight.insert(root.to_path_buf(), answer.clone());
+        let entries = Arc::clone(&self.in_flight);
+        let own = answer.clone();
+        let spelled = root.to_path_buf();
+        // The entry is in the map before the computation can finish and look
+        // for it, because the map's mutex is held until this returns.
+        tokio::task::spawn_blocking(move || {
+            let key = compute(&spelled);
+            {
+                let mut in_flight = entries.lock().unwrap_or_else(PoisonError::into_inner);
+                if in_flight
+                    .get(&spelled)
+                    .is_some_and(|answer| answer.same_channel(&own))
+                {
+                    in_flight.remove(&spelled);
+                }
+            }
+            publish.send_replace(Some(key));
+        });
+        answer
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::future::Future;
     use std::path::Path;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
+    use std::time::Duration;
 
     /// Poll `future` once and report whether it is still pending.
     async fn still_pending<F: Future + Unpin>(future: &mut F) -> bool {
@@ -206,6 +291,86 @@ mod tests {
             locks.len(),
             1,
             "a lookup kept the entry of a root whose last caller was cancelled"
+        );
+    }
+
+    /// Count the computations `compute` stands for, and answer `root`
+    /// under `/canonical`.
+    fn counting(computed: &Arc<AtomicUsize>) -> impl FnOnce(&Path) -> PathBuf + Send + 'static {
+        let computed = Arc::clone(computed);
+        move |root| {
+            computed.fetch_add(1, Ordering::SeqCst);
+            Path::new("/canonical").join(root.strip_prefix("/").unwrap_or(root))
+        }
+    }
+
+    #[tokio::test]
+    async fn one_spelling_shares_the_key_computation_in_flight() {
+        let keys = RootKeys::default();
+        let root = Path::new("/roots/hung");
+        let computed = Arc::new(AtomicUsize::new(0));
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let held = counting(&computed);
+        let mut first = Box::pin(keys.key(root, move |root| {
+            entered.send(()).unwrap();
+            gate.recv().unwrap();
+            held(root)
+        }));
+        assert!(still_pending(&mut first).await);
+        started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first computation never started");
+        let mut second = Box::pin(keys.key(root, counting(&computed)));
+        assert!(
+            still_pending(&mut second).await,
+            "a caller did not wait for the computation in flight for its spelling"
+        );
+        release.send(()).unwrap();
+        let expected = Some(PathBuf::from("/canonical/roots/hung"));
+        assert_eq!(first.await, expected);
+        assert_eq!(second.await, expected);
+        assert_eq!(
+            computed.load(Ordering::SeqCst),
+            1,
+            "two callers of one spelling each computed its key"
+        );
+        assert_eq!(keys.len(), 0, "a finished computation left its entry behind");
+    }
+
+    #[tokio::test]
+    async fn a_finished_key_computation_is_not_served_again() {
+        let keys = RootKeys::default();
+        let root = Path::new("/roots/a");
+        let computed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            assert_eq!(
+                keys.key(root, counting(&computed)).await,
+                Some(PathBuf::from("/canonical/roots/a"))
+            );
+        }
+        assert_eq!(
+            computed.load(Ordering::SeqCst),
+            2,
+            "a key computed earlier was served instead of asked for afresh"
+        );
+        assert_eq!(keys.len(), 0, "a finished computation left its entry behind");
+    }
+
+    #[tokio::test]
+    async fn a_key_computation_that_ends_without_an_answer_is_replaced() {
+        let keys = RootKeys::default();
+        let root = Path::new("/roots/a");
+        assert_eq!(
+            keys.key(root, |_| panic!("the computation ends without an answer"))
+                .await,
+            None
+        );
+        let computed = Arc::new(AtomicUsize::new(0));
+        assert_eq!(
+            keys.key(root, counting(&computed)).await,
+            Some(PathBuf::from("/canonical/roots/a")),
+            "a caller joined a computation that had ended without an answer"
         );
     }
 }

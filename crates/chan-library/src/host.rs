@@ -24,7 +24,7 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use crate::desktop_window_ops::DesktopBridge;
-use crate::root_locks::RootLocks;
+use crate::root_locks::{RootKeys, RootLocks};
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
 use crate::tenant::{
@@ -370,6 +370,10 @@ pub struct WorkspaceHost {
     /// open, the release budget and the blocking hops, so it is asynchronous;
     /// the lock order is stated on [`RootLocks`].
     root_locks: RootLocks,
+    /// The key computations the root locks are taken under, one per spelled
+    /// root in flight, so a hung root costs one blocking thread however
+    /// often its callers retry.
+    root_keys: RootKeys,
     /// The route layer's tenant constructor, inverted so the host builds tenants
     /// without depending on chan-server. chan-server's `RouteLayer` implements
     /// it; `open_*` call through it.
@@ -746,6 +750,7 @@ impl WorkspaceHost {
             workspaces: RwLock::new(HashMap::new()),
             desktop,
             root_locks: RootLocks::default(),
+            root_keys: RootKeys::default(),
             #[cfg(test)]
             open_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1099,6 +1104,21 @@ impl WorkspaceHost {
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
+        let key = self.root_key(root).await?;
+        self.open_registered_workspace_keyed(root, key, config)
+            .await
+    }
+
+    /// [`open_registered_workspace`](Self::open_registered_workspace) for a
+    /// caller that holds `root`'s canonical `key`, which the lifecycle
+    /// bookkeeping goes by so that none of it asks the root's filesystem on
+    /// the runtime thread.
+    async fn open_registered_workspace_keyed(
+        &self,
+        root: &Path,
+        key: PathBuf,
+        config: ServeConfig,
+    ) -> Result<HostedWorkspace, Error> {
         // Mark the mount in flight (status `starting`) and fire the watch feed
         // so the launcher spins this row before the (possibly slow) tenant build
         // completes. This is the SHARED inner mount every entry point funnels
@@ -1107,10 +1127,10 @@ impl WorkspaceHost {
         // `starting`/`error` without each routing the lifecycle themselves.
         let mut mounting = WorkspaceMountGuard {
             host: self,
-            root: canonical_key(root),
+            root: key,
             armed: true,
         };
-        self.mark_mount_starting(&mounting.root);
+        self.mark_mount_starting_by_key(&mounting.root);
         let result = self.open_registered_workspace_inner(root, config).await;
         self.settle_mount(&mounting.root, &result);
         mounting.armed = false;
@@ -1231,13 +1251,14 @@ impl WorkspaceHost {
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
-        let key = self.canonical_key_off_runtime(root).await?;
+        let key = self.root_key(root).await?;
         let _root_lock = self.root_locks.lock(&key).await;
         if let Some(existing) = self.hosted_for_key(&key)? {
-            self.revalidate_mounted_root(root).await;
+            self.revalidate_mounted_root(root, &key).await;
             return Ok(existing);
         }
-        self.open_registered_workspace(root, config).await
+        self.open_registered_workspace_keyed(root, key, config)
+            .await
     }
 
     /// Re-check one mounted root's filesystem and publish the result through
@@ -1256,8 +1277,8 @@ impl WorkspaceHost {
     /// and can never pin a runtime worker. Nothing here bounds that stat; the
     /// caller's own budget does, and the launcher's `add` / `on` routes have
     /// none beyond their client.
-    async fn revalidate_mounted_root(&self, root: &Path) {
-        let Some(workspace) = self.live_workspace(root) else {
+    async fn revalidate_mounted_root(&self, root: &Path, key: &Path) {
+        let Some(workspace) = self.live_workspace_by_key(key) else {
             return;
         };
         #[cfg(test)]
@@ -1272,7 +1293,7 @@ impl WorkspaceHost {
         .await;
         match joined {
             Ok(outcome) => {
-                let _ = self.reconcile_root_health(root, outcome);
+                let _ = self.reconcile_root_health(root, key, outcome);
             }
             // A join failure (a panicked blocking task, or a runtime shutting
             // down) says nothing about the root, so the overlay keeps whatever
@@ -1347,20 +1368,16 @@ impl WorkspaceHost {
             prefix: prefix.clone(),
             handle: handle.clone(),
         };
-        let runtime = HostedWorkspaceRuntime {
-            canonical_root: canonical_key(&root),
-            root,
-            handle,
-            artifacts,
-        };
 
         #[cfg(test)]
         let probe = self.root_check_probe.lock().unwrap().take();
         // Revalidate after the asynchronous tenant build, without holding the
-        // routing map lock across filesystem work.
+        // routing map lock across filesystem work, and resolve the key the
+        // runtime is found by in the same hop: both ask the root's filesystem.
         let checking_workspace = Arc::clone(&workspace);
+        let checking_root = root.clone();
         drop(workspace);
-        let root_available = match tokio::task::spawn_blocking(move || {
+        let (root_available, canonical_root) = match tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if let Some(probe) = probe {
                 probe.entered.send(()).unwrap();
@@ -1369,15 +1386,24 @@ impl WorkspaceHost {
                     .recv_timeout(std::time::Duration::from_secs(3))
                     .unwrap();
             }
-            checking_workspace.ensure_root_available()
+            (
+                checking_workspace.ensure_root_available(),
+                canonical_key(&checking_root),
+            )
         })
         .await
         {
-            Ok(result) => result.map_err(Error::from),
-            Err(error) => Err(std::io::Error::other(format!(
-                "workspace root check task failed: {error}"
-            ))
-            .into()),
+            Ok((result, key)) => (result.map_err(Error::from), key),
+            Err(error) => (
+                Err(std::io::Error::other(format!("workspace root check task failed: {error}")).into()),
+                root.clone(),
+            ),
+        };
+        let runtime = HostedWorkspaceRuntime {
+            canonical_root,
+            root,
+            handle,
+            artifacts,
         };
         if let Err(error) = root_available {
             runtime.shutdown().await;
@@ -2876,10 +2902,31 @@ impl WorkspaceHost {
         })
     }
 
-    /// The canonical key of `root`, computed off the runtime thread.
-    async fn canonical_key_off_runtime(&self, root: &Path) -> Result<PathBuf, Error> {
-        let root = root.to_path_buf();
-        self.off_runtime(move || canonical_key(&root)).await
+    /// The canonical key of `root`, the one its root lock, mount state and
+    /// mounted runtime go by, resolved on the blocking pool.
+    ///
+    /// Resolving asks the root's filesystem. A caller that asks while a
+    /// resolution of the same spelling is in flight waits on that one, so a
+    /// hung root holds one blocking thread however many callers ask for it,
+    /// and every caller of it waits without holding a runtime worker.
+    pub async fn root_key(&self, root: &Path) -> Result<PathBuf, Error> {
+        #[cfg(test)]
+        let probe = self.blocking_thread_probe.lock().unwrap().clone();
+        self.root_keys
+            .key(root, move |root| {
+                #[cfg(test)]
+                if let Some(probe) = probe {
+                    let _ = probe.send(std::thread::current().id());
+                }
+                canonical_key(root)
+            })
+            .await
+            .ok_or_else(|| {
+                Error::from(std::io::Error::other(format!(
+                    "workspace host blocking task failed: resolving {} ended without an answer",
+                    root.display()
+                )))
+            })
     }
 
     /// Shared body for the close-by-root variants. `record_off` gates the off
@@ -2897,7 +2944,7 @@ impl WorkspaceHost {
         force: bool,
         record_off: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let target = self.canonical_key_off_runtime(root).await?;
+        let target = self.root_key(root).await?;
         let _root_lock = self.root_locks.lock(&target).await;
         self.close_workspace_for_root_locked(root, &target, force, record_off)
             .await
@@ -2991,7 +3038,7 @@ impl WorkspaceHost {
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let target = self.canonical_key_off_runtime(root).await?;
+        let target = self.root_key(root).await?;
         let _root_lock = self.root_locks.lock(&target).await;
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
@@ -3304,11 +3351,16 @@ impl WorkspaceHost {
     /// (mirrors `AppState::try_workspace`); the caller then falls back
     /// to a transient open against the registry.
     pub fn live_workspace(&self, root: &Path) -> Option<Arc<Workspace>> {
-        let target = canonical_key(root);
+        self.live_workspace_by_key(&canonical_key(root))
+    }
+
+    /// [`live_workspace`](Self::live_workspace) for a caller that holds the
+    /// root's canonical key; touches no filesystem.
+    fn live_workspace_by_key(&self, key: &Path) -> Option<Arc<Workspace>> {
         let workspaces = self.workspaces.read().ok()?;
         let runtime = workspaces
             .values()
-            .find(|runtime| runtime.canonical_root == target)?;
+            .find(|runtime| runtime.canonical_root == key)?;
         runtime.artifacts.cell.workspace()
     }
 
@@ -3432,6 +3484,13 @@ impl WorkspaceHost {
         self.mark_mount_starting(root);
     }
 
+    /// [`mark_workspace_starting`](Self::mark_workspace_starting) for a
+    /// caller that already holds the root's canonical key; touches no
+    /// filesystem.
+    pub fn mark_canonical_root_starting(&self, key: &Path) {
+        self.mark_mount_starting_by_key(key);
+    }
+
     /// Publish a terminal mount failure supplied by an external lifecycle
     /// owner, such as the devserver's bounded-attempt timeout.
     pub fn mark_workspace_failed(&self, root: &Path, reason: String) {
@@ -3450,14 +3509,17 @@ impl WorkspaceHost {
     /// wins), so a retry of an already-served workspace never spuriously flips
     /// it to `starting`. Overwrites a prior `error` -- a fresh attempt clears it.
     fn mark_mount_starting(&self, root: &Path) {
-        if self.is_root_mounted(root) {
+        self.mark_mount_starting_by_key(&canonical_key(root));
+    }
+
+    fn mark_mount_starting_by_key(&self, key: &Path) {
+        if self.is_canonical_root_mounted(key) {
             return;
         }
-        let key = canonical_key(root);
         self.mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, MountState::Starting);
+            .insert(key.to_path_buf(), MountState::Starting);
         self.notify_window_change();
     }
 
@@ -3508,7 +3570,7 @@ impl WorkspaceHost {
     /// Returns the number of roots whose handle was refreshed. Blocking: the
     /// caller runs it off the async runtime.
     pub fn probe_mounted_roots(&self) -> usize {
-        let mounted: Vec<(PathBuf, Arc<Workspace>)> = {
+        let mounted: Vec<(PathBuf, PathBuf, Arc<Workspace>)> = {
             let Ok(workspaces) = self.workspaces.read() else {
                 return 0;
             };
@@ -3516,14 +3578,18 @@ impl WorkspaceHost {
                 .values()
                 .filter_map(|runtime| {
                     let workspace = runtime.artifacts.cell.workspace()?;
-                    Some((runtime.root.clone(), workspace))
+                    Some((
+                        runtime.root.clone(),
+                        runtime.canonical_root.clone(),
+                        workspace,
+                    ))
                 })
                 .collect()
         };
         let mut refreshed = 0;
-        for (root, workspace) in mounted {
+        for (root, key, workspace) in mounted {
             if self
-                .reconcile_root_health(&root, workspace.revalidate_root())
+                .reconcile_root_health(&root, &key, workspace.revalidate_root())
                 .is_ok_and(|remounted| remounted)
             {
                 refreshed += 1;
@@ -3554,14 +3620,14 @@ impl WorkspaceHost {
     fn reconcile_root_health(
         &self,
         root: &Path,
+        key: &Path,
         outcome: Result<bool, ChanError>,
     ) -> Result<bool, ChanError> {
-        let key = canonical_key(root);
         let published = match self
             .mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
+            .get(key)
         {
             Some(MountState::Unavailable(reason)) => Some(reason.clone()),
             _ => None,
@@ -3572,7 +3638,7 @@ impl WorkspaceHost {
                     self.mount_state
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .remove(&key);
+                        .remove(key);
                     tracing::info!(
                         root = %root.display(),
                         remounted,
@@ -3584,7 +3650,7 @@ impl WorkspaceHost {
             // A close that landed while this root was being stat-ed has
             // already dropped the tenant and clears the overlay itself, so do
             // not republish a degraded row for an unmounted workspace.
-            Err(_) if !self.is_root_mounted(root) => {}
+            Err(_) if !self.is_canonical_root_mounted(key) => {}
             Err(error) => {
                 let reason = degraded_root_reason(error);
                 if published.as_deref() != Some(reason.as_str()) {
@@ -3596,7 +3662,7 @@ impl WorkspaceHost {
                     self.mount_state
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .insert(key, MountState::Unavailable(reason));
+                        .insert(key.to_path_buf(), MountState::Unavailable(reason));
                     self.notify_window_change();
                 }
             }
@@ -3607,10 +3673,6 @@ impl WorkspaceHost {
     /// Drop a workspace root's transient lifecycle state (it settled to running,
     /// or was torn down). No feed push: the settling transition already fired
     /// one (mount success in `open_workspace`, close in `close_workspace`).
-    fn clear_mount_state(&self, root: &Path) {
-        self.clear_mount_state_by_key(&canonical_key(root));
-    }
-
     fn clear_mount_state_by_key(&self, key: &Path) {
         self.mount_state
             .lock()
@@ -3619,25 +3681,29 @@ impl WorkspaceHost {
     }
 
     /// Clear successful mounts and foreign-lock contention; publish failures
-    /// for the launcher to display and retry.
-    fn settle_mount(&self, root: &Path, result: &Result<HostedWorkspace, Error>) {
+    /// for the launcher to display and retry. By the mount's canonical key,
+    /// so settling asks no filesystem even when the root stopped answering
+    /// during the mount.
+    fn settle_mount(&self, key: &Path, result: &Result<HostedWorkspace, Error>) {
         match result {
-            Ok(_) => self.clear_mount_state(root),
+            Ok(_) => self.clear_mount_state_by_key(key),
             Err(Error::Core(ChanError::WorkspaceAlreadyOpen)) => {
-                self.settle_interrupted_mount(root)
+                self.settle_interrupted_mount(key)
             }
-            Err(Error::Core(ChanError::WorkspaceLocked)) => self.clear_workspace_lifecycle(root),
-            Err(e) => self.mark_mount_error(root, e.to_string()),
+            Err(Error::Core(ChanError::WorkspaceLocked)) => {
+                self.clear_workspace_lifecycle_by_key(key)
+            }
+            Err(e) => self.mark_mount_error_by_key(key, e.to_string()),
         }
     }
 
-    fn settle_interrupted_mount(&self, root: &Path) {
-        if self.is_root_mounted(root) {
-            self.clear_workspace_lifecycle(root);
+    fn settle_interrupted_mount(&self, key: &Path) {
+        if self.is_canonical_root_mounted(key) {
+            self.clear_workspace_lifecycle_by_key(key);
         } else {
             // A cancelled blocking open can keep its writer handle until the
             // operation returns, so cancellation leaves an explicit retry state.
-            self.mark_mount_error(root, "workspace is still releasing; retry".into());
+            self.mark_mount_error_by_key(key, "workspace is still releasing; retry".into());
         }
     }
 
