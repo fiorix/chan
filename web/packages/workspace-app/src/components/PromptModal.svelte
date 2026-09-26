@@ -31,9 +31,6 @@
     if (e.key === "Enter") {
       e.preventDefault();
       ok();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      cancel();
     }
   }
 </script>

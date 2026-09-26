@@ -13,6 +13,7 @@ import {
   dialogName,
   mountDialog,
   press,
+  recordDocumentKeys,
   settle,
   unmountDialogs,
 } from "../__tests__/dialog";
@@ -90,6 +91,16 @@ describe("ConfirmModal", () => {
     const escape = press(document.activeElement!, "Escape");
     await expect(answer).resolves.toBe(false);
     expect(escape.defaultPrevented).toBe(true);
+  });
+
+  test("the Escape that cancels goes no further than the dialog", async () => {
+    const target = mountDialog(ConfirmModal);
+    const { answer } = await open(target);
+    const reached = recordDocumentKeys();
+    press(document.activeElement!, "Escape");
+    reached.stop();
+    await expect(answer).resolves.toBe(false);
+    expect(reached.keys, "keys that reached the document").toEqual([]);
   });
 
   test("a click on the backdrop cancels and a click inside the panel does not", async () => {

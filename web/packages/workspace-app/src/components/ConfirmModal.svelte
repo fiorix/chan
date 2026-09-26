@@ -8,8 +8,8 @@
 
   let okEl: HTMLButtonElement | undefined = $state();
 
-  // Focus the OK button when the dialog opens so Enter confirms and
-  // Esc cancels without an extra click.
+  // Park focus on the OK button when the dialog opens, so the default
+  // action is the focused control.
   $effect(() => {
     if (confirmState.open) {
       queueMicrotask(() => okEl?.focus());
@@ -26,9 +26,6 @@
     if (e.key === "Enter") {
       e.preventDefault();
       ok();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      cancel();
     }
   }
 </script>

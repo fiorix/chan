@@ -18,7 +18,8 @@
     // The id of the caller's title element, which names the dialog.
     labelledby: string;
     onClose: () => void;
-    // Keys the dialog answers wherever focus sits inside the panel.
+    // Keys other than Escape that the dialog answers wherever focus sits
+    // inside the panel.
     onKeydown?: (e: KeyboardEvent) => void;
     minWidth?: string;
     // The spacing between the panel's rows, when the content wants it
@@ -33,6 +34,19 @@
   // the surface behind it. A body that parks focus on a control does so
   // after it renders and moves it on from the panel.
   onMount(() => panel?.focus());
+
+  // Escape closes this dialog and goes no further. App's document-level
+  // handler answers Escape too, by closing the topmost overlay, and must
+  // not act on a press the dialog has already taken.
+  function onPanelKeydown(e: KeyboardEvent): void {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    onKeydown?.(e);
+  }
 </script>
 
 <div class="overlay">
@@ -51,7 +65,7 @@
     style:min-width={minWidth}
     style:gap
     onclick={(e) => e.stopPropagation()}
-    onkeydown={onKeydown}
+    onkeydown={onPanelKeydown}
     role="dialog"
     aria-modal="true"
     aria-labelledby={labelledby}

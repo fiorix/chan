@@ -27,7 +27,13 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import PathPromptModal from "./PathPromptModal.svelte";
-import { clickBackdrop, dialogIn, dialogName, press } from "../__tests__/dialog";
+import {
+  clickBackdrop,
+  dialogIn,
+  dialogName,
+  press,
+  recordDocumentKeys,
+} from "../__tests__/dialog";
 import {
   resolvePathPrompt,
   tree,
@@ -319,6 +325,16 @@ describe("dismissal", () => {
     const escape = press(target.querySelector("input")!, "Escape");
     await expect(promise).resolves.toBeNull();
     expect(escape.defaultPrevented).toBe(true);
+  });
+
+  test("the Escape that cancels goes no further than the dialog", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(target, { kind: "file", mode: "create" }, "docs/new.md");
+    const reached = recordDocumentKeys();
+    press(target.querySelector("input")!, "Escape");
+    reached.stop();
+    await expect(promise).resolves.toBeNull();
+    expect(reached.keys, "keys that reached the document").toEqual([]);
   });
 
   test("a click on the backdrop answers null and a click inside the panel does not", async () => {

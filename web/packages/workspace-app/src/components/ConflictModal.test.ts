@@ -27,6 +27,8 @@ import {
   dialogName,
   focusOrigin,
   mountDialog,
+  press,
+  recordDocumentKeys,
   settle,
   unmountDialogs,
 } from "../__tests__/dialog";
@@ -94,6 +96,17 @@ describe("ConflictModal", () => {
     await settle();
     expect(conflictDialog.open).toBe(false);
     expect(dialogIn(target)).toBeNull();
+  });
+
+  test("Escape dismisses it and goes no further", async () => {
+    const target = mountDialog(ConflictModal);
+    await open(target);
+    const reached = recordDocumentKeys();
+    press(document.activeElement!, "Escape");
+    reached.stop();
+    await settle();
+    expect(conflictDialog.open).toBe(false);
+    expect(reached.keys, "keys that reached the document").toEqual([]);
   });
 
   test("a click on the backdrop dismisses and a click inside the panel does not", async () => {

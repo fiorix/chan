@@ -13,6 +13,7 @@ import {
   dialogName,
   mountDialog,
   press,
+  recordDocumentKeys,
   settle,
   unmountDialogs,
 } from "../__tests__/dialog";
@@ -96,6 +97,19 @@ describe("PromptModal", () => {
     const escape = press(input(target), "Escape");
     await expect(answer).resolves.toBeNull();
     expect(escape.defaultPrevented).toBe(true);
+  });
+
+  test("Escape anywhere in the dialog cancels it and goes no further", async () => {
+    const target = mountDialog(PromptModal);
+    const { answer } = await open(target);
+    let answered: string | null | undefined;
+    void answer.then((v) => (answered = v));
+    const reached = recordDocumentKeys();
+    press(button(target, "Cancel"), "Escape");
+    reached.stop();
+    await settle();
+    expect(answered, "Escape on the Cancel button answers null").toBeNull();
+    expect(reached.keys, "keys that reached the document").toEqual([]);
   });
 
   test("a click on the backdrop cancels and a click inside the panel does not", async () => {

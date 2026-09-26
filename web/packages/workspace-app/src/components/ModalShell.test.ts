@@ -16,6 +16,7 @@ import {
   focusOrigin,
   mountDialog,
   press,
+  recordDocumentKeys,
   settle,
   unmountDialogs,
 } from "../__tests__/dialog";
@@ -87,7 +88,20 @@ describe("ModalShell", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  test("hands the dialog every key pressed inside the panel", () => {
+  test("Escape anywhere in the panel closes it and goes no further", () => {
+    const onClose = vi.fn();
+    const onKeydown = vi.fn();
+    const target = render({ onClose, onKeydown });
+    const reached = recordDocumentKeys();
+    const escape = press(dialogIn(target)!.querySelector("button")!, "Escape");
+    reached.stop();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(escape.defaultPrevented).toBe(true);
+    expect(reached.keys, "keys that reached the document").toEqual([]);
+    expect(onKeydown, "the dialog's own key handler").not.toHaveBeenCalled();
+  });
+
+  test("hands the dialog every other key pressed inside the panel", () => {
     const onKeydown = vi.fn();
     const target = render({ onKeydown });
     press(dialogIn(target)!.querySelector("button")!, "Enter");

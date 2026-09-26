@@ -60,6 +60,17 @@ export function press(el: Element, key: string): KeyboardEvent {
   return e;
 }
 
+/// Record the keys that reach the document, where App's global shortcut
+/// handler listens. Stop recording with the returned `stop`.
+export function recordDocumentKeys(): { keys: string[]; stop: () => void } {
+  const keys: string[] = [];
+  const listen = (e: KeyboardEvent): void => {
+    keys.push(e.key);
+  };
+  document.addEventListener("keydown", listen);
+  return { keys, stop: () => document.removeEventListener("keydown", listen) };
+}
+
 /// A focused button on the body, standing in for the surface (an editor, a
 /// terminal) that held focus when the dialog opened.
 export function focusOrigin(): HTMLButtonElement {

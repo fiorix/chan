@@ -582,9 +582,6 @@
         return;
       }
       ok();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      cancel();
     } else if (e.key === "Tab" && suggestions.length > 0) {
       // Tab-complete:
       //   1. If a suggestion is already highlighted, Tab accepts
