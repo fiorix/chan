@@ -245,9 +245,9 @@ impl EmbeddedServer {
         )
     }
 
-    /// Install a workspace overlay at `store`, which [`for_tests`](Self::for_tests)
-    /// leaves out, so a test can observe the on-set snapshot the desktop
-    /// writes there.
+    /// Install a workspace overlay at `store`, which
+    /// [`for_tests`](Self::for_tests) leaves out, so a test can observe the
+    /// on-set snapshot the desktop writes there.
     #[cfg(test)]
     pub fn install_workspace_overlay_for_tests(&self, store: std::path::PathBuf) {
         self.host

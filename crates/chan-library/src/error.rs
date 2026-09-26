@@ -2,8 +2,8 @@
 //!
 //! `Error` is returned by the host lifecycle (`WorkspaceHost::open_*`/`close_*`)
 //! and the tenant builder. The variants are generic (workspace / io / config /
-//! bad-request / shutting-down) with no HTTP coupling; `chan-server` maps them onto HTTP
-//! responses with its own `err_*` helpers and re-exports this type.
+//! bad-request / shutting-down) with no HTTP coupling; `chan-server` maps them
+//! onto HTTP responses with its own `err_*` helpers and re-exports this type.
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -1177,8 +1177,8 @@ fn snapshot_workspaces(state: &AppState) {
     // and resurrected on the next boot. Each row is matched by the root it
     // stores against the keys the host's workspace tenants store, resolving no
     // root: the handoff close, a quit and the exit run this, and one root that
-    // stops answering must not hold up any of them. The shared terminal tenant goes
-    // by the home directory and counts for no workspace registered there.
+    // stops answering must not hold up any of them. The shared terminal tenant
+    // goes by the home directory and counts for no workspace registered there.
     // `overlay.replace` sorts by path on save.
     //
     // A row the boot restore has not finished, the one it is mounting or one
