@@ -1574,15 +1574,23 @@ impl DevserverState {
     /// workspace the devserver is not serving is `on:false` at its stable
     /// derived prefix with no token; toggling it on mounts it (see
     /// [`set_workspace_on`](Self::set_workspace_on)). Sorted by prefix.
+    ///
+    /// The records are copied out of the record map before any row is built,
+    /// so a row's status probe never runs while this holds the map that
+    /// mounts, the on and off toggle, forget and persistence all take.
     fn workspace_entries(&self) -> Vec<WorkspaceEntry> {
-        let by_root: HashMap<PathBuf, WorkspaceEntry> = {
+        let records: Vec<WorkspaceRecord> = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             workspaces
                 .values()
                 .filter(|record| record.desired != DesiredMount::Forgotten)
-                .map(|record| (record.root.clone(), self.entry_from_record(record)))
+                .cloned()
                 .collect()
         };
+        let by_root: HashMap<PathBuf, WorkspaceEntry> = records
+            .into_iter()
+            .map(|record| (record.root.clone(), self.entry_from_record(&record)))
+            .collect();
         let mut entries: Vec<WorkspaceEntry> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
         for ws in self.host.library().list_workspaces() {
