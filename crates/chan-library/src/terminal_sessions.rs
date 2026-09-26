@@ -11913,6 +11913,82 @@ mod tests {
             );
         }
 
+        /// A crash restore of a parked session over a real PTY whose manifest
+        /// was written at 80x24. With `resized_to`, the PTY is resized after
+        /// that manifest write as the controller does it (the kernel's size,
+        /// then the session's record), and no manifest follows. Returns the
+        /// restored session's handle and the pair, whose master is the
+        /// restored PTY's.
+        fn restore_after_a_resize(
+            id: &str,
+            resized_to: Option<PtySize>,
+        ) -> (Registry, AttachHandle, portable_pty::PtyPair) {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let (session, pair) = parked_session_without_a_child(&registry, id);
+            store.changed();
+            if let Some(size) = resized_to {
+                pair.master.resize(size).unwrap();
+                *session.winsize.lock().unwrap() = size;
+            }
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let after = next.attach(id, None).unwrap();
+            (next, after, pair)
+        }
+
+        // A resize the controller applied after the last manifest write is in
+        // the kernel's size, not the manifest's. The restored session starts
+        // from the kernel's, so a client declaring the manifest's stale size
+        // is fitted before its first repaint.
+        #[test]
+        fn a_restore_takes_the_ptys_real_size_not_the_manifests() {
+            let real = PtySize {
+                rows: 43,
+                cols: 132,
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+            let (_next, mut after, pair) =
+                restore_after_a_resize("resized-after-the-manifest", Some(real));
+            assert!(
+                after.fit(test_size()),
+                "a client declaring the manifest's 80x24 must be fitted: the PTY is at 132x43"
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match after.rx.try_recv() {
+                    Ok(SessionEvent::Resize(size)) if size == test_size() => break,
+                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(error) => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "the restored PTY never took 80x24: {error:?}"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+            let kernel = pair.master.get_size().unwrap();
+            assert_eq!((kernel.cols, kernel.rows), (80, 24));
+        }
+
+        // When no resize followed the manifest, its size is the PTY's, and a
+        // client declaring it is not resized.
+        #[test]
+        fn a_restore_whose_manifest_has_the_real_size_fits_nothing() {
+            let (_next, after, _pair) = restore_after_a_resize("sized-as-the-manifest", None);
+            assert!(
+                !after.fit(test_size()),
+                "a client declaring the PTY's own 80x24 needs no resize"
+            );
+        }
+
         /// The import of a manifest entry that names no ring file, as a
         /// manifest from before ring files or a partial store gives, from a
         /// manifest that is not the seal's final write: a
