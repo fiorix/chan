@@ -1,6 +1,10 @@
 # The writer-lock probe resolves a root another process holds, so a hung one stalls the workspace lists
 
-Status: raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 2), which the lane's report also leaves open (`dev/v0101-tasks/report-rlock-2.md`, part C). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md): the path is outside that lane's files. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 2), which the lane's report also leaves open (`dev/v0101-tasks/report-rlock-2.md`, part C). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md): the path is outside that lane's files. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 on the owner's word that nothing is deferred, in the services lane's hung-root orders with [a-hung-root-keeps-reading-running](a-hung-root-keeps-reading-running.md). The lead's ruling on the open point: the holder's record is compared with the stored key lexically, a dead holder of a relinked root reading `locked` where it read `stopped` is acceptable and is named in the design text, and `workspace_entries` copies its records out before it builds rows.
 
 ## What was seen
 

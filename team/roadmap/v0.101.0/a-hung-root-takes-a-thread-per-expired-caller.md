@@ -1,6 +1,10 @@
 # A root that answers its key and then hangs takes one blocking thread per caller that gives up
 
-Status: raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 5, with the "two spellings" row of its table of paths left on purpose folded in as a note below). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md). A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 5, with the "two spellings" row of its table of paths left on purpose folded in as a note below). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md). A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 on the owner's word that nothing is deferred, in the services lane after the hung-root orders. The lead's ruling on the shape: the blocking work owns what serializes it, the root lock's guard moving into the blocking closure and the registration hop getting a single flight keyed by the root's key; whether two spellings of one root share a computation is settled when the order is cut.
 
 ## What was seen
 

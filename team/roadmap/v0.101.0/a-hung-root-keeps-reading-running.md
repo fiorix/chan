@@ -1,6 +1,10 @@
 # A mounted root that hangs, rather than errors, reads running for as long as it hangs
 
-Status: raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 6), which the lane's report discloses and names as a small follow-up (`dev/v0101-tasks/report-rlock-2.md`, part B, what is left, 3). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md). A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 6), which the lane's report discloses and names as a small follow-up (`dev/v0101-tasks/report-rlock-2.md`, part B, what is left, 3). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md). A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 on the owner's word that nothing is deferred, in the services lane's hung-root orders with [the-writer-lock-probe-waits-on-a-hung-root](the-writer-lock-probe-waits-on-a-hung-root.md). The lead's ruling on when a check is overdue: after two consecutive missed budgets, about thirty seconds, so a root that is only slow is not flagged on one miss.
 
 ## What was seen
 

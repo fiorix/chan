@@ -1,6 +1,10 @@
 # A started MCP tool cannot be cancelled and holds its root's writer lock until it returns
 
-Status: raised during v0.101.0 on 2026-09-26 from the root locks lane, whose report and independent review (`dev/v0101-tasks/report-rlock.md` and `dev/v0101-tasks/reviews/review-rlock.md`, 2026-09-25) both confirmed by reading the second of the two clauses [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md) reported without re-verifying: a tool body that is not cancelled at unmount. The lane did not fix it. A source reading against `main` at `426f06e33`; not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the root locks lane, whose report and independent review (`dev/v0101-tasks/report-rlock.md` and `dev/v0101-tasks/reviews/review-rlock.md`, 2026-09-25) both confirmed by reading the second of the two clauses [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md) reported without re-verifying: a tool body that is not cancelled at unmount. The lane did not fix it. A source reading against `main` at `426f06e33`; not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 with the six hung-root items, on the owner's word that nothing is deferred; the lead had recommended the next version. It is cut to a Rust seat when one frees after its queue, as one order: the request's token carried in `ToolContext`, a cancellation seam in the chan-workspace walks the tools call, and the question of whether a root's close reaches the tokens of the requests still running against it, answered in the report.
 
 ## What was seen
 

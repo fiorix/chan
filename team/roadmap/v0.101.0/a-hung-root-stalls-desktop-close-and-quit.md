@@ -1,6 +1,10 @@
 # The desktop waits on every registered root to close a workspace, open a window or quit
 
-Status: raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 3). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md): the review notes that the lane's brief named the desktop's close, and the lane changed nothing under `desktop/`. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 3). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md): the review notes that the lane's brief named the desktop's close, and the lane changed nothing under `desktop/`. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 on the owner's word that nothing is deferred, in the services lane's hung-root orders with [a-late-http-mount-escapes-the-shutdown-sweep](a-late-http-mount-escapes-the-shutdown-sweep.md). The lead's ruling: the stored-key answers the item suggests (`is_canonical_root_mounted` through the embedded wrapper, `registered_workspace_prefix` re-exported beside `allocate_workspace_prefix`), with a red test at the host level for the helpers the desktop calls unless the `test-hooks` feature can enter the desktop's dev-dependencies without a `Cargo.lock` change.
 
 ## What was seen
 

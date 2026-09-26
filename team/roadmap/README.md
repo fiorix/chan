@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item.
 
 **Frontend review, phased from v0.100.0**
 
@@ -126,14 +126,17 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-sent-prompt-stays-editable-while-pending][rpro] | accepted | build |
 | [a-click-beside-a-graph-node-clears-the-selection][gring] | accepted | build |
 | [a-mirrored-value-focuses-an-unfocused-editor][afoc] | accepted | build |
-| [a-started-mcp-tool-cannot-be-cancelled][mcan] | raised | decide |
-| [the-writer-lock-probe-waits-on-a-hung-root][wlock] | raised | decide |
-| [a-hung-root-stalls-desktop-close-and-quit][dquit] | raised | decide |
-| [one-hung-root-holds-up-the-whole-restore][rseq] | raised | decide |
-| [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | raised | decide |
-| [a-hung-root-keeps-reading-running][hrun] | raised | decide |
-| [a-late-http-mount-escapes-the-shutdown-sweep][lsweep] | raised | decide |
+| [a-started-mcp-tool-cannot-be-cancelled][mcan] | accepted | build |
+| [the-writer-lock-probe-waits-on-a-hung-root][wlock] | accepted | build |
+| [a-hung-root-stalls-desktop-close-and-quit][dquit] | accepted | build |
+| [one-hung-root-holds-up-the-whole-restore][rseq] | accepted | build |
+| [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | accepted | build |
+| [a-hung-root-keeps-reading-running][hrun] | accepted | build |
+| [a-late-http-mount-escapes-the-shutdown-sweep][lsweep] | accepted | build |
 | [the-linux-gate-runs-tests-under-a-canonical-tmpdir][ctmp] | raised | decide |
+| [a-relinked-root-window-nests-outside-its-row][rnest] | raised | decide |
+| [the-desktop-handoff-keys-an-absent-root][hkey] | raised | decide |
+| [one-close-reason-covers-a-parked-and-a-killed-pty][pkill] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -220,6 +223,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [hrun]: v0.101.0/a-hung-root-keeps-reading-running.md
 [lsweep]: v0.101.0/a-late-http-mount-escapes-the-shutdown-sweep.md
 [ctmp]: v0.101.0/the-linux-gate-runs-tests-under-a-canonical-tmpdir.md
+[rnest]: v0.101.0/a-relinked-root-window-nests-outside-its-row.md
+[hkey]: v0.101.0/the-desktop-handoff-keys-an-absent-root.md
+[pkill]: v0.101.0/one-close-reason-covers-a-parked-and-a-killed-pty.md
 
 ## Completed
 

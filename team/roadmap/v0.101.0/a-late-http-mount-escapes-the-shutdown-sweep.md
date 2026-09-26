@@ -1,6 +1,10 @@
 # A management mount accepted just before stop can publish after the devserver's last shutdown sweep
 
-Status: raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 7), which says the gap existed before that branch. It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md), whose lane added the second sweep for discovery registrations. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 7), which says the gap existed before that branch. It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md), whose lane added the second sweep for discovery registrations. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 on the owner's word that nothing is deferred, in the services lane's hung-root orders with [a-hung-root-stalls-desktop-close-and-quit](a-hung-root-stalls-desktop-close-and-quit.md). The lead's ruling on the shape: the host flag, set by the first `shutdown_all` and checked at publication under the write lock, so one check covers every entry point and a late runtime shuts itself down like a runtime that loses a publication race.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # One hung root holds up every other restored workspace and the devserver's READY
 
-Status: raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 4), which the lane's report discloses as "restore attempts run one after another" (`dev/v0101-tasks/report-rlock-2.md`, part C). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md). A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 4), which the lane's report discloses as "restore attempts run one after another" (`dev/v0101-tasks/report-rlock-2.md`, part C). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md). A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 on the owner's word that nothing is deferred, in the runtime lane after the crash resume order, since the per-root shape touches the fd-store apply that lane is changing. The cap is a load decision the owner settles when the order is cut; the lead recommends attempts under a cap of four, so one hung root costs one slot.
 
 ## What was seen
 
