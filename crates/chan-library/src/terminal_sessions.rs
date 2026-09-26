@@ -12285,6 +12285,50 @@ mod tests {
             assert_eq!(resumed.missed_bytes, 600);
         }
 
+        // A lossy restore keeps its ring file's stop mark through output that
+        // changes the terminal state, which rewrites the header's state
+        // region beside the window.
+        #[test]
+        fn a_lossy_restore_keeps_the_mark_through_a_state_change() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "stopped-then-mouse-mode";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            session.record_output(&numbered_lines(1000));
+            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session.record_output(&b"lost ".repeat(120));
+            let attached = registry.attach(id, Some(0)).unwrap();
+            let (cursor, generation) = (attached.seq, attached.generation);
+            drop(attached);
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let b = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = b.restore_fdstore_sessions(store.imports_keeping());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert!(b.inject_output(id, b"\x1b[?1000h"));
+            drop(b);
+
+            let c = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = c.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let resumed = c
+                .get_or_create_for_ws(
+                    Some(id),
+                    Some(cursor),
+                    opts(Some("w1"), None),
+                    TerminalPlacement::default(),
+                    Some(generation),
+                )
+                .unwrap();
+            assert_ne!(
+                resumed.generation, generation,
+                "the restore after a state change read the file as exact"
+            );
+            assert_eq!(resumed.missed_bytes, 1600 - 1008);
+        }
+
         // The mark a lossy restore keeps comes off once a manifest carrying
         // the generation it minted is committed: the restore after the next
         // crash reads the file as exact, and a client of the lossy restore
