@@ -301,8 +301,9 @@ pub fn persisted_devserver_port() -> Option<u16> {
 const WORKSPACE_MOUNT_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often a mounted workspace's root is probed for reachability and for a
 /// remount underneath it. Cheap (one `lstat` per mounted root) and far below
-/// the human threshold for noticing a degraded row, while rare enough that a
-/// stalled mount's hung probe cannot pile up.
+/// the human threshold for noticing a degraded row. A stalled mount's hung
+/// check cannot pile up: the host keeps one check per root in flight, however
+/// many ticks meet it.
 pub const ROOT_HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Drive [`WorkspaceHost::probe_mounted_roots`] on [`ROOT_HEALTH_PROBE_INTERVAL`]
@@ -320,8 +321,9 @@ pub const ROOT_HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 /// writes for itself. It runs on the blocking pool, because it stats real roots
 /// and a stalled network mount is exactly where that call hangs, so a hung probe
 /// must never occupy a runtime worker. And its ticks are serialized by awaiting
-/// each one before the next is scheduled, with `MissedTickBehavior::Delay`, so a
-/// slow probe delays the cadence instead of accumulating overlapping stats.
+/// each one before the next is scheduled, with `MissedTickBehavior::Delay`. A
+/// tick checks every root at once and returns within the host's probe budget,
+/// so a hung root delays neither the other roots' rows nor the next tick.
 pub fn spawn_root_health_probe(
     host: Arc<WorkspaceHost>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,

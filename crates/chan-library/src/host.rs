@@ -43,6 +43,13 @@ use crate::{
 };
 
 const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long one health probe tick waits for the mounted roots to answer.
+/// The roots are checked at once, each on a thread of its own, so a root
+/// that has not answered by then holds up only its own row: the tick
+/// reconciles every root that did answer and returns. An lstat of a healthy
+/// root answers in microseconds, a network root's in milliseconds; two
+/// seconds is far above either and far below the probe's cadence.
+const ROOT_HEALTH_PROBE_BUDGET: Duration = Duration::from_secs(2);
 const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[cfg(test)]
@@ -370,6 +377,11 @@ pub struct WorkspaceHost {
     /// open, the release budget and the blocking hops, so it is asynchronous;
     /// the lock order is stated on [`RootLocks`].
     root_locks: RootLocks,
+    /// The health checks in flight, one per mounted root's canonical key.
+    /// A check whose root hangs stays here until the root answers, and
+    /// later ticks wait on it instead of starting another, so a hung root
+    /// holds one thread however many ticks meet it. Its mutex is a leaf.
+    root_probes: Arc<Mutex<HashMap<PathBuf, Arc<RootProbe>>>>,
     /// The key computations the root locks are taken under, one per spelled
     /// root in flight, so a hung root costs one blocking thread however
     /// often its callers retry.
@@ -633,6 +645,41 @@ impl Drop for WorkspaceCloseGuard<'_> {
     }
 }
 
+/// One mounted root's health check in flight, shared by the probe ticks
+/// that wait on it.
+#[derive(Default)]
+struct RootProbe {
+    outcome: Mutex<Option<Result<bool, ChanError>>>,
+    answered: std::sync::Condvar,
+}
+
+impl RootProbe {
+    fn answer(&self, outcome: Result<bool, ChanError>) {
+        *self.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+        self.answered.notify_all();
+    }
+
+    /// The check's outcome once it answers, or `None` when it has not by
+    /// `deadline` (or another tick already took it).
+    fn wait_until(&self, deadline: Instant) -> Option<Result<bool, ChanError>> {
+        let mut outcome = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(answered) = outcome.take() {
+                return Some(answered);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            outcome = self
+                .answered
+                .wait_timeout(outcome, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
 struct WorkspaceMountGuard<'a> {
     host: &'a WorkspaceHost,
     root: PathBuf,
@@ -750,6 +797,7 @@ impl WorkspaceHost {
             workspaces: RwLock::new(HashMap::new()),
             desktop,
             root_locks: RootLocks::default(),
+            root_probes: Arc::default(),
             root_keys: RootKeys::default(),
             #[cfg(test)]
             open_thread_probe: std::sync::Mutex::new(None),
@@ -3567,6 +3615,13 @@ impl WorkspaceHost {
     /// the only recovery available while this process still holds the writer
     /// lock for that root.
     ///
+    /// Every mounted root is checked at once, each on a thread of its own,
+    /// and the tick waits at most [`ROOT_HEALTH_PROBE_BUDGET`] for the
+    /// answers, so one root whose filesystem hangs delays no other root's
+    /// row. A check that has not answered keeps its thread, and the
+    /// workspace it holds, until the root answers; the next tick waits on
+    /// that check again rather than starting another beside it.
+    ///
     /// Returns the number of roots whose handle was refreshed. Blocking: the
     /// caller runs it off the async runtime.
     pub fn probe_mounted_roots(&self) -> usize {
@@ -3586,16 +3641,78 @@ impl WorkspaceHost {
                 })
                 .collect()
         };
+        let checks: Vec<(PathBuf, PathBuf, Arc<RootProbe>)> = mounted
+            .into_iter()
+            .filter_map(|(root, key, workspace)| {
+                let check = self.start_root_probe(&key, workspace)?;
+                Some((root, key, check))
+            })
+            .collect();
+        let deadline = Instant::now() + ROOT_HEALTH_PROBE_BUDGET;
         let mut refreshed = 0;
-        for (root, key, workspace) in mounted {
+        for (root, key, check) in checks {
+            // A root that has not answered keeps whatever the last check
+            // that did answer published.
+            let Some(outcome) = check.wait_until(deadline) else {
+                continue;
+            };
             if self
-                .reconcile_root_health(&root, &key, workspace.revalidate_root())
+                .reconcile_root_health(&root, &key, outcome)
                 .is_ok_and(|remounted| remounted)
             {
                 refreshed += 1;
             }
         }
         refreshed
+    }
+
+    /// The health check in flight for the root keyed `key`, or a new one
+    /// revalidating `workspace` on a thread of its own; `None` when no
+    /// thread can be started.
+    fn start_root_probe(&self, key: &Path, workspace: Arc<Workspace>) -> Option<Arc<RootProbe>> {
+        let mut checks = self
+            .root_probes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(check) = checks.get(key) {
+            return Some(Arc::clone(check));
+        }
+        let check = Arc::new(RootProbe::default());
+        let running = Arc::clone(&check);
+        let entries = Arc::clone(&self.root_probes);
+        let owned = key.to_path_buf();
+        // The map's mutex is held across the spawn, so the thread cannot
+        // finish and look for its entry before the entry is inserted.
+        let spawned = std::thread::Builder::new()
+            .name("chan-root-health".into())
+            .spawn(move || {
+                let outcome = workspace.revalidate_root();
+                drop(workspace);
+                {
+                    let mut checks = entries.lock().unwrap_or_else(|e| e.into_inner());
+                    if checks
+                        .get(&owned)
+                        .is_some_and(|check| Arc::ptr_eq(check, &running))
+                    {
+                        checks.remove(&owned);
+                    }
+                }
+                running.answer(outcome);
+            });
+        match spawned {
+            Ok(_) => {
+                checks.insert(key.to_path_buf(), Arc::clone(&check));
+                Some(check)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    root = %key.display(),
+                    %error,
+                    "could not start a workspace root health check",
+                );
+                None
+            }
+        }
     }
 
     /// Fold one root's [`Workspace::revalidate_root`] outcome into the degraded
