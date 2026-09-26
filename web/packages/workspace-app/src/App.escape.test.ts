@@ -16,6 +16,7 @@ vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { pressInPage } from "./__tests__/keys";
 import { settingsPanel } from "./state/store.svelte";
 
 stubAppEnvironment();
@@ -36,16 +37,6 @@ afterEach(async () => {
   await settle();
   await unmountApp();
 });
-
-/// A keydown from an element inside the page, so a capture listener on the
-/// document runs before the event reaches the app's bubble-phase handler.
-function pressInPage(init: KeyboardEventInit): KeyboardEvent {
-  const inner = document.body.appendChild(document.createElement("div"));
-  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
-  inner.dispatchEvent(event);
-  inner.remove();
-  return event;
-}
 
 /// A capture-phase handler that takes `key` the way a menu or a renderer
 /// does: it prevents the default and lets the event travel on.
