@@ -244,6 +244,16 @@ describe("parseMarkdown", () => {
     expect(idx.headings.map((h) => h.text)).toEqual(["Outside"]);
   });
 
+  test("a shorter run inside a longer fence keeps its tags code", () => {
+    const idx = parseMarkdown("````\n```\n#inside\n```\n````\n#outside\n");
+    expect(idx.tags).toEqual(["outside"]);
+  });
+
+  test("an indented fence keeps its tags code", () => {
+    const idx = parseMarkdown("  ```\n#inside\n  ```\n#outside\n");
+    expect(idx.tags).toEqual(["outside"]);
+  });
+
   test("code blocks produce no tags or links", () => {
     const idx = parseMarkdown("```\n#tag [[link]]\n```\nand `#inline [[x]]` code");
     expect(idx.tags).toEqual([]);

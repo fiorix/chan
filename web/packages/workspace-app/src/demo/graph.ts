@@ -76,8 +76,11 @@ function headingAnchor(text: string): string {
 /// Strip fenced code blocks and inline code spans so their contents never
 /// produce tags or links (mirrors the Rust parser skipping code).
 function stripCode(content: string): string {
+  const fence = fenceLineTracker();
   return content
-    .replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, "")
+    .split("\n")
+    .map((line) => (fence(line) === "text" ? line : ""))
+    .join("\n")
     .replace(/`[^`\n]*`/g, "");
 }
 
