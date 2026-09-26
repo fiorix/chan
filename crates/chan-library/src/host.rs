@@ -5774,6 +5774,196 @@ mod tests {
         mount_publication_race(true).await;
     }
 
+    /// A builder for the publication checks the last shutdown sweep closes.
+    /// It counts the tenants it builds, and each tenant's task counts a stop
+    /// only when the runtime's shutdown signals it, never when the task is
+    /// aborted. A terminal build waits for the test once it is entered.
+    #[derive(Default)]
+    struct SweepBuilder {
+        built: std::sync::atomic::AtomicUsize,
+        stopped: Arc<std::sync::atomic::AtomicUsize>,
+        terminal_gate: tokio::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                tokio::sync::oneshot::Receiver<()>,
+            )>,
+        >,
+    }
+
+    impl SweepBuilder {
+        fn artifacts(&self) -> TenantArtifacts {
+            self.built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+            let stopped = self.stopped.clone();
+            let task = tokio::spawn(async move {
+                if shutdown_rx.changed().await.is_ok() {
+                    // An abort lands at this yield, so only a shutdown that
+                    // joins the task gets past it.
+                    tokio::task::yield_now().await;
+                    stopped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            let mut artifacts = fake_artifacts(Router::new(), Arc::new(FakeTerminalCell));
+            artifacts.tasks = TenantTaskOwner::new(Arc::new(shutdown_tx), vec![task]);
+            artifacts
+        }
+
+        fn built(&self) -> usize {
+            self.built.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn stopped(&self) -> usize {
+            self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TenantBuilder for SweepBuilder {
+        async fn build_workspace(
+            &self,
+            _library: Library,
+            _workspace: Arc<Workspace>,
+            _config: &ServeConfig,
+            _desktop: DesktopBridge,
+            _unserve: UnserveMode,
+            _control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            Ok(self.artifacts())
+        }
+
+        async fn build_terminal(
+            &self,
+            _library: Library,
+            _config: &ServeConfig,
+            _desktop: DesktopBridge,
+            _unserve: UnserveMode,
+            _command: Option<String>,
+            _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
+            _control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            let artifacts = self.artifacts();
+            if let Some((entered, release)) = self.terminal_gate.lock().await.take() {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            Ok(artifacts)
+        }
+    }
+
+    /// A host over one registered root, with its builder.
+    fn sweep_host() -> (
+        Arc<WorkspaceHost>,
+        Arc<SweepBuilder>,
+        Arc<Workspace>,
+        [tempfile::TempDir; 2],
+    ) {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        let builder = Arc::new(SweepBuilder::default());
+        let host = Arc::new(WorkspaceHost::new(library, builder.clone()));
+        (host, builder, workspace, [cfg, root])
+    }
+
+    fn assert_shutting_down(refused: Result<HostedWorkspace, Error>) {
+        let error = refused.expect_err("a publication after the last sweep succeeded");
+        assert!(
+            error.to_string().contains("shutting down"),
+            "the refusal does not say the host is shutting down: {error}"
+        );
+    }
+
+    /// A workspace mount that starts after the last shutdown sweep is refused
+    /// before it builds a tenant.
+    #[tokio::test]
+    async fn a_mount_after_the_last_sweep_builds_nothing() {
+        let (host, builder, workspace, _dirs) = sweep_host();
+        host.shutdown_all().await.unwrap();
+        assert_shutting_down(host.open_workspace(workspace, serve_config("/late")).await);
+        assert_eq!(builder.built(), 0, "a mount built a tenant after the sweep");
+    }
+
+    /// A workspace mount built before the last shutdown sweep, still checking
+    /// its root when the sweep runs, is refused at publication and shuts its
+    /// runtime down before it reports the refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mount_built_before_the_last_sweep_shuts_its_runtime_down() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (host, builder, workspace, _dirs) = sweep_host();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
+                entered: entered_tx,
+                release: release_rx,
+            });
+            let mounting = host.clone();
+            let mount = tokio::spawn(async move {
+                mounting
+                    .open_workspace(workspace, serve_config("/late"))
+                    .await
+            });
+            entered_rx.await.unwrap();
+            assert_eq!(builder.built(), 1, "fixture: the mount did not build");
+            host.shutdown_all().await.unwrap();
+            release_tx.send(()).unwrap();
+            assert_shutting_down(mount.await.unwrap());
+            assert_eq!(
+                builder.stopped(),
+                1,
+                "the refused runtime was not shut down before the refusal"
+            );
+            assert!(host.mounted_prefixes().unwrap().is_empty());
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A terminal tenant that starts after the last shutdown sweep is refused
+    /// before it builds a tenant.
+    #[tokio::test]
+    async fn a_terminal_tenant_after_the_last_sweep_builds_nothing() {
+        let (host, builder, _workspace, _dirs) = sweep_host();
+        host.shutdown_all().await.unwrap();
+        assert_shutting_down(
+            host.open_terminal_session_with_command(serve_config("/terminal"), None, None)
+                .await,
+        );
+        assert_eq!(builder.built(), 0, "a terminal built a tenant after the sweep");
+    }
+
+    /// A terminal tenant built across the last shutdown sweep is refused at
+    /// publication and shuts its runtime down before it reports the refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_terminal_tenant_built_across_the_last_sweep_shuts_its_runtime_down() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (host, builder, _workspace, _dirs) = sweep_host();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            *builder.terminal_gate.lock().await = Some((entered_tx, release_rx));
+            let opening = host.clone();
+            let open = tokio::spawn(async move {
+                opening
+                    .open_terminal_session_with_command(serve_config("/terminal"), None, None)
+                    .await
+            });
+            entered_rx.await.unwrap();
+            host.shutdown_all().await.unwrap();
+            release_tx.send(()).unwrap();
+            assert_shutting_down(open.await.unwrap());
+            assert_eq!(
+                builder.stopped(),
+                1,
+                "the refused terminal runtime was not shut down before the refusal"
+            );
+            assert!(host.mounted_prefixes().unwrap().is_empty());
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn failed_remove_guard_settles_cancellation_and_unwind() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
