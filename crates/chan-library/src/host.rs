@@ -5354,7 +5354,7 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        lib.register_workspace(root.path()).expect("register");
+        let row = lib.register_workspace(root.path()).expect("register");
         let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
         host.open_registered_workspace(root.path(), serve_config("/workspace"))
             .await
@@ -5362,9 +5362,12 @@ mod tests {
 
         let store = tempfile::tempdir().expect("store dir");
         let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        // The record stores the registry row's root, as every mint site does:
+        // the tempdir's own spelling is only an alias of it wherever the temp
+        // path is not canonical, as on macOS behind the `/var` symlink.
         let ws = registry.create(
             WindowKind::Workspace,
-            Some(root.path().to_string_lossy().into_owned()),
+            Some(row.root_path.to_string_lossy().into_owned()),
         );
         let term = registry.create(WindowKind::Terminal, None);
         host.install_window_registry(registry.clone(), "local".into());
