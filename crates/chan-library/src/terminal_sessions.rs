@@ -11460,6 +11460,33 @@ mod tests {
                     })
                     .collect()
             }
+
+            /// What a next process imports when the one before it died
+            /// before its first manifest commit: the same published manifest
+            /// and a duplicate of every fd, which the store keeps for the
+            /// process after it.
+            fn imports_keeping(&self) -> Vec<FdStoreSessionImport> {
+                let fds = self.0.fds.lock().unwrap();
+                let duplicate = |name: &str| {
+                    fds.get(name)
+                        .expect("the store retains every manifested fd")
+                        .try_clone()
+                        .expect("duplicate a stored fd")
+                };
+                self.0
+                    .published
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| FdStoreSessionImport {
+                        master_fd: duplicate(&entry.fd_name),
+                        ring_fd: entry.ring_fd_name.as_deref().map(duplicate),
+                        meta: entry.meta.clone(),
+                        replay: entry.replay.clone(),
+                        sealed_manifest: false,
+                    })
+                    .collect()
+            }
         }
 
         impl FdStorePark for StoreSim {
@@ -11931,6 +11958,114 @@ mod tests {
             assert_eq!(
                 String::from_utf8_lossy(&after.mode_reassert),
                 "\x1b[?1000h\x1b[?1006h"
+            );
+        }
+
+        // A restore that may end behind the previous process leaves that
+        // mark on the ring file until a manifest carrying its new generation
+        // is committed. Process A's mirror write fails at E1 and A goes on
+        // to E2; B restores from the stopped file and dies before its first
+        // manifest commit; C restores from A's manifest and the same file.
+        // A's client, whose cursor is past E1, must still get the whole ring
+        // and a notice from C, not a replay shifted into C's numbering.
+        #[test]
+        fn a_restore_that_dies_before_its_commit_leaves_the_file_marked_stopped() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "stopped-then-restored-twice";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            let early = numbered_lines(1000);
+            session.record_output(&early);
+            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session.record_output(&b"lost ".repeat(120));
+            let attached = registry.attach(id, Some(0)).unwrap();
+            let (cursor, generation) = (attached.seq, attached.generation);
+            drop(attached);
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            // B commits no manifest: no parker, no activation.
+            let b = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = b.restore_fdstore_sessions(store.imports_keeping());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            drop(b);
+
+            let c = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = c.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let late = b"after the second restart\n".repeat(60);
+            assert!(c.inject_output(id, &late));
+            let resumed = c
+                .get_or_create_for_ws(
+                    Some(id),
+                    Some(cursor),
+                    opts(Some("w1"), None),
+                    TerminalPlacement::default(),
+                    Some(generation),
+                )
+                .unwrap();
+            let mut ring = early.clone();
+            ring.extend_from_slice(&late);
+            assert!(
+                resumed.missed_bytes > 0 && resumed.replay.concat() == ring,
+                "A's client, resuming at {cursor} under generation {generation}, is replayed {} \
+                 bytes with {} missed; want the whole {}-byte ring and a notice",
+                resumed.replay.concat().len(),
+                resumed.missed_bytes,
+                ring.len()
+            );
+            assert_eq!(resumed.missed_bytes, 600);
+        }
+
+        // A generation minted for a restore that may end behind the previous
+        // process is never minted again by another process. B restores a
+        // session with no ring file from a crash manifest, serves a client,
+        // and dies with no manifest written; C restores from the same
+        // manifest. B's client, whose cursor is in B's numbering, must not
+        // be taken for one of C's.
+        #[test]
+        fn two_restores_of_one_crash_manifest_mint_different_generations() {
+            let id = "restored-twice-from-a-crash";
+            let restored = numbered_lines(1000);
+            let b = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let (import, _b_pair) = ringless_import(id, 5, &restored);
+            let report = b.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert!(b.inject_output(id, &b"served by b\n".repeat(25)));
+            let attached = b.attach(id, Some(0)).unwrap();
+            let (cursor, generation) = (attached.seq, attached.generation);
+            drop(attached);
+            drop(b);
+
+            let c = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let (import, _c_pair) = ringless_import(id, 5, &restored);
+            let report = c.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let late = b"after the second restart\n".repeat(60);
+            assert!(c.inject_output(id, &late));
+            let resumed = c
+                .get_or_create_for_ws(
+                    Some(id),
+                    Some(cursor),
+                    opts(Some("w1"), None),
+                    TerminalPlacement::default(),
+                    Some(generation),
+                )
+                .unwrap();
+            assert_ne!(
+                resumed.generation,
+                generation,
+                "C minted generation {generation}, which B's client holds, so its cursor {cursor} \
+                 in B's numbering is honoured in C's: {} bytes replayed, {} missed",
+                resumed.replay.concat().len(),
+                resumed.missed_bytes
+            );
+            let mut ring = restored.clone();
+            ring.extend_from_slice(&late);
+            assert!(
+                resumed.replay.concat() == ring,
+                "B's client gets the whole ring"
             );
         }
 
