@@ -92,10 +92,13 @@
   // and X/Escape are standard on every survey. Scoped to the focused
   // card (NOT the window) so each terminal's survey handles its own keys, a
   // focused terminal does not swallow the keystroke into its PTY, and a handled
-  // Escape does not bubble out to close other overlays.
+  // Escape does not bubble out to close other overlays. The card answers them
+  // unmodified, as the viewers do: a chord with Ctrl, Cmd or Alt held is the
+  // app's and travels on.
   function onCardKeydown(e: KeyboardEvent): void {
     const s = active;
     if (!s) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key >= "1" && e.key <= "9") {
       const idx = Number(e.key) - 1;
       if (idx < s.options.length) {
