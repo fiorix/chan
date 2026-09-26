@@ -25,7 +25,16 @@ import { sessionWindowId } from "../api/client";
 import { setSocketFactory } from "../api/transport";
 import { demoSocketFactory } from "../demo/socket";
 import { onWatchEvent } from "../state/store.svelte";
-import { cancelPaneMode, flipHybrid, moveTab, selectTabInPane, splitPane } from "../state/tabs.svelte";
+import {
+  cancelPaneMode,
+  closePane,
+  closeTab,
+  flipHybrid,
+  moveTab,
+  selectTabInPane,
+  setActivePane,
+  splitPane,
+} from "../state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -193,5 +202,62 @@ describe("a live terminal under a pane restructure", () => {
     await vi.waitFor(() =>
       expect(dial!.sent).toContainEqual({ type: "resize", cols: 57, rows: 19 }),
     );
+  });
+});
+
+/// Past the host-resume recovery's last delayed fit (250ms) and the trailing
+/// fit (120ms), so a fit a focus change queued has run before a test moves on.
+const RECOVERY_SETTLED = 400;
+
+describe("a terminal the pane tree rebuilds", () => {
+  test("opens its renderer inside the pane that holds it", async () => {
+    const openedIn: Array<string | null> = [];
+    const open = FakeTerminal.prototype.open;
+    vi.spyOn(FakeTerminal.prototype, "open").mockImplementation(function (this: FakeTerminal, element: HTMLElement) {
+      openedIn.push(element.closest<HTMLElement>("[data-pane-id]")?.dataset.paneId ?? null);
+      open.call(this, element);
+    });
+    resetLayout([terminalTab({ id: HOST })]);
+    await settle();
+    await vi.waitFor(() => expect(openedIn).toHaveLength(1));
+
+    expect(openedIn).toEqual([SEED_PANE]);
+  });
+
+  test("keeps its renderer when the pane beside it closes, fits it and takes the keyboard back", async () => {
+    const { root, term, dials } = await hostUnderTeam();
+    const beside = splitPane(SEED_PANE, "row")!;
+    await settle();
+    // The host's pane is the focused one again, so closing the other pane
+    // changes neither its focus nor its tab: only the rebuild can move it.
+    setActivePane(SEED_PANE);
+    await settle();
+    await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
+    xterm.fit.size = { cols: 90, rows: 30 };
+    const focusesBefore = term.focusCount;
+
+    await closePane(beside);
+    await settle();
+
+    const [dial] = hostDials(dials);
+    await vi.waitFor(() =>
+      expect(dial!.sent).toContainEqual({ type: "resize", cols: 90, rows: 30 }),
+    );
+    expect({
+      sameElement: hostTerminal() === root,
+      sameRenderer: liveHostRenderer() === term,
+      hostDialsSince: hostDials(dials).map((d) => d.url.searchParams.get("since")),
+      pane: paneHolding(root),
+      refocused: term.focusCount > focusesBefore,
+    }).toEqual({ sameElement: true, sameRenderer: true, hostDialsSince: ["0"], pane: SEED_PANE, refocused: true });
+  });
+
+  test("is torn down and leaves its pane when its tab closes", async () => {
+    const { term } = await hostUnderTeam();
+
+    await closeTab(SEED_PANE, HOST, { force: true });
+    await settle();
+
+    expect({ disposed: term.disposed, element: hostTerminal() }).toEqual({ disposed: true, element: null });
   });
 });
