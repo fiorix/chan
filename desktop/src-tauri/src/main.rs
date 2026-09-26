@@ -2961,8 +2961,9 @@ fn open_workspace_from_handoff(
 /// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
 /// (handoff `CloseWorkspace`). Runs through the embedded host's owner operation
 /// so live-terminal refusal is reported before anything is unregistered.
-async fn close_workspace_from_handoff(
-    app: tauri::AppHandle,
+/// Generic over the Tauri runtime so a test can drive it with the mock app.
+async fn close_workspace_from_handoff<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: Arc<AppState>,
     path: PathBuf,
     remove: bool,
