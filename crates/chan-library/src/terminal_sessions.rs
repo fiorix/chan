@@ -735,10 +735,32 @@ pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
     "CHAN_MCP_SERVER_JSON",
 ];
 
+/// Whether a child's environment keys ignore ASCII case: on Windows
+/// portable-pty lowercases every key it is given, so a caller's `Path` or
+/// `chan_mcp_socket` is the variable chan's `PATH` or `CHAN_MCP_SOCKET`
+/// replaces.
+const ENV_KEYS_IGNORE_CASE: bool = cfg!(windows);
+
+/// Whether `a` and `b` name one variable in a child's environment.
+fn same_env_key(a: &str, b: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
 /// Whether `key` is one chan sets for itself at spawn
-/// ([`CHAN_SPAWN_ENV_KEYS`]).
+/// ([`CHAN_SPAWN_ENV_KEYS`]), compared as the child's environment compares
+/// keys.
 pub fn is_chan_spawn_env_key(key: &str) -> bool {
-    CHAN_SPAWN_ENV_KEYS.contains(&key)
+    is_chan_spawn_env_key_on(key, ENV_KEYS_IGNORE_CASE)
+}
+
+fn is_chan_spawn_env_key_on(key: &str, ignore_case: bool) -> bool {
+    CHAN_SPAWN_ENV_KEYS
+        .iter()
+        .any(|chan_key| same_env_key(chan_key, key, ignore_case))
 }
 
 /// Whether chan's own entry would overwrite a caller's `key=value` in a
@@ -746,7 +768,30 @@ pub fn is_chan_spawn_env_key(key: &str) -> bool {
 /// refused: any key on [`CHAN_SPAWN_ENV_KEYS`] except a `CHAN_TAB_NAME` that
 /// restates the tab name.
 pub fn chan_overrides_spawn_env(key: &str, value: &str, tab_name: Option<&str>) -> bool {
-    is_chan_spawn_env_key(key) && !(key == "CHAN_TAB_NAME" && Some(value) == tab_name)
+    chan_overrides_spawn_env_on(key, value, tab_name, ENV_KEYS_IGNORE_CASE)
+}
+
+fn chan_overrides_spawn_env_on(
+    key: &str,
+    value: &str,
+    tab_name: Option<&str>,
+    ignore_case: bool,
+) -> bool {
+    is_chan_spawn_env_key_on(key, ignore_case)
+        && !(same_env_key(key, "CHAN_TAB_NAME", ignore_case) && Some(value) == tab_name)
+}
+
+/// The value `env` gives `key`, matched as a child's environment matches
+/// keys.
+#[cfg(any(windows, test))]
+fn env_value<'a>(
+    env: &'a BTreeMap<String, String>,
+    key: &str,
+    ignore_case: bool,
+) -> Option<&'a String> {
+    env.iter()
+        .find(|(candidate, _)| same_env_key(candidate, key, ignore_case))
+        .map(|(_, value)| value)
 }
 
 /// chan's own entries for one spawn. It applies exactly the keys of
@@ -3963,9 +4008,7 @@ impl Session {
                 prepend.push(local.join("chan").join("bin"));
             }
             if !prepend.is_empty() {
-                let inherited = opts
-                    .env
-                    .get("PATH")
+                let inherited = env_value(&opts.env, "PATH", ENV_KEYS_IGNORE_CASE)
                     .cloned()
                     .or_else(|| std::env::var("PATH").ok())
                     .unwrap_or_default();
@@ -6999,6 +7042,32 @@ mod tests {
         assert_eq!((ring.end_seq(), held(ring)), (180, tail.to_vec()));
         assert!(!ring.is_mirrored());
         assert!(restored.behind);
+    }
+
+    // Windows keys ignore ASCII case, so the validator refuses a caller's
+    // `chan_mcp_socket` there and the PATH layering finds a caller's `Path`.
+    #[test]
+    fn env_keys_match_ignoring_ascii_case_where_the_child_does() {
+        assert!(is_chan_spawn_env_key_on("chan_mcp_socket", true));
+        assert!(!is_chan_spawn_env_key_on("chan_mcp_socket", false));
+        assert!(chan_overrides_spawn_env_on(
+            "Chan_Tab_Name",
+            "@@Worker",
+            Some("@@Lead"),
+            true
+        ));
+        assert!(!chan_overrides_spawn_env_on(
+            "Chan_Tab_Name",
+            "@@Lead",
+            Some("@@Lead"),
+            true
+        ));
+        let env = BTreeMap::from([("Path".to_string(), r"C:\tools".to_string())]);
+        assert_eq!(
+            env_value(&env, "PATH", true).map(String::as_str),
+            Some(r"C:\tools")
+        );
+        assert_eq!(env_value(&env, "PATH", false), None);
     }
 
     #[test]
