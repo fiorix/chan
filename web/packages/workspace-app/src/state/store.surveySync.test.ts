@@ -198,10 +198,12 @@ describe("survey_sync", () => {
   test("an earlier group entry does not take the window-wide slot from a later one that shows", async () => {
     await open(spec("survey-early"));
     await open(spec("survey-late"));
+    replyInFlight(null);
 
     await sync({ survey: spec("survey-early") }, { survey: spec("survey-late") });
 
     expect(surveyFor(null)?.surveyId).toBe("survey-late");
+    expect(surveyBusy(null)).toBe(true);
   });
 
   test("a group survey set aside with its reply in flight is still open when that reply fails", async () => {
