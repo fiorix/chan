@@ -10191,9 +10191,10 @@ mod tests {
     }
 
     // A caller that declines colour (`NO_COLOR` set, or `TERM=dumb`) gets
-    // none of chan's colour forcing, and the server's own colour keys decide
-    // nothing either way. The server's env is this test's re-invocation of
-    // its own binary, so the child half sees colour keys it inherited.
+    // none of chan's colour forcing, while the colour keys the server
+    // inherited pass through as any inherited key does, and a caller empties
+    // one to clear it. The server's env is this test's re-invocation of its
+    // own binary, so the child half sees colour keys it inherited.
     #[cfg(unix)]
     #[test]
     fn a_caller_declining_colour_gets_no_colour_forcing() {
@@ -10266,14 +10267,20 @@ mod tests {
 
         colour(
             &[("NO_COLOR", "1")],
-            format!("COLOUR=<1|{default_term}||||>"),
-            "a caller's NO_COLOR withdraws chan's colour forcing",
+            format!("COLOUR=<1|{default_term}|server|server|server|server>"),
+            "a caller's NO_COLOR withdraws chan's colour forcing and keeps the server's",
         )
         .await;
         colour(
             &[("TERM", "dumb")],
-            "COLOUR=<server|dumb||||>".to_string(),
+            "COLOUR=<server|dumb|server|server|server|server>".to_string(),
             "a caller's TERM=dumb withdraws chan's colour forcing and keeps NO_COLOR",
+        )
+        .await;
+        colour(
+            &[("NO_COLOR", "1"), ("FORCE_COLOR", "")],
+            format!("COLOUR=<1|{default_term}|server|server|server|>"),
+            "a caller empties an inherited forcing key to clear it",
         )
         .await;
         colour(
