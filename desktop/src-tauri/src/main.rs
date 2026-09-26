@@ -8933,7 +8933,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 registered,
-                [desktop.hung.clone()],
+                std::slice::from_ref(&desktop.hung),
                 "the forget left its row"
             );
         }
