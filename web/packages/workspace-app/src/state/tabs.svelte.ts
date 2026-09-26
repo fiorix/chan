@@ -5403,6 +5403,10 @@ export function setTabHighlightTrailingWhitespace(tab: FileTab, on: boolean): vo
 export function setTabCodeBlocksCollapsed(tab: FileTab, collapsed: boolean): void {
   tab.codeBlocksCollapsed = collapsed;
 }
+/// The user's read-only toggle for the tab, the status bar's lamp.
+export function setTabReadMode(tab: FileTab, on: boolean): void {
+  tab.readMode = on;
+}
 
 /// Whether a tab represents an unsaved buffer.
 export function isDirty(t: Tab): boolean {

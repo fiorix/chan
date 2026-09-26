@@ -70,6 +70,7 @@
     setTabCodeBlocksCollapsed,
     setTabOutlineOpen,
     setTabOutlineWidth,
+    setTabReadMode,
     setTabSlidePreviewIndex,
     setTabSlidePreviewMode,
     setTabSlidePreviewOpen,
@@ -325,8 +326,8 @@
     recoveredBuffer = null;
   }
 
-  /// Read-only mode for this tab. The status bar's lamp toggle
-  /// workspaces `tab.readMode` directly; an OS-level read-only file
+  /// Read-only mode for this tab. The status bar's lamp toggles
+  /// `tab.readMode` through the store; an OS-level read-only file
   /// (no user-write bit) is reflected through `tab.fsWritable`
   /// and overrides the lamp so the user can't try to write.
   /// Per-tab so multi-pane layouts can mix read/write without
@@ -1511,7 +1512,7 @@
         path={tab.path}
         content={tab.content}
         fsWritable={tab.fsWritable}
-        bind:readMode={tab.readMode}
+        bind:readMode={() => tab.readMode, (on) => setTabReadMode(tab, on)}
       />
     {/if}
   {/if}
