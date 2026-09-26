@@ -370,7 +370,9 @@ pub enum ForeignHolder {
 /// root's filesystem has stopped answering. A root whose canonical path has
 /// changed since its key was taken does not match its holder's record, so
 /// that holder is [`ForeignHolder::Present`] even when it is this process or
-/// provably dead.
+/// provably dead. The key is canonical only by convention: pass a stored key
+/// or one resolved for the call, never a user's spelling, which would misread
+/// this process or a dead holder as [`ForeignHolder::Present`].
 pub fn probe_foreign_holder(lock_dir: &Path, root_key: &Path) -> ForeignHolder {
     let path = lock_dir.join(LOCK_FILE);
     match open_lock_file(&path) {
@@ -1047,6 +1049,9 @@ mod tests {
         );
     }
 
+    /// How long a test waits for a probe beside a stalled root.
+    const HUNG_ROOT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// A probe of a root another process holds answers while that root's
     /// filesystem hangs: the holder's record is compared with the key the
     /// caller holds, and nothing asks the root.
@@ -1072,7 +1077,7 @@ mod tests {
         let lock_path = lock_dir.path().to_path_buf();
         let holder = stall.finishes_beside(
             "a probe of a root another process holds",
-            std::time::Duration::from_secs(30),
+            HUNG_ROOT_BOUND,
             move || probe_foreign_holder(&lock_path, &key),
         );
         assert_eq!(holder, ForeignHolder::Present);
@@ -1097,8 +1102,10 @@ mod tests {
         let _held = WorkspaceLock::acquire(lock_dir.path(), &moved_key).unwrap();
         // A pid above every unix pid limit, rather than a reaped child: a child
         // spawned here holds a duplicate of every descriptor this process has
-        // open until it execs, which keeps a concurrent test's lock held
-        // after that test closes it.
+        // open until its close-on-exec sweep, so a concurrent test's lock
+        // released by closing its descriptor, as `is_free` and the probe
+        // release theirs, stays held meanwhile. A lock released by `unlock`,
+        // as `WorkspaceLock` releases its own on drop, is not exposed.
         let dead_pid = 999_999_999;
         assert_eq!(process_alive(dead_pid), ProcessLiveness::Dead);
         let dead = LockRecord {
