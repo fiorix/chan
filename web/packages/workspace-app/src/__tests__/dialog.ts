@@ -60,6 +60,18 @@ export function press(el: Element, key: string): KeyboardEvent {
   return e;
 }
 
+/// Press the pointer on `el` as Chromium does: a bubbling, cancelable
+/// mousedown whose default action focuses the pressed control unless a
+/// handler prevents it. jsdom runs no default action for a mousedown, so
+/// this applies that one. The event comes back so a test can read
+/// `defaultPrevented`.
+export function pointerPress(el: HTMLElement): MouseEvent {
+  const e = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+  el.dispatchEvent(e);
+  if (!e.defaultPrevented) el.focus();
+  return e;
+}
+
 /// Record the keys that reach the document, where App's global shortcut
 /// handler listens. Stop recording with the returned `stop`.
 export function recordDocumentKeys(): { keys: string[]; stop: () => void } {

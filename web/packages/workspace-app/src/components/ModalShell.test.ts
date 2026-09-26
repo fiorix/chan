@@ -15,6 +15,7 @@ import {
   dialogName,
   focusOrigin,
   mountDialog,
+  pointerPress,
   press,
   recordDocumentKeys,
   settle,
@@ -110,6 +111,20 @@ describe("ModalShell", () => {
     expect(onClose, "a click inside the panel").not.toHaveBeenCalled();
     clickBackdrop(target);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  test("a press on the backdrop leaves focus in the panel, so Escape stays the dialog's", async () => {
+    const onClose = vi.fn();
+    const target = render({ onClose });
+    await settle();
+    const dialog = dialogIn(target)!;
+    pointerPress(backdropIn(target)!);
+    expect(dialog.contains(document.activeElement), "focus is inside the panel after the press").toBe(true);
+    const reached = recordDocumentKeys();
+    press(document.activeElement!, "Escape");
+    reached.stop();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(reached.keys, "keys that reached the document").toEqual([]);
   });
 
   test("a press inside the panel released over the dim leaves it open", () => {

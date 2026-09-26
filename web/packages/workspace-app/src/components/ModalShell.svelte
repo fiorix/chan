@@ -62,12 +62,16 @@
 
 <div class="overlay">
   <!-- A pointer target only: Escape and the dialog's own buttons are the
-       keyboard's way out, so the backdrop stays out of the tab order. -->
+       keyboard's way out, so the backdrop stays out of the tab order. A
+       press on it takes no focus either: focus held here would carry Escape
+       past the panel to the app and let Enter or Space cancel the dialog.
+       The click still lands. -->
   <button
     class="backdrop"
     type="button"
     aria-label="Close"
     tabindex="-1"
+    onmousedown={(e) => e.preventDefault()}
     onclick={onClose}
   ></button>
   <div
