@@ -11677,6 +11677,65 @@ mod tests {
             assert_ne!(resumed.generation, generation);
         }
 
+        // A ring park the store refuses (its cap, a failed store, barrier or
+        // commit) leaves the session as it was: its PTY parked alone, no ring
+        // file named or mirrored, the manifest's tail kept.
+        #[test]
+        fn a_refused_ring_park_leaves_the_pty_parked_alone() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let id = "ring-park-refused";
+            let (import, _pair) = ringless_import(id, 1, b"restored");
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            hook.0.refuse_park.store(true, Ordering::Relaxed);
+            registry.park_unparked_windowed_sessions();
+
+            let ring_name = fdstore_ring_fd_name(id, None);
+            assert!(
+                hook.calls()
+                    .iter()
+                    .any(|call| call.starts_with("park") && call.ends_with(&ring_name)),
+                "the reconcile asks the store for the ring: {:?}",
+                hook.calls()
+            );
+            let session = registry.sessions.lock().unwrap()[id].clone();
+            assert!(session.is_fdstore_parked());
+            assert!(!session.has_ring_file());
+            assert!(!session.ring.lock().unwrap().is_mirrored());
+            let entry = registry.fdstore_manifest_sessions("t").pop().unwrap();
+            assert_eq!(entry.ring_fd_name, None);
+            assert_eq!(entry.replay, b"restored", "the session keeps its tail");
+        }
+
+        // A program still on the alternate screen at a crash is restored there
+        // with its modes: output published them to the ring file after the
+        // last manifest rewrite, which saw a plain shell.
+        #[test]
+        fn a_crash_restore_keeps_a_program_still_on_the_alternate_screen() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            store.serve(&registry);
+            let id = "still-on-the-alternate-screen";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            session.record_output(b"$ htop\r\n");
+            store.changed();
+            session.record_output(b"\x1b[?1049h\x1b[?1006;1000hhtop's screen");
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let after = next.attach(id, Some(0)).unwrap();
+            assert!(after.alt_screen, "htop is still on the alternate screen");
+            assert!(after.replay.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&after.mode_reassert),
+                "\x1b[?1000h\x1b[?1006h"
+            );
+        }
+
         // A restore from a manifest that is not the seal's final write may end
         // behind the previous process, so a client cursor from that process
         // past the restored `seq` names bytes this process never had. That
