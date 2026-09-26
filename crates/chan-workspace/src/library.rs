@@ -537,6 +537,13 @@ impl Library {
         ))
     }
 
+    /// Per-workspace paths for a registry row, from the metadata key it
+    /// stores, touching no filesystem: a caller holding the row, such as a
+    /// listing, needs no lookup that would resolve the workspace's root.
+    pub fn workspace_paths_for_row(&self, row: &KnownWorkspace) -> paths::WorkspacePaths {
+        paths::workspace_paths_for_metadata_key_in(&self.inner.chan_home, &row.metadata_key)
+    }
+
     /// Match `root` against the registry without holding its mutex across
     /// any filesystem call: `root` is canonicalized, the rows a stale cache
     /// could hide it behind are copied out under the mutex, and those roots

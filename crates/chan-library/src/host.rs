@@ -38,7 +38,7 @@ use crate::terminal_sessions::{
 };
 use crate::windows::{PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry};
 use crate::{
-    allocate_workspace_prefix, sanitize_prefix, DevserverRegistry, Error, GatewayRegistry,
+    sanitize_prefix, workspace_prefix_for, DevserverRegistry, Error, GatewayRegistry,
     ServeConfig, ServeHandle, WorkspaceOverlay,
 };
 
@@ -2091,7 +2091,9 @@ impl WorkspaceHost {
     /// workspace-gated; a workspace row missing its path is included defensively.
     fn window_in_live_feed(&self, row: &PersistedWindow) -> bool {
         match (row.kind, row.workspace_path.as_deref()) {
-            (WindowKind::Workspace, Some(path)) => self.is_root_mounted(Path::new(path)),
+            (WindowKind::Workspace, Some(path)) => {
+                self.is_canonical_root_mounted(&stored_window_key(Path::new(path)))
+            }
             _ => true,
         }
     }
@@ -2158,7 +2160,7 @@ impl WorkspaceHost {
     pub fn tenant_leader(&self, kind: WindowKind, workspace_path: Option<&str>) -> Option<String> {
         let target = match kind {
             WindowKind::Terminal => None,
-            WindowKind::Workspace => Some(canonical_key(Path::new(workspace_path?))),
+            WindowKind::Workspace => Some(stored_window_key(Path::new(workspace_path?))),
         };
         let workspaces = self.workspaces.read().ok()?;
         let runtime = match target {
@@ -2831,7 +2833,7 @@ impl WorkspaceHost {
             return (String::new(), String::new(), false);
         };
         let path = Path::new(path);
-        let target = canonical_key(path);
+        let target = stored_window_key(path);
         if let Ok(workspaces) = self.workspaces.read() {
             if let Some(runtime) = workspaces
                 .values()
@@ -2850,7 +2852,7 @@ impl WorkspaceHost {
                 );
             }
         }
-        let prefix = allocate_workspace_prefix(path).unwrap_or_default();
+        let prefix = workspace_prefix_for(path, &target).unwrap_or_default();
         (prefix, String::new(), false)
     }
 
@@ -3455,19 +3457,54 @@ impl WorkspaceHost {
     /// it. The launcher drives its spinner and toggle-disable off this, not an
     /// optimistic timer.
     pub fn workspace_status(&self, root: &Path) -> (WorkspaceStatus, Option<String>) {
-        let key = canonical_key(root);
+        self.workspace_status_by_key(&canonical_key(root), || self.foreign_holder(root))
+    }
+
+    /// [`workspace_status`](Self::workspace_status) for a registry row, by
+    /// the canonical root and the metadata key the row stores, so a listing
+    /// asks no workspace root's filesystem.
+    pub fn registered_workspace_status(
+        &self,
+        row: &chan_workspace::KnownWorkspace,
+    ) -> (WorkspaceStatus, Option<String>) {
+        self.workspace_status_by_key(&row.root_path, || {
+            let paths = self.library.workspace_paths_for_row(row);
+            chan_workspace::lock::probe_foreign_holder(&paths.lock, &row.root_path)
+        })
+    }
+
+    /// [`workspace_status`](Self::workspace_status) for a caller that holds
+    /// the root's canonical key, such as a devserver record: the registry row
+    /// is found by the keys it stores, so no root's filesystem is asked.
+    pub fn canonical_root_status(&self, key: &Path) -> (WorkspaceStatus, Option<String>) {
+        let row = self
+            .library
+            .list_workspaces()
+            .into_iter()
+            .find(|row| row.root_path == key || row.cached_canonical_path() == key);
+        match row {
+            Some(row) => self.registered_workspace_status(&row),
+            None => self.workspace_status_by_key(key, || ForeignHolder::Absent),
+        }
+    }
+
+    fn workspace_status_by_key(
+        &self,
+        key: &Path,
+        foreign_holder: impl FnOnce() -> ForeignHolder,
+    ) -> (WorkspaceStatus, Option<String>) {
         let state = self
             .mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
+            .get(key)
             .cloned();
         match state {
             Some(MountState::Closing) => return (WorkspaceStatus::Closing, None),
             Some(MountState::Removing) => return (WorkspaceStatus::Removing, None),
             _ => {}
         }
-        if self.is_root_mounted(root) {
+        if self.is_canonical_root_mounted(key) {
             // A mounted tenant whose filesystem is unreachable is NOT running.
             // Reporting `running` over a dead mount is what let a workspace sit
             // green in the launcher while every read returned a transport
@@ -3486,7 +3523,7 @@ impl WorkspaceHost {
             Some(MountState::Closing) | Some(MountState::Removing) => {
                 (WorkspaceStatus::Stopped, None)
             }
-            None => match self.foreign_holder(root) {
+            None => match foreign_holder() {
                 ForeignHolder::Present => (WorkspaceStatus::Locked, None),
                 ForeignHolder::Unknown { reason } => (WorkspaceStatus::Unknown, Some(reason)),
                 ForeignHolder::Absent => (WorkspaceStatus::Stopped, None),
@@ -4064,6 +4101,14 @@ fn canonical_key(root: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(root)
 }
 
+/// The key a window record's workspace path is matched by: the path as
+/// stored, normalized lexically. Every minting site stores the workspace's
+/// canonical root, so this finds its runtime without asking any root's
+/// filesystem, which the window feed must not do for every record.
+fn stored_window_key(path: &Path) -> PathBuf {
+    chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(path))
+}
+
 /// [`Library::workspace_paths_for`] for the close path, which must call it
 /// off the runtime thread: the registry canonicalizes `root` to find it.
 fn registered_workspace_paths(
@@ -4093,11 +4138,7 @@ fn unregister_registered_workspace(library: &Library, root: &Path) -> chan_works
 /// window, and one of those may have stalled. A record minted with some
 /// other alias of the root is not matched and stays.
 fn workspace_window_ids(registry: &WindowRegistry, target: &Path, root: &Path) -> Vec<String> {
-    let stored = |path: &Path| {
-        chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(
-            path,
-        ))
-    };
+    let stored = stored_window_key;
     let root = stored(root);
     registry
         .snapshot()
@@ -4246,12 +4287,23 @@ mod tests {
         check("mounted_prefix_for_root", &|| {
             assert!(host.mounted_prefix_for_root(&missing).is_none());
         });
-        check("tenant_leader", &|| {
+        // A window record's path is looked up by the canonical root it
+        // stores, so the window lookups canonicalize nothing at all.
+        let check_stored = |name: &str, lookup: &dyn Fn()| {
+            observed.borrow_mut().clear();
+            lookup();
+            assert_eq!(
+                *observed.borrow(),
+                Vec::<bool>::new(),
+                "{name} must look a window's workspace up by its stored key"
+            );
+        };
+        check_stored("tenant_leader", &|| {
             assert!(host
                 .tenant_leader(WindowKind::Workspace, Some(&missing.to_string_lossy()))
                 .is_none());
         });
-        check("workspace_window_live", &|| {
+        check_stored("workspace_window_live", &|| {
             let _ = host.workspace_window_live(Some(&missing.to_string_lossy()), "w-a");
         });
         let mounted = cfg.path().join("root-0");
@@ -6359,7 +6411,7 @@ mod tests {
 
         // Mount at a desktop-style prefix that is NOT the workspace's slug.
         let mount_prefix = "/workspace-deadbeef";
-        let slug = allocate_workspace_prefix(root.path()).expect("slug prefix");
+        let slug = crate::allocate_workspace_prefix(root.path()).expect("slug prefix");
         assert_ne!(slug, mount_prefix, "test needs a non-slug mount prefix");
         host.open_registered_workspace(root.path(), serve_config(mount_prefix))
             .await
