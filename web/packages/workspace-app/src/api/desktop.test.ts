@@ -10,6 +10,7 @@ import {
   saveBytesToDownloads,
   setWindowFullscreen,
   tauriInvoke,
+  writeClipboardText,
 } from "./desktop";
 import { transfers } from "../state/transfers.svelte";
 
@@ -88,6 +89,32 @@ describe("tauriInvoke", () => {
     setTauriInternals(spy);
     await expect(tauriInvoke("ping")).resolves.toBe("ok");
     expect(spy).toHaveBeenCalledWith("ping", undefined);
+  });
+});
+
+describe("writeClipboardText", () => {
+  afterEach(() => {
+    clearTauriGlobals();
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    vi.restoreAllMocks();
+  });
+
+  test("falls back to the Clipboard API when the native write fails", async () => {
+    setTauriInternals(async () => Promise.reject(new Error("not allowed")));
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await writeClipboardText("hello");
+
+    expect(writeText).toHaveBeenCalledWith("hello");
+  });
+
+  test("fails with the native error when there is no Clipboard API to fall back on", async () => {
+    setTauriInternals(async () => Promise.reject(new Error("not allowed")));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(writeClipboardText("hello")).rejects.toThrow("not allowed");
   });
 });
 

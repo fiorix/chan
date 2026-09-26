@@ -21,6 +21,7 @@ function setDesktopBridge(invoke: (cmd: string, args?: unknown) => Promise<unkno
 afterEach(() => {
   delete (window as W).__TAURI_INTERNALS__;
   setClipboard(undefined);
+  vi.restoreAllMocks();
 });
 
 async function copy(text: string): Promise<{ onSuccess: () => void; onError: (msg: string) => void }> {
@@ -40,6 +41,16 @@ describe("copyTextToClipboard", () => {
     expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "notes/a.md" });
     expect(onError).not.toHaveBeenCalled();
     expect(onSuccess).toHaveBeenCalledOnce();
+  });
+
+  test("on the desktop, reports a failed native write that has no Clipboard API to fall back on", async () => {
+    setDesktopBridge(async () => Promise.reject(new Error("not allowed")));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { onSuccess, onError } = await copy("notes/a.md");
+
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith("not allowed");
   });
 
   test("in a browser, writes through the Clipboard API", async () => {

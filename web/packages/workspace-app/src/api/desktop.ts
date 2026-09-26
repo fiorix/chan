@@ -180,7 +180,11 @@ export async function readClipboardText(): Promise<string> {
 /// clipboard and never needs a gesture. On web `navigator.clipboard.writeText()`
 /// is the only option -- it is gesture-permitted in a foreground tab, which is
 /// where the terminal lives. Best-effort: a failed native IPC logs and falls
-/// back to the web API so the copy still has a chance to land.
+/// back to the web API so the copy still has a chance to land, and fails with
+/// the IPC's error when the webview has no web API to fall back on (a plain
+/// http origin), so a caller that reports the outcome does not report a copy
+/// that never happened. Off the desktop a missing web API writes nothing and
+/// resolves; `copyTextToClipboard` reports that case itself.
 export async function writeClipboardText(text: string): Promise<void> {
   if (isTauriDesktop()) {
     try {
@@ -188,6 +192,7 @@ export async function writeClipboardText(text: string): Promise<void> {
       return;
     } catch (err) {
       console.warn("writeClipboardText: write_clipboard_text IPC failed", err);
+      if (!navigator.clipboard) throw err;
     }
   }
   await navigator.clipboard?.writeText(text);
