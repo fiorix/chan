@@ -2968,8 +2968,10 @@ impl WorkspaceHost {
     ///
     /// Resolving asks the root's filesystem. A caller that asks while a
     /// resolution of the same spelling is in flight waits on that one, so a
-    /// hung root holds one blocking thread however many callers ask for it,
-    /// and every caller of it waits without holding a runtime worker.
+    /// root that hangs while its key is resolved holds one blocking thread
+    /// for it however many callers ask, and every caller of it waits without
+    /// holding a runtime worker. The bound is this hop's only; see
+    /// `RootKeys` for the hops after it.
     pub async fn root_key(&self, root: &Path) -> Result<PathBuf, Error> {
         #[cfg(test)]
         let probe = self.blocking_thread_probe.lock().unwrap().clone();
@@ -3490,7 +3492,10 @@ impl WorkspaceHost {
 
     /// [`workspace_status`](Self::workspace_status) for a registry row, by
     /// the canonical root and the metadata key the row stores, so a listing
-    /// asks no workspace root's filesystem.
+    /// resolves no workspace root, with one exception: when another process
+    /// holds the root's writer lock, the probe behind a `locked` status
+    /// compares the holder's record with the root by canonicalizing it
+    /// (`chan_workspace::lock::probe_foreign_holder`).
     pub fn registered_workspace_status(
         &self,
         row: &chan_workspace::KnownWorkspace,
@@ -3503,7 +3508,10 @@ impl WorkspaceHost {
 
     /// [`workspace_status`](Self::workspace_status) for a caller that holds
     /// the root's canonical key, such as a devserver record: the registry row
-    /// is found by the keys it stores, so no root's filesystem is asked.
+    /// is found by the keys it stores, resolving no root, and its status is
+    /// then asked as [`registered_workspace_status`](
+    /// Self::registered_workspace_status) asks it, writer-lock probe
+    /// included.
     pub fn canonical_root_status(&self, key: &Path) -> (WorkspaceStatus, Option<String>) {
         let row = self
             .library

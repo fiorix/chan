@@ -139,11 +139,16 @@ pub(crate) type RootLocks = KeyedLocks<PathBuf>;
 /// A key asks the root's filesystem, and a hung network mount never answers.
 /// A caller that asks for a spelling whose computation is still running
 /// waits on that computation instead of starting another, so however often
-/// clients retry requests for a hung root, that root holds one blocking
-/// thread and the rest of the pool stays free for every other root's key,
-/// open and probe. A small executor of its own would not keep that promise:
-/// one hung root's retries fill its few threads and then every other root's
-/// key waits behind them.
+/// clients retry requests for a root that hangs while its key is computed,
+/// that root holds one blocking thread for its key and the rest of the pool
+/// stays free for every other root's key, open and probe. A small executor
+/// of its own would not keep that promise: one hung root's retries fill its
+/// few threads and then every other root's key waits behind them.
+///
+/// The bound covers the key alone. A root that answers its key and then
+/// stops answering holds a thread in each later hop that asks it, the open,
+/// a mounted root's revalidation or the registration, for every caller that
+/// stops waiting on it.
 ///
 /// A computation drops its entry when it finishes, so a later caller asks
 /// the filesystem afresh; a caller that gives up leaves the computation to
