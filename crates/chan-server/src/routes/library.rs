@@ -1142,10 +1142,11 @@ async fn handle_create_library_window(
         let Some(path) = workspace_path.as_deref() else {
             return (StatusCode::BAD_REQUEST, "workspace_path is required").into_response();
         };
-        // The record stores the workspace's canonical root, the key the window
-        // feed finds its tenant by without asking any root's filesystem.
-        // Resolving the client's spelling asks this root's, so it runs off
-        // the runtime.
+        // The record stores the root the workspace's runtime was opened at,
+        // the registry's stored root: the path the launcher lists it by and
+        // nests its windows under, and one the window feed finds the runtime
+        // by without asking any root's filesystem. Resolving the client's
+        // spelling asks this root's, so it runs off the runtime.
         let key = match host.root_key(Path::new(path)).await {
             Ok(key) => key,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -1158,7 +1159,8 @@ async fn handle_create_library_window(
             )
                 .into_response();
         }
-        workspace_path = Some(key.to_string_lossy().into_owned());
+        let stored = host.mounted_root(&key).unwrap_or(key);
+        workspace_path = Some(stored.to_string_lossy().into_owned());
     }
     // Leader gate on the TARGET tenant of the mint (workspace path, or the shared
     // terminal tenant for a terminal mint); leaderless establishes leadership at

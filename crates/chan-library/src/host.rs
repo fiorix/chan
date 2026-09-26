@@ -582,6 +582,14 @@ struct HostedWorkspaceRuntime {
 }
 
 impl HostedWorkspaceRuntime {
+    /// Whether `key` names this runtime: its canonical root, or the root it
+    /// was opened at, which is the registry row's stored root. The two
+    /// differ for a root whose path resolves elsewhere since it was
+    /// registered, and a caller holding the row asks by the stored one.
+    fn found_by(&self, key: &Path) -> bool {
+        self.canonical_root == key || self.root == key
+    }
+
     fn router(&self) -> Router {
         self.artifacts.app.clone()
     }
@@ -1364,7 +1372,7 @@ impl WorkspaceHost {
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
         Ok(workspaces
             .values()
-            .find(|runtime| runtime.canonical_root == key)
+            .find(|runtime| runtime.found_by(key))
             .map(hosted_from_runtime))
     }
 
@@ -2167,7 +2175,7 @@ impl WorkspaceHost {
             None => workspaces.get(self.terminal_tenant_prefix.get()?)?,
             Some(target) => workspaces
                 .values()
-                .find(|runtime| runtime.canonical_root == target)?,
+                .find(|runtime| runtime.found_by(&target))?,
         };
         runtime.artifacts.session_registry.leader()
     }
@@ -2835,10 +2843,7 @@ impl WorkspaceHost {
         let path = Path::new(path);
         let target = stored_window_key(path);
         if let Ok(workspaces) = self.workspaces.read() {
-            if let Some(runtime) = workspaces
-                .values()
-                .find(|runtime| runtime.canonical_root == target)
-            {
+            if let Some(runtime) = workspaces.values().find(|runtime| runtime.found_by(&target)) {
                 let connected = runtime
                     .artifacts
                     .window_presence
@@ -3411,9 +3416,7 @@ impl WorkspaceHost {
     /// root's canonical key; touches no filesystem.
     fn live_workspace_by_key(&self, key: &Path) -> Option<Arc<Workspace>> {
         let workspaces = self.workspaces.read().ok()?;
-        let runtime = workspaces
-            .values()
-            .find(|runtime| runtime.canonical_root == key)?;
+        let runtime = workspaces.values().find(|runtime| runtime.found_by(key))?;
         runtime.artifacts.cell.workspace()
     }
 
@@ -3433,6 +3436,28 @@ impl WorkspaceHost {
     /// answering.
     pub fn is_canonical_root_mounted(&self, key: &Path) -> bool {
         self.hosted_for_key(key).ok().flatten().is_some()
+    }
+
+    /// The canonical root of the runtime `key` names (by its canonical root
+    /// or by the root it was opened at), the key the host keys that mount's
+    /// lifecycle row by; `None` when nothing mounted goes by `key`.
+    pub fn mounted_canonical_root(&self, key: &Path) -> Option<PathBuf> {
+        let workspaces = self.workspaces.read().ok()?;
+        workspaces
+            .values()
+            .find(|runtime| runtime.found_by(key))
+            .map(|runtime| runtime.canonical_root.clone())
+    }
+
+    /// The root the runtime `key` names was opened at, the registry row's
+    /// stored root, which is the path the launcher lists that workspace by;
+    /// `None` when nothing mounted goes by `key`.
+    pub fn mounted_root(&self, key: &Path) -> Option<PathBuf> {
+        let workspaces = self.workspaces.read().ok()?;
+        workspaces
+            .values()
+            .find(|runtime| runtime.found_by(key))
+            .map(|runtime| runtime.root.clone())
     }
 
     /// The prefix string this canonical root is CURRENTLY mounted at (the
@@ -3493,18 +3518,24 @@ impl WorkspaceHost {
         key: &Path,
         foreign_holder: impl FnOnce() -> ForeignHolder,
     ) -> (WorkspaceStatus, Option<String>) {
-        let state = self
-            .mount_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .cloned();
+        // The host keys a mount's lifecycle row by its runtime's canonical
+        // root, which a caller holding a relinked root's stored path does
+        // not have; the runtime found by that path supplies it.
+        let runtime_key = self.mounted_canonical_root(key);
+        let state = {
+            let states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+            runtime_key
+                .as_deref()
+                .and_then(|runtime_key| states.get(runtime_key))
+                .or_else(|| states.get(key))
+                .cloned()
+        };
         match state {
             Some(MountState::Closing) => return (WorkspaceStatus::Closing, None),
             Some(MountState::Removing) => return (WorkspaceStatus::Removing, None),
             _ => {}
         }
-        if self.is_canonical_root_mounted(key) {
+        if runtime_key.is_some() {
             // A mounted tenant whose filesystem is unreachable is NOT running.
             // Reporting `running` over a dead mount is what let a workspace sit
             // green in the launcher while every read returned a transport
@@ -4109,9 +4140,10 @@ fn canonical_key(root: &Path) -> PathBuf {
 }
 
 /// The key a window record's workspace path is matched by: the path as
-/// stored, normalized lexically. Every minting site stores the workspace's
-/// canonical root, so this finds its runtime without asking any root's
-/// filesystem, which the window feed must not do for every record.
+/// stored, normalized lexically. Every minting site stores a root the
+/// workspace's runtime goes by, its canonical root or the registry's stored
+/// root it was opened at, so this finds the runtime without asking any
+/// root's filesystem, which the window feed must not do for every record.
 fn stored_window_key(path: &Path) -> PathBuf {
     chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(path))
 }

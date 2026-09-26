@@ -1025,7 +1025,21 @@ impl DevserverState {
                         .unwrap_or(MountCompletion::ForgetStale)
                 };
                 match completion {
-                    MountCompletion::Adopted => {}
+                    // The host keys the mount's lifecycle by its runtime's
+                    // canonical root. For a root whose path resolves
+                    // elsewhere since it was registered, that is not the
+                    // record's root, under which this attempt published
+                    // `starting`; the mount adopts the runtime's key, so
+                    // that row goes.
+                    MountCompletion::Adopted => {
+                        if self
+                            .host
+                            .mounted_canonical_root(&attempt.root)
+                            .is_some_and(|runtime_key| runtime_key != attempt.root)
+                        {
+                            self.host.clear_canonical_root_lifecycle(&attempt.root);
+                        }
+                    }
                     MountCompletion::CloseStale => {
                         let _ = self.host.close_workspace(&hosted.prefix, true).await;
                         self.restore_current_host_lifecycle(&attempt.prefix);
