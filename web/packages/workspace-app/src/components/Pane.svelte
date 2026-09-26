@@ -84,7 +84,6 @@
   import FileBrowserSurface from "./FileBrowserSurface.svelte";
   import GraphPanel from "./GraphPanel.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
-  import TerminalTab from "./TerminalTab.svelte";
   import {
     ui,
     workspaceDisplayName,
@@ -128,6 +127,7 @@
   import { onDestroy, onMount } from "svelte";
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
   import { windowCaps } from "../state/windowCaps";
+  import { terminalLayer } from "../state/terminalDock.svelte";
   import { dispatchAllowsCommand } from "../state/commands";
 
   let { pane }: { pane: LeafNode } = $props();
@@ -164,12 +164,6 @@
 
   function isLiveActive(tab: Tab): boolean {
     return !paneMode.active && tab.id === visibleActiveTabId && isVisibleTab(tab);
-  }
-
-  function sideForTab(tab: Tab): PaneSide {
-    return paneTabs(pane, "b").some((candidate) => candidate.id === tab.id)
-      ? "b"
-      : "a";
   }
 
   /// Per-row is_dir lookup for the active tree, keyed by path. Workspaces
@@ -1767,9 +1761,10 @@
     aria-label="pane content"
   >
     <!-- The outer net for this pane's body. Every tab body has a boundary of
-         its own, the five keep-alive kinds below and the browser kind in the
-         active-tab chain above, so what reaches this one is the rest of what
-         the body draws: the Hybrid Nav preview and the empty-pane placeholder.
+         its own, the four keep-alive kinds below, the browser kind in the
+         active-tab chain above and each terminal in Terminals.svelte, so what
+         reaches this one is the rest of what the body draws: the Hybrid Nav
+         preview and the empty-pane placeholder.
 
          The keying of the tab lists is not among them. A keyed each
          evaluates its key in the block's own effect, and each item's subtree
@@ -1855,32 +1850,19 @@
       </div>
     {/if}
         <!--
-          Keep terminal tabs mounted across Hybrid Nav (pane mode) and
-          side flips so xterm.js's 20k-line scrollback buffer survives.
-          Unmounting a terminal would dispose the EditorView and drop the
-          buffer, losing every line that had scrolled off screen. The
-          active terminal is hidden by `class:active` flipping to false
-          during pane mode or while the tab is on the hidden side (the existing
-          `visibility: hidden; pointer-events: none` rule does the
-          hiding).
+          This pane's terminals are drawn by Terminals.svelte, above the pane
+          tree, and docked into this layer, so a split that rebuilds this pane
+          or a move to another pane keeps each terminal's xterm.js renderer,
+          its scrollback and its socket. They stay mounted across
+          Hybrid Nav (pane mode) and side flips too: the active terminal is
+          hidden by `class:active` flipping to false during pane mode or
+          while the tab is on the hidden side (its `visibility: hidden;
+          pointer-events: none` rule does the hiding).
         -->
-    {#each everyTab.filter((t) => t.kind === "terminal") as t (t.id)}
-      <svelte:boundary>
-        <TerminalTab
-          tab={t}
-          paneId={pane.id}
-          side={sideForTab(t)}
-          active={isLiveActive(t)}
-          focused={isLiveActive(t) && viewLayout.activePaneId === pane.id}
-        />
-        {#snippet failed(error, reset)}
-          {@render tabFailed(t, error, reset)}
-        {/snippet}
-      </svelte:boundary>
-    {/each}
+    <div class="terminal-layer" {@attach terminalLayer(pane.id)}></div>
         <!--
-          File tabs are kept mounted for the same reason as terminals
-          above: unmounting destroys the CM6 EditorView, and on remount
+          File tabs are kept mounted for the same reason as terminals:
+          unmounting destroys the CM6 EditorView, and on remount
           the decoration walker computes from a pre-layout viewport --
           on WKWebView the document then shows raw un-decorated
           markdown until a click, and scroll/caret/undo/FindBar state
@@ -2019,6 +2001,12 @@
 
   .tab-failed.offscreen {
     display: none;
+  }
+
+  /* Docked terminals position against the pane body, as the tab bodies
+     beside them do, so the layer adds no box. */
+  .terminal-layer {
+    display: contents;
   }
 
   .pane {

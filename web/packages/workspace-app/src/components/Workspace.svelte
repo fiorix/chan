@@ -19,6 +19,7 @@
     scheduleSessionSave,
   } from "../state/store.svelte";
   import Pane from "./Pane.svelte";
+  import Terminals from "./Terminals.svelte";
   import Self from "./Workspace.svelte";
 
   let { nodeId }: { nodeId?: string } = $props();
@@ -100,6 +101,12 @@
       </div>
     </div>
   {/if}
+{/if}
+<!-- The root draws every terminal once, keyed by tab id, and docks each into
+     its pane, so a split or a tab move that rebuilds the panes below never
+     rebuilds a terminal. -->
+{#if nodeId === undefined}
+  <Terminals />
 {/if}
 
 <style>

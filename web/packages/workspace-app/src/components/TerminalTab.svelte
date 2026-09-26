@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import {
     Check,
     Clipboard,
@@ -190,6 +190,7 @@
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
   import { surveyFor } from "../state/survey.svelte";
+  import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
 
   let {
@@ -554,6 +555,20 @@
     term?.blur();
     recoverTerminalRendererAfterHostResume();
     sendFocusState();
+  });
+
+  // A split or a tab move docks this terminal's element into another pane's
+  // layer with its renderer and socket intact (terminalDock.svelte.ts). The
+  // move drops the keyboard focus and the new host has a size of its own, so
+  // run the host-resume recovery: fit on the next frame, when the destination
+  // is laid out (a changed grid reaches the PTY through onResize), repaint,
+  // and give the keyboard back when this is still the focused terminal.
+  let relocationsSeen = untrack(() => terminalRelocations(tab.id));
+  $effect(() => {
+    const relocations = terminalRelocations(tab.id);
+    if (relocations === relocationsSeen) return;
+    relocationsSeen = relocations;
+    untrack(recoverTerminalAfterHostResume);
   });
 
   // An idle terminal (visible in its pane but NOT focused, or a
