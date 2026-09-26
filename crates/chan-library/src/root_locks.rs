@@ -121,7 +121,9 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// the root lock: the routing map, the mount-state map, the overlay's and
 /// the window registry's data and save locks, and the library's registry
 /// mutex. Those are taken and released while the root lock is held and
-/// none is held while a root lock is awaited.
+/// none is held while a root lock is awaited. The maps of key computations
+/// ([`RootKeys`]) and health checks in flight are leaves, held across no
+/// await and no filesystem call.
 ///
 /// The devserver's mount-attempt locks, a [`KeyedLocks`] by prefix, sit
 /// above the root locks: an attempt holds its prefix's lock across its

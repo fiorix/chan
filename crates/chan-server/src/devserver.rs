@@ -5031,9 +5031,6 @@ mod tests {
         );
     }
 
-    /// Build a `DevserverState` over a sandbox dir for the on/off
-    /// state-machine tests: a fresh `Library`, an empty host, and a devserver
-    /// store under `home`.
     /// A runtime whose blocking pool is one thread, so a test that parks that
     /// thread holds every later blocking hop behind it.
     fn one_blocking_thread_runtime() -> tokio::runtime::Runtime {
@@ -5044,6 +5041,9 @@ mod tests {
             .expect("runtime")
     }
 
+    /// Build a `DevserverState` over a sandbox dir for the on/off
+    /// state-machine tests: a fresh `Library`, an empty host, and a devserver
+    /// store under `home`, with the production mount bound.
     fn test_state(home: &Path, addr: SocketAddr) -> Arc<DevserverState> {
         let lib = Library::open_at(home.join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
