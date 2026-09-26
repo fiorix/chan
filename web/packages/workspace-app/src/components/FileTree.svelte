@@ -1223,8 +1223,11 @@
   function onTreeMouseDown(e: MouseEvent): void {
     // Left button only; ignore clicks that land on a row's interactive
     // controls (name button/span, dirty dot, expand chevron) - those own
-    // their own select/toggle gesture, and expanding a folder leaves the
-    // selection as it is. The empty gutter and inter-row space start a band.
+    // their own select/toggle gesture, and expanding or collapsing a folder
+    // leaves the selection as it is. So rows selected inside a folder that
+    // is then collapsed stay selected and go with a Delete, cut, copy or drag
+    // of the selection; the count on the Delete confirm is the cue. The
+    // empty gutter and inter-row space start a band.
     if (e.button !== 0) return;
     const t = e.target as HTMLElement | null;
     if (t && t.closest(".name, .row-icon, .dirty-dot, .empty, .twirl")) return;

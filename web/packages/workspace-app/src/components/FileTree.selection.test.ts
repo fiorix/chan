@@ -4,9 +4,13 @@
 // the row's menu or the command, removes every selected row behind one
 // confirm that names the count; a row under a selected folder goes with the
 // folder; a refused delete leaves the rest deleted, says how many went and
-// keeps the failed rows selected. A right-click outside the selection, like a
-// drag, acts on that row alone. Expanding or collapsing a folder leaves the
-// selection as it was.
+// keeps the failed rows selected, less a path the server no longer has; a
+// delete that went clears the selection, and a tree refresh that fails after
+// it keeps that report and still closes the deleted files' tabs. A
+// right-click outside the selection, like a drag, acts on that row alone.
+// Expanding a folder with its chevron leaves the selection as it was (a
+// click on a folder's name replaces the selection with that folder, as a
+// click on any row does).
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 

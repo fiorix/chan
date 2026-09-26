@@ -160,7 +160,8 @@ function cancelPending(key: string): void {
 
 /// Drop the caret entry for `path` and everything beneath it. `path` alone
 /// covers a single-file delete; the `${path}/` prefix covers a directory
-/// delete, mirroring fileOps.remove's `underDeleted` predicate.
+/// delete, mirroring the `underDeleted` predicate in the store's
+/// settleDeleted.
 export function clearCaretsUnder(path: string): void {
   const prefix = caretKeyPrefix();
   if (prefix === null || !isStorageAvailable()) return;

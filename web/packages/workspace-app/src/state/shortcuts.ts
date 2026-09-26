@@ -123,11 +123,11 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // key) or forward-Delete removes the selected entries; the dispatch
   // source is FileTree's `onTreeKeydown`, with the uiConfirm in
   // `fileOps.remove` and `fileOps.removeSelection` as the safety gate.
-  // Recorded here so the FB
-  // selection-menu hint reads the chord from the central store
-  // (`chordFor`) and it ports across web/native. No modifier, so it
-  // never escapes the terminal (`chordFromEvent` ignores modifierless
-  // keys); `escapeTerminal` stays false to keep shell Backspace intact.
+  // Recorded here so the FB selection-menu hint reads the chord from the
+  // central store (`chordFor`) and it ports across web/native. No
+  // modifier, so it never escapes the terminal (`chordFromEvent` ignores
+  // modifierless keys); `escapeTerminal` stays false to keep shell
+  // Backspace intact.
   {
     id: "app.files.delete",
     label: "Delete file or directory",
