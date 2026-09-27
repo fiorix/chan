@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract test for the AUR check() contract in check-build-matrix.py.
+"""Contract test for AUR package selection and saved-binary ownership.
 
 Each case writes a throwaway recipe whose check() holds one shape, most of
 them beside the pinned `cargo test -p <pkgname>` call, and runs it through the
@@ -29,10 +29,9 @@ REAL_RECIPES = (
     "packaging/distros/arch/aur/chan-desktop/PKGBUILD.in",
 )
 FIXTURE = "PKGBUILD.in"
-# check() opens on line 3 and its body starts after two fixed lines, so the
-# first body line is 6 and a shape written beside the pinned call is on 7.
-REPLACED = 6
-BESIDE = 7
+# check() opens on line 3 and its commands follow cd and three exports.
+REPLACED = 8
+BESIDE = 9
 # A refusal that names the recipe but no line, such as a check() with no
 # cargo call left in it.
 NO_LINE = 0
@@ -48,6 +47,9 @@ class Case:
     pkgname: str = "chan"
     # Text the refusal must also contain.
     says: str = ""
+    # A single edit to the otherwise valid recipe, for artifact ownership.
+    edit: tuple[str, str] | None = None
+    at: str = ""
 
 
 def pinned(pkgname: str = "chan") -> str:
@@ -126,7 +128,7 @@ CASES = (
         "    cargo test --frozen -p chan -rF chan-workspace/test-hooks",
         says="-F",
     ),
-    # Round one's red copies: the pinned call widened in place.
+    # The pinned call widened in place.
     replaced("--workspace", "    cargo test --frozen --release --workspace", says="--workspace"),
     replaced(
         "--workspace in the desktop recipe",
@@ -157,7 +159,7 @@ CASES = (
     beside("a command substitution", "    x=$(cargo test --frozen --release --workspace)"),
     beside("behind command", "    command cargo test --frozen --release --workspace"),
     # A widened call beside the pinned one, hidden behind a word the
-    # contract does not read: each passed the contract as round one wrote it.
+    # contract does not read.
     beside("behind timeout", "    timeout 60m cargo test --frozen --release --workspace"),
     beside("behind env with an assignment", "    env RUSTFLAGS=x cargo test --frozen --release --workspace"),
     beside("behind time -p", "    time -p cargo test --frozen --release --workspace"),
@@ -196,21 +198,95 @@ CASES = (
 )
 
 
+def artifact(name: str, before: str, after: str, *, at: str = "", says: str) -> Case:
+    return Case(name, (pinned(),), NO_LINE, says=says, edit=(before, after), at=at)
+
+
+BUILD = "    cargo build --frozen --release -p chan"
+COPY = "    install -Dm755 target/release/chan package-bin/chan"
+INSTALL = '    install -Dm755 package-bin/chan "$pkgdir/usr/bin/chan"'
+ARTIFACT_CASES = (
+    artifact("installing the test build", INSTALL, INSTALL.replace("package-bin", "target/release"),
+             at="install -Dm755 target/release/chan", says="must install the saved binary"),
+    artifact("copy before the build", BUILD + "\n" + COPY, COPY + "\n" + BUILD,
+             at=COPY, says="after the last cargo build"),
+    artifact("a second build after the copy", COPY, COPY + "\n" + BUILD,
+             at=COPY, says="after the last cargo build"),
+    artifact("no saved copy", COPY + "\n", "", says="must save its release binary"),
+    artifact("no binary install", INSTALL + "\n", "", says="must install the saved binary"),
+    artifact("check overwrites the copy", pinned(), pinned() + "\n" + COPY,
+             at=COPY, says="cannot prove this command preserves"),
+    artifact("package overwrites the copy", INSTALL, COPY + "\n" + INSTALL,
+             at=COPY, says="must install the saved binary"),
+    artifact("copy to an unreadable variable", COPY, COPY.replace("package-bin/chan", '"$saved"'),
+             at='install -Dm755 target/release/chan "$saved"', says="cannot prove this command preserves"),
+    artifact("install from an unreadable variable", INSTALL, INSTALL.replace("package-bin/chan", '"$saved"'),
+             at='install -Dm755 "$saved"', says="must install the saved binary"),
+    artifact("check writes through a redirect", pinned(), pinned() + "\n    echo broken > package-bin/chan",
+             at="echo broken", says="without shell control operators or redirections"),
+    artifact("package writes through a redirect", INSTALL, INSTALL + "\n    echo broken >> package-bin/chan",
+             at="echo broken", says="without shell control operators or redirections"),
+    artifact("conditional copy after a failed build", BUILD + "\n" + COPY, BUILD + " || " + COPY.strip(),
+             at=BUILD, says="without shell control operators or redirections"),
+    artifact("check replaces the target directory", pinned(), "    CARGO_TARGET_DIR=package-bin " + pinned().strip(),
+             at="CARGO_TARGET_DIR=package-bin cargo", says="cannot prove this command preserves"),
+    artifact("cargo writes in the saved directory", pinned(), pinned() + " --target-dir package-bin",
+             at=pinned(), says="cannot prove this command preserves"),
+    artifact("cargo vendor writes the saved directory", pinned(), pinned() + "\n    cargo vendor package-bin",
+             at="cargo vendor", says="cannot prove this command preserves"),
+    artifact("check invokes an unreadable writer", pinned(), pinned() + "\n    python3 overwrite.py",
+             at="python3 overwrite.py", says="cannot prove this command preserves"),
+    artifact("package escapes its destination", INSTALL,
+             INSTALL + '\n    install -Dm644 LICENSE "$pkgdir/../src/chan-$pkgver/package-bin/chan"',
+             at="install -Dm644", says="cannot prove this command preserves"),
+    artifact("copy without a build", BUILD + "\n", "",
+             at=COPY, says="after the last cargo build"),
+    artifact("two saved copies", COPY, COPY + "\n" + COPY + " # second copy",
+             at=COPY + " # second copy", says="writes the saved binary twice"),
+    artifact("two binary installs", INSTALL, INSTALL + "\n" + INSTALL + " # second install",
+             at=INSTALL + " # second install", says="installs its binary twice"),
+    artifact("build in another source directory", 'build() {\n    cd "chan-$pkgver"',
+             'build() {\n    cd elsewhere', says="build() must start in chan-$pkgver"),
+    artifact("build without its pinned target", 'build() {\n    cd "chan-$pkgver"\n    export RUSTUP_TOOLCHAIN=stable\n    export CARGO_TARGET_DIR=target',
+             'build() {\n    cd "chan-$pkgver"\n    export RUSTUP_TOOLCHAIN=stable',
+             says="build() must export"),
+    artifact("a second build function", "build() {", "build() {\n}\nbuild() {",
+             says="expected one `build() {` line"),
+)
+
+
 def recipe(case: Case) -> str:
     lines = (
         f"pkgname={case.pkgname}",
         "",
         "check() {",
         '    cd "chan-$pkgver"',
+        "    export RUSTUP_TOOLCHAIN=stable",
         "    export CARGO_TARGET_DIR=target",
+        "    export CHAN_PACKAGED=aur",
         *case.body,
         "}",
         "",
         "package() {",
-        f'    install -Dm755 target/release/{case.pkgname} "$pkgdir/usr/bin/{case.pkgname}"',
+        '    cd "chan-$pkgver"',
+        f'    install -Dm755 package-bin/{case.pkgname} "$pkgdir/usr/bin/{case.pkgname}"',
+        "}",
+        "",
+        "build() {",
+        '    cd "chan-$pkgver"',
+        "    export RUSTUP_TOOLCHAIN=stable",
+        "    export CARGO_TARGET_DIR=target",
+        "    export CHAN_PACKAGED=aur",
+        f"    cargo build --frozen --release -p {case.pkgname}",
+        f"    install -Dm755 target/release/{case.pkgname} package-bin/{case.pkgname}",
         "}",
     )
-    return "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n"
+    if case.edit is not None:
+        before, after = case.edit
+        assert text.count(before) == 1, (case.name, before)
+        text = text.replace(before, after)
+    return text
 
 
 def run(directory: Path, *recipes: str) -> tuple[int, str]:
@@ -230,7 +306,10 @@ def problem(case: Case, status: int, output: str) -> str | None:
         if status == 0 and "build-matrix contract: PASS" in output:
             return None
         return f"expected a pass, got status {status}"
-    where = FIXTURE if case.line == NO_LINE else f"{FIXTURE}:{case.line}"
+    line = case.line
+    if case.at:
+        line = next(i for i, text in enumerate(recipe(case).splitlines(), 1) if case.at in text)
+    where = FIXTURE if line == NO_LINE else f"{FIXTURE}:{line}"
     refusals = [
         line
         for line in output.splitlines()
@@ -247,7 +326,7 @@ def main() -> int:
     failures = 0
     with tempfile.TemporaryDirectory(prefix="chan-aur-contract.") as scratch:
         directory = Path(scratch)
-        for case in CASES:
+        for case in (*CASES, *ARTIFACT_CASES):
             (directory / FIXTURE).write_text(recipe(case), encoding="utf-8")
             status, output = run(directory, FIXTURE)
             reason = problem(case, status, output)
@@ -262,7 +341,7 @@ def main() -> int:
     else:
         failures += 1
         print(f"not ok - the real recipes: status {status}\n{output.rstrip()}", file=sys.stderr)
-    total = len(CASES) + 1
+    total = len(CASES) + len(ARTIFACT_CASES) + 1
     if failures:
         print(f"AUR check() contract test: {failures} of {total} cases failed", file=sys.stderr)
         return 1

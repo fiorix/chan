@@ -1102,16 +1102,13 @@ def shell_function(text: str, name: str, path: str) -> list[tuple[int, str]]:
     templates use; anything else fails rather than being read partially.
     """
     lines = text.splitlines()
-    start = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if re.match(rf"^{name}\(\)\s*\{{\s*$", line)
-        ),
-        None,
-    )
-    if start is None:
-        raise ContractError(f"{path}: no `{name}() {{` line")
+    starts = [
+        index for index, line in enumerate(lines)
+        if re.match(rf"^{name}\(\)\s*\{{\s*$", line)
+    ]
+    if len(starts) != 1:
+        raise ContractError(f"{path}: expected one `{name}() {{` line")
+    start = starts[0]
     for end in range(start + 1, len(lines)):
         if lines[end] == "}":
             return [(index + 1, lines[index]) for index in range(start + 1, end)]
@@ -1149,14 +1146,17 @@ def shell_code(text: str) -> tuple[str, bool]:
     return text, escaped
 
 
-def shell_commands(body: list[tuple[int, str]], path: str) -> list[tuple[int, list[str]]]:
+def shell_commands(
+    body: list[tuple[int, str]], path: str, *, literal: bool = False
+) -> list[tuple[int, list[str]]]:
     """The simple commands in BODY as (first line number, words) pairs.
 
     Lines are joined where bash joins them, removing the backslash and the
     newline outright, so a word split across two lines is one word. `;`,
     `&&`, `||`, `|` and parentheses end a command, so a cargo call chained
     after another one is read on its own. Leading `NAME=value` assignments
-    are dropped.
+    are dropped. Literal mode retains assignments and refuses shell control
+    operators and redirects so an artifact writer cannot hide behind them.
     """
     commands = []
     pending = ""
@@ -1178,6 +1178,15 @@ def shell_commands(body: list[tuple[int, str]], path: str) -> list[tuple[int, li
             raise ContractError(
                 f"{path}:{pending_line}: cannot split the command: {error}"
             ) from error
+        if literal:
+            if any(token and all(c in ";&|()<>" for c in token) for token in tokens):
+                raise ContractError(
+                    f"{path}:{pending_line}: artifact ownership requires simple "
+                    "commands without shell control operators or redirections"
+                )
+            if tokens:
+                commands.append((pending_line, tokens))
+            continue
         words: list[str] = []
         for token in tokens + [";"]:
             if token and all(character in ";&|()" for character in token):
@@ -1241,7 +1250,7 @@ def cargo_selection(arguments: list[str]) -> tuple[list[str], list[str], list[st
 
 
 def check_aur_check_selection_contract() -> None:
-    """Every cargo call in an AUR recipe's check() selects only its package.
+    """An AUR package installs the release binary saved by build().
 
     Each building cargo call selects the package with `-p` (or `$pkgname`)
     and nothing wider, names no feature, and carries no shell expansion
@@ -1251,51 +1260,31 @@ def check_aur_check_selection_contract() -> None:
     is a check() with no building cargo call left; scripts/
     test-check-build-matrix.py proves each refusal.
 
-    makepkg runs check() between build() and package(). check()'s
-    `cargo test --release` rebuilds a package's `target/release` binary
-    whenever the package has an integration test, as chan does, and
-    package() then installs that binary. A test build unifies the
-    dev-dependency features of every package it selects, and chan-server's
-    dev-dependencies are the only edges that enable chan-workspace's
-    `test-hooks` and chan-library's `test-util`. A check() widened to the
-    workspace, or to chan-server, would therefore ship both test-only
-    features in the installed binary, and a stripped release binary would
-    not show it. chan-desktop has no integration test, so its check()
-    leaves the build() binary in place; its recipe is pinned all the same,
-    since one integration test would change that.
+    makepkg runs check() between build() and package(). A cargo test build
+    resolves dev-dependency features and can overwrite target/release's
+    binary when integration tests need it. Package selection alone cannot
+    keep those features out of an installed binary: the selected package's
+    own dev-dependencies can enable them too.
 
-    The feature sets the recipes' test builds resolve, read with cargo's
-    own resolver for each shipped package (and for chan-server as the
-    control that shows the reading can see both features):
-
-        cargo tree --locked -p <package> --target x86_64-unknown-linux-gnu \\
-            -e normal,build,dev --prefix none --format '{p} [{f}]'
-
-    `-e dev` resolves with dev units, the way `cargo test` does, so the
-    reading covers check()'s relink and not only build(). For `chan` and
-    `chan-desktop` neither the chan-workspace nor the chan-library line
-    lists a test-only feature; for `chan-server` they list `test-hooks` and
-    `test-util`, and so does the chan tree under `-p chan --workspace` or
-    `-p chan -p chan-server`, the widenings this contract refuses.
+    build() saves target/release/<pkgname> as package-bin/<pkgname> after
+    its last cargo build. package() installs that copy, outside cargo's
+    target directory, and neither check() nor package() may write it.
+    check_aur_artifact pins the literal source and destination and a small
+    command grammar, refusing unreadable writers and path expansions.
+    It trusts the commands' implementations, including the tests, and
+    does not parse manifests or run cargo's resolver. A package build and
+    comparison of its artifacts must prove the installed file's contents.
     """
     for path in AUR_RECIPES:
         check_aur_recipe(path, read(path))
 
 
 def check_aur_recipe(path: str, recipe: str) -> None:
-    """The AUR check() selection contract for one recipe's text."""
+    """The AUR package selection and saved-binary contracts for one recipe."""
     pkgname = re.search(r"^pkgname=([A-Za-z0-9_.+-]+)$", recipe, re.MULTILINE)
     if pkgname is None:
         raise ContractError(f"{path}: no `pkgname=` line")
     package = pkgname.group(1)
-    # The package is named by what package() installs, so a recipe that
-    # stops installing its own cargo package's binary has to update this
-    # contract rather than pass it.
-    require(
-        "\n".join(line for _, line in shell_function(recipe, "package", path)),
-        f"install -Dm755 target/release/{package} ",
-        f"{path} package()",
-    )
     cargo_calls = 0
     for number, words in shell_commands(shell_function(recipe, "check", path), path):
         program = words[0]
@@ -1344,8 +1333,7 @@ def check_aur_recipe(path: str, recipe: str) -> None:
         if features:
             raise ContractError(
                 f"{where}, and {', '.join(dict.fromkeys(features))} selects features; "
-                "check() selects none, since a feature flag is how a test-only "
-                "feature would reach the binary package() installs"
+                "check() uses the selected package's default test features"
             )
         if wider:
             raise ContractError(
@@ -1368,6 +1356,113 @@ def check_aur_recipe(path: str, recipe: str) -> None:
             f"{path}: check() runs no cargo build or test, so the selection "
             "this contract pins is gone; update the contract with the recipe"
         )
+    check_aur_artifact(path, recipe, package)
+
+
+def check_aur_artifact(path: str, recipe: str, package: str) -> None:
+    """Pin the saved release binary and refuse unreadable shell writers.
+
+    This is a deliberately small recipe grammar, not a shell interpreter.
+    build() ends by copying its release output outside target/. Later
+    commands may run the selected cargo tests or write below $pkgdir only.
+    Cargo, make and test internals are trusted; this reads no feature graph.
+    """
+    saved = f"package-bin/{package}"
+    copy = ["install", "-Dm755", f"target/release/{package}", saved]
+    binary_install = ["install", "-Dm755", saved, f"$pkgdir/usr/bin/{package}"]
+    bodies = {
+        name: shell_commands(shell_function(recipe, name, path), path, literal=True)
+        for name in ("build", "check", "package")
+    }
+    exports = (
+        ["export", "RUSTUP_TOOLCHAIN=stable"],
+        ["export", "CARGO_TARGET_DIR=target"],
+        ["export", "CHAN_PACKAGED=aur"],
+    )
+    copied = False
+    installed = False
+    last_build = -1
+    copy_index = -1
+
+    def package_destination(word: str) -> bool:
+        return bool(
+            re.fullmatch(r"\$pkgdir/(?:[A-Za-z0-9_+.-]+/)*[A-Za-z0-9_+.-]*/?", word)
+        ) and all(
+            part not in (".", "..") for part in word.split("/")
+        )
+
+    for phase, commands in bodies.items():
+        if not commands or commands[0][1] != ["cd", "chan-$pkgver"]:
+            raise ContractError(f"{path}: {phase}() must start in chan-$pkgver")
+        if phase in ("build", "check") and [words for _, words in commands[1:4]] != list(exports):
+            raise ContractError(f"{path}: {phase}() must export the pinned toolchain, target and package marker before running commands")
+        for index, (number, raw_words) in enumerate(commands):
+            words = [PKGNAME_EXPANSION.sub(package, word) for word in raw_words]
+            where = f"{path}:{number}: {phase}() runs `{' '.join(words)}`"
+            if index == 0 or words in exports:
+                continue
+            if phase == "build":
+                if words == copy:
+                    if copied:
+                        raise ContractError(f"{where}: build() writes the saved binary twice")
+                    copied = True
+                    copy_index = index
+                    continue
+                if words == ["cargo", "build", "--frozen", "--release", "-p", package]:
+                    last_build = index
+                    continue
+                if words == ["make", "web", "WEB_SKIP_INSTALL=1"] and not copied:
+                    continue
+            elif phase == "check":
+                # Selection and expansion checks above read cargo's arguments.
+                # The saved path must not become an output of cargo vendor,
+                # --target-dir or a test-binary argument either.
+                if (words[0] == "cargo" or words[0].endswith("/cargo")) and not any(
+                    "package-bin" in word for word in words
+                ):
+                    continue
+                if words in (
+                    ["true"],
+                    ["desktop-file-validate", "packaging/distros/shared/chan-desktop.desktop"],
+                ):
+                    continue
+                if words[0] == "echo" and not any(SHELL_EXPANSION.search(word) for word in words):
+                    continue
+            else:
+                if words == binary_install:
+                    if installed:
+                        raise ContractError(f"{where}: package() installs its binary twice")
+                    installed = True
+                    continue
+                if words[0:2] == ["install", "-Dm755"]:
+                    raise ContractError(f"{where}: package() must install the saved binary from {saved}")
+                if words[0:2] == ["install", "-Dm644"]:
+                    sources = words[2:-1]
+                    if sources and sources[-1] == "-t":
+                        sources = sources[:-1]
+                    if sources and package_destination(words[-1]) and all(
+                        re.fullmatch(r"[A-Za-z0-9_./@+-]+", source)
+                        and not source.startswith(("/", "package-bin/"))
+                        and ".." not in source.split("/")
+                        for source in sources
+                    ):
+                        continue
+                if (
+                    len(words) == 4 and words[:2] == ["ln", "-s"]
+                    and words[2] == package and package_destination(words[3])
+                ):
+                    continue
+            raise ContractError(
+                f"{where}: cannot prove this command preserves the saved binary {saved}; "
+                "use the literal build copy and package install paths"
+            )
+    if not copied:
+        raise ContractError(f"{path}: build() must save its release binary to {saved}")
+    if last_build < 0 or copy_index <= last_build:
+        number = bodies["build"][copy_index][0]
+        raise ContractError(f"{path}:{number}: the saved binary must be copied after the last cargo build")
+    if not installed:
+        raise ContractError(f"{path}: package() must install the saved binary from {saved}")
 
 
 NODE_MAJOR_FILE = ".nvmrc"
