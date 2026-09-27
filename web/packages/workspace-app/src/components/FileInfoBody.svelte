@@ -20,6 +20,7 @@
   // tracking does the gating).
 
   import { untrack } from "svelte";
+  import { ApiError, apiErrorCode } from "../api/errors";
   import { api, withTokenQuery } from "../api/client";
   import type {
     GraphEdge,
@@ -738,8 +739,7 @@
         // when the cache has no entry yet, so a folder inspected on any
         // surface gets the same cheap path.
         api.reportDir(target).catch((e) => {
-          const msg = (e as Error)?.message ?? "";
-          if (/404/.test(msg) || /not found/i.test(msg)) {
+          if (e instanceof ApiError && e.status === 404 && apiErrorCode(e) === "report_not_found") {
             return api.reportPrefix(target);
           }
           throw e;

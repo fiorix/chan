@@ -14,6 +14,7 @@
   // (inspector) vs. nothing (dashboard front slide).
 
   import { untrack } from "svelte";
+  import { ApiError, apiErrorCode } from "../api/errors";
   import { api } from "../api/client";
   import type { InspectorPayload, ReportPrefix } from "../api/types";
   import { formatMtime, formatSize } from "../state/format";
@@ -234,8 +235,7 @@
     void api
       .reportDir("")
       .catch((e) => {
-        const msg = (e as Error)?.message ?? "";
-        if (/404/.test(msg) || /not found/i.test(msg)) {
+        if (e instanceof ApiError && e.status === 404 && apiErrorCode(e) === "report_not_found") {
           return api.reportPrefix("");
         }
         throw e;

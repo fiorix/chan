@@ -19,6 +19,15 @@ export class ApiError extends Error {
   }
 }
 
+/** The server's machine-readable refusal code, independent of its sentence. */
+export function apiErrorCode(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  const data = error.data;
+  return data !== null && typeof data === "object" && "code" in data && typeof data.code === "string"
+    ? data.code
+    : null;
+}
+
 /// True when a request failure is transient and worth retrying: the
 /// server is briefly unreachable rather than returning a real error.
 /// A `fetch` to a refused/dropped socket throws a bare `TypeError`

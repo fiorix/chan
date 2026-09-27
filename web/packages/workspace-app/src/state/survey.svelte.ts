@@ -35,7 +35,7 @@ import {
   type SurveySpec,
   type SurveyReplyRequest,
 } from "../api/client";
-import { ApiError } from "../api/errors";
+import { ApiError, apiErrorCode } from "../api/errors";
 import { notify } from "./notify.svelte";
 
 /// One in-flight survey + its reply guard. `busy` gates the reply buttons so a
@@ -190,10 +190,10 @@ function release(slot: SurveySlot, surveyId: string): void {
 
 /// Whether the reply route refused a reply because no survey is parked under
 /// its id (answered, timed out or cancelled). The route's 404 carries its own
-/// text; a gateway answers a bare 404 when the devserver's tunnel is down or
+/// code; a gateway answers a bare 404 when the devserver's tunnel is down or
 /// an authorization is cancelled, which says nothing about the survey.
 function refusedAsUnknown(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 404 && err.message.includes("no survey parked");
+  return err instanceof ApiError && err.status === 404 && apiErrorCode(err) === "survey_not_found";
 }
 
 /// Post `reply` for the survey `e` shows on `slot`, holding the slot busy
