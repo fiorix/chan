@@ -25,7 +25,8 @@
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Enter") {
       e.preventDefault();
-      ok();
+      if (e.target instanceof HTMLButtonElement) e.target.click();
+      else ok();
     }
   }
 </script>
