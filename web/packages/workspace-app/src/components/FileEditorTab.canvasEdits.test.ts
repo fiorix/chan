@@ -12,8 +12,8 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import { refreshWorkspace } from "../state/store.svelte";
 import {
   closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane,
-  closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode,
-  type FileTab,
+  closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
+  type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
 const { render, unmountRoot } = vi.hoisted(() => ({ render: vi.fn(), unmountRoot: vi.fn() }));
@@ -139,5 +139,20 @@ describe("pending drawing edits", () => {
       resolveDraftClose("cancel");
       await closing;
     }
+  });
+
+  test.each(["kept pane", "rebuilt pane"])("a peer close preserves the pending stroke in a %s", async (topology) => {
+    const { tab } = await draw();
+    const remote: SerNode = topology === "kept pane"
+      ? { k: "l", t: [] }
+      : { k: "s", d: "r", a: { k: "l", t: [] }, b: { k: "l", t: [] } };
+
+    expect(reconcileLayout(remote)).toBe("diverged");
+    const kept = readTab(tab.id)!;
+    expect(kept.content).toContain("last-stroke");
+    await saveTab(kept);
+    expect(disk.get(tab.path)?.content).toContain("last-stroke");
+    expect(reconcileLayout(remote)).toBe("applied");
+    expect(readTab(tab.id)).toBeUndefined();
   });
 });
