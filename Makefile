@@ -388,6 +388,21 @@ endif
 
 .PHONY: ci-linux
 ci-linux: pre-push ## Run the Linux CI validation target.
+	$(MAKE) test-symlink-tmpdir
+
+.PHONY: test-symlink-tmpdir
+test-symlink-tmpdir: ## Run library and server tests with a noncanonical temp path.
+	@set -eu; \
+		real="$$(mktemp -d /tmp/chan-tmp-XXXXXX)"; link="$$real-l"; \
+		trap 'rm -f "$$link"; rm -rf "$$real"' EXIT; \
+		trap 'exit 1' HUP INT TERM; \
+		if ! ln -s "$$real" "$$link" || [ ! -L "$$link" ] || \
+			! resolved="$$(cd "$$link" && pwd -P)" || \
+			[ "$$resolved" != "$$real" ] || [ "$$resolved" = "$$link" ]; then \
+			echo "error: symlinked TMPDIR must resolve to another directory" >&2; \
+			exit 1; \
+		fi; \
+		TMPDIR="$$link" RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-server --no-fail-fast
 
 .PHONY: ci-macos
 ci-macos: ## Run the focused macOS CI validation target.
