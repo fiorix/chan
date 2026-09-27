@@ -306,11 +306,13 @@ impl WindowBuilds {
     }
 
     /// Settle a build whose window now exists. False when the watcher no
-    /// longer wants that window.
+    /// longer wants that window: a disconnect retired it first, and its
+    /// sweep closed the windows before this one existed. A stop that keeps
+    /// the windows keeps this one too.
     fn land(&self, label: &str) -> bool {
         let mut pending = self.pending.lock().unwrap();
-        if pending.retired.is_some() {
-            return true;
+        if let Some(stop) = pending.retired {
+            return stop == WatchLoopStop::KeepWindows;
         }
         pending.entries.remove(label);
         drop(pending);
