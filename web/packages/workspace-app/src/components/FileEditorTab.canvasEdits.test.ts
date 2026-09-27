@@ -564,7 +564,13 @@ describe("a board seeded from the buffer it holds", () => {
 
   test("a drawing's background and grid, loaded after its board rendered, are shown and kept under a stroke", async () => {
     const backdrop = { gridSize: 20, gridStep: 5, gridModeEnabled: true, viewBackgroundColor: "#ffc9c9" };
-    const BACKDROP = JSON.stringify({ elements: [ON_DISK], appState: backdrop, files: {} });
+    // Written as another program writes it, so that the library's serialization
+    // of the same scene is other bytes and publishing it would dirty the tab.
+    const BACKDROP = JSON.stringify(
+      { type: "excalidraw", version: 2, source: "https://elsewhere.example", elements: [ON_DISK], appState: backdrop, files: {} },
+      null,
+      2,
+    );
     const { pane, tab, write, reads } = await loadedTab("notes/backdrop.excalidraw", BACKDROP);
     const loading = reloadTabFromDisk(tab.id);
     const { board } = await mountBoard(tab);
