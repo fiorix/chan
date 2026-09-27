@@ -439,12 +439,14 @@
     renderExcalidraw(true);
   });
 
-  // Theme follows the app surface. The theme prop is controlled, so a
-  // re-render (not updateScene) is what re-themes; the React root is
-  // reused and the scene survives. Reads dark only, so an external
-  // content change does not trigger a re-render here.
+  // Theme follows the app surface and view mode follows the tab, which is
+  // read only while it loads. Both props are controlled, so a re-render (not
+  // updateScene) is what applies them; the React root is reused and the
+  // scene survives. Reads dark and readonly only, so an external content
+  // change does not trigger a re-render here.
   $effect(() => {
     void dark;
+    void readonly;
     if (root) renderExcalidraw(false);
   });
 
