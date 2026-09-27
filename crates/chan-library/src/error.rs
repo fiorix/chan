@@ -15,8 +15,8 @@ pub enum Error {
     Config(String),
     #[error("{0}")]
     BadRequest(String),
-    /// The host's last shutdown sweep has begun, so it publishes nothing
-    /// more; the message names what was not mounted.
+    /// The devserver is stopping or the host's last shutdown sweep has begun.
+    /// The message names what was not mounted.
     #[error("{0}")]
     ShuttingDown(String),
 }
