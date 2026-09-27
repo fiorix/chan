@@ -94,6 +94,24 @@ describe("ConfirmModal", () => {
     expect(escape.defaultPrevented).toBe(true);
   });
 
+  test("Enter on the focused cancel button answers false", async () => {
+    const target = mountDialog(ConfirmModal);
+    const { answer } = await open(target);
+    const keep = button(target, "Keep");
+    keep.focus();
+    const enter = press(keep, "Enter");
+    await expect(answer).resolves.toBe(false);
+    expect(enter.defaultPrevented).toBe(true);
+  });
+
+  test("Enter outside a button confirms", async () => {
+    const target = mountDialog(ConfirmModal);
+    const { answer } = await open(target);
+    const enter = press(dialogIn(target)!, "Enter");
+    await expect(answer).resolves.toBe(true);
+    expect(enter.defaultPrevented).toBe(true);
+  });
+
   test("the Escape that cancels goes no further than the dialog", async () => {
     const target = mountDialog(ConfirmModal);
     const { answer } = await open(target);
