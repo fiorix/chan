@@ -211,7 +211,7 @@ fn blocking_failure_text(text: &str) -> bool {
 
 fn io_error_text(text: &str) -> bool {
     // tempfile adds a debug-quoted path to the underlying I/O error.
-    let text = if let Some((error, path)) = text.rsplit_once(" at path ") {
+    let text = if let Some((error, path)) = text.split_once(" at path ") {
         if !path.starts_with('"') || !path.ends_with('"') {
             return false;
         }
@@ -942,7 +942,6 @@ mod tests {
     );
 
     #[tokio::test]
-    #[ignore = "run explicitly until the quoted path keeps its delimiter text"]
     async fn session_io_path_can_contain_the_context_delimiter() {
         use axum::response::IntoResponse;
         let body = format!(
