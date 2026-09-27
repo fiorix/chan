@@ -2110,9 +2110,22 @@ mod tests {
     fn classify_path_reports_read_only_permission() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("locked");
         std::fs::create_dir(&path).unwrap();
+        let _restore = ModeRestore(
+            path.clone(),
+            std::fs::metadata(&path).unwrap().permissions(),
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let class = classify_path(tmp.path(), "locked").unwrap();
