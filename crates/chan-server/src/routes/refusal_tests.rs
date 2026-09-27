@@ -404,3 +404,19 @@ async fn terminal_tenant_path_not_utf8_is_json() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn terminal_tenant_multipart_boundary_is_json() {
+    assert_refusal(
+        terminal_answer(
+            Request::post("/api/attachments")
+                .header(header::CONTENT_TYPE, "multipart/form-data")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": "Invalid `boundary` for `multipart/form-data` request"}),
+    )
+    .await;
+}
