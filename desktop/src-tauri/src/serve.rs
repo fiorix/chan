@@ -2275,14 +2275,19 @@ mod tests {
             destroyed.contains("retarget_tickets.cancel(label)"),
             "destroy cancels a pending retarget before a label can be reused"
         );
+    }
+
+    #[test]
+    fn retirement_cancels_the_library_label_prefix() {
         let retired = source_section(
-            main,
+            include_str!("main.rs"),
             "fn mark_devserver_control_exited",
             "fn close_devserver_control_terminal",
         );
         assert!(
-            retired.contains("cancel_prefix"),
-            "retiring a watcher cancels retargets of its kept windows"
+            retired.contains("if let Some(library_id) = state.devserver_feed.library_id_of(id)")
+                && retired.contains(".cancel_prefix(&format!(\"{library_id}::\"))"),
+            "retirement must cancel the library label prefix, not the connection id"
         );
     }
 
@@ -2298,6 +2303,12 @@ mod tests {
             failure.contains(".with_current(ticket, rollback)"),
             "a stale mint or navigation failure cannot erase the newer key"
         );
+        let rollback = source_section(failure, "let rollback = || {", "};");
+        assert!(
+            rollback.contains("remote_launches.lock().unwrap().remove(&label)")
+                && rollback.contains("builds.retry()"),
+            "failure removal and retry must be inside the guarded rollback"
+        );
         let gone = source_section(
             navigator,
             "Ok(serve::RetargetOutcome::Gone) => {",
@@ -2307,11 +2318,34 @@ mod tests {
             gone.contains(".with_current("),
             "a vanished stale retarget cannot erase the newer key"
         );
+        let gone_guard = source_section(gone, "|| {", "},");
+        assert!(
+            gone_guard.contains("remote_launches.lock().unwrap().remove(&label)")
+                && gone_guard.contains("nudge.notify_one()"),
+            "Gone removal and nudge must be inside the currency guard"
+        );
         assert!(navigator.contains("Ok(serve::RetargetOutcome::Superseded) => return"));
+    }
+
+    #[test]
+    fn retarget_dispatch_remembers_only_with_a_current_ticket() {
+        let navigator = source_section(
+            include_str!("window_watcher_wiring.rs"),
+            "fn navigate_remote",
+            "/// Reconcile one live window",
+        );
         let remember = navigator.split("async_runtime::spawn").next().unwrap();
         assert!(
-            remember.contains(".with_current(ticket, remember)"),
+            remember
+                .contains("let ticket = retarget.then(|| state.retarget_tickets.begin(&label));")
+                && remember.contains("if let Some(ticket) = &ticket {")
+                && remember.contains(".with_current(ticket, remember)"),
             "dispatch cannot remember an older key after a newer ticket"
+        );
+        let guarded_write = source_section(remember, "let remember = || {", "};");
+        assert!(
+            guarded_write.contains("remote_launches.lock().unwrap().insert("),
+            "dispatch must insert the key inside the guarded remember closure"
         );
     }
 
@@ -2331,12 +2365,13 @@ mod tests {
             not_ready.contains("tracing::debug!") && !not_ready.contains("tracing::warn!"),
             "not-ready retargets log below warn"
         );
+        let guarded = source_section(not_ready, "|| {", "},");
         assert!(
-            not_ready.contains("remote_launches.lock().unwrap().remove(&label)"),
+            guarded.contains("remote_launches.lock().unwrap().remove(&label)"),
             "readiness refusal forgets the key for reconciliation"
         );
         assert!(
-            not_ready.contains("builds.retry()"),
+            guarded.contains("builds.retry()"),
             "readiness refusal uses the existing retry cadence"
         );
         assert!(
