@@ -1650,7 +1650,7 @@ async fn handle_pick_folder(State(host): State<Arc<WorkspaceHost>>) -> Response 
         .await
     {
         Ok(path) => Json(path).into_response(),
-        Err(msg) => (StatusCode::CONFLICT, msg).into_response(),
+        Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
     }
 }
 
@@ -5160,7 +5160,11 @@ mod window_op_route_tests {
         // launcher falls back to plain text entry.
         let (status, body) = post(&router, "/api/library/fs/pick-folder").await;
         assert_eq!(status, StatusCode::CONFLICT, "pick-folder");
-        assert_eq!(body, NO_DESKTOP, "pick-folder");
+        assert_eq!(
+            body,
+            serde_json::json!({"error": NO_DESKTOP}).to_string(),
+            "pick-folder"
+        );
     }
 
     /// Native trust is a desktop-bridge op, and no gate in front of it tells
