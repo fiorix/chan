@@ -2436,10 +2436,7 @@ mod tests {
                 && !driver.contains("attempts"),
             "the retarget driver must neither wait nor spend an attempt budget",
         );
-        let main = include_str!("main.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
+        let main = include_str!("main.rs");
         assert!(!main.contains("fn retarget_should_navigate"));
     }
 
