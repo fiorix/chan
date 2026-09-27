@@ -1826,6 +1826,18 @@ mod tests {
             .expect("the boot restore ends");
 
         assert!(boot.contains("restore_on_workspaces("));
+        // The pending set is filled before the shared terminal tenant mounts,
+        // so a quit or a handoff close during that mount keeps the on rows.
+        let queued_at = boot
+            .find("queue_boot_restore(")
+            .expect("the boot matrix queues the restore");
+        let terminal_at = boot
+            .find("open_terminal()")
+            .expect("the boot matrix mounts the terminal tenant");
+        assert!(
+            queued_at < terminal_at,
+            "the restore is queued after the terminal tenant mounts"
+        );
         assert!(!boot.contains("serve::WorkspaceOpenMode::OpenWindow"));
         assert!(restore.contains("serve::WorkspaceOpenMode::RestoreOnly"));
         assert!(!restore.contains("serve::WorkspaceOpenMode::OpenWindow"));
