@@ -12,6 +12,7 @@
   // policy so a single-cell edit only changes the bytes of the
   // affected line.
 
+  import { tick } from "svelte";
   import { parseCsv, serializeCsv, maxRowWidth } from "./csv";
 
   let {
@@ -103,16 +104,34 @@
   }
 
   function onKeydown(e: KeyboardEvent): void {
+    const at = editing;
     if (e.key === "Enter") {
       e.preventDefault();
       commitEdit();
+      if (at) void focusCell(at.row, at.col);
       return;
     }
     if (e.key === "Escape") {
       e.preventDefault();
       cancelEdit();
+      if (at) void focusCell(at.row, at.col);
       return;
     }
+  }
+
+  let tableEl: HTMLElement | undefined = $state();
+
+  /// Give focus back to a cell's button once the edit that replaced it is
+  /// gone, so a keyboard user carries on from the cell rather than from the
+  /// top of the page. A blur commit leaves focus where the user put it.
+  async function focusCell(row: number, col: number): Promise<void> {
+    await tick();
+    tableEl?.querySelector<HTMLButtonElement>(`button[data-cell="${row}:${col}"]`)?.focus();
+  }
+
+  /// Focus the edit's input when it opens.
+  function focusOnMount(input: HTMLInputElement): void {
+    input.focus();
   }
 
   // Column count for the rendered table. Use the widest row so
@@ -126,7 +145,7 @@
   const body = $derived<string[][]>(rows.length > 1 ? rows.slice(1) : []);
 </script>
 
-<div class="csv-table">
+<div class="csv-table" bind:this={tableEl}>
   {#if rows.length === 0}
     <div class="empty-hint">
       Empty file. Flip to Source mode to add rows.
@@ -139,20 +158,23 @@
             {@const cell = header[c] ?? ""}
             {#if editing && editing.row === 0 && editing.col === c}
               <th>
-                <!-- svelte-ignore a11y_autofocus -->
                 <input
                   type="text"
                   bind:value={draft}
                   onblur={commitEdit}
                   onkeydown={onKeydown}
-                  autofocus
+                  use:focusOnMount
                 />
               </th>
             {:else}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <th onclick={() => startEdit(0, c, cell)}>
-                {cell || " "}
+              <th>
+                <button
+                  type="button"
+                  class="cell"
+                  data-cell={`${0}:${c}`}
+                  disabled={readonly}
+                  onclick={() => startEdit(0, c, cell)}
+                >{cell || " "}</button>
               </th>
             {/if}
           {/each}
@@ -166,20 +188,23 @@
               {@const cell = row[c] ?? ""}
               {#if editing && editing.row === realRow && editing.col === c}
                 <td>
-                  <!-- svelte-ignore a11y_autofocus -->
                   <input
                     type="text"
                     bind:value={draft}
                     onblur={commitEdit}
                     onkeydown={onKeydown}
-                    autofocus
+                    use:focusOnMount
                   />
                 </td>
               {:else}
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <td onclick={() => startEdit(realRow, c, cell)}>
-                  {cell || " "}
+                <td>
+                  <button
+                    type="button"
+                    class="cell"
+                    data-cell={`${realRow}:${c}`}
+                    disabled={readonly}
+                    onclick={() => startEdit(realRow, c, cell)}
+                  >{cell || " "}</button>
                 </td>
               {/if}
             {/each}
@@ -235,6 +260,34 @@
   /* Zebra striping. Same shade the file tree uses for its
      alternating rows so the two surfaces speak the same visual
      dialect. */
+  /* A cell's text is a button, so the cell is a tab stop that opens its
+     edit. The button fills the cell and carries its padding, ellipsis and
+     cursor, so a click anywhere in the cell reaches it. */
+  th:has(> .cell),
+  td:has(> .cell) {
+    padding: 0;
+  }
+  .cell {
+    display: block;
+    width: 100%;
+    padding: 6px 10px;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: inherit;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: cell;
+  }
+  .cell:disabled {
+    cursor: default;
+  }
+  .cell:focus-visible {
+    outline: 2px solid var(--pane-focus, var(--accent));
+    outline-offset: -2px;
+  }
   tbody tr:nth-child(odd) td {
     background: var(--zebra-bg);
   }
