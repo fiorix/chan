@@ -5716,4 +5716,29 @@ mod refusal_envelopes {
         };
         assert_refusal(response, StatusCode::CONFLICT, message).await;
     }
+
+    #[tokio::test]
+    async fn workspace_mutation_read_only() {
+        let (_dir, host) = host();
+        let app = launcher_router(host, None, None);
+        assert_refusal(send(&app, "POST", "/api/library/workspaces", Some(serde_json::json!({"path":"unused"}))).await, StatusCode::FORBIDDEN, "workspace mutation is available only on the desktop loopback; manage a devserver's workspaces from the desktop app or the CLI").await;
+    }
+
+    #[tokio::test]
+    async fn workspace_mutation_not_ready() {
+        let (_dir, host) = host();
+        let app = launcher_router(host, None, Some(Arc::new(OnceLock::new())));
+        assert_refusal(
+            send(
+                &app,
+                "POST",
+                "/api/library/workspaces",
+                Some(serde_json::json!({"path":"unused"})),
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "launcher not ready",
+        )
+        .await;
+    }
 }
