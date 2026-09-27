@@ -192,7 +192,7 @@ impl RemoteLaunch {
 #[derive(Default)]
 struct Launches {
     entries: HashMap<String, RemoteLaunch>,
-    retired: bool,
+    retired: Option<WatchLoopStop>,
 }
 
 impl Launches {
@@ -204,8 +204,8 @@ impl Launches {
             .min()
     }
 
-    fn retire(&mut self) {
-        self.retired = true;
+    fn retire(&mut self, stop: WatchLoopStop) {
+        self.retired = Some(stop);
         self.entries.clear();
     }
 }
@@ -231,7 +231,7 @@ impl WindowBuilds {
         let label = native_label(record);
         let key = RemoteLaunchKey::from_record(record, gateway);
         let mut pending = self.pending.lock().unwrap();
-        if pending.retired
+        if pending.retired.is_some()
             || pending
                 .entries
                 .get(&label)
@@ -283,31 +283,64 @@ impl WindowBuilds {
     }
 
     fn complete(&self, label: &str, result: Result<(), String>) {
+        let error = match result {
+            // Only a devserver watcher retires, and its builds settle through
+            // `remote_completion`, which acts on what landing answers.
+            Ok(()) => {
+                self.land(label);
+                return;
+            }
+            Err(error) => error,
+        };
         let mut pending = self.pending.lock().unwrap();
-        if pending.retired {
+        if pending.retired.is_some() {
             return;
         }
-        match result {
-            Ok(()) => {
-                pending.entries.remove(label);
-                drop(pending);
-                self.nudge.notify_waiters();
-            }
-            Err(error) => {
-                let Some(attempt) = pending.entries.get_mut(label) else {
-                    return;
-                };
-                attempt.phase = LaunchPhase::Waiting;
-                drop(pending);
-                tracing::warn!(window = %label, %error, "window watcher: opening a window failed");
-                self.retry();
-            }
+        let Some(attempt) = pending.entries.get_mut(label) else {
+            return;
+        };
+        attempt.phase = LaunchPhase::Waiting;
+        drop(pending);
+        tracing::warn!(window = %label, %error, "window watcher: opening a window failed");
+        self.retry();
+    }
+
+    /// Settle a build whose window now exists. False when the watcher no
+    /// longer wants that window.
+    fn land(&self, label: &str) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.retired.is_some() {
+            return true;
         }
+        pending.entries.remove(label);
+        drop(pending);
+        self.nudge.notify_waiters();
+        true
     }
 
     fn completion(&self, label: String) -> BuildCompletion {
         let builds = self.clone();
         Box::new(move |result| builds.complete(&label, result))
+    }
+
+    /// The completion of a remote build. It runs on the main thread once the
+    /// builder installed the window or failed; `destroy` removes an installed
+    /// window the watcher no longer wants.
+    fn remote_completion(
+        &self,
+        label: String,
+        fail: impl FnOnce(String) + Send + 'static,
+        destroy: impl FnOnce() + Send + 'static,
+    ) -> BuildCompletion {
+        let builds = self.clone();
+        Box::new(move |result| match result {
+            Ok(()) => {
+                if !builds.land(&label) {
+                    destroy();
+                }
+            }
+            Err(error) => fail(error),
+        })
     }
 }
 
@@ -319,7 +352,7 @@ impl RemoteLaunches {
         let label = native_label(record);
         let next = RemoteLaunchKey::from_record(record, gateway);
         let state = self.0.lock().unwrap();
-        !state.retired
+        state.retired.is_none()
             && (reload
                 || state
                     .entries
@@ -340,7 +373,7 @@ impl RemoteLaunches {
         // move an attempt's next eligible dispatch behind another window's.
         let remember = || {
             let mut state = self.0.lock().unwrap();
-            if state.retired {
+            if state.retired.is_some() {
                 return;
             }
             state.entries.insert(
@@ -486,9 +519,30 @@ impl RemoteLaunches {
         remote.into_iter().chain(native).min()
     }
 
-    fn retire(&self, builds: &WindowBuilds) {
-        self.0.lock().unwrap().retire();
-        builds.pending.lock().unwrap().retire();
+    fn retire(&self, builds: &WindowBuilds, stop: WatchLoopStop) {
+        self.0.lock().unwrap().retire(stop);
+        builds.pending.lock().unwrap().retire(stop);
+    }
+
+    /// Hand a resolved open to the native builder. A close or a retirement
+    /// during the resolution removed the in-flight marker, and building then
+    /// would bring back a window the user just closed.
+    fn build_resolved(
+        &self,
+        label: &str,
+        builds: &WindowBuilds,
+        fail: impl FnOnce(String) + Clone + Send + 'static,
+        destroy: impl FnOnce() + Send + 'static,
+        build: impl FnOnce(BuildCompletion) -> Result<(), String>,
+    ) {
+        if !builds.contains(label) {
+            self.forget(label);
+            return;
+        }
+        let completion = builds.remote_completion(label.to_string(), fail.clone(), destroy);
+        if let Err(error) = build(completion) {
+            fail(error);
+        }
     }
 }
 
@@ -592,29 +646,20 @@ impl TauriNativeSurface {
                 Ok(url) => url,
                 Err(e) => return fail(e),
             };
-            let result = {
-                // Cancellation check: a close()/disconnect during the mint
-                // removed the marker; building now would resurrect a window
-                // the user just closed.
-                if !builds.contains(&label) {
-                    remote_launches.forget(&label);
-                    return;
+            // The completion runs on the main thread, where the window it
+            // destroys was just built.
+            let destroy = {
+                let app = app.clone();
+                let label = label.clone();
+                move || {
+                    if let Some(window) = app.get_webview_window(&label) {
+                        let _ = window.destroy();
+                    }
                 }
-                let completion = {
-                    let builds = builds.clone();
-                    let label = label.clone();
-                    let fail = fail.clone();
-                    Box::new(move |result| match result {
-                        Ok(()) => builds.complete(&label, Ok(())),
-                        Err(error) => fail(error),
-                    })
-                };
-                serve::open_watched_remote_window(&app, &url, &conn.name, &record, completion)
             };
-            match result {
-                Ok(()) => {}
-                Err(e) => fail(e),
-            }
+            remote_launches.build_resolved(&label, &builds, fail, destroy, |completion| {
+                serve::open_watched_remote_window(&app, &url, &conn.name, &record, completion)
+            });
         });
     }
 
@@ -691,8 +736,8 @@ impl NativeSurface for TauriNativeSurface {
         self.remote_launches.retry_deadline(&self.builds)
     }
 
-    fn retire(&self) {
-        self.remote_launches.retire(&self.builds);
+    fn retire(&self, stop: WatchLoopStop) {
+        self.remote_launches.retire(&self.builds, stop);
     }
 
     fn open_labels(&self, library_id: &str) -> HashSet<String> {
@@ -1598,8 +1643,8 @@ mod tests {
             self.launches.retry_deadline(&self.builds)
         }
 
-        fn retire(&self) {
-            self.launches.retire(&self.builds);
+        fn retire(&self, stop: WatchLoopStop) {
+            self.launches.retire(&self.builds, stop);
         }
 
         fn open_labels(&self, library_id: &str) -> HashSet<String> {

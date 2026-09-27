@@ -210,7 +210,9 @@ pub trait NativeSurface {
         None
     }
     /// Prevent late completions from creating work after the loop stops.
-    fn retire(&self) {}
+    /// `stop` is how the loop stopped, which decides the fate of a build
+    /// that lands afterwards.
+    fn retire(&self, _stop: WatchLoopStop) {}
 }
 
 /// Whether the reconcile surfaces `record` as a native window: persisted,
@@ -496,7 +498,7 @@ pub async fn watch_loop<F, S, C>(
             biased;
             stop = &mut cancel => {
                 view.stop();
-                surface.retire();
+                surface.retire(stop);
                 if stop == WatchLoopStop::CloseWindows {
                     // Disconnect: reconcile to empty so the library's native
                     // windows close (detach, NOT reap -- the library keeps its set

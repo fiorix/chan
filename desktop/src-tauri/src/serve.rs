@@ -2564,7 +2564,9 @@ mod tests {
         assert!(pre_spawn.contains("remote_launches.begin_remote("));
         // Open-path cancellation: a close() during the mint removes the
         // in-flight marker and the task must bail instead of building.
-        assert!(navigator.contains("if !builds.contains(&label)"));
+        assert!(navigator.contains("remote_launches.build_resolved("));
+        let resolved = source_section(WIRING_RS, "    fn build_resolved(", "\n    }\n}");
+        assert!(resolved.contains("if !builds.contains(label)"));
         // Vanished-retarget arm bails without a rebuild.
         let settlement = source_section(
             WIRING_RS,
