@@ -6,16 +6,35 @@
     items,
     onChoose = () => {},
     onSuccess,
+    onError = () => {},
   }: {
     items: DeckItem[];
     onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
     onSuccess?: (item: DeckItem) => void;
+    onError?: (item: DeckItem, error: unknown) => void;
   } = $props();
 
   let draft = $state({ ...createDeckDraft(), visible: true });
+  let replacementItems: DeckItem[] | null = $state(null);
 
-  export function replaceDraft(): void {
-    draft = { ...createDeckDraft(), visible: true };
+  export function setItems(entries: DeckItem[]): void {
+    replacementItems = entries;
+  }
+
+  export function replaceDraft(visible = true): void {
+    draft = { ...createDeckDraft(), visible };
+  }
+
+  export function open(): void {
+    draft.visible = true;
+  }
+
+  export function resetDraft(): void {
+    Object.assign(draft, createDeckDraft());
+  }
+
+  export function currentDraft(): typeof draft {
+    return draft;
   }
 
   /// Hide the deck the way a host does: by turning its `open` prop off.
@@ -27,11 +46,12 @@
 <CommandDeck
   open={draft.visible}
   bind:draft
-  {items}
+  items={replacementItems ?? items}
   scopes={[]}
   onClose={() => { draft.visible = false; }}
   {onChoose}
   {onSuccess}
+  {...{ onError }}
   onBack={() => {}}
   onScope={() => {}}
   onClearScope={() => {}}
