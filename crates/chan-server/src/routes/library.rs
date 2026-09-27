@@ -6033,6 +6033,28 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn folder_picker_refused() {
+        let (_dir, host, mut rx) = bridge_host(false);
+        let app = launcher_router(host, None, None);
+        let request = send(&app, "POST", "/api/library/fs/pick-folder", None);
+        let reply = async {
+            let DesktopWindowOp::PickFolder { reply, .. } = rx.recv().await.unwrap() else {
+                panic!("PickFolder op expected")
+            };
+            reply
+                .send(Err("desktop refused this request".into()))
+                .unwrap();
+        };
+        let (response, ()) = tokio::join!(request, reply);
+        assert_refusal(
+            response,
+            StatusCode::CONFLICT,
+            "desktop refused this request",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn launcher_bearer() {
         let (_dir, host) = host();
         let app = launcher_router(
