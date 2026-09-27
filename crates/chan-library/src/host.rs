@@ -3324,7 +3324,7 @@ impl WorkspaceHost {
         let prefix = sanitize_prefix(prefix).map_err(Error::Config)?;
         // The runtime's stored key serves every mount-state edit below, so a
         // close never canonicalizes on the runtime thread.
-        let (canonical_root, active_terminals) = {
+        let (canonical_root, holds_workspace, active_terminals) = {
             let workspaces = self
                 .workspaces
                 .read()
@@ -3334,17 +3334,20 @@ impl WorkspaceHost {
             };
             (
                 runtime.canonical_root.clone(),
+                runtime.holds_workspace,
                 runtime.artifacts.terminal_sessions.roster().len(),
             )
         };
         if active_terminals > 0 && !force {
             return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
         }
-        self.mark_mount_closing_by_key(&canonical_root);
+        if holds_workspace {
+            self.mark_mount_closing_by_key(&canonical_root);
+        }
         let mut closing = WorkspaceCloseGuard {
             host: self,
             key: canonical_root.clone(),
-            armed: true,
+            armed: holds_workspace,
         };
         let runtime = {
             let mut workspaces = self
@@ -3374,7 +3377,9 @@ impl WorkspaceHost {
         // A running workspace carries no transient lifecycle state, but clear
         // defensively so a leftover `error`/`starting` can never outlive a
         // close. No feed push here -- the `notify_window_change` below covers it.
-        self.clear_mount_state_by_key(&canonical_root);
+        if holds_workspace {
+            self.clear_mount_state_by_key(&canonical_root);
+        }
         self.notify_window_change();
         closing.armed = false;
         Ok(WorkspaceLifecycleOutcome::Completed)
