@@ -1622,12 +1622,19 @@ impl<'a> PerArmLabel<'a> {
     }
 }
 
-fn devserver_status_error(
+async fn devserver_status_error(
     conn: &DevserverConn,
-    status: reqwest::StatusCode,
+    resp: reqwest::Response,
     label: PerArmLabel<'_>,
 ) -> String {
-    format!("{} returned HTTP {status}", label.for_conn(conn))
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let fallback = format!("HTTP {status}");
+    format!(
+        "{} returned {}",
+        label.for_conn(conn),
+        refusal_message(status, &body, &fallback)
+    )
 }
 
 pub async fn gateway_entry_url(conn: &DevserverConn, path: &str) -> Result<String, String> {
@@ -1949,7 +1956,7 @@ pub async fn fetch_local_color(conn: &DevserverConn) -> Result<Option<String>, S
     )
     .await?;
     if !resp.status().is_success() {
-        return Err(devserver_status_error(conn, resp.status(), label));
+        return Err(devserver_status_error(conn, resp, label).await);
     }
     resp.json::<LocalColorResponse>()
         .await
@@ -2126,7 +2133,7 @@ pub async fn fetch_library_windows(
     )
     .await?;
     if !resp.status().is_success() {
-        return Err(devserver_status_error(conn, resp.status(), label));
+        return Err(devserver_status_error(conn, resp, label).await);
     }
     let rows = resp
         .json::<Vec<serde_json::Value>>()
@@ -2176,7 +2183,7 @@ pub async fn mint_library_window(
     )
     .await?;
     if !resp.status().is_success() {
-        return Err(devserver_status_error(conn, resp.status(), status_label));
+        return Err(devserver_status_error(conn, resp, status_label).await);
     }
     resp.json::<chan_server::WindowRecord>()
         .await
@@ -2202,12 +2209,13 @@ pub async fn discard_library_window(conn: &DevserverConn, window_id: &str) -> Re
     if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
         return Err(devserver_status_error(
             conn,
-            resp.status(),
+            resp,
             PerArmLabel {
                 gateway: "gateway library window discard",
                 raw: "library window discard",
             },
-        ));
+        )
+        .await);
     }
     Ok(())
 }
@@ -2312,12 +2320,13 @@ pub async fn set_window_visibility(
     if !resp.status().is_success() {
         return Err(devserver_status_error(
             conn,
-            resp.status(),
+            resp,
             PerArmLabel {
                 gateway: "gateway window visibility",
                 raw: "devserver window visibility",
             },
-        ));
+        )
+        .await);
     }
     Ok(())
 }
@@ -2342,12 +2351,13 @@ pub async fn set_window_label(
     if !resp.status().is_success() {
         return Err(devserver_status_error(
             conn,
-            resp.status(),
+            resp,
             PerArmLabel {
                 gateway: "gateway window label",
                 raw: "devserver window label",
             },
-        ));
+        )
+        .await);
     }
     Ok(())
 }
