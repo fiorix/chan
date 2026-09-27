@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Malformed requests and unrouted methods are refused in the JSON envelope.** In a workspace, in a standalone terminal window and on the devserver's management API, a body, query, path or multipart request the server cannot read answers `{"error": ...}` with the status and sentence it answered in plain text, including oversized bodies on both draft-create routes. Once its gates admit the request, a route answers a method it does not serve with 405, `{"error": "method not allowed"}` and its `Allow` header where it answered an empty body. A gate that refuses a wrong method keeps its refusal status and body with the route's `Allow` header. The launcher's routes are unchanged.
 
+- **A `.json` file is saved as typed.** A `.json` tab without a live editing session no longer refuses to save a buffer that does not parse, which left the parse error in place of the editor and a tab that would not close. It saves the buffer as typed, as it saves any other text file, and the JSON tree shows the parse error. A live-edited `.json` tab was already written as typed, and its tree no longer says that saves are blocked. A drawing edited as source is still not saved while it does not parse.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
