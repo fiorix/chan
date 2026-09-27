@@ -426,6 +426,16 @@
     return true;
   }
 
+  /// The editor's own Mod-Enter actions, in its keymap's order: open the
+  /// calendar of a date under the caret, then leave a fenced code block.
+  /// True when one of them acted. A host that claims the chord ahead of the
+  /// editor asks this first. A view the user cannot type into answers false,
+  /// as its keymap would never see the chord.
+  export function runOwnModEnter(): boolean {
+    if (!view || !view.state.facet(EditorView.editable)) return false;
+    return openDateAtCaret(view) || fmt.exitFenceAnywhere(view) || fmt.escapeFenceAtDocEnd(view);
+  }
+
   /// Re-measure without focusing. Used by FileEditorTab's keep-alive
   /// host when this tab becomes active WITHOUT gaining keyboard focus
   /// (flip-back, pane-mode exit, tab switch in a non-active pane):
