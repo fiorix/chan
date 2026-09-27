@@ -2523,6 +2523,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_key_that_changes_during_a_build_waits_for_the_window() {
+        let mut record = retry_record("key-during-build", 0);
+        let harness = RetryHarness::start_with(vec![record.clone()], true, true, true).await;
+        harness.surface.resolve_opens();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        record.token = "restarted-token".into();
+        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed_wake().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0],
+            "no retarget is dispatched for a window whose webview is not there"
+        );
+        let reads = harness.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
+        harness.surface.land_builds();
+        harness.after_pass(reads).await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "the pass after the build lands retargets the moved key"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stopped_watchers_reject_late_settlement_and_admission() {
         for stop in [WatchLoopStop::KeepWindows, WatchLoopStop::CloseWindows] {
             let record = retry_record("stopped-waiter", 0);
