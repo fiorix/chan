@@ -1423,23 +1423,17 @@
       <!-- Pretty / structured renderer (JSON tree today). The
            buffer stays authoritative; we don't mount FindBar
            here because the renderer is read-only -- edits happen
-           in source mode. -->
-      <div
-        class="editor-host"
-        oncontextmenu={onEditorContext}
-        role="presentation"
-      >
+           in source mode. No body menu: its actions act on an editor
+           this host does not mount, and a node copies its own path. -->
+      <div class="editor-host" role="presentation">
         <JsonPretty value={tab.content} />
       </div>
     {:else if tab.mode === "table"}
       <!-- Tabular renderer (CSV / TSV). Cell commits flow back
            through the bound value prop; the autosave debouncer
-           picks them up like any other text edit. -->
-      <div
-        class="editor-host"
-        oncontextmenu={onEditorContext}
-        role="presentation"
-      >
+           picks them up like any other text edit. No body menu, so a
+           cell and its edit input keep the browser's own. -->
+      <div class="editor-host" role="presentation">
         <CsvTable
           bind:value={() => tab.content, (content) => setTabContent(tab, content)}
           delimiter={csvDelimiter(tab.path)}
