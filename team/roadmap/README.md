@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item. The same day the owner gave the four rulings the frontend review remainder waited on and closed the ring mirror's throughput cost as measured; one test-harness race from landing 15's CI is raised for a decision. Later that day the owner accepted the seven items then awaiting a decision, each as the lead recommended, with the shape and lane rulings recorded in their files. Five more, raised that day by reviews and reports of the work in hand, were accepted the same evening, each as the lead recommended, and a sixth found the same way landed with its fix. On 2026-09-27 eight items landed, among them a live terminal that keeps its renderer across a pane split, the desktop's close and quit beside a hung root, and one found and fixed while those were built, a save during shutdown that turned every other workspace off; the refusal envelope's first part landed too, with its item still open. The two items a review raised on 2026-09-26, the terminal tenant answering for a home workspace and a quit drain that can hang on a recovery pass, enter as accepted with the owner's rulings of that day, and three more found in that work are raised for a decision.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item. The same day the owner gave the four rulings the frontend review remainder waited on and closed the ring mirror's throughput cost as measured; one test-harness race from landing 15's CI is raised for a decision. Later that day the owner accepted the seven items then awaiting a decision, each as the lead recommended, with the shape and lane rulings recorded in their files. Five more, raised that day by reviews and reports of the work in hand, were accepted the same evening, each as the lead recommended, and a sixth found the same way landed with its fix. On 2026-09-27 eight items landed, among them a live terminal that keeps its renderer across a pane split, the desktop's close and quit beside a hung root, and one found and fixed while those were built, a save during shutdown that turned every other workspace off; the refusal envelope's first part landed too, with its item still open. The two items a review raised on 2026-09-26, the terminal tenant answering for a home workspace and a quit drain that can hang on a recovery pass, enter as accepted with the owner's rulings of that day, and three more found in that work are raised for a decision. Later on 2026-09-27 the owner ruled that every accepted item lands before the first candidate, with the comment pass, the low-severity rows of the frontend review remainder, the dedup seams and the CLI crate split last. Then three items landed: the terminal tenant answering for a home workspace, with the two narrower items it absorbed. The refusal envelope's second part landed too, the refusals a tenant's own handlers write, the devserver's own and the extension proxy's, with the owner's two rulings on it and its item still open, and two of the frontend review remainder's editor defects were fixed. One more item, a JSON tab attached to a document session skipping the save's parse check, is raised for a decision.
 
 **Frontend review, phased from v0.100.0**
 
@@ -147,16 +147,17 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-resilience-transcript-is-dumped-before-its-readers-drain][tdump] | landed | GA |
 | [co-viewers-of-a-window-keep-an-answered-survey][coview] | landed | GA |
 | [an-adopted-sessions-recorded-size-can-lag-its-pty][adsz] | landed | GA |
-| [is-root-mounted-answers-from-the-first-tenant-the-key-finds][rmfirst] | accepted | build |
-| [the-canonical-key-query-counts-the-terminal-tenant][ckterm] | accepted | build |
+| [is-root-mounted-answers-from-the-first-tenant-the-key-finds][rmfirst] | landed | GA |
+| [the-canonical-key-query-counts-the-terminal-tenant][ckterm] | landed | GA |
 | [the-linux-gate-has-no-windows-target-check][wingate] | accepted | build |
 | [an-inspector-effect-refetches-a-failing-graph-stream-without-bound][insp] | landed | GA |
 | [a-save-after-the-shutdown-sweeps-turns-every-workspace-off][ssave] | landed | GA |
-| [the-terminal-tenant-answers-for-a-home-workspace][tterm] | accepted | build |
+| [the-terminal-tenant-answers-for-a-home-workspace][tterm] | landed | GA |
 | [the-quit-drain-can-hang-on-a-recovery-pass][qdrain] | accepted | build |
 | [the-devserver-stop-refuses-mounts-before-the-host][dstop] | raised | decide |
 | [forgetting-a-relinked-root-waits-four-lookups][sfgt] | raised | decide |
 | [a-relinked-off-row-outlives-a-devserver-restart][roff] | raised | decide |
+| [an-attached-json-tab-skips-the-parse-check][jsave] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -266,6 +267,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [dstop]: v0.101.0/the-devserver-stop-refuses-mounts-before-the-host.md
 [sfgt]: v0.101.0/forgetting-a-relinked-root-waits-four-lookups.md
 [roff]: v0.101.0/a-relinked-off-row-outlives-a-devserver-restart.md
+[jsave]: v0.101.0/an-attached-json-tab-skips-the-parse-check.md
 
 ## Completed
 

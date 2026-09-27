@@ -21,3 +21,7 @@ Give `is_canonical_root_mounted` a workspace-only filter, or route the three cal
 ## Boundaries
 
 `crates/chan-library/src/host.rs` (`is_canonical_root_mounted`, `hosted_for_key`) and the three callers' tests.
+
+## What shipped
+
+Landed on 2026-09-27 with [the-terminal-tenant-answers-for-a-home-workspace](the-terminal-tenant-answers-for-a-home-workspace.md), whose What shipped is the full record. What answers this item: `is_canonical_root_mounted` goes by `hosted_for_key`, which through `found_by` now finds only a runtime that holds a workspace, so the shared terminal tenant never reads as a mounted home workspace to the window feed's filter (`window_in_live_feed`), the health fold (`reconcile_root_health`), the starting mark or the devserver's list (`entry_from_record` in `crates/chan-server/src/devserver.rs`). Pinned with the terminal tenant up and the home registered and not mounted: in the library its window stays out of the live feed and is kept, a failed health check publishes nothing for it, and it reads stopped and can be marked starting; on the devserver its row lists stopped and off with no token. With the home mounted, the query answers true beside the terminal tenants and its windows resolve to its own tenant, pinned in the library only, since the devserver's tests do not mount the home directory.

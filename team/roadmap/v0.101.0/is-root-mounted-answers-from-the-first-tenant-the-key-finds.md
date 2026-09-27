@@ -21,3 +21,7 @@ Have `live_workspace_by_key` prefer a runtime whose cell holds a workspace, or a
 ## Boundaries
 
 `crates/chan-library/src/host.rs` (`live_workspace_by_key`, `is_root_mounted`) and its tests.
+
+## What shipped
+
+Landed on 2026-09-27 with [the-terminal-tenant-answers-for-a-home-workspace](the-terminal-tenant-answers-for-a-home-workspace.md), whose What shipped is the full record. What answers this item: `live_workspace_by_key` finds its runtime through `found_by`, which now answers only for a runtime that holds a workspace, so `is_root_mounted` and `live_workspace` read the home workspace's own runtime whatever terminal tenants go by the same key. Pinned with the shared terminal tenant and two command tenants up beside a mounted home workspace (`queries_find_home_beside_shared_and_command_terminals` in `crates/chan-library/src/host.rs`). Which runtime the routing map yields first is not fixed, so a return to the first match would red that pin only when a terminal tenant comes first, which three of them beside one workspace make likely but not certain.
