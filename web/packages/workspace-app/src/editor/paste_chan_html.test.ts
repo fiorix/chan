@@ -28,7 +28,7 @@ vi.mock("./bubbles/image", () => ({
 vi.mock("../state/notify.svelte", () => ({ notify: (m: string) => notify(m) }));
 
 import type { ChanClipboardContext } from "./copy_html";
-import { applyChanHtmlPaste, parseChanWrapper } from "./paste_html";
+import { applyChanHtmlPaste, parseChanWrapper, pasteHandler } from "./paste_html";
 
 /// A chan-doc wrapper HTML string, built the same way copy_html does.
 function wrapper(
@@ -156,5 +156,36 @@ describe("applyChanHtmlPaste: same workspace (zero uploads)", () => {
     expect(uploadAttachment).not.toHaveBeenCalled();
     expect(view.state.doc.toString()).toBe("![alt](../docs/a.png#w=250)");
     view.destroy();
+  });
+});
+
+describe("rich paste image names", () => {
+  test.each([
+    ["parameterless SVG", "data:image/svg+xml,%3Csvg%3E%3C%2Fsvg%3E", "svg", "image/svg+xml"],
+    ["SVG with a payload semicolon", "data:image/svg+xml,%3Csvg%20style%3D%22fill:red;%22%3E%3C%2Fsvg%3E", "svg", "image/svg+xml"],
+    ["base64 SVG", "data:image/svg+xml;base64,AQID", "svg", "image/svg+xml"],
+    ["JPEG", "data:image/jpeg;base64,AQID", "jpg", "image/jpeg"],
+  ])("uses the image extension for %s", async (_label, src, ext, mime) => {
+    uploadAttachment.mockResolvedValue({ path: `notes/image.${ext}` });
+    const view = new EditorView({
+      state: EditorState.create({ extensions: [pasteHandler(ctxTo("/ws", "notes/a.md"))] }),
+    });
+    try {
+      const img = document.createElement("img");
+      img.src = src!;
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: {
+        items: [],
+        getData: (format: string) => format === "text/html" ? `<p>${img.outerHTML}</p>` : "",
+      } });
+      view.contentDOM.dispatchEvent(event);
+      await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
+      const file = uploadAttachment.mock.calls[0]![0] as File;
+      expect(file.name).toBe(`pasted-image.${ext}`);
+      expect(file.type).toBe(mime);
+      await vi.waitFor(() => expect(view.state.doc.toString()).toBe(`![](./image.${ext})`));
+    } finally {
+      view.destroy();
+    }
   });
 });
