@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
+import * as notifications from "./notify.svelte";
 import { confirmState, resolveConfirm } from "./confirm.svelte";
 import { pathPromptState, resolvePathPrompt } from "./store.svelte";
 import { editorToolsPrefs } from "./editorTools.svelte";
@@ -4825,23 +4826,57 @@ describe("openLinkTarget resolves a wiki/link stem before opening", () => {
     expect(live.selected).toBe("team");
   });
 
-  test("falls back to the raw target when resolve fails (broken link still surfaces)", async () => {
+  test("opens the raw target for a link_not_found 404 through the real transport", async () => {
     resetLayout([]);
-    vi.spyOn(api, "resolveLink").mockRejectedValue(new ApiError(404, "not found"));
-    const read = vi.spyOn(api, "readStream").mockResolvedValue({
-      path: "notes/real.md",
-      content: "x\n",
-      mtime: 1,
-      mtime_ns: "1",
-      writable: true,
+    const notice = vi.spyOn(notifications, "notify");
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+      if (url.pathname === "/api/resolve-link") {
+        expect(url.searchParams.get("target")).toBe("notes/note");
+        return Response.json({ error: "No candidate matches this target", code: "link_not_found" }, { status: 404 });
+      }
+      expect(url.pathname).toBe("/api/fs/notes/note");
+      return Response.json({ error: "file not found" }, { status: 404 });
     });
 
-    await openLinkTarget("notes/real.md");
+    await openLinkTarget("notes/note");
 
-    // Unresolvable resolve-link → open the raw target verbatim so the
-    // normal open path (and its missing-file banner) takes over.
-    expect(read).toHaveBeenCalledWith("notes/real.md", expect.anything());
     expect(activePane().tabs).toHaveLength(1);
+    const live = activePane().tabs[0];
+    if (live?.kind !== "file") throw new Error("expected a file tab");
+    expect(live.path).toBe("notes/note");
+    expect(live.fileMissing?.path).toBe("notes/note");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { name: "restoring server", status: 503, body: { error: "The workspace is restoring" }, message: "The workspace is restoring" },
+    { name: "uncoded 404", status: 404, body: { error: "link target not found" }, message: "link target not found" },
+    { name: "another code", status: 404, body: { error: "link target not found", code: "workspace_not_found" }, message: "link target not found" },
+    { name: "another status", status: 503, body: { error: "Resolver unavailable", code: "link_not_found" }, message: "Resolver unavailable" },
+    { name: "gateway failure", status: 502, body: "The tunnel is down", message: "The tunnel is down" },
+    { name: "network failure", status: 0, body: null, message: "Failed to fetch" },
+  ])("opens nothing and notices $name through the real transport", async ({ status, body, message }) => {
+    resetLayout([]);
+    const notice = vi.spyOn(notifications, "notify");
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+      if (url.pathname !== "/api/resolve-link") {
+        return Response.json({ error: "file not found" }, { status: 404 });
+      }
+      expect(url.searchParams.get("target")).toBe("notes/note");
+      if (status === 0) throw new TypeError(message);
+      return typeof body === "string"
+        ? new Response(body, { status })
+        : Response.json(body, { status });
+    });
+
+    await openLinkTarget("notes/note");
+
+    expect(activePane().tabs).toHaveLength(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledExactlyOnceWith(message);
   });
 });
 
