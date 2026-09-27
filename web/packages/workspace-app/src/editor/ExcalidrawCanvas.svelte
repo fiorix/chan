@@ -38,7 +38,7 @@
   // itself reached only via a dynamic import from FileEditorTab, so the
   // static index.css import rides its async chunk instead of the eager
   // CSS. See ../editor/ExcalidrawCanvas source-pin test.
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import type {
     ExcalidrawImperativeAPI,
     ExcalidrawInitialDataState,
@@ -390,14 +390,18 @@
     onSceneChange(json);
   }
 
-  // withInitial mounts the scene on the first render; a themed re-render
-  // omits it (excalidraw consumes initialData once, so re-passing would
-  // be ignored anyway) to keep the drawn scene.
-  function renderExcalidraw(withInitial: boolean): void {
+  // The library's App reads its initial data once, when it mounts, from the
+  // props of the render in effect then, and the API its constructor hands
+  // over is the sign that it has mounted. Every render until then carries
+  // the buffer as it is at that render, so the App is built from the buffer
+  // whichever render it mounts with; once it has mounted it would ignore
+  // the initial data. The buffer is read untracked, so the render effect
+  // below does not re-render when it changes.
+  function renderExcalidraw(): void {
     if (!root || !react || !ex) return;
     root.render(
       react.createElement(ex.Excalidraw, {
-        ...(withInitial ? { initialData: parseScene(content) } : {}),
+        ...(api ? {} : { initialData: parseScene(untrack(() => content)) }),
         theme: dark ? "dark" : "light",
         viewModeEnabled: readonly,
         excalidrawAPI: (a: ExcalidrawImperativeAPI) => {
@@ -436,7 +440,7 @@
     react = r;
     ex = e;
     root = reactDom.createRoot(host);
-    renderExcalidraw(true);
+    renderExcalidraw();
   });
 
   // Theme follows the app surface and view mode follows the tab, which is
@@ -447,7 +451,7 @@
   $effect(() => {
     void dark;
     void readonly;
-    if (root) renderExcalidraw(false);
+    if (root) renderExcalidraw();
   });
 
   // The tab's buffer or its load changed. A load in flight unseeds the board
