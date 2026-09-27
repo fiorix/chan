@@ -362,6 +362,12 @@ impl RemoteLaunches {
                     .is_none_or(|entry| entry.should_retry(&next)))
     }
 
+    /// Whether a refresh dispatches a retarget. `present` says whether the
+    /// window's webview exists; a Reload addresses only an existing one.
+    fn admit(&self, record: &WindowRecord, gateway: bool, reload: bool, present: bool) -> bool {
+        (present || !reload) && self.needs_retarget(record, gateway, reload)
+    }
+
     fn begin_remote(
         &self,
         record: &WindowRecord,
@@ -783,14 +789,13 @@ impl NativeSurface for TauriNativeSurface {
         // reconciles the OS title too -- for local windows as well, which have
         // no other reason to be refreshed.
         self.sync_title(record);
-        if !self.opener.is_remote()
-            || (reload && self.app.get_webview_window(&native_label(record)).is_none())
-        {
+        if !self.opener.is_remote() {
             return;
         }
+        let present = self.app.get_webview_window(&native_label(record)).is_some();
         if self
             .remote_launches
-            .needs_retarget(record, self.opener.is_gateway(), reload)
+            .admit(record, self.opener.is_gateway(), reload, present)
         {
             self.navigate_remote(record, true);
         }
@@ -1728,10 +1733,11 @@ mod tests {
                 .complete(&label, Err("native build refused".into()));
         }
         fn refresh(&self, record: &WindowRecord, reload: bool) {
-            if !self.launches.needs_retarget(record, false, reload) {
+            let label = native_label(record);
+            let present = self.live.lock().unwrap().contains(&label);
+            if !self.launches.admit(record, false, reload, present) {
                 return;
             }
-            let label = native_label(record);
             let ticket = self
                 .launches
                 .begin_remote(record, false, true, &self.tickets)

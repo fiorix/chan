@@ -2255,9 +2255,10 @@ mod tests {
         );
         assert!(reconcile.contains("surface.refresh(record, reloads.contains(&label))"));
         let refresh = source_section(wiring, "fn refresh(&self, record", "fn close(&self, label");
-        assert!(refresh.contains(".needs_retarget(record, self.opener.is_gateway(), reload)"));
-        assert!(refresh
-            .contains("reload && self.app.get_webview_window(&native_label(record)).is_none()"));
+        assert!(refresh.contains(".admit(record, self.opener.is_gateway(), reload, present)"));
+        assert!(refresh.contains(
+            "let present = self.app.get_webview_window(&native_label(record)).is_some();"
+        ));
         assert!(refresh.contains("navigate_remote(record, true)"));
         assert!(dispatch.contains("prepare_remote_navigation("));
         assert!(dispatch.contains("window_navigation_url(&conn, &record)"));
