@@ -87,6 +87,22 @@ describe("liveApi.setWorkspaceOn", () => {
 });
 
 describe("ApiError", () => {
+  it("parses the body once for its message and repeated live-terminal reads", () => {
+    const body = { error: "live_terminals", active_terminals: 3 };
+    const text = JSON.stringify(body);
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const error = new ApiError(409, text);
+      expect(error.message).toBe("live_terminals");
+      expect(liveTerminalsCount(error)).toBe(3);
+      expect(liveTerminalsCount(error)).toBe(3);
+      expect(parse).toHaveBeenCalledExactlyOnceWith(text);
+      expect(error).toMatchObject({ body: text, data: body });
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
   it("reads an enveloped refusal as its message and keeps the raw body", () => {
     // Refusals mapped from a chan-workspace error arrive as
     // `{"error": "<reason>"}` (fd pressure on the on route is one); the reason
@@ -103,7 +119,7 @@ describe("ApiError", () => {
     expect(new ApiError(500, "").message).toBe("HTTP 500");
   });
 
-  it("still reads the live-terminals refusal off the raw body", () => {
+  it("reads the live-terminal count from an enveloped refusal", () => {
     // The envelope reader must not cost the confirm-and-retry flow its shape:
     // that refusal carries a count beside its `error` tag.
     const live = new ApiError(
