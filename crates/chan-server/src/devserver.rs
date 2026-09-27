@@ -4600,7 +4600,10 @@ mod tests {
             } else {
                 "notes"
             });
-            std::fs::create_dir(&root).unwrap();
+            if case != "invalid_open" {
+                std::fs::create_dir(&root).unwrap();
+            }
+            let prefix = registered_workspace_prefix(&canonical_root(&root)).unwrap();
             let state = devserver_with_windows(home.path()).await;
             let mut method = "POST";
             let mut path = "/api/devserver/workspaces".to_string();
@@ -4616,12 +4619,15 @@ mod tests {
                 }
                 "invalid_open" => {
                     status = StatusCode::BAD_REQUEST;
-                    sentence = "config: cannot mount a workspace at /api: that path is reserved for the devserver management API (/api/*). Rename the workspace directory; its basename becomes the public slug.".into();
+                    sentence = format!(
+                        "chan-workspace: workspace root does not exist: {}",
+                        root.display()
+                    );
                 }
                 "stopping_open" | "stopping_on" => {
                     state.host.library().register_workspace(&root).unwrap();
                     if case == "stopping_on" {
-                        path = "/api/devserver/workspaces/notes/on".into();
+                        path = format!("/api/devserver/workspaces{prefix}/on");
                         body = serde_json::json!({"on":true});
                     }
                     state.host.shutdown_all().await.unwrap();
@@ -4649,10 +4655,10 @@ mod tests {
                     foreign = Some(hold_foreign_lock(state.host.library(), &root));
                     if case == "failed_forget" {
                         method = "DELETE";
-                        path = "/api/devserver/workspaces/notes".into();
+                        path = format!("/api/devserver/workspaces{prefix}");
                         sentence = "chan-workspace: workspace is locked by another process".into();
                     } else {
-                        path = "/api/devserver/workspaces/notes/on".into();
+                        path = format!("/api/devserver/workspaces{prefix}/on");
                         body = serde_json::json!({"on":true});
                         sentence = "chan-workspace: workspace is locked by another process".into();
                     }
