@@ -1286,6 +1286,25 @@ mod tests {
             ("GET", "/api/library/devservers"),
             ("POST", "/api/library/command-capabilities"),
             ("GET", "/api/library/command-capabilities/probe"),
+            ("POST", "/api/library/windows"),
+            ("DELETE", "/api/library/windows/probe"),
+            ("GET", "/api/library/windows/probe/live-terminals"),
+            ("POST", "/api/library/windows/probe/close"),
+            ("PUT", "/api/library/windows/probe/label"),
+            ("POST", "/api/library/windows/probe/visibility"),
+            ("POST", "/api/library/devservers/probe/workspaces/on"),
+            ("POST", "/api/library/devservers/probe/workspaces/off"),
+            ("POST", "/api/library/devservers/probe/workspaces/forget"),
+            ("POST", "/api/library/fs/pick-folder"),
+            ("POST", "/api/library/command-capabilities/probe/actions"),
+            (
+                "GET",
+                "/api/library/command-capabilities/probe/windows/probe/launch",
+            ),
+            (
+                "GET",
+                "/api/library/command-capabilities/probe/windows/probe/live-terminals",
+            ),
         ] {
             if accepts_refusal(
                 method,
