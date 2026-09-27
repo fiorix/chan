@@ -38,6 +38,8 @@ use crate::standalone_mutations::StandaloneMutationBus;
 
 /// How often pending (desired but unattached) scopes retry their OS watch.
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// Maximum wait for a watch worker that may be inside a stalled filesystem call.
+const WATCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Validates and translates wire-relative watch scopes for the actor. The
 /// standalone Files state implements this over its capability root, so the
@@ -57,10 +59,12 @@ enum Command {
 }
 
 /// Handle to the watch actor. Cheap to clone behind an `Arc`; dropping the
-/// last handle shuts the actor down and joins its thread.
+/// last handle waits up to two seconds for the actor to exit before joining.
+/// A stalled worker is left running until its call returns or the process exits.
 pub struct ScopedWatchManager {
     tx: mpsc::Sender<Command>,
     worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    exited: std::sync::Mutex<mpsc::Receiver<()>>,
 }
 
 impl ScopedWatchManager {
@@ -78,12 +82,19 @@ impl ScopedWatchManager {
             let _ = event_tx.send(Command::Event(event));
         })
         .map_err(|e| std::io::Error::other(format!("starting scoped watcher: {e}")))?;
+        let (exit_tx, exited) = mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("chan-files-watch".into())
-            .spawn(move || actor_loop(rx, watcher, resolver, registry, mutations))?;
+            .spawn(move || {
+                // Disconnect only after the actor's state is dropped, including
+                // on unwind, so a healthy shutdown can join immediately.
+                let _exit = exit_tx;
+                actor_loop(rx, watcher, resolver, registry, mutations);
+            })?;
         Ok(Arc::new(Self {
             tx,
             worker: std::sync::Mutex::new(Some(worker)),
+            exited: std::sync::Mutex::new(exited),
         }))
     }
 
@@ -104,7 +115,16 @@ impl Drop for ScopedWatchManager {
     fn drop(&mut self) {
         let _ = self.tx.send(Command::Shutdown);
         if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = worker.join();
+            let exited = self
+                .exited
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .recv_timeout(WATCH_SHUTDOWN_TIMEOUT);
+            if matches!(exited, Err(mpsc::RecvTimeoutError::Timeout)) {
+                tracing::warn!("Files watch worker exceeded the shutdown deadline; leaving it in the background");
+            } else {
+                let _ = worker.join();
+            }
         }
     }
 }
