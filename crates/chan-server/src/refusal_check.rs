@@ -55,6 +55,7 @@ async fn inspect(request: Request, next: Next) -> Response {
             // HEAD has no response body, including on a refusal.
             || (method == Method::HEAD && bytes.is_empty())
             || permanent_exception(&method, &path, parts.status, is_fallback, &bytes)
+            || range_refusal(&method, &path, parts.status, &parts.headers, &bytes)
             || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes)
             || PENDING
                 .iter()
@@ -86,6 +87,9 @@ fn pending_refusal(
     {
         return true;
     }
+    if pending_handler_refusal(method, path, status, headers, body) {
+        return true;
+    }
     // The startup gate spans all mounted tenant routes.
     if status == StatusCode::SERVICE_UNAVAILABLE
         && body == b"devserver is restoring terminal sessions"
@@ -101,6 +105,155 @@ fn pending_refusal(
         && PENDING_PROXY_REFUSALS
             .iter()
             .any(|sentence| body == sentence.as_bytes())
+}
+
+// Fixed handler messages are scoped by method, path and status. Prefixes
+// belong only to writers that append an underlying error to a fixed label.
+const PENDING_HANDLER_REFUSALS: &[(&str, &str, u16, &str, bool)] = &[
+    ("GET", "/api/resolve-link", 404, "", false),
+    ("GET", "/api/report/dir", 404, "", false),
+    ("GET", "/api/graph", 500, "graph stream cancelled", false),
+    (
+        "GET",
+        "/api/graph",
+        500,
+        "graph stream ended before metadata",
+        false,
+    ),
+    ("GET", "/api/graph", 500, "graph stream meta encode: ", true),
+    (
+        "GET",
+        "/api/backlinks/{*path}",
+        500,
+        "backlinks stream ended before metadata",
+        false,
+    ),
+    (
+        "GET",
+        "/api/backlinks/{*path}",
+        500,
+        "backlinks stream meta encode: ",
+        true,
+    ),
+];
+
+fn pending_handler_refusal(
+    method: &Method,
+    path: &str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
+    if PENDING_HANDLER_REFUSALS
+        .iter()
+        .any(|&(verb, route, code, text, prefix)| {
+            method.as_str() == verb
+                && matches_path(route, path)
+                && status.as_u16() == code
+                && if prefix {
+                    body.starts_with(text.as_bytes()) && body.len() > text.len()
+                } else {
+                    body == text.as_bytes()
+                }
+        })
+    {
+        return true;
+    }
+    // These middleware writers can refuse any tenant route. The tunnel
+    // assertion layer is normally outside the assembled router's checker.
+    if (status == StatusCode::INTERNAL_SERVER_ERROR
+        && body == b"config: workspace host lock poisoned")
+        || (status == StatusCode::UNAUTHORIZED && body == b"unauthorized")
+    {
+        return true;
+    }
+    if status != StatusCode::INTERNAL_SERVER_ERROR
+        || !headers
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|v| v == "text/plain; charset=utf-8")
+    {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    if blocking_failure_text(text) {
+        return true;
+    }
+    if matches!(
+        (method.as_str(), path),
+        ("GET" | "PUT" | "DELETE", "/api/session") | ("GET", "/api/sessions")
+    ) {
+        return io_error_text(text) || (*method == Method::PUT && text == "invalid session key");
+    }
+    *method == Method::POST
+        && path == "/api/index/semantic/download"
+        && text
+            .strip_prefix("creating model cache ")
+            .and_then(|rest| rest.rsplit_once(": "))
+            .is_some_and(|(path, error)| !path.is_empty() && io_error_text(error))
+}
+
+fn blocking_failure_text(text: &str) -> bool {
+    let Some((label, task)) = text.split_once(" task panicked: task ") else {
+        return false;
+    };
+    let Some((id, reason)) = task.split_once(' ') else {
+        return false;
+    };
+    !label.is_empty()
+        && id.parse::<u64>().is_ok()
+        && (matches!(reason, "was cancelled" | "panicked")
+            || reason
+                .strip_prefix("panicked with message ")
+                .is_some_and(|message| message.starts_with('"') && message.ends_with('"')))
+}
+
+fn io_error_text(text: &str) -> bool {
+    // tempfile adds a debug-quoted path to the underlying I/O error.
+    let text = if let Some((error, path)) = text.rsplit_once(" at path ") {
+        if !path.starts_with('"') || !path.ends_with('"') {
+            return false;
+        }
+        if error == "too many temporary files exist" {
+            return true;
+        }
+        error
+    } else {
+        text
+    };
+    let Some((message, number)) = text.rsplit_once(" (os error ") else {
+        return false;
+    };
+    !message.is_empty()
+        && number
+            .strip_suffix(')')
+            .is_some_and(|n| n.parse::<i32>().is_ok())
+}
+
+fn range_refusal(
+    method: &Method,
+    path: &str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
+    // Binary resources and downloads use HTTP ranges, with no JSON reader.
+    *method == Method::GET
+        && matches_path("/api/fs/{*path}", path)
+        && status == StatusCode::RANGE_NOT_SATISFIABLE
+        && body.is_empty()
+        && headers
+            .get(header::ACCEPT_RANGES)
+            .is_some_and(|v| v == "bytes")
+        && headers
+            .get(header::ETAG)
+            .is_some_and(|v| !v.as_bytes().is_empty())
+        && headers
+            .get(header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("bytes */"))
+            .is_some_and(|size| !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn write_conflict_shape(body: &[u8]) -> bool {
@@ -195,6 +348,13 @@ const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
         "Failed to deserialize query string: ",
         true,
     ),
+    // The search handler maps every JsonRejection to 400.
+    (
+        "MissingJsonContentType",
+        400,
+        "Expected request with `Content-Type: application/json`",
+        false,
+    ),
     ("FailedToDeserializePathParams", 400, "Invalid URL: ", true),
     (
         "InvalidBoundary",
@@ -267,6 +427,8 @@ fn permanent_exception(
 // axum::extract::ws::rejection types have fixed response bodies. A handler's
 // own refusal on an upgrade route must still satisfy the JSON contract.
 const WEBSOCKET_REJECTIONS: &[(&str, u16, &str)] = &[
+    ("MethodNotGet", 405, "Request method must be `GET`"),
+    ("MethodNotConnect", 405, "Request method must be `CONNECT`"),
     (
         "InvalidConnectionHeader",
         400,
@@ -397,7 +559,9 @@ mod tests {
         let app = check(Router::new().route(
             path,
             axum::routing::any(move || async move {
-                let mut response = Response::builder().status(status);
+                let mut response = Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8");
                 if let Some(retry) = retry {
                     response = response.header(header::RETRY_AFTER, retry);
                 }
@@ -627,7 +791,6 @@ mod tests {
     macro_rules! pending_text_shape {
         ($name:ident, $method:literal, $path:literal, $status:expr, $body:expr) => {
             #[tokio::test]
-            #[ignore = "run explicitly until the refusal inventory recognizes this shape"]
             async fn $name() {
                 use axum::response::IntoResponse;
                 let body = $body;
@@ -779,7 +942,6 @@ mod tests {
     );
 
     #[tokio::test]
-    #[ignore = "run explicitly until the refusal inventory recognizes this shape"]
     async fn inventory_blocking_task_failure() {
         let response = crate::routes::blocking_response("refusal probe", || {
             panic!("injected blocking failure")
@@ -809,7 +971,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "run explicitly until range refusals have a permanent shape entry"]
     async fn inventory_range_refusal() {
         fn range(status: StatusCode, content_range: &str, body: &'static str) -> Response {
             Response::builder()
@@ -883,7 +1044,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "run explicitly until the remapped missing-content-type rejection is listed"]
     async fn inventory_search_missing_content_type() {
         let app = crate::router(crate::state::test_support::make_test_state(false));
         let result = tokio::spawn(
