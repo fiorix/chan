@@ -67,6 +67,8 @@ In this bundle the deck's Computers scope rides the same `/api/library/*` feed t
 - Each window keeps separate contextual and Computers drafts in its own session storage, holding visibility, query, path, selection, and recoverable operation state. Reload and hide preserve the draft; successful execution, window close, and app exit clear it.
 - Theme is a live input: an open deck follows the page's light/dark theme immediately.
 
+The launcher's New Workspace and Confirm dialogs share focus entry, Tab wrapping, Escape containment and focus return with the workspace app through `@chan/web-shared/modal-focus`; each keeps its own markup and styles.
+
 ## The `/api/library/*` surface
 
 - **workspaces**: `GET` list (`{workspace_id, path, label, on, status, error?, library_id, devserver_id, prefix}`; a local row's `prefix` equals its `workspace_id`, a devserver row carries its remote mount prefix), `POST {path}` add, `POST /{id}/{on|off}` toggle, `DELETE /{id}` remove.
@@ -86,6 +88,8 @@ wrappers as the card controls and completes over live computers, workspaces,
 and windows for New terminal/window, Focus, Hide, Show, Close, Connect,
 Disconnect, Turn on/off, Quit, and New devserver. Window completion search
 includes the optional caption.
+
+While visible, a live launcher re-lists workspaces every two seconds to refresh foreign writer-lock status, which the host probes on list without a window-feed signal; host-owned lifecycle changes refresh through the feed, and the demo installs no poll.
 
 The SPA reads its bearer from `?t=` in its own URL and presents it as `Authorization: Bearer` on fetch and as `?t=` on the watch WebSocket (a browser WebSocket cannot set headers).
 
