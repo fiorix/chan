@@ -18,7 +18,11 @@
     | { ok: true; value: any }
     | { ok: false; error: string };
 
-  const parsed = $derived<Parsed>(parse(value));
+  const MAX_TREE_BYTES = 1024 * 1024;
+  const tooLarge = $derived(
+    value.length > MAX_TREE_BYTES || new Blob([value]).size > MAX_TREE_BYTES,
+  );
+  const parsed = $derived<Parsed | null>(tooLarge ? null : parse(value));
 
   function parse(src: string): Parsed {
     // Empty buffer: render an empty doc rather than an error so a
@@ -35,9 +39,11 @@
 </script>
 
 <div class="json-pretty">
-  {#if parsed.ok}
+  {#if tooLarge}
+    <p>This file is too large for the tree (over 1 MiB). Source shows its contents.</p>
+  {:else if parsed?.ok}
     <JsonNode value={parsed.value} path="$" />
-  {:else}
+  {:else if parsed}
     <div class="parse-error">
       <strong>Parse error:</strong>
       <span>{parsed.error}</span>

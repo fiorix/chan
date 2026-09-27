@@ -16,7 +16,8 @@
     value,
     label,
     path,
-    initialCollapsed = false,
+    depth = 0,
+    initialCollapsed = depth > 1,
   }: {
     /// The parsed JSON value at this node. `any` here is unavoidable
     /// (the renderer dispatches on JS runtime type); upstream
@@ -30,8 +31,9 @@
     /// JSONPath-style breadcrumb for the current node. Used as the
     /// hover title and copy-to-clipboard target.
     path: string;
-    /// Collapsed-at-mount hint. The top-level call from
-    /// JsonPretty passes false so the root expands automatically.
+    /// The root and its direct members expand; deeper containers wait
+    /// for the reader to open them.
+    depth?: number;
     initialCollapsed?: boolean;
   } = $props();
 
@@ -109,6 +111,7 @@
             value={entry.val}
             label={entry.key}
             path={`${path}.${entry.key}`}
+            depth={depth + 1}
           />
         {/each}
       </div>
@@ -128,7 +131,7 @@
     {:else}
       <div class="children">
         {#each arr as item, i}
-          <JsonNode value={item} path={`${path}[${i}]`} />
+          <JsonNode value={item} path={`${path}[${i}]`} depth={depth + 1} />
         {/each}
       </div>
       <span class="bracket">]</span>
