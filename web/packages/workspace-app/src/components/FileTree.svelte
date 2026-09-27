@@ -51,6 +51,7 @@
     browserSelection,
     clearTreeDirError,
     clearTreeLoadingForPath,
+    copyTextToClipboard,
     draftsDir,
     isDraftPath,
     workspace,
@@ -761,10 +762,10 @@
   }
   async function copyPath(path: string): Promise<void> {
     try {
-      await navigator.clipboard?.writeText(path);
-      notify("Copied path");
-    } catch (err) {
-      notify(`copy failed: ${(err as Error).message}`);
+      await copyTextToClipboard(path, {
+        onSuccess: () => notify("Copied path"),
+        onError: (message) => notify(`copy failed: ${message}`),
+      });
     } finally {
       clearTreeLoadingForPath(path);
     }
