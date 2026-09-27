@@ -12,6 +12,7 @@
 // the popup dance stays exactly as it was. This module owns that split so it
 // can be driven directly by tests, rather than only through the deck UI.
 
+import { navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import {
   blockedWindowMessage,
@@ -35,6 +36,8 @@ export type CreateLibraryWindowAction =
 /// than imported so the deck keeps ownership of its capability lifecycle and
 /// its snapshot state, and so the branch is testable without mounting the deck.
 export interface LibraryWindowBridge {
+  /// Ask for a launch page through this surface's transport and refusal reader.
+  checkPage: WindowPageCheck;
   /// POST a scoped action to the library that serves this window.
   runAction: (action: ScopedLibraryAction) => Promise<ScopedLibraryActionResult | undefined>;
   /// Re-read the scoped snapshot after a mutation.
@@ -158,7 +161,7 @@ export async function createLibraryWindow(
     const result = await bridge.runAction(action);
     if (!result?.window) throw new Error("Chan did not return the new window");
     popup.name = result.window.window_id;
-    popup.location.href = result.window.launch_path;
+    if (!(await navigateWindowWhenReady(popup, result.window.launch_path, bridge.checkPage))) return;
     popup.focus();
     await bridge.refresh();
   } catch (error) {

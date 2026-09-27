@@ -51,6 +51,7 @@
   import { sessionWindowId } from "../api/client";
   import { ApiError } from "../api/errors";
   import {
+    checkScopedWindowPage,
     loadScopedLibrarySnapshot,
     loadScopedWindowLiveTerminals,
     runScopedLibraryAction,
@@ -315,6 +316,7 @@
   // created, raised, or buried differs between a browser and chan-desktop and
   // lives in the api module, where it can be driven without the deck UI.
   const libraryWindowBridge: LibraryWindowBridge = {
+    checkPage: checkScopedWindowPage,
     runAction: runScopedLibraryAction,
     refresh: refreshScopedLibrary,
     currentWindowId: sessionWindowId,
