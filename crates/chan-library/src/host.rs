@@ -1265,7 +1265,11 @@ impl WorkspaceHost {
     /// lifecycle bookkeeping. The caller retains any lifecycle root guard
     /// through this method's settlement. A mount permit follows the filesystem
     /// open, tenant construction and post-build root check, so an abandoned
-    /// blocking hop keeps later opens waiting until it returns.
+    /// blocking hop admits no second open until it returns. A later open waits
+    /// for that permit at most the open's release budget, then answers
+    /// [`ChanError::WorkspaceAlreadyOpen`] as for an owner that has not
+    /// released, and the root's row reads "workspace is still releasing;
+    /// retry" unless the root is mounted.
     ///
     /// Starting and its success, failure or cancellation settlement share this
     /// body. The raw public entry is non-idempotent; the idempotent entry checks
@@ -1282,12 +1286,26 @@ impl WorkspaceHost {
         // through -- the `open_or_get` wrapper, the desktop's direct boot-restore
         // (embedded.rs), the devserver `mount_at` -- so all of them surface
         // `starting`/`error` without each routing the lifecycle themselves.
-        let mut permit = Some(
-            self.root_calls
-                .lock(&(key.clone(), RootCall::Mount))
-                .await
-                .into_owned(),
-        );
+        #[cfg(test)]
+        let release_budget = self.open_release_budget;
+        #[cfg(not(test))]
+        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
+        // The permit's holder can be a call whose caller left and whose
+        // filesystem call has not returned. Wait for it as long as an open
+        // waits for an in-process owner to let the workspace go, then answer
+        // as for an owner that has not, so an idempotent caller gives its
+        // root's lock back to a close or a removal.
+        let Ok(permit) = tokio::time::timeout(
+            release_budget,
+            self.root_calls.lock(&(key.clone(), RootCall::Mount)),
+        )
+        .await
+        else {
+            let result = Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            self.settle_mount(&key, &result);
+            return result;
+        };
+        let mut permit = Some(permit.into_owned());
         let mut mounting = WorkspaceMountGuard {
             host: self,
             root: key,
@@ -1295,7 +1313,7 @@ impl WorkspaceHost {
         };
         self.mark_mount_starting_by_key(&mounting.root);
         let result = self
-            .open_registered_workspace_inner(root, &mut permit, config)
+            .open_registered_workspace_inner(root, &mut permit, config, release_budget)
             .await;
         self.settle_mount(&mounting.root, &result);
         mounting.armed = false;
@@ -1311,6 +1329,7 @@ impl WorkspaceHost {
         root: &Path,
         permit: &mut Option<OwnedMutexGuard<()>>,
         config: ServeConfig,
+        release_budget: Duration,
     ) -> Result<HostedWorkspace, Error> {
         let library = self.library.clone();
         let root = root.to_path_buf();
@@ -1320,10 +1339,6 @@ impl WorkspaceHost {
         let mut release_probe = self.open_release_probe.lock().unwrap().take();
         #[cfg(test)]
         let mut attempt_probe = self.open_attempt_probe.lock().unwrap().take();
-        #[cfg(test)]
-        let release_budget = self.open_release_budget;
-        #[cfg(not(test))]
-        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _cancel_on_drop = WorkspaceOpenCancellation(cancelled.clone());
         let call_permit = permit.take();
