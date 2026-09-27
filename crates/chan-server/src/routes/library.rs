@@ -5141,9 +5141,9 @@ mod window_op_route_tests {
                 "{uri}"
             );
         }
-        // Gateway connect/disconnect are inert without a desktop -- 409
-        // NO_DESKTOP with the pinned body, distinguishable from the
-        // live_terminals JSON 409.
+        // Gateway connect/disconnect are inert without a desktop. The 409
+        // envelope's error sentence distinguishes it from the live_terminals
+        // discriminator in the typed 409.
         for uri in [
             "/api/library/gateways/gw-1/connect",
             "/api/library/gateways/gw-1/disconnect",
