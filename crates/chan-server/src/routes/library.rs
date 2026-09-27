@@ -5520,9 +5520,9 @@ mod window_op_route_tests {
 #[cfg(test)]
 mod refusal_envelopes {
     use super::*;
-    use std::sync::RwLock;
     use axum::body::to_bytes;
     use chan_workspace::Library;
+    use std::sync::RwLock;
     use tower::ServiceExt;
 
     fn host() -> (tempfile::TempDir, Arc<WorkspaceHost>) {
@@ -5579,6 +5579,22 @@ mod refusal_envelopes {
             send(&app, "GET", "/api/library/windows", None).await,
             StatusCode::UNAUTHORIZED,
             "missing or invalid launcher bearer token",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn surface_bearer() {
+        let (_dir, host) = host();
+        let app = launcher_router(
+            host,
+            Some(Arc::new(RwLock::new("launcher-secret".into()))),
+            None,
+        );
+        assert_refusal(
+            send(&app, "GET", "/api/library/local-color", None).await,
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid surface bearer token",
         )
         .await;
     }
