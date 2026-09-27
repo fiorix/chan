@@ -6,8 +6,9 @@
   //
   // Parse is reactive on the buffer: a single bad keystroke in
   // source mode shows a parse error here as soon as the user
-  // flips back. Save-time validation lives in performSave so the
-  // file system never sees a broken JSON write.
+  // flips back. The buffer is saved as typed whether or not it
+  // parses, as any other text file is, so this view is where a
+  // JSON that does not parse is said.
 
   import JsonNode from "./JsonNode.svelte";
 
@@ -47,10 +48,7 @@
     <div class="parse-error">
       <strong>Parse error:</strong>
       <span>{parsed.error}</span>
-      <p class="hint">
-        Flip back to Source to fix the syntax. Saves are blocked
-        until the buffer parses.
-      </p>
+      <p class="hint">Flip back to Source to fix the syntax.</p>
     </div>
   {/if}
 </div>
