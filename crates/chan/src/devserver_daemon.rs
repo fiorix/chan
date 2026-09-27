@@ -730,6 +730,46 @@ mod command_tests {
             "the daemon keeps the launching shell's directory"
         );
     }
+
+    fn handed_chan_home(cmd: &Command) -> Option<&std::ffi::OsStr> {
+        cmd.get_envs()
+            .find(|(key, _)| *key == "CHAN_HOME")
+            .and_then(|(_, value)| value)
+    }
+
+    /// With no override and a home that resolves, the daemon is not handed
+    /// CHAN_HOME: it resolves the same home from any directory, and a
+    /// CHAN_HOME it did not need would read as an override to everything it
+    /// spawns.
+    #[test]
+    fn a_home_that_resolves_is_not_handed_to_the_daemon() {
+        let home = DaemonHome::from_parts(&absolute("launch"), &absolute("home"), false, true);
+        assert_eq!(handed_chan_home(&command_for(&home)), None);
+    }
+
+    /// An override is handed to the daemon as an absolute path: a relative
+    /// one, left to inheritance, would resolve against the daemon's own
+    /// directory.
+    #[test]
+    fn a_relative_override_is_handed_to_the_daemon_as_an_absolute_path() {
+        let home = DaemonHome::from_parts(&absolute("launch"), Path::new("relative-home"), true, true);
+        let cmd = command_for(&home);
+        let expected = absolute("launch").join("relative-home");
+        assert_eq!(handed_chan_home(&cmd), Some(expected.as_os_str()));
+        assert_eq!(cmd.get_current_dir(), Some(expected.as_path()));
+    }
+
+    /// With no home to resolve, the daemon is handed the home its parent
+    /// resolved: the fallback makes a fresh directory per process, so the
+    /// two would otherwise split.
+    #[test]
+    fn a_home_less_parent_hands_the_daemon_its_resolved_home() {
+        let home = DaemonHome::from_parts(&absolute("launch"), &absolute("fallback"), false, false);
+        assert_eq!(
+            handed_chan_home(&command_for(&home)),
+            Some(absolute("fallback").as_os_str())
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

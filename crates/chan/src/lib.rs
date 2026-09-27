@@ -9121,6 +9121,26 @@ fn print_import_summary(summary: &chan_workspace::ImportSummary) {
 mod tests {
     use super::*;
 
+    /// A reports disable asked on a terminal goes ahead only on yes; a
+    /// declined prompt, an empty answer and end of input are errors, so the
+    /// command does not exit 0 having changed nothing.
+    #[test]
+    fn a_declined_reports_disable_is_an_error() {
+        let root = Path::new("workspace");
+        for declined in ["n\n", "no\n", "\n", ""] {
+            assert!(
+                confirm_reports_disable(root, &mut declined.as_bytes()).is_err(),
+                "the answer {declined:?} confirmed the disable"
+            );
+        }
+        for confirmed in ["y\n", "yes\n", "Y\n"] {
+            assert!(
+                confirm_reports_disable(root, &mut confirmed.as_bytes()).is_ok(),
+                "the answer {confirmed:?} did not confirm the disable"
+            );
+        }
+    }
+
     #[test]
     fn version_names_the_build_beside_the_release_version() {
         // The acceptance line: two builds from different commits have to be
