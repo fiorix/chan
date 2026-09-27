@@ -367,6 +367,8 @@ pub struct WorkspaceHost {
     #[cfg(test)]
     open_release_budget: std::time::Duration,
     #[cfg(test)]
+    shutdown_release_budget: std::time::Duration,
+    #[cfg(test)]
     root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
     #[cfg(test)]
     removal_hop_probe: std::sync::Mutex<Option<RemovalHopProbe>>,
@@ -875,6 +877,8 @@ impl WorkspaceHost {
             open_attempt_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
+            #[cfg(test)]
+            shutdown_release_budget: Duration::from_secs(5),
             #[cfg(test)]
             root_check_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -6847,6 +6851,103 @@ mod tests {
             .await
             .expect("cancelled close notifies the feed");
         assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    struct HeldClearCell {
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        entered: std::sync::mpsc::Sender<()>,
+        clears: std::sync::atomic::AtomicUsize,
+    }
+
+    impl WorkspaceCellHandle for HeldClearCell {
+        fn workspace(&self) -> Option<Arc<Workspace>> {
+            None
+        }
+
+        fn cancel_reindex(&self) {}
+
+        fn clear(&self) -> Option<(Weak<Workspace>, PathBuf)> {
+            let release = self.release.lock().unwrap().take();
+            let _ = self.entered.send(());
+            if let Some(release) = release {
+                let _ = release.recv();
+            }
+            self.clears
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+    }
+
+    #[test]
+    fn host_drain_leaves_a_stalled_clear_and_shuts_down_healthy_tenants() {
+        for close_publication in [false, true] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let cfg = tempfile::tempdir().expect("config");
+            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            host.shutdown_release_budget = Duration::from_millis(40);
+            let bound = host.shutdown_release_budget + Duration::from_secs(5);
+            let (release, held) = std::sync::mpsc::channel();
+            let (entered, arrivals) = std::sync::mpsc::channel();
+            let stalled = Arc::new(HeldClearCell {
+                release: std::sync::Mutex::new(Some(held)),
+                entered: entered.clone(),
+                clears: Default::default(),
+            });
+            let healthy = Arc::new(HeldClearCell {
+                release: std::sync::Mutex::new(None),
+                entered,
+                clears: Default::default(),
+            });
+            for (prefix, cell) in [("/stalled", stalled.clone()), ("/healthy", healthy.clone())] {
+                host.workspaces.write().unwrap().insert(
+                    prefix.into(),
+                    HostedWorkspaceRuntime {
+                        holds_workspace: true,
+                        root: cfg.path().to_path_buf(),
+                        canonical_root: cfg.path().to_path_buf(),
+                        handle: ServeHandle {
+                            addr: ([127, 0, 0, 1], 0).into(),
+                            prefix: prefix.into(),
+                            token: None,
+                        },
+                        artifacts: fake_artifacts(Router::new(), cell),
+                    },
+                );
+            }
+            let host = Arc::new(host);
+            let draining = Arc::clone(&host);
+            let (done, finished) = std::sync::mpsc::channel();
+            let shutdown = runtime.spawn(async move {
+                let result = draining.drain_tenants(close_publication).await;
+                let _ = done.send(result);
+            });
+            let outcome = finished.recv_timeout(bound);
+            let held_at_return = stalled.clears.load(std::sync::atomic::Ordering::SeqCst) == 0;
+            let healthy_at_return = healthy.clears.load(std::sync::atomic::Ordering::SeqCst);
+            // Disconnect also releases the clear if an assertion unwinds.
+            drop(release);
+            runtime.block_on(shutdown).expect("drain task");
+            assert!(
+                outcome.is_ok(),
+                "host drain waited on a stalled cell clear: {outcome:?}"
+            );
+            outcome.unwrap().expect("drain");
+            assert!(held_at_return, "the stalled clear completed before release");
+            assert_eq!(
+                healthy_at_return, 1,
+                "the healthy tenant was not cleared once"
+            );
+            assert!(
+                arrivals.try_iter().count() >= 2,
+                "both cells must enter clear"
+            );
+            assert!(host.mounted_prefixes().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

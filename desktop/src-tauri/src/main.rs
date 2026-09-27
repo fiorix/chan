@@ -8977,6 +8977,78 @@ mod tests {
             );
         }
 
+        #[test]
+        fn the_quit_drain_does_not_await_stalled_open_recovery() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let config = tempfile::tempdir().expect("config");
+            let root = tempfile::tempdir().expect("root");
+            let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
+                .expect("library");
+            let stored = library
+                .register_workspace(root.path())
+                .expect("register")
+                .root_path;
+            let workspace = library.open_workspace(&stored).expect("seed workspace");
+            workspace
+                .report()
+                .expect("persist a report to owe recovery");
+            workspace.stop_open_recovery();
+            let lock_dir = workspace.paths().lock.clone();
+            drop(workspace);
+            let (reached, release) =
+                chan_workspace::workspace::arm_open_recovery_pause_for_test(stored.clone());
+            let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
+            runtime
+                .block_on(embedded.open_workspace(stored.to_str().expect("root text")))
+                .expect("mount");
+            reached
+                .recv_timeout(HEALTHY_ROOT_BOUND)
+                .expect("recovery reached its pause");
+            let state = empty_state();
+            assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+            let stall = root_stall::stall(&stored);
+            release
+                .send(())
+                .expect("release recovery into the stalled root");
+            assert!(
+                stall.wait_entered(HEALTHY_ROOT_BOUND),
+                "recovery did not reach the root stall"
+            );
+            state
+                .shutdown_started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            snapshot_workspaces(&state);
+            let draining = Arc::clone(&state);
+            let handle = runtime.handle().clone();
+            // Five seconds for tenant tasks, five for teardown, and scheduling slack.
+            stall.finishes_beside(
+                "the quit drain with stalled open recovery",
+                std::time::Duration::from_secs(15),
+                move || handle.block_on(serve::stop_all(&draining)),
+            );
+            assert!(
+                !chan_workspace::lock::is_free(&lock_dir),
+                "quit awaited the recovery lock"
+            );
+            assert!(
+                !stall.entered().is_empty(),
+                "quit returned without a held root call"
+            );
+            drop(stall);
+            let deadline = std::time::Instant::now() + HEALTHY_ROOT_BOUND;
+            while !chan_workspace::lock::is_free(&lock_dir) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "released recovery kept the workspace lock"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+
         /// A quit while the boot restore waits on a hung root keeps on every
         /// row the restore has not finished: the one it waits on and the ones
         /// queued behind it. None of them was tried, so nothing says the user
