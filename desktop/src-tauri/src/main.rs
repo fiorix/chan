@@ -5547,6 +5547,11 @@ fn main() {
             // a truly fresh library (empty registry, marker unset).
             let handle = app.handle().clone();
             let state_for_restore = Arc::clone(&state_for_setup);
+            // Queue the restore before anything mounts: a quit or a handoff
+            // close while the terminal tenant mounts then keeps the on rows
+            // on, where an empty pending set would write every one of them
+            // off.
+            let queued = queue_boot_restore(&state_for_restore);
             tauri::async_runtime::spawn(async move {
                 // Mount the shared terminal tenant FIRST so persisted terminal
                 // windows resolve and the watcher reopens them on relaunch.
@@ -5555,7 +5560,7 @@ fn main() {
                         tracing::warn!(error = %e, "mounting the shared terminal tenant on boot failed");
                     }
                 }
-                restore_on_workspaces(handle, Arc::clone(&state_for_restore)).await;
+                restore_on_workspaces(handle, Arc::clone(&state_for_restore), queued).await;
                 // First-open rule (library-owned): the very first time this local
                 // library is opened with an empty registry, mint one boot terminal
                 // and persist a marker. Once set, an emptied registry never
@@ -6634,14 +6639,9 @@ enum ShutdownAction {
     },
 }
 
-/// Re-serve each workspace that was on at the last clean shutdown, read from
-/// the library-owned workspace overlay. Serial so concurrent opens can't race
-/// the shared embedded host; on a failure surface a notice and leave it off
-/// (the key drops out of the overlay on the next clean shutdown).
-async fn restore_on_workspaces<R: tauri::Runtime>(
-    handle: tauri::AppHandle<R>,
-    state: Arc<AppState>,
-) {
+/// The overlay's on rows, which the boot restore re-serves, placed in the
+/// pending set before the restore starts.
+fn queue_boot_restore(state: &AppState) -> Vec<String> {
     let enabled: Vec<String> = state
         .embedded()
         .and_then(|embedded| embedded.workspace_overlay())
@@ -6653,6 +6653,19 @@ async fn restore_on_workspaces<R: tauri::Runtime>(
         "restoring the on workspaces from the overlay"
     );
     *state.restore_pending.lock().unwrap() = enabled.clone();
+    enabled
+}
+
+/// Re-serve `enabled`, the rows [`queue_boot_restore`] queued from the
+/// workspaces that were on at the last clean shutdown. Serial so concurrent
+/// opens can't race the shared embedded host; on a failure surface a notice
+/// and leave it off (the key drops out of the overlay on the next clean
+/// shutdown).
+async fn restore_on_workspaces<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    state: Arc<AppState>,
+    enabled: Vec<String>,
+) {
     for key in enabled {
         // Boot restores persisted windows only. A workspace whose windows
         // were all closed has no record, so it stays windowless. The watcher
@@ -8989,7 +9002,8 @@ mod tests {
                 let app_handle = app.handle().clone();
                 let state = Arc::clone(&state);
                 std::thread::spawn(move || {
-                    handle.block_on(restore_on_workspaces(app_handle, state))
+                    let queued = queue_boot_restore(&state);
+                    handle.block_on(restore_on_workspaces(app_handle, state, queued))
                 })
             };
             assert!(
