@@ -1436,7 +1436,10 @@ impl WorkspaceHost {
     /// An existing mount is revalidated before it is handed back, so a caller
     /// that re-registers a root whose directory has gone away or been replaced
     /// sees that through [`workspace_status`](Self::workspace_status) at once
-    /// instead of after the next health probe tick.
+    /// instead of after the next health probe tick. While a revalidation whose
+    /// caller left is still in flight, the mount is handed back without one
+    /// and the status is the one last published, so a root that has stopped
+    /// answering reads running until the health probe marks it.
     pub async fn open_or_get_registered_workspace(
         &self,
         root: impl AsRef<Path>,
@@ -1458,19 +1461,23 @@ impl WorkspaceHost {
     ///
     /// The caller owns the lifecycle root lock; the blocking stat owns a
     /// separate revalidation permit. Cancelling the caller releases the root
-    /// lock while the stat retains its permit and workspace until it returns.
-    /// A later caller waits for the permit and checks the current mounted
-    /// workspace afresh. An abandoned answer is discarded.
+    /// lock while the stat retains its permit and workspace until it returns,
+    /// and its answer is discarded. A later caller that finds the permit held
+    /// checks nothing and publishes nothing: a permit held beside a free root
+    /// lock says that a caller left, not that the root is dead, and the health
+    /// probe owns the verdict on a root that does not answer.
     ///
     /// The caller's bound limits its wait, not the filesystem operation; this
     /// method supplies no timeout. Join failure leaves the last published
     /// health state unchanged.
     async fn revalidate_mounted_root(&self, root: &Path, key: &Path) {
-        let permit = self
+        let Some(permit) = self
             .root_calls
-            .lock(&(key.to_path_buf(), RootCall::Revalidate))
-            .await
-            .into_owned();
+            .try_lock(&(key.to_path_buf(), RootCall::Revalidate))
+        else {
+            return;
+        };
+        let permit = permit.into_owned();
         let Some(workspace) = self.live_workspace_by_key(key) else {
             return;
         };

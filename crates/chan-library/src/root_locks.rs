@@ -53,6 +53,20 @@ impl<K: Eq + Hash + Clone> KeyedLocks<K> {
         }
     }
 
+    /// The lock of `key` when nobody holds it, without waiting.
+    pub(crate) fn try_lock<Q>(&self, key: &Q) -> Option<KeyedLockGuard<'_, K>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        let guard = self.mutex_for(key).try_lock_owned().ok()?;
+        Some(KeyedLockGuard {
+            locks: self,
+            key: key.to_owned(),
+            guard: Some(guard),
+        })
+    }
+
     fn mutex_for<Q>(&self, key: &Q) -> Arc<AsyncMutex<()>>
     where
         K: Borrow<Q>,
@@ -251,6 +265,25 @@ mod tests {
         assert!(
             !still_pending(&mut other).await,
             "a lock on one root waited on another root's lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_lock_takes_a_free_key_and_refuses_a_held_one() {
+        let locks = RootLocks::default();
+        let key = Path::new("/roots/a");
+        let held = locks.try_lock(key).expect("a free key");
+        assert!(locks.try_lock(key).is_none(), "a held key was taken twice");
+        assert!(
+            locks.try_lock(Path::new("/roots/b")).is_some(),
+            "a held key refused another key"
+        );
+        drop(held);
+        drop(locks.try_lock(key).expect("a released key"));
+        assert_eq!(
+            locks.len(),
+            0,
+            "a guard taken without waiting left its entry"
         );
     }
 
