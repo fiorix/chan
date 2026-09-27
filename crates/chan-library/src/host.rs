@@ -1380,7 +1380,7 @@ impl WorkspaceHost {
         .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))?;
         *permit = returned_permit;
         let workspace = workspace?;
-        self.open_workspace(workspace.into_workspace(), config)
+        self.open_workspace_with_permit(workspace.into_workspace(), config, permit)
             .await
     }
 
@@ -1496,10 +1496,26 @@ impl WorkspaceHost {
     }
 
     /// Mount an already-open workspace under `config.prefix`.
+    ///
+    /// Tenant builds may overlap for one root. Immediately before dispatching
+    /// the post-build root check, take the same mount permit as a registered
+    /// open. Keep it through the check and publication or result disposal, so
+    /// an abandoned check admits no second blocking call for that root.
     pub async fn open_workspace(
         &self,
         workspace: Arc<Workspace>,
+        config: ServeConfig,
+    ) -> Result<HostedWorkspace, Error> {
+        let mut permit = None;
+        self.open_workspace_with_permit(workspace, config, &mut permit)
+            .await
+    }
+
+    async fn open_workspace_with_permit(
+        &self,
+        workspace: Arc<Workspace>,
         mut config: ServeConfig,
+        permit: &mut Option<OwnedMutexGuard<()>>,
     ) -> Result<HostedWorkspace, Error> {
         config.prefix = sanitize_prefix(&config.prefix).map_err(Error::Config)?;
         let prefix = config.prefix.clone();
@@ -1550,6 +1566,16 @@ impl WorkspaceHost {
             handle: handle.clone(),
         };
 
+        if permit.is_none() {
+            let key = self.root_key(&root).await?;
+            *permit = Some(
+                self.root_calls
+                    .lock(&(key, RootCall::Mount))
+                    .await
+                    .into_owned(),
+            );
+        }
+        let call_permit = permit.take();
         #[cfg(test)]
         let probe = self.root_check_probe.lock().unwrap().take();
         // Revalidate after the asynchronous tenant build, without holding the
@@ -1558,31 +1584,36 @@ impl WorkspaceHost {
         let checking_workspace = Arc::clone(&workspace);
         let checking_root = root.clone();
         drop(workspace);
-        let (root_available, canonical_root) = match tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            if let Some(probe) = probe {
-                probe.entered.send(()).unwrap();
-                probe
-                    .release
-                    .recv_timeout(std::time::Duration::from_secs(3))
-                    .unwrap();
-            }
-            (
-                checking_workspace.ensure_root_available(),
-                canonical_key(&checking_root),
-            )
-        })
-        .await
-        {
-            Ok((result, key)) => (result.map_err(Error::from), key),
-            Err(error) => (
-                Err(
-                    std::io::Error::other(format!("workspace root check task failed: {error}"))
-                        .into(),
+        let (root_available, canonical_root, returned_permit) =
+            match tokio::task::spawn_blocking(move || {
+                let held_permit = call_permit;
+                let workspace = checking_workspace;
+                #[cfg(test)]
+                if let Some(probe) = probe {
+                    probe.entered.send(()).unwrap();
+                    probe
+                        .release
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                }
+                let result = workspace.ensure_root_available();
+                let key = canonical_key(&checking_root);
+                drop(workspace);
+                (result, key, held_permit)
+            })
+            .await
+            {
+                Ok((result, key, permit)) => (result.map_err(Error::from), key, permit),
+                Err(error) => (
+                    Err(std::io::Error::other(format!(
+                        "workspace root check task failed: {error}"
+                    ))
+                    .into()),
+                    root.clone(),
+                    None,
                 ),
-                root.clone(),
-            ),
-        };
+            };
+        *permit = returned_permit;
         let runtime = HostedWorkspaceRuntime {
             clear_started: false,
             holds_workspace: true,
