@@ -145,7 +145,7 @@ import {
 // open) without a storage polyfill.
 vi.mock("./caretIndex");
 import { readCaret, recordCaret } from "./caretIndex";
-import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
+import { fileTab, readTab, resetLayout, terminalTab } from "../__tests__/tabs";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -3586,6 +3586,23 @@ describe("terminal tab naming", () => {
 });
 
 describe("autosave", () => {
+  test("saves JSON5 syntax through the classic write path", async () => {
+    const content = "{a: 1, // comment\n}";
+    const tab = fileTab({
+      path: "conf/app.json5", fileKind: "text", mode: "source",
+      content, saved: "{}",
+    });
+    resetLayout([tab]);
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2 });
+
+    expect(readTab(tab.id)?.doc).toBeUndefined();
+    await saveTab(tab);
+
+    expect(readTab(tab.id)?.error).toBeNull();
+    expect(write).toHaveBeenCalledWith(tab.path, content, null, 1, null);
+    expect(readTab(tab.id)?.saved).toBe(content);
+  });
+
   test("opens the conflict dialog with retry metadata when PUT requires preconditions", async () => {
     const tab = fileTab({
       content: "changed",
