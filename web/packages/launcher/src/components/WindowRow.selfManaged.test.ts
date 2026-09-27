@@ -69,7 +69,7 @@ describe("WindowRow self-managed actions", () => {
     vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response('{"error":"This window is unavailable."}', { status: 500 }));
     const child = {
       closed: false,
-      location: { href: "" },
+      location: { href: "about:blank" },
       document: document.implementation.createHTMLDocument(),
       focus: vi.fn(),
       close: vi.fn(),
@@ -87,7 +87,7 @@ describe("WindowRow self-managed actions", () => {
     vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response('{"error":"Window focus was refused."}', { status: 404 }));
     const child = {
       closed: false,
-      location: { href: "" },
+      location: { href: "about:blank" },
       document: document.implementation.createHTMLDocument(),
       focus: vi.fn(),
       close: vi.fn(),
