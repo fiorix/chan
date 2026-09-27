@@ -1358,6 +1358,496 @@ mod tests {
         assert!(started.elapsed() >= RETRY_NUDGE);
     }
 
+    #[derive(Clone)]
+    struct RetryFeed {
+        records: Arc<Mutex<Vec<WindowRecord>>>,
+        nudge: Arc<Notify>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl WindowFeed for RetryFeed {
+        fn snapshot(&self) -> Vec<WindowRecord> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.records.lock().unwrap().clone()
+        }
+        fn change_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.nudge)
+        }
+    }
+
+    struct RetrySurface {
+        launches: RemoteLaunches,
+        builds: WindowBuilds,
+        tickets: serve::RetargetTickets,
+        live: Mutex<HashSet<String>>,
+        attempts: Mutex<Vec<(String, tokio::time::Instant)>>,
+        held: Mutex<Vec<(String, serve::RetargetTicket)>>,
+        hold: std::sync::atomic::AtomicBool,
+    }
+
+    impl NativeSurface for Arc<RetrySurface> {
+        fn open_labels(&self, library_id: &str) -> HashSet<String> {
+            self.builds.open_labels(
+                &format!("{library_id}::"),
+                self.live.lock().unwrap().clone(),
+            )
+        }
+        fn open(&self, record: &WindowRecord) {
+            let label = native_label(record);
+            self.builds.begin(label.clone());
+            self.attempts
+                .lock()
+                .unwrap()
+                .push((label.clone(), tokio::time::Instant::now()));
+            self.builds
+                .complete(&label, Err("native build refused".into()));
+        }
+        fn refresh(&self, record: &WindowRecord) {
+            if !self.launches.needs_retarget(record, false) {
+                return;
+            }
+            let label = native_label(record);
+            let ticket = self
+                .launches
+                .begin_remote(record, false, true, &self.tickets)
+                .unwrap();
+            self.attempts
+                .lock()
+                .unwrap()
+                .push((label.clone(), tokio::time::Instant::now()));
+            if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+                self.held.lock().unwrap().push((label, ticket));
+            } else {
+                self.launches.finish_retarget(
+                    &label,
+                    &self.tickets,
+                    &ticket,
+                    &self.builds,
+                    Ok(serve::RetargetOutcome::NotReady),
+                );
+            }
+        }
+        fn close(&self, label: &str) {
+            self.builds.remove(label);
+            self.launches.forget(label);
+            self.live.lock().unwrap().remove(label);
+            self.tickets.cancel(label);
+        }
+    }
+
+    struct RetryHarness {
+        feed: RetryFeed,
+        surface: Arc<RetrySurface>,
+        view: Arc<WatcherViewState>,
+        pending_deletes: Arc<PendingDeleteState>,
+        stop: tokio::sync::oneshot::Sender<WatchLoopStop>,
+        task: tokio::task::JoinHandle<()>,
+        started: tokio::time::Instant,
+    }
+
+    impl RetryHarness {
+        async fn start(records: Vec<WindowRecord>, build: bool, hold: bool) -> Self {
+            let library_id = records[0].library_id.clone();
+            let nudge = Arc::new(Notify::new());
+            let feed = RetryFeed {
+                records: Arc::new(Mutex::new(records.clone())),
+                nudge: Arc::clone(&nudge),
+                reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            };
+            let pending_deletes = Arc::new(PendingDeleteState::default());
+            let view = Arc::new(WatcherViewState::with_pending_deletes(Arc::clone(
+                &pending_deletes,
+            )));
+            let surface = Arc::new(RetrySurface {
+                launches: RemoteLaunches::default(),
+                builds: WindowBuilds::new(nudge),
+                tickets: serve::RetargetTickets::default(),
+                live: Mutex::new(if build {
+                    HashSet::new()
+                } else {
+                    records.iter().map(native_label).collect()
+                }),
+                attempts: Mutex::new(Vec::new()),
+                held: Mutex::new(Vec::new()),
+                hold: std::sync::atomic::AtomicBool::new(hold),
+            });
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn({
+                let feed = feed.clone();
+                let surface = Arc::clone(&surface);
+                let view = Arc::clone(&view);
+                async move {
+                    watch_loop(Some(&library_id), feed, surface, view, async {
+                        stopped.await.unwrap()
+                    })
+                    .await;
+                }
+            });
+            let harness = Self {
+                feed,
+                surface,
+                view,
+                pending_deletes,
+                stop,
+                task,
+                started: tokio::time::Instant::now(),
+            };
+            harness.after_pass(0).await;
+            harness
+        }
+
+        async fn after_pass(&self, previous: usize) {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+                if self.feed.reads.load(std::sync::atomic::Ordering::SeqCst) > previous {
+                    return;
+                }
+            }
+            panic!("the production watch loop must reconcile after its wake");
+        }
+
+        async fn feed_wake(&self) {
+            let previous = self.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
+            self.feed.nudge.notify_one();
+            self.after_pass(previous).await;
+        }
+
+        async fn view_wake(&self) {
+            let previous = self.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
+            self.view.unbury("lib-unused::w-other");
+            self.after_pass(previous).await;
+        }
+
+        fn times(&self, record: &WindowRecord) -> Vec<u64> {
+            let label = native_label(record);
+            self.surface
+                .attempts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(window, _)| *window == label)
+                .map(|(_, at)| at.duration_since(self.started).as_secs())
+                .collect()
+        }
+
+        async fn stop(self, stop: WatchLoopStop) -> Arc<RetrySurface> {
+            self.stop.send(stop).unwrap();
+            self.task.await.unwrap();
+            self.surface
+        }
+    }
+
+    fn retry_record(library: &str, index: usize) -> WindowRecord {
+        WindowRecord {
+            library_id: format!("lib-{library}"),
+            window_id: format!("w-{index}"),
+            ..rec()
+        }
+    }
+
+    async fn cadence_with_other_wakes(library: &str, offsets: &[u64]) {
+        let records: Vec<_> = (0..offsets.len())
+            .map(|i| retry_record(library, i))
+            .collect();
+        let harness = RetryHarness::start(vec![records[0].clone()], false, false).await;
+        for second in 1..120 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for (record, offset) in records.iter().zip(offsets) {
+                if *offset == second {
+                    harness
+                        .surface
+                        .live
+                        .lock()
+                        .unwrap()
+                        .insert(native_label(record));
+                    harness.feed.records.lock().unwrap().push(record.clone());
+                }
+            }
+            harness.feed_wake().await;
+            harness.view_wake().await;
+            let previous = harness.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
+            harness
+                .surface
+                .builds
+                .complete("lib-unused::w-other", Ok(()));
+            harness.after_pass(previous).await;
+            for (record, offset) in records
+                .iter()
+                .zip(offsets)
+                .filter(|(_, offset)| **offset <= second)
+            {
+                let expected: Vec<_> = (*offset..=second).step_by(15).collect();
+                assert_eq!(
+                    harness.times(record),
+                    expected,
+                    "{library}: other wakes must not advance a waiting window's retry"
+                );
+            }
+        }
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_waiting_windows_keep_their_dispatch_intervals() {
+        cadence_with_other_wakes("two-waiters", &[0, 5]).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ten_waiting_windows_keep_their_dispatch_intervals() {
+        cadence_with_other_wakes("ten-waiters", &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_native_build_waits_through_other_wakes() {
+        let record = retry_record("build-waiter", 0);
+        let harness = RetryHarness::start(vec![record.clone()], true, false).await;
+        for second in 1..=30 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            harness.feed_wake().await;
+            harness.view_wake().await;
+            assert_eq!(
+                harness.times(&record),
+                (0..=second).step_by(15).collect::<Vec<_>>(),
+                "a failed native build must wait fifteen seconds from dispatch"
+            );
+        }
+        harness.stop(WatchLoopStop::CloseWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_retry_timer_drives_staggered_waiters_without_feed_changes() {
+        let a = retry_record("timer-waiters", 0);
+        let b = retry_record("timer-waiters", 1);
+        let harness = RetryHarness::start(vec![a.clone()], false, false).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        harness
+            .surface
+            .live
+            .lock()
+            .unwrap()
+            .insert(native_label(&b));
+        harness.feed.records.lock().unwrap().push(b.clone());
+        harness.feed_wake().await;
+        assert_eq!(
+            harness.times(&a),
+            vec![0],
+            "adding a waiter cannot retry the first window early"
+        );
+        for second in [15, 20, 30, 35, 45, 50] {
+            let elapsed = tokio::time::Instant::now()
+                .duration_since(harness.started)
+                .as_secs();
+            let previous = harness.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
+            tokio::time::advance(Duration::from_secs(second - elapsed)).await;
+            harness.after_pass(previous).await;
+            assert_eq!(
+                harness.times(&a),
+                (0..=second).step_by(15).collect::<Vec<_>>(),
+                "the timer must service the first window's deadline"
+            );
+            assert_eq!(
+                harness.times(&b),
+                (5..=second).step_by(15).collect::<Vec<_>>(),
+                "the timer must retain the staggered deadline"
+            );
+        }
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_target_bypasses_the_waiting_interval() {
+        let mut record = retry_record("changed-target", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, false).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        record.token = "replacement-token".into();
+        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed_wake().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "a changed target must be tried immediately"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness.feed_wake().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "the replacement target owns a fresh dispatch interval"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_refusal_wakes_an_overdue_waiter_without_spinning() {
+        let record = retry_record("late-refusal", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        harness.feed_wake().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0],
+            "an in-flight probe is not duplicated at its deadline"
+        );
+        let reads = harness.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            harness.feed.reads.load(std::sync::atomic::Ordering::SeqCst),
+            reads,
+            "an overdue in-flight attempt must not spin the loop"
+        );
+        let (label, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness
+            .surface
+            .hold
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        harness.surface.launches.finish_retarget(
+            &label,
+            &harness.surface.tickets,
+            &ticket,
+            &harness.surface.builds,
+            Ok(serve::RetargetOutcome::NotReady),
+        );
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 20],
+            "settling an overdue refusal must wake the next try immediately"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_watchers_reject_late_settlement_and_admission() {
+        for stop in [WatchLoopStop::KeepWindows, WatchLoopStop::CloseWindows] {
+            let record = retry_record("stopped-waiter", 0);
+            let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+            let surface = harness.stop(stop).await;
+            let (label, ticket) = surface.held.lock().unwrap().pop().unwrap();
+            surface.launches.finish_retarget(
+                &label,
+                &surface.tickets,
+                &ticket,
+                &surface.builds,
+                Ok(serve::RetargetOutcome::NotReady),
+            );
+            tokio::time::advance(Duration::from_secs(60)).await;
+            assert!(
+                !surface.launches.needs_retarget(&record, false),
+                "a stopped watcher must reject a late completion's next attempt"
+            );
+            assert_eq!(surface.attempts.lock().unwrap().len(), 1);
+            assert_eq!(
+                surface
+                    .live
+                    .lock()
+                    .unwrap()
+                    .contains(&native_label(&record)),
+                stop == WatchLoopStop::KeepWindows
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hidden_closed_and_removed_waiters_receive_no_more_attempts() {
+        for action in ["bury", "server-hidden", "close", "removed"] {
+            let record = retry_record(action, 0);
+            let harness = RetryHarness::start(vec![record.clone()], false, false).await;
+            match action {
+                "bury" => harness.view.bury(&native_label(&record)),
+                "server-hidden" => harness.feed.records.lock().unwrap()[0].hidden = true,
+                "close" => {
+                    harness.pending_deletes.queue("test-connection", &record);
+                    harness.view.bury(&native_label(&record));
+                    harness.surface.close(&native_label(&record));
+                }
+                "removed" => harness.feed.records.lock().unwrap().clear(),
+                _ => unreachable!(),
+            }
+            harness.feed_wake().await;
+            for _ in 0..4 {
+                tokio::time::advance(Duration::from_secs(15)).await;
+                harness.feed_wake().await;
+                assert_eq!(
+                    harness.times(&record),
+                    vec![0],
+                    "{action}: an unwanted waiting window must receive no further attempt"
+                );
+            }
+            harness.stop(WatchLoopStop::CloseWindows).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_retargets_keep_the_dispatch_deadline() {
+        for failure in ["mint", "session", "navigation"] {
+            let record = retry_record("failed-retarget", 0);
+            let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+            tokio::time::advance(Duration::from_secs(5)).await;
+            let (label, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+            if failure == "navigation" {
+                harness.surface.launches.finish_retarget(
+                    &label,
+                    &harness.surface.tickets,
+                    &ticket,
+                    &harness.surface.builds,
+                    Err("navigation failed".into()),
+                );
+            } else {
+                harness.surface.launches.fail(
+                    &label,
+                    true,
+                    &harness.surface.tickets,
+                    Some(&ticket),
+                    &harness.surface.builds,
+                    failure.into(),
+                );
+            }
+            harness.feed_wake().await;
+            assert_eq!(
+                harness.times(&record),
+                vec![0],
+                "{failure}: a failed retarget must retain its dispatch deadline"
+            );
+            tokio::time::advance(Duration::from_secs(10)).await;
+            harness.feed_wake().await;
+            assert_eq!(
+                harness.times(&record),
+                vec![0, 15],
+                "{failure}: failure must leave an eligible retry"
+            );
+            harness.stop(WatchLoopStop::KeepWindows).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_deadlines_do_not_wake_shared_feed_subscribers() {
+        use futures::FutureExt;
+        let record = retry_record("private-retry", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, false).await;
+        let nudge = Arc::clone(&harness.feed.nudge);
+        let subscriber = nudge.notified();
+        tokio::pin!(subscriber);
+        subscriber.as_mut().enable();
+        tokio::time::advance(Duration::from_secs(15)).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 15],
+            "the owned deadline must retry without a feed push"
+        );
+        assert!(
+            subscriber.as_mut().now_or_never().is_none(),
+            "retry scheduling must not wake shared feed subscribers"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
     #[test]
     fn native_gateway_websocket_uses_the_exact_proxy_origin() {
         let conn = DevserverConn {
