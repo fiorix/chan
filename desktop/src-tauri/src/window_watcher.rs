@@ -247,7 +247,7 @@ pub fn reconcile(
     buried: &HashSet<String>,
     surface: &impl NativeSurface,
 ) {
-    reconcile_with_reloads(library_id, snapshot, buried, &HashSet::new(), surface);
+    reconcile_with_reloads(library_id, snapshot, buried, &HashSet::new(), true, surface);
 }
 
 fn reconcile_with_reloads(
@@ -255,6 +255,7 @@ fn reconcile_with_reloads(
     snapshot: &[WindowRecord],
     buried: &HashSet<String>,
     reloads: &HashSet<String>,
+    open_missing: bool,
     surface: &impl NativeSurface,
 ) {
     debug_assert!(
@@ -278,7 +279,7 @@ fn reconcile_with_reloads(
         let label = native_label(record);
         if actual.contains(&label) {
             surface.refresh(record, reloads.contains(&label));
-        } else if !reloads.contains(&label) {
+        } else if open_missing && !reloads.contains(&label) {
             // A Reload only addresses the existing native window. A later
             // authoritative reconcile may still open this desired record.
             surface.open(record);
@@ -318,13 +319,14 @@ pub struct WatcherViewState {
     buried: Mutex<HashSet<String>>,
     pending_deletes: Arc<PendingDeleteState>,
     changed: Notify,
-    reloads: Mutex<ReloadRequests>,
+    requests: Mutex<ViewRequests>,
 }
 
 #[derive(Default)]
-struct ReloadRequests {
+struct ViewRequests {
     labels: HashSet<String>,
     stopped: bool,
+    reconcile: bool,
 }
 
 impl Default for WatcherViewState {
@@ -335,7 +337,12 @@ impl Default for WatcherViewState {
 
 impl WatcherViewState {
     pub(crate) fn wake(&self) {
+        self.requests.lock().unwrap().reconcile = true;
         self.changed.notify_one();
+    }
+
+    fn take_reconcile_request(&self) -> bool {
+        std::mem::take(&mut self.requests.lock().unwrap().reconcile)
     }
 
     pub(crate) fn with_pending_deletes(pending_deletes: Arc<PendingDeleteState>) -> Self {
@@ -343,14 +350,14 @@ impl WatcherViewState {
             buried: Mutex::new(HashSet::new()),
             pending_deletes,
             changed: Notify::new(),
-            reloads: Mutex::new(ReloadRequests::default()),
+            requests: Mutex::new(ViewRequests::default()),
         }
     }
 
     /// Queue a user-requested retarget for this watcher's next pass. The loop
     /// checks its fresh snapshot and native presence before dispatching it.
     pub(crate) fn request_reload(&self, label: &str) -> bool {
-        let mut requests = self.reloads.lock().unwrap();
+        let mut requests = self.requests.lock().unwrap();
         if requests.stopped {
             return false;
         }
@@ -360,11 +367,11 @@ impl WatcherViewState {
     }
 
     pub(crate) fn take_reload_requests(&self) -> HashSet<String> {
-        std::mem::take(&mut self.reloads.lock().unwrap().labels)
+        std::mem::take(&mut self.requests.lock().unwrap().labels)
     }
 
     fn stop(&self) {
-        let mut requests = self.reloads.lock().unwrap();
+        let mut requests = self.requests.lock().unwrap();
         requests.stopped = true;
         requests.labels.clear();
     }
@@ -373,13 +380,13 @@ impl WatcherViewState {
     /// reconcile closes it, and it surfaces in the Window menu for reopen.
     pub fn bury(&self, native_label: &str) {
         self.buried.lock().unwrap().insert(native_label.to_string());
-        self.changed.notify_one();
+        self.wake();
     }
 
     /// Un-bury (reopen from the menu): the next reconcile re-opens it.
     pub fn unbury(&self, native_label: &str) {
         self.buried.lock().unwrap().remove(native_label);
-        self.changed.notify_one();
+        self.wake();
     }
 
     fn buried_snapshot(&self) -> HashSet<String> {
@@ -443,6 +450,7 @@ pub async fn watch_loop<F, S, C>(
     let mut library_id = initial_library_id.map(str::to_string);
     let feed_notify = feed.change_notify();
     tokio::pin!(cancel);
+    let mut open_missing = true;
     loop {
         // Create both change futures BEFORE the snapshot so each captures the
         // current notify_waiters generation; a change during the snapshot then
@@ -456,6 +464,9 @@ pub async fn watch_loop<F, S, C>(
         view_changed.as_mut().enable();
 
         let reloads = view.take_reload_requests();
+        // A buffered Reload notification can outlive consumption of its
+        // labels. Only an authoritative or ordinary view wake may open windows.
+        let view_reconcile = view.take_reconcile_request();
         let snapshot = feed.snapshot();
         if let Some(record) = snapshot.first() {
             library_id = Some(record.library_id.clone());
@@ -466,6 +477,7 @@ pub async fn watch_loop<F, S, C>(
                 &snapshot,
                 &view.suppressed_snapshot(),
                 &reloads,
+                open_missing || view_reconcile,
                 &surface,
             );
         }
@@ -496,9 +508,9 @@ pub async fn watch_loop<F, S, C>(
                 }
                 break;
             }
-            _ = feed_changed => {}
-            _ = view_changed => {}
-            _ = retry => {}
+            _ = feed_changed => { open_missing = true; }
+            _ = view_changed => { open_missing = false; }
+            _ = retry => { open_missing = true; }
         }
     }
 }
