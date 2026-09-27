@@ -18,12 +18,13 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 
-import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { FakeTerminal, xterm } from "../__tests__/xterm";
 import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { sessionWindowId } from "../api/client";
 import { setSocketFactory } from "../api/transport";
 import { demoSocketFactory } from "../demo/socket";
+import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { onWatchEvent } from "../state/store.svelte";
 import {
   cancelPaneMode,
@@ -50,6 +51,8 @@ afterEach(async () => {
   await unmountApp();
   xterm.terminals.splice(0);
   xterm.fit.size = null;
+  xterm.textareaFocus = false;
+  richPrompt.byTab = {};
 });
 
 function terminal(): HTMLElement {
@@ -282,5 +285,90 @@ describe("a terminal the pane tree rebuilds", () => {
     await settle();
 
     expect({ disposed: term.disposed, element: hostTerminal() }).toEqual({ disposed: true, element: null });
+  });
+});
+
+describe("the keyboard after a relocation", () => {
+  // Moving a terminal's element drops the keyboard in a browser, which jsdom
+  // does not model, so these pins read which surface inside the terminal is
+  // asked to take it back once the pane beside it closes and its own pane is
+  // rebuilt, with its focus and its tab unchanged.
+  async function focusedHostBesideEmptyPane() {
+    xterm.textareaFocus = true;
+    const host = await hostUnderTeam();
+    const beside = splitPane(SEED_PANE, "row")!;
+    await settle();
+    setActivePane(SEED_PANE);
+    await settle();
+    await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
+    return { ...host, beside };
+  }
+
+  /// Every element asked to take focus from here on.
+  function recordFocusRequests(): HTMLElement[] {
+    const asked: HTMLElement[] = [];
+    const focus = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      asked.push(this);
+      focus.call(this, options);
+    });
+    return asked;
+  }
+
+  function lastAskedInside(asked: HTMLElement[], root: HTMLElement): HTMLElement | null {
+    return asked.filter((el) => root.contains(el)).at(-1) ?? null;
+  }
+
+  async function openFind(root: HTMLElement): Promise<HTMLInputElement> {
+    hostCommand("app.find.open");
+    await settle();
+    const find = await vi.waitFor(() => {
+      const input = root.querySelector<HTMLInputElement>(".terminal-find input");
+      expect(input).not.toBeNull();
+      return input!;
+    });
+    await vi.waitFor(() => expect(document.activeElement).toBe(find));
+    return find;
+  }
+
+  test("goes back to the find input that held it", async () => {
+    const { root, beside } = await focusedHostBesideEmptyPane();
+    const find = await openFind(root);
+    const asked = recordFocusRequests();
+
+    await closePane(beside);
+    await settle();
+
+    await vi.waitFor(() => expect(lastAskedInside(asked, root)).toBe(find));
+  });
+
+  test("goes back to the terminal that held it with the find bar open", async () => {
+    const { root, term, beside } = await focusedHostBesideEmptyPane();
+    await openFind(root);
+    term.focus();
+    expect(document.activeElement).toBe(term.textarea);
+    const asked = recordFocusRequests();
+
+    await closePane(beside);
+    await settle();
+
+    await vi.waitFor(() => expect(lastAskedInside(asked, root)).toBe(term.textarea));
+  });
+
+  test("goes back to the Rich Prompt composer that held it", async () => {
+    const { root, beside } = await focusedHostBesideEmptyPane();
+    showRichPromptForTab(HOST);
+    await settle();
+    const composer = await vi.waitFor(() => {
+      const el = root.querySelector<HTMLElement>(".rich-prompt");
+      expect(el?.contains(document.activeElement)).toBe(true);
+      return el!;
+    });
+    const asked = recordFocusRequests();
+
+    await closePane(beside);
+    await settle();
+
+    await vi.waitFor(() => expect(composer.contains(lastAskedInside(asked, root))).toBe(true));
   });
 });
