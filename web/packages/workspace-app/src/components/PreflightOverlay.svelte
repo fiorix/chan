@@ -14,7 +14,6 @@
 
   import { onMount, onDestroy } from "svelte";
   import { api } from "../api/client";
-  import { ApiError } from "../api/errors";
   import { setCoverBlocking, workspace } from "../state/store.svelte";
   import type { PreflightSnapshot } from "../api/types";
 
@@ -42,16 +41,6 @@
   });
 
   function errText(e: unknown): string {
-    if (e instanceof ApiError) {
-      // Some transports hand back the raw JSON body; unwrap { error }.
-      try {
-        const body = JSON.parse(e.message) as { error?: unknown };
-        if (typeof body.error === "string" && body.error.trim()) return body.error;
-      } catch {
-        // Not JSON: the message is already human-readable.
-      }
-      return e.message;
-    }
     return e instanceof Error ? e.message : String(e);
   }
   // First-run onboarding nudge. Non-locking: it rides on the ready snapshot's
