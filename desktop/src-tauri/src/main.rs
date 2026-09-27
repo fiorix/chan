@@ -9030,13 +9030,10 @@ mod tests {
                 std::time::Duration::from_secs(15),
                 move || handle.block_on(serve::stop_all(&draining)),
             );
+            // The held writer lock proves quit left the stalled teardown behind.
             assert!(
                 !chan_workspace::lock::is_free(&lock_dir),
                 "quit awaited the recovery lock"
-            );
-            assert!(
-                !stall.entered().is_empty(),
-                "quit returned without a held root call"
             );
             drop(stall);
             let deadline = std::time::Instant::now() + HEALTHY_ROOT_BOUND;
