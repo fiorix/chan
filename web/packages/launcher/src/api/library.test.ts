@@ -133,3 +133,18 @@ describe("ApiError", () => {
     expect(liveTerminalsCount(new ApiError(409, "NO_DESKTOP"))).toBeNull();
   });
 });
+
+
+describe("liveApi.checkWindowPage", () => {
+  it("checks the page without caching and preserves its response and abort signal", async () => {
+    const controller = new AbortController();
+    const response = new Response('{"error":"Still restoring."}', { status: 503, headers: { "Retry-After": "2" } });
+    const fetch = vi.fn().mockResolvedValue(response);
+    vi.stubGlobal("fetch", fetch);
+    const url = `${location.origin}/proj-1/?w=w-1&t=fixture`;
+    expect(await liveApi.checkWindowPage(url, controller.signal)).toBe(response);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(url, { cache: "no-store", signal: controller.signal });
+    expect(response.headers.get("Retry-After")).toBe("2");
+    expect(await response.text()).toBe('{"error":"Still restoring."}');
+  });
+});

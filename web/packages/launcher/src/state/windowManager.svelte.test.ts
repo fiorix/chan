@@ -59,6 +59,7 @@ function clonedSessionStorage(source: Storage): Storage {
 }
 
 function fakeWin(): FakeWin {
+  let href = "";
   const w: FakeWin = {
     closed: false,
     name: "",
@@ -66,7 +67,7 @@ function fakeWin(): FakeWin {
       w.closed = true;
     }),
     focus: vi.fn(),
-    location: { href: "" },
+    location: { get href() { return href; }, set href(value: string) { href = value; } },
     sessionStorage: clonedSessionStorage(sessionStorage),
     document: document.implementation.createHTMLDocument(),
   };
@@ -249,6 +250,7 @@ describe("mintWindow", () => {
     expect(settled).toBe(false);
     expect(opened[0].win.closed).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
     expect(await pending).toMatchObject({ status: 503, message: "devserver is restoring terminal sessions" });
     expect(opened[0].win.closed).toBe(true);
     expect(opened[0].win.location.href).toBe("");
@@ -274,6 +276,47 @@ describe("mintWindow", () => {
     checkWindowPage.mockImplementation(async () => new Response("<html></html>"));
     await vi.advanceTimersByTimeAsync(1000);
     await pending;
+  });
+
+  it("bounds a Retry-After beyond the timer range without checking early", async () => {
+    vi.useFakeTimers();
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockImplementation(async () => gateResponse("9999999999"));
+    const pending = mintWindow("terminal").catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(59900);
+    expect(await pending).toMatchObject({ status: 503 });
+  });
+
+  it("aborts a stalled page check when the window closes", async () => {
+    vi.useFakeTimers();
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockImplementation(() => new Promise(() => {}));
+    let settled = false;
+    const pending = mintWindow("terminal").then((value) => { settled = true; return value; });
+    await vi.advanceTimersByTimeAsync(0);
+    const signal = checkWindowPage.mock.calls[0][1] as AbortSignal;
+    opened[0].win.closed = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
+    expect(await pending).toBeNull();
+    expect(signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a stalled retry and keeps the last server refusal", async () => {
+    vi.useFakeTimers();
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockImplementationOnce(async () => gateResponse());
+    checkWindowPage.mockImplementation(() => new Promise(() => {}));
+    let settled = false;
+    const pending = mintWindow("terminal").catch((error: unknown) => { settled = true; return error; });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(settled).toBe(true);
+    expect(await pending).toMatchObject({ message: "devserver is restoring terminal sessions" });
+    expect((checkWindowPage.mock.calls[1][1] as AbortSignal).aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("is inert under demoState.enabled (no window opened, no mint)", async () => {
@@ -338,6 +381,20 @@ describe("openWindowRecord", () => {
     expect(checkWindowPage).toHaveBeenCalledTimes(2);
   });
 
+  it("shares a waiting named window check and navigates only once", async () => {
+    vi.useFakeTimers();
+    checkWindowPage.mockImplementationOnce(async () => gateResponse());
+    const first = openWindowRecord(record({}));
+    const child = opened[0].win;
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const second = openWindowRecord(record({}));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.all([first, second]);
+    expect(navigation).toHaveBeenCalledTimes(1);
+  });
+
   it("closes a refused re-open and raises the server sentence", async () => {
     checkWindowPage.mockResolvedValue(new Response('{"error":"This page cannot open."}', { status: 409 }));
     const outcome = await Promise.resolve(openWindowRecord(record({}))).then(() => null, (error: unknown) => error);
@@ -350,8 +407,13 @@ describe("openWindowRecord", () => {
   it("ends a re-open wait at sixty seconds with the server sentence", async () => {
     vi.useFakeTimers();
     checkWindowPage.mockImplementation(async () => gateResponse("120"));
-    const pending = Promise.resolve(openWindowRecord(record({}))).then(() => null, (error: unknown) => error);
+    let settled = false;
+    const pending = Promise.resolve(openWindowRecord(record({}))).then(
+      () => { settled = true; return null; },
+      (error: unknown) => { settled = true; return error; },
+    );
     await vi.advanceTimersByTimeAsync(60000);
+    expect(settled).toBe(true);
     expect(await pending).toMatchObject({ status: 503, message: "devserver is restoring terminal sessions" });
     expect(opened[0].win.closed).toBe(true);
     expect(opened[0].win.location.href).toBe("");
