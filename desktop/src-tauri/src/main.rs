@@ -3664,12 +3664,6 @@ async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     }
 }
 
-/// Match the connecting page's twenty-attempt budget while retaining the current
-/// page until readiness or exhaustion allows navigation.
-fn retarget_should_navigate(probe: Option<&ProbeResult>, attempts: usize) -> bool {
-    probe.is_some_and(|probe| probe.reachable) || attempts >= 20
-}
-
 /// Collapse a reqwest error to the transport-failure class the
 /// connecting screen's row cares about. reqwest's own Display is verbose
 /// and embeds the full URL, so we surface a short ASCII label instead.
@@ -4093,9 +4087,13 @@ fn reload_devserver_window_from_feed(
             return;
         }
         let result = match serve::retarget_watched_remote_window(&app, &url, &record).await {
-            Ok(true) => Ok(()),
-            Ok(false) => {
+            Ok(serve::RetargetOutcome::Navigated) => Ok(()),
+            Ok(serve::RetargetOutcome::Gone) => {
                 tracing::debug!(window = %record.window_id, "reload: window is gone");
+                Ok(())
+            }
+            Ok(serve::RetargetOutcome::NotReady) => {
+                tracing::debug!(window = %record.window_id, "reload: target is not ready");
                 Ok(())
             }
             Err(e) => Err(e),
@@ -7871,34 +7869,6 @@ mod tests {
         let reason = linux_updater_refusal(None).expect("a non-AppImage build refuses");
         assert!(reason.contains("AppImage"), "{reason}");
         assert!(!reason.contains("chan upgrade"), "{reason}");
-    }
-
-    #[test]
-    fn retarget_waits_for_readiness_or_the_attempt_budget() {
-        assert!(
-            !retarget_should_navigate(None, 0),
-            "retarget must probe before navigating"
-        );
-        for target in [ProbeTargetKind::Loopback, ProbeTargetKind::Gateway] {
-            for status in [
-                None,
-                Some(reqwest::StatusCode::SERVICE_UNAVAILABLE),
-                Some(reqwest::StatusCode::OK),
-            ] {
-                let probe = ProbeResult {
-                    reachable: probe_response_reachable(target, status),
-                    status: status.map(|status| status.as_u16()),
-                    detail: String::new(),
-                };
-                for attempt in 1..=20 {
-                    assert_eq!(
-                        retarget_should_navigate(Some(&probe), attempt),
-                        probe.reachable || attempt == 20,
-                        "retarget {target:?} {status:?} attempt {attempt}",
-                    );
-                }
-            }
-        }
     }
 
     #[test]

@@ -296,12 +296,13 @@ impl TauriNativeSurface {
                     // The webview vanished mid-gap: a close raced this
                     // retarget. Do NOT rebuild here -- if the record still
                     // wants a window, the nudged reconcile below reopens it.
-                    Ok(false) => {
+                    Ok(serve::RetargetOutcome::Gone) => {
                         remote_launches.lock().unwrap().remove(&label);
                         nudge.notify_one();
                         return;
                     }
-                    Ok(true) => Ok(()),
+                    Ok(serve::RetargetOutcome::Navigated) => Ok(()),
+                    Ok(serve::RetargetOutcome::NotReady) => Err("target is not ready".into()),
                     Err(e) => Err(e),
                 }
             } else {

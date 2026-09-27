@@ -365,28 +365,30 @@ pub(crate) fn open_watched_remote_window(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetargetOutcome {
+    Navigated,
+    Gone,
+    NotReady,
+}
+
 async fn retarget_window<F: std::future::Future<Output = crate::ProbeResult>>(
     mut probe: impl FnMut() -> F,
     exists: impl Fn() -> bool,
     navigate: impl FnOnce() -> Result<(), String>,
-) -> Result<bool, String> {
-    let mut last_probe = None;
-    let mut attempts = 0;
-    while !crate::retarget_should_navigate(last_probe.as_ref(), attempts) {
-        if attempts > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-        if !exists() {
-            return Ok(false);
-        }
-        last_probe = Some(probe().await);
-        attempts += 1;
-    }
+) -> Result<RetargetOutcome, String> {
     if !exists() {
-        return Ok(false);
+        return Ok(RetargetOutcome::Gone);
+    }
+    let result = probe().await;
+    if !exists() {
+        return Ok(RetargetOutcome::Gone);
+    }
+    if !result.reachable {
+        return Ok(RetargetOutcome::NotReady);
     }
     navigate()?;
-    Ok(true)
+    Ok(RetargetOutcome::Navigated)
 }
 
 /// Retarget a live watched REMOTE window in place after its devserver rotated
@@ -397,10 +399,10 @@ pub(crate) async fn retarget_watched_remote_window(
     app: &AppHandle,
     url: &str,
     record: &WindowRecord,
-) -> Result<bool, String> {
+) -> Result<RetargetOutcome, String> {
     let label = crate::window_watcher::native_label(record);
     let Some(window) = app.get_webview_window(&label) else {
-        return Ok(false);
+        return Ok(RetargetOutcome::Gone);
     };
     let kind = watched_window_kind(record);
     let target = workspace_window_target_url(
@@ -2295,12 +2297,12 @@ mod tests {
         assert!(navigator.contains("if !builds.contains(&label)"));
         // Vanished-retarget arm bails without a rebuild.
         let vanished = navigator
-            .split("Ok(false) => {")
+            .split("Ok(serve::RetargetOutcome::Gone) => {")
             .nth(1)
             .expect("vanished-retarget arm exists")
-            .split("Ok(true)")
+            .split("Ok(serve::RetargetOutcome::Navigated)")
             .next()
-            .expect("vanished arm ends before Ok(true)");
+            .expect("vanished arm ends before Navigated");
         assert!(vanished.contains("return;"));
         assert!(
             !vanished.contains("open_watched_remote_window"),
