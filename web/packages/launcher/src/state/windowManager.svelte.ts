@@ -130,8 +130,8 @@ function navigateWindowWhenReady(h: Window, url: string): Promise<boolean> {
 /** Mint a browser window of the local library and open it in-app. Call this
  * DIRECTLY from a user gesture: it opens the blank window synchronously, before
  * the mint await, so the browser does not treat the later navigation as a popup.
- * On mint failure (e.g. the workspace is not running -> 409) the blank window is
- * closed and the error rethrown for the caller's banner. `actingWindowId` claims
+ * A refused mint or page check closes the blank window and rethrows the error
+ * for the caller's banner. `actingWindowId` claims
  * the leader identity for the per-tenant mint gate. */
 export async function mintWindow(
   kind: WindowKind,
@@ -153,7 +153,7 @@ export async function mintWindow(
       pendingDiscards.delete(rec.window_id);
       const url = windowUrl(rec, servingOrigin());
       if (!(await navigateWindowWhenReady(blank, url)) || blank.closed) {
-        discardBrowserWindow(rec.window_id);
+        if (handles.get(rec.window_id) === blank) discardBrowserWindow(rec.window_id);
         return null;
       }
     }
@@ -164,7 +164,7 @@ export async function mintWindow(
     return rec;
   } catch (e) {
     blank?.close();
-    if (rec) discardBrowserWindow(rec.window_id);
+    if (rec && handles.get(rec.window_id) === blank) discardBrowserWindow(rec.window_id);
     throw e;
   }
 }
@@ -191,13 +191,13 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   try {
     const url = windowUrl(record, servingOrigin());
     if (!(await navigateWindowWhenReady(h, url)) || h.closed) {
-      handles.delete(record.window_id);
+      if (handles.get(record.window_id) === h) handles.delete(record.window_id);
       return null;
     }
     return h;
   } catch (e) {
     h.close();
-    handles.delete(record.window_id);
+    if (handles.get(record.window_id) === h) handles.delete(record.window_id);
     throw e;
   }
 }
