@@ -43,6 +43,8 @@ use crate::{
 };
 
 const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Shared deadline for cell teardown and writer-lock release during a drain.
+const WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long one health probe tick waits for the mounted roots to answer.
 /// The roots are checked at once, each on a thread of its own, so a root
 /// that has not answered by then holds up only its own row: the tick
@@ -586,6 +588,8 @@ fn degraded_root_reason(error: &ChanError) -> String {
 }
 
 struct HostedWorkspaceRuntime {
+    /// Once dispatched, teardown owns the cell even if shutdown is cancelled.
+    clear_started: bool,
     /// Fixed at construction: a workspace cell can be empty during a storage reset.
     holds_workspace: bool,
     root: PathBuf,
@@ -612,19 +616,14 @@ impl HostedWorkspaceRuntime {
         self.artifacts.app.clone()
     }
 
-    /// Stop and join the tenant tasks before clearing the workspace cell, then
-    /// verify the workspace flock is released before returning.
-    async fn shutdown(mut self) {
-        // Signal the reindex coordinator FIRST. Its pass runs on the blocking
-        // pool holding a strong `Arc<Workspace>`, and `spawn_blocking` cannot
-        // be cancelled: if the pass is mid-walk when we tear down, that handle
-        // outlives the tenant, keeps the writer flock, and makes every later
-        // open of this root fail `WorkspaceAlreadyOpen` for the life of the
-        // process. The cancel flag is checked at file boundaries, so raising it
-        // here bounds the strand to one filesystem call instead of a whole
-        // pass. On a stalled network mount that single call can still hang --
-        // which is why `wait_for_workspace_release` is bounded rather than
-        // infinite -- but the window shrinks from minutes to one operation.
+    /// A close waits for cell teardown; the lock check shares its deadline.
+    async fn shutdown(self) {
+        self.shutdown_with_budget(None).await;
+    }
+
+    async fn shutdown_with_budget(mut self, budget: Option<Duration>) {
+        // A blocking index pass keeps its workspace handle until the next
+        // cancel check. Signal it before stopping the tenant tasks.
         self.artifacts.cell.cancel_reindex();
         self.artifacts.tasks.shutdown().await;
         // Socket owners must end their sessions before the release verifier
@@ -633,26 +632,53 @@ impl HostedWorkspaceRuntime {
             &mut self.artifacts.keepalive,
             Box::new(()),
         ));
-        let released = self.artifacts.cell.clear();
-        if let Some((weak, lock_dir)) = released {
-            let wait = tokio::task::spawn_blocking(move || {
-                wait_for_workspace_release(&weak, &lock_dir);
-            });
-            if let Err(error) = wait.await {
-                tracing::warn!(%error, "workspace flock-release verifier panicked");
+        let deadline = Instant::now() + budget.unwrap_or(WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT);
+        let cell = Arc::clone(&self.artifacts.cell);
+        self.clear_started = true;
+        // Clear joins both recovery and watcher threads, either of which can
+        // be waiting on a filesystem that has stopped answering.
+        let wait = tokio::task::spawn_blocking(move || {
+            if let Some((weak, lock_dir)) = cell.clear() {
+                wait_for_workspace_release(&weak, &lock_dir, deadline);
             }
+        });
+        let result = if budget.is_some() {
+            match tokio::time::timeout_at(deadline.into(), wait).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!("workspace teardown exceeded the shutdown deadline; leaving it in the background");
+                    return;
+                }
+            }
+        } else {
+            wait.await
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "workspace teardown panicked");
         }
     }
 }
 
 impl Drop for HostedWorkspaceRuntime {
     fn drop(&mut self) {
-        // Cancellation/unwind fallback: no async join is possible here. Abort
-        // the tasks explicitly before clearing the cell so field declaration
-        // order can never expose a cleared cell to a detached flusher.
+        if self.clear_started {
+            return;
+        }
+        // Cancellation can precede the blocking hop, or the host can drop
+        // without a shutdown. Neither path may join a stuck root inline.
         self.artifacts.cell.cancel_reindex();
         self.artifacts.tasks.cancel_and_abort();
-        let _ = self.artifacts.cell.clear();
+        let cell = Arc::clone(&self.artifacts.cell);
+        let keepalive = std::mem::replace(&mut self.artifacts.keepalive, Box::new(()));
+        if let Err(error) = std::thread::Builder::new()
+            .name("chan-workspace-teardown".into())
+            .spawn(move || {
+                drop(keepalive);
+                let _ = cell.clear();
+            })
+        {
+            tracing::warn!(%error, "could not start workspace teardown thread");
+        }
     }
 }
 
@@ -878,7 +904,7 @@ impl WorkspaceHost {
             #[cfg(test)]
             open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
             #[cfg(test)]
-            shutdown_release_budget: Duration::from_secs(5),
+            shutdown_release_budget: WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT,
             #[cfg(test)]
             root_check_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1526,6 +1552,7 @@ impl WorkspaceHost {
             ),
         };
         let runtime = HostedWorkspaceRuntime {
+            clear_started: false,
             holds_workspace: true,
             canonical_root,
             root,
@@ -1713,6 +1740,7 @@ impl WorkspaceHost {
             handle: handle.clone(),
         };
         let runtime = HostedWorkspaceRuntime {
+            clear_started: false,
             holds_workspace: false,
             canonical_root: canonical_key(&root),
             root,
@@ -3493,9 +3521,13 @@ impl WorkspaceHost {
             }
             workspaces.drain().map(|(_, runtime)| runtime).collect()
         };
+        #[cfg(test)]
+        let budget = self.shutdown_release_budget;
+        #[cfg(not(test))]
+        let budget = WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT;
         let mut shutdowns = tokio::task::JoinSet::new();
         for runtime in runtimes {
-            shutdowns.spawn(runtime.shutdown());
+            shutdowns.spawn(runtime.shutdown_with_budget(Some(budget)));
         }
         while let Some(result) = shutdowns.join_next().await {
             if let Err(error) = result {
@@ -4465,8 +4497,7 @@ fn duplicate_prefix_error(prefix: &str) -> Error {
 /// teardown and the wait is typically a few milliseconds. Bounded so a
 /// wedged reindex cannot hang close: past the deadline the caller sees
 /// the same lingering-flock behavior it would have had without the wait.
-fn wait_for_workspace_release(weak: &Weak<Workspace>, lock_dir: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+fn wait_for_workspace_release(weak: &Weak<Workspace>, lock_dir: &Path, deadline: Instant) {
     // Two conditions, not one: the last strong `Arc` must drop, AND the
     // per-workspace flock must actually release. An `Arc`'s strong count hits
     // zero *before* `Workspace::drop` runs the `_lock` field's drop, so
@@ -4476,7 +4507,7 @@ fn wait_for_workspace_release(weak: &Weak<Workspace>, lock_dir: &Path) {
     // (and releases it), proving the prior holder's Drop completed.
     while weak.strong_count() > 0 || !chan_workspace::lock::is_free(lock_dir) {
         if Instant::now() >= deadline {
-            tracing::warn!("close_workspace: workspace flock still held 5s after teardown");
+            tracing::warn!("workspace writer lock still held at the teardown deadline");
             return;
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -4523,6 +4554,7 @@ mod tests {
             std::fs::create_dir(&root).expect("workspace root");
             let prefix = format!("/workspace-{index}");
             let runtime = HostedWorkspaceRuntime {
+                clear_started: false,
                 holds_workspace: true,
                 canonical_root: canonical_key(&root),
                 root,
@@ -6562,6 +6594,7 @@ mod tests {
             );
             artifacts.cell = Arc::new(FakeWorkspaceCell(std::sync::Mutex::new(Some(workspace))));
             host.workspaces.write().unwrap().insert("/workspace".into(), HostedWorkspaceRuntime {
+                clear_started: false,
                 holds_workspace: true,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_key(root.path()),
@@ -6804,6 +6837,7 @@ mod tests {
         host.workspaces.write().expect("host map").insert(
             "/workspace".into(),
             HostedWorkspaceRuntime {
+                clear_started: false,
                 holds_workspace: true,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_root.clone(),
@@ -6907,6 +6941,7 @@ mod tests {
                 host.workspaces.write().unwrap().insert(
                     prefix.into(),
                     HostedWorkspaceRuntime {
+                        clear_started: false,
                         holds_workspace: true,
                         root: cfg.path().to_path_buf(),
                         canonical_root: cfg.path().to_path_buf(),
@@ -6972,6 +7007,7 @@ mod tests {
                 workspaces.insert(
                     prefix.to_string(),
                     HostedWorkspaceRuntime {
+                        clear_started: false,
                         holds_workspace: prefix == "/workspace",
                         root: root.path().to_path_buf(),
                         canonical_root: canonical_root.clone(),
@@ -9429,6 +9465,7 @@ mod tests {
             host.workspaces.write().expect("host map").insert(
                 "/terminal".to_string(),
                 HostedWorkspaceRuntime {
+                    clear_started: false,
                     holds_workspace: false,
                     root: PathBuf::from("/"),
                     canonical_root,
