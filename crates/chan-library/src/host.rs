@@ -7114,6 +7114,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_open_of_a_mounted_root_returns_beside_an_abandoned_revalidation() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            let mounted = host
+                .open_or_get_registered_workspace(root.path(), serve_config("/mounted"))
+                .await
+                .unwrap();
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            *host.revalidate_probe.lock().unwrap() = Some(RootCheckProbe {
+                entered,
+                release: released,
+            });
+            let mut first = Box::pin(
+                host.open_or_get_registered_workspace(root.path(), serve_config("/mounted")),
+            );
+            tokio::select! {
+                entry = entry => entry.unwrap(),
+                result = &mut first => panic!("the revalidation was not held: {result:?}"),
+            }
+            drop(first);
+            // A second revalidation would take this hold and say so.
+            let (again, mut revalidated) = tokio::sync::oneshot::channel();
+            let (_again_release, again_released) = std::sync::mpsc::channel();
+            *host.revalidate_probe.lock().unwrap() = Some(RootCheckProbe {
+                entered: again,
+                release: again_released,
+            });
+            let second = tokio::time::timeout(
+                Duration::from_secs(5),
+                host.open_or_get_registered_workspace(root.path(), serve_config("/mounted")),
+            )
+            .await;
+            release.send(()).unwrap();
+            let second = second
+                .expect("an open of a mounted root waited for a revalidation whose caller left")
+                .expect("an open of a mounted root returns its mount");
+            assert_eq!(second.prefix, mounted.prefix);
+            assert!(
+                revalidated.try_recv().is_err(),
+                "an open of a mounted root revalidated beside a revalidation in flight"
+            );
+            host.close_workspace_for_root(root.path(), false)
+                .await
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn already_open_mount_waits_for_an_in_process_release() {
         // A hang guard, not a latency bound: the workspace opens and the close are
         // real I/O that a loaded runner can stretch to several seconds, and the
