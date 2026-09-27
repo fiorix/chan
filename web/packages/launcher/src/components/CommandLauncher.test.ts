@@ -815,6 +815,7 @@ describe("Waiting command refusals", () => {
       openCommandLauncher("computers");
       flushSync();
     }
+    const retainedOperation = surface === "replaced" ? executionDraft.operation : null;
     await vi.advanceTimersByTimeAsync(outcome === "timeout" ? 60_000 : 1000);
     await flushPromises();
     if (surface === "visible") {
@@ -827,7 +828,7 @@ describe("Waiting command refusals", () => {
       expect(library.error).toBe(`Project: ${sentence}`);
       if (surface === "replaced") expect(target.querySelector(".deck-operation-icon.error")).toBeNull();
       else expect(activeCommandLauncherDraft().visible).toBe(false);
-      expect(executionDraft.operation).toBeNull();
+      expect(executionDraft.operation).toBe(retainedOperation);
       openCommandLauncher("computers");
       await flushPromises();
       expect(target.querySelector(".deck-operation")).toBeNull();

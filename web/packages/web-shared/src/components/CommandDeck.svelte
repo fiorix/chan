@@ -33,6 +33,7 @@
     onScope,
     onClearScope,
     onSuccess,
+    onError,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -47,6 +48,7 @@
     onScope: (scope: DeckScopeId) => void;
     onClearScope: () => void;
     onSuccess?: (item: DeckItem) => void;
+    onError: (item: DeckItem, error: unknown) => void;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -58,6 +60,7 @@
   let pointerIndex: number | null = $state(null);
   let scopeIndex = $state(0);
   let wasOpen = false;
+  let closeVersion = 0;
   // Where focus goes back to when the deck closes, captured as it opens.
   let returnFocus: HTMLElement | null = null;
   // The run in flight: a plain item while the host handles it, an awaited
@@ -101,6 +104,7 @@
       pointerIndex = null;
       void tick().then(() => input?.focus());
     } else if (!isOpen && wasOpen) {
+      closeVersion += 1;
       // Handing focus back is not navigation: it must not scroll the page.
       if (!closingRun && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
       returnFocus = null;
@@ -229,13 +233,20 @@
   async function execute(item: DeckItem): Promise<void> {
     if (item.disabled) return;
     const executionDraft = draft;
-    if (!item.awaitResult) {
-      const run = {};
-      closingRun = run;
-      try {
-        await onChoose(item);
-      } catch (error) {
-        if (draft !== executionDraft) return;
+    const token = {};
+    executionToken = token;
+    preparationToken = null;
+    const executionCloseVersion = closeVersion;
+    let closedDuringChoose = false;
+    const ownsPending = (): boolean =>
+      executionToken === token &&
+      executionDraft.operation?.kind === "pending" &&
+      executionDraft.operation.itemId === item.id;
+
+    function reject(error: unknown): void {
+      const ownsCard = executionToken === token && (!item.awaitResult || ownsPending());
+      if (open && draft === executionDraft && ownsCard &&
+          closeVersion === executionCloseVersion && !closedDuringChoose) {
         executionDraft.operation = {
           kind: "error",
           itemId: item.id,
@@ -243,6 +254,25 @@
           message: errorMessage(error),
           selected: "back",
         };
+        return;
+      }
+      // Retire this run's spinner even on a hidden or replaced draft, while
+      // preserving any card a later command or preparation has taken.
+      if (ownsPending()) executionDraft.operation = null;
+      onError(item, error);
+    }
+
+    if (!item.awaitResult) {
+      const run = {};
+      closingRun = run;
+      try {
+        const chosen = onChoose(item);
+        // A host can close synchronously and reopen before the open effect
+        // runs. Observe that close before yielding to the command's promise.
+        closedDuringChoose = !open;
+        await chosen;
+      } catch (error) {
+        reject(error);
       } finally {
         // Still open: the host kept the deck up (a submenu, a refusal), so
         // the next close is a dismissal.
@@ -250,11 +280,11 @@
       }
       return;
     }
-    const token = {};
-    executionToken = token;
     draft.operation = { kind: "pending", itemId: item.id, title: item.title };
     try {
-      const result = await onChoose(item);
+      const chosen = onChoose(item);
+      closedDuringChoose = !open;
+      const result = await chosen;
       // A hidden pending command can finish after the draft it started with
       // was cleared and swapped for a fresh one. Never paint that result into
       // the new draft.
@@ -284,14 +314,7 @@
       if (draft !== executionDraft) return;
       succeed(item);
     } catch (error) {
-      if (draft !== executionDraft) return;
-      executionDraft.operation = {
-        kind: "error",
-        itemId: item.id,
-        title: item.title,
-        message: errorMessage(error),
-        selected: "back",
-      };
+      reject(error);
     }
   }
 
