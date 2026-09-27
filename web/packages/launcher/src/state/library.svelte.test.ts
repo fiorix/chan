@@ -24,6 +24,7 @@ import {
   windowLiveTerminalCount,
 } from "./library.svelte";
 import { ApiError } from "../api/library";
+import { setDemoMode } from "./demo.svelte";
 import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "./pending.svelte";
 
 // Pin the in-memory mock as the backend so these tests drive the registry +
@@ -408,5 +409,70 @@ describe("gateway registry state", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe("workspace polling", () => {
+  afterEach(() => {
+    stopWatching();
+    setDemoMode(null);
+    vi.restoreAllMocks();
+  });
+
+  it("keeps external lock changes current on a two-second visible cadence", async () => {
+    stopWatching();
+    vi.useFakeTimers();
+    const { backend } = await import("../api/backend");
+    const row = { ...library.workspaces[0]!, on: false, status: "locked" as const };
+    const list = vi.spyOn(backend, "listWorkspaces").mockResolvedValue([row]);
+    vi.spyOn(backend, "watchWindows").mockReturnValue(() => {});
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    await loadLibrary();
+    expect(library.workspaces[0]!.status).toBe("locked");
+    list.mockResolvedValue([{ ...row, status: "stopped" }]);
+    list.mockClear();
+
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(list).not.toHaveBeenCalled();
+    expect(library.workspaces[0]!.status).toBe("locked");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(library.workspaces[0]!.status).toBe("stopped");
+
+    visibility.mockReturnValue("hidden");
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(1);
+    visibility.mockReturnValue("visible");
+    stopWatching();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not install a demo poll and still refreshes on the window feed", async () => {
+    stopWatching();
+    vi.useFakeTimers();
+    setDemoMode({});
+    const { backend } = await import("../api/backend");
+    const row = { ...library.workspaces[0]!, on: false, status: "stopped" as const };
+    const list = vi.spyOn(backend, "listWorkspaces").mockResolvedValue([row]);
+    let feed!: Parameters<typeof backend.watchWindows>[0];
+    vi.spyOn(backend, "watchWindows").mockImplementation((onSet) => {
+      feed = onSet;
+      return () => {};
+    });
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    await loadLibrary();
+    expect(interval).not.toHaveBeenCalled();
+    list.mockResolvedValue([{ ...row, on: true, status: "running" }]);
+    list.mockClear();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(list).not.toHaveBeenCalled();
+    expect(library.workspaces[0]!.status).toBe("stopped");
+
+    feed({ windows: [], leaders: {} });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(library.workspaces[0]!.status).toBe("running");
   });
 });
