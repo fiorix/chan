@@ -2389,7 +2389,7 @@ export function resolvePendingPrompt(
   const pending = tab.pendingPrompt;
   if (!pending || pending.id !== id) return;
   // Queue and delivery frames cannot settle an outstanding cancellation.
-  if (pending.phase === "recalling") return;
+  if (pending.phase === "recalling" && phase !== "rejected") return;
   tab.pendingPrompt = { ...pending, phase, ...(depth !== undefined ? { depth } : {}) };
 }
 
