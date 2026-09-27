@@ -211,6 +211,21 @@
     else sourceRef?.focus();
   }
 
+  let findWasOpen = false;
+  $effect(() => {
+    const open = tab.find?.open === true;
+    const closed = findWasOpen && !open;
+    findWasOpen = open;
+    if (!closed) return;
+    // Wait for the focused find control to leave the DOM. A command or
+    // another control may take focus during that update.
+    void tick().then(() => {
+      if (!active || !focused || tab.find?.open) return;
+      const owner = document.activeElement;
+      if (owner === null || owner === document.body) focusActiveEditor();
+    });
+  });
+
   function refocusAfterSlidePreviewClose(): void {
     void tick().then(() => {
       if (!active || !focused) return;
