@@ -6368,6 +6368,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_removal_answers_while_an_abandoned_open_owns_the_writer_lock() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let host = Arc::new(WorkspaceHost::new(library.clone(), fake_builder()));
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (release, released) = std::sync::mpsc::channel();
+        *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+            let workspace = result.as_ref().unwrap();
+            entered
+                .take()
+                .unwrap()
+                .send(Arc::downgrade(workspace))
+                .unwrap();
+            released.recv().unwrap();
+        }));
+        let mounting = Arc::clone(&host);
+        let mounting_root = root.path().to_path_buf();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/held"))
+                .await
+        });
+        let workspace = entry.await.unwrap();
+        mount.abort();
+        assert!(mount.await.unwrap_err().is_cancelled());
+        let removal = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.remove_workspace_for_root(root.path(), false),
+        )
+        .await;
+        release.send(()).unwrap();
+        assert!(
+            removal.is_ok(),
+            "removal waited for the abandoned open's writer lock"
+        );
+        assert!(
+            matches!(
+                removal.unwrap(),
+                Err(Error::Core(ChanError::WorkspaceAlreadyOpen))
+            ),
+            "a live workspace must retain its typed removal refusal"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while workspace.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(host
+            .remove_workspace_for_root(root.path(), false)
+            .await
+            .unwrap()
+            .completed());
+        assert!(library.workspace_paths_for(root.path()).is_none());
+        assert!(host.workspaces.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_panicked_open_keeps_its_root_locked_until_mount_settlement() {
+        struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let host = WorkspaceHost::new(library, fake_builder());
+        let key = canonical_key(root.path());
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (release, released) = std::sync::mpsc::channel();
+        let (finished, completion) = tokio::sync::oneshot::channel();
+        let finished = Finished(Some(finished));
+        *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+            let _ = &finished;
+            result.as_ref().unwrap().stop_open_recovery();
+            entered.take().unwrap().send(()).unwrap();
+            released.recv().unwrap();
+            panic!("filesystem open task panicked");
+        }));
+        let mut mount =
+            Box::pin(host.open_or_get_registered_workspace(root.path(), serve_config("/panic")));
+        tokio::select! {
+            entry = entry => entry.unwrap(),
+            result = &mut mount => panic!("the open was not held: {result:?}"),
+        }
+        release.send(()).unwrap();
+        completion.await.unwrap();
+        // Wait for the blocking task to finish unwinding, leaving its receiver
+        // unpolled so Starting has not yet been settled by the caller.
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        let mut next = Box::pin(host.root_locks.lock(&key));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                std::future::Future::poll(next.as_mut(), cx).is_pending()
+            ))
+            .await,
+            "a panicked open released its root lock before mount settlement"
+        );
+        assert!(mount.await.is_err());
+        let _next = next.await;
+        assert!(
+            matches!(
+                host.mount_state.lock().unwrap().get(&key),
+                Some(MountState::Error(_))
+            ),
+            "the next lifecycle caller observed an unsettled mount"
+        );
+    }
+
+    #[tokio::test]
     async fn a_cancelled_open_releases_the_workspace_before_its_root_lock() {
         tokio::time::timeout(Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();

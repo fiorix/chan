@@ -6956,6 +6956,143 @@ mod tests {
     }
 
     #[test]
+    fn a_close_finishes_beside_an_abandoned_filesystem_open() {
+        lifecycle_beside_abandoned_root_call(false, false);
+    }
+
+    #[test]
+    fn a_removal_finishes_beside_an_abandoned_filesystem_open() {
+        lifecycle_beside_abandoned_root_call(false, true);
+    }
+
+    #[test]
+    fn a_mounted_close_finishes_beside_an_abandoned_revalidation() {
+        lifecycle_beside_abandoned_root_call(true, false);
+    }
+
+    fn lifecycle_beside_abandoned_root_call(mounted: bool, remove: bool) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            state
+                .host
+                .library()
+                .register_workspace(root.path())
+                .unwrap();
+            let config = tenant_config(state.addr, "/abandoned");
+            if mounted {
+                state
+                    .host
+                    .open_or_get_registered_workspace(root.path(), config.clone())
+                    .await
+                    .unwrap();
+            }
+            let hop = if mounted {
+                "Workspace::revalidate_root"
+            } else {
+                "Library::open_workspace"
+            };
+            let stall = root_stall::stall_matching(root.path(), &[hop]);
+            let opening = Arc::clone(&state.host);
+            let opening_root = root.path().to_path_buf();
+            let mut caller = tokio::spawn(async move {
+                opening
+                    .open_or_get_registered_workspace(opening_root, config)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while stall.entered().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the call never reached its filesystem hop");
+            tokio::time::timeout(Duration::from_millis(100), &mut caller)
+                .await
+                .expect_err("the caller expires while its filesystem call is held");
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+                if remove {
+                    state
+                        .host
+                        .remove_workspace_for_root(root.path(), false)
+                        .await
+                } else {
+                    state
+                        .host
+                        .close_workspace_for_root(root.path(), false)
+                        .await
+                }
+            })
+            .await;
+            assert!(
+                outcome.is_ok(),
+                "the lifecycle operation waited for an abandoned {hop}"
+            );
+            let outcome = outcome.unwrap().unwrap();
+            assert_eq!(
+                outcome,
+                if mounted || remove {
+                    WorkspaceLifecycleOutcome::Completed
+                } else {
+                    WorkspaceLifecycleOutcome::NotFound
+                }
+            );
+            assert!(
+                state.host.mounted_prefixes().unwrap().is_empty(),
+                "the abandoned call kept a mount"
+            );
+            assert_eq!(
+                state
+                    .host
+                    .library()
+                    .workspace_paths_for(root.path())
+                    .is_none(),
+                remove
+            );
+            drop(stall);
+            // Drain the old call by a fresh open. A removed root must stay
+            // removed; a closed root can mount only on this explicit request.
+            let reopened = tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                state.host.open_or_get_registered_workspace(
+                    root.path(),
+                    tenant_config(state.addr, "/fresh"),
+                ),
+            )
+            .await
+            .expect("the abandoned call did not drain");
+            if remove {
+                assert!(
+                    reopened.is_err(),
+                    "an abandoned open recreated a removed root"
+                );
+                assert!(state.host.mounted_prefixes().unwrap().is_empty());
+                assert!(state
+                    .host
+                    .library()
+                    .workspace_paths_for(root.path())
+                    .is_none());
+            } else {
+                reopened.expect("a fresh caller mounts after the old call drains");
+                state
+                    .host
+                    .close_workspace_for_root(root.path(), false)
+                    .await
+                    .unwrap();
+            }
+        });
+    }
+
+    #[test]
     fn opens_of_a_hung_root_hold_one_blocking_thread() {
         hung_root_hop_holds_one_blocking_thread(false);
     }
