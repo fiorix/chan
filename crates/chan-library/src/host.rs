@@ -5938,6 +5938,107 @@ mod tests {
         );
     }
 
+    /// A host over one registered workspace whose root moved under a symlink
+    /// after it was registered, with an overlay holding its row on under the
+    /// stored root, as the launcher's on and the desktop's snapshot write it.
+    /// Returns the stored root and the canonical key it resolves to now.
+    #[cfg(unix)]
+    fn relinked_host() -> (
+        Arc<WorkspaceHost>,
+        Arc<WorkspaceOverlay>,
+        PathBuf,
+        PathBuf,
+        [tempfile::TempDir; 2],
+    ) {
+        use std::os::unix::fs::symlink;
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = library
+            .register_workspace(&parent.join("ws"))
+            .unwrap()
+            .root_path;
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let canonical = chan_workspace::paths::canonicalize_normalized(&stored);
+        assert_ne!(canonical, stored, "fixture: the root did not relink");
+        let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+        let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+        overlay.set(&stored.to_string_lossy(), true);
+        host.install_workspace_overlay(Arc::clone(&overlay));
+        (host, overlay, stored, canonical, [cfg, holder])
+    }
+
+    /// A user's off of a relinked root that is not mounted, called with the
+    /// stored root as the launcher's off route calls it, leaves no on-row
+    /// under either spelling, so no reader of the on rows brings it back.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_off_of_a_relinked_root_leaves_no_on_row() {
+        let (host, overlay, stored, _canonical, _dirs) = relinked_host();
+        host.close_workspace_for_root(&stored, false).await.unwrap();
+        assert_eq!(
+            overlay.on_paths(),
+            Vec::<String>::new(),
+            "an on-row survived the off"
+        );
+    }
+
+    /// The same for a relinked root that is mounted: the close records off
+    /// under both spellings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_off_of_a_mounted_relinked_root_leaves_no_on_row() {
+        let (host, overlay, stored, _canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        assert!(
+            host.close_workspace_for_root(&stored, false)
+                .await
+                .unwrap()
+                .completed(),
+            "fixture: the close did not take the mount down"
+        );
+        assert_eq!(
+            overlay.on_paths(),
+            Vec::<String>::new(),
+            "an on-row survived the off"
+        );
+    }
+
+    /// Turned back on after an off, as the launcher's on route writes its
+    /// row under the stored root, a relinked root reads on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_turned_off_and_on_again_reads_on() {
+        let (host, overlay, stored, _canonical, _dirs) = relinked_host();
+        host.close_workspace_for_root(&stored, false).await.unwrap();
+        overlay.set(&stored.to_string_lossy(), true);
+        assert_eq!(
+            overlay.on_paths(),
+            vec![stored.to_string_lossy().into_owned()],
+            "the relinked root turned on again does not read on"
+        );
+    }
+
+    /// A forget of a relinked root leaves no overlay row under either
+    /// spelling, so nothing is restored, or fails to restore, next start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_forget_of_a_relinked_root_leaves_no_overlay_row() {
+        let (host, overlay, stored, _canonical, _dirs) = relinked_host();
+        assert!(host
+            .remove_workspace_for_root(&stored, false)
+            .await
+            .unwrap()
+            .completed());
+        assert_eq!(overlay.entries(), Vec::new(), "a row survived the forget");
+    }
+
     /// A terminal tenant built across the last shutdown sweep is refused at
     /// publication and shuts its runtime down before it reports the refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

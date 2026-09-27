@@ -9035,6 +9035,222 @@ mod tests {
             drop(stall);
             restoring.join().expect("the restore thread");
         }
+
+        /// Relinked and turned-off rows queued behind a hung root in the boot
+        /// restore. Unix: the relinked root is made with a symlink.
+        #[cfg(unix)]
+        mod held_restore {
+            use super::*;
+
+            /// A boot restore parked on a hung root, with two rows queued behind
+            /// it: `relinked`, whose root moved under a symlink after it was
+            /// registered, and `plain`. Each field holds a row's stored root, the
+            /// spelling its overlay on-row uses.
+            struct HeldRestore {
+                runtime: tokio::runtime::Runtime,
+                state: Arc<AppState>,
+                hung: String,
+                relinked: String,
+                plain: String,
+                /// The path the relinked workspace is found at now.
+                relinked_now: PathBuf,
+                stall: Option<root_stall::RootStall>,
+                restoring: Option<std::thread::JoinHandle<()>>,
+                app: tauri::App<tauri::test::MockRuntime>,
+                _dirs: [tempfile::TempDir; 4],
+            }
+
+            impl HeldRestore {
+                fn new() -> Self {
+                    use std::os::unix::fs::symlink;
+
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()
+                        .expect("test runtime");
+                    let config = tempfile::tempdir().expect("config dir");
+                    let hung = tempfile::tempdir().expect("hung root");
+                    let plain = tempfile::tempdir().expect("plain root");
+                    let holder = tempfile::tempdir().expect("relinked holder");
+                    let parent = holder.path().join("parent");
+                    std::fs::create_dir_all(parent.join("ws")).expect("relinked root");
+                    let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
+                        .expect("library");
+                    let stored = |root: &Path| {
+                        library
+                            .register_workspace(root)
+                            .expect("register")
+                            .root_path
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    let (hung_root, relinked, plain_root) =
+                        (stored(hung.path()), stored(&parent.join("ws")), stored(plain.path()));
+                    let moved = holder.path().join("moved");
+                    std::fs::rename(&parent, &moved).expect("move the parent");
+                    symlink(&moved, &parent).expect("link the old parent");
+                    let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
+                    embedded
+                        .install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
+                    let overlay = embedded.workspace_overlay().expect("the overlay is installed");
+                    for path in [&hung_root, &relinked, &plain_root] {
+                        overlay.set(path, true);
+                    }
+                    let state = empty_state();
+                    assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+                    let stall = root_stall::stall(&hung_root);
+                    let app = tauri::test::mock_app();
+                    let restoring = {
+                        let handle = runtime.handle().clone();
+                        let app_handle = app.handle().clone();
+                        let state = Arc::clone(&state);
+                        std::thread::spawn(move || {
+                            let queued = queue_boot_restore(&state);
+                            handle.block_on(restore_on_workspaces(app_handle, state, queued))
+                        })
+                    };
+                    assert!(
+                        stall.wait_entered(std::time::Duration::from_secs(10)),
+                        "fixture: the restore never reached the hung root"
+                    );
+                    Self {
+                        runtime,
+                        state,
+                        hung: hung_root,
+                        relinked,
+                        plain: plain_root,
+                        relinked_now: moved.join("ws"),
+                        stall: Some(stall),
+                        restoring: Some(restoring),
+                        app,
+                        _dirs: [config, hung, plain, holder],
+                    }
+                }
+
+                fn embedded(&self) -> &embedded::EmbeddedServer {
+                    self.state.embedded().expect("embedded")
+                }
+
+                /// What `begin_normal_shutdown` writes before its drain.
+                fn quit(&self) -> Vec<String> {
+                    self.state
+                        .shutdown_started
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    snapshot_workspaces(&self.state);
+                    let mut on = self
+                        .embedded()
+                        .workspace_overlay()
+                        .expect("the overlay is installed")
+                        .on_paths();
+                    on.sort();
+                    on
+                }
+
+                /// The launcher's off, which calls the host with the row's stored
+                /// root.
+                fn launcher_off(&self, stored: &str) {
+                    self.runtime
+                        .block_on(self.embedded().close_workspace_root(Path::new(stored), false))
+                        .expect("the launcher's off");
+                }
+
+                fn handoff_close(&self, path: &Path, remove: bool) {
+                    self.runtime
+                        .block_on(close_workspace_from_handoff(
+                            self.app.handle().clone(),
+                            Arc::clone(&self.state),
+                            path.to_path_buf(),
+                            remove,
+                        ))
+                        .expect("the handoff close");
+                }
+
+                /// Let the hung root answer and wait for the restore to return.
+                fn release(&mut self) {
+                    drop(self.stall.take());
+                    if let Some(restoring) = self.restoring.take() {
+                        restoring.join().expect("the restore thread");
+                    }
+                }
+            }
+
+            impl Drop for HeldRestore {
+                /// The restore holds a thread blocked on the runtime until the
+                /// hung root answers, so it finishes before the runtime drops.
+                fn drop(&mut self) {
+                    drop(self.stall.take());
+                    if let Some(restoring) = self.restoring.take() {
+                        let _ = restoring.join();
+                    }
+                }
+            }
+
+            fn sorted(mut paths: Vec<String>) -> Vec<String> {
+                paths.sort();
+                paths
+            }
+
+            /// `chan close` of a relinked workspace queued behind a hung root
+            /// holds across a quit: the close's own snapshot and the quit's do
+            /// not write it back on under the spelling its on-row used.
+            #[test]
+            fn a_handoff_close_of_a_queued_relinked_root_reads_off_after_a_quit() {
+                let held = HeldRestore::new();
+                held.handoff_close(&held.relinked_now, false);
+                assert_eq!(
+                    held.quit(),
+                    sorted(vec![held.hung.clone(), held.plain.clone()]),
+                    "the closed relinked workspace reads on after the quit"
+                );
+            }
+
+            /// The same for the launcher's off, which does not snapshot.
+            #[test]
+            fn a_launcher_off_of_a_queued_relinked_root_reads_off_after_a_quit() {
+                let held = HeldRestore::new();
+                held.launcher_off(&held.relinked);
+                assert_eq!(
+                    held.quit(),
+                    sorted(vec![held.hung.clone(), held.plain.clone()]),
+                    "the relinked workspace turned off reads on after the quit"
+                );
+            }
+
+            /// `chan workspace forget` of a relinked workspace queued behind a
+            /// hung root leaves no on-row, so the next start has nothing of it
+            /// to restore or fail to restore.
+            #[test]
+            fn a_forget_of_a_queued_relinked_root_leaves_no_row_to_restore() {
+                let held = HeldRestore::new();
+                held.handoff_close(&held.relinked_now, true);
+                assert_eq!(
+                    held.quit(),
+                    sorted(vec![held.hung.clone(), held.plain.clone()]),
+                    "the forgotten relinked workspace is still on"
+                );
+            }
+
+            /// A queued row turned off while the restore waited on an earlier
+            /// root is not mounted when the restore reaches it.
+            #[test]
+            fn the_restore_skips_a_row_turned_off_while_it_waited() {
+                let mut held = HeldRestore::new();
+                let plain = held.plain.clone();
+                let hung = held.hung.clone();
+                held.launcher_off(&plain);
+                held.release();
+                let embedded = held.embedded();
+                assert!(
+                    embedded.is_workspace_mounted_by_key(Path::new(&hung)),
+                    "fixture: the hung root did not mount once it answered"
+                );
+                assert!(
+                    !embedded.is_workspace_mounted_by_key(Path::new(&plain)),
+                    "the restore mounted a row turned off while it waited"
+                );
+            }
+        }
     }
 
     /// What the on-set snapshot records beside the shared terminal tenant and

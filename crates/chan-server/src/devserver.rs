@@ -6879,6 +6879,56 @@ mod tests {
         );
     }
 
+    /// A relinked root turned off through the host, as the launcher's off
+    /// route turns it off, reads off after a devserver restart: its on-row,
+    /// kept under the root its registry row stores, is written off too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_turned_off_reads_off_after_a_restart() {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("mkdir");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register");
+        let stored = state.host.library().list_workspaces()[0].root_path.clone();
+        std::fs::rename(&parent, holder.path().join("moved")).expect("move the parent");
+        symlink(holder.path().join("moved"), &parent).expect("link the old parent");
+        state
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .set(&stored.to_string_lossy(), true);
+
+        state
+            .host
+            .close_workspace_for_root(&stored, false)
+            .await
+            .expect("turn off through the host");
+
+        let restarted = devserver_with_windows(home.path()).await;
+        let rows = restarted
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        let rows = restarted.register_restore_rows(rows).await;
+        let attempts = restarted.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(&restarted), attempts, shutdown_rx).await;
+        let entries = restarted.workspace_entries();
+        assert!(
+            entries.iter().all(|entry| !entry.on),
+            "the relinked root turned off is on after a restart: {entries:?}"
+        );
+    }
+
     /// A registered root that moved under a symlink still mounts through the
     /// devserver. Its registry row caches the old spelling until the serve
     /// request's registration re-resolves it, and the attempt's intent check
