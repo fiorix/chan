@@ -7,13 +7,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { WindowRecord, WindowSet } from "../api/library";
 
-const { createWindow, discardWindow, setWindowVisibility } = vi.hoisted(() => ({
+const { createWindow, discardWindow, setWindowVisibility, checkWindowPage } = vi.hoisted(() => ({
   createWindow: vi.fn(),
+  checkWindowPage: vi.fn(),
   discardWindow: vi.fn(),
   setWindowVisibility: vi.fn(),
 }));
 vi.mock("../api/backend", () => ({
-  backend: { createWindow, discardWindow, setWindowVisibility },
+  backend: { createWindow, discardWindow, setWindowVisibility, checkWindowPage },
 }));
 
 import {
@@ -33,6 +34,7 @@ interface FakeWin {
   focus: ReturnType<typeof vi.fn>;
   location: { href: string };
   sessionStorage: Storage;
+  document: Document;
 }
 
 let opened: { win: FakeWin; url: string; name: string }[] = [];
@@ -64,6 +66,7 @@ function fakeWin(): FakeWin {
     focus: vi.fn(),
     location: { href: "" },
     sessionStorage: clonedSessionStorage(sessionStorage),
+    document: document.implementation.createHTMLDocument(),
   };
   return w;
 }
@@ -88,12 +91,20 @@ function record(over: Partial<WindowRecord>): WindowRecord {
 
 const set = (windows: WindowRecord[]): WindowSet => ({ windows });
 
+function gateResponse(retryAfter: string | null = "1"): Response {
+  return new Response(JSON.stringify({ error: "devserver is restoring terminal sessions" }), {
+    status: 503,
+    headers: retryAfter === null ? {} : { "Retry-After": retryAfter },
+  });
+}
+
 beforeEach(() => {
   sessionStorage.clear();
   resetWindowManager();
   clearAllWindowAttention();
   setDemoReset(null);
   createWindow.mockReset();
+  checkWindowPage.mockReset().mockImplementation(async () => new Response("<html></html>"));
   discardWindow.mockReset().mockResolvedValue(undefined);
   setWindowVisibility.mockReset().mockResolvedValue(undefined);
   opened = [];
@@ -106,6 +117,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("mintWindow", () => {
@@ -146,6 +158,118 @@ describe("mintWindow", () => {
     await expect(mintWindow("workspace", { workspacePath: "/x/proj" })).rejects.toThrow("not running");
     expect(opened[0].win.close).toHaveBeenCalled();
     expect(hasWindowHandle("w-1")).toBe(false);
+  });
+
+  it("opens in the gesture before minting or checking the page", async () => {
+    const calls: string[] = [];
+    vi.spyOn(window, "open").mockImplementation(() => {
+      calls.push("open");
+      return fakeWin() as unknown as Window;
+    });
+    createWindow.mockImplementation(async () => {
+      calls.push("mint");
+      return record({});
+    });
+    checkWindowPage.mockImplementation(async () => {
+      calls.push("check");
+      return new Response("<html></html>");
+    });
+    const pending = mintWindow("terminal");
+    expect(calls).toEqual(["open", "mint"]);
+    await pending;
+    expect(calls).toEqual(["open", "mint", "check"]);
+  });
+
+  it.each([
+    ["seconds", "2", 2000],
+    ["date", "Sun, 27 Sep 2026 12:00:03 GMT", 3000],
+    ["absent", null, 1000],
+  ])("waits for the page and honours the %s Retry-After", async (_kind, retryAfter, delay) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockImplementationOnce(async () => gateResponse(retryAfter));
+    const pending = mintWindow("workspace");
+    await vi.advanceTimersByTimeAsync(0);
+    const child = opened[0].win;
+    expect(child.location.href).toBe("");
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(child.location.href).toBe("");
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(checkWindowPage).toHaveBeenCalledTimes(2);
+    expect(child.location.href).toContain("/proj-1/?w=w-1");
+    expect(checkWindowPage.mock.calls[0][0]).toBe(child.location.href);
+    expect(child.closed).toBe(false);
+  });
+
+  it.each([404, 409, 500])("closes and discards on a page's %s refusal with its sentence", async (status) => {
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockResolvedValue(new Response(JSON.stringify({ error: "Page is unavailable." }), { status }));
+    const outcome = await mintWindow("workspace").then(() => null, (error: unknown) => error);
+    expect(outcome).toMatchObject({ status, message: "Page is unavailable." });
+    expect(opened[0].win.location.href).toBe("");
+    expect(opened[0].win.closed).toBe(true);
+    expect(discardWindow).toHaveBeenCalledWith("w-1");
+    expect(hasWindowHandle("w-1")).toBe(false);
+  });
+
+  it("ends the wait when the user closes the blank window", async () => {
+    vi.useFakeTimers();
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockImplementation(async () => gateResponse("30"));
+    let settled = false;
+    const pending = mintWindow("terminal").then((value) => { settled = true; return value; });
+    await vi.advanceTimersByTimeAsync(0);
+    opened[0].win.closed = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
+    expect(await pending).toBeNull();
+    expect(opened[0].win.location.href).toBe("");
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(discardWindow).toHaveBeenCalledWith("w-1");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ends at sixty seconds with the last refusal sentence", async () => {
+    vi.useFakeTimers();
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockImplementation(async () => gateResponse("120"));
+    let settled = false;
+    const pending = mintWindow("workspace").then(
+      () => { settled = true; return null; },
+      (error: unknown) => { settled = true; return error; },
+    );
+    await vi.advanceTimersByTimeAsync(59999);
+    expect(settled).toBe(false);
+    expect(opened[0].win.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toMatchObject({ status: 503, message: "devserver is restoring terminal sessions" });
+    expect(opened[0].win.closed).toBe(true);
+    expect(opened[0].win.location.href).toBe("");
+    expect(discardWindow).toHaveBeenCalledWith("w-1");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the waiting handle through disconnected feed reconciliation", async () => {
+    vi.useFakeTimers();
+    const rec = record({ connected: false, origin: "browser" });
+    createWindow.mockResolvedValue(rec);
+    checkWindowPage.mockImplementation(async () => gateResponse("1"));
+    const pending = mintWindow("workspace");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(hasWindowHandle("w-1")).toBe(true);
+    reconcileWindows(set([rec]));
+    await vi.advanceTimersByTimeAsync(3000);
+    reconcileWindows(set([rec]));
+    expect(discardWindow).not.toHaveBeenCalled();
+    expect(hasWindowHandle("w-1")).toBe(true);
+    expect(hasWindowAttention("w-1")).toBe(false);
+    checkWindowPage.mockImplementation(async () => new Response("<html></html>"));
+    await vi.advanceTimersByTimeAsync(1000);
+    await pending;
   });
 
   it("is inert under demoState.enabled (no window opened, no mint)", async () => {
