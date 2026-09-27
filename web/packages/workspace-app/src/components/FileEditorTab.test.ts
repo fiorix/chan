@@ -1343,3 +1343,45 @@ describe("the source toolbar", () => {
     expect(host.style.getPropertyValue("--editor-top-pad")).toBe("");
   });
 });
+
+describe("a right-click in the JSON tree and the table", () => {
+  function rightClick(el: Element): MouseEvent {
+    const e = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 30, clientY: 40 });
+    el.dispatchEvent(e);
+    return e;
+  }
+
+  test("a table cell keeps the browser's menu", async () => {
+    const csv = "name,count\nfigs,1\n";
+    const tab = seat(fileTab({ path: "notes/stock.csv", fileKind: "text", mode: "table", content: csv, saved: csv }));
+    const { target } = await render(tab);
+
+    const e = rightClick(target.querySelector("tbody td")!);
+    await settle(2);
+    expect({ prevented: e.defaultPrevented, menu: bubble() }).toEqual({ prevented: false, menu: null });
+  });
+
+  test("off the JSON tree the browser's menu stays, and a node still copies its path", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      const json = '{"a":1}';
+      const tab = seat(fileTab({ path: "notes/data.json", fileKind: "text", mode: "pretty", content: json, saved: json }));
+      const { target } = await render(tab);
+
+      const off = rightClick(target.querySelector(".json-pretty")!);
+      await settle(2);
+      const node = [...target.querySelectorAll<HTMLElement>(".node")].find(
+        (n) => n.querySelector(":scope > .key")?.textContent === '"a":',
+      )!;
+      const on = rightClick(node);
+      await settle(2);
+      expect({ off: off.defaultPrevented, menu: bubble(), on: on.defaultPrevented }).toEqual({
+        off: false, menu: null, on: true,
+      });
+      expect(writeText).toHaveBeenCalledWith(node.title);
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    }
+  });
+});
