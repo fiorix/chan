@@ -5618,4 +5618,74 @@ mod refusal_envelopes {
             }
         }
     }
+
+    #[tokio::test]
+    async fn window_bridge_absent() {
+        let (_dir, host) = host();
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(&app, "POST", "/api/library/windows/missing/open", None).await,
+            StatusCode::CONFLICT,
+            crate::NO_DESKTOP,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_bridge_closed() {
+        bridge_failure("closed").await;
+    }
+    #[tokio::test]
+    async fn window_bridge_dropped_reply() {
+        bridge_failure("dropped").await;
+    }
+    #[tokio::test]
+    async fn window_bridge_refused() {
+        bridge_failure("refused").await;
+    }
+
+    async fn bridge_failure(kind: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(dir.path().join("config.toml")).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let bridge = crate::DesktopBridge {
+            window_ops: Some(tx),
+            window_titles: Default::default(),
+        };
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            lib,
+            bridge,
+            crate::route_builder(),
+        ));
+        let app = launcher_router(host, None, None);
+        let request = send(&app, "POST", "/api/library/windows/missing/open", None);
+        let (response, message) = if kind == "closed" {
+            drop(rx);
+            (request.await, "desktop window manager unavailable")
+        } else {
+            let reply = async {
+                let op = rx.recv().await.unwrap();
+                let DesktopWindowOp::Open { reply, .. } = op else {
+                    panic!("open op expected")
+                };
+                if kind == "dropped" {
+                    drop(reply);
+                } else {
+                    reply
+                        .send(Err("desktop policy refused this window".into()))
+                        .unwrap();
+                }
+            };
+            let (response, ()) = tokio::join!(request, reply);
+            (
+                response,
+                if kind == "dropped" {
+                    "desktop window manager dropped the request"
+                } else {
+                    "desktop policy refused this window"
+                },
+            )
+        };
+        assert_refusal(response, StatusCode::CONFLICT, message).await;
+    }
 }
