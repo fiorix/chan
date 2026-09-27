@@ -316,7 +316,7 @@ function responseTextError(res: Response): Promise<never> {
     .catch(() => res.statusText)
     .then((text) => {
       let data: unknown = null;
-      let message = text || res.statusText;
+      let message = text || res.statusText || `HTTP ${res.status}`;
       if (text) {
         try {
           data = JSON.parse(text);
@@ -337,16 +337,18 @@ function responseTextError(res: Response): Promise<never> {
 }
 
 function xhrTextError(status: number, statusText: string, text: string): never {
-  let message = text || statusText || "request failed";
+  let data: unknown = null;
+  let message = text || statusText || `HTTP ${status}`;
   try {
-    const body = JSON.parse(text) as { error?: unknown };
-    if (typeof body.error === "string" && body.error.trim()) {
-      message = body.error;
+    data = JSON.parse(text);
+    if (data && typeof data === "object" && "error" in data &&
+        typeof data.error === "string" && data.error.trim()) {
+      message = data.error;
     }
   } catch {
     // Keep the raw text fallback.
   }
-  throw new ApiError(status, message);
+  throw new ApiError(status, message, data);
 }
 
 export type TransferRoot = "workspace" | "filesystem";

@@ -460,7 +460,7 @@ async function requestTo<T>(
       // { error } wrapper) reach the caller as ApiError.data. Any
       // non-JSON body falls back to the textual message.
       let data: unknown = null;
-      let message = text || res.statusText;
+      let message = text || res.statusText || `HTTP ${res.status}`;
       if (text) {
         try {
           data = JSON.parse(text);
