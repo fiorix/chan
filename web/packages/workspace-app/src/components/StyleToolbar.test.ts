@@ -169,7 +169,7 @@ describe("StyleToolbar", () => {
     expect(onModeToggle).toHaveBeenCalledWith("wysiwyg");
   });
 
-  test("active marks render selected state and keyboard focus expands the row", async () => {
+  test("active marks render selected state", async () => {
     const wysiwyg = fakeWysiwyg(["bold", "link", "taskList"], "quote");
     const { target } = await renderToolbar({ wysiwyg, selVer: 2 });
 
@@ -177,21 +177,41 @@ describe("StyleToolbar", () => {
     expect(button(target, "toggle link").classList.contains("on")).toBe(true);
     expect(button(target, "task list").classList.contains("on")).toBe(true);
     expect(target.querySelector<HTMLSelectElement>("select.block-kind")?.value).toBe("quote");
+  });
 
-    const secondTarget = document.createElement("div");
-    document.body.append(secondTarget);
+  test("the formatting pill opens the row by focus and preserves editor mouse focus", async () => {
+    const target = document.createElement("div");
+    const editor = document.createElement("textarea");
+    document.body.append(editor, target);
     const component = mount(StyleToolbar, {
-      target: secondTarget,
-      props: { wysiwyg: asWysiwyg(wysiwyg), selVer: 3 },
+      target,
+      props: { wysiwyg: asWysiwyg(fakeWysiwyg()), selVer: 1 },
     });
     mounted.push(component);
     await tick();
-    expect(secondTarget.querySelector(".fbtn-row")).toBeNull();
+    expect(target.querySelector(".fbtn-row")).toBeNull();
+    const pill = target.querySelector<HTMLElement>(".pill")!;
+    expect(pill.tagName).toBe("BUTTON");
+    expect(pill.getAttribute("type")).toBe("button");
+    expect(pill.getAttribute("aria-label")).toBe("formatting");
+    expect(pill.hasAttribute("aria-hidden")).toBe(false);
+    expect(pill.getAttribute("aria-expanded")).toBe("false");
+    expect(pill.tabIndex).toBe(0);
 
-    secondTarget
-      .querySelector<HTMLElement>(".expand-zone")
-      ?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    pill.focus();
+    expect(document.activeElement).toBe(pill);
     await tick();
-    expect(secondTarget.querySelector(".fbtn-row")).not.toBeNull();
+    expect(target.querySelector(".fbtn-row")).not.toBeNull();
+    expect(pill.getAttribute("aria-expanded")).toBe("true");
+    button(target, "bold").focus();
+    expect(document.activeElement).toBe(button(target, "bold"));
+
+    editor.focus();
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    pill.dispatchEvent(press);
+    // jsdom does not transfer focus on mousedown; cancellation is the
+    // browser contract that keeps the editor's selection available.
+    expect(press.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(editor);
   });
 });
