@@ -5517,3 +5517,70 @@ mod window_op_route_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod refusal_envelopes {
+    use super::*;
+    use std::sync::RwLock;
+    use axum::body::to_bytes;
+    use chan_workspace::Library;
+    use tower::ServiceExt;
+
+    fn host() -> (tempfile::TempDir, Arc<WorkspaceHost>) {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open_at(dir.path().join("config.toml")).unwrap();
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        (dir, host)
+    }
+
+    async fn send(
+        app: &Router,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Response {
+        let mut request = Request::builder().method(method).uri(path);
+        let body = match body {
+            Some(body) => {
+                request = request.header(header::CONTENT_TYPE, "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        app.clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn assert_refusal(response: Response, status: StatusCode, message: &str) {
+        assert_eq!(response.status(), status, "refusal status");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json")),
+            "refusal content type"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            bytes.as_ref(),
+            serde_json::to_vec(&serde_json::json!({"error": message})).unwrap(),
+            "refusal envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn launcher_bearer() {
+        let (_dir, host) = host();
+        let app = launcher_router(
+            host,
+            Some(Arc::new(RwLock::new("launcher-secret".into()))),
+            None,
+        );
+        assert_refusal(
+            send(&app, "GET", "/api/library/windows", None).await,
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid launcher bearer token",
+        )
+        .await;
+    }
+}
