@@ -39,12 +39,12 @@ use std::time::Duration;
 
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::State;
 use axum::http::{header, Request as HttpRequest, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
-use axum::{Json, Router};
+use axum::Router;
 use chan_workspace::Library;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,7 @@ use crate::devserver_api::{
     ActiveTerminalsRejection, DevserverInfo, MountedPrefix, OpenWorkspaceRequest, RotatedToken,
     SetWorkspaceOnRequest, WorkspaceEntry, DEVSERVER_API_PROTOCOL,
 };
+use crate::extract::{Json, Path as AxumPath, Query};
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
 // Prefix allocation lives in chan-library (the window-record assembly needs the
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
