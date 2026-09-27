@@ -943,6 +943,8 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
     };
     #[cfg(any(test, feature = "test-hooks"))]
     open_recovery_pause_for_test(&workspace, stop);
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::paths::root_stall::stall_point(workspace.root());
     tracing::debug!(
         generation = plan.generation.get(),
         action = ?plan.action,
