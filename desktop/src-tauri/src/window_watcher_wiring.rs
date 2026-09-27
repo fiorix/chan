@@ -1758,6 +1758,8 @@ mod tests {
         raises: Mutex<Vec<(String, bool)>>,
         // What each window's webview reports as its own URL.
         urls: Mutex<HashMap<String, String>>,
+        // Whether the windows are a gateway devserver's.
+        gateway: bool,
     }
 
     impl RetrySurface {
@@ -1830,7 +1832,7 @@ mod tests {
         }
         fn open(&self, record: &WindowRecord) {
             let label = native_label(record);
-            if !self.builds.begin(record, false) {
+            if !self.builds.begin(record, self.gateway) {
                 return;
             }
             self.attempts
@@ -1839,7 +1841,7 @@ mod tests {
                 .push((label.clone(), tokio::time::Instant::now()));
             if self.hold_opens {
                 self.launches
-                    .begin_remote(record, false, false, &self.tickets);
+                    .begin_remote(record, self.gateway, false, &self.tickets);
                 self.resolving.lock().unwrap().push(label);
                 return;
             }
@@ -1853,7 +1855,10 @@ mod tests {
                 let urls = self.urls.lock().unwrap();
                 urls.get(&label).and_then(|url| url.parse().ok())
             };
-            let Some(retarget) = self.launches.admit(record, false, reload, present, url) else {
+            let Some(retarget) = self
+                .launches
+                .admit(record, self.gateway, reload, present, url)
+            else {
                 return;
             };
             self.raises
@@ -1862,7 +1867,7 @@ mod tests {
                 .push((label.clone(), retarget.raises()));
             let ticket = self
                 .launches
-                .begin_remote(record, false, true, &self.tickets)
+                .begin_remote(record, self.gateway, true, &self.tickets)
                 .unwrap();
             self.attempts
                 .lock()
@@ -1909,6 +1914,22 @@ mod tests {
             hold: bool,
             hold_opens: bool,
         ) -> Self {
+            Self::start_on(records, build, hold, hold_opens, false).await
+        }
+
+        /// Held retargets of live windows, a gateway devserver's when
+        /// `gateway`.
+        async fn start_gateway(records: Vec<WindowRecord>, gateway: bool) -> Self {
+            Self::start_on(records, false, true, false, gateway).await
+        }
+
+        async fn start_on(
+            records: Vec<WindowRecord>,
+            build: bool,
+            hold: bool,
+            hold_opens: bool,
+            gateway: bool,
+        ) -> Self {
             let library_id = records[0].library_id.clone();
             let nudge = Arc::new(Notify::new());
             let feed = RetryFeed {
@@ -1937,6 +1958,7 @@ mod tests {
                 queued: Mutex::new(Vec::new()),
                 raises: Mutex::new(Vec::new()),
                 urls: Mutex::new(HashMap::new()),
+                gateway,
             });
             let (stop, stopped) = tokio::sync::oneshot::channel();
             let task = tokio::spawn({
@@ -2051,7 +2073,7 @@ mod tests {
             );
             assert_eq!(
                 attempt.key,
-                RemoteLaunchKey::from_record(record, false),
+                RemoteLaunchKey::from_record(record, self.surface.gateway),
                 "the newest target keeps retry ownership"
             );
             assert_eq!(
@@ -2077,6 +2099,14 @@ mod tests {
                 .filter(|(window, _)| *window == label)
                 .map(|(_, raised)| *raised)
                 .collect()
+        }
+
+        /// The feed pushes `record` with its window's socket `connected`.
+        async fn set_connected(&self, record: &WindowRecord, connected: bool) {
+            let mut pushed = record.clone();
+            pushed.connected = connected;
+            *self.feed.records.lock().unwrap() = vec![pushed];
+            self.feed_wake().await;
         }
 
         fn show_url(&self, record: &WindowRecord, url: &str) {
@@ -2848,6 +2878,72 @@ mod tests {
                 harness.raised(&record),
                 vec![true, true, false],
                 "{case}: a timer's try raises nothing"
+            );
+            harness.stop(WatchLoopStop::KeepWindows).await;
+        }
+    }
+
+    // A Reload that found its target not ready is carried out by a later try
+    // once the target answers ready, on a page whose socket is gone, whatever
+    // the page's URL reads: a page stuck after a failed self-reload of its
+    // stripped URL reads as booted.
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_carries_out_a_refused_reload_on_a_disconnected_page() {
+        for gateway in [false, true] {
+            let record = retry_record(&format!("disconnected-{gateway}"), 0);
+            let harness = RetryHarness::start_gateway(vec![record.clone()], gateway).await;
+            harness.navigate_first(&record).await;
+            harness.show_url(&record, BOOTED_URL);
+            harness
+                .refused_reload_then_timer(&record, Some(BOOTED_URL))
+                .await;
+            assert_eq!(
+                harness.times(&record),
+                vec![0, 5, 20],
+                "gateway={gateway}: the timer's try carries out the Reload on a page whose socket is gone"
+            );
+            assert_eq!(
+                harness.raised(&record),
+                vec![true, true, false],
+                "gateway={gateway}: a timer's try raises nothing"
+            );
+            harness.stop(WatchLoopStop::KeepWindows).await;
+        }
+    }
+
+    // A window whose record reads connected has its socket, whatever its
+    // page's URL reads: the timer's try leaves it alone. The Reload's own
+    // dispatch still navigates, as the user asked.
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_leaves_a_connected_window_alone() {
+        for gateway in [false, true] {
+            let record = retry_record(&format!("connected-{gateway}"), 0);
+            let harness = RetryHarness::start_gateway(vec![record.clone()], gateway).await;
+            harness.navigate_first(&record).await;
+            harness.show_url(&record, UNBOOTED_URL);
+            harness.set_connected(&record, true).await;
+            tokio::time::advance(Duration::from_secs(5)).await;
+            assert!(harness.request_reload(&record, true, Some(&harness.view)));
+            harness.drain().await;
+            let (_, ticket) = harness
+                .surface
+                .held
+                .lock()
+                .unwrap()
+                .pop()
+                .expect("a Reload of a connected window is dispatched");
+            harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
+            harness.drain().await;
+            tokio::time::advance(RETRY_NUDGE).await;
+            harness.drain().await;
+            assert_eq!(
+                harness.times(&record),
+                vec![0, 5],
+                "gateway={gateway}: the timer's try dispatches nothing to a connected window"
+            );
+            assert!(
+                harness.applied(&record),
+                "gateway={gateway}: the try marks the attempt applied"
             );
             harness.stop(WatchLoopStop::KeepWindows).await;
         }
