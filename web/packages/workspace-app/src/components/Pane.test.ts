@@ -1455,6 +1455,7 @@ describe("Pane tab drag and drop between windows", () => {
 
   class DragData {
     store = new Map<string, string>();
+    protected = false;
     effectAllowed = "";
     dropEffect = "";
     constructor(entries: Record<string, string> = {}, readonly listTypes = false) {
@@ -1464,7 +1465,7 @@ describe("Pane tab drag and drop between windows", () => {
       this.store.set(type, value);
     }
     getData(type: string): string {
-      return this.store.get(type) ?? "";
+      return this.protected ? "" : this.store.get(type) ?? "";
     }
     // WKWebView hands back a DOMStringList rather than an array.
     get types(): unknown {
@@ -1475,10 +1476,16 @@ describe("Pane tab drag and drop between windows", () => {
     setDragImage(): void {}
   }
 
-  function fire(el: Element, type: string, data: DragData): Event {
+  function fire(el: Element, type: string, data: DragData, clientX = 0, clientY = 0): Event {
     const event = new Event(type, { bubbles: true, cancelable: true });
     Object.defineProperty(event, "dataTransfer", { value: data });
-    el.dispatchEvent(event);
+    Object.defineProperties(event, { clientX: { value: clientX }, clientY: { value: clientY } });
+    data.protected = type === "dragover" || type === "dragenter";
+    try {
+      el.dispatchEvent(event);
+    } finally {
+      data.protected = false;
+    }
     return event;
   }
 
@@ -1491,6 +1498,7 @@ describe("Pane tab drag and drop between windows", () => {
     );
     const data = new DragData();
     fire(target.querySelector('[draggable="true"]')!, "dragstart", data);
+    fire(target.querySelector('[draggable="true"]')!, "dragend", data);
     for (const component of mounted.splice(0)) unmount(component);
     document.body.innerHTML = "";
     return Object.fromEntries(data.store);
@@ -1522,6 +1530,7 @@ describe("Pane tab drag and drop between windows", () => {
     });
     expect(data.getData(OURS)).toBe("1");
     expect(OURS.slice(SCOPE_PREFIX.length)).toMatch(/^[0-9a-f]+$/);
+    fire(target.querySelector('.tab[draggable="true"]')!, "dragend", data);
   });
 
   test.each(SPOTS)("hovering %s refuses a tab from another scope and accepts one from this scope", async (_spot, selector) => {
@@ -1575,6 +1584,78 @@ describe("Pane tab drag and drop between windows", () => {
     expect(drop.defaultPrevented).toBe(true);
     expect((layout.nodes["pane-here"] as LeafNode).tabs.map((tab) => tab.id)).toEqual(["here", "there"]);
     expect((layout.nodes["pane-there"] as LeafNode | undefined)?.tabs ?? []).toEqual([]);
+  });
+
+  test("a local tab drag crosses pane bodies with protected data and splits at the previewed edge", async () => {
+    const source = await renderTarget();
+    layout.nodes["pane-dest"] = {
+      kind: "leaf", id: "pane-dest",
+      tabs: [fileTab({ id: "dest", path: "dest.md" })], activeTabId: "dest",
+    };
+    layout.nodes["split"] = { kind: "split", id: "split", direction: "row", ratio: 0.5, a: "pane-here", b: "pane-dest" };
+    layout.rootId = "split";
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane: layout.nodes["pane-dest"] as LeafNode } }));
+    await tick();
+    const tab = source.querySelector('.tab[draggable="true"]')!;
+    const body = target.querySelector<HTMLElement>(".editor-wrap")!;
+    body.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    const foreign = new DragData({ [TAB_MIME]: "{}", [OURS]: "1" });
+    expect(fire(body, "dragover", foreign, 799, 300).defaultPrevented).toBe(false);
+
+    const data = new DragData();
+    fire(tab, "dragstart", data);
+    try {
+      expect(fire(body, "dragover", data, 799, 300).defaultPrevented).toBe(true);
+      expect(data.dropEffect).toBe("move");
+      await tick();
+      expect(body.classList.contains("body-drop-right")).toBe(true);
+
+      const wrongScope = new DragData({ [TAB_MIME]: "{}", [THEIRS]: "1" });
+      expect(fire(body, "dragover", wrongScope, 799, 300).defaultPrevented).toBe(false);
+      await tick();
+      expect(body.classList.contains("body-drop-right")).toBe(false);
+
+      data.dropEffect = "none";
+      fire(tab, "dragend", data);
+      expect(fire(body, "dragover", data, 799, 300).defaultPrevented).toBe(false);
+      fire(tab, "dragstart", data);
+      expect(fire(body, "dragover", data, 799, 300).defaultPrevented).toBe(true);
+      expect(fire(body, "drop", data, 799, 300).defaultPrevented).toBe(true);
+      const split = Object.values(layout.nodes).find((node) => node.kind === "split" && node.a === "pane-dest");
+      expect(split?.kind).toBe("split");
+      if (split?.kind !== "split") throw new Error("no right-hand split");
+      expect((layout.nodes[split.b] as LeafNode).tabs.map((t) => t.id)).toEqual(["here"]);
+    } finally {
+      fire(tab, "dragend", data);
+    }
+  });
+
+  test.each([
+    [0, 2, 210], [0, 2, 290], [3, 1, 110], [3, 1, 190],
+  ])("same-pane drag %i to %i at x=%i lands where its indicator points", async (from, to, x) => {
+    const tabs = ["a", "b", "c", "d"].map((id) => fileTab({ id, path: `${id}.md` }));
+    const target = await renderPane({ kind: "leaf", id: "pane-reorder", tabs, activeTabId: "a" }, { paneMode: false });
+    const buttons = [...target.querySelectorAll<HTMLElement>('.tab[draggable="true"]')];
+    buttons.forEach((tab, index) => { tab.getBoundingClientRect = () => new DOMRect(index * 100, 0, 100, 30); });
+    const data = new DragData();
+    fire(buttons[from]!, "dragstart", data);
+    try {
+      fire(buttons[to]!, "dragover", data, x, 15);
+      await tick();
+      const afterBar = target.querySelector(".drop-bar")?.nextElementSibling;
+      const indicatedIndex = buttons.findIndex((tab) => tab === afterBar);
+      expect(indicatedIndex, "the indicator has a following tab").toBeGreaterThanOrEqual(0);
+      const successor = tabs[indicatedIndex]!.id;
+      const sourceId = tabs[from]!.id;
+      fire(buttons[to]!, "drop", data, x, 15);
+      const ids = (layout.nodes["pane-reorder"] as LeafNode).tabs.map((tab) => tab.id);
+      expect(ids[to]).toBe(sourceId);
+      expect(ids[ids.indexOf(sourceId) + 1], "the tab lands immediately before the indicated successor").toBe(successor);
+    } finally {
+      fire(buttons[from]!, "dragend", data);
+    }
   });
 });
 
