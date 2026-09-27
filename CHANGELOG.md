@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The extension catalog reports process state.** `GET /api/extensions` includes `running` for every extension. It becomes false when the supervisor observes the child exit or stops it at shutdown; it does not indicate whether a live process answers requests.
 
+### Changed
+
+- **Malformed requests and unrouted methods are refused in the JSON envelope.** In a workspace, in a standalone terminal window and on the devserver's management API, a body, query, path or multipart request the server cannot read answers `{"error": ...}` with the status and sentence it answered in plain text, and a method a route does not serve answers 405 with `{"error": "method not allowed"}` and its `Allow` header where it answered an empty body. The launcher's routes are unchanged.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
