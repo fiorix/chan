@@ -1899,7 +1899,7 @@ async fn handle_workspace_on(
         Err(resp) => return *resp,
     };
     let Some((prefix, registered)) = resolve_registered_workspace(&state.host, &id) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     let root = registered.root_path.clone();
     match state
@@ -1920,15 +1920,14 @@ async fn handle_workspace_on(
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
         }
-        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => (
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => crate::error::err(
             StatusCode::CONFLICT,
-            "workspace is open in another Chan process",
-        )
-            .into_response(),
+            "workspace is open in another Chan process".into(),
+        ),
         Err(e @ crate::Error::ShuttingDown(_)) => {
-            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+            crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2592,24 +2591,6 @@ mod devserver_route_tests {
             .unwrap();
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
-    }
-
-    /// [`request`] keeping the body as text, for the routes that answer a plain
-    /// string rather than JSON. Unix-only with its one caller, so the
-    /// windows-gnu arm does not carry an unused helper.
-    #[cfg(unix)]
-    async fn request_text(router: &axum::Router, method: &str, uri: &str) -> (StatusCode, String) {
-        let req = Caller::Local.stamp(Request::builder().method(method).uri(uri), None);
-        let response = router
-            .clone()
-            .oneshot(req.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     #[cfg(unix)]
@@ -3379,11 +3360,10 @@ mod devserver_route_tests {
     }
 
     /// A writer flock held elsewhere is not the degraded-root condition and does
-    /// not become a row: `on` cannot mount at all, so it keeps its plain-text
-    /// conflict.
+    /// not become a row: `on` cannot mount at all and answers a conflict.
     #[cfg(unix)]
     #[tokio::test]
-    async fn on_over_a_foreign_locked_workspace_answers_a_plain_text_conflict() {
+    async fn on_over_a_foreign_locked_workspace_answers_a_conflict_envelope() {
         let cfg = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -3395,14 +3375,18 @@ mod devserver_route_tests {
             .expect("prefix")
             .trim_start_matches('/')
             .to_string();
-        let (status, body) = request_text(
+        let (status, body) = request(
             &router,
             "POST",
             &format!("/api/library/workspaces/{workspace_id}/on"),
+            None,
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "locked on answered {status}");
-        assert_eq!(body, "workspace is open in another Chan process");
+        assert_eq!(
+            body,
+            serde_json::json!({"error":"workspace is open in another Chan process"})
+        );
         assert!(
             !host.is_root_mounted(root.path()),
             "a refused on mounted the workspace anyway"
