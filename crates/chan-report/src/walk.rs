@@ -13,6 +13,7 @@ use ignore::gitignore::Gitignore;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::error::ChanReportError;
@@ -126,7 +127,10 @@ pub(crate) struct WalkResult {
 
 /// Walk the configured root and return accepted relative POSIX paths.
 /// Nested ignore files apply during the walk but not in the cached filter.
-pub(crate) fn walk_root(opts: &ReportOptions) -> Result<WalkResult, ChanReportError> {
+pub(crate) fn walk_root(
+    opts: &ReportOptions,
+    cancel: Option<&AtomicBool>,
+) -> Result<WalkResult, ChanReportError> {
     let mut builder = WalkBuilder::new(&opts.root);
     if let Some(path_policy) = &opts.path_policy {
         let root = opts.root.clone();
@@ -197,12 +201,14 @@ pub(crate) fn walk_root(opts: &ReportOptions) -> Result<WalkResult, ChanReportEr
                 )
             })
         }),
+        cancel,
     )
 }
 
 fn collect_entries(
     root: &Path,
     entries: impl IntoIterator<Item = Result<(bool, PathBuf), ignore::Error>>,
+    _cancel: Option<&AtomicBool>,
 ) -> Result<WalkResult, ChanReportError> {
     let mut out = Vec::new();
     let mut skipped = 0;
@@ -265,6 +271,7 @@ mod tests {
                     "root listing failed",
                 ))),
             ],
+            None,
         );
         assert!(
             matches!(result, Err(ChanReportError::Walk(_))),
@@ -300,8 +307,8 @@ mod tests {
             Ok((false, root.join("src"))),
             Ok((true, root.join("src/b.rs"))),
         ]);
-        let result =
-            collect_entries(root, entries).expect("bad entries must not abort sibling traversal");
+        let result = collect_entries(root, entries, None)
+            .expect("bad entries must not abort sibling traversal");
         assert_eq!(result.paths, ["a.rs", "src/b.rs"]);
         assert_eq!(result.skipped, if cfg!(unix) { 2 } else { 1 });
     }
@@ -310,7 +317,7 @@ mod tests {
     fn an_unreadable_root_still_fails_the_walk() {
         let root = Path::new("workspace");
         assert!(matches!(
-            collect_entries(root, [Err(denied(root.to_path_buf()))]),
+            collect_entries(root, [Err(denied(root.to_path_buf()))], None),
             Err(ChanReportError::Walk(_))
         ));
     }
@@ -324,6 +331,7 @@ mod tests {
                 Ok((true, PathBuf::from("outside.rs"))),
                 Ok((true, root.join("a.rs"))),
             ],
+            None,
         )
         .unwrap();
         assert_eq!(result.paths, ["a.rs"]);

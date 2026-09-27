@@ -23,6 +23,10 @@ pub enum ChanReportError {
 
     #[error("count: {0}")]
     Count(String),
+
+    /// The caller's cancel flag was set before the scan finished.
+    #[error("scan cancelled")]
+    Cancelled,
 }
 
 impl From<io::Error> for ChanReportError {

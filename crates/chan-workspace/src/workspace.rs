@@ -1964,6 +1964,15 @@ impl Workspace {
         self.list_tree()
     }
 
+    /// [`Workspace::list_tree_unified`] that stops at the next walked entry
+    /// once `cancel` is set, returning [`ChanError::Cancelled`].
+    pub fn list_tree_unified_cancelable(
+        &self,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<TreeEntry>> {
+        fs_ops::list_tree_cancelable(self.root(), cancel)
+    }
+
     /// Subtree variant of `list_tree`: walk only the descendants of
     /// `prefix` instead of the entire workspace. Returned `TreeEntry.path`
     /// values stay relative to the workspace root, so the caller sees the
@@ -1982,15 +1991,35 @@ impl Workspace {
     /// promptly. Use `list_tree` when the caller actually wants the
     /// whole workspace.
     pub fn list_tree_prefix(&self, prefix: &str) -> Result<Vec<TreeEntry>> {
+        self.list_tree_prefix_cancelable(prefix, None)
+    }
+
+    /// [`Workspace::list_tree_prefix`] that stops at the next walked entry
+    /// once `cancel` is set, returning [`ChanError::Cancelled`].
+    fn list_tree_prefix_cancelable(
+        &self,
+        prefix: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<TreeEntry>> {
         let resolved = fs_ops::resolve_safe_strict(self.root(), prefix)?;
-        fs_ops::list_tree_prefix(self.root(), &resolved)
+        fs_ops::list_tree_prefix_cancelable(self.root(), &resolved, cancel)
     }
 
     /// Subtree variant of `list_tree_unified`. Drafts live in-root
     /// under `<drafts_dir_name>/...`, so a `.Drafts/...` prefix walks
     /// the workspace tree like any other prefix.
     pub fn list_tree_prefix_unified(&self, prefix: &str) -> Result<Vec<TreeEntry>> {
-        self.list_tree_prefix(prefix.trim_matches('/'))
+        self.list_tree_prefix_unified_cancelable(prefix, None)
+    }
+
+    /// [`Workspace::list_tree_prefix_unified`] that stops at the next walked
+    /// entry once `cancel` is set, returning [`ChanError::Cancelled`].
+    pub fn list_tree_prefix_unified_cancelable(
+        &self,
+        prefix: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<TreeEntry>> {
+        self.list_tree_prefix_cancelable(prefix.trim_matches('/'), cancel)
     }
 
     /// Filtered counterpart of `list_tree_unified`. Applies the
@@ -2001,8 +2030,17 @@ impl Workspace {
     /// raw `list_tree_unified` stays unfiltered for the editor's
     /// on-demand open-inside-a-noisy-dir path.
     pub fn list_tree_filtered_unified(&self) -> Result<Vec<TreeEntry>> {
+        self.list_tree_filtered_unified_cancelable(None)
+    }
+
+    /// [`Workspace::list_tree_filtered_unified`] that stops at the next walked
+    /// entry once `cancel` is set, returning [`ChanError::Cancelled`].
+    pub(crate) fn list_tree_filtered_unified_cancelable(
+        &self,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<TreeEntry>> {
         let policy = self.scope_policy();
-        fs_ops::list_tree_scoped(self.root(), &policy)
+        fs_ops::list_tree_scoped_cancelable(self.root(), &policy, cancel)
     }
 
     /// Filtered counterpart of `list_tree_prefix_unified`. Drafts live
@@ -2734,8 +2772,12 @@ impl Workspace {
         }
         // Subtree entries stay workspace-relative, including source paths
         // reached through an in-root symlink component.
-        let entries =
-            fs_ops::list_tree_prefix_with_limit(self.root(), &self.root().join(&from_rel), limit)?;
+        let entries = fs_ops::list_tree_prefix_with_limit(
+            self.root(),
+            &self.root().join(&from_rel),
+            limit,
+            None,
+        )?;
         let prefix = if from.is_empty() {
             String::new()
         } else {
@@ -3297,7 +3339,7 @@ impl Workspace {
             policy
         };
         if let Some(report) = self.report.get() {
-            report.replace_policy(self.root(), policy)?;
+            report.replace_policy(self.root(), policy, None)?;
         }
         Ok(())
     }
@@ -4274,15 +4316,37 @@ impl Workspace {
     /// `Report` is a plain serde value; clone-and-shape is the
     /// caller's job.
     pub fn report(&self) -> Result<Report> {
-        Ok(self.report_state()?.snapshot(&ReportScope::All))
+        self.report_cancelable(None)
+    }
+
+    /// [`Workspace::report`] whose scan, cold or after a scope change, stops
+    /// at the next walked entry or counted file once `cancel` is set,
+    /// returning [`ChanError::Cancelled`]. A cancelled scan leaves the cached
+    /// report as it was, so the next call scans again.
+    pub fn report_cancelable(&self, cancel: Option<&AtomicBool>) -> Result<Report> {
+        Ok(self
+            .report_state_cancelable(cancel)?
+            .snapshot(&ReportScope::All))
     }
 
     /// Return a maintained report snapshot without initializing a cold report.
     /// A warm report captured under an older scope generation is rescanned
     /// before it is returned.
     pub fn report_if_available(&self) -> Result<Option<Report>> {
+        self.report_if_available_cancelable(None)
+    }
+
+    /// [`Workspace::report_if_available`] whose rescan stops as
+    /// [`Workspace::report_cancelable`]'s scan does.
+    pub(crate) fn report_if_available_cancelable(
+        &self,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Option<Report>> {
         if self.report.get().is_some() {
-            return Ok(Some(self.report_state()?.snapshot(&ReportScope::All)));
+            return Ok(Some(
+                self.report_state_cancelable(cancel)?
+                    .snapshot(&ReportScope::All),
+            ));
         }
         if !self.reports_enabled()? {
             return Ok(None);
@@ -4298,8 +4362,18 @@ impl Workspace {
     /// POSIX prefix. Empty `prefix` is equivalent to `report()`.
     /// Missing files in the prefix produce empty roll-ups.
     pub fn report_for_prefix(&self, prefix: &str) -> Result<Report> {
+        self.report_for_prefix_cancelable(prefix, None)
+    }
+
+    /// [`Workspace::report_for_prefix`] whose scan stops as
+    /// [`Workspace::report_cancelable`]'s does.
+    pub fn report_for_prefix_cancelable(
+        &self,
+        prefix: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Report> {
         Ok(self
-            .report_state()?
+            .report_state_cancelable(cancel)?
             .snapshot(&ReportScope::Prefix(prefix.to_string())))
     }
 
@@ -4307,8 +4381,18 @@ impl Workspace {
     /// workspace-relative paths. Paths absent from the index are
     /// silently ignored.
     pub fn report_for_files(&self, paths: &[String]) -> Result<Report> {
+        self.report_for_files_cancelable(paths, None)
+    }
+
+    /// [`Workspace::report_for_files`] whose scan stops as
+    /// [`Workspace::report_cancelable`]'s does.
+    pub fn report_for_files_cancelable(
+        &self,
+        paths: &[String],
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Report> {
         Ok(self
-            .report_state()?
+            .report_state_cancelable(cancel)?
             .snapshot(&ReportScope::Files(paths.to_vec())))
     }
 
@@ -4338,8 +4422,12 @@ impl Workspace {
     }
 
     fn report_state(&self) -> Result<&Arc<ReportState>> {
+        self.report_state_cancelable(None)
+    }
+
+    fn report_state_cancelable(&self, cancel: Option<&AtomicBool>) -> Result<&Arc<ReportState>> {
         if let Some(s) = self.report.get() {
-            self.refresh_report_scope_if_needed(s)?;
+            self.refresh_report_scope_if_needed(s, cancel)?;
             return Ok(s);
         }
         // The report's initial `Index::scan` walks the workspace and
@@ -4349,18 +4437,23 @@ impl Workspace {
         // the same reserve the reindex workers honor so the report walk
         // yields the table to editing + the terminal when fds are
         // tight. Cheap and best-effort: clear headroom returns at once.
-        crate::fd_budget::pace_reindex_worker(None);
-        let state = ReportState::open(self.root(), &self.paths.report, self.scope_policy())?;
+        crate::fd_budget::pace_reindex_worker(cancel);
+        let state =
+            ReportState::open(self.root(), &self.paths.report, self.scope_policy(), cancel)?;
         // OnceLock::set is racy with a concurrent caller; the
         // loser drops its state cleanly, which terminates its
         // writer thread via Drop. The winner's state stays.
         let _ = self.report.set(state);
         let state = self.report.get().expect("report state just set");
-        self.refresh_report_scope_if_needed(state)?;
+        self.refresh_report_scope_if_needed(state, cancel)?;
         Ok(state)
     }
 
-    fn refresh_report_scope_if_needed(&self, report: &ReportState) -> Result<()> {
+    fn refresh_report_scope_if_needed(
+        &self,
+        report: &ReportState,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<()> {
         let policy = self.scope_policy();
         if report.policy_generation() == Some(policy.generation().get()) {
             return Ok(());
@@ -4368,7 +4461,7 @@ impl Workspace {
         let _serial = self.write_serial.lock().unwrap();
         let policy = self.scope_policy();
         if report.policy_generation() != Some(policy.generation().get()) {
-            report.replace_policy(self.root(), policy)?;
+            report.replace_policy(self.root(), policy, cancel)?;
         }
         Ok(())
     }
@@ -4376,7 +4469,7 @@ impl Workspace {
     fn rescan_persisted_report(&self) -> Result<()> {
         let report = self.report_state()?;
         let _serial = self.write_serial.lock().unwrap();
-        report.replace_policy(self.root(), self.scope_policy())
+        report.replace_policy(self.root(), self.scope_policy(), None)
     }
 }
 

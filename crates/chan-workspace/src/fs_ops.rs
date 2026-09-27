@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 use std::fs::Metadata;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 use ignore::gitignore::Gitignore;
@@ -1864,7 +1865,16 @@ pub const LIST_DIR_LIMIT: usize = 50_000;
 /// walker sees more than `LIST_TREE_LIMIT` entries, so a runaway
 /// or mis-pointed workspace never OOMs the caller.
 pub fn list_tree(root: &Path) -> Result<Vec<TreeEntry>> {
-    list_tree_inner(root, root, 1, None, LIST_TREE_LIMIT)
+    list_tree_cancelable(root, None)
+}
+
+/// [`list_tree`] that stops at the next walked entry once `cancel` is set,
+/// returning [`ChanError::Cancelled`].
+pub(crate) fn list_tree_cancelable(
+    root: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<TreeEntry>> {
+    list_tree_inner(root, root, 1, None, LIST_TREE_LIMIT, cancel)
 }
 
 /// Variant of `list_tree` that also applies a caller-supplied
@@ -1873,12 +1883,22 @@ pub fn list_tree(root: &Path) -> Result<Vec<TreeEntry>> {
 /// rebuild to walk a hundred thousand README.md files. The
 /// editor's tree view keeps using the unfiltered `list_tree`.
 pub fn list_tree_filtered(root: &Path, filter: &WalkFilter) -> Result<Vec<TreeEntry>> {
-    list_tree_inner(root, root, 1, Some(filter), LIST_TREE_LIMIT)
+    list_tree_inner(root, root, 1, Some(filter), LIST_TREE_LIMIT, None)
 }
 
 /// `list_tree` variant governed by one generated scope policy.
 pub fn list_tree_scoped(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<TreeEntry>> {
-    list_tree_scoped_inner(root, root, 1, policy)
+    list_tree_scoped_cancelable(root, policy, None)
+}
+
+/// [`list_tree_scoped`] that stops at the next walked entry once `cancel` is
+/// set, returning [`ChanError::Cancelled`].
+pub(crate) fn list_tree_scoped_cancelable(
+    root: &Path,
+    policy: &IndexScopePolicy,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<TreeEntry>> {
+    list_tree_scoped_inner(root, root, 1, policy, cancel)
 }
 
 /// Variant of `list_tree` scoped to the subtree at `subtree_abs`,
@@ -1898,13 +1918,24 @@ pub fn list_tree_scoped(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<Tr
 /// `LIST_TREE_LIMIT` still applies, in case a misconfigured prefix
 /// covers the whole workspace (e.g. the user pointed chan at `~`).
 pub fn list_tree_prefix(root: &Path, subtree_abs: &Path) -> Result<Vec<TreeEntry>> {
-    list_tree_prefix_with_limit(root, subtree_abs, LIST_TREE_LIMIT)
+    list_tree_prefix_cancelable(root, subtree_abs, None)
+}
+
+/// [`list_tree_prefix`] that stops at the next walked entry once `cancel` is
+/// set, returning [`ChanError::Cancelled`].
+pub(crate) fn list_tree_prefix_cancelable(
+    root: &Path,
+    subtree_abs: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<TreeEntry>> {
+    list_tree_prefix_with_limit(root, subtree_abs, LIST_TREE_LIMIT, cancel)
 }
 
 pub(crate) fn list_tree_prefix_with_limit(
     root: &Path,
     subtree_abs: &Path,
     limit: usize,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
     if !subtree_abs.exists() {
         return Ok(Vec::new());
@@ -1913,7 +1944,7 @@ pub(crate) fn list_tree_prefix_with_limit(
     // legacy client-side filter in chan-llm did the same. Files
     // come back as their single self-entry; directories come back
     // with their own entry plus descendants.
-    list_tree_inner(root, subtree_abs, 0, None, limit)
+    list_tree_inner(root, subtree_abs, 0, None, limit, cancel)
 }
 
 /// Subtree listing governed by one generated scope policy.
@@ -1925,7 +1956,7 @@ pub fn list_tree_prefix_scoped(
     if !subtree_abs.exists() {
         return Ok(Vec::new());
     }
-    list_tree_scoped_inner(root, subtree_abs, 0, policy)
+    list_tree_scoped_inner(root, subtree_abs, 0, policy, None)
 }
 
 fn list_tree_scoped_inner(
@@ -1933,6 +1964,7 @@ fn list_tree_scoped_inner(
     walk_from: &Path,
     min_depth: usize,
     policy: &IndexScopePolicy,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
     let iter: Box<dyn Iterator<Item = DirEntry> + '_> = if walk_from == root {
         Box::new(walk_workspace_scoped(root, policy))
@@ -1964,7 +1996,7 @@ fn list_tree_scoped_inner(
             });
         Box::new(walker)
     };
-    tree_entries(root, iter, LIST_TREE_LIMIT)
+    tree_entries(root, iter, LIST_TREE_LIMIT, cancel)
 }
 
 /// Collect walked entries into tree entries, refusing with
@@ -1974,6 +2006,7 @@ fn tree_entries<'a>(
     root: &Path,
     iter: impl Iterator<Item = DirEntry> + 'a,
     limit: usize,
+    _cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
     let mut out = Vec::new();
     for entry in iter {
@@ -2016,6 +2049,7 @@ fn list_tree_inner(
     min_depth: usize,
     filter: Option<&WalkFilter>,
     limit: usize,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
     let iter: Box<dyn Iterator<Item = DirEntry>> = if walk_from == root {
         // Same shape the public `walk_workspace` / `walk_workspace_filtered`
@@ -2065,7 +2099,7 @@ fn list_tree_inner(
             });
         Box::new(walker)
     };
-    tree_entries(root, iter, limit)
+    tree_entries(root, iter, limit, cancel)
 }
 
 #[cfg(test)]
@@ -2321,7 +2355,7 @@ mod tests {
                 .filter_map(|entry| entry.ok())
         };
         // The bound is the caller's, not `LIST_TREE_LIMIT`.
-        let error = tree_entries(root.path(), walk(), 2).unwrap_err();
+        let error = tree_entries(root.path(), walk(), 2, None).unwrap_err();
         assert!(
             matches!(
                 error,
@@ -2332,7 +2366,7 @@ mod tests {
             ),
             "{error:?}"
         );
-        assert_eq!(tree_entries(root.path(), walk(), 3).unwrap().len(), 3);
+        assert_eq!(tree_entries(root.path(), walk(), 3, None).unwrap().len(), 3);
     }
 
     #[test]

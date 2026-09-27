@@ -26,6 +26,7 @@ pub use summary::{
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -159,14 +160,24 @@ impl Index {
     /// Entry and per-file counting errors are recorded by `skipped_entries`;
     /// root traversal and invalid override errors still fail the scan.
     pub fn scan(opts: &ReportOptions) -> Result<Self, ChanReportError> {
-        Self::scan_with(opts, count::count_file_impl)
+        Self::scan_cancelable(opts, None)
+    }
+
+    /// [`Index::scan`] that stops at the next walked entry or counted file
+    /// once `cancel` is set, returning [`ChanReportError::Cancelled`].
+    pub fn scan_cancelable(
+        opts: &ReportOptions,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Self, ChanReportError> {
+        Self::scan_with(opts, cancel, count::count_file_impl)
     }
 
     fn scan_with(
         opts: &ReportOptions,
+        cancel: Option<&AtomicBool>,
         mut count: impl FnMut(&Path, &str) -> Result<Option<FileStats>, ChanReportError>,
     ) -> Result<Self, ChanReportError> {
-        let mut rels = walk::walk_root(opts)?;
+        let mut rels = walk::walk_root(opts, cancel)?;
         let mut files = HashMap::with_capacity(rels.paths.len());
         for rel in rels.paths {
             match count(&opts.root, &rel) {
@@ -629,7 +640,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
         let opts = ReportOptions::new(dir.path());
-        let index = Index::scan_with(&opts, |root, rel| {
+        let index = Index::scan_with(&opts, None, |root, rel| {
             if rel == "a.rs" {
                 Err(ChanReportError::Io("injected count failure".into()))
             } else {
@@ -689,7 +700,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/b.rs"), "fn b() {}\n").unwrap();
         let opts = ReportOptions::new(dir.path());
-        let index = Index::scan_with(&opts, |root, rel| {
+        let index = Index::scan_with(&opts, None, |root, rel| {
             if rel == "a.rs" {
                 Err(ChanReportError::Io("injected count failure".into()))
             } else {

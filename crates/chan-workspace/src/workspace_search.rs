@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path};
+use std::sync::atomic::AtomicBool;
 
 use serde::{Deserialize, Serialize};
 
@@ -563,6 +564,18 @@ impl Workspace {
         &self,
         request: &WorkspaceSearchRequest,
     ) -> Result<WorkspaceSearchResult> {
+        self.workspace_search_cancelable(request, None)
+    }
+
+    /// [`Workspace::workspace_search`] that stops once `cancel` is set: at the
+    /// next entry of its tree walk, the next file of a report rescan and the
+    /// next seed of its traversal, returning [`crate::ChanError::Cancelled`].
+    /// One content query or one hop of a seed's traversal runs to its end.
+    pub fn workspace_search_cancelable(
+        &self,
+        request: &WorkspaceSearchRequest,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<WorkspaceSearchResult> {
         let identity = WorkspaceSearchIdentity {
             root: self.canonical_root().display().to_string(),
             metadata_key: self.metadata_key().to_string(),
@@ -608,7 +621,7 @@ impl Workspace {
             return Ok(result);
         }
 
-        let catalog = Catalog::load(self)?;
+        let catalog = Catalog::load(self, cancel)?;
         let language_requested = normalized
             .domains
             .contains(&WorkspaceSearchDomain::Language)
@@ -926,8 +939,8 @@ struct Catalog {
 }
 
 impl Catalog {
-    fn load(workspace: &Workspace) -> Result<Self> {
-        let entries = workspace.list_tree_filtered_unified()?;
+    fn load(workspace: &Workspace, cancel: Option<&AtomicBool>) -> Result<Self> {
+        let entries = workspace.list_tree_filtered_unified_cancelable(cancel)?;
         let mut files = BTreeSet::new();
         let mut directories = BTreeSet::from([String::new()]);
         for entry in entries {
@@ -955,7 +968,7 @@ impl Catalog {
             .map(|mention| (mention.name, mention.count as u64))
             .collect();
         let reports_enabled = workspace.reports_enabled()?;
-        let report = workspace.report_if_available()?;
+        let report = workspace.report_if_available_cancelable(cancel)?;
         Ok(Self {
             files,
             directories,

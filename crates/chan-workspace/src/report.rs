@@ -8,6 +8,7 @@
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
@@ -51,11 +52,13 @@ impl ReportState {
     /// Initialize state: try to load the persisted JSONL, fall
     /// back to a full scan on missing-or-corrupt. Spawns the
     /// writer thread. Caller wraps the returned value in an
-    /// `Arc` for shared ownership with the watcher fanout.
+    /// `Arc` for shared ownership with the watcher fanout. A scan
+    /// stopped by `cancel` returns its error before any state exists.
     pub(crate) fn open(
         workspace_root: &Path,
         jsonl_path: &Path,
         policy: Arc<IndexScopePolicy>,
+        cancel: Option<&AtomicBool>,
     ) -> Result<Arc<Self>> {
         let opts = report_options(workspace_root, policy);
 
@@ -70,7 +73,8 @@ impl ReportState {
         };
         let index = match loaded {
             Some(idx) => idx,
-            None => Index::scan(&opts).map_err(|e| ChanError::Report(e.to_string()))?,
+            None => Index::scan_cancelable(&opts, cancel)
+                .map_err(|e| ChanError::Report(e.to_string()))?,
         };
 
         if index.skipped_entries() != 0 {
@@ -201,15 +205,17 @@ impl ReportState {
     /// Replace the cached report with a scan governed by a newer scope.
     ///
     /// The caller holds the workspace derived-state serialization lock, so
-    /// watcher mutations cannot land between the scan and swap.
+    /// watcher mutations cannot land between the scan and swap. A scan
+    /// stopped by `cancel` returns its error and keeps the cached report.
     pub(crate) fn replace_policy(
         &self,
         workspace_root: &Path,
         policy: Arc<IndexScopePolicy>,
+        cancel: Option<&AtomicBool>,
     ) -> Result<()> {
         let opts = report_options(workspace_root, policy);
-        let replacement =
-            Index::scan(&opts).map_err(|error| ChanError::Report(error.to_string()))?;
+        let replacement = Index::scan_cancelable(&opts, cancel)
+            .map_err(|error| ChanError::Report(error.to_string()))?;
         if replacement.skipped_entries() != 0 {
             tracing::warn!(
                 root = %workspace_root.display(),
@@ -483,7 +489,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let state = ReportState::open(root, &jsonl, policy).unwrap();
+        let state = ReportState::open(root, &jsonl, policy, None).unwrap();
         assert!(lang_of(&state, "keep.rs").is_some(), "the cache must load");
         assert!(
             lang_of(&state, "b.rs").is_none(),
@@ -539,7 +545,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let state = ReportState::open(root, &jsonl, policy).unwrap();
+        let state = ReportState::open(root, &jsonl, policy, None).unwrap();
         assert_eq!(lang_of(&state, "a.md").as_deref(), Some("Markdown"));
 
         // `mv a.md b.md`. macOS surfaces this as the destination's lone Name
@@ -589,7 +595,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let state = ReportState::open(root, &jsonl, policy).unwrap();
+        let state = ReportState::open(root, &jsonl, policy, None).unwrap();
         assert_eq!(lang_of(&state, "arrived.md"), None);
 
         fs::write(root.join("arrived.md"), "# Arrived\n\nprose\n").unwrap();
