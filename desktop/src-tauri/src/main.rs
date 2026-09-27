@@ -7654,6 +7654,42 @@ mod tests {
     }
 
     #[test]
+    fn a_reload_after_the_watcher_stop_is_sent_is_not_handled() {
+        for stop in [
+            DevserverWatcherStop::RetireKeepWindows,
+            DevserverWatcherStop::CloseWindows,
+        ] {
+            let state = empty_state();
+            let view = Arc::new(window_watcher::WatcherViewState::default());
+            state
+                .devserver_watcher_views
+                .lock()
+                .unwrap()
+                .insert("ds-1".to_string(), Arc::clone(&view));
+            let (cancel, watcher) = tokio::sync::watch::channel(DevserverWatcherStop::Running);
+            state
+                .devserver_watchers
+                .lock()
+                .unwrap()
+                .insert("ds-1".to_string(), cancel);
+            stop_devserver_watcher(&state, "ds-1", stop);
+            assert_eq!(*watcher.borrow(), stop, "the stop is sent");
+            assert!(state
+                .devserver_watcher_views
+                .lock()
+                .unwrap()
+                .get("ds-1")
+                .is_none());
+            // The view as a Reload finds it once the stop is sent, before the
+            // watch loop reads the stop.
+            assert!(
+                !window_watcher_wiring::request_devserver_reload("lib-fed::w-1", true, Some(&view)),
+                "{stop:?}: a Reload after the stop was sent is not handled"
+            );
+        }
+    }
+
+    #[test]
     fn every_devserver_connect_wires_its_watcher_through_one_helper() {
         const MAIN_RS: &str = include_str!("main.rs");
         let (production, _) = MAIN_RS
