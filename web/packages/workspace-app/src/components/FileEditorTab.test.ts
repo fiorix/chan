@@ -1266,3 +1266,30 @@ describe("closing the editor find bar", () => {
     expect(document.activeElement).toBe(other);
   });
 });
+
+describe("the source toolbar", () => {
+  test("reserves top padding only while its toolbar is mounted", async () => {
+    const tab = seat(fileTab({ mode: "source", styleToolbarOpen: true }));
+    const { target } = await render(tab);
+    const host = target.querySelector<HTMLElement>(".editor-host")!;
+    expect(target.querySelector(".md-source")).not.toBeNull();
+    expect(host.querySelector(".style-toolbar")).not.toBeNull();
+    expect(host.style.getPropertyValue("--editor-top-pad")).toBe("2.5rem");
+
+    tab.styleToolbarOpen = false;
+    await settle();
+    expect(host.querySelector(".style-toolbar")).toBeNull();
+    expect(host.style.getPropertyValue("--editor-top-pad")).toBe("");
+
+    tab.styleToolbarOpen = true;
+    await settle();
+    expect(host.querySelector(".style-toolbar")).not.toBeNull();
+    expect(host.style.getPropertyValue("--editor-top-pad")).toBe("2.5rem");
+
+    tab.fileKind = "text";
+    tab.path = "notes/raw.log";
+    await settle();
+    expect(host.querySelector(".style-toolbar")).toBeNull();
+    expect(host.style.getPropertyValue("--editor-top-pad")).toBe("");
+  });
+});
