@@ -23,9 +23,9 @@ use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
 /// holding that mutex keeps an `Arc` to it. A caller shares the live mutex
 /// when one exists and inserts a fresh one only when no `Arc` is left, which
 /// means nobody holds or waits on the old one, so pruning never hands two
-/// callers different mutexes for one key. The last guard of a key removes
-/// its entry, and every lookup prunes the entries a cancelled waiter left
-/// behind, so the map holds only keys with a caller in flight.
+/// callers different mutexes for one key. The last borrowed guard of a key
+/// removes its entry, and every lookup prunes the entries a cancelled waiter
+/// or a detached guard left behind after dropping its mutex.
 ///
 /// The entry map's own mutex is a leaf: held only to look up, insert or
 /// prune an entry, never across an await and never while another lock is
@@ -146,17 +146,16 @@ pub(crate) type RootLocks = KeyedLocks<PathBuf>;
 ///
 /// A key asks the root's filesystem, and a hung network mount never answers.
 /// A caller that asks for a spelling whose computation is still running
-/// waits on that computation instead of starting another, so however often
-/// clients retry requests for a root that hangs while its key is computed,
-/// that root holds one blocking thread for its key and the rest of the pool
-/// stays free for every other root's key, open and probe. A small executor
-/// of its own would not keep that promise: one hung root's retries fill its
-/// few threads and then every other root's key waits behind them.
+/// waits on that computation instead of starting another. Retries hold one
+/// blocking thread per spelling, leaving the rest of the pool available.
+/// Two spellings can each hold a thread: the canonical key is not known
+/// until the filesystem answers, so the computation is keyed by spelling.
 ///
-/// The bound covers the key alone. A root that answers its key and then
-/// stops answering holds a thread in each later hop that asks it, the open,
-/// a mounted root's revalidation or the registration, for every caller that
-/// stops waiting on it.
+/// After the key is known, the host's idempotent open and mounted-root
+/// revalidation carry the root lock into their blocking calls. A hung root
+/// holds one thread across those calls even when their callers give up.
+/// Registration does not carry that lock; a root that answers its key and
+/// then hangs in registration holds one thread per caller that stops waiting.
 ///
 /// A computation drops its entry when it finishes, so a later caller asks
 /// the filesystem afresh; a caller that gives up leaves the computation to
