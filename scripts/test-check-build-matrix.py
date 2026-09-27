@@ -252,6 +252,15 @@ ARTIFACT_CASES = (
              says="build() must export"),
     artifact("a second build function", "build() {", "build() {\n}\nbuild() {",
              says="expected one `build() {` line"),
+    artifact("metadata overwrites the installed binary", INSTALL,
+             INSTALL + '\n    install -Dm644 LICENSE "$pkgdir/usr/bin/chan"',
+             at="install -Dm644", says="cannot prove this command preserves"),
+    artifact("metadata uses the binary directory", INSTALL,
+             INSTALL + '\n    install -Dm644 chan -t "$pkgdir/usr/bin/"',
+             at="install -Dm644", says="cannot prove this command preserves"),
+    artifact("an entry-point link replaces the binary", INSTALL,
+             '    ln -s chan "$pkgdir/usr/bin/chan"\n' + INSTALL,
+             at="ln -s chan", says="cannot prove this command preserves"),
 )
 
 
