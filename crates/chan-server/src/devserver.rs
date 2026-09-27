@@ -6955,6 +6955,28 @@ mod tests {
         });
     }
 
+    /// Open `root` once an abandoned call on it has drained. A released
+    /// stall's call still does real I/O before it lets the root go, and a
+    /// waiter that outlasts the open's release budget is answered that the
+    /// root is still releasing, which is the row's cue to retry.
+    async fn open_after_release(
+        host: &WorkspaceHost,
+        root: &Path,
+        config: ServeConfig,
+    ) -> Result<crate::HostedWorkspace, Error> {
+        loop {
+            match host
+                .open_or_get_registered_workspace(root, config.clone())
+                .await
+            {
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
     #[test]
     fn a_close_finishes_beside_an_abandoned_filesystem_open() {
         lifecycle_beside_abandoned_root_call(false, false);
@@ -7063,7 +7085,8 @@ mod tests {
             // removed; a closed root can mount only on this explicit request.
             let reopened = tokio::time::timeout(
                 HEALTHY_ROOT_BOUND,
-                state.host.open_or_get_registered_workspace(
+                open_after_release(
+                    &state.host,
                     root.path(),
                     tenant_config(state.addr, "/fresh"),
                 ),
@@ -7207,16 +7230,109 @@ mod tests {
             tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
                 match workspace {
                     Some(workspace) => state.host.open_workspace(workspace, config).await,
-                    None => {
-                        state
-                            .host
-                            .open_or_get_registered_workspace(root.path(), config)
-                            .await
-                    }
+                    None => open_after_release(&state.host, root.path(), config).await,
                 }
             })
             .await
             .unwrap()
+            .expect("a fresh caller mounts after the abandoned check drains");
+            state
+                .host
+                .close_workspace_for_root(root.path(), false)
+                .await
+                .unwrap();
+        });
+    }
+
+    /// A serve of a root whose abandoned mount still holds its workspace
+    /// answers within the open's release budget rather than its own mount
+    /// bound, and a close and a forget of that root finish after it.
+    #[test]
+    fn a_serve_beside_an_abandoned_root_check_answers_within_the_release_budget() {
+        const CHECK: &str =
+            "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            state
+                .host
+                .library()
+                .register_workspace(root.path())
+                .unwrap();
+            let prefix = allocate_workspace_prefix(root.path()).unwrap();
+            let stall = root_stall::stall_matching(root.path(), &[CHECK]);
+            let opening = Arc::clone(&state.host);
+            let opening_root = root.path().to_path_buf();
+            let config = tenant_config(state.addr, &prefix);
+            let first = tokio::spawn(async move {
+                opening
+                    .open_or_get_registered_workspace(opening_root, config)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while stall.entered().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the first mount never reached its root check");
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            // The abandoned check keeps the workspace, and with it the writer
+            // lock, beside the mount permit until the root answers.
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                state.mount_at(root.path(), &prefix),
+            )
+            .await
+            .expect("a serve waited past the release budget beside an abandoned mount")
+            .expect_err("a serve mounted beside an abandoned owner of its workspace");
+            assert!(
+                matches!(
+                    error,
+                    Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)
+                ),
+                "a serve beside an abandoned owner answered {error}"
+            );
+            let closed = tokio::time::timeout(
+                Duration::from_secs(10),
+                state.host.close_workspace_for_root(root.path(), false),
+            )
+            .await
+            .expect("a close waited behind a serve of an abandoned root")
+            .unwrap();
+            assert_eq!(closed, WorkspaceLifecycleOutcome::NotFound);
+            let forgotten = tokio::time::timeout(
+                Duration::from_secs(10),
+                state.forget_workspace(&prefix, false),
+            )
+            .await
+            .expect("a forget waited behind a serve of an abandoned root");
+            assert!(
+                matches!(
+                    forgotten,
+                    Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+                ),
+                "a live workspace must keep its typed removal error: {forgotten:?}"
+            );
+            drop(stall);
+            tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                open_after_release(
+                    &state.host,
+                    root.path(),
+                    tenant_config(state.addr, "/fresh"),
+                ),
+            )
+            .await
+            .expect("the abandoned check did not drain")
             .expect("a fresh caller mounts after the abandoned check drains");
             state
                 .host
@@ -7326,9 +7442,7 @@ mod tests {
             drop(stall);
             tokio::time::timeout(
                 HEALTHY_ROOT_BOUND,
-                state
-                    .host
-                    .open_or_get_registered_workspace(hung.path(), config),
+                open_after_release(&state.host, hung.path(), config),
             )
             .await
             .expect("the root lock is released once the filesystem answers")
