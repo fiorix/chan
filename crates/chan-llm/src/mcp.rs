@@ -2081,7 +2081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_cancel_does_not_undo_a_finished_write() {
+    async fn mcp_cancel_reports_a_successful_write_result() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (_cfg, _root, workspace) = open_idle_workspace();
             let arguments = serde_json::json!({"path": "done.md", "content": "landed"});

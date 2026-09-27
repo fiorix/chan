@@ -4437,9 +4437,13 @@ impl Workspace {
         // the same reserve the reindex workers honor so the report walk
         // yields the table to editing + the terminal when fds are
         // tight. Cheap and best-effort: clear headroom returns at once.
-        crate::fd_budget::pace_reindex_worker(cancel);
+        let _pacing_steps = crate::fd_budget::pace_reindex_worker(cancel);
+        #[cfg(all(test, target_os = "linux"))]
+        tests::record_report_pacing(self, _pacing_steps);
         let state =
             ReportState::open(self.root(), &self.paths.report, self.scope_policy(), cancel)?;
+        #[cfg(test)]
+        tests::cancel_after_report_open(self, cancel);
         // OnceLock::set is racy with a concurrent caller; the
         // loser drops its state cleanly, which terminates its
         // writer thread via Drop. The winner's state stays.
@@ -11454,6 +11458,178 @@ mod tests {
             workspace.recovery_is_unowned(),
             "clearing the installed driver uninstalls it"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    static REPORT_PACING: std::sync::Mutex<Option<(std::path::PathBuf, Option<u32>)>> =
+        std::sync::Mutex::new(None);
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn record_report_pacing(workspace: &Workspace, steps: u32) {
+        let mut observation = REPORT_PACING.lock().unwrap();
+        if let Some((root, observed)) = observation.as_mut() {
+            if root == workspace.root() {
+                *observed = Some(steps);
+            }
+        }
+    }
+
+    // Descriptor limits belong to a process. The child changes only its own
+    // limit, and observes the real pacing call's returned step count.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_report_cancel_skips_descriptor_pressure_pacing() {
+        const CHILD: &str = "CHAN_TEST_REPORT_CANCEL_PACING_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "workspace::tests::a_report_cancel_skips_descriptor_pressure_pacing",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "descriptor-pressure child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let (_cfg, _root, workspace) = fixture();
+        workspace.stop_open_recovery();
+        workspace.write_text("a.rs", "fn a() {}\n").unwrap();
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: limit is a writable rlimit and remains live for the call.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        let original = limit;
+        // Keep enough room for the cancelled scan to open its root while
+        // leaving less than the pacing reserve, including the SQLite pool.
+        limit.rlim_cur = 256.min(limit.rlim_max);
+        // SAFETY: this child owns its descriptor limit; the hard limit stays.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let mut fillers = Vec::new();
+        loop {
+            let snapshot = crate::fd_budget::snapshot().unwrap();
+            if snapshot.limit.saturating_sub(snapshot.open) <= 16 {
+                break;
+            }
+            fillers.push(std::fs::File::open("/dev/null").unwrap());
+        }
+        *REPORT_PACING.lock().unwrap() = Some((workspace.root().to_path_buf(), None));
+        let cancel = AtomicBool::new(true);
+        let result = workspace.report_cancelable(Some(&cancel));
+        let steps = REPORT_PACING.lock().unwrap().take().unwrap().1;
+        let control_steps = crate::fd_budget::pace_reindex_worker(None);
+        drop(fillers);
+        // SAFETY: original is the child process's unchanged hard limit and
+        // saved soft limit. Restore before asserting or dropping the fixture.
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &original) },
+            0
+        );
+        assert!(
+            control_steps > 0,
+            "the child did not establish descriptor pressure"
+        );
+        assert_eq!(
+            steps,
+            Some(0),
+            "a cancelled report waited for descriptor headroom"
+        );
+        assert!(matches!(result, Err(ChanError::Cancelled)), "{result:?}");
+        assert!(workspace.report.get().is_none());
+    }
+
+    static CANCEL_AFTER_REPORT_OPEN: std::sync::Mutex<Vec<std::path::PathBuf>> =
+        std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn cancel_after_report_open(workspace: &Workspace, cancel: Option<&AtomicBool>) {
+        let armed = {
+            let mut roots = CANCEL_AFTER_REPORT_OPEN.lock().unwrap();
+            roots
+                .iter()
+                .position(|root| root == workspace.root())
+                .map(|index| roots.swap_remove(index))
+        };
+        if armed.is_some() {
+            workspace.refresh_repository_scope().unwrap();
+            cancel.unwrap().store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_report_cancel_reaches_the_refresh_after_initialization() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.stop_open_recovery();
+        workspace.write_text("a.rs", "fn a() {}\n").unwrap();
+        let scanned = workspace.scope_policy().generation().get();
+        CANCEL_AFTER_REPORT_OPEN
+            .lock()
+            .unwrap()
+            .push(workspace.root().to_path_buf());
+        let cancel = AtomicBool::new(false);
+        let result = workspace.report_cancelable(Some(&cancel));
+        assert!(
+            matches!(result, Err(ChanError::Cancelled)),
+            "the refresh after report initialization ignored cancellation: {result:?}"
+        );
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(
+            workspace.report.get().unwrap().policy_generation(),
+            Some(scanned)
+        );
+        assert_ne!(workspace.scope_policy().generation().get(), scanned);
+        assert_eq!(workspace.report().unwrap().files.len(), 1);
+        assert_eq!(
+            workspace.report.get().unwrap().policy_generation(),
+            Some(workspace.scope_policy().generation().get())
+        );
+    }
+
+    #[test]
+    fn a_search_cancel_reaches_its_report_rescan() {
+        use crate::workspace_search::{WorkspaceSearchDomain, WorkspaceSearchRequest};
+
+        let (_cfg, _root, workspace) = fixture();
+        workspace.stop_open_recovery();
+        workspace.write_text("a.rs", "fn a() {}\n").unwrap();
+        assert_eq!(workspace.report().unwrap().files.len(), 1);
+        let scanned = workspace.report.get().unwrap().policy_generation();
+        workspace.refresh_repository_scope().unwrap();
+        workspace.reconcile().unwrap();
+        assert!(workspace.readiness().is_ready());
+        assert_eq!(workspace.report.get().unwrap().policy_generation(), scanned);
+        crate::workspace_search::CANCEL_BEFORE_REPORT
+            .lock()
+            .unwrap()
+            .push(workspace.root().to_path_buf());
+        let cancel = AtomicBool::new(false);
+        // An absent match produces no seed that could mask an ignored flag.
+        let result = workspace.workspace_search_cancelable(
+            &WorkspaceSearchRequest {
+                query: Some("absent-token".into()),
+                domains: vec![WorkspaceSearchDomain::File],
+                ..WorkspaceSearchRequest::default()
+            },
+            Some(&cancel),
+        );
+        assert!(
+            matches!(result, Err(ChanError::Cancelled)),
+            "the search's report rescan ignored cancellation: {result:?}"
+        );
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(workspace.report.get().unwrap().policy_generation(), scanned);
     }
 
     // Both scans the report runs on a caller's behalf stop on its flag: the

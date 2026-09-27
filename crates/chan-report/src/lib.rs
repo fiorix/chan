@@ -668,6 +668,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_cancelled_directory_only_scan_stops_in_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        let opts = ReportOptions::new(dir.path());
+        let cancel = AtomicBool::new(true);
+        let mut counted = 0;
+        let result = Index::scan_with(&opts, Some(&cancel), |_, _| {
+            counted += 1;
+            Ok(None)
+        });
+        assert_eq!(
+            counted, 0,
+            "no count may mask a walk that ignores cancellation"
+        );
+        assert!(
+            matches!(result, Err(ChanReportError::Cancelled)),
+            "the directory-only scan ignored cancellation: {:?}",
+            result.as_ref().map(Index::skipped_entries)
+        );
+        assert!(Index::scan(&opts).unwrap().is_empty());
+    }
+
     // A cancel is read by the loop that counts, so it ends the scan instead
     // of costing a skipped file: the count it cut short reports an error the
     // loop would otherwise record as a skip.

@@ -931,6 +931,28 @@ fn content_hit(hit: Hit) -> WorkspaceContentHit {
     }
 }
 
+// Cancel after the catalog walk so the report hand-off can be exercised
+// without an earlier entry check ending the search.
+#[cfg(test)]
+pub(crate) static CANCEL_BEFORE_REPORT: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn cancel_before_report(workspace: &Workspace, cancel: Option<&AtomicBool>) {
+    let armed = {
+        let mut roots = CANCEL_BEFORE_REPORT.lock().unwrap();
+        roots
+            .iter()
+            .position(|root| root == workspace.root())
+            .map(|index| roots.swap_remove(index))
+    };
+    if armed.is_some() {
+        cancel
+            .unwrap()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug)]
 struct Catalog {
     files: BTreeSet<String>,
@@ -973,6 +995,8 @@ impl Catalog {
             .map(|mention| (mention.name, mention.count as u64))
             .collect();
         let reports_enabled = workspace.reports_enabled()?;
+        #[cfg(test)]
+        cancel_before_report(workspace, cancel);
         let report = workspace.report_if_available_cancelable(cancel)?;
         Ok(Self {
             files,
