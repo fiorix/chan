@@ -2392,9 +2392,8 @@ mod tests {
         assert!(
             KEY_BRIDGE_JS.contains("case 'KeyN': if (!e.metaKey) invokeIpc(e, 'open_new_window')")
         );
-        assert!(
-            KEY_BRIDGE_JS.contains("case 'KeyQ': if (!MAC && !e.metaKey) invokeIpc(e, 'request_app_quit')")
-        );
+        assert!(KEY_BRIDGE_JS
+            .contains("case 'KeyQ': if (!MAC && !e.metaKey) invokeIpc(e, 'request_app_quit')"));
         assert!(KEY_BRIDGE_JS.contains("window.__CHAN_WINDOW_KIND__ === 'control'"));
         // The kind global is stamped per window at build time, ahead of
         // the bridge in both init-script shapes (direct load and the
