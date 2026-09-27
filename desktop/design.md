@@ -179,7 +179,7 @@ The native menus route by the focused window's kind:
 - Window > New Window (Cmd+Shift+N): asks the focused window's library to mint another record of the same kind. A focused standalone terminal opens another terminal window; the launcher (or nothing) focused opens a standalone terminal. Plain Cmd+N is deliberately left to the SPA's New Draft.
 - Window > Computers: shows the launcher.
 
-Quitting prompts for confirmation once (running terminals and workspace runtimes die with the process); a confirmed quit tears down every runtime and listener.
+Quitting prompts for confirmation once (running terminals and workspace runtimes die with the process). A confirmed quit drains hosted runtimes in parallel: tenant tasks get their five-second shutdown grace, then each workspace cell clear and writer-lock check runs on a blocking thread with one five-second deadline (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT` in chan-library). The drain stops awaiting that hop at its deadline, so a recovery or watcher join on a root that stopped answering does not hold up the quit. Extension supervisors then get up to three seconds each to stop before process exit. An abandoned teardown can retain its workspace handles and writer lock until the root answers or the process exits. Open-time recovery reads the user root and writes only derived state under the chan home; abandoning it loses no user content, and the next open schedules recovery again from durable metadata.
 
 ### 6.3 Bury-on-close and window restore
 
