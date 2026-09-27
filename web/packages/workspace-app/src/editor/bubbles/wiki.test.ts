@@ -213,6 +213,20 @@ describe("inside an existing link's URL", () => {
     expect(view.state.doc.toString()).toBe("see [x](./other.md");
   });
 
+  test.each(["raw", "code"] as const)("encodes a filename containing spaces in a %s slot", async (templateMode) => {
+    vi.mocked(api.linkTargets).mockResolvedValue([target("notes/My Photo.md")]);
+    const slot = templateMode === "raw" ? "see [x](old.md)" : "see `old.md`";
+    const { view, key } = open(slot, slot.indexOf("old.md"), {
+      templateMode, initialQuery: "old.md", triggerEnd: slot.length - 1,
+    });
+    await vi.waitFor(() => expect(rows()).toHaveLength(1));
+    key("Enter");
+
+    expect(view.state.doc.toString()).toBe(templateMode === "raw"
+      ? "see [x](./My%20Photo.md)"
+      : "see `./My%20Photo.md`");
+  });
+
   test("offers to open the link already there, and opening it leaves the text alone", async () => {
     vi.mocked(api.linkTargets).mockResolvedValue([target("notes/other.md")]);
     const onOpenLink = vi.fn();
