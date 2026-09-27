@@ -2484,8 +2484,8 @@ mod tests {
 
     #[test]
     fn key_bridge_releases_a_focused_terminals_chords() {
-        // Ctrl+F, Ctrl+G, Ctrl+[ and Ctrl+] send 0x06, 0x07, 0x1B and 0x1D
-        // to a shell, and
+        // Ctrl+F, Ctrl+G, Ctrl+[, Ctrl+] and Ctrl+/ send 0x06, 0x07, 0x1B,
+        // 0x1D and 0x1F to a shell, and
         // terminal find belongs to the terminal tab rather than to the page,
         // so the bridge stops claiming them while a terminal holds the
         // keyboard. It reads that from the focused element, which is the one
@@ -2530,12 +2530,13 @@ mod tests {
             "Find must not keep its claim on the Cmd form over a terminal",
         );
 
-        // Find Next and pane navigation release only the Ctrl
+        // Find Next, pane navigation and Split Right release only the Ctrl
         // form: their Command forms are not shell input, and macOS keeps them.
         for (label, next) in [
             ("case 'KeyG':", "case 'BracketLeft':"),
             ("case 'BracketLeft':", "case 'BracketRight':"),
             ("case 'BracketRight':", "case 'Slash':"),
+            ("case 'Slash':", "const m = code.match"),
         ] {
             let arm = KEY_BRIDGE_JS
                 .split(label)
@@ -2550,14 +2551,14 @@ mod tests {
             );
         }
 
-        // The release set is exactly those four. Zoom, tab jump and Quit
+        // The release set is exactly those five. Zoom, tab jump and Quit
         // are claimed under Ctrl alone as well, and a focused terminal keeps
         // none of them: releasing those would cost every Linux and Windows
         // window its tab switching and zoom whenever a terminal has focus.
         assert_eq!(
             KEY_BRIDGE_JS.matches("terminalHasFocus()").count(),
-            5,
-            "one definition and four call sites; a fifth widens the release set",
+            6,
+            "one definition and five call sites; a sixth widens the release set",
         );
     }
 

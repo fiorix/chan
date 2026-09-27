@@ -96,6 +96,7 @@ describe.each([
   describe.each([
     ["[", "BracketLeft", "{", "app.pane.prev", "app.tab.prev"],
     ["]", "BracketRight", "}", "app.pane.next", "app.tab.next"],
+    ["/", "Slash", "?", "app.pane.splitRight", "app.pane.splitDown"],
   ] as const)("%s", (key, code, shiftedKey, command, shiftedCommand) => {
     test("Ctrl stays with a focused terminal", () => {
       focusSurface("terminal");
