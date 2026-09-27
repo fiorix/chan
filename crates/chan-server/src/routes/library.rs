@@ -2055,12 +2055,15 @@ async fn handle_update_devserver(
         return *resp;
     }
     let Some(reg) = state.host.devserver_registry() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(
+            StatusCode::NOT_FOUND,
+            "devserver registry is not available on this surface".into(),
+        );
     };
     match reg.update(&id, input) {
         Ok(Some(entry)) => Json(entry).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+        Ok(None) => crate::error::err(StatusCode::NOT_FOUND, "devserver not found".into()),
+        Err(msg) => crate::error::err(StatusCode::BAD_REQUEST, msg),
     }
 }
 
