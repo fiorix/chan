@@ -7272,7 +7272,30 @@ mod tests {
             // Every key lookup must pass so later callers reach the same
             // lifecycle lock, even after an earlier caller stops waiting.
             let stall = root_stall::stall_matching(hung.path(), &[hop]);
-            for _ in 0..RETRIES {
+            // The first caller's bound starts once it is held at the hop: on
+            // a loaded runner its key lookup alone can outlast a fixed bound,
+            // and a caller that expires on the way dispatches nothing.
+            let opening = Arc::clone(&state.host);
+            let opening_root = hung.path().to_path_buf();
+            let opening_config = config.clone();
+            let mut first = tokio::spawn(async move {
+                opening
+                    .open_or_get_registered_workspace(opening_root, opening_config)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while stall.entered().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("no call reached {hop}"));
+            tokio::time::timeout(Duration::from_millis(500), &mut first)
+                .await
+                .expect_err("the hung root request must expire");
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            for _ in 1..RETRIES {
                 tokio::time::timeout(
                     Duration::from_millis(500),
                     state
@@ -7282,10 +7305,6 @@ mod tests {
                 .await
                 .expect_err("the hung root request must expire");
             }
-            assert!(
-                stall.wait_entered(Duration::from_secs(10)),
-                "no call reached {hop}"
-            );
             eprintln!("held calls at {hop}: {:#?}", stall.entered());
 
             let host = Arc::clone(&state.host);
