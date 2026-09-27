@@ -3607,9 +3607,9 @@ impl WorkspaceHost {
             .any(|runtime| runtime.found_by(key) && runtime.artifacts.cell.workspace().is_some())
     }
 
-    /// The canonical root of the runtime `key` names (by its canonical root
-    /// or by the root it was opened at), the key the host keys that mount's
-    /// lifecycle row by; `None` when nothing mounted goes by `key`.
+    /// The canonical root of the workspace runtime `key` names (by its canonical
+    /// root or by the root it was opened at), the key the host keys that mount's
+    /// lifecycle row by; `None` when no workspace runtime goes by `key`.
     pub fn mounted_canonical_root(&self, key: &Path) -> Option<PathBuf> {
         let workspaces = self.workspaces.read().ok()?;
         workspaces
@@ -3618,9 +3618,9 @@ impl WorkspaceHost {
             .map(|runtime| runtime.canonical_root.clone())
     }
 
-    /// The root the runtime `key` names was opened at, the registry row's
-    /// stored root, which is the path the launcher lists that workspace by;
-    /// `None` when nothing mounted goes by `key`.
+    /// The root the workspace runtime `key` names was opened at, the registry
+    /// row's stored root, which is the path the launcher lists that workspace by;
+    /// `None` when no workspace runtime goes by `key`.
     pub fn mounted_root(&self, key: &Path) -> Option<PathBuf> {
         let workspaces = self.workspaces.read().ok()?;
         workspaces
