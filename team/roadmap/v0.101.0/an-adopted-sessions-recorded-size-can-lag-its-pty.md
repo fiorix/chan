@@ -21,3 +21,7 @@ Read the kernel's size (`TIOCGWINSZ`) at adoption, or record the applied size in
 ## Boundaries
 
 `crates/chan-library/src/terminal_sessions.rs` (adoption and the applied size) and its tests.
+
+## What shipped
+
+Landed on 2026-09-27. An adopted session reads its PTY's real size from the adopted master with `tcgetwinsize`, through the `rustix` termios API the imported controller already resizes with, and seeds both its applied and its requested size from it. When the read fails or reports no cells, as for a PTY nobody sized, it falls back to the manifest's record. A client that declares the manifest's stale size after a restart is fitted before its first repaint; one that declares the PTY's own size resizes nothing. No dependency changed.

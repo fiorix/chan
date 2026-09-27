@@ -113,8 +113,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-watcher-loss-leaves-the-code-report-stale][wrep] | landed | GA |
 | [terminal-env-overrides-are-silently-dropped][tenv] | landed | GA |
 | [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | landed | GA |
-| [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | accepted | build |
-| [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | accepted | build |
+| [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | landed | GA |
+| [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | landed | GA |
 | [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | landed | GA |
 | [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | landed | GA |
 | [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
@@ -145,8 +145,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-backslash-in-a-name-reads-two-ways-on-the-wire][bslash] | accepted | build |
 | [a-spawned-child-holds-a-lock-until-it-execs][lockdup] | accepted | build |
 | [a-resilience-transcript-is-dumped-before-its-readers-drain][tdump] | landed | GA |
-| [co-viewers-of-a-window-keep-an-answered-survey][coview] | accepted | build |
-| [an-adopted-sessions-recorded-size-can-lag-its-pty][adsz] | accepted | build |
+| [co-viewers-of-a-window-keep-an-answered-survey][coview] | landed | GA |
+| [an-adopted-sessions-recorded-size-can-lag-its-pty][adsz] | landed | GA |
 | [is-root-mounted-answers-from-the-first-tenant-the-key-finds][rmfirst] | accepted | build |
 | [the-canonical-key-query-counts-the-terminal-tenant][ckterm] | accepted | build |
 | [the-linux-gate-has-no-windows-target-check][wingate] | accepted | build |

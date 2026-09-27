@@ -17,3 +17,7 @@ Refuse non-interactive stdin without `--yes` with an error that names `--yes`, a
 ## Boundaries
 
 Only the disable confirmation changes; the enable path, `--yes` and the flag's persistence stay as they are. `crates/chan/src/lib.rs` is the subject of the-chan-cli-crate-is-one-13k-line-file.md, so coordinate with that split if it is in flight.
+
+## What shipped
+
+Landed on 2026-09-27. `chan workspace reports disable` without `--yes` on a standard input that is not a terminal refuses at once with an error naming `--yes` and exits nonzero, and the reports flag stays on. On a terminal, any answer but yes is an error, an empty line and end of input included. `--yes` still disables without a prompt and enable is unchanged, both pinned.

@@ -21,3 +21,9 @@ Send the close to the answering window too (drop the skip in the fan-out); the a
 ## Boundaries
 
 `crates/chan-server/src/control_socket.rs` (the close fan-out) and its tests; no client change.
+
+## What shipped
+
+Landed on 2026-09-27. After a reply the server sends the survey's close to every window the survey targeted, the answering one included, so another app instance sharing that window id clears at once. The answering instance finds nothing left to close by that id: a close that arrives while its reply is in flight is held and dropped when the reply is accepted, and after that no slot shows the survey. Both are pinned through the app's own socket arm.
+
+The server no longer reads the window id a reply carries, and the workspace app no longer sends it. A reply body that still carries `windowId`, as shipped apps and desktops send it, parses to the same reply and completes its survey, pinned through the route for an option, a follow-up and a dismissal. An app without the field against an older server gets the close fanned back to the answering instance, which is the same no-op.

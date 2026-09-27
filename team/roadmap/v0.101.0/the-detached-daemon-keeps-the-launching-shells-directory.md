@@ -17,3 +17,9 @@ Pin the child's working directory to a stable location, such as the resolved cha
 ## Boundaries
 
 `home_unavailable_config_dir` consults `current_dir()` when HOME cannot be resolved (`crates/chan-workspace/src/paths.rs:76`, `:95`). A child with a new cwd could therefore resolve a different home than its parent and miss the lock and record the parent waits on. The fix must hand the child the parent's resolved `CHAN_HOME` explicitly and must not change that fallback, which the-chan-home-fallback-trusts-var-tmp.md owns.
+
+## What shipped
+
+Landed on 2026-09-27. The detached daemon runs in the parent's resolved chan home, made absolute, so it keeps no directory of the user's busy. The daemon end-to-end test reads the live daemon's `/proc/<pid>/cwd`.
+
+The daemon is handed `CHAN_HOME` in two cases only, which narrows the Boundaries sentence above. One is when the parent has a `CHAN_HOME` override: the daemon gets the resolved home as an absolute path, because a relative override would resolve against the daemon's new directory. The other is when no home resolves, because the fallback makes a fresh directory per process and the two would split. A daemon whose home resolves finds the same one from any directory and gets no `CHAN_HOME`: a set `CHAN_HOME` reads as an override to every terminal the daemon spawns, to the bin directory it resolves, and to the systemd and launchd backends, which carry it into a unit or plist only when the user set it. The three cases are pinned through the command build's inputs; no test runs the third against a process that has no home. `crates/chan-workspace/src/paths.rs` is unchanged.
