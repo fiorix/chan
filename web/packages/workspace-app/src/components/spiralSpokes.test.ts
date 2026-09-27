@@ -23,6 +23,25 @@ vi.mock("./spiralSpokes", async (importOriginal) => {
 afterEach(stopAnimations);
 
 describe("Spiral Spokes", () => {
+  test("keeps drawing after the fade period and across a pause", () => {
+    const { ctx, ops } = recordingContext2d();
+    const { callbacks } = startAnimation(SpiralSpokes, ctx);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const opacity = vi.mocked(spiralSpokesOpacity);
+    opacity.mockClear();
+    ops.length = 0;
+    callbacks.frame(431_000);
+    expect(ops.some(({ op }) => op === "stroke")).toBe(true);
+    const step = opacity.mock.calls.at(-1)![0];
+    expect(step).toBeCloseTo(1720 % (256 / (0.05 * 3)), 9);
+    callbacks.start?.();
+    callbacks.frame(600_000);
+    expect(opacity.mock.calls.at(-1)![0]).toBeCloseTo(step, 9);
+    callbacks.frame(601_000);
+    expect(opacity.mock.calls.at(-1)![0]).toBeCloseTo(step + 4, 9);
+  });
+
   test("steps the source sketch four times per second of animation time", () => {
     const { callbacks } = startAnimation(SpiralSpokes, recordingContext2d().ctx);
     callbacks.resize(800, 800, false, 0);
