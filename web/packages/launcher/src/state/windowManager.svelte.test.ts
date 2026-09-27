@@ -378,6 +378,20 @@ describe("openWindowRecord", () => {
     expect(checkWindowPage).not.toHaveBeenCalled();
   });
 
+  it.each(["location", "document"] as const)("focuses a foreign window whose %s is unreadable", async (property) => {
+    const child = fakeWin();
+    child.location.href = "https://elsewhere.example/";
+    Object.defineProperty(child, property, {
+      get() { throw new DOMException("Blocked cross-origin access", "SecurityError"); },
+    });
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const outcome = await openWindowRecord(record({})).catch((error: unknown) => error);
+    expect(outcome).toBe(child);
+    expect(child.focus).toHaveBeenCalledOnce();
+    expect(child.close).not.toHaveBeenCalled();
+    expect(checkWindowPage).not.toHaveBeenCalled();
+  });
+
   it("reuses a minted window by its record name", async () => {
     createWindow.mockResolvedValue(record({}));
     await mintWindow("workspace");

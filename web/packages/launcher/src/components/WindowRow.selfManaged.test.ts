@@ -60,6 +60,7 @@ afterEach(() => {
   library.leaders = {};
   library.error = null;
   resetWindowManager();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -97,6 +98,42 @@ describe("WindowRow self-managed actions", () => {
     expect(open).toHaveBeenCalledExactlyOnceWith("", "w");
     const outcome = await pending.then(() => null, (error: unknown) => error);
     expect(outcome).toMatchObject({ message: "Window focus was refused." });
+  });
+
+  it.each(["Open", "Focus"])("repairs a JSON refusal page through %s", async (action) => {
+    vi.useFakeTimers();
+    const { backend } = await import("../api/backend");
+    const check = vi.spyOn(backend, "checkWindowPage")
+      .mockResolvedValueOnce(new Response('{"error":"Still restoring."}', { status: 503, headers: { "Retry-After": "1" } }))
+      .mockResolvedValue(new Response("<html></html>"));
+    const page = document.implementation.createHTMLDocument();
+    Object.defineProperty(page, "contentType", { value: "application/json" });
+    const child = {
+      closed: false,
+      location: { href: "http://localhost:3000/p/?w=w" },
+      document: page,
+      focus: vi.fn(),
+      close: vi.fn(),
+    };
+    const navigate = vi.fn();
+    Object.defineProperty(child.location, "href", { get: () => "http://localhost:3000/p/?w=w", set: navigate });
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const rec = win({ window_id: "w", library_id: "local" });
+    let pending: Promise<void> | undefined;
+    if (action === "Open") {
+      const el = render(rec);
+      (el.querySelector('[aria-label="Open window"]') as HTMLButtonElement).click();
+    } else {
+      pending = focusComputerWindow(rec);
+    }
+    await vi.advanceTimersByTimeAsync(999);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(navigate).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("/p/?w=w"));
+    expect(child.focus).toHaveBeenCalledOnce();
+    expect(child.close).not.toHaveBeenCalled();
   });
 
   it("renders OPEN plus a leader-allowed HIDE toggle when leaderless", () => {
