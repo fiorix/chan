@@ -214,6 +214,62 @@ describe("a live terminal under a pane restructure", () => {
 /// fit (120ms), so a fit a focus change queued has run before a test moves on.
 const RECOVERY_SETTLED = 400;
 
+/// The pane the layout lists a tab in, by the tab's title.
+function paneListing(title: string): string | null {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    if ([...node.tabs, ...(node.bTabs ?? [])].some((tab) => tab.title === title)) return node.id;
+  }
+  return null;
+}
+
+describe("a live terminal under a positioned team spawn", () => {
+  test("keeps its renderer and its socket when the grid moves it to the free cell", async () => {
+    const dials = recordDials();
+    resetLayout([terminalTab({ id: HOST, title: "host", terminalSessionId: HOST_SESSION })]);
+    await settle();
+    await vi.waitFor(() => expect(liveHostRenderer()).toBeDefined());
+    const root = hostTerminal()!;
+    const term = liveHostRenderer()!;
+
+    // Five members over a three-by-two grid leave one cell free, and the host
+    // terminal is swapped into it.
+    onWatchEvent({
+      type: "window_command",
+      window_id: sessionWindowId(),
+      command: "team_spawned",
+      group: "team-1",
+      members: [
+        { tab_name: "lead", session_id: "session-lead", position: { row: 0, col: 0 } },
+        { tab_name: "w1", session_id: "session-w1", position: { row: 0, col: 1 } },
+        { tab_name: "w2", session_id: "session-w2", position: { row: 1, col: 0 } },
+        { tab_name: "w3", session_id: "session-w3", position: { row: 1, col: 1 } },
+        { tab_name: "w4", session_id: "session-w4", position: { row: 2, col: 0 } },
+      ],
+    });
+    await settle();
+    await vi.waitFor(() => expect(paneListing("w4")).not.toBeNull());
+    await vi.waitFor(() => expect(liveHostRenderer()).toBeDefined());
+
+    const memberPanes = ["lead", "w1", "w2", "w3", "w4"].map(paneListing);
+    expect({
+      sameElement: hostTerminal() === root,
+      sameRenderer: liveHostRenderer() === term,
+      disposed: term.disposed,
+      hostDialsSince: hostDials(dials).map((d) => d.url.searchParams.get("since")),
+      drawnWhereListed: paneHolding(root) === paneListing("host"),
+      inAMemberCell: memberPanes.includes(paneHolding(root)),
+    }).toEqual({
+      sameElement: true,
+      sameRenderer: true,
+      disposed: false,
+      hostDialsSince: ["0"],
+      drawnWhereListed: true,
+      inAMemberCell: false,
+    });
+  });
+});
+
 describe("a terminal the pane tree rebuilds", () => {
   test("opens its renderer inside the pane that holds it", async () => {
     const openedIn: Array<string | null> = [];
