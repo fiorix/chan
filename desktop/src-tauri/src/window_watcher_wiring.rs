@@ -1695,6 +1695,8 @@ mod tests {
         queued: Mutex<Vec<(String, BuildCompletion)>>,
         // Whether each retarget dispatch raises its window, in order.
         raises: Mutex<Vec<(String, bool)>>,
+        // What each window's webview reports as its own URL.
+        urls: Mutex<HashMap<String, String>>,
     }
 
     impl RetrySurface {
@@ -1869,6 +1871,7 @@ mod tests {
                 resolving: Mutex::new(Vec::new()),
                 queued: Mutex::new(Vec::new()),
                 raises: Mutex::new(Vec::new()),
+                urls: Mutex::new(HashMap::new()),
             });
             let (stop, stopped) = tokio::sync::oneshot::channel();
             let task = tokio::spawn({
@@ -1998,7 +2001,82 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }
+
+        fn raised(&self, record: &WindowRecord) -> Vec<bool> {
+            let label = native_label(record);
+            self.surface
+                .raises
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(window, _)| *window == label)
+                .map(|(_, raised)| *raised)
+                .collect()
+        }
+
+        fn show_url(&self, record: &WindowRecord, url: &str) {
+            self.surface
+                .urls
+                .lock()
+                .unwrap()
+                .insert(native_label(record), url.to_string());
+        }
+
+        fn applied(&self, record: &WindowRecord) -> bool {
+            self.surface
+                .launches
+                .0
+                .lock()
+                .unwrap()
+                .entries
+                .get(&native_label(record))
+                .is_some_and(|attempt| attempt.phase == LaunchPhase::Applied)
+        }
+
+        /// Settle the first pass's held retarget of a live window as
+        /// navigated.
+        async fn navigate_first(&self, record: &WindowRecord) {
+            let (_, ticket) = self.surface.held.lock().unwrap().pop().unwrap();
+            self.finish_requested(record, &ticket, Ok(serve::RetargetOutcome::Navigated));
+            self.drain().await;
+        }
+
+        /// A Reload at t=5 that finds its target not ready, then the page
+        /// reporting `url` (none: unreadable) when the timer's try comes due
+        /// at t=20.
+        async fn refused_reload_then_timer(&self, record: &WindowRecord, url: Option<&str>) {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            assert!(self.request_reload(record, true, Some(&self.view)));
+            self.drain().await;
+            let (_, ticket) = self.surface.held.lock().unwrap().pop().unwrap();
+            self.finish_requested(record, &ticket, Ok(serve::RetargetOutcome::NotReady));
+            self.drain().await;
+            self.waiting_since(record, 5);
+            match url {
+                Some(url) => self.show_url(record, url),
+                None => {
+                    self.surface
+                        .urls
+                        .lock()
+                        .unwrap()
+                        .remove(&native_label(record));
+                }
+            }
+            tokio::time::advance(RETRY_NUDGE).await;
+            self.drain().await;
+        }
     }
+
+    // What a devserver window's webview is assumed to report as its URL, read
+    // in the code and not on a display. WebKitGTK's `uri`, WKWebView's `URL`
+    // and WebView2's source all follow a same-document `replaceState`, and the
+    // SPA deletes its `t` pair that way when it boots and writes its layout
+    // into the fragment. So a booted page reports its target without `t`; a
+    // page that never booted still carries `t`, and the connecting page
+    // reports its bundled asset.
+    const BOOTED_URL: &str = "http://127.0.0.1:4100/terminal/index.html?w=w-0&kind=terminal#l=1";
+    const UNBOOTED_URL: &str = "http://127.0.0.1:4100/terminal/index.html?t=tok-1&w=w-0";
+    const CONNECTING_URL: &str = "tauri://localhost/connecting.html";
 
     async fn reload_race(reload_first: bool, newer_finishes_first: bool) {
         let mut record = retry_record(
@@ -2601,6 +2679,113 @@ mod tests {
             "the pass after the build lands retargets the moved key"
         );
         harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_leaves_a_page_that_recovered_alone() {
+        let record = retry_record("recovered", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        harness.navigate_first(&record).await;
+        harness.show_url(&record, BOOTED_URL);
+        harness
+            .refused_reload_then_timer(&record, Some(BOOTED_URL))
+            .await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "the timer's try navigates nothing on a page that recovered"
+        );
+        assert!(
+            harness.applied(&record),
+            "the try marks the attempt applied"
+        );
+        assert_eq!(
+            harness.raised(&record),
+            vec![true, true],
+            "a Reload's own dispatch raises as the user asked"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_leaves_a_connecting_page_that_navigated_alone() {
+        let record = retry_record("connected-itself", 0);
+        let harness = RetryHarness::start_with(vec![record.clone()], true, true, true).await;
+        harness.surface.resolve_opens();
+        harness.show_url(&record, CONNECTING_URL);
+        let reads = harness.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
+        harness.surface.land_builds();
+        harness.after_pass(reads).await;
+        // The Reload is pressed on the connecting page, which then reaches
+        // its target by itself before the timer's try.
+        harness
+            .refused_reload_then_timer(&record, Some(BOOTED_URL))
+            .await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "the timer's try navigates nothing once the connecting page reached its target"
+        );
+        assert!(
+            harness.applied(&record),
+            "the try marks the attempt applied"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_on_a_changed_token_navigates_without_raising() {
+        let mut record = retry_record("changed-token-try", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        harness.navigate_first(&record).await;
+        // The page booted on the old token, so its URL looks like the new
+        // target's with the token pair gone.
+        harness.show_url(&record, BOOTED_URL);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        record.token = "restarted-token".into();
+        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed_wake().await;
+        let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
+        harness.drain().await;
+        tokio::time::advance(RETRY_NUDGE).await;
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5, 20],
+            "the timer's try navigates a page loaded with another token"
+        );
+        assert_eq!(
+            harness.raised(&record),
+            vec![true, true, false],
+            "a timer's try raises nothing"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_navigates_a_page_that_never_booted_without_raising() {
+        for (case, url) in [
+            ("token", Some(UNBOOTED_URL)),
+            ("connecting", Some(CONNECTING_URL)),
+            ("unreadable", None),
+        ] {
+            let record = retry_record(&format!("unbooted-{case}"), 0);
+            let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+            harness.navigate_first(&record).await;
+            harness.refused_reload_then_timer(&record, url).await;
+            assert_eq!(
+                harness.times(&record),
+                vec![0, 5, 20],
+                "{case}: the timer's try navigates a page that never got past loading"
+            );
+            assert_eq!(
+                harness.raised(&record),
+                vec![true, true, false],
+                "{case}: a timer's try raises nothing"
+            );
+            harness.stop(WatchLoopStop::KeepWindows).await;
+        }
     }
 
     #[tokio::test(start_paused = true)]
