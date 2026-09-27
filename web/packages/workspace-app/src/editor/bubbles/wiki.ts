@@ -693,9 +693,8 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   /// is a workspace-rooted POSIX path (no leading slash). Three forms:
   ///   slot mode (`raw`) -> bare relativized path filling an existing slot
   ///                     (the surrounding `[label](...)` / backticks stay).
-  ///                     "code" mode percent-encodes it so an inline-code
-  ///                     link survives detection (which rejects a space);
-  ///                     a markdown URL slot keeps the verbatim path.
+  ///                     Both slot modes percent-encode spaces so markdown
+  ///                     destinations and inline-code links stay parseable.
   ///   wiki-mode file -> `[[path#anchor]]`, preserving the file's
   ///                     existing wiki-link style.
   ///   default        -> relative markdown `[stem](./path#anchor)`.
@@ -706,10 +705,9 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   ): string {
     if (raw) {
       const rel = opts.fromPath ? relativizePath(path, opts.fromPath) : path;
-      // Inline-code links carry no markdown delimiters around the slot, so
-      // a literal space would break re-detection - percent-encode the path
-      // in "code" mode (a markdown URL slot keeps its existing raw form).
-      const slot = opts.templateMode === "code" ? encodeRelPath(rel) : rel;
+      // A literal space breaks both a markdown destination and detection
+      // of an inline-code link.
+      const slot = encodeRelPath(rel);
       return anchor ? `${slot}#${anchor}` : slot;
     }
     if (fileUsesWikiLinks) {
