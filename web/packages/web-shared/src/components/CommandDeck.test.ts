@@ -386,3 +386,82 @@ describe("CommandDeck focus on close", () => {
     expect(document.activeElement).not.toBe(origin);
   });
 });
+
+
+describe("CommandDeck non-awaited rejection", () => {
+  let origin: HTMLButtonElement;
+  let unhandled: unknown[];
+  const runner = globalThis as unknown as {
+    process: {
+      on: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
+      off: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
+    };
+  };
+  const recordUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  const recordWindowRejection = (event: PromiseRejectionEvent): void => {
+    recordUnhandled(event.reason);
+  };
+
+  beforeEach(() => {
+    unhandled = [];
+    // jsdom uses Node's promise queue; a browser dispatches the window event.
+    runner.process.on("unhandledRejection", recordUnhandled);
+    window.addEventListener("unhandledrejection", recordWindowRejection);
+    origin = document.createElement("button");
+    document.body.appendChild(origin);
+    origin.focus();
+  });
+
+  afterEach(() => {
+    runner.process.off("unhandledRejection", recordUnhandled);
+    window.removeEventListener("unhandledrejection", recordWindowRejection);
+    origin.remove();
+  });
+
+  async function rejectCommand(replaceDraft = false): Promise<void> {
+    const pending = deferred<void>();
+    mountDeck({ ...item(undefined), awaitResult: false }, () => pending.promise);
+    await flush();
+    closeResult().click();
+    await flush();
+    if (replaceDraft) {
+      (app.replaceDraft as () => void)();
+      await flush();
+    }
+    pending.reject(new Error("The command was refused"));
+    // An unhandled rejection is reported only after the promise queue drains.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
+  }
+
+  it("shows the rejection sentence and Back returns to the results", async () => {
+    await rejectCommand();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("The command was refused");
+    const back = [...target.querySelectorAll<HTMLButtonElement>(".deck-decisions button")]
+      .find((button) => button.textContent === "Back");
+    expect(back?.classList.contains("chosen")).toBe(true);
+    back!.click();
+    await flush();
+    expect(target.querySelector(".deck-operation")).toBeNull();
+    expect(closeResult()).not.toBeNull();
+    expect(document.activeElement).toBe(target.querySelector(".deck-input"));
+    expect(unhandled).toEqual([]);
+  });
+
+  it("closes the error card on Escape and restores the opening focus", async () => {
+    await rejectCommand();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("The command was refused");
+    escape();
+    await flush();
+    expect(target.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(origin);
+    expect(unhandled).toEqual([]);
+  });
+
+  it("handles a late rejection without painting into a replacement draft", async () => {
+    await rejectCommand(true);
+    expect(target.querySelector(".deck-operation")).toBeNull();
+    expect(closeResult()).not.toBeNull();
+    expect(unhandled).toEqual([]);
+  });
+});

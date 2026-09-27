@@ -14,6 +14,10 @@
 
   let draft = $state({ ...createDeckDraft(), visible: true });
 
+  export function replaceDraft(): void {
+    draft = { ...createDeckDraft(), visible: true };
+  }
+
   /// Hide the deck the way a host does: by turning its `open` prop off.
   export function close(): void {
     draft.visible = false;
