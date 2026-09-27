@@ -73,6 +73,10 @@
     /// The board renders in view mode, which is what keeps it from
     /// producing changes a live session refuses and the disk will not take.
     readonly?: boolean;
+    /// The tab's load is finished: the buffer holds the file, not the emptied
+    /// or partial buffer of a read in flight. Defaults true so standalone
+    /// mounts (tests, a host that never loads) behave as a loaded tab.
+    loaded?: boolean;
   };
   let {
     content,
@@ -81,6 +85,7 @@
     onSceneChange,
     session = null,
     readonly = false,
+    loaded = true,
   }: Props = $props();
 
   let host: HTMLDivElement | undefined = $state();
@@ -92,7 +97,9 @@
   /// bind effect re-runs once the async chunk delivers it.
   let apiReady = $state(false);
 
-  // Last scene JSON we know the buffer holds. Distinguishes our own
+  // The scene the board and the buffer last agreed on: the buffer the board
+  // was built from until it is seeded, then the library's serialization of
+  // each seed and of each change published since. Distinguishes our own
   // serialized output from an external buffer write (reload, 409
   // resolution, sibling-pane mirror) so we neither reparse bytes we just
   // emitted nor dirty the tab on a write we did not make. Mirrors
@@ -100,6 +107,16 @@
   // purpose; the effects below track later content changes.
   // svelte-ignore state_referenced_locally
   let lastSerialized = content;
+
+  // Seeded: the library holds the buffer of a finished load, applied after
+  // its own init (whose apply replaces every element set before it), and
+  // `lastSerialized` holds the library's serialization of that buffer. Only
+  // a seeded board publishes, and the serialization a seed takes is the
+  // baseline rather than an edit, so a board nobody drew on writes nothing:
+  // neither the empty or partial scene of a load in flight nor the library's
+  // rewrite of a file it did not write (its indentation, its `source`, the
+  // fields it restores). Set by `seed`; cleared when a load starts.
+  let seeded = false;
 
   // Serialization is debounced: excalidraw's onChange fires per pointer
   // event, and serializing the whole scene on each would jank a drag.
@@ -310,15 +327,47 @@
     serializeTimer = setTimeout(flushSerialize, 200);
   }
 
+  function serializeScene(
+    a: ExcalidrawImperativeAPI,
+    e: typeof import("@excalidraw/excalidraw"),
+  ): string {
+    return e.serializeAsJSON(a.getSceneElements(), a.getAppState(), a.getFiles(), "local");
+  }
+
+  /// Put the buffer of a finished load on the board and adopt the library's
+  /// serialization of it as the baseline, in one synchronous run, so no
+  /// stroke can land between the two. The library must be past its init: it
+  /// reports `isLoading` until then, and the init's apply would replace
+  /// whatever this put there. `apply` is false when the board already holds
+  /// the buffer, as it does when the init seeded it from `initialData`.
+  function seed(apply: boolean): void {
+    if (seeded || !loaded || !api || !ex) return;
+    if (api.getAppState().isLoading) return;
+    if (apply) {
+      const scene = parseScene(content);
+      api.updateScene({
+        elements: scene?.elements ?? [],
+        captureUpdate: ex.CaptureUpdateAction.NEVER,
+      } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
+      const files = scene?.files;
+      if (files) api.addFiles(Object.values(files));
+    }
+    lastSerialized = serializeScene(api, ex);
+    seeded = true;
+  }
+
+  /// Every change the library reports. The first comes from its init, and
+  /// none comes before it, so it is where a board whose buffer was loaded
+  /// before the init finished is seeded.
+  function onLibraryChange(): void {
+    seed(content !== lastSerialized);
+    scheduleSerialize();
+  }
+
   function flushSerialize(): void {
     serializeTimer = null;
     if (!api || !ex) return;
-    const json = ex.serializeAsJSON(
-      api.getSceneElements(),
-      api.getAppState(),
-      api.getFiles(),
-      "local",
-    );
+    const json = serializeScene(api, ex);
     if (session) {
       // The serialized envelope already carries the cleaned appState
       // (the exact object the classic save would persist); reuse it as
@@ -333,6 +382,9 @@
       }
       pushDeltas();
     }
+    // An unseeded board, or one whose tab is loading, holds no drawing of
+    // the user's to publish.
+    if (!seeded || !loaded) return;
     if (json === lastSerialized) return;
     lastSerialized = json;
     onSceneChange(json);
@@ -351,8 +403,9 @@
         excalidrawAPI: (a: ExcalidrawImperativeAPI) => {
           api = a;
           apiReady = true;
+          seed(content !== lastSerialized);
         },
-        onChange: scheduleSerialize,
+        onChange: onLibraryChange,
         onPointerUpdate: (p: {
           pointer: { x: number; y: number; tool: string };
         }) => {
@@ -395,18 +448,20 @@
     if (root) renderExcalidraw(false);
   });
 
-  // External buffer change (reload, 409 resolution, sibling mirror):
-  // load the new scene into the live board. Skipped for our own writes
-  // via lastSerialized. Reads content only.
+  // The tab's buffer or its load changed. A load in flight unseeds the board
+  // and leaves the drawing on screen (the board is in view mode while its
+  // tab loads); a finished load, or a buffer change the board did not make
+  // (a reload, a 409 resolution, a sibling pane's mirror), seeds it again.
+  // Our own serializations come back as the buffer and are skipped.
   $effect(() => {
     const c = content;
-    if (c === lastSerialized) return;
-    lastSerialized = c;
-    if (!api) return;
-    const scene = parseScene(c);
-    api.updateScene({ elements: scene?.elements ?? [] });
-    const files = scene?.files;
-    if (files) api.addFiles(Object.values(files));
+    if (!loaded) {
+      seeded = false;
+      return;
+    }
+    if (seeded && c === lastSerialized) return;
+    seeded = false;
+    seed(true);
   });
 
   /// Move keyboard focus into the board, the canvas analogue of the
