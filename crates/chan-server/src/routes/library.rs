@@ -1127,6 +1127,10 @@ struct ActingWindow {
     acting_window_id: Option<String>,
 }
 
+fn create_window_root_error(error: crate::Error) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+}
+
 /// `POST /api/library/windows` `{kind, workspace_path?, origin?, acting_window_id?}`:
 /// mint a window. The library assigns the id and persists the record; the
 /// registry change bridge fires the watch. Returns the assembled record in the
@@ -1147,7 +1151,7 @@ async fn handle_create_library_window(
         // spelling asks this root's, so it runs off the runtime.
         let key = match host.root_key(Path::new(path)).await {
             Ok(key) => key,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => return create_window_root_error(e),
         };
         let (status, _) = host.canonical_root_status(&key);
         if status != WorkspaceStatus::Running {
