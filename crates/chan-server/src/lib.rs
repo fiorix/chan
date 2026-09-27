@@ -38,6 +38,7 @@ mod doc_sessions;
 mod embed_seed;
 mod error;
 mod extensions;
+mod extract;
 /// CLI-to-desktop workspace handoff over a well-known per-user Unix socket or Windows named pipe.
 /// Public so both the `chan` CLI (client) and `chan-desktop`
 /// (listener) consume it; both already depend on chan-server.

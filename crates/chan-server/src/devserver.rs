@@ -4915,6 +4915,113 @@ mod tests {
         #[cfg(unix)]
         management_case!(management_failed_on, "failed_on");
 
+        /// Sends one request to the management routes and to the same routes
+        /// over the framework's extractors and request types, and requires the
+        /// devserver to answer the framework's status with its sentence in the
+        /// envelope.
+        async fn framework_rejection(
+            method: &'static str,
+            uri: &'static str,
+            content_type: Option<&'static str>,
+            body: &'static str,
+        ) {
+            let request = || {
+                let mut builder = HttpRequest::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, "Bearer test-token");
+                if let Some(content_type) = content_type {
+                    builder = builder.header(header::CONTENT_TYPE, content_type);
+                }
+                builder.body(Body::from(body)).unwrap()
+            };
+            let framework =
+                Router::new()
+                    .route(
+                        "/api/devserver/workspaces",
+                        post(|_: axum::Json<OpenWorkspaceRequest>| async {}),
+                    )
+                    .route(
+                        "/api/devserver/workspaces/{*prefix}",
+                        delete(
+                            |_: axum::extract::Path<String>,
+                             _: axum::extract::Query<ForceQuery>| async {
+                            },
+                        )
+                        .post(
+                            |_: axum::extract::Path<String>,
+                             _: axum::Json<SetWorkspaceOnRequest>| async {
+                            },
+                        ),
+                    )
+                    .oneshot(request())
+                    .await
+                    .unwrap();
+            let status = framework.status();
+            assert!(status.is_client_error(), "the framework refuses");
+            let sentence = to_bytes(framework.into_body(), usize::MAX).await.unwrap();
+            let sentence = String::from_utf8(sentence.to_vec()).unwrap();
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            assert_refusal(app.oneshot(request()).await.unwrap(), status, &sentence).await;
+        }
+
+        #[tokio::test]
+        async fn open_json_syntax() {
+            framework_rejection(
+                "POST",
+                "/api/devserver/workspaces",
+                Some("application/json"),
+                "{",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn open_json_content_type() {
+            framework_rejection("POST", "/api/devserver/workspaces", None, "{}").await;
+        }
+
+        #[tokio::test]
+        async fn on_json_data() {
+            framework_rejection(
+                "POST",
+                "/api/devserver/workspaces/missing/on",
+                Some("application/json"),
+                r#"{"on":"yes"}"#,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn on_path_utf8() {
+            framework_rejection(
+                "POST",
+                "/api/devserver/workspaces/%FF/on",
+                Some("application/json"),
+                r#"{"on":true}"#,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn forget_path_utf8() {
+            framework_rejection("DELETE", "/api/devserver/workspaces/%FF", None, "").await;
+        }
+
+        #[tokio::test]
+        async fn forget_query() {
+            framework_rejection(
+                "DELETE",
+                "/api/devserver/workspaces/missing?force=maybe",
+                None,
+                "",
+            )
+            .await;
+        }
+
         #[tokio::test]
         async fn startup_restoring() {
             let home = tempfile::tempdir().unwrap();
