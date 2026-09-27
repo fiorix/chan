@@ -6075,6 +6075,42 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn gateway_add_unavailable() {
+        let (_dir, host) = host();
+
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                "/api/library/gateways",
+                Some(serde_json::json!({"url":"https://gateway.example"})),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "gateway registry is not available on this surface",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gateway_add_rejected() {
+        let (_dir, host) = host();
+        host.install_gateway_registry(Arc::new(RefusingRegistry));
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                "/api/library/gateways",
+                Some(serde_json::json!({"url":"https://gateway.example"})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "registry rejected addition",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
         let app = launcher_router(host, None, None);
