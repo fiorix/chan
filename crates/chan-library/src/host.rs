@@ -6924,7 +6924,8 @@ mod tests {
             let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
             let mut host = WorkspaceHost::new(library, fake_builder());
             host.shutdown_release_budget = Duration::from_millis(40);
-            let bound = host.shutdown_release_budget + Duration::from_secs(5);
+            // Using the production deadline in place of the budget must fail.
+            let bound = WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT / 2;
             let (release, held) = std::sync::mpsc::channel();
             let (entered, arrivals) = std::sync::mpsc::channel();
             let stalled = Arc::new(HeldClearCell {
