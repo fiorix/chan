@@ -374,7 +374,7 @@ export function isMarkdown(path: string): boolean {
 /// separate `FileKind` for every renderable format.
 export function isJson(path: string): boolean {
   const ext = extOf(path);
-  return ext === "json" || ext === "json5";
+  return ext === "json";
 }
 
 /// True for tabular CSV / TSV files. The editor tab opens these in
