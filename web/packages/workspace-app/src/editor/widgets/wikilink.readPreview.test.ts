@@ -52,6 +52,6 @@ describe("a wiki pill in read mode", () => {
 
     expect(reads).toEqual(["Note.md"]);
     expect(reads).toEqual([resolvePreviewTarget(pill!.dataset.target!)]);
-    expect(document.querySelector(".md-preview-popover .md-preview-md")?.textContent).toBe("Note");
+    expect(document.querySelector(".md-preview-popover .md-preview-md h1")?.textContent).toBe("Note");
   });
 });
