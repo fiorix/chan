@@ -657,7 +657,9 @@ describe("Library: workspace OFF confirm-and-retry", () => {
     flushSync();
     const dlg = target.querySelector('[role="dialog"]');
     expect(dlg).not.toBeNull();
-    expect(dlg?.getAttribute("aria-label")).toBe("Turn off workspace?");
+    const titleId = dlg?.getAttribute("aria-labelledby");
+    expect(titleId).toBeTruthy();
+    expect(document.getElementById(titleId!)?.textContent).toBe("Turn off workspace?");
     expect(target.textContent).toContain("still running");
     cancelConfirm();
   });

@@ -4,7 +4,8 @@
   // rules; the content sits above it and is never dismissed by an in-body
   // click. The launcher uses in-SPA modals only (WKWebView blocks native
   // dialogs), so this is the single dialog surface.
-  import type { Snippet } from "svelte";
+  import { onMount, type Snippet } from "svelte";
+  import { createModalFocus } from "@chan/web-shared/modal-focus";
 
   interface Props {
     title: string;
@@ -14,21 +15,34 @@
 
   let { title, onclose, children }: Props = $props();
 
-  function onKey(e: KeyboardEvent): void {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      onclose();
-    }
-  }
+  const titleId = $props.id();
+  let panel: HTMLElement | undefined = $state();
+  const focus = createModalFocus({ onClose: () => onclose() });
+  onMount(() => focus.mount(panel!));
 </script>
 
-<svelte:window onkeydown={onKey} />
-
 <div class="overlay">
-  <button class="backdrop" type="button" aria-label="Close" onclick={onclose}></button>
-  <div class="modal" role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
+  <!-- The backdrop takes pointer clicks without taking focus: Escape must
+       stay inside the panel, and Tab must reach only the dialog's controls. -->
+  <button
+    class="backdrop"
+    type="button"
+    aria-label="Close"
+    tabindex="-1"
+    onmousedown={(event) => event.preventDefault()}
+    onclick={onclose}
+  ></button>
+  <div
+    bind:this={panel}
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby={titleId}
+    tabindex="-1"
+    onkeydown={focus.onKeydown}
+  >
     <header class="modal-header">
-      <h2>{title}</h2>
+      <h2 id={titleId}>{title}</h2>
       <button class="modal-close" type="button" aria-label="Close" onclick={onclose}>×</button>
     </header>
     <div class="modal-body">
