@@ -24,6 +24,7 @@ const CONNECTING_HTML = readFileSync("../../../desktop/src/connecting.html", "ut
 
 const MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)";
 const LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64)";
+const WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
 
 type KeyInit = KeyboardEventInit & { altGraph?: boolean };
 
@@ -39,7 +40,7 @@ function keydown({ altGraph, ...init }: KeyInit): KeyboardEvent {
 
 /// Run KEY_BRIDGE_JS on a fresh host and press one key. The host records
 /// command events and IPC invokes, so a duplicate dispatch is visible.
-function pressKeyBridge(init: KeyInit, mac: boolean): BridgeOutcome {
+function pressKeyBridge(init: KeyInit, platform: boolean | string): BridgeOutcome {
   const commands: string[] = [];
   const ipc: string[] = [];
   const listeners: Array<(e: KeyboardEvent) => void> = [];
@@ -65,7 +66,7 @@ function pressKeyBridge(init: KeyInit, mac: boolean): BridgeOutcome {
     host,
     { pathname: "/" },
     CustomEvent,
-    { userAgent: mac ? MAC_UA : LINUX_UA },
+    { userAgent: typeof platform === "string" ? platform : platform ? MAC_UA : LINUX_UA },
   );
   const event = keydown(init);
   for (const fn of listeners) fn(event);
@@ -131,6 +132,40 @@ describe.each([
           commands: [shiftedCommand], ipc: [], prevented: true,
         });
       }
+    });
+  });
+});
+
+describe.each(["terminal", "editor"] as const)("KEY_BRIDGE_JS Quit with %s focus", (surface) => {
+  beforeEach(() => {
+    const root = document.createElement("div");
+    root.className = surface === "terminal" ? "terminal-tab active" : "editor";
+    const input = document.createElement("textarea");
+    root.append(input);
+    document.body.append(root);
+    input.focus();
+    expect(document.activeElement).toBe(input);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  test("macOS Ctrl+Q stays with the page", () => {
+    expect(pressKeyBridge({ key: "q", code: "KeyQ", ctrlKey: true }, MAC_UA)).toEqual({
+      commands: [], ipc: [], prevented: false,
+    });
+  });
+
+  test("macOS Command+Q stays with the menubar", () => {
+    expect(pressKeyBridge({ key: "q", code: "KeyQ", metaKey: true }, MAC_UA)).toEqual({
+      commands: [], ipc: [], prevented: false,
+    });
+  });
+
+  test.each([["Linux", LINUX_UA], ["Windows", WINDOWS_UA]])("%s Ctrl+Q requests Quit", (_platform, ua) => {
+    expect(pressKeyBridge({ key: "q", code: "KeyQ", ctrlKey: true }, ua)).toEqual({
+      commands: [], ipc: ["request_app_quit"], prevented: true,
     });
   });
 });
