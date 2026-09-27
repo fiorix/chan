@@ -4308,6 +4308,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_operations_read_refusals_per_arm() {
+        use axum::http::StatusCode;
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for gateway in [false, true] {
+            for operation in ["colour", "list", "mint", "discard", "visibility", "label"] {
+                for (body, detail) in [
+                    ("plain refusal", ""),
+                    (
+                        r#"{"error":"launcher not ready","code":"starting"}"#,
+                        ": launcher not ready",
+                    ),
+                ] {
+                    let server = MockManagementServer::start(vec![mock_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        body,
+                    )])
+                    .await;
+                    let conn = if gateway {
+                        server.gateway_conn()
+                    } else {
+                        server.raw_conn()
+                    };
+                    let (message, label) = match operation {
+                        "colour" => (
+                            fetch_local_color(&conn).await.unwrap_err(),
+                            if gateway {
+                                "gateway colour"
+                            } else {
+                                "devserver colour"
+                            },
+                        ),
+                        "list" => (
+                            fetch_library_windows("dev-1", &conn).await.unwrap_err(),
+                            if gateway {
+                                "gateway library windows"
+                            } else {
+                                "library windows"
+                            },
+                        ),
+                        "mint" => (
+                            mint_library_window(&conn, chan_server::WindowKind::Terminal, None)
+                                .await
+                                .unwrap_err(),
+                            if gateway {
+                                "gateway library window mint"
+                            } else {
+                                "library window mint"
+                            },
+                        ),
+                        "discard" => (
+                            discard_library_window(&conn, "window-1").await.unwrap_err(),
+                            if gateway {
+                                "gateway library window discard"
+                            } else {
+                                "library window discard"
+                            },
+                        ),
+                        "visibility" => (
+                            set_window_visibility(&conn, "window-1", true)
+                                .await
+                                .unwrap_err(),
+                            if gateway {
+                                "gateway window visibility"
+                            } else {
+                                "devserver window visibility"
+                            },
+                        ),
+                        "label" => (
+                            set_window_label(&conn, "window-1", "Notes")
+                                .await
+                                .unwrap_err(),
+                            if gateway {
+                                "gateway window label"
+                            } else {
+                                "devserver window label"
+                            },
+                        ),
+                        _ => unreachable!(),
+                    };
+                    actual.push(format!("{operation}: {message}"));
+                    expected.push(format!(
+                        "{operation}: {label} returned HTTP 503 Service Unavailable{detail}"
+                    ));
+                    server.assert_responses_drained();
+                }
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "refusals must retain the server sentence on both transports"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_workspaces_request_contract_per_arm() {
         use axum::http::{Method, StatusCode};
 
