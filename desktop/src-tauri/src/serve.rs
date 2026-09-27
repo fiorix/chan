@@ -446,12 +446,13 @@ async fn retarget_window<F: std::future::Future<Output = crate::ProbeResult>>(
 /// A not-ready target keeps the current page; the watcher settles its current
 /// attempt as waiting for another try. A gone window is never built here, and
 /// a superseded ticket cannot navigate. Navigation keeps the native window and
-/// its geometry.
+/// its geometry, and `raise` shows the window after it.
 pub(crate) async fn retarget_watched_remote_window(
     app: &AppHandle,
     url: &str,
     record: &WindowRecord,
     ticket: &RetargetTicket,
+    raise: bool,
 ) -> Result<RetargetOutcome, String> {
     let label = crate::window_watcher::native_label(record);
     let Some(window) = app.get_webview_window(&label) else {
@@ -474,8 +475,10 @@ pub(crate) async fn retarget_watched_remote_window(
             window
                 .navigate(target)
                 .map_err(|e| format!("retargeting {label}: {e}"))?;
-            if let Err(e) = window.show() {
-                tracing::warn!(label = %label, error = %e, "showing retargeted devserver window failed");
+            if raise {
+                if let Err(e) = window.show() {
+                    tracing::warn!(label = %label, error = %e, "showing retargeted devserver window failed");
+                }
             }
             Ok(RetargetOutcome::Navigated)
         }).unwrap_or(Ok(RetargetOutcome::Superseded)),
@@ -2259,7 +2262,7 @@ mod tests {
         assert!(refresh.contains(
             "let present = self.app.get_webview_window(&native_label(record)).is_some();"
         ));
-        assert!(refresh.contains("navigate_remote(record, true)"));
+        assert!(refresh.contains("navigate_remote(record, Some(retarget))"));
         assert!(dispatch.contains("prepare_remote_navigation("));
         assert!(dispatch.contains("window_navigation_url(&conn, &record)"));
         assert!(dispatch.contains("install_gateway_webview_session("));
@@ -2547,7 +2550,7 @@ mod tests {
             .split("fn close(&self, label")
             .next()
             .expect("refresh section ends before close");
-        assert!(refresh.contains("navigate_remote(record, true)"));
+        assert!(refresh.contains("navigate_remote(record, Some(retarget))"));
         let navigator = WIRING_RS
             .split("fn navigate_remote(&self, record")
             .nth(1)

@@ -165,6 +165,25 @@ enum LaunchPhase {
     Applied,
 }
 
+/// Why the watcher dispatches a retarget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retarget {
+    /// The user's Reload.
+    Requested,
+    /// A target the window has not been sent to: a changed launch key, or a
+    /// window this watcher has no attempt for.
+    Changed,
+    /// A waiting attempt whose dispatch deadline passed.
+    Retry,
+}
+
+impl Retarget {
+    /// Whether the navigation shows and raises the window.
+    fn raises(self) -> bool {
+        true
+    }
+}
+
 struct RemoteLaunch {
     key: RemoteLaunchKey,
     attempted_at: tokio::time::Instant,
@@ -183,9 +202,19 @@ impl RemoteLaunch {
     }
 
     fn should_retry(&self, next: &RemoteLaunchKey) -> bool {
-        self.key != *next
-            || (self.phase == LaunchPhase::Waiting
-                && tokio::time::Instant::now() >= self.attempted_at + RETRY_NUDGE)
+        self.retry(next).is_some()
+    }
+
+    fn retry(&self, next: &RemoteLaunchKey) -> Option<Retarget> {
+        if self.key != *next {
+            Some(Retarget::Changed)
+        } else if self.phase == LaunchPhase::Waiting
+            && tokio::time::Instant::now() >= self.attempted_at + RETRY_NUDGE
+        {
+            Some(Retarget::Retry)
+        } else {
+            None
+        }
     }
 }
 
@@ -350,24 +379,38 @@ impl WindowBuilds {
 struct RemoteLaunches(Mutex<Launches>);
 
 impl RemoteLaunches {
-    fn needs_retarget(&self, record: &WindowRecord, gateway: bool, reload: bool) -> bool {
+    fn retarget(&self, record: &WindowRecord, gateway: bool, reload: bool) -> Option<Retarget> {
         let label = native_label(record);
         let next = RemoteLaunchKey::from_record(record, gateway);
         let state = self.0.lock().unwrap();
-        state.retired.is_none()
-            && (reload
-                || state
-                    .entries
-                    .get(&label)
-                    .is_none_or(|entry| entry.should_retry(&next)))
+        if state.retired.is_some() {
+            return None;
+        }
+        if reload {
+            return Some(Retarget::Requested);
+        }
+        match state.entries.get(&label) {
+            Some(entry) => entry.retry(&next),
+            None => Some(Retarget::Changed),
+        }
     }
 
-    /// Whether a refresh dispatches a retarget. `present` says whether the
-    /// window's webview exists. A window still being built has none: its
-    /// build owns it, and the pass after the build lands retargets it if the
-    /// key moved, so no attempt is ever dispatched at an absent webview.
-    fn admit(&self, record: &WindowRecord, gateway: bool, reload: bool, present: bool) -> bool {
-        present && self.needs_retarget(record, gateway, reload)
+    /// Whether a refresh dispatches a retarget, and why. `present` says
+    /// whether the window's webview exists. A window still being built has
+    /// none: its build owns it, and the pass after the build lands retargets
+    /// it if the key moved, so no attempt is ever dispatched at an absent
+    /// webview.
+    fn admit(
+        &self,
+        record: &WindowRecord,
+        gateway: bool,
+        reload: bool,
+        present: bool,
+    ) -> Option<Retarget> {
+        if !present {
+            return None;
+        }
+        self.retarget(record, gateway, reload)
     }
 
     fn begin_remote(
@@ -589,10 +632,12 @@ impl TauriNativeSurface {
     /// retiring the watcher removes that marker. A vanished retarget never
     /// builds a window: authoritative reconciliation owns reopening, subject
     /// to the current visibility and pending-delete state.
-    fn navigate_remote(&self, record: &WindowRecord, retarget: bool) {
+    fn navigate_remote(&self, record: &WindowRecord, retarget: Option<Retarget>) {
         let WindowOpener::Remote { conn } = &self.opener else {
             return;
         };
+        let raise = retarget.is_some_and(Retarget::raises);
+        let retarget = retarget.is_some();
         let app = self.app.clone();
         let conn = conn.clone();
         let record = record.clone();
@@ -644,8 +689,10 @@ impl TauriNativeSurface {
                             let app = &app;
                             let record = &record;
                             async move {
-                                serve::retarget_watched_remote_window(app, &url, record, ticket)
-                                    .await
+                                serve::retarget_watched_remote_window(
+                                    app, &url, record, ticket, raise,
+                                )
+                                .await
                             }
                         },
                     )
@@ -782,7 +829,7 @@ impl NativeSurface for TauriNativeSurface {
             // Remote builds resolve their navigation URL asynchronously
             // first (a gateway mint is an HTTP round trip); the in-flight
             // marker covers the whole gap.
-            WindowOpener::Remote { .. } => self.navigate_remote(record, false),
+            WindowOpener::Remote { .. } => self.navigate_remote(record, None),
         }
     }
 
@@ -795,11 +842,11 @@ impl NativeSurface for TauriNativeSurface {
             return;
         }
         let present = self.app.get_webview_window(&native_label(record)).is_some();
-        if self
-            .remote_launches
-            .admit(record, self.opener.is_gateway(), reload, present)
+        if let Some(retarget) =
+            self.remote_launches
+                .admit(record, self.opener.is_gateway(), reload, present)
         {
-            self.navigate_remote(record, true);
+            self.navigate_remote(record, Some(retarget));
         }
     }
 
@@ -1646,6 +1693,8 @@ mod tests {
         hold_opens: bool,
         resolving: Mutex<Vec<String>>,
         queued: Mutex<Vec<(String, BuildCompletion)>>,
+        // Whether each retarget dispatch raises its window, in order.
+        raises: Mutex<Vec<(String, bool)>>,
     }
 
     impl RetrySurface {
@@ -1737,9 +1786,13 @@ mod tests {
         fn refresh(&self, record: &WindowRecord, reload: bool) {
             let label = native_label(record);
             let present = self.live.lock().unwrap().contains(&label);
-            if !self.launches.admit(record, false, reload, present) {
+            let Some(retarget) = self.launches.admit(record, false, reload, present) else {
                 return;
-            }
+            };
+            self.raises
+                .lock()
+                .unwrap()
+                .push((label.clone(), retarget.raises()));
             let ticket = self
                 .launches
                 .begin_remote(record, false, true, &self.tickets)
@@ -1815,6 +1868,7 @@ mod tests {
                 hold_opens,
                 resolving: Mutex::new(Vec::new()),
                 queued: Mutex::new(Vec::new()),
+                raises: Mutex::new(Vec::new()),
             });
             let (stop, stopped) = tokio::sync::oneshot::channel();
             let task = tokio::spawn({
@@ -2565,7 +2619,7 @@ mod tests {
             );
             tokio::time::advance(Duration::from_secs(60)).await;
             assert!(
-                !surface.launches.needs_retarget(&record, false, false),
+                surface.launches.retarget(&record, false, false).is_none(),
                 "a stopped watcher must reject a late completion's next attempt"
             );
             assert_eq!(surface.attempts.lock().unwrap().len(), 1);
