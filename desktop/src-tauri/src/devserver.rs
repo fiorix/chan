@@ -2247,9 +2247,12 @@ pub async fn forget_workspace(
             return Err(refusal_from_conflict(resp).await);
         }
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let fallback = format!("HTTP {status}");
             return Err(SetWorkspaceOnError::other(format!(
-                "gateway workspace delete returned HTTP {}",
-                resp.status()
+                "gateway workspace delete returned {}",
+                refusal_message(status, &body, &fallback)
             )));
         }
         return Ok(());
@@ -2269,9 +2272,12 @@ pub async fn forget_workspace(
         return Err(refusal_from_conflict(resp).await);
     }
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let fallback = format!("HTTP {status}");
         return Err(SetWorkspaceOnError::other(format!(
-            "devserver workspace delete returned HTTP {}",
-            resp.status()
+            "devserver workspace delete returned {}",
+            refusal_message(status, &body, &fallback)
         )));
     }
     Ok(())
@@ -2491,9 +2497,12 @@ pub async fn set_workspace_on(
             return Err(refusal_from_conflict(resp).await);
         }
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let fallback = format!("HTTP {status}");
             return Err(SetWorkspaceOnError::other(format!(
-                "gateway workspace on/off returned HTTP {}",
-                resp.status()
+                "gateway workspace on/off returned {}",
+                refusal_message(status, &body, &fallback)
             )));
         }
         if !on {
@@ -2531,9 +2540,12 @@ pub async fn set_workspace_on(
         return Err(refusal_from_conflict(resp).await);
     }
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let fallback = format!("HTTP {status}");
         return Err(SetWorkspaceOnError::other(format!(
-            "devserver workspace on/off returned HTTP {}",
-            resp.status()
+            "devserver workspace on/off returned {}",
+            refusal_message(status, &body, &fallback)
         )));
     }
     if !on {
