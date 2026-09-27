@@ -66,6 +66,7 @@ function handleState(id: string): "live" | "closed" | "none" {
 const WINDOW_PAGE_WAIT_MS = 60_000;
 const WINDOW_CLOSED_POLL_MS = 100;
 const waitingPages = new WeakMap<Window, Promise<boolean>>();
+const navigatingDocuments = new WeakMap<Window, Document>();
 
 function retryAfterMs(header: string | null): number {
   if (header === null || header.trim() === "") return 1000;
@@ -79,7 +80,8 @@ function navigateWindowWhenReady(h: Window, url: string): Promise<boolean> {
   const waiting = waitingPages.get(h);
   if (waiting) return waiting;
   if (h.closed) return Promise.resolve(false);
-  h.document.body.textContent = "Waiting for the window to be ready...";
+  const page = h.document;
+  page.body.textContent = "Waiting for the window to be ready...";
   const controller = new AbortController();
   let lastRefusal: Error = new Error("Timed out waiting for the window page");
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -115,6 +117,7 @@ function navigateWindowWhenReady(h: Window, url: string): Promise<boolean> {
   const pending = Promise.race([check(), stopped]).then((ready) => {
     if (!ready || h.closed) return false;
     h.location.href = url;
+    navigatingDocuments.set(h, page);
     return true;
   }).finally(() => {
     clearTimeout(retryTimer);
@@ -182,7 +185,12 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   h.focus?.();
   let blank: boolean;
   try {
-    blank = h.location.href === "" || h.location.href === "about:blank" || h.document.contentType !== "text/html";
+    const page = h.document;
+    // Location can still describe the old page until navigation commits.
+    // A later refusal document on this window must remain retryable.
+    if (navigatingDocuments.get(h) === page) return h;
+    navigatingDocuments.delete(h);
+    blank = h.location.href === "" || h.location.href === "about:blank" || page.contentType !== "text/html";
   } catch {
     // A window navigated to another origin still belongs to its user.
     return h;
