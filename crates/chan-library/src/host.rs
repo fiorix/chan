@@ -598,8 +598,8 @@ struct HostedWorkspaceRuntime {
 }
 
 impl HostedWorkspaceRuntime {
-    /// Whether `key` names this runtime: its canonical root, or the root it
-    /// was opened at, which is the registry row's stored root. The two
+    /// Whether this is a workspace runtime that `key` names by its canonical
+    /// root or the root it was opened at, the registry row's stored root. The two
     /// differ for a root whose path resolves elsewhere since it was
     /// registered, and a caller holding the row asks by the stored one.
     fn found_by(&self, key: &Path) -> bool {
@@ -1418,8 +1418,9 @@ impl WorkspaceHost {
         }
     }
 
-    /// The existing mount whose canonical root is `key`, or `None` when no
-    /// tenant owns that root. One read lock; the returned
+    /// The workspace mount whose canonical or opened-at root is `key`, or
+    /// `None` when no workspace runtime goes by it. Terminal tenants are
+    /// excluded even when their PTY cwd matches. One read lock; the returned
     /// [`HostedWorkspace`] is rebuilt from the handle captured at mount.
     fn hosted_for_key(&self, key: &Path) -> Result<Option<HostedWorkspace>, Error> {
         let workspaces = self
@@ -3002,11 +3003,11 @@ impl WorkspaceHost {
             .and_then(|runtime| runtime.artifacts.terminal_sessions.last_exit())
     }
 
-    /// Close the mounted workspace whose root matches `root` (by canonical
-    /// form), returning a typed lifecycle outcome. The control-socket `Close`
-    /// handler uses this to unmount a single hosted tenant by path without
-    /// disturbing the rest of the host. A terminal tenant (no workspace root)
-    /// never matches a real workspace root.
+    /// Close the workspace runtime whose canonical root matches `root` after
+    /// resolution, returning a typed lifecycle outcome. The control-socket
+    /// `Close` handler uses this to unmount a workspace by path without
+    /// disturbing the rest of the host. Shared and command terminal tenants
+    /// are excluded even when their PTY cwd matches the workspace root.
     ///
     /// On a successful unmount it also records the workspace OFF in the on/off
     /// overlay, so a devserver restart (which re-mounts from the overlay) does
@@ -3545,8 +3546,8 @@ impl WorkspaceHost {
     }
 
     /// Return the live `Arc<Workspace>` for a mounted workspace whose root
-    /// matches `root`, or `None` when no mounted runtime owns that
-    /// path.
+    /// matches `root`, or `None` when no workspace runtime has a live cell
+    /// at that path. Terminal tenants are excluded before reading a cell.
     ///
     /// Desktop feature toggles need the SAME handle the runtime
     /// holds: a second `Library::open_workspace` for a mounted path
@@ -3569,20 +3570,18 @@ impl WorkspaceHost {
         runtime.artifacts.cell.workspace()
     }
 
-    /// True iff a workspace with this canonical root is mounted (under ANY
-    /// prefix). The launcher's `on` state reads this so it reflects the real
-    /// mount regardless of the prefix scheme that mounted it -- the desktop
-    /// mounts at `workspace-<hash>` while the devserver mounts at the slug, so a
-    /// slug-prefix membership check reads `off` on the desktop.
+    /// True iff a workspace runtime matching `root` has a live workspace cell,
+    /// under any prefix. Resolves the caller's root before looking it up, and
+    /// excludes terminal tenants even when their PTY cwd matches that root.
     pub fn is_root_mounted(&self, root: &Path) -> bool {
         self.live_workspace(root).is_some()
     }
 
-    /// [`is_root_mounted`](Self::is_root_mounted) for a caller that already
-    /// holds the root's canonical key, such as the devserver's record of a
-    /// mount attempt: answered from the runtimes' stored keys without touching
-    /// the filesystem, so it answers even when that root has stopped
-    /// answering.
+    /// Whether a workspace runtime goes by `key`, its canonical or opened-at
+    /// root. Terminal tenants are excluded. Unlike
+    /// [`is_root_mounted`](Self::is_root_mounted), this reads only the stored
+    /// keys, without resolving a path or reading the workspace cell, so a
+    /// published workspace runtime counts even while its cell is empty.
     pub fn is_canonical_root_mounted(&self, key: &Path) -> bool {
         self.hosted_for_key(key).ok().flatten().is_some()
     }
