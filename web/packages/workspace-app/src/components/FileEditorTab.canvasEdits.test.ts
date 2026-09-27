@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 import FileEditorTab from "./FileEditorTab.svelte";
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -13,6 +14,7 @@ import { refreshWorkspace } from "../state/store.svelte";
 import {
   closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
+  clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave,
   type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
@@ -58,9 +60,116 @@ afterEach(async () => {
   vi.useRealTimers();
   document.body.innerHTML = "";
   resetLayout();
+  clearRecentlyClosedTabsForTest();
   uninstallDemoWorkspace();
   timers.release();
   vi.restoreAllMocks();
+});
+
+const PARTIAL = '{"type":"excalidraw","elements":[';
+const DRAWING = JSON.stringify({ elements: [{ id: "on-disk", version: 1 }], appState: {}, files: {} });
+
+async function mountDuringLoad(exists = true) {
+  const initial = fileTab({
+    path: "notes/loading.excalidraw", fileKind: "text", mode: "canvas",
+    content: DRAWING, saved: DRAWING,
+  });
+  if (exists) disk.write(initial.path, DRAWING);
+  const pane = resetLayout([initial]);
+  const tab = readTab(initial.id)!;
+  let readOptions: Parameters<typeof api.readStream>[1];
+  let rejectRead!: (reason: unknown) => void;
+  vi.spyOn(api, "readStream").mockImplementation((_path, options) => {
+    readOptions = options;
+    return new Promise((_resolve, reject) => {
+      rejectRead = reject;
+      options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    });
+  });
+  const loading = reloadTabFromDisk(tab.id);
+  const write = vi.spyOn(api, "write");
+  const target = document.createElement("div");
+  document.body.append(target);
+  const component = mount(FileEditorTab, { target, props: { tab, active: true, focused: true } });
+  mounted.push(component);
+  const props = await canvasReady;
+  let elements: unknown[] = [];
+  props.excalidrawAPI({
+    getSceneElements: () => elements, getAppState: () => ({}), getFiles: () => ({}),
+    updateScene: (scene: { elements: unknown[] }) => { elements = scene.elements; props.onChange(); },
+  });
+  await tick();
+  vi.useFakeTimers();
+  // The library reports a change after mounting even without a stroke.
+  props.onChange();
+  expect(tab.loading).toBe(true);
+  expect(target.querySelector(".excalidraw-host")).not.toBeNull();
+  return {
+    pane, tab, target, component, loading, write, rejectRead,
+    chunk: async () => {
+      readOptions?.onChunk?.(PARTIAL, { loadedBytes: PARTIAL.length, totalBytes: DRAWING.length });
+      await tick();
+    },
+  };
+}
+
+describe("drawing loads", () => {
+  test("a failed load under a mounted canvas leaves the drawing clean and unwritten", async () => {
+    const { pane, tab, target, loading, write, rejectRead, chunk } = await mountDuringLoad();
+    await chunk();
+    vi.advanceTimersByTime(50);
+    rejectRead(new Error("stream interrupted"));
+    await loading;
+    await tick();
+    expect(target.querySelector(".excalidraw-host")).toBeNull();
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ dirty, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
+      dirty: false, writes: [], content: DRAWING,
+    });
+    expect(tab.error).toBe("stream interrupted");
+  });
+
+  test("a missing file under a mounted canvas stays missing and unwritten", async () => {
+    const { pane, tab, target, loading, write, rejectRead } = await mountDuringLoad(false);
+    vi.advanceTimersByTime(50);
+    rejectRead(new ApiError(404, "file not found"));
+    await loading;
+    await tick();
+    expect(target.querySelector(".excalidraw-host")).toBeNull();
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ dirty, writes: write.mock.calls, file: disk.get(tab.path) }).toEqual({
+      dirty: false, writes: [], file: undefined,
+    });
+    expect(tab.fileMissing?.path).toBe(tab.path);
+  });
+
+  test("closing during a mounted canvas load and reopening writes no placeholder", async () => {
+    const { pane, tab, component, loading, write, chunk } = await mountDuringLoad();
+    await chunk();
+    vi.advanceTimersByTime(50);
+    await closeTab(pane.id, tab.id);
+    await loading;
+    await unmount(component);
+    mounted.splice(mounted.indexOf(component), 1);
+    expect(readTab(tab.id)).toBeUndefined();
+    expect(reopenClosedTab()).toBe(true);
+    const reopened = readTab(tab.id)!;
+    const dirty = isDirty(reopened);
+    scheduleAutosave(pane.id, reopened.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ dirty, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
+      dirty: true, writes: [], content: DRAWING,
+    });
+    expect(reopened.content).toBe(PARTIAL);
+    expect(reopened.error).toContain("JSON parse error");
+  });
 });
 
 async function draw(over: Partial<FileTab> = {}) {
