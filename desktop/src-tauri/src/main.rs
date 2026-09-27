@@ -237,8 +237,11 @@ pub struct AppState {
     /// normal exit or update restart.
     pub shutdown_started: std::sync::atomic::AtomicBool,
     /// The overlay rows the boot restore has not finished: the one it is
-    /// mounting and the ones queued behind it. The on-set snapshot keeps
-    /// them on, since none of them has been tried.
+    /// mounting and the ones queued behind it. Only the restore takes a row
+    /// out, once its mount has published or failed, or when its turn comes
+    /// and the overlay no longer has it on. The on-set snapshot keeps each
+    /// row here on while the overlay still has it on, so a quit while one
+    /// hung root holds the restore does not turn off the rows behind it.
     pub restore_pending: Mutex<Vec<String>>,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
@@ -6666,6 +6669,21 @@ async fn restore_on_workspaces<R: tauri::Runtime>(
     enabled: Vec<String>,
 ) {
     for key in enabled {
+        // A row turned off or forgotten while the restore waited on the rows
+        // before it stays off: the overlay is read again at each row's turn.
+        let still_on = state
+            .embedded()
+            .and_then(|embedded| embedded.workspace_overlay())
+            .is_some_and(|overlay| overlay.on_paths().contains(&key));
+        if !still_on {
+            state
+                .restore_pending
+                .lock()
+                .unwrap()
+                .retain(|pending| pending != &key);
+            tracing::info!(key = %key, "not restoring a workspace turned off during the restore");
+            continue;
+        }
         // Boot restores persisted windows only. A workspace whose windows
         // were all closed has no record, so it stays windowless. The watcher
         // keeps hidden records hidden.
