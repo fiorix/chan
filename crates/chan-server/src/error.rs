@@ -169,6 +169,84 @@ mod tests {
         );
     }
 
+    async fn assert_invalid_refusal(response: Response) {
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), 8192).await.unwrap(),
+            r#"{"error":"cannot construct refusal response"}"#,
+        );
+    }
+
+    macro_rules! invalid_details {
+        ($name:ident, $details:expr) => {
+            #[tokio::test]
+            #[ignore = "run explicitly until invalid refusal inputs are handled"]
+            async fn $name() {
+                assert_invalid_refusal(err_code(
+                    StatusCode::CONFLICT,
+                    "the displayed sentence".into(),
+                    "conflict",
+                    $details,
+                ))
+                .await;
+            }
+        };
+    }
+
+    invalid_details!(
+        details_cannot_replace_error,
+        serde_json::json!({"error":"token"})
+    );
+    invalid_details!(
+        details_cannot_replace_code,
+        serde_json::json!({"code":"other"})
+    );
+    invalid_details!(details_cannot_be_a_string, "text");
+    invalid_details!(details_cannot_be_a_sequence, vec![1, 2]);
+    invalid_details!(details_cannot_be_null, ());
+    invalid_details!(details_cannot_be_a_number, 7);
+    invalid_details!(details_cannot_be_a_boolean, true);
+
+    #[tokio::test]
+    #[ignore = "run explicitly until invalid refusal inputs are handled"]
+    async fn details_serialization_failure_is_a_json_server_error() {
+        struct Unserializable;
+        impl serde::Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("details unavailable"))
+            }
+        }
+        assert_invalid_refusal(err_code(
+            StatusCode::CONFLICT,
+            "conflict".into(),
+            "conflict",
+            Unserializable,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "run explicitly until invalid refusal inputs are handled"]
+    async fn an_empty_code_answers_without_panicking() {
+        let response = std::panic::catch_unwind(|| {
+            err_code(
+                StatusCode::CONFLICT,
+                "conflict".into(),
+                "",
+                serde_json::json!({}),
+            )
+        });
+        assert!(
+            response.is_ok(),
+            "an empty refusal code must answer without panicking"
+        );
+        assert_invalid_refusal(response.unwrap()).await;
+    }
+
     async fn body_json(r: Response) -> serde_json::Value {
         let (parts, body) = r.into_parts();
         let bytes = to_bytes(body, 8192).await.expect("read body");
