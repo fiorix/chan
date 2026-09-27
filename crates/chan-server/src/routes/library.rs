@@ -6325,6 +6325,52 @@ mod refusal_envelopes {
         .await;
     }
 
+    struct RefusingCollapsedMachinesStore;
+    impl chan_library::CollapsedMachinesStore for RefusingCollapsedMachinesStore {
+        fn get(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn set(&self, _value: Vec<String>) -> Result<(), String> {
+            Err("store could not persist the value".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn collapsed_machines_unavailable() {
+        let (_dir, host) = host();
+
+        assert_refusal(
+            send(
+                &launcher_router(host, None, None),
+                "PUT",
+                "/api/library/collapsed-machines",
+                Some(serde_json::json!({"collapsed":["local"]})),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "collapsed machines are not available on this surface",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn collapsed_machines_rejected() {
+        let (_dir, host) = host();
+        host.install_collapsed_machines_store(Arc::new(RefusingCollapsedMachinesStore));
+        assert_refusal(
+            send(
+                &launcher_router(host, None, None),
+                "PUT",
+                "/api/library/collapsed-machines",
+                Some(serde_json::json!({"collapsed":["local"]})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "store could not persist the value",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
