@@ -24,14 +24,30 @@ pub fn err(status: StatusCode, msg: String) -> Response {
 }
 
 /// A refusal a client branches on. Details serialize beside the reserved
-/// `error` and `code` fields and must not declare either of those names.
+/// `error` and `code` fields. Invalid details or an empty code produce a
+/// JSON 500, since a caller's construction error must not corrupt the wire.
 pub(crate) fn err_code(
     status: StatusCode,
     msg: String,
     code: &'static str,
     details: impl serde::Serialize,
 ) -> Response {
-    assert!(!code.is_empty(), "a refusal code must not be empty");
+    let details = match serde_json::to_value(details) {
+        Ok(serde_json::Value::Object(details))
+            if !code.is_empty()
+                && !details.contains_key("error")
+                && !details.contains_key("code") =>
+        {
+            details
+        }
+        _ => {
+            tracing::error!("invalid coded refusal: code or details violate the envelope");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot construct refusal response".into(),
+            );
+        }
+    };
     #[derive(serde::Serialize)]
     struct Refusal<T> {
         error: String,
@@ -158,17 +174,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[should_panic(expected = "a refusal code must not be empty")]
-    fn an_empty_refusal_code_is_rejected() {
-        err_code(
-            StatusCode::CONFLICT,
-            "conflict".into(),
-            "",
-            serde_json::json!({}),
-        );
-    }
-
     async fn assert_invalid_refusal(response: Response) {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
@@ -184,7 +189,6 @@ mod tests {
     macro_rules! invalid_details {
         ($name:ident, $details:expr) => {
             #[tokio::test]
-            #[ignore = "run explicitly until invalid refusal inputs are handled"]
             async fn $name() {
                 assert_invalid_refusal(err_code(
                     StatusCode::CONFLICT,
@@ -212,7 +216,6 @@ mod tests {
     invalid_details!(details_cannot_be_a_boolean, true);
 
     #[tokio::test]
-    #[ignore = "run explicitly until invalid refusal inputs are handled"]
     async fn details_serialization_failure_is_a_json_server_error() {
         struct Unserializable;
         impl serde::Serialize for Unserializable {
@@ -230,7 +233,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "run explicitly until invalid refusal inputs are handled"]
     async fn an_empty_code_answers_without_panicking() {
         let response = std::panic::catch_unwind(|| {
             err_code(
