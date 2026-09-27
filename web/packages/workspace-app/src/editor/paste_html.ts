@@ -259,12 +259,22 @@ function dirOfPath(path: string): string {
   return idx < 0 ? "" : path.slice(0, idx);
 }
 
+function dataUriImageMetadata(dataUri: string): { mime: string; extension: string } {
+  const comma = dataUri.indexOf(",");
+  const meta = comma < 0 ? "" : dataUri.slice(5, comma);
+  const mime = meta.split(";")[0] || "";
+  const extension = mime === "image/svg+xml" ? "svg"
+    : mime === "image/jpeg" ? "jpg"
+    : mime.split("/")[1] || "png";
+  return { mime: mime || "application/octet-stream", extension };
+}
+
 /// Decode a base64 data: URI into a File. Non-base64 (`;charset` /
 /// percent) payloads decode through decodeURIComponent.
 function dataUriToFile(dataUri: string, name: string): File {
   const comma = dataUri.indexOf(",");
   const meta = comma < 0 ? "" : dataUri.slice(5, comma);
-  const mime = meta.split(";")[0] || "application/octet-stream";
+  const { mime } = dataUriImageMetadata(dataUri);
   const payload = comma < 0 ? "" : dataUri.slice(comma + 1);
   const bytes = /;base64/i.test(meta)
     ? base64ToBytes(payload)
@@ -281,9 +291,7 @@ function dataUriToFile(dataUri: string, name: string): File {
 function uploadNameFor(ref: WorkspaceImageRef, dataUri: string): string {
   const base = decodePercent(ref.base).split("/").pop() ?? "";
   if (base) return base;
-  const mime = dataUri.slice(5, dataUri.indexOf(";"));
-  const ext = mime.split("/")[1] || "png";
-  return `pasted-image.${ext}`;
+  return `pasted-image.${dataUriImageMetadata(dataUri).extension}`;
 }
 
 /// Same-workspace paste: no uploads. Rebase each ref from the SOURCE
@@ -405,9 +413,8 @@ async function uploadInlineDataImages(
   const rewrites: SrcRewrite[] = [];
   for (const match of matches) {
     try {
-      const mime = match.src.slice(5, match.src.indexOf(";"));
-      const ext = mime.split("/")[1] || "png";
-      const file = dataUriToFile(match.src, `pasted-image.${ext}`);
+      const { extension } = dataUriImageMetadata(match.src);
+      const file = dataUriToFile(match.src, `pasted-image.${extension}`);
       const res = await api.uploadAttachment(file, uploadDir);
       const rel = destPath ? relativizePath(res.path, destPath) : res.path;
       rewrites.push({ start: match.start, end: match.end, text: encodeRelPath(rel) });
