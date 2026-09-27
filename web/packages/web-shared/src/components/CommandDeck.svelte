@@ -238,8 +238,10 @@
     preparationToken = null;
     const executionCloseVersion = closeVersion;
     let closedDuringChoose = false;
+    let pendingOperation: DeckDraft["operation"] = null;
     const ownsPending = (): boolean =>
-      executionToken === token &&
+      pendingOperation !== null &&
+      executionDraft.operation === pendingOperation &&
       executionDraft.operation?.kind === "pending" &&
       executionDraft.operation.itemId === item.id;
 
@@ -281,6 +283,7 @@
       return;
     }
     draft.operation = { kind: "pending", itemId: item.id, title: item.title };
+    pendingOperation = executionDraft.operation;
     try {
       const chosen = onChoose(item);
       closedDuringChoose = !open;
