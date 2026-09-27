@@ -220,6 +220,27 @@ describe("list marker rendering (real positioned markers)", () => {
     parent.remove();
   });
 
+  test("gives an ordered task its checkbox and keeps its marker", () => {
+    const doc = "1. [ ] a\n2) [x] b";
+    const { parent, view } = mountDecorated(doc);
+    const boxes = () => [...parent.querySelectorAll<HTMLInputElement>(".cm-md-task-checkbox")];
+    const tick = (box: HTMLInputElement) =>
+      box.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+
+    expect(boxes().map((box) => box.checked)).toEqual([false, true]);
+    expect([...parent.querySelectorAll(".cm-md-ol-marker")].map((el) => el.textContent)).toEqual(["1.", "2)"]);
+    expect(parent.textContent).not.toContain("[");
+    expect(view.state.doc.toString()).toBe(doc);
+
+    tick(boxes()[0]!);
+    expect(view.state.doc.toString()).toBe("1. [x] a\n2) [x] b");
+    tick(boxes()[1]!);
+    expect(view.state.doc.toString()).toBe("1. [x] a\n2) [ ] b");
+
+    view.destroy();
+    parent.remove();
+  });
+
   test("tags every list line with its syntactic depth for the hanging indent", () => {
     const parent = document.createElement("div");
     document.body.appendChild(parent);
