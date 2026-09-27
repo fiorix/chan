@@ -83,6 +83,29 @@ function button(target: ParentNode, name: string): HTMLButtonElement {
 }
 
 describe("StyleToolbar", () => {
+  test("unmount cancels pending collapse and hide timers", async () => {
+    vi.useFakeTimers();
+    expect(vi.getTimerCount()).toBe(0);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(StyleToolbar, {
+      target,
+      props: { wysiwyg: undefined, selVer: 1, mode: "wysiwyg" },
+    });
+    mounted.push(component);
+    await tick();
+    expect(vi.getTimerCount()).toBe(1);
+    target.querySelector(".expand-zone")!.dispatchEvent(new MouseEvent("mouseenter"));
+    await tick();
+    expect(vi.getTimerCount()).toBe(0);
+    target.querySelector(".style-toolbar")!.dispatchEvent(new MouseEvent("mouseleave"));
+    await tick();
+    expect(vi.getTimerCount()).toBe(2);
+    await unmount(component);
+    mounted.splice(mounted.indexOf(component), 1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   test.each(["source", "wysiwyg"] as const)("idle visibility in %s mode", async (mode) => {
     vi.useFakeTimers();
     const target = document.createElement("div");
