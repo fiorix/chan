@@ -3549,9 +3549,9 @@ fn restart_desktop_after_update() -> Result<(), String> {
     ))
 }
 
-/// Result of a connecting-screen reachability probe. Loopback targets treat
-/// every HTTP response as reachable. Non-loopback targets also require that a
-/// gateway upstream status (502, 503, or 504) was not returned. `detail` is a
+/// Result of a connecting-screen reachability probe. Loopback targets wait on
+/// 503 while the devserver restores its tenants. Non-loopback targets also wait
+/// on gateway upstream failures (502 and 504). `detail` is a
 /// short ASCII reason shown in the per-attempt row; `status` is the HTTP code
 /// when a response arrived.
 #[derive(Debug, Clone, Serialize)]
@@ -3598,13 +3598,12 @@ fn probe_target_kind(raw_url: &str) -> ProbeTargetKind {
 
 fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::StatusCode>) -> bool {
     status.is_some_and(|status| {
-        target == ProbeTargetKind::Loopback
-            || !matches!(
-                status,
-                reqwest::StatusCode::BAD_GATEWAY
-                    | reqwest::StatusCode::SERVICE_UNAVAILABLE
-                    | reqwest::StatusCode::GATEWAY_TIMEOUT
-            )
+        status != reqwest::StatusCode::SERVICE_UNAVAILABLE
+            && (target == ProbeTargetKind::Loopback
+                || !matches!(
+                    status,
+                    reqwest::StatusCode::BAD_GATEWAY | reqwest::StatusCode::GATEWAY_TIMEOUT
+                ))
     })
 }
 

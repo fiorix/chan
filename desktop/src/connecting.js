@@ -29,7 +29,7 @@
 //     too; the runtime capability minted for a gateway origin omits it.
 //     For a gateway target, reachable is false on 502/503/504 and on a
 //     transport failure; 401/403/404 prove the gate answered and are
-//     reachable. Loopback targets keep the any-response behavior. The
+//     reachable. Loopback targets wait on 503 and transport failures. The
 //     Rust request carries the target origin's webview cookies when
 //     available so the probe can tell a registered-but-not-answering
 //     gateway devserver from a live one.
