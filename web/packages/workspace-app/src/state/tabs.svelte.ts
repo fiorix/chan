@@ -421,9 +421,12 @@ export type TerminalTab = {
   /// (frame out, no ack yet) -> "queued" (server ack; depth = the ack's
   /// 1-based position) -> "delivered" (last write hit the PTY) | "rejected"
   /// (queue full) | "failed" (WS close / ack timeout / session end). Cancel/
-  /// recall locks the composer in "recalling" until its acknowledgement,
-  /// then adds two terminal phases the bubble consumes: "recalled" (the
-  /// `prompt-cancelled` ack removed a still-queued message -- unlock + keep the
+  /// recall locks the composer in "recalling" until cancellation answers,
+  /// the prompt is rejected, or delivery becomes uncertain ("failed"). A
+  /// rejection preserves the saved text; queue and delivery frames leave
+  /// recall pending. Cancellation adds two terminal phases the bubble
+  /// consumes: "recalled" (the `prompt-cancelled` ack removed a still-queued
+  /// message -- unlock + keep the
   /// draft text to edit + resubmit) | "drained" (the cancel raced a drain; the
   /// message already hit the PTY -- surface it, don't silently re-edit). The
   /// bubble's $effect consumes terminal phases and clears this field.
@@ -2388,7 +2391,8 @@ export function resolvePendingPrompt(
 ): void {
   const pending = tab.pendingPrompt;
   if (!pending || pending.id !== id) return;
-  // Queue and delivery frames cannot settle an outstanding cancellation.
+  // A refusal proves this message was never queued and returns its text.
+  // Queue and delivery frames leave the cancellation outcome to its ack.
   if (pending.phase === "recalling" && phase !== "rejected") return;
   tab.pendingPrompt = { ...pending, phase, ...(depth !== undefined ? { depth } : {}) };
 }
