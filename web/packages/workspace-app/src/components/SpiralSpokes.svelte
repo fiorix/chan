@@ -4,6 +4,7 @@
     buildSpiralSpokes,
     fitSpiralSpokes,
     spiralSpokesOpacity,
+    wrapSpiralSpokesStep,
   } from "./spiralSpokes";
   import {
     canvasCssNumber,
@@ -69,6 +70,7 @@
             ((timeMs - lastFrameMs) / 1000) * STEPS_PER_SECOND;
         }
         lastFrameMs = timeMs;
+        sourceStep = wrapSpiralSpokesStep(sourceStep);
         draw(sourceStep);
       }
 

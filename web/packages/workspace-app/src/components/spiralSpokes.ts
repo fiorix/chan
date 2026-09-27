@@ -6,6 +6,11 @@ export const SPIRAL_SPOKES_REFERENCE_SIZE = 800;
 export const SPIRAL_SPOKES_RADIUS = SPIRAL_SPOKES_REFERENCE_SIZE / 2;
 export const SPIRAL_SPOKES_DENSITY_RATE = 0.5;
 export const SPIRAL_SPOKES_PHASE_RATE = 0.05;
+export const SPIRAL_SPOKES_STEP_PERIOD = 256 / (SPIRAL_SPOKES_PHASE_RATE * 3);
+
+export function wrapSpiralSpokesStep(step: number): number {
+  return Math.max(0, step) % SPIRAL_SPOKES_STEP_PERIOD;
+}
 
 export interface Point {
   x: number;
