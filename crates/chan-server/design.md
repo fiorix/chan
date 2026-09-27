@@ -52,6 +52,14 @@ flowchart TB
   Client -->|"GET / (library root)"| Launcher
 ```
 
+## HTTP refusals
+
+The refusal envelope for JSON clients is an object with a string `error` containing a sentence the client can display as received. A refusal that a client branches on also carries a nonempty string `code`; it is absent when no client branches. Typed details sit beside those fields and do not reuse their names. `error` is never the machine token. The helpers in `src/error.rs` build the envelope without changing the HTTP status. An unknown survey reply uses `survey_not_found` and keeps the words "no survey parked" in its sentence.
+
+A static asset or SPA navigation 404, including a missing frontend bundle, stays outside the envelope because the browser loads it as a resource or a page. A refused WebSocket upgrade can stay outside because the browser's WebSocket API exposes connection failure without exposing the HTTP body. A HEAD refusal has no body, as required by HTTP. An unknown API path is a JSON refusal even when the static fallback handles it. An extension's own upstream response stays as sent because its protocol belongs to the extension; a refusal the proxy writes itself follows the envelope.
+
+In chan-server's own unit-test build, a response-inspecting layer surrounds each of the four assembled routers and rejects a 4xx or 5xx body outside the envelope and the explicit exceptions in `src/refusal_check.rs`; it leaves other responses unbuffered and preserves inspected refusal bytes, status and headers. The `cfg(test)` hooks are absent from integration tests and from other crates' tests, which compile chan-server as a dependency. A direct `oneshot` sees a checker panic; a test using a spawned HTTP server must assert request completion to expose the resulting dropped connection. The check covers only requests tests actually send. The pending route list names existing handler refusals that do not satisfy the contract and only shrinks as they are converted; the startup gate and the proxy's own failures are pending by their exact refusal shapes. Framework-generated extractor rejections and the default method-not-allowed response are also pending, recognized by their fixed rejection texts or the empty 405 with its Allow header.
+
 ## Boundaries
 
 - chan-server depends on `chan-library`, so the launcher assets + handlers live here (the higher layer) and are injected into chan-library's root fallback; chan-library never references a frontend bundle.
