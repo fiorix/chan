@@ -189,10 +189,6 @@ struct RemoteLaunch {
     key: RemoteLaunchKey,
     attempted_at: tokio::time::Instant,
     phase: LaunchPhase,
-    /// The key last loaded into the window's webview, by its open or by a
-    /// navigation in place. A devserver window's page deletes its token from
-    /// its own URL, so only the watcher knows which token the page holds.
-    loaded: Option<RemoteLaunchKey>,
 }
 
 impl RemoteLaunch {
@@ -279,7 +275,6 @@ impl WindowBuilds {
                 key,
                 attempted_at: tokio::time::Instant::now(),
                 phase: LaunchPhase::InFlight,
-                loaded: None,
             },
         );
         true
@@ -407,44 +402,26 @@ impl RemoteLaunches {
     /// it if the key moved, so no attempt is ever dispatched at an absent
     /// webview.
     ///
-    /// A try of the timer finds its window on its target when the webview
-    /// was last loaded with the attempt's key and its own URL (`url`, read
-    /// only then) shows a page that booted: the attempt is applied and
-    /// nothing navigates. That cannot tell a page whose socket never heals
-    /// on an unchanged token from a healthy one; the user's Reload navigates
-    /// it. A try that falls between the connecting page's own navigation and
-    /// the page's boot navigates once more.
+    /// A try of the timer on a window whose record reads connected finds
+    /// the window's page on its target, since that page's own socket is up:
+    /// the attempt is applied and nothing navigates. Every other try
+    /// navigates when the target answers ready.
     fn admit(
         &self,
         record: &WindowRecord,
         gateway: bool,
         reload: bool,
         present: bool,
-        url: impl FnOnce() -> Option<tauri::Url>,
     ) -> Option<Retarget> {
         if !present {
             return None;
         }
         let retarget = self.retarget(record, gateway, reload)?;
-        if retarget == Retarget::Retry
-            && self.loaded_with(record, gateway)
-            && url().is_some_and(|url| serve::page_booted(&url))
-        {
+        if retarget == Retarget::Retry && record.connected {
             self.apply(record, gateway);
             return None;
         }
         Some(retarget)
-    }
-
-    /// Whether the window's webview was last loaded with `record`'s key.
-    fn loaded_with(&self, record: &WindowRecord, gateway: bool) -> bool {
-        let next = RemoteLaunchKey::from_record(record, gateway);
-        self.0
-            .lock()
-            .unwrap()
-            .entries
-            .get(&native_label(record))
-            .is_some_and(|entry| entry.loaded.as_ref() == Some(&next))
     }
 
     /// Mark the waiting attempt for `record`'s key applied.
@@ -474,18 +451,10 @@ impl RemoteLaunches {
             if state.retired.is_some() {
                 return;
             }
-            let key = RemoteLaunchKey::from_record(record, gateway);
-            // The open loads its own key; a retarget leaves the webview on
-            // what it was loaded with until it navigates.
-            let loaded = state
-                .entries
-                .get(&label)
-                .and_then(|entry| entry.loaded.clone());
             state.entries.insert(
                 label.clone(),
                 RemoteLaunch {
-                    loaded: if retarget { loaded } else { Some(key.clone()) },
-                    key,
+                    key: RemoteLaunchKey::from_record(record, gateway),
                     attempted_at: tokio::time::Instant::now(),
                     phase: if retarget {
                         LaunchPhase::InFlight
@@ -567,7 +536,6 @@ impl RemoteLaunches {
                         return;
                     };
                     attempt.phase = LaunchPhase::Applied;
-                    attempt.loaded = Some(attempt.key.clone());
                     drop(state);
                     builds.retry();
                 });
@@ -900,12 +868,9 @@ impl NativeSurface for TauriNativeSurface {
         }
         let label = native_label(record);
         let present = self.app.get_webview_window(&label).is_some();
-        // Reading a webview's URL is a main-thread round trip, taken only for
-        // a try of the timer on a window loaded with the same key.
-        let url = || serve::webview_url(&self.app, &label);
         if let Some(retarget) =
             self.remote_launches
-                .admit(record, self.opener.is_gateway(), reload, present, url)
+                .admit(record, self.opener.is_gateway(), reload, present)
         {
             self.navigate_remote(record, Some(retarget));
         }
@@ -1756,8 +1721,6 @@ mod tests {
         queued: Mutex<Vec<(String, BuildCompletion)>>,
         // Whether each retarget dispatch raises its window, in order.
         raises: Mutex<Vec<(String, bool)>>,
-        // What each window's webview reports as its own URL.
-        urls: Mutex<HashMap<String, String>>,
         // Whether the windows are a gateway devserver's.
         gateway: bool,
     }
@@ -1851,14 +1814,7 @@ mod tests {
         fn refresh(&self, record: &WindowRecord, reload: bool) {
             let label = native_label(record);
             let present = self.live.lock().unwrap().contains(&label);
-            let url = || {
-                let urls = self.urls.lock().unwrap();
-                urls.get(&label).and_then(|url| url.parse().ok())
-            };
-            let Some(retarget) = self
-                .launches
-                .admit(record, self.gateway, reload, present, url)
-            else {
+            let Some(retarget) = self.launches.admit(record, self.gateway, reload, present) else {
                 return;
             };
             self.raises
@@ -1957,7 +1913,6 @@ mod tests {
                 resolving: Mutex::new(Vec::new()),
                 queued: Mutex::new(Vec::new()),
                 raises: Mutex::new(Vec::new()),
-                urls: Mutex::new(HashMap::new()),
                 gateway,
             });
             let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -2109,14 +2064,6 @@ mod tests {
             self.feed_wake().await;
         }
 
-        fn show_url(&self, record: &WindowRecord, url: &str) {
-            self.surface
-                .urls
-                .lock()
-                .unwrap()
-                .insert(native_label(record), url.to_string());
-        }
-
         fn applied(&self, record: &WindowRecord) -> bool {
             self.surface
                 .launches
@@ -2136,10 +2083,10 @@ mod tests {
             self.drain().await;
         }
 
-        /// A Reload at t=5 that finds its target not ready, then the page
-        /// reporting `url` (none: unreadable) when the timer's try comes due
-        /// at t=20.
-        async fn refused_reload_then_timer(&self, record: &WindowRecord, url: Option<&str>) {
+        /// A Reload at t=5 that finds its target not ready, then the feed
+        /// pushing the window's socket `connected` before the timer's try
+        /// comes due at t=20.
+        async fn refused_reload_then_timer(&self, record: &WindowRecord, connected: bool) {
             tokio::time::advance(Duration::from_secs(5)).await;
             assert!(self.request_reload(record, true, Some(&self.view)));
             self.drain().await;
@@ -2147,31 +2094,11 @@ mod tests {
             self.finish_requested(record, &ticket, Ok(serve::RetargetOutcome::NotReady));
             self.drain().await;
             self.waiting_since(record, 5);
-            match url {
-                Some(url) => self.show_url(record, url),
-                None => {
-                    self.surface
-                        .urls
-                        .lock()
-                        .unwrap()
-                        .remove(&native_label(record));
-                }
-            }
+            self.set_connected(record, connected).await;
             tokio::time::advance(RETRY_NUDGE).await;
             self.drain().await;
         }
     }
-
-    // What a devserver window's webview is assumed to report as its URL, read
-    // in the code and not on a display. WebKitGTK's `uri`, WKWebView's `URL`
-    // and WebView2's source all follow a same-document `replaceState`, and the
-    // SPA deletes its `t` pair that way when it boots and writes its layout
-    // into the fragment. So a booted page reports its target without `t`; a
-    // page that never booted still carries `t`, and the connecting page
-    // reports its bundled asset.
-    const BOOTED_URL: &str = "http://127.0.0.1:4100/terminal/index.html?w=w-0&kind=terminal#l=1";
-    const UNBOOTED_URL: &str = "http://127.0.0.1:4100/terminal/index.html?t=tok-1&w=w-0";
-    const CONNECTING_URL: &str = "tauri://localhost/connecting.html";
 
     async fn reload_race(reload_first: bool, newer_finishes_first: bool) {
         let mut record = retry_record(
@@ -2396,6 +2323,7 @@ mod tests {
         );
         harness.drain().await;
         harness.waiting_since(&record, 5);
+        // The window's record reads not connected, so the timer tries again.
         tokio::time::advance(Duration::from_secs(15)).await;
         harness.drain().await;
         assert_eq!(
@@ -2781,10 +2709,9 @@ mod tests {
         let record = retry_record("recovered", 0);
         let harness = RetryHarness::start(vec![record.clone()], false, true).await;
         harness.navigate_first(&record).await;
-        harness.show_url(&record, BOOTED_URL);
-        harness
-            .refused_reload_then_timer(&record, Some(BOOTED_URL))
-            .await;
+        // The page comes back by itself after the refused Reload: its socket
+        // reconnects before the timer's try.
+        harness.refused_reload_then_timer(&record, true).await;
         assert_eq!(
             harness.times(&record),
             vec![0, 5],
@@ -2807,15 +2734,12 @@ mod tests {
         let record = retry_record("connected-itself", 0);
         let harness = RetryHarness::start_with(vec![record.clone()], true, true, true).await;
         harness.surface.resolve_opens();
-        harness.show_url(&record, CONNECTING_URL);
         let reads = harness.feed.reads.load(std::sync::atomic::Ordering::SeqCst);
         harness.surface.land_builds();
         harness.after_pass(reads).await;
         // The Reload is pressed on the connecting page, which then reaches
-        // its target by itself before the timer's try.
-        harness
-            .refused_reload_then_timer(&record, Some(BOOTED_URL))
-            .await;
+        // its target by itself and dials its socket before the timer's try.
+        harness.refused_reload_then_timer(&record, true).await;
         assert_eq!(
             harness.times(&record),
             vec![0, 5],
@@ -2833,9 +2757,6 @@ mod tests {
         let mut record = retry_record("changed-token-try", 0);
         let harness = RetryHarness::start(vec![record.clone()], false, true).await;
         harness.navigate_first(&record).await;
-        // The page booted on the old token, so its URL looks like the new
-        // target's with the token pair gone.
-        harness.show_url(&record, BOOTED_URL);
         tokio::time::advance(Duration::from_secs(5)).await;
         record.token = "restarted-token".into();
         *harness.feed.records.lock().unwrap() = vec![record.clone()];
@@ -2858,31 +2779,6 @@ mod tests {
         harness.stop(WatchLoopStop::KeepWindows).await;
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_timer_try_navigates_a_page_that_never_booted_without_raising() {
-        for (case, url) in [
-            ("token", Some(UNBOOTED_URL)),
-            ("connecting", Some(CONNECTING_URL)),
-            ("unreadable", None),
-        ] {
-            let record = retry_record(&format!("unbooted-{case}"), 0);
-            let harness = RetryHarness::start(vec![record.clone()], false, true).await;
-            harness.navigate_first(&record).await;
-            harness.refused_reload_then_timer(&record, url).await;
-            assert_eq!(
-                harness.times(&record),
-                vec![0, 5, 20],
-                "{case}: the timer's try navigates a page that never got past loading"
-            );
-            assert_eq!(
-                harness.raised(&record),
-                vec![true, true, false],
-                "{case}: a timer's try raises nothing"
-            );
-            harness.stop(WatchLoopStop::KeepWindows).await;
-        }
-    }
-
     // A Reload that found its target not ready is carried out by a later try
     // once the target answers ready, on a page whose socket is gone, whatever
     // the page's URL reads: a page stuck after a failed self-reload of its
@@ -2893,10 +2789,7 @@ mod tests {
             let record = retry_record(&format!("disconnected-{gateway}"), 0);
             let harness = RetryHarness::start_gateway(vec![record.clone()], gateway).await;
             harness.navigate_first(&record).await;
-            harness.show_url(&record, BOOTED_URL);
-            harness
-                .refused_reload_then_timer(&record, Some(BOOTED_URL))
-                .await;
+            harness.refused_reload_then_timer(&record, false).await;
             assert_eq!(
                 harness.times(&record),
                 vec![0, 5, 20],
@@ -2920,7 +2813,6 @@ mod tests {
             let record = retry_record(&format!("connected-{gateway}"), 0);
             let harness = RetryHarness::start_gateway(vec![record.clone()], gateway).await;
             harness.navigate_first(&record).await;
-            harness.show_url(&record, UNBOOTED_URL);
             harness.set_connected(&record, true).await;
             tokio::time::advance(Duration::from_secs(5)).await;
             assert!(harness.request_reload(&record, true, Some(&harness.view)));

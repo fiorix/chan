@@ -712,13 +712,6 @@ fn on_connecting_page(url: &tauri::Url) -> bool {
     url.path().ends_with("connecting.html")
 }
 
-/// Whether a devserver window's own URL shows a page that booted: off the
-/// connecting screen, and without the `t` pair the SPA deletes from its URL
-/// when it boots. A page that never got past loading still carries it.
-pub(crate) fn page_booted(url: &tauri::Url) -> bool {
-    !on_connecting_page(url) && !url.query_pairs().any(|(key, _)| key == "t")
-}
-
 /// Inputs for one SPA webview window build: identity (label/title),
 /// where to point it, what to restore, and how to load.
 struct WindowSpec<'a> {
@@ -2273,9 +2266,12 @@ mod tests {
         );
         assert!(reconcile.contains("surface.refresh(record, reloads.contains(&label))"));
         let refresh = source_section(wiring, "fn refresh(&self, record", "fn close(&self, label");
-        assert!(refresh.contains(".admit(record, self.opener.is_gateway(), reload, present, url)"));
+        assert!(refresh.contains(".admit(record, self.opener.is_gateway(), reload, present)"));
         assert!(refresh.contains("let present = self.app.get_webview_window(&label).is_some();"));
-        assert!(refresh.contains("let url = || serve::webview_url(&self.app, &label);"));
+        assert!(
+            !refresh.contains("webview_url"),
+            "a watcher pass makes no main-thread call for a window's URL"
+        );
         assert!(refresh.contains("navigate_remote(record, Some(retarget))"));
         assert!(dispatch.contains("prepare_remote_navigation("));
         assert!(dispatch.contains("window_navigation_url(&conn, &record)"));
