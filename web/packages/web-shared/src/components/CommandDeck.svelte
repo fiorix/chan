@@ -234,6 +234,15 @@
       closingRun = run;
       try {
         await onChoose(item);
+      } catch (error) {
+        if (draft !== executionDraft) return;
+        executionDraft.operation = {
+          kind: "error",
+          itemId: item.id,
+          title: item.title,
+          message: errorMessage(error),
+          selected: "back",
+        };
       } finally {
         // Still open: the host kept the deck up (a submenu, a refusal), so
         // the next close is a dismissal.
