@@ -92,9 +92,10 @@
   // macOS, Ctrl+Shift+T off-mac) and Reopen closed tab (Cmd+Shift+T on
   // macOS, Ctrl+Alt+Shift+T off-mac), which route through the
   // context-aware helpers in App.svelte. Off-mac the bridge additionally
-  // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q) -- the chords a
-  // menubar would own; off-mac these windows have none -- gated on !metaKey so macOS,
-  // whose menubar still owns them, never double-fires.
+  // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q), the chords a
+  // menubar would own. New Window also accepts Ctrl+Shift+N on macOS;
+  // Quit leaves Ctrl+Q with the page there. Both leave the Command forms
+  // to the macOS menubar.
   // A focused terminal takes five of these back, because their Ctrl form
   // encodes a byte the shell reads and terminal find belongs to the tab
   // rather than to the page: Find in both modifier forms, and Find Next
@@ -152,15 +153,11 @@
     }
     if (!shift) {
       switch (code) {
-        // Quit on Linux/Windows: Ctrl+Q. The native Quit item owned this
-        // chord while these windows had menubars; with the bars gone the
-        // bridge claims it and routes to the same confirm-then-quit flow
-        // the launcher's Quit item runs. Routed over IPC (like reload/
-        // zoom) so a frozen SPA can't lock it away, and gated on
-        // !metaKey so macOS Cmd+Q stays with the menubar. Claiming Ctrl+Q
-        // costs a focused terminal its XON chord exactly as the menu
-        // accelerator already did.
-        case 'KeyQ': if (!e.metaKey) invokeIpc(e, 'request_app_quit'); return;
+        // Quit on Linux/Windows: Ctrl+Q routes over IPC so a frozen SPA
+        // cannot lock away the confirm-then-quit flow. On macOS Ctrl+Q
+        // stays with the page, letting a focused shell read XON (0x11),
+        // and the menubar owns Command+Q.
+        case 'KeyQ': if (!MAC && !e.metaKey) invokeIpc(e, 'request_app_quit'); return;
         // Reload. macOS binds Cmd+R (metaKey); Linux/Windows moves to
         // Ctrl+Shift+R (shift branch below) so plain Ctrl+R reaches a
         // focused terminal's shell reverse-search. Gating on metaKey

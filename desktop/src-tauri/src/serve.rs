@@ -2384,8 +2384,8 @@ mod tests {
     #[test]
     fn key_bridge_serves_the_retired_menu_chords_off_mac() {
         // With no per-window menubars off-mac, the chords the menus owned
-        // move into the bridge, gated on !metaKey so macOS (whose menubar
-        // still owns them) never double-fires. New Window / Quit route
+        // move into the bridge. Both leave Command to the macOS menubar;
+        // Quit also leaves Control to the page on macOS. New Window / Quit route
         // over IPC (not the SPA bus) so the connecting screen can serve
         // them too; a control terminal's New-terminal chord spawns a
         // standalone window instead of toggling a tab it does not have.
@@ -2393,7 +2393,7 @@ mod tests {
             KEY_BRIDGE_JS.contains("case 'KeyN': if (!e.metaKey) invokeIpc(e, 'open_new_window')")
         );
         assert!(
-            KEY_BRIDGE_JS.contains("case 'KeyQ': if (!e.metaKey) invokeIpc(e, 'request_app_quit')")
+            KEY_BRIDGE_JS.contains("case 'KeyQ': if (!MAC && !e.metaKey) invokeIpc(e, 'request_app_quit')")
         );
         assert!(KEY_BRIDGE_JS.contains("window.__CHAN_WINDOW_KIND__ === 'control'"));
         // The kind global is stamped per window at build time, ahead of
@@ -2551,10 +2551,10 @@ mod tests {
             );
         }
 
-        // The release set is exactly those five. Zoom, tab jump and Quit
-        // are claimed under Ctrl alone as well, and a focused terminal keeps
-        // none of them: releasing those would cost every Linux and Windows
-        // window its tab switching and zoom whenever a terminal has focus.
+        // The focus-dependent release set is exactly those five. Zoom and
+        // tab jump are claimed under Ctrl alone on every platform; Quit is
+        // claimed under Ctrl alone off macOS. Releasing these by focus would
+        // cost Linux and Windows windows their commands over a terminal.
         assert_eq!(
             KEY_BRIDGE_JS.matches("terminalHasFocus()").count(),
             6,
