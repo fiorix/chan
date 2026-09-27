@@ -4622,6 +4622,7 @@ mod tests {
             let mut body = serde_json::json!({"path": root});
             let mut status = StatusCode::NOT_FOUND;
             let mut sentence = "workspace not found".to_string();
+            #[cfg(unix)]
             let mut foreign = None;
             match case {
                 "bearer" => {
@@ -4662,6 +4663,7 @@ mod tests {
                     path = "/api/devserver/workspaces/missing/on".into();
                     body = serde_json::json!({"on":true});
                 }
+                #[cfg(unix)]
                 "failed_forget" | "failed_on" => {
                     state.host.library().register_workspace(&root).unwrap();
                     foreign = Some(hold_foreign_lock(state.host.library(), &root));
@@ -4698,6 +4700,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            #[cfg(unix)]
             drop(foreign);
             assert_refusal(response, status, &sentence).await;
         }
@@ -4713,10 +4716,12 @@ mod tests {
         management_case!(management_invalid_open, "invalid_open");
         management_case!(management_stopping_open, "stopping_open");
         management_case!(management_missing_forget, "missing_forget");
+        #[cfg(unix)]
         management_case!(management_failed_forget, "failed_forget");
         management_case!(management_invalid_suffix, "invalid_suffix");
         management_case!(management_missing_on, "missing_on");
         management_case!(management_stopping_on, "stopping_on");
+        #[cfg(unix)]
         management_case!(management_failed_on, "failed_on");
 
         #[tokio::test]
