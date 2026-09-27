@@ -5739,12 +5739,12 @@ export function setTabDocState(t: FileTab, doc: DocTabState | null): void {
 /// On 409, opens the conflict dialog and returns; the dialog's
 /// Reload / Overwrite buttons workspace the recovery.
 ///
-/// Format-specific pre-checks live here so the gate is uniform
-/// across autosave and Cmd+S. Today only JSON is validated:
-/// writing invalid JSON onto disk would surface as a parse error
-/// the next time a tool / our own pretty viewer reads the file,
-/// which is too late to recover the user's typo. Refusing the
-/// write at the editor boundary keeps the file system honest.
+/// Format-specific pre-checks live here so the gate is uniform across
+/// every save. Only a drawing is checked, since a scene that does not
+/// parse is one the canvas cannot restore. Every other text file, a
+/// `.json` among them, is written as typed, which is also how a live
+/// document session's authority writes it; the JSON tree is where a
+/// `.json` that does not parse is said.
 async function performSave(t: FileTab): Promise<void> {
   if (savingTabs.has(t.id)) {
     saveAgainAfterCurrent.add(t.id);
@@ -5801,10 +5801,9 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // reattach diff-push. A reachable-but-degraded session (flush timeout)
   // reads false here and PUTs normally.
   if (isDocSavePaused(live)) return;
-  // Excalidraw scenes are JSON too: gate them like .json so a
-  // source-mode typo can't write a corrupt scene the canvas then
-  // refuses to restore.
-  if (isJson(live.path) || isExcalidraw(live.path)) {
+  // A drawing's buffer must parse: a source-mode typo would otherwise
+  // write a scene the canvas then refuses to restore.
+  if (isExcalidraw(live.path)) {
     const reason = validateJsonBuffer(live.content);
     if (reason !== null) {
       live.error = `JSON parse error: ${reason}`;
@@ -5866,8 +5865,8 @@ async function performSaveOnce(t: FileTab): Promise<void> {
 
 /// Return null when `src` parses as JSON, otherwise the
 /// JSON.parse error message. An empty / whitespace-only buffer is
-/// accepted: a fresh `.json` file the user has not yet typed into
-/// is allowed to round-trip empty.
+/// accepted: a fresh file the user has not yet typed into is allowed
+/// to round-trip empty.
 function validateJsonBuffer(src: string): string | null {
   if (src.trim() === "") return null;
   try {
