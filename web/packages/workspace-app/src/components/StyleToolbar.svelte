@@ -2,11 +2,12 @@
   // Floating style toolbar pinned to the top-left of the editor
   // canvas. Three states:
   //
-  //   - hidden: the toolbar fades out after the user has been idle
-  //     in the editor for IDLE_HIDE_MS. Any cursor activity from
+  //   - hidden: outside source mode, the toolbar fades out after
+  //     the user has been idle for IDLE_HIDE_MS. Cursor activity from
   //     the editor (selVer bump on click / typing / arrow keys)
   //     brings it back. Keeps the editor's top corner clean when
-  //     the user is reading.
+  //     the user is reading. Source mode has no activity signal,
+  //     so its toolbar stays visible to keep the mode switch reachable.
   //   - collapsed: a small "Aa" pill. Default visible state right
   //     after activity.
   //   - expanded: full formatting toolbar (block kind selector
@@ -126,6 +127,7 @@
 
   function scheduleHide(): void {
     cancelHide();
+    if (mode === "source") return;
     hideTimer = setTimeout(() => {
       hideTimer = null;
       // Keep the toolbar visible while the user is actively
