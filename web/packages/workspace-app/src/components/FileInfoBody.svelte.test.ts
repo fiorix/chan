@@ -160,7 +160,12 @@ function menuItem(target: HTMLElement, label: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
-  h.entries = [];
+  let entries = $state<Entry[]>([]);
+  Object.defineProperty(h, "entries", {
+    configurable: true,
+    get: () => entries,
+    set: (value: Entry[]) => { entries = value; },
+  });
   h.caps.workspace = true;
   h.draftsDir = ".Drafts";
   h.prefixReport = null;
@@ -641,6 +646,46 @@ describe("the shared graph load", () => {
   afterEach(() => {
     for (const app of mounted.splice(0)) unmount(app);
     invalidateGraph();
+  });
+
+  test("directory relists retain streams while edits and selection changes refresh reports", async () => {
+    const a = file("notes/a.md");
+    h.entries = [a];
+    vi.mocked(api.graphStream).mockResolvedValue({ nodes: [], edges: [] });
+    const props = $state({ path: "notes/a.md", showRefs: true });
+    await render(props);
+    expect(api.reportFileStream).toHaveBeenCalledTimes(1);
+    expect(api.backlinksStream).toHaveBeenCalledTimes(1);
+    const reportSignal = vi.mocked(api.reportFileStream).mock.calls[0]![1]!.signal!;
+    const backlinksSignal = vi.mocked(api.backlinksStream).mock.calls[0]![1]!.signal!;
+
+    h.entries = [{ ...a }, file("notes/b.md")];
+    await settle();
+    expect(api.reportFileStream, "an unchanged entry keeps its report").toHaveBeenCalledTimes(1);
+    expect(api.backlinksStream, "an unchanged entry keeps its backlinks").toHaveBeenCalledTimes(1);
+    expect(reportSignal.aborted).toBe(false);
+    expect(backlinksSignal.aborted).toBe(false);
+
+    h.entries = [{ ...a, mtime: a.mtime! + 1 }, file("notes/b.md")];
+    await settle();
+    expect(api.reportFileStream, "an outside edit refreshes the file report").toHaveBeenCalledTimes(2);
+    expect(reportSignal.aborted).toBe(true);
+    expect(api.backlinksStream).toHaveBeenCalledTimes(1);
+    expect(backlinksSignal.aborted).toBe(false);
+
+    props.path = "notes/b.md";
+    await settle();
+    expect(api.reportFileStream).toHaveBeenCalledTimes(3);
+    expect(api.reportFileStream).toHaveBeenLastCalledWith("notes/b.md", expect.any(Object));
+    expect(api.backlinksStream).toHaveBeenCalledTimes(2);
+    expect(backlinksSignal.aborted).toBe(true);
+
+    h.entries = [dir("notes/b.md")];
+    await settle();
+    expect(api.reportDir).toHaveBeenLastCalledWith("notes/b.md");
+    props.path = "";
+    await settle();
+    expect(api.reportDir).toHaveBeenLastCalledWith("");
   });
 
   test("a graph stream that keeps failing is started once while the file is shown", async () => {
