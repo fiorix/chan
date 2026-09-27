@@ -74,6 +74,66 @@ function pressKeyBridge(init: KeyInit, mac: boolean): BridgeOutcome {
 
 const CMD = { metaKey: true };
 
+describe.each([
+  ["macOS", true],
+  ["Linux", false],
+] as const)("KEY_BRIDGE_JS terminal focus on %s", (_platform, mac) => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  function focusSurface(surface: "terminal" | "editor" | "inactive terminal"): void {
+    const root = document.createElement("div");
+    root.className = surface === "editor" ? "editor" : "terminal-tab";
+    if (surface === "terminal") root.classList.add("active");
+    const input = document.createElement("textarea");
+    root.append(input);
+    document.body.append(root);
+    input.focus();
+    expect(document.activeElement).toBe(input);
+  }
+
+  describe.each([
+    ["[", "BracketLeft", "{", "app.pane.prev", "app.tab.prev"],
+    ["]", "BracketRight", "}", "app.pane.next", "app.tab.next"],
+  ] as const)("%s", (key, code, shiftedKey, command, shiftedCommand) => {
+    test("Ctrl stays with a focused terminal", () => {
+      focusSurface("terminal");
+      expect(pressKeyBridge({ key, code, ctrlKey: true }, mac)).toEqual({
+        commands: [], ipc: [], prevented: false,
+      });
+    });
+
+    test("Command keeps its command with a focused terminal", () => {
+      focusSurface("terminal");
+      expect(pressKeyBridge({ key, code, metaKey: true }, mac)).toEqual({
+        commands: [command], ipc: [], prevented: true,
+      });
+    });
+
+    test.each(["editor", "inactive terminal"] as const)(
+      "both modifiers keep their command with focus in an %s",
+      (surface) => {
+        focusSurface(surface);
+        for (const modifier of [{ ctrlKey: true }, CMD]) {
+          expect(pressKeyBridge({ key, code, ...modifier }, mac)).toEqual({
+            commands: [command], ipc: [], prevented: true,
+          });
+        }
+      },
+    );
+
+    test("shifted forms keep their command with a focused terminal", () => {
+      focusSurface("terminal");
+      for (const modifier of [{ ctrlKey: true }, CMD]) {
+        expect(pressKeyBridge({ key: shiftedKey, code, shiftKey: true, ...modifier }, mac)).toEqual({
+          commands: [shiftedCommand], ipc: [], prevented: true,
+        });
+      }
+    });
+  });
+});
+
 describe("KEY_BRIDGE_JS follows the layout's symbols", () => {
   test.each<[string, KeyInit, Partial<BridgeOutcome>]>([
     ["US Cmd+/ splits right", { key: "/", code: "Slash" }, { commands: ["app.pane.splitRight"] }],
