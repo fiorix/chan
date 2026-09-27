@@ -5597,4 +5597,28 @@ mod refusal_envelopes {
         )
         .await;
     }
+
+    #[tokio::test]
+    async fn owner_desktop() {
+        use crate::route_authority::test_support::Caller;
+        let (_dir, host) = host();
+        let app = launcher_router(host, None, None);
+        for caller in [Caller::Grantee, Caller::BrowserOwner] {
+            for path in [
+                "/api/library/tunnel/control",
+                "/api/library/tunnel/conn?tunnel=x&conn=x",
+            ] {
+                let request = caller
+                    .stamp(Request::get(path), None)
+                    .body(Body::empty())
+                    .unwrap();
+                assert_refusal(
+                    app.clone().oneshot(request).await.unwrap(),
+                    StatusCode::FORBIDDEN,
+                    "reverse tunnels are not available for this gateway role",
+                )
+                .await;
+            }
+        }
+    }
 }
