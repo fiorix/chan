@@ -54,7 +54,7 @@ import type {
   BubbleOverlayMode,
   FsContext,
 } from "./types";
-import { ApiError } from "./errors";
+import { ApiError, apiErrorFromText, readApiError } from "./errors";
 import { updateGlobalConfigSerial } from "./preferenceWrite";
 import {
   apiPath,
@@ -311,44 +311,12 @@ function directAuthHeaders(): Record<string, string> {
   return headers;
 }
 
-function responseTextError(res: Response): Promise<never> {
-  return res.text()
-    .catch(() => res.statusText)
-    .then((text) => {
-      let data: unknown = null;
-      let message = text || res.statusText || `HTTP ${res.status}`;
-      if (text) {
-        try {
-          data = JSON.parse(text);
-          if (
-            data &&
-            typeof data === "object" &&
-            "error" in (data as Record<string, unknown>) &&
-            typeof (data as { error: unknown }).error === "string"
-          ) {
-            message = (data as { error: string }).error;
-          }
-        } catch {
-          // Keep the raw text fallback.
-        }
-      }
-      throw new ApiError(res.status, message, data);
-    });
+async function responseTextError(res: Response): Promise<never> {
+  throw await readApiError(res);
 }
 
 function xhrTextError(status: number, statusText: string, text: string): never {
-  let data: unknown = null;
-  let message = text || statusText || `HTTP ${status}`;
-  try {
-    data = JSON.parse(text);
-    if (data && typeof data === "object" && "error" in data &&
-        typeof data.error === "string" && data.error.trim()) {
-      message = data.error;
-    }
-  } catch {
-    // Keep the raw text fallback.
-  }
-  throw new ApiError(status, message, data);
+  throw apiErrorFromText(status, statusText, text, { allowBlankMessage: false });
 }
 
 export type TransferRoot = "workspace" | "filesystem";

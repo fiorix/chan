@@ -19,6 +19,40 @@ export class ApiError extends Error {
   }
 }
 
+/** Parse the sentence and retain structured details for callers that branch. */
+export function apiErrorFromText(
+  status: number,
+  statusText: string,
+  text: string,
+  options: { allowBlankMessage?: boolean } = {},
+): ApiError {
+  let data: unknown = null;
+  let message = text || statusText || `HTTP ${status}`;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+      if (
+        data &&
+        typeof data === "object" &&
+        "error" in data &&
+        typeof data.error === "string" &&
+        (options.allowBlankMessage !== false || data.error.trim())
+      ) {
+        message = data.error;
+      }
+    } catch {
+      // Keep the raw text fallback.
+    }
+  }
+  return new ApiError(status, message, data);
+}
+
+/** Read a refusal once, falling back to the response status text. */
+export async function readApiError(response: Response): Promise<ApiError> {
+  const text = await response.text().catch(() => response.statusText);
+  return apiErrorFromText(response.status, response.statusText, text);
+}
+
 /** The server's machine-readable refusal code, independent of its sentence. */
 export function apiErrorCode(error: unknown): string | null {
   if (!(error instanceof ApiError)) return null;
