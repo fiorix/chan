@@ -7309,6 +7309,7 @@ type TabMatch = {
 /// A tab the reconcile must never close: a dirty file tab (unsaved
 /// content) or one with a write in flight.
 function reconcileProtectedTab(t: Tab): boolean {
+  if (t.kind === "file") pendingEditFlushes.get(t.id)?.();
   return (
     t.kind === "file" &&
     (savingTabs.has(t.id) || (!t.loading && t.content !== t.saved))
