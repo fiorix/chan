@@ -16,6 +16,7 @@
 //   - Cmd/Ctrl+Enter or click "Open" -> caller's onOpen (with Shift
 //     flagging open-in-new-pane).
 //   - Esc, outside click, scroll -> dismiss.
+//   - One popover at a time: opening another dismisses this one.
 
 import { api } from "../../api/client";
 import { renderMarkdown } from "../../api/markdown";
@@ -56,9 +57,17 @@ function extOf(p: string): string {
   return i < 0 ? "" : p.slice(i).toLowerCase();
 }
 
+// The popover on screen. Each popover takes its keys from a capture
+// listener on the document, where the one added first runs first and
+// stops the event, so a second popover opened over this one would
+// leave the covered preview taking the Escape and Mod+Enter meant for
+// the visible one.
+let dismissCurrent: (() => void) | null = null;
+
 export function openPreviewPopover(
   opts: PreviewPopoverOpts,
 ): { dismiss: () => void } {
+  dismissCurrent?.();
   let alive = true;
   const wrap = document.createElement("div");
   wrap.className = "md-preview-popover";
@@ -182,7 +191,6 @@ export function openPreviewPopover(
 
   function outsideClick(e: MouseEvent): void {
     if (wrap.contains(e.target as Node)) return;
-    if (opts.anchor.contains(e.target as Node)) return;
     dismiss();
   }
 
@@ -204,6 +212,7 @@ export function openPreviewPopover(
   function dismiss(): void {
     if (!alive) return;
     alive = false;
+    if (dismissCurrent === dismiss) dismissCurrent = null;
     document.removeEventListener("mousedown", outsideClick, true);
     document.removeEventListener("keydown", keyHandler, true);
     window.removeEventListener("scroll", dismiss, true);
@@ -220,5 +229,6 @@ export function openPreviewPopover(
     window.addEventListener("scroll", dismiss, true);
   }, 0);
 
+  dismissCurrent = dismiss;
   return { dismiss };
 }

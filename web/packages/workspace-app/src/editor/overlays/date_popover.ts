@@ -9,6 +9,7 @@
 //   - Day cells highlight selected and today.
 //   - Click a day to commit that date in the chosen format.
 //   - Esc / outside click / scroll dismisses without commit.
+//   - One popover at a time: opening another dismisses this one.
 //
 // Keep this surface intentionally small: no time-of-day, no range
 // selection, no recurrence - we're a notes app.
@@ -50,7 +51,15 @@ const MONTH_LABELS = [
   "July", "August", "September", "October", "November", "December",
 ];
 
+// The popover on screen. Each popover takes its keys from a capture
+// listener on the document, where the one added first runs first and
+// stops the event, so a second popover opened over this one would
+// leave the covered calendar taking the arrows, Enter and Escape meant
+// for the visible one.
+let dismissCurrent: (() => void) | null = null;
+
 export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } {
+  dismissCurrent?.();
   let selected = new Date(opts.initialDate);
   selected.setHours(0, 0, 0, 0);
   let viewMonth = new Date(selected.getFullYear(), selected.getMonth(), 1);
@@ -257,6 +266,7 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
   function dismiss(): void {
     if (!alive) return;
     alive = false;
+    if (dismissCurrent === dismiss) dismissCurrent = null;
     document.removeEventListener("mousedown", outsideClick, true);
     document.removeEventListener("keydown", escListener, true);
     window.removeEventListener("scroll", dismiss, true);
@@ -266,7 +276,6 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
 
   function outsideClick(e: MouseEvent): void {
     if (wrap.contains(e.target as Node)) return;
-    if (opts.anchor.contains(e.target as Node)) return; // re-clicking the pill is a no-op
     dismiss();
   }
 
@@ -327,6 +336,7 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
   }, 0);
 
   render();
+  dismissCurrent = dismiss;
   return { dismiss };
 }
 
