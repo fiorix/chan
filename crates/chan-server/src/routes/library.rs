@@ -6276,6 +6276,52 @@ mod refusal_envelopes {
         .await;
     }
 
+    struct RefusingLocalThemeStore;
+    impl chan_library::LocalThemeStore for RefusingLocalThemeStore {
+        fn get(&self) -> Option<String> {
+            None
+        }
+        fn set(&self, _value: Option<String>) -> Result<(), String> {
+            Err("store could not persist the value".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_theme_unavailable() {
+        let (_dir, host) = host();
+
+        assert_refusal(
+            send(
+                &launcher_router(host, None, None),
+                "PUT",
+                "/api/library/local-theme",
+                Some(serde_json::json!({"theme":"dark"})),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "local theme is not available on this surface",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn local_theme_rejected() {
+        let (_dir, host) = host();
+        host.install_local_theme_store(Arc::new(RefusingLocalThemeStore));
+        assert_refusal(
+            send(
+                &launcher_router(host, None, None),
+                "PUT",
+                "/api/library/local-theme",
+                Some(serde_json::json!({"theme":"dark"})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "store could not persist the value",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
