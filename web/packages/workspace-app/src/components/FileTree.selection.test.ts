@@ -26,7 +26,7 @@ import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../_
 import { resetLayout } from "../__tests__/tabs";
 import { allCommands, commandContext } from "../state/commands";
 import { browserSelection, fbSelectSet, fbSelectSingle, fileOps, ui } from "../state/store.svelte";
-import { allPaneTabs, layout, openBrowserInActivePane, openInActivePane } from "../state/tabs.svelte";
+import { allPaneTabs, closeTab, layout, openBrowserInActivePane, openInActivePane } from "../state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -276,4 +276,31 @@ describe("the expand chevron", () => {
     await vi.waitFor(() => expect(row("docs/x.md")).toBeDefined());
     expect(browserSelection.paths).toEqual(["a.md", "b.md"]);
   });
+});
+
+
+test("closing the Files tab detaches an unfinished rubber band without clearing selection", async () => {
+  fbSelectSet(["a.md", "b.md"], "b.md");
+  const add = vi.spyOn(window, "addEventListener");
+  const remove = vi.spyOn(window, "removeEventListener");
+  document.querySelector('[role="tree"]')!.dispatchEvent(
+    new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, clientX: 5, clientY: 5 }),
+  );
+  const move = add.mock.calls.find(([type]) => type === "mousemove")!;
+  const up = add.mock.calls.find(([type]) => type === "mouseup")!;
+  expect(move).toBeDefined();
+  expect(up).toBeDefined();
+  const pane = layout.nodes[layout.activePaneId];
+  if (pane?.kind !== "leaf") throw new Error("no active pane");
+  const browser = allPaneTabs(pane).find((tab) => tab.kind === "browser")!;
+  await closeTab(pane.id, browser.id);
+  await settle();
+  expect(document.querySelector('[role="tree"]')).toBeNull();
+  expect(browserSelection.paths).toEqual(["a.md", "b.md"]);
+  const removedMove = remove.mock.calls.some(([type, handler, capture]) => type === "mousemove" && handler === move[1] && capture === true);
+  const removedUp = remove.mock.calls.some(([type, handler, capture]) => type === "mouseup" && handler === up[1] && capture === true);
+  window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+  expect(browserSelection.paths, "a dead tree cannot clear the current selection").toEqual(["a.md", "b.md"]);
+  expect(removedMove).toBe(true);
+  expect(removedUp).toBe(true);
 });
