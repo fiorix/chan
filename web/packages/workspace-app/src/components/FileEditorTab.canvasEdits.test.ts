@@ -12,18 +12,31 @@ import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { EXCALIDRAW_VERSION, excalidrawBoard, type BoardProps } from "../__tests__/excalidrawLibrary";
 import { trackTimers, type TimerTrack } from "../demo/timers";
-import { refreshWorkspace } from "../state/store.svelte";
+import { applyLocalTheme, effectiveHybridSurfaceTheme, refreshWorkspace } from "../state/store.svelte";
 import {
   closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
-  clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave,
+  clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
   type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
-const { render, unmountRoot } = vi.hoisted(() => ({ render: vi.fn(), unmountRoot: vi.fn() }));
+const { render, unmountRoot, beforeLibrary } = vi.hoisted(() => ({
+  render: vi.fn(),
+  unmountRoot: vi.fn(),
+  beforeLibrary: { run: null as (() => void) | null },
+}));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render, unmount: unmountRoot }) }));
 vi.mock("react", () => ({ createElement: (_kind: unknown, props: unknown) => props }));
 vi.mock("@excalidraw/excalidraw", async () => (await import("../__tests__/excalidrawLibrary")).excalidrawModule);
+// The canvas configures the library's assets after it is created and before
+// it imports the library, so `beforeLibrary.run` is a step taken in that gap.
+vi.mock("../editor/excalidrawAssets", () => ({
+  configureExcalidrawAssets: () => {
+    const run = beforeLibrary.run;
+    beforeLibrary.run = null;
+    run?.();
+  },
+}));
 vi.mock("../state/sceneSync.svelte", async (original) => ({
   ...await original<typeof import("../state/sceneSync.svelte")>(),
   isSceneSyncEligible: () => false,
@@ -49,6 +62,7 @@ beforeEach(async () => {
   });
   await refreshWorkspace();
   render.mockReset();
+  beforeLibrary.run = null;
   canvasReady = new Promise((resolve) => { render.mockImplementation(resolve); });
   unmountRoot.mockClear();
 });
@@ -57,6 +71,7 @@ afterEach(async () => {
   resolveDraftClose("cancel");
   for (const component of mounted.splice(0)) await unmount(component);
   vi.useRealTimers();
+  applyLocalTheme(null);
   document.body.innerHTML = "";
   resetLayout();
   clearRecentlyClosedTabsForTest();
@@ -464,6 +479,144 @@ describe("a board during its tab's load", () => {
       during: { viewMode: true, board: [ON_DISK], content: RELOADED.slice(0, 10) },
       after: { viewMode: false, board: [reloaded], dirty: false },
       writes: [],
+    });
+  });
+});
+
+const STROKE = { id: "stroke", version: 1 };
+
+/// What the board shows and what the tab writes: untouched through a debounce
+/// and an autosave, then after one stroke and another autosave.
+async function untouchedThenStroke(
+  pane: { id: string },
+  tab: FileTab,
+  board: { readonly elements: unknown[]; stroke(element: unknown): void },
+  write: { mock: { calls: unknown[] } },
+) {
+  await vi.advanceTimersByTimeAsync(200);
+  const dirty = isDirty(tab);
+  scheduleAutosave(pane.id, tab.id);
+  await vi.advanceTimersByTimeAsync(800);
+  const untouched = { board: board.elements, dirty, writes: write.mock.calls.length };
+  board.stroke(STROKE);
+  await vi.advanceTimersByTimeAsync(200);
+  scheduleAutosave(pane.id, tab.id);
+  await vi.advanceTimersByTimeAsync(800);
+  const written = JSON.parse(disk.get(tab.path)?.content ?? "{}") as { elements: unknown[]; appState: unknown };
+  return { untouched, written };
+}
+
+describe("a board seeded from the buffer it holds", () => {
+  test("a buffer's round trip before the library's first change leaves the drawing on the board and under a stroke", async () => {
+    const { pane, tab, write, reads } = await loadedTab("notes/board.excalidraw", DRAWING, { readMode: true });
+    let loading: Promise<void> | undefined;
+    beforeLibrary.run = () => { loading = reloadTabFromDisk(tab.id); };
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await reads.finish(DRAWING);
+    await loading;
+    await board.start();
+    setTabReadMode(tab, false);
+    await tick();
+    const { untouched, written } = await untouchedThenStroke(pane, tab, board, write);
+
+    expect({ untouched, written: written.elements }).toEqual({
+      untouched: { board: [ON_DISK], dirty: false, writes: 0 },
+      written: [ON_DISK, STROKE],
+    });
+  });
+
+  test("a board rendered again for a theme change before the library's App mounted is built from the drawing and keeps it", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    applyLocalTheme(effectiveHybridSurfaceTheme("editor") === "dark" ? "light" : "dark");
+    await tick();
+    await board.start();
+    const built = board.mountedWith?.initialData?.elements;
+    const { untouched, written } = await untouchedThenStroke(pane, tab, board, write);
+
+    expect({ built, untouched, written: written.elements }).toEqual({
+      built: [ON_DISK],
+      untouched: { board: [ON_DISK], dirty: false, writes: 0 },
+      written: [ON_DISK, STROKE],
+    });
+  });
+
+  test("a board rendered again for two read-only flips before the library's App mounted is built from the drawing and keeps it", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    setTabReadMode(tab, true);
+    await tick();
+    setTabReadMode(tab, false);
+    await tick();
+    await board.start();
+    const built = board.mountedWith?.initialData?.elements;
+    const { untouched, written } = await untouchedThenStroke(pane, tab, board, write);
+
+    expect({ built, untouched, written: written.elements }).toEqual({
+      built: [ON_DISK],
+      untouched: { board: [ON_DISK], dirty: false, writes: 0 },
+      written: [ON_DISK, STROKE],
+    });
+  });
+
+  test("a drawing's background and grid, loaded after its board rendered, are shown and kept under a stroke", async () => {
+    const backdrop = { gridSize: 20, gridStep: 5, gridModeEnabled: true, viewBackgroundColor: "#ffc9c9" };
+    const BACKDROP = JSON.stringify({ elements: [ON_DISK], appState: backdrop, files: {} });
+    const { pane, tab, write, reads } = await loadedTab("notes/backdrop.excalidraw", BACKDROP);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await reads.finish(BACKDROP);
+    await loading;
+    const shown = board.appState;
+    const { untouched, written } = await untouchedThenStroke(pane, tab, board, write);
+
+    expect({ shown, untouched, written: written.appState }).toEqual({
+      shown: backdrop,
+      untouched: { board: [ON_DISK], dirty: false, writes: 0 },
+      written: backdrop,
+    });
+  });
+
+  test("a drawing loaded after its board rendered is restored as the library's init restores it", async () => {
+    const RAW = JSON.stringify({ elements: [{ id: "bare" }, { id: "marquee", type: "selection", version: 1 }], appState: {}, files: {} });
+    const { pane, tab, write, reads } = await loadedTab("notes/raw.excalidraw", RAW);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await reads.finish(RAW);
+    await loading;
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ board: board.elements, dirty, writes: write.mock.calls.length }).toEqual({
+      board: [{ id: "bare", version: 1 }], dirty: false, writes: 0,
+    });
+  });
+
+  test("a load that ends between the API handover and the library's init shows the drawing and writes nothing", async () => {
+    const { pane, tab, write, reads } = await loadedTab("notes/late.excalidraw", DRAWING);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.handOver();
+    await reads.finish(DRAWING);
+    await loading;
+    await board.init();
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ board: board.elements, dirty, writes: write.mock.calls.length }).toEqual({
+      board: [ON_DISK], dirty: false, writes: 0,
     });
   });
 });
