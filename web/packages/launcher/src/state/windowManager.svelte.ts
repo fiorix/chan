@@ -182,7 +182,7 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   h.focus?.();
   let blank: boolean;
   try {
-    blank = h.location.href === "" || h.location.href === "about:blank";
+    blank = h.location.href === "" || h.location.href === "about:blank" || h.document.contentType !== "text/html";
   } catch {
     // A window navigated to another origin still belongs to its user.
     return h;
