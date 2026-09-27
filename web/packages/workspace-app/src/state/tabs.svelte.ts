@@ -7239,10 +7239,11 @@ export type ReconcileResult = "applied" | "diverged" | "deferred";
 /// across panes (the keyed component salvage local drag-move relies on).
 /// Remote tabs with no live match are created via the restore
 /// constructors; a remote terminal without a `tsid` is skipped (a sync
-/// never spawns a PTY; the peer's next save carries the id). Live tabs
-/// absent from the remote are closed, EXCEPT dirty file tabs
-/// (content !== saved) and tabs mid-save, which stay in their pane (or
-/// park in the focused pane when theirs was rebuilt away).
+/// never spawns a PTY; the peer's next save carries the id). Before
+/// closing a file tab absent from the remote, flush its pending editor
+/// edits; this can update its buffer and send live scene deltas. Dirty
+/// file tabs (content !== saved) and tabs mid-save stay in their pane
+/// (or park in the focused pane when theirs was rebuilt away).
 ///
 /// Never applied from remote: active markers `a`, focus `f`, carets,
 /// scroll, read mode. Each co-viewer keeps its own view; local active
@@ -7306,8 +7307,9 @@ type TabMatch = {
   consumed: Set<Tab>;
 };
 
-/// A tab the reconcile must never close: a dirty file tab (unsaved
-/// content) or one with a write in flight.
+/// Flush pending editor edits before checking whether a file tab has
+/// unsaved content or a write in flight and must survive reconciliation.
+/// The flush can update the buffer and send live scene deltas.
 function reconcileProtectedTab(t: Tab): boolean {
   if (t.kind === "file") pendingEditFlushes.get(t.id)?.();
   return (
