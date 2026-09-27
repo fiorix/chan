@@ -549,7 +549,7 @@ struct ScopedLibraryActionResult {
 }
 
 fn command_capability_error(status: StatusCode, message: &'static str) -> Response {
-    (status, message).into_response()
+    crate::error::err(status, message.into())
 }
 
 async fn command_capability_response_headers(req: Request<Body>, next: Next) -> Response {
