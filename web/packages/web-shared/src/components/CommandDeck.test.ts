@@ -624,4 +624,30 @@ describe("command rejection ownership", () => {
     expect(draft().operation).toBeNull();
     expect(closeResult()).not.toBeNull();
   });
+  it("retires its own pending card after a different draft starts another run", async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const onChoose = vi.fn().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    const { entry, onError } = start("different drafts", true, onChoose);
+    await flush();
+    const original = draft();
+    (app.replaceDraft as () => void)();
+    await flush();
+    closeResult().click();
+    await flush();
+    const current = draft();
+    const newerOperation = current.operation;
+    const error = new Error("old draft refused");
+    first.reject(error);
+    await flush();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(entry, error);
+    expect(current.operation).toBe(newerOperation);
+    expect(current.operation?.kind).toBe("pending");
+    expect(original.operation).toBeNull();
+    host("close");
+    second.resolve();
+    await flush();
+    await vi.advanceTimersByTimeAsync(260);
+  });
+
 });
