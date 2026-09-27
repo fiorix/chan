@@ -1266,6 +1266,14 @@ async fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppStat
     }
 }
 
+/// Stop a devserver's window watcher and forget its view.
+fn stop_devserver_watcher(state: &AppState, id: &str, stop: DevserverWatcherStop) {
+    if let Some(cancel) = state.devserver_watchers.lock().unwrap().remove(id) {
+        let _ = cancel.send(stop);
+    }
+    state.devserver_watcher_views.lock().unwrap().remove(id);
+}
+
 /// Drop a devserver's live connection windows: stop its window watcher and
 /// remove its workspace tenants/standalone terminals, then drop it from the
 /// launcher feed. Leaves the control terminal to the caller: a live but
@@ -1275,10 +1283,7 @@ async fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppStat
 fn remove_devserver_windows(app: &tauri::AppHandle, state: &AppState, id: &str) {
     // Cancel the window watcher (it detaches its windows, not reap -- the
     // devserver keeps its set server-side).
-    if let Some(cancel) = state.devserver_watchers.lock().unwrap().remove(id) {
-        let _ = cancel.send(DevserverWatcherStop::CloseWindows);
-    }
-    state.devserver_watcher_views.lock().unwrap().remove(id);
+    stop_devserver_watcher(state, id, DevserverWatcherStop::CloseWindows);
     // Drop it from the launcher feed and re-push so its windows + workspaces
     // leave the launcher (the watcher/poll already stopped on cancel).
     state.devserver_feed.forget(id);
@@ -1462,10 +1467,7 @@ fn mark_devserver_control_exited(app: &tauri::AppHandle, state: &AppState, id: &
     // spinner). Do NOT forget the feed or reap the control terminal, so the
     // launcher keeps rendering the flashing control row (a `control:true`
     // record under the devserver's `lib-` library) at "process exited".
-    if let Some(cancel) = state.devserver_watchers.lock().unwrap().remove(id) {
-        let _ = cancel.send(DevserverWatcherStop::RetireKeepWindows);
-    }
-    state.devserver_watcher_views.lock().unwrap().remove(id);
+    stop_devserver_watcher(state, id, DevserverWatcherStop::RetireKeepWindows);
     // Hide the devserver's workspace + window rows from the launcher NOW: the
     // script was the connection, so every affordance on those rows (open /
     // hide / on / off) is a doomed click while it is down. The kept control
