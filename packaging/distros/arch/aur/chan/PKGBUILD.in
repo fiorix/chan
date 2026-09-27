@@ -41,6 +41,9 @@ build() {
     export CHAN_PACKAGED=aur
     make web WEB_SKIP_INSTALL=1
     cargo build --frozen --release -p chan
+    # Integration tests can relink target/release with dev-dependency features.
+    # Preserve the release build outside cargo's target directory for packaging.
+    install -Dm755 target/release/chan package-bin/chan
 }
 
 check() {
@@ -53,7 +56,7 @@ check() {
 
 package() {
     cd "chan-$pkgver"
-    install -Dm755 target/release/chan "$pkgdir/usr/bin/chan"
+    install -Dm755 package-bin/chan "$pkgdir/usr/bin/chan"
     ln -s chan "$pkgdir/usr/bin/cs"
     install -Dm644 packaging/distros/shared/chan-devserver.service \
         "$pkgdir/usr/lib/systemd/user/chan-devserver.service"
