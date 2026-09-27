@@ -5794,6 +5794,33 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn workspace_off_missing() {
+        let (_dir, host) = host();
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                "/api/library/workspaces/missing/off",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "workspace not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_off_host() {
+        assert_refusal(
+            workspace_off_error(crate::Error::Config("workspace host lock poisoned".into())),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config: workspace host lock poisoned",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
         let app = launcher_router(host, None, None);
