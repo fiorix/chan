@@ -1,3 +1,9 @@
+<script module lang="ts">
+  // Drag payload values are protected during hover; panes in this window
+  // share the source identity recorded while the payload is writable.
+  let localTabDrag: { fromPaneId: string; fromSide: "a" | "b"; tabId: string } | null = null;
+</script>
+
 <script lang="ts">
   import { shortcutLetter } from "@chan/web-shared/keyboard";
   // One pane: a horizontal tab strip on top, an editor below.
@@ -815,6 +821,7 @@
   function onDragStart(e: DragEvent, tabId: string, fromSide: PaneSide): void {
     if (paneMode.stale) return;
     if (!e.dataTransfer) return;
+    localTabDrag = { fromPaneId: pane.id, fromSide, tabId };
     activeDragSourceSides.set(tabId, fromSide);
     e.dataTransfer.effectAllowed = "move";
     // `fromWindow` is what actually separates an intra-window move from a
@@ -909,6 +916,7 @@
   /// landed in another window - close it locally so the visual
   /// matches the cross-window result.
   function onDragEnd(e: DragEvent, tabId: string, fallbackSide: PaneSide): void {
+    localTabDrag = null;
     const fromSide = activeDragSourceSides.get(tabId) ?? fallbackSide;
     activeDragSourceSides.delete(tabId);
     if (paneMode.stale) return;
@@ -1108,12 +1116,13 @@
   }
 
   function onBodyDragOver(e: DragEvent): void {
-    const payload = tabDragPayload(e);
     if (
-      !payload ||
-      !isIntraWindowDrag(payload.fromWindow) ||
-      !paneInThisWindow(payload.fromPaneId)
+      !localTabDrag ||
+      !isTabMoveDrag(e) ||
+      !isTabDragScopeCompatible(e) ||
+      !paneInThisWindow(localTabDrag.fromPaneId)
     ) {
+      bodyDropEdge = null;
       if (isTabMoveDrag(e)) rejectTabMoveDrag(e);
       return;
     }
@@ -1165,13 +1174,11 @@
   /// to displace it. Cross-pane drops keep the precise "insert before
   /// or after this tab" semantic since insertion between tabs is the
   /// useful action there.
-  function isSamePaneDrag(e: DragEvent): boolean {
-    const payload = tabDragPayload(e);
+  function isSamePaneDrag(): boolean {
     return (
-      !!payload &&
-      isIntraWindowDrag(payload.fromWindow) &&
-      payload.fromPaneId === pane.id &&
-      (payload.fromSide ?? visibleSide) === visibleSide
+      localTabDrag !== null &&
+      localTabDrag.fromPaneId === pane.id &&
+      localTabDrag.fromSide === visibleSide
     );
   }
 
@@ -1191,10 +1198,14 @@
       e.dataTransfer.dropEffect = isTabMoveDrag(e) ? "move" : "copy";
     }
     dropActive = true;
-    // For same-pane drags we show the indicator at the target tab's
-    // slot (i.e., "this is where your tab will land"). For cross-pane
-    // drags the half-tab heuristic gives precise insertion control.
-    dropIndicator = isSamePaneDrag(e) ? tabIdx : indicatorIndexFor(tabIdx, e);
+    // Same-pane drops use the target's final index. Account for removing
+    // the source when locating that slot in the current strip.
+    const from = isSamePaneDrag()
+      ? visibleTabs.findIndex((tab) => tab.id === localTabDrag!.tabId)
+      : -1;
+    dropIndicator = from < 0
+      ? indicatorIndexFor(tabIdx, e)
+      : from < tabIdx ? tabIdx + 1 : tabIdx;
   }
 
   /// Whether a `fromPaneId` belongs to this window's layout. Cross-
