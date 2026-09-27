@@ -3,9 +3,10 @@
 // invoking window's live /ws presence. The capability and its snapshots stay in
 // module memory: launcher drafts persist across reload, authority does not.
 
+import type { WindowPageCheck } from "@chan/web-shared/window-page";
 import { sessionWindowId } from "./client";
-import { ApiError } from "./errors";
-import { requestRoot } from "./transport";
+import { ApiError, readApiError } from "./errors";
+import { chanFetch, requestRoot, rootPath } from "./transport";
 import type { ScopedWorkspaceStatus } from "./workspaceStatus";
 
 export type { ScopedWorkspaceStatus } from "./workspaceStatus";
@@ -165,6 +166,15 @@ export function runScopedLibraryAction(
     ),
   );
 }
+
+/** A launch path carries its own capability. Follow its redirect to check the
+ * tenant page without minting another capability or consuming the HTML body. */
+export const checkScopedWindowPage: WindowPageCheck = async (url, signal) => {
+  const response = await chanFetch(rootPath(url), {
+    method: "GET", cache: "no-store", redirect: "follow", signal,
+  });
+  return { response, readRefusal: () => readApiError(response) };
+};
 
 /** Drop authority after a definitive liveness/auth failure or in tests. */
 export function resetScopedLibraryCapability(): void {
