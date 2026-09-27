@@ -120,6 +120,7 @@ function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibra
 afterEach(() => {
   delete (window as W).__TAURI_INTERNALS__;
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   resetHostVocabularyForTests();
 });
@@ -607,5 +608,138 @@ describe("creating a capability popup", () => {
     expect(popup.location.href).toBe("about:blank");
     expect(host.refresh).not.toHaveBeenCalled();
     expect(vi.mocked(host.checkPage).mock.calls[0][1].aborted).toBe(true);
+  });
+});
+
+describe("focusing a capability popup", () => {
+  test("opens synchronously and checks before unhiding a fresh named popup", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockImplementation(() => {
+      calls.push("open");
+      return popup as unknown as Window;
+    });
+    const host = bridge({
+      checkPage: vi.fn()
+        .mockImplementationOnce(async () => { calls.push("503"); return pageAnswer(503, "Restoring sessions.", "2"); })
+        .mockImplementationOnce(async () => { calls.push("200"); return pageAnswer(); }),
+      runAction: vi.fn(async () => { calls.push("unhide"); return undefined; }),
+    });
+
+    const pending = focusLibraryWindow(host, scopedWindow({ hidden: true }));
+    expect(calls).toEqual(["open", "503"]);
+    expect(window.open).toHaveBeenCalledWith("", "w-other");
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(host.runAction).not.toHaveBeenCalled();
+    expect(popup.location.href).toBe("about:blank");
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(calls).toEqual(["open", "503", "200", "unhide"]);
+    expect(host.runAction).toHaveBeenCalledExactlyOnceWith({
+      action: "set_window_visibility", window_id: "w-other", hidden: false,
+    });
+    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(popup.focus).toHaveBeenCalled();
+  });
+
+  test.each([
+    [401, "invalid or expired library command capability"],
+    [410, "the invoking window is no longer live"],
+    [409, "window tenant is not running"],
+    [404, "window not found"],
+  ] as const)("closes a fresh popup on %i without unhiding it", async (status, message) => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({ checkPage: vi.fn().mockResolvedValue(pageAnswer(status, message)) });
+
+    await expect(focusLibraryWindow(host, scopedWindow({ hidden: true }))).rejects.toMatchObject({ status, message });
+
+    expect(popup.close).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe("about:blank");
+    expect(host.runAction).not.toHaveBeenCalled();
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test("focuses a live named popup without checking or navigating it", async () => {
+    const popup = fakePopup("https://chan.test/project/index.html?w=w-other");
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge();
+
+    await focusLibraryWindow(host, scopedWindow({ hidden: true }));
+
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(popup.location.href).toBe("https://chan.test/project/index.html?w=w-other");
+    expect(popup.focus).toHaveBeenCalled();
+    expect(popup.close).not.toHaveBeenCalled();
+  });
+
+  test("leaves a live popup open when unhiding is refused", async () => {
+    const popup = fakePopup("https://chan.test/project/index.html?w=w-other");
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({ runAction: vi.fn().mockRejectedValue(new Error("Cannot show this window.")) });
+
+    await expect(focusLibraryWindow(host, scopedWindow({ hidden: true }))).rejects.toThrow("Cannot show this window.");
+
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(popup.location.href).toBe("https://chan.test/project/index.html?w=w-other");
+    expect(popup.close).not.toHaveBeenCalled();
+  });
+
+  test("does not check its own window even when its location is blank", async () => {
+    const host = bridge();
+    const self = { ...fakePopup(), open: vi.fn() };
+    vi.stubGlobal("window", self);
+
+    await focusLibraryWindow(host, scopedWindow({ window_id: "w-self" }));
+
+    expect(self.open).not.toHaveBeenCalled();
+    expect(host.checkPage).not.toHaveBeenCalled();
+  });
+
+  test("focuses a foreign popup without checking, navigating or closing it", async () => {
+    const popup = fakePopup();
+    Object.defineProperty(popup, "location", { get: () => { throw new DOMException("cross-origin", "SecurityError"); } });
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge();
+
+    await expect(focusLibraryWindow(host, scopedWindow())).resolves.toBeUndefined();
+
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(popup.focus).toHaveBeenCalled();
+    expect(popup.close).not.toHaveBeenCalled();
+  });
+
+  test("keeps one navigation while the outgoing document is still active", async () => {
+    vi.useFakeTimers();
+    const popup = fakePopup();
+    const navigate = vi.fn();
+    Object.defineProperty(popup.location, "href", { get: () => "about:blank", set: navigate });
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge();
+
+    await focusLibraryWindow(host, scopedWindow());
+    expect(host.checkPage).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledTimes(1);
+    await focusLibraryWindow(host, scopedWindow());
+    expect(host.checkPage).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledTimes(1);
+    popup.document = document.implementation.createHTMLDocument();
+    await focusLibraryWindow(host, scopedWindow());
+    expect(host.checkPage).toHaveBeenCalledTimes(2);
+    expect(navigate).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(["new_terminal", "new_workspace_window", "focus"] as const)("does not check a page on the native %s branch", async (action) => {
+    asDesktop(vi.fn().mockResolvedValue(null));
+    const open = vi.spyOn(window, "open");
+    const host = bridge();
+
+    if (action === "focus") await focusLibraryWindow(host, scopedWindow({ hidden: true }));
+    else await createLibraryWindow(host, action === "new_terminal"
+      ? { action } : { action, workspace_id: "project-a" });
+
+    expect(open).not.toHaveBeenCalled();
+    expect(host.checkPage).not.toHaveBeenCalled();
   });
 });
