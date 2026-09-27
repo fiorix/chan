@@ -7184,8 +7184,182 @@ mod tests {
         );
     }
 
-    /// A mount the stopping host refuses answers 503, so a caller can tell
-    /// a devserver that is going away from a bad request.
+    mod stopping_mounts {
+        use super::*;
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        async fn signal_stop(state: &DevserverState, fully_stopped: bool) {
+            let signal_tx = tokio::sync::watch::channel(false).0;
+            let tasks = ServeLifetimeTasks::spawn(state, &signal_tx);
+            signal_tx.send(true).expect("send stop signal");
+            tokio::time::timeout(Duration::from_secs(10), tasks.finish())
+                .await
+                .expect("stop task finishes")
+                .expect("stop task");
+            assert_eq!(state.startup.phase(), StartupPhase::Stopping);
+            if fully_stopped {
+                shut_down_hosted(state, None).await.expect("shut down host");
+                state.startup.stop();
+                state.startup.stopped();
+                assert_eq!(state.startup.phase(), StartupPhase::Stopped);
+            }
+        }
+
+        fn mount_request(path: &str, body: serde_json::Value) -> HttpRequest<Body> {
+            HttpRequest::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        }
+
+        async fn refusal_body(response: Response) -> String {
+            let status = response.status();
+            let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            assert_eq!(content_type.unwrap(), "application/json");
+            body
+        }
+
+        async fn refuses_after_signal(route: &str) {
+            let _env = chan_home_env_read();
+            for fully_stopped in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let key = canonical_root(root.path());
+                let prefix = registered_workspace_prefix(&key).unwrap();
+                let state = devserver_with_windows(home.path()).await;
+                if route == "on" {
+                    state
+                        .host
+                        .library()
+                        .register_workspace(root.path())
+                        .unwrap();
+                } else if route == "pending" {
+                    state
+                        .begin_mount(root.path(), &prefix)
+                        .unwrap()
+                        .expect("pending mount");
+                }
+                signal_stop(&state, fully_stopped).await;
+
+                let body = if route == "discovery" {
+                    let response =
+                        handle_discovery_request(&state, 8787, register_request(root.path())).await;
+                    let crate::devserver_handoff::Response::Error { message } = response else {
+                        panic!("discovery registration was not refused: {response:?}");
+                    };
+                    serde_json::json!({"error": message}).to_string()
+                } else {
+                    let (path, body) = if route == "on" {
+                        (
+                            format!("/api/devserver/workspaces{prefix}/on"),
+                            serde_json::json!({"on": true}),
+                        )
+                    } else {
+                        (
+                            "/api/devserver/workspaces".to_string(),
+                            serde_json::json!({"path": root.path()}),
+                        )
+                    };
+                    let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+                    refusal_body(app.oneshot(mount_request(&path, body)).await.unwrap()).await
+                };
+
+                if matches!(route, "open" | "discovery") {
+                    assert!(
+                        state.host.library().list_workspaces().is_empty(),
+                        "refused {route} registered a row: {body}"
+                    );
+                    assert!(state.workspace_entries().is_empty());
+                }
+                assert_eq!(
+                    body,
+                    serde_json::json!({
+                        "error": format!(
+                            "the devserver is stopping; {} was not mounted",
+                            root.path().display()
+                        )
+                    })
+                    .to_string(),
+                    "{route}, fully_stopped={fully_stopped}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn open_refuses_after_the_stop_signal_without_registering() {
+            refuses_after_signal("open").await;
+        }
+
+        #[tokio::test]
+        async fn on_refuses_after_the_stop_signal() {
+            refuses_after_signal("on").await;
+        }
+
+        #[tokio::test]
+        async fn discovery_refuses_after_the_stop_signal_without_registering() {
+            refuses_after_signal("discovery").await;
+        }
+
+        #[tokio::test]
+        async fn a_pending_mount_repeat_refuses_after_the_stop_signal() {
+            refuses_after_signal("pending").await;
+        }
+
+        /// A mount admitted before the signal can finish registering after it.
+        /// Its refusal keeps that row: unregistering would erase workspace
+        /// state. The later coordinator check must still identify the stop.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_mount_admitted_before_stop_keeps_its_registration() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let prefix = registered_workspace_prefix(&canonical_root(root.path())).unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let request = mount_request(
+                "/api/devserver/workspaces",
+                serde_json::json!({"path": root.path()}),
+            );
+            let stall = root_stall::stall_after(root.path(), 1);
+            let mounting = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "mount never reached registration"
+            );
+            assert!(
+                stall.entered()[0].contains("register_workspace"),
+                "the held call must be registration: {:?}",
+                stall.entered()
+            );
+            signal_stop(&state, false).await;
+            drop(stall);
+            let response = tokio::time::timeout(Duration::from_secs(10), mounting)
+                .await
+                .expect("mount finishes after registration resumes")
+                .expect("mount task");
+            let body = refusal_body(response).await;
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "error": format!("the devserver is stopping; {prefix} was not mounted")
+                })
+                .to_string()
+            );
+            assert_eq!(state.host.library().list_workspaces().len(), 1);
+            assert!(!state.host.is_root_mounted(root.path()));
+        }
+    }
+
+    /// Isolates the host's own refusal with the coordinator still Ready.
+    /// The devserver signal stops the coordinator before shutting the host
+    /// down; a mount admitted before that signal can still meet this refusal.
     #[tokio::test]
     async fn a_mount_refused_by_a_stopping_host_answers_503() {
         let _env = chan_home_env_read();
