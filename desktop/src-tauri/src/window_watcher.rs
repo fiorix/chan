@@ -1085,6 +1085,67 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_buffered_reload_does_not_open_a_missing_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Feed(WindowRecord, Arc<Notify>);
+        impl WindowFeed for Feed {
+            fn snapshot(&self) -> Vec<WindowRecord> {
+                vec![self.0.clone()]
+            }
+            fn change_notify(&self) -> Arc<Notify> {
+                Arc::clone(&self.1)
+            }
+        }
+        struct MissingSurface(Arc<AtomicUsize>);
+        impl NativeSurface for MissingSurface {
+            fn open_labels(&self, _: &str) -> HashSet<String> {
+                HashSet::new()
+            }
+            fn open(&self, _: &WindowRecord) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn close(&self, _: &str) {}
+        }
+        let record = rec("lib-buffered-reload", "w-1", WindowKind::Terminal);
+        let label = native_label(&record);
+        let view = Arc::new(WatcherViewState::default());
+        assert!(view.request_reload(&label));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let library_id = record.library_id.clone();
+        let watcher = watch_loop(
+            Some(&library_id),
+            Feed(record, Arc::new(Notify::new())),
+            MissingSurface(Arc::clone(&opens)),
+            Arc::clone(&view),
+            std::future::pending(),
+        );
+        tokio::pin!(watcher);
+        assert!(futures::poll!(watcher.as_mut()).is_pending());
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            0,
+            "a buffered Reload wake must not build its absent window on a second pass"
+        );
+        for _ in 0..3 {
+            assert!(view.request_reload(&label));
+        }
+        assert!(futures::poll!(watcher.as_mut()).is_pending());
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            0,
+            "coalesced Reload wakes must not build an absent window"
+        );
+        view.unbury(&label);
+        assert!(futures::poll!(watcher.as_mut()).is_pending());
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "an explicit restore still opens the desired window"
+        );
+    }
+
     #[test]
     fn view_state_bury_unbury_tracks_local_set() {
         let view = WatcherViewState::default();
