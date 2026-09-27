@@ -347,16 +347,6 @@ const WEBSOCKETS: &[&str] = &[
 // Each entry names an existing route whose refusals are not all envelopes.
 // Remove entries as those routes adopt the contract; new routes must obey it.
 const PENDING: &[(&str, &str)] = &[
-    ("POST", "/api/library/windows"),
-    ("DELETE", "/api/library/windows/{window_id}"),
-    ("GET", "/api/library/windows/{window_id}/live-terminals"),
-    ("POST", "/api/library/windows/{window_id}/close"),
-    ("PUT", "/api/library/windows/{window_id}/label"),
-    ("POST", "/api/library/windows/{window_id}/visibility"),
-    ("POST", "/api/library/devservers/{id}/workspaces/on"),
-    ("POST", "/api/library/devservers/{id}/workspaces/off"),
-    ("POST", "/api/library/devservers/{id}/workspaces/forget"),
-    ("POST", "/api/library/fs/pick-folder"),
     ("POST", "/api/library/workspaces"),
     ("POST", "/api/library/workspaces/{id}/on"),
     ("POST", "/api/library/workspaces/{id}/off"),
@@ -364,18 +354,6 @@ const PENDING: &[(&str, &str)] = &[
     ("PUT", "/api/library/local-color"),
     ("PUT", "/api/library/local-theme"),
     ("PUT", "/api/library/collapsed-machines"),
-    (
-        "POST",
-        "/api/library/command-capabilities/{capability}/actions",
-    ),
-    (
-        "GET",
-        "/api/library/command-capabilities/{capability}/windows/{window_id}/launch",
-    ),
-    (
-        "GET",
-        "/api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals",
-    ),
     ("POST", "/api/library/gateways"),
     ("PUT", "/api/library/gateways/{id}"),
     ("DELETE", "/api/library/gateways/{id}"),
