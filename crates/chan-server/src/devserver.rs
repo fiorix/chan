@@ -2553,6 +2553,8 @@ fn build_devserver_app(
             "/api/devserver/terminal-sessions/drain",
             post(handle_terminal_sessions_drain),
         )
+        // Before the gate, so the bearer check answers a wrong method first.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,

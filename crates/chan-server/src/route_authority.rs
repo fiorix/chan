@@ -441,8 +441,9 @@ pub(crate) mod test_support {
     /// A method router that names verbs counts only those. Its fallback, when
     /// it has its own, is taken for the crate's 405 answer, which the text
     /// cannot tell from any other fallback, so
-    /// [`assert_uncounted_verbs_refused`] sends every verb not counted to the
-    /// assembled routers and fails on any answer other than that 405. A method
+    /// [`assert_uncounted_verbs_refused`] sends every verb not counted, and
+    /// HEAD where GET is not counted, to the assembled routers and fails on any
+    /// answer other than that 405. A method
     /// router that names no verb is an `any()` handler and counts every verb.
     pub(crate) fn mounted_routes<S>(router: &axum::Router<S>) -> BTreeSet<(Verb, String)> {
         let text = format!("{router:?}");
@@ -782,9 +783,10 @@ pub(crate) mod test_support {
     }
 
     /// Send each verb [`mounted_routes`] did not count for a route of
-    /// `router` once, as a local caller with the router's bearer, and fail
-    /// unless every answer is 405 with an `Allow` header and the envelope's
-    /// "method not allowed". This is what holds the walker to its reading of a
+    /// `router` once, and HEAD where GET is not counted, as a local caller with
+    /// the router's bearer, and fail unless every answer is 405 with an `Allow`
+    /// header and the envelope's "method not allowed", whose body a HEAD
+    /// answer leaves out. This is what holds the walker to its reading of a
     /// method router's own fallback as the crate's 405 answer.
     ///
     /// Captures are filled with a placeholder: the method is refused before
@@ -807,7 +809,9 @@ pub(crate) mod test_support {
         let mut sent = 0;
         let mut contradictions = Vec::new();
         for (path, verbs) in &counted {
-            for verb in EVERY_VERB.into_iter().filter(|verb| !verbs.contains(verb)) {
+            let head = (!verbs.contains(&Verb::Get)).then_some(Verb::Head);
+            let uncounted = EVERY_VERB.into_iter().filter(|verb| !verbs.contains(verb));
+            for verb in uncounted.chain(head) {
                 let bearer = local_bearer
                     .as_ref()
                     .map(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
@@ -841,6 +845,11 @@ pub(crate) mod test_support {
                     .await
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                     .unwrap_or_default();
+                let expected = if verb == Verb::Head {
+                    ""
+                } else {
+                    expected.as_str()
+                };
                 if status != StatusCode::METHOD_NOT_ALLOWED || !allow || !json || body != expected {
                     contradictions.push(format!(
                         "{verb:?} {path} answered {status} allow={allow} json={json} {body:.120}"

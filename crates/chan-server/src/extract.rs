@@ -39,8 +39,9 @@ impl Rejection {
         }
     }
 
-    /// The sentence the framework answers. For a path rejection it differs
-    /// from the display, which leaves out the "Invalid URL" prefix.
+    /// The sentence the framework answers. For a path parameter that fails to
+    /// decode or parse it carries an "Invalid URL: " prefix that the display
+    /// leaves out; for every other rejection the two are the same.
     pub(crate) fn body_text(&self) -> String {
         match self {
             Self::Json(rejection) => rejection.body_text(),

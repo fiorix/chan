@@ -1761,6 +1761,9 @@ fn router_with_extensions(
         "/api/metadata/import",
         post(api_metadata_import).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
     );
+    // Before the gate, so the settings gate answers a wrong method first.
+    let settings_writes =
+        settings_writes.method_not_allowed_fallback(crate::error::method_not_allowed);
     let settings_writes = settings_writes.route_layer(middleware::from_fn_with_state(
         state.clone(),
         tunnel_guard::settings_guard,

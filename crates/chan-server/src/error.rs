@@ -25,8 +25,11 @@ pub fn err(status: StatusCode, msg: String) -> Response {
 
 /// The answer to a method a route does not serve. A router takes it with
 /// `method_not_allowed_fallback` after its last route, since the framework
-/// gives it only to the routes registered before the call. The framework
-/// adds the `Allow` header to its answer.
+/// gives it only to the routes registered before the call and only where a
+/// route still has the default. A sub-router whose routes sit behind a gate
+/// placed with `route_layer` takes it before that gate, so the gate wraps it
+/// and answers a wrong method first. The framework adds the `Allow` header to
+/// its answer.
 pub(crate) async fn method_not_allowed() -> Response {
     err(StatusCode::METHOD_NOT_ALLOWED, "method not allowed".into())
 }
