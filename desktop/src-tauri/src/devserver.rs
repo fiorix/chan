@@ -4261,6 +4261,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_workspaces_reads_refusals_per_arm() {
+        use axum::http::StatusCode;
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for gateway in [false, true] {
+            for (body, detail) in [
+                ("plain refusal", ""),
+                (
+                    r#"{"error":"launcher not ready","code":"starting"}"#,
+                    ": launcher not ready",
+                ),
+            ] {
+                let server = MockManagementServer::start(vec![mock_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    body,
+                )])
+                .await;
+                let conn = if gateway {
+                    server.gateway_conn()
+                } else {
+                    server.raw_conn()
+                };
+                actual.push(fetch_workspaces(&conn).await.unwrap_err());
+                let label = if gateway {
+                    "gateway workspaces"
+                } else {
+                    "devserver workspaces"
+                };
+                expected.push(format!(
+                    "{label} returned HTTP 503 Service Unavailable{detail}"
+                ));
+                server.assert_responses_drained();
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "refusals must retain the server sentence on both transports"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_workspaces_request_contract_per_arm() {
         use axum::http::{Method, StatusCode};
 
