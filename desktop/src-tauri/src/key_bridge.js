@@ -95,10 +95,10 @@
   // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q) -- the chords a
   // menubar would own; off-mac these windows have none -- gated on !metaKey so macOS,
   // whose menubar still owns them, never double-fires.
-  // A focused terminal takes three of these back, because their Ctrl form
+  // A focused terminal takes four of these back, because their Ctrl form
   // encodes a byte the shell reads and terminal find belongs to the tab
   // rather than to the page: Find in both modifier forms, and Find Next
-  // and Previous Pane under Ctrl alone.
+  // and Previous/Next Pane under Ctrl alone.
   function onKey(e) {
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
@@ -230,7 +230,12 @@
           if (!e.metaKey && terminalHasFocus()) return;
           fire(e, 'app.pane.prev');
           return;
-        case 'BracketRight': fire(e, 'app.pane.next'); return;
+        // Next pane. Ctrl+] is the Group Separator (0x1D) to a focused
+        // shell; Cmd+] stays pane navigation on macOS.
+        case 'BracketRight':
+          if (!e.metaKey && terminalHasFocus()) return;
+          fire(e, 'app.pane.next');
+          return;
         // Cmd+/ split right. Split
         // bottom is Cmd+Shift+/ (shift branch below). Cmd+\ is
         // deliberately NOT used: 1Password's system-wide Cmd+\

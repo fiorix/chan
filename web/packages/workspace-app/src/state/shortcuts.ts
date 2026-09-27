@@ -784,6 +784,12 @@ export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
   const chord = resolveEventChord(e);
   if (!chord) return false;
   if (overrideEscapeMatcher?.(chord)) return true;
+  // Native Control brackets carry ESC and GS to the shell. User assignments
+  // take precedence; Command and shifted chords keep their app commands.
+  if (
+    currentPlatform() === "native" &&
+    (chordsEqual(chord, "Ctrl+[") || chordsEqual(chord, "Ctrl+]"))
+  ) return false;
   return registryCommandId(chord, true) !== null;
 }
 
