@@ -1128,7 +1128,7 @@ struct ActingWindow {
 }
 
 fn create_window_root_error(error: crate::Error) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+    crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
 /// `POST /api/library/windows` `{kind, workspace_path?, origin?, acting_window_id?}`:
@@ -1142,7 +1142,7 @@ async fn handle_create_library_window(
     let mut workspace_path = req.workspace_path;
     if req.kind == WindowKind::Workspace {
         let Some(path) = workspace_path.as_deref() else {
-            return (StatusCode::BAD_REQUEST, "workspace_path is required").into_response();
+            return crate::error::err(StatusCode::BAD_REQUEST, "workspace_path is required".into());
         };
         // The record stores the root the workspace's runtime was opened at,
         // the registry's stored root: the path the launcher lists it by and
@@ -1155,11 +1155,10 @@ async fn handle_create_library_window(
         };
         let (status, _) = host.canonical_root_status(&key);
         if status != WorkspaceStatus::Running {
-            return (
+            return crate::error::err(
                 StatusCode::CONFLICT,
-                "workspace is not running; turn it on before opening a window",
-            )
-                .into_response();
+                "workspace is not running; turn it on before opening a window".into(),
+            );
         }
         let stored = host.mounted_root(&key).unwrap_or(key);
         workspace_path = Some(stored.to_string_lossy().into_owned());
@@ -1177,7 +1176,7 @@ async fn handle_create_library_window(
     // native twin for a browser-minted window (honest-client input).
     match host.mint_window_with_origin(req.kind, workspace_path, req.origin) {
         Ok(record) => Json(record).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
