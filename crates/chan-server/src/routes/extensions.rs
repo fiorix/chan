@@ -1266,6 +1266,213 @@ mod tests {
         }
     }
 
+    mod refusal_envelopes {
+        use super::*;
+
+        async fn assert_refusal(response: Response, sentence: &str, code: &str) {
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/json"),
+                "proxy refusal content type"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                format!(
+                    "{{\"error\":{},\"code\":{}}}",
+                    serde_json::to_string(sentence).unwrap(),
+                    serde_json::to_string(code).unwrap()
+                ),
+                "exact proxy refusal body"
+            );
+        }
+
+        fn app(url: &str, scope: &str) -> Router {
+            let mut state = crate::state::test_support::make_test_state(false);
+            Arc::get_mut(&mut state).unwrap().instance_id = scope.into();
+            crate::router_with_extensions(
+                state,
+                ExtensionCatalog::for_test(vec![ExtensionEntry::for_test(
+                    "echo",
+                    "Echo",
+                    url,
+                    "upstream-secret",
+                    CAPABILITY,
+                )]),
+            )
+        }
+
+        async fn websocket_refusal(app: Router) -> Response {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = reqwest::Client::new()
+                .get(format!(
+                    "http://{addr}/_chan/extensions/echo/{CAPABILITY}/ws"
+                ))
+                .header(header::CONNECTION, "Upgrade")
+                .header(header::UPGRADE, "websocket")
+                .header(header::SEC_WEBSOCKET_VERSION, "13")
+                .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await;
+            server.abort();
+            let response = result.expect("the checked proxy must answer the upgrade request");
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = response.bytes().await.unwrap();
+            let mut response = Response::new(Body::from(bytes));
+            *response.status_mut() = status;
+            *response.headers_mut() = headers;
+            response
+        }
+
+        #[tokio::test]
+        async fn proxy_http_unavailable() {
+            let response = app("http://127.0.0.1:9/", "scope")
+                .oneshot(
+                    Request::get(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                "null"
+            );
+            assert_refusal(response, "extension unavailable", "extension_unavailable").await;
+        }
+        #[tokio::test]
+        async fn proxy_websocket_invalid_url() {
+            assert_refusal(
+                websocket_refusal(app("file:///tmp/extension", "scope")).await,
+                "invalid extension websocket URL",
+                "extension_websocket_url_invalid",
+            )
+            .await;
+        }
+        #[tokio::test]
+        async fn proxy_websocket_invalid_scope() {
+            assert_refusal(
+                websocket_refusal(app("http://127.0.0.1:9/", "invalid\nscope")).await,
+                "extension scope invalid",
+                "extension_scope_invalid",
+            )
+            .await;
+        }
+        #[tokio::test]
+        async fn proxy_websocket_unavailable() {
+            assert_refusal(
+                websocket_refusal(app("http://127.0.0.1:9/", "scope")).await,
+                "extension unavailable",
+                "extension_unavailable",
+            )
+            .await;
+        }
+        #[tokio::test]
+        async fn proxy_websocket_request_error_mapper() {
+            let result = extension_websocket_request(
+                Err(tokio_tungstenite::tungstenite::Error::Io(
+                    std::io::Error::other("invalid request"),
+                )),
+                "echo",
+            );
+            assert_refusal(
+                result.unwrap_err(),
+                "extension unavailable",
+                "extension_unavailable",
+            )
+            .await;
+        }
+        #[tokio::test]
+        async fn proxy_websocket_origin_error_mapper() {
+            let mut headers = HeaderMap::new();
+            assert_refusal(
+                extension_websocket_headers(&mut headers, "scope", "invalid\norigin").unwrap_err(),
+                "extension origin invalid",
+                "extension_origin_invalid",
+            )
+            .await;
+        }
+        #[tokio::test]
+        async fn proxy_websocket_timeout() {
+            use tokio::io::AsyncReadExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (ready, received) = tokio::sync::oneshot::channel();
+            let upstream = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut byte = [0];
+                socket.read_exact(&mut byte).await.unwrap();
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            let response =
+                tokio::spawn(websocket_refusal(app(&format!("http://{addr}/"), "scope")));
+            received.await.unwrap();
+            tokio::time::pause();
+            tokio::time::advance(EXTENSION_CONNECT_TIMEOUT + Duration::from_millis(1)).await;
+            tokio::time::resume();
+            let response = response.await.unwrap();
+            upstream.abort();
+            assert_refusal(response, "extension unavailable", "extension_unavailable").await;
+        }
+
+        #[tokio::test]
+        async fn upstream_refusal_is_preserved_by_the_checked_proxy() {
+            let bytes: &'static [u8] = b"extension refusal\0\xff\n";
+            let upstream = Router::new().route(
+                "/state",
+                axum::routing::get(move || async move {
+                    Response::builder()
+                        .status(StatusCode::IM_A_TEAPOT)
+                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                        .header("x-extension-refusal", "kept")
+                        .body(Body::from(bytes))
+                        .unwrap()
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server =
+                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+            let checked = app(&format!("http://{addr}/"), "scope");
+            let result = tokio::spawn(
+                checked.oneshot(
+                    Request::get(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+            .await;
+            server.abort();
+            assert!(
+                result.is_ok(),
+                "the checked proxy must preserve an extension's own refusal"
+            );
+            let response = result.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/octet-stream"
+            );
+            assert_eq!(response.headers()["x-extension-refusal"], "kept");
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                "null"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                bytes
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_dead_upstream_502_is_cors_readable() {
         // catalog() points at 127.0.0.1:9 (nothing listens): the proxy

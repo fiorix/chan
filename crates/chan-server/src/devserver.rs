@@ -4569,6 +4569,364 @@ mod tests {
         }
     }
 
+    mod refusal_envelopes {
+        use super::*;
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        async fn assert_refusal(response: Response, status: StatusCode, sentence: &str) {
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/json"),
+                "refusal content type"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                serde_json::json!({"error": sentence}).to_string(),
+                "exact refusal body"
+            );
+        }
+
+        async fn management(case: &str) {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let roots = tempfile::tempdir().unwrap();
+            let root = roots.path().join(if case == "invalid_open" {
+                "api"
+            } else {
+                "notes"
+            });
+            std::fs::create_dir(&root).unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let mut method = "POST";
+            let mut path = "/api/devserver/workspaces".to_string();
+            let mut body = serde_json::json!({"path": root});
+            let mut status = StatusCode::NOT_FOUND;
+            let mut sentence = "workspace not found".to_string();
+            let mut foreign = None;
+            match case {
+                "bearer" => {
+                    path = "/api/devserver/terminal-sessions/drain".into();
+                    status = StatusCode::UNAUTHORIZED;
+                    sentence = "missing or invalid devserver bearer token".into();
+                }
+                "invalid_open" => {
+                    status = StatusCode::BAD_REQUEST;
+                    sentence = "config: cannot mount a workspace at /api: that path is reserved for the devserver management API (/api/*). Rename the workspace directory; its basename becomes the public slug.".into();
+                }
+                "stopping_open" | "stopping_on" => {
+                    state.host.library().register_workspace(&root).unwrap();
+                    if case == "stopping_on" {
+                        path = "/api/devserver/workspaces/notes/on".into();
+                        body = serde_json::json!({"on":true});
+                    }
+                    state.host.shutdown_all().await.unwrap();
+                    status = StatusCode::SERVICE_UNAVAILABLE;
+                    sentence = format!(
+                        "the workspace host is shutting down; {} was not mounted",
+                        canonical_root(&root).display()
+                    );
+                }
+                "missing_forget" => {
+                    method = "DELETE";
+                    path = "/api/devserver/workspaces/missing".into();
+                }
+                "invalid_suffix" => {
+                    path = "/api/devserver/workspaces/missing/off".into();
+                    body = serde_json::json!({"on":true});
+                    sentence = "workspace route not found".into();
+                }
+                "missing_on" => {
+                    path = "/api/devserver/workspaces/missing/on".into();
+                    body = serde_json::json!({"on":true});
+                }
+                "failed_forget" | "failed_on" => {
+                    state.host.library().register_workspace(&root).unwrap();
+                    foreign = Some(hold_foreign_lock(state.host.library(), &root));
+                    if case == "failed_forget" {
+                        method = "DELETE";
+                        path = "/api/devserver/workspaces/notes".into();
+                        sentence = "chan-workspace: workspace is locked by another process".into();
+                    } else {
+                        path = "/api/devserver/workspaces/notes/on".into();
+                        body = serde_json::json!({"on":true});
+                        sentence = "chan-workspace: workspace is locked by another process".into();
+                    }
+                    status = StatusCode::INTERNAL_SERVER_ERROR;
+                }
+                _ => panic!("unknown case"),
+            }
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let response = app
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(
+                            header::AUTHORIZATION,
+                            if case == "bearer" {
+                                "Bearer wrong"
+                            } else {
+                                "Bearer test-token"
+                            },
+                        )
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            drop(foreign);
+            assert_refusal(response, status, &sentence).await;
+        }
+        macro_rules! management_case {
+            ($name:ident, $case:literal) => {
+                #[tokio::test]
+                async fn $name() {
+                    management($case).await;
+                }
+            };
+        }
+        management_case!(management_bearer, "bearer");
+        management_case!(management_invalid_open, "invalid_open");
+        management_case!(management_stopping_open, "stopping_open");
+        management_case!(management_missing_forget, "missing_forget");
+        management_case!(management_failed_forget, "failed_forget");
+        management_case!(management_invalid_suffix, "invalid_suffix");
+        management_case!(management_missing_on, "missing_on");
+        management_case!(management_stopping_on, "stopping_on");
+        management_case!(management_failed_on, "failed_on");
+
+        #[tokio::test]
+        async fn startup_restoring() {
+            let home = tempfile::tempdir().unwrap();
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            state.mount_shared_terminal_tenant().await.unwrap();
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let response = app
+                .oneshot(
+                    HttpRequest::get("/api/terminal/api/session?w=test")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+            assert_refusal(
+                response,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "devserver is restoring terminal sessions",
+            )
+            .await;
+            state.host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn startup_state_error_mapper() {
+            let response =
+                startup_refusal(Err(Error::Config("workspace host lock poisoned".into()))).unwrap();
+            assert!(response.headers().get(header::RETRY_AFTER).is_none());
+            assert_refusal(
+                response,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config: workspace host lock poisoned",
+            )
+            .await;
+            assert!(startup_refusal(Ok(false)).is_none());
+        }
+
+        async fn tunnel(case: &str) {
+            let assertion = test_tunnel_assertion();
+            let app = tunnel_app(
+                Router::new().route("/api/probe", get(|| async { "accepted" })),
+                assertion.clone(),
+            );
+            let mut request =
+                HttpRequest::get("/api/probe").header("x-forwarded-host", "owner.dev");
+            if case != "missing_assertion" {
+                let token = if case == "invalid_assertion" {
+                    "invalid".into()
+                } else {
+                    test_gateway_assertion(
+                        &assertion,
+                        "owner.dev",
+                        if case == "no_user" { "nil" } else { "owner" },
+                    )
+                };
+                request = request.header(chan_tunnel_proto::gateway_assertion::HEADER_NAME, token);
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            if case != "missing_registration" {
+                let mut registration = test_tunnel_registration();
+                if case == "mismatched_registration" {
+                    registration.workspace = "other".into();
+                }
+                request.extensions_mut().insert(registration);
+            }
+            assert_refusal(
+                app.oneshot(request).await.unwrap(),
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            )
+            .await;
+        }
+        macro_rules! tunnel_case {
+            ($name:ident, $case:literal) => {
+                #[tokio::test]
+                async fn $name() {
+                    tunnel($case).await;
+                }
+            };
+        }
+        tunnel_case!(tunnel_missing_assertion, "missing_assertion");
+        tunnel_case!(tunnel_missing_registration, "missing_registration");
+        tunnel_case!(tunnel_mismatched_registration, "mismatched_registration");
+        tunnel_case!(tunnel_invalid_assertion, "invalid_assertion");
+        tunnel_case!(tunnel_no_user, "no_user");
+
+        struct RefusalTenantBuilder {
+            checked: bool,
+            envelope: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl chan_library::TenantBuilder for RefusalTenantBuilder {
+            async fn build_workspace(
+                &self,
+                library: Library,
+                workspace: Arc<chan_workspace::Workspace>,
+                config: &ServeConfig,
+                desktop: crate::DesktopBridge,
+                unserve: chan_library::UnserveMode,
+                control_identity: Option<String>,
+            ) -> Result<chan_library::TenantArtifacts, Error> {
+                let artifacts = crate::build_app(
+                    library,
+                    workspace,
+                    config,
+                    desktop,
+                    unserve,
+                    control_identity,
+                )
+                .await?;
+                let mut artifacts = crate::into_tenant_artifacts(artifacts);
+                let envelope = self.envelope;
+                let app = Router::new().route(
+                    "/api/refusal-probe",
+                    get(move || async move {
+                        if envelope {
+                            crate::error::err(StatusCode::NOT_FOUND, "probe not found".into())
+                        } else {
+                            (StatusCode::NOT_FOUND, "probe not found").into_response()
+                        }
+                    }),
+                );
+                let app = if self.checked {
+                    crate::refusal_check::check(app)
+                } else {
+                    app
+                };
+                artifacts.app = Router::new().nest(&config.prefix, app);
+                Ok(artifacts)
+            }
+            async fn build_terminal(
+                &self,
+                _library: Library,
+                _config: &ServeConfig,
+                _desktop: crate::DesktopBridge,
+                _unserve: chan_library::UnserveMode,
+                _command: Option<String>,
+                _session_dir: Option<PathBuf>,
+                _drafts_store_root: Option<PathBuf>,
+                _control_identity: Option<String>,
+            ) -> Result<chan_library::TenantArtifacts, Error> {
+                Err(Error::Config("workspace probe only".into()))
+            }
+        }
+
+        async fn mounted_refusal(checked: bool, envelope: bool) {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            let library = state.host.library().clone();
+            Arc::get_mut(&mut state).unwrap().host = Arc::new(WorkspaceHost::new(
+                library,
+                Arc::new(RefusalTenantBuilder { checked, envelope }),
+            ));
+            let prefix = state.register_workspace(root.path()).await.unwrap();
+            complete_test_startup(&state).await;
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let result = tokio::spawn(
+                app.oneshot(
+                    HttpRequest::get(format!("{prefix}/api/refusal-probe"))
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+            .await;
+            state.host.shutdown_all().await.unwrap();
+            if envelope {
+                let response = result
+                    .expect("a tenant envelope must pass the assembled devserver")
+                    .unwrap();
+                assert!(
+                    response
+                        .extensions()
+                        .get::<crate::refusal_check::Inspected>()
+                        .is_some(),
+                    "the tenant refusal must carry its inspection marker"
+                );
+                assert_refusal(response, StatusCode::NOT_FOUND, "probe not found").await;
+            } else {
+                let panic =
+                    result.expect_err("a tenant's plain 404 must not pass as a navigation page");
+                let panic = panic.into_panic();
+                let message = panic.downcast_ref::<String>().unwrap();
+                assert!(message.contains("refusal envelope violated"), "{message}");
+                if checked {
+                    assert!(
+                        message.contains("GET /api/refusal-probe"),
+                        "the tenant must be judged at its own path: {message}"
+                    );
+                }
+            }
+        }
+        #[tokio::test]
+        async fn mounted_tenant_envelope_passes() {
+            mounted_refusal(true, true).await;
+        }
+        #[tokio::test]
+        async fn mounted_tenant_text_fails_at_its_own_path() {
+            mounted_refusal(true, false).await;
+        }
+        #[tokio::test]
+        async fn uninspected_tenant_text_is_not_a_navigation_page() {
+            mounted_refusal(false, false).await;
+        }
+
+        #[tokio::test]
+        async fn tunnel_composition_checks_refusals() {
+            use super::super::tunnel_test_support::{signed_as, through_the_tunnel};
+            let app = through_the_tunnel(Router::new().route(
+                "/api/probe",
+                get(|| async { (StatusCode::FORBIDDEN, "unchecked refusal") }),
+            ));
+            let request = signed_as(HttpRequest::get("/api/probe"), "owner")
+                .body(Body::empty())
+                .unwrap();
+            let result = tokio::spawn(app.oneshot(request)).await;
+            assert!(
+                result.is_err_and(|e| e.is_panic()),
+                "the real tunnel composition must inspect refusals"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn terminal_sessions_drain_is_bearer_gated_and_reports_counts() {
         use tower::ServiceExt;

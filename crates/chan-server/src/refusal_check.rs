@@ -7,6 +7,12 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::Router;
 
+#[derive(Clone, Debug)]
+pub(crate) struct Inspected;
+
+#[derive(Clone, Debug)]
+pub(crate) struct UpstreamResponse;
+
 pub(crate) fn check(app: Router) -> Router {
     app.layer(middleware::from_fn(inspect))
 }
@@ -672,6 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn converted_tenant_shapes_require_the_envelope() {
+        let mut admitted = Vec::new();
         for (method, path, status, body) in [
             ("GET", "/api/resolve-link", 404, ""),
             ("GET", "/api/report/dir", 404, ""),
@@ -746,18 +753,22 @@ mod tests {
                 "creating model cache /models: Input/output error (os error 5)",
             ),
         ] {
-            assert!(
-                !accepts_refusal(
-                    method,
-                    path,
-                    StatusCode::from_u16(status).unwrap(),
-                    body,
-                    None
-                )
-                .await,
-                "converted refusal must require the envelope: {method} {path}: {body}"
-            );
+            if accepts_refusal(
+                method,
+                path,
+                StatusCode::from_u16(status).unwrap(),
+                body,
+                None,
+            )
+            .await
+            {
+                admitted.push(format!("{method} {path}: {status} {body}"));
+            }
         }
+        assert!(
+            admitted.is_empty(),
+            "converted tenant refusals admitted without envelopes: {admitted:#?}"
+        );
     }
 
     macro_rules! pending_text_shape {
@@ -1041,6 +1052,201 @@ mod tests {
                 b"another refusal"
             ),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn host_lock_exception_requires_dispatch_fallback() {
+        use axum::response::IntoResponse;
+        let response = || {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config: workspace host lock poisoned",
+            )
+                .into_response()
+        };
+        let app = check(Router::new().fallback(move || async move { response() }));
+        let result = app
+            .oneshot(
+                Request::get("/tenant/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            to_bytes(result.into_body(), usize::MAX).await.unwrap(),
+            "config: workspace host lock poisoned"
+        );
+        assert!(
+            !accepts_response("GET", "/api/probe", response()).await,
+            "host-lock text on a matched handler must require the envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn inspected_refusals_pass_outer_checks_without_reading_the_body() {
+        let inner = check(Router::new().route(
+            "/api/probe",
+            axum::routing::get(|| async {
+                crate::error::err(StatusCode::CONFLICT, "conflict".into())
+            }),
+        ))
+        .layer(middleware::from_fn(
+            |request: Request, next: Next| async move {
+                let response = next.run(request).await;
+                assert!(
+                    response.extensions().get::<Inspected>().is_some(),
+                    "an inspected refusal must carry its marker"
+                );
+                let (parts, _) = response.into_parts();
+                Response::from_parts(
+                    parts,
+                    Body::from_stream(futures::stream::poll_fn(
+                        |_| -> std::task::Poll<Option<Result<axum::body::Bytes, std::io::Error>>> {
+                            panic!("an outer check must not poll an inspected refusal");
+                        },
+                    )),
+                )
+            },
+        ));
+        let app = check(Router::new().nest("/workspace", inner));
+        let result = tokio::spawn(
+            app.oneshot(
+                Request::get("/workspace/api/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a refusal inspected at the tenant path must pass the outer check once"
+        );
+        assert_eq!(result.unwrap().unwrap().status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn upstream_mark_passes_without_path_or_body_constraints() {
+        let app = check(Router::new().route(
+            "/api/unrelated",
+            axum::routing::get(|| async {
+                let mut response = Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(Body::from_stream(futures::stream::poll_fn(
+                        |_| -> std::task::Poll<Option<Result<axum::body::Bytes, std::io::Error>>> {
+                            panic!("an upstream refusal must remain unbuffered");
+                        },
+                    )))
+                    .unwrap();
+                response.extensions_mut().insert(UpstreamResponse);
+                response
+            }),
+        ));
+        let result =
+            tokio::spawn(app.oneshot(Request::get("/api/unrelated").body(Body::empty()).unwrap()))
+                .await;
+        assert!(
+            result.is_ok(),
+            "upstream provenance must admit the response independently of its path and body"
+        );
+        assert_eq!(result.unwrap().unwrap().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn converted_devserver_and_proxy_shapes_require_envelopes() {
+        let mut admitted = Vec::new();
+        for (method, path, status, body, retry) in [
+            (
+                "GET",
+                "/api/devserver/workspaces",
+                401,
+                "missing or invalid devserver bearer token",
+                None,
+            ),
+            (
+                "POST",
+                "/api/devserver/workspaces",
+                400,
+                "invalid workspace",
+                None,
+            ),
+            ("DELETE", "/api/devserver/workspaces/notes", 404, "", None),
+            (
+                "POST",
+                "/api/devserver/workspaces/notes/on",
+                500,
+                "invalid workspace",
+                None,
+            ),
+            (
+                "POST",
+                "/api/devserver/rotate-token",
+                401,
+                "missing or invalid devserver bearer token",
+                None,
+            ),
+            (
+                "POST",
+                "/api/devserver/terminal-sessions/drain",
+                401,
+                "missing or invalid devserver bearer token",
+                None,
+            ),
+            (
+                "GET",
+                "/api/terminal/api/session",
+                503,
+                "devserver is restoring terminal sessions",
+                Some("1"),
+            ),
+            ("GET", "/tenant/api/health", 401, "unauthorized", None),
+            (
+                "GET",
+                "/_chan/extensions/echo/cap/state",
+                502,
+                "extension unavailable",
+                None,
+            ),
+            (
+                "GET",
+                "/_chan/extensions/echo/cap/ws",
+                502,
+                "invalid extension websocket URL",
+                None,
+            ),
+            (
+                "GET",
+                "/_chan/extensions/echo/cap/ws",
+                502,
+                "extension scope invalid",
+                None,
+            ),
+            (
+                "GET",
+                "/_chan/extensions/echo/cap/ws",
+                502,
+                "extension origin invalid",
+                None,
+            ),
+        ] {
+            if accepts_refusal(
+                method,
+                path,
+                StatusCode::from_u16(status).unwrap(),
+                body,
+                retry,
+            )
+            .await
+            {
+                admitted.push(format!("{method} {path}: {status} {body}"));
+            }
+        }
+        assert!(
+            admitted.is_empty(),
+            "converted refusals admitted without envelopes: {admitted:#?}"
         );
     }
 
