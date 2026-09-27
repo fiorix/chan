@@ -7333,6 +7333,74 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn closing_a_terminal_preserves_the_home_lifecycle() {
+            for cancel in [false, true] {
+                let (host, row, _config) = with_terminal().await;
+                host.open_registered_workspace(&row.root_path, serve_config("/home"))
+                    .await
+                    .unwrap();
+                let reason = "home health failure";
+                assert!(host
+                    .reconcile_root_health(
+                        &row.root_path,
+                        &row.root_path,
+                        Err(ChanError::RootUnavailable {
+                            path: row.root_path.clone(),
+                            reason: reason.into(),
+                        }),
+                    )
+                    .is_err());
+                let unavailable = (WorkspaceStatus::Unavailable, Some(reason.to_string()));
+                assert_eq!(host.workspace_status(&row.root_path), unavailable);
+
+                let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+                let release = Arc::new(tokio::sync::Semaphore::new(0));
+                let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                host.workspaces
+                    .write()
+                    .unwrap()
+                    .get_mut("/terminal")
+                    .unwrap()
+                    .artifacts
+                    .tasks = fake_artifacts_with_gated_shutdown(
+                    entered_tx,
+                    Arc::clone(&release),
+                    Arc::clone(&completed),
+                )
+                .tasks;
+                let mut close = Box::pin(host.close_workspace("/terminal", false));
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    tokio::select! {
+                        entered = entered_rx.recv() => entered.expect("terminal shutdown started"),
+                        result = close.as_mut() => panic!("close finished before release: {result:?}"),
+                    }
+                })
+                .await
+                .expect("close enters terminal shutdown");
+                let during = host.workspace_status(&row.root_path);
+                if cancel {
+                    drop(close);
+                } else {
+                    release.add_permits(1);
+                    assert!(close.await.unwrap().completed());
+                }
+                let after = host.workspace_status(&row.root_path);
+                assert_eq!(
+                    (during, after),
+                    (unavailable.clone(), unavailable),
+                    "terminal close changed the home lifecycle (cancel={cancel})"
+                );
+                assert_eq!(host.mounted_prefixes().unwrap(), ["/home"]);
+                assert!(host.is_root_mounted(&row.root_path));
+                assert_eq!(
+                    completed.load(std::sync::atomic::Ordering::SeqCst),
+                    usize::from(!cancel)
+                );
+                host.shutdown_all().await.unwrap();
+            }
+        }
+
+        #[tokio::test]
         async fn forgetting_an_unmounted_home_keeps_the_terminal() {
             let (host, row, _config) = with_terminal().await;
             assert!(host
