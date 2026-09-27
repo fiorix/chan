@@ -244,7 +244,10 @@ function uploadAndInsertAll(
   let cursor = pos;
   void (async () => {
     for (const original of files) {
-      if (original.size > MAX_UPLOAD_BYTES) continue;
+      if (original.size > MAX_UPLOAD_BYTES) {
+        notify(`Image ${original.name} exceeds the 50 MiB upload limit; skipped`);
+        continue;
+      }
       // HEIC -> WebP conversion happens here so a mixed batch
       // (some PNG, some HEIC) converts only the ones that need it
       // without blocking the others; non-HEIC inputs return from
@@ -259,27 +262,27 @@ function uploadAndInsertAll(
         notify(`HEIC conversion failed for ${original.name}; skipped`);
         continue;
       }
+      let res: { path: string };
       try {
-        const res = await api.uploadAttachment(file, ctx.uploadDir);
-        invalidateImageCatalog();
-        const onListLine = listLineAt(view.state, cursor) !== null;
-        const { text: insert, caret } = buildImageInsert(res.path, {
-          currentPath: ctx.currentPath,
-          onListLine,
-        });
-        view.dispatch({
-          changes: { from: cursor, to: cursor, insert },
-          selection: { anchor: cursor + caret },
-          // Scroll the doc so the new caret stays in view. Pasting /
-          // dropping at the bottom can push the cursor off-screen;
-          // `scrollIntoView: true` tells CM6 to correct that immediately.
-          scrollIntoView: true,
-        });
-        cursor += insert.length;
+        res = await api.uploadAttachment(file, ctx.uploadDir);
       } catch (err) {
         console.error("[chan] image upload failed", err);
-        return;
+        notify(`Image upload failed for ${original.name}; skipped`);
+        continue;
       }
+      invalidateImageCatalog();
+      const onListLine = listLineAt(view.state, cursor) !== null;
+      const { text: insert, caret } = buildImageInsert(res.path, {
+        currentPath: ctx.currentPath,
+        onListLine,
+      });
+      view.dispatch({
+        changes: { from: cursor, to: cursor, insert },
+        selection: { anchor: cursor + caret },
+        // Pasting at the bottom can push the caret off-screen.
+        scrollIntoView: true,
+      });
+      cursor += insert.length;
     }
   })();
 }
