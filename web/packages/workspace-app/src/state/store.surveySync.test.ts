@@ -4,6 +4,8 @@
 // which surveys are still open in that window, oldest first, each in the
 // `open_survey` shape. The overlays converge on that list, while
 // `open_survey` and `close_survey` still apply in arrival order around it.
+// An answered survey's close reaches every window it targeted, the one that
+// answered included, where it leaves the slot to that window's own reply.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -241,5 +243,36 @@ describe("survey_sync", () => {
 
     expect(surveyFor("term-a")).toBeNull();
     expect(richPrompt.byTab["term-a"]).toBe(true);
+  });
+});
+
+describe("an answered_elsewhere close delivered to the window that answered", () => {
+  const answeredElsewhere = (surveyId: string, tabName: string) =>
+    deliver({ command: "close_survey", surveyId, reason: "answered_elsewhere", tabName });
+
+  test("while its reply is in flight leaves the slot to that reply", async () => {
+    await open(spec("survey-1"), "@@A");
+    const { answer, sent } = replyInFlight("term-a");
+
+    await answeredElsewhere("survey-1", "@@A");
+    expect({ shown: surveyFor("term-a")?.surveyId, busy: surveyBusy("term-a") }).toEqual({
+      shown: "survey-1",
+      busy: true,
+    });
+
+    answer.resolve();
+    await sent;
+    expect({ shown: surveyFor("term-a"), notices }).toEqual({ shown: null, notices: [] });
+  });
+
+  test("after its reply settled leaves a later survey on the slot alone", async () => {
+    await open(spec("survey-1"), "@@A");
+    vi.spyOn(api, "surveyReply").mockResolvedValue(undefined as never);
+    await pickOption("term-a", 0);
+    await open(spec("survey-2"), "@@A");
+
+    await answeredElsewhere("survey-1", "@@A");
+
+    expect({ shown: surveyFor("term-a")?.surveyId, notices }).toEqual({ shown: "survey-2", notices: [] });
   });
 });
