@@ -161,7 +161,7 @@ pub(crate) fn draft_seed_for_body(body: &[u8]) -> Result<&'static str, String> {
 /// the retry keeps the contract clean.
 pub async fn api_create_draft(
     State(state): State<Arc<AppState>>,
-    body: axum::body::Bytes,
+    body: crate::extract::Bytes,
 ) -> Response {
     let seed = match draft_seed_for_body(&body) {
         Ok(seed) => seed,

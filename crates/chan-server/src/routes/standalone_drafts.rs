@@ -157,7 +157,7 @@ async fn create_with_retry(
 pub async fn api_standalone_create_draft(
     State(state): State<Arc<AppState>>,
     Query(query): Query<StandaloneMutationQuery>,
-    body: axum::body::Bytes,
+    body: crate::extract::Bytes,
 ) -> Response {
     let Some((files, drafts)) = drafts_state(&state) else {
         return drafts_not_served();
