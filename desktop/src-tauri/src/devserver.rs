@@ -430,6 +430,17 @@ fn peer_message(raw: &str) -> String {
     out
 }
 
+/// Keep each caller's non-envelope fallback while displaying a peer's sentence
+/// through the same bounded, inert text normalization as conflict refusals.
+pub(crate) fn refusal_message(status: reqwest::StatusCode, body: &str, fallback: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.as_object()?.get("error")?.as_str().map(peer_message))
+        .filter(|message| has_visible_content(message))
+        .map(|message| format!("HTTP {status}: {message}"))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 /// Read a `409 Conflict` by its body rather than by its status.
 ///
 /// The server answers refusals in more than one shape and a route's set of
@@ -2356,9 +2367,10 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
+                let fallback = format!("HTTP {status}: {}", body.trim());
                 return Err(format!(
-                    "gateway workspace add returned HTTP {status}: {}",
-                    body.trim()
+                    "gateway workspace add returned {}",
+                    refusal_message(status, &body, &fallback)
                 ));
             }
             let entry = resp
@@ -2386,9 +2398,10 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            let fallback = format!("HTTP {status}: {}", body.trim());
             return Err(format!(
-                "devserver workspace mount returned HTTP {status}: {}",
-                body.trim()
+                "devserver workspace mount returned {}",
+                refusal_message(status, &body, &fallback)
             ));
         }
         let mounted = resp
