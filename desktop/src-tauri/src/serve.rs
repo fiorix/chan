@@ -2570,7 +2570,16 @@ mod tests {
             "fn finish_retarget",
             "/// The Tauri native-window surface",
         );
-        assert!(navigator.contains("remote_launches.finish_retarget("));
+        assert!(navigator
+            .split_whitespace()
+            .collect::<String>()
+            .contains("remote_launches.run_retarget("));
+        let runner = source_section(
+            WIRING_RS,
+            "    async fn run_retarget",
+            "    fn retain_attempts",
+        );
+        assert!(runner.contains("self.finish_retarget(label, tickets, ticket, builds, outcome)"));
         let vanished = settlement
             .split("Ok(serve::RetargetOutcome::Gone) => {")
             .nth(1)

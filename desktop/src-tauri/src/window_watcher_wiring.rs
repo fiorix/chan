@@ -444,6 +444,24 @@ impl RemoteLaunches {
         }
     }
 
+    async fn run_retarget<
+        F: std::future::Future<Output = Result<serve::RetargetOutcome, String>>,
+    >(
+        &self,
+        label: &str,
+        tickets: &serve::RetargetTickets,
+        ticket: &serve::RetargetTicket,
+        builds: &WindowBuilds,
+        prepare: impl std::future::Future<Output = Result<String, String>>,
+        navigate: impl FnOnce(String) -> F,
+    ) {
+        let outcome = match prepare.await {
+            Ok(url) => navigate(url).await,
+            Err(error) => Err(error),
+        };
+        self.finish_retarget(label, tickets, ticket, builds, outcome);
+    }
+
     fn retain_attempts(
         &self,
         builds: &WindowBuilds,
@@ -540,7 +558,7 @@ impl TauriNativeSurface {
                     );
                 }
             };
-            let url = match prepare_remote_navigation(
+            let navigation = prepare_remote_navigation(
                 crate::devserver::window_navigation_url(&conn, &record),
                 || {
                     crate::devserver::install_gateway_webview_session(
@@ -549,29 +567,32 @@ impl TauriNativeSurface {
                         retarget.then_some(label.as_str()),
                     )
                 },
-            )
-            .await
-            {
+            );
+            if retarget {
+                let ticket = ticket.as_ref().expect("retarget ticket");
+                remote_launches
+                    .run_retarget(
+                        &label,
+                        &state.retarget_tickets,
+                        ticket,
+                        &builds,
+                        navigation,
+                        |url| {
+                            let app = &app;
+                            let record = &record;
+                            async move {
+                                serve::retarget_watched_remote_window(app, &url, record, ticket)
+                                    .await
+                            }
+                        },
+                    )
+                    .await;
+                return;
+            }
+            let url = match navigation.await {
                 Ok(url) => url,
                 Err(e) => return fail(e),
             };
-            if retarget {
-                let outcome = serve::retarget_watched_remote_window(
-                    &app,
-                    &url,
-                    &record,
-                    ticket.as_ref().expect("retarget ticket"),
-                )
-                .await;
-                remote_launches.finish_retarget(
-                    &label,
-                    &state.retarget_tickets,
-                    ticket.as_ref().expect("retarget ticket"),
-                    &builds,
-                    outcome,
-                );
-                return;
-            }
             let result = {
                 // Cancellation check: a close()/disconnect during the mint
                 // removed the marker; building now would resurrect a window
@@ -1978,6 +1999,8 @@ mod tests {
         assert!(harness.request_reload(&record, true, Some(&harness.view)));
         harness.drain().await;
         let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        let installs = std::cell::Cell::new(0);
+        let navigations = std::cell::Cell::new(0);
         let prepared = prepare_remote_navigation(
             std::future::ready(if failure == "resolve" {
                 Err("resolve".into())
@@ -1985,25 +2008,39 @@ mod tests {
                 Ok("https://test.invalid/".into())
             }),
             || {
+                installs.set(installs.get() + 1);
                 if failure == "session" {
                     Err("session".into())
                 } else {
                     Ok(())
                 }
             },
-        )
-        .await;
-        match prepared {
-            Err(error) => harness.surface.launches.fail(
+        );
+        harness
+            .surface
+            .launches
+            .run_retarget(
                 &native_label(&record),
-                true,
                 &harness.surface.tickets,
-                Some(&ticket),
+                &ticket,
                 &harness.surface.builds,
-                error,
-            ),
-            Ok(_) => harness.finish_requested(&record, &ticket, Err("navigation".into())),
-        }
+                prepared,
+                |_| {
+                    navigations.set(navigations.get() + 1);
+                    std::future::ready(Err("navigation".into()))
+                },
+            )
+            .await;
+        assert_eq!(
+            installs.get(),
+            u32::from(failure != "resolve"),
+            "resolution failure must skip session installation"
+        );
+        assert_eq!(
+            navigations.get(),
+            u32::from(failure == "navigation"),
+            "preparation failure must skip native navigation"
+        );
         harness.drain().await;
         harness.waiting_since(&record, 5);
         tokio::time::advance(Duration::from_secs(15)).await;
