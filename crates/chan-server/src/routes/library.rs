@@ -1932,7 +1932,7 @@ async fn handle_workspace_on(
 }
 
 fn workspace_off_error(error: crate::Error) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+    crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
 /// `POST /api/library/workspaces/{id}/off`: unmount (release the per-workspace
@@ -1950,7 +1950,7 @@ async fn handle_workspace_off(
         .unwrap_or_default()
         .force;
     let Some((_allocated, root)) = resolve_workspace(&state.host, &id) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     match state.host.close_workspace_for_root(&root, force).await {
         Ok(WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound) => {
