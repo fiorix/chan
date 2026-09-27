@@ -624,6 +624,339 @@ mod tests {
         );
     }
 
+    macro_rules! pending_text_shape {
+        ($name:ident, $method:literal, $path:literal, $status:expr, $body:expr) => {
+            #[tokio::test]
+            #[ignore = "run explicitly until the refusal inventory recognizes this shape"]
+            async fn $name() {
+                use axum::response::IntoResponse;
+                let body = $body;
+                assert!(
+                    accepts_response($method, $path, ($status, body).into_response()).await,
+                    "inventory must recognize {} {}",
+                    $method,
+                    $path
+                );
+                assert!(
+                    !accepts_response(
+                        $method,
+                        $path,
+                        ($status, "unrelated handler refusal").into_response()
+                    )
+                    .await,
+                    "the inventory entry must require its body shape"
+                );
+            }
+        };
+    }
+
+    pending_text_shape!(
+        inventory_resolve_link,
+        "GET",
+        "/api/resolve-link",
+        StatusCode::NOT_FOUND,
+        ""
+    );
+    pending_text_shape!(
+        inventory_report_dir,
+        "GET",
+        "/api/report/dir",
+        StatusCode::NOT_FOUND,
+        ""
+    );
+    pending_text_shape!(
+        inventory_graph_cancelled,
+        "GET",
+        "/api/graph",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "graph stream cancelled"
+    );
+    pending_text_shape!(
+        inventory_graph_metadata,
+        "GET",
+        "/api/graph",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "graph stream ended before metadata"
+    );
+    pending_text_shape!(
+        inventory_backlinks_metadata,
+        "GET",
+        "/api/backlinks/probe.md",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "backlinks stream ended before metadata"
+    );
+    pending_text_shape!(
+        inventory_graph_encoder,
+        "GET",
+        "/api/graph",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "graph stream meta encode: injected error"
+    );
+    pending_text_shape!(
+        inventory_backlinks_encoder,
+        "GET",
+        "/api/backlinks/probe.md",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "backlinks stream meta encode: injected error"
+    );
+    pending_text_shape!(
+        inventory_model_cache,
+        "POST",
+        "/api/index/semantic/download",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!(
+            "creating model cache /tmp/models: {}",
+            std::io::Error::from_raw_os_error(5)
+        )
+    );
+    pending_text_shape!(
+        inventory_session_get,
+        "GET",
+        "/api/session",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        std::io::Error::from_raw_os_error(5).to_string()
+    );
+    pending_text_shape!(
+        inventory_session_put,
+        "PUT",
+        "/api/session",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        std::io::Error::from_raw_os_error(5).to_string()
+    );
+    pending_text_shape!(
+        inventory_session_delete,
+        "DELETE",
+        "/api/session",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        std::io::Error::from_raw_os_error(5).to_string()
+    );
+    pending_text_shape!(
+        inventory_sessions_list,
+        "GET",
+        "/api/sessions",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        std::io::Error::from_raw_os_error(5).to_string()
+    );
+    pending_text_shape!(
+        inventory_session_invalid_key,
+        "PUT",
+        "/api/session",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "invalid session key"
+    );
+    pending_text_shape!(
+        inventory_session_temporary_path,
+        "PUT",
+        "/api/session",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!(
+            "{} at path {:?}",
+            std::io::Error::from_raw_os_error(5),
+            "/tmp/session"
+        )
+    );
+    pending_text_shape!(
+        inventory_startup_state_error,
+        "GET",
+        "/tenant/api/health",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "config: workspace host lock poisoned"
+    );
+    pending_text_shape!(
+        inventory_tunnel_assertion,
+        "GET",
+        "/tenant/api/health",
+        StatusCode::UNAUTHORIZED,
+        "unauthorized"
+    );
+
+    #[tokio::test]
+    #[ignore = "run explicitly until the refusal inventory recognizes this shape"]
+    async fn inventory_blocking_task_failure() {
+        let response = crate::routes::blocking_response("refusal probe", || {
+            panic!("injected blocking failure")
+        })
+        .await;
+        assert!(
+            accepts_response("GET", "/api/probe", response).await,
+            "inventory must recognize the real blocking-task failure"
+        );
+        for body in [
+            "task panicked",
+            "probe task panicked: arbitrary text",
+            "probe task panicked: task nope panicked",
+            "probe task panicked: task 1 arbitrary text",
+        ] {
+            assert!(
+                !accepts_refusal(
+                    "GET",
+                    "/api/probe",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    body,
+                    None
+                )
+                .await
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "run explicitly until range refusals have a permanent shape entry"]
+    async fn inventory_range_refusal() {
+        fn range(status: StatusCode, content_range: &str, body: &'static str) -> Response {
+            Response::builder()
+                .status(status)
+                .header(header::CONTENT_RANGE, content_range)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::ETAG, "\"file-token\"")
+                .body(Body::from(body))
+                .unwrap()
+        }
+        assert!(
+            accepts_response(
+                "GET",
+                "/api/fs/movie.mp4",
+                range(StatusCode::RANGE_NOT_SATISFIABLE, "bytes */100", "")
+            )
+            .await,
+            "range refusals are empty with the unsatisfied Content-Range"
+        );
+        for (method, path, status, content_range, body) in [
+            (
+                "POST",
+                "/api/fs/movie.mp4",
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "bytes */100",
+                "",
+            ),
+            (
+                "GET",
+                "/api/unrelated",
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "bytes */100",
+                "",
+            ),
+            (
+                "GET",
+                "/api/fs/movie.mp4",
+                StatusCode::BAD_REQUEST,
+                "bytes */100",
+                "",
+            ),
+            (
+                "GET",
+                "/api/fs/movie.mp4",
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "bytes */oops",
+                "",
+            ),
+            (
+                "GET",
+                "/api/fs/movie.mp4",
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "bytes 0-1/100",
+                "",
+            ),
+            (
+                "GET",
+                "/api/fs/movie.mp4",
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "bytes */100",
+                "handler text",
+            ),
+        ] {
+            assert!(!accepts_response(method, path, range(status, content_range, body)).await);
+        }
+        for header in [header::CONTENT_RANGE, header::ACCEPT_RANGES, header::ETAG] {
+            let mut response = range(StatusCode::RANGE_NOT_SATISFIABLE, "bytes */100", "");
+            response.headers_mut().remove(header);
+            assert!(!accepts_response("GET", "/api/fs/movie.mp4", response).await);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "run explicitly until the remapped missing-content-type rejection is listed"]
+    async fn inventory_search_missing_content_type() {
+        let app = crate::router(crate::state::test_support::make_test_state(false));
+        let result = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/search/workspace")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "the search route's remapped missing JSON content type is pending"
+        );
+        let response = result.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            "Expected request with `Content-Type: application/json`"
+        );
+    }
+
+    pending_text_shape!(
+        inventory_ws_get_method,
+        "POST",
+        "/_chan/extensions/echo/cap/ws",
+        StatusCode::METHOD_NOT_ALLOWED,
+        "Request method must be `GET`"
+    );
+    pending_text_shape!(
+        inventory_ws_connect_method,
+        "GET",
+        "/api/terminal/ws",
+        StatusCode::METHOD_NOT_ALLOWED,
+        "Request method must be `CONNECT`"
+    );
+
+    #[test]
+    fn websocket_exception_accepts_only_the_fixed_framework_bodies() {
+        let samples = [
+            (400, "Connection header did not include 'upgrade'"),
+            (400, "`Upgrade` header did not include 'websocket'"),
+            (400, "`:protocol` pseudo-header did not include 'websocket'"),
+            (400, "`Sec-WebSocket-Version` header did not include '13'"),
+            (400, "`Sec-WebSocket-Key` header missing"),
+            (
+                426,
+                "WebSocket request couldn't be upgraded since no upgrade state was present",
+            ),
+        ];
+        for path in WEBSOCKETS
+            .iter()
+            .copied()
+            .chain(["/_chan/extensions/echo/cap/ws"])
+        {
+            for (status, text) in samples {
+                assert!(permanent_exception(
+                    &Method::GET,
+                    path,
+                    StatusCode::from_u16(status).unwrap(),
+                    false,
+                    text.as_bytes()
+                ));
+                assert!(!permanent_exception(
+                    &Method::GET,
+                    path,
+                    StatusCode::from_u16(status).unwrap(),
+                    false,
+                    b"handler-authored refusal"
+                ));
+                assert!(!permanent_exception(
+                    &Method::GET,
+                    path,
+                    StatusCode::from_u16(status).unwrap(),
+                    false,
+                    format!("{text} extra").as_bytes()
+                ));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn pending_startup_refusal_requires_its_sentence_and_retry_header() {
         let sentence = "devserver is restoring terminal sessions";
