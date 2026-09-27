@@ -1,6 +1,10 @@
 # An open with no time limit of its own holds a hung root's lock, and a close of that root waits behind it
 
-Status: raised for a decision on 2026-09-27 by the plan for the fix round of the hung root's open and revalidation (`dev/v0101-team/followups/followup-Services-Lead-9.md` in the development tree, section 2, its table of the surfaces that wait on a root lock), with the independent review that read who waits on a root lock (`dev/v0101-team/reviews/review-Services-13.md`, finding 1). Both read a range that has not landed, in which the open's blocking work owned the root lock, and marked the consequence inferred. Read again at `d1fe06c86`, where the root lock is the caller's and nothing of that range is present; not run. Recommendation: accept for v0.101.0, as the bound the devserver's own mount already has.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the plan for the fix round of the hung root's open and revalidation (`dev/v0101-team/followups/followup-Services-Lead-9.md` in the development tree, section 2, its table of the surfaces that wait on a root lock), with the independent review that read who waits on a root lock (`dev/v0101-team/reviews/review-Services-13.md`, finding 1). Both read a range that has not landed, in which the open's blocking work owned the root lock, and marked the consequence inferred. Read again at `d1fe06c86`, where the root lock is the caller's and nothing of that range is present; not run.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended, in the owner's answer to it by its number: with the bound the devserver's own mount already has.
 
 ## What was seen
 

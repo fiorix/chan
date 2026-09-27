@@ -1,6 +1,10 @@
 # A pane close from the control client, and a window's close, can still drop a drawing's last stroke
 
-Status: raised for a decision on 2026-09-27 by the independent review of the fix that keeps a drawing's last stroke ([the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md); `dev/v0101-team/reviews/review-Frontend-10.md` in the development tree, finding 3), which read the code at `3dc581d3b`; read again in code at `b1ef073ae`, where both hold, and not reproduced. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the independent review of the fix that keeps a drawing's last stroke ([the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md); `dev/v0101-team/reviews/review-Frontend-10.md` in the development tree, finding 3), which read the code at `3dc581d3b`; read again in code at `b1ef073ae`, where both hold, and not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, built after the drawing's orders then in hand.
 
 ## What was seen
 

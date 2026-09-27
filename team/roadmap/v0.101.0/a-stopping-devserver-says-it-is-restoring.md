@@ -1,6 +1,10 @@
 # While a devserver stops, its startup gate answers every tenant request that it is restoring terminal sessions
 
-Status: raised for a decision on 2026-09-27 by two code maps, the one written for [the-devserver-stop-refuses-mounts-before-the-host](the-devserver-stop-refuses-mounts-before-the-host.md) (`dev/v0101-team/int24-docs/codemaps/runtime-next.md` in the development tree, headline 2) and the one for the Clients lane's next orders (`dev/v0101-team/int24-docs/codemaps/clients-next.md`, headline 1), which read it at `4809d8d4d` and `c4d7d811c`; read again in code at `b1ef073ae`, where it holds, and not reproduced. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by two code maps, the one written for [the-devserver-stop-refuses-mounts-before-the-host](the-devserver-stop-refuses-mounts-before-the-host.md) (`dev/v0101-team/int24-docs/codemaps/runtime-next.md` in the development tree, headline 2) and the one for the Clients lane's next orders (`dev/v0101-team/int24-docs/codemaps/clients-next.md`, headline 1), which read it at `4809d8d4d` and `c4d7d811c`; read again in code at `b1ef073ae`, where it holds, and not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with [the-launchers-add-and-on-skip-the-stop-check](the-launchers-add-and-on-skip-the-stop-check.md) built beside it.
 
 ## What was seen
 

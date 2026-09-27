@@ -1,6 +1,10 @@
 # The build container runs the gate as root, so a fault that needs a user who is not root shows in no gate
 
-Status: raised for a decision on 2026-09-27 by the lead from main CI's run 36321021487 on `4139f8656`, whose `make ci-linux` failed where the integration gate had passed on the same sha; reproduced on the host as a user who is not root, with a stand-in for cargo (`dev/v0101-team/evidence/int/ci-36321021487/README.md` and `dev/v0101-team/journals/journal-Lead.md`, its entry of 13:56Z, in the development tree). The documented recipe read at `b1ef073ae`. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the lead from main CI's run 36321021487 on `4139f8656`, whose `make ci-linux` failed where the integration gate had passed on the same sha; reproduced on the host as a user who is not root, with a stand-in for cargo (`dev/v0101-team/evidence/int/ci-36321021487/README.md` and `dev/v0101-team/journals/journal-Lead.md`, its entry of 13:56Z, in the development tree). The documented recipe read at `b1ef073ae`.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with no shape of the fix named.
 
 ## What was seen
 

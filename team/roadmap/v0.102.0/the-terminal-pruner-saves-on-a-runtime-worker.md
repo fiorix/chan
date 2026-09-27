@@ -1,6 +1,10 @@
 # The terminal pruner saves the window registry under the chan home on a runtime worker
 
-Status: raised for a decision on 2026-09-27 by the independent review of the Files watch bound ([a-quit-can-hang-on-a-standalone-files-watch](a-quit-can-hang-on-a-standalone-files-watch.md); `dev/v0101-team/reviews/review-Services-10.md` in the development tree, finding 4), which read the code at `24731ad21`; read again in code at `b1ef073ae`, where the path holds. The hang on a chan home that stopped answering is inferred and not reproduced. Recommendation: a later version.
+Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 by the independent review of the Files watch bound ([a-quit-can-hang-on-a-standalone-files-watch](../v0.101.0/a-quit-can-hang-on-a-standalone-files-watch.md); `dev/v0101-team/reviews/review-Services-10.md` in the development tree, finding 4), which read the code at `24731ad21`; read again in code at `b1ef073ae`, where the path holds. The hang on a chan home that stopped answering is inferred and not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for a later version, as the lead recommended: the owner accepted in one answer every recommendation the lead had put to them that day, and for this item the recommendation was a later version. It is not part of v0.101.0.
 
 ## What was seen
 

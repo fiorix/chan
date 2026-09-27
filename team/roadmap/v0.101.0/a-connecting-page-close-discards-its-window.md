@@ -1,6 +1,10 @@
 # A close or a Disconnect on the connecting page discards a library window and reaps its terminals
 
-Status: raised for a decision on 2026-09-27 by the code map written for the fix round of the desktop's readiness wait (`dev/v0101-team/int24-docs/codemaps/services-desktop-fix.md` in the development tree, headline 2 and section B), which read it at `9a3dd3e5c`; read again in code at `b1ef073ae`, where the mechanism holds as the map gives it, and not reproduced. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the code map written for the fix round of the desktop's readiness wait (`dev/v0101-team/int24-docs/codemaps/services-desktop-fix.md` in the development tree, headline 2 and section B), which read it at `9a3dd3e5c`; read again in code at `b1ef073ae`, where the mechanism holds as the map gives it, and not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with no shape of the fix named.
 
 ## What was seen
 

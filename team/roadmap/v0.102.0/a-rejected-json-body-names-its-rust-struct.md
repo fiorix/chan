@@ -1,6 +1,10 @@
 # A rejected JSON body's refusal repeats the deserializer's message, which names the request's Rust type
 
-Status: raised for a decision on 2026-09-27 by the code map written for the framework's refusals (`dev/v0101-team/int24-docs/codemaps/runtime-next.md` in the development tree, section C), which read the framework's rejection texts in axum 0.8.9 at `4809d8d4d` and inferred the deserializer's words from serde's derive; the server's side read again at `b1ef073ae`. The words were not reproduced. Recommendation: a later version.
+Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 by the code map written for the framework's refusals (`dev/v0101-team/int24-docs/codemaps/runtime-next.md` in the development tree, section C), which read the framework's rejection texts in axum 0.8.9 at `4809d8d4d` and inferred the deserializer's words from serde's derive; the server's side read again at `b1ef073ae`. The words were not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for a later version, as the lead recommended: the owner accepted in one answer every recommendation the lead had put to them that day, and for this item the recommendation was a later version. It is not part of v0.101.0.
 
 ## What was seen
 

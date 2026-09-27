@@ -1,6 +1,10 @@
 # A live drawing whose stored appState lacks the serializer's keys is written with no edit
 
-Status: raised for a decision on 2026-09-27 by the plan for the fix that seeds a drawing's board from its buffer as the drawing library restores it, the next work of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/followups/followup-Frontend-Lead-10.md` in the development tree, section 5, "An older write without an edit"), which read the app at `71793f3ca` and the installed `@excalidraw/excalidraw` 0.18.1 as far as the authority's dirty mark, inferred the write from the flusher's description, and ran nothing; read again at `d1fe06c86`, where the canvas is as the last landing left it, and not run. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the plan for the fix that seeds a drawing's board from its buffer as the drawing library restores it, the next work of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/followups/followup-Frontend-Lead-10.md` in the development tree, section 5, "An older write without an edit"), which read the app at `71793f3ca` and the installed `@excalidraw/excalidraw` 0.18.1 as far as the authority's dirty mark, inferred the write from the flusher's description, and ran nothing; read again at `d1fe06c86`, where the canvas is as the last landing left it, and not run.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended, in the owner's answer to it by its number. The recommendation placed it under the owner's ruling of 2026-09-26 that no surface but the Markdown editor writes a file without a user's edit.
 
 ## What was seen
 

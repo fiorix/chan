@@ -1,6 +1,10 @@
 # An MCP tool reads a whole file before its size cap applies
 
-Status: raised for a decision on 2026-09-27 by the plan for the cancellation of a started MCP tool ([a-started-mcp-tool-cannot-be-cancelled](a-started-mcp-tool-cannot-be-cancelled.md); `dev/v0101-team/followups/followup-Runtime-Lead-16.md` in the development tree, section 6), which read `read_media`'s read and its cap at `836d2508a` and took `read_file`'s from a code map, and ran nothing; read again in code at `d1fe06c86`, where both hold, and not run. Recommendation: accept for v0.101.0, as a stat before the read; it is a bound and not a cancel.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the plan for the cancellation of a started MCP tool ([a-started-mcp-tool-cannot-be-cancelled](a-started-mcp-tool-cannot-be-cancelled.md); `dev/v0101-team/followups/followup-Runtime-Lead-16.md` in the development tree, section 6), which read `read_media`'s read and its cap at `836d2508a` and took `read_file`'s from a code map, and ran nothing; read again in code at `d1fe06c86`, where both hold, and not run.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended, in the owner's answer to it by its number: a stat before the read, which bounds the read and does not cancel it. The owner added that the documents say so: the tool's documentation and the design document say what a read of a file over its cap answers, and that the file is not read to learn its size. In the same answer the owner asked for an investigation, for the next version, of how other MCP servers handle a read of a file over their cap; that is [how-mcp-servers-cap-a-read-is-unsurveyed](../v0.102.0/how-mcp-servers-cap-a-read-is-unsurveyed.md).
 
 ## What was seen
 
@@ -30,3 +34,4 @@ Stat the file before the read: `read_media` refuses a file whose size passes its
 2. `read_file` of a file over its cap reads at most its cap and answers the file's size, the truncated text and its note, as now; pinned red first.
 3. A file within each cap reads as it does now.
 4. `crates/chan-llm/design.md` says that a tool's read of one file is bounded by its cap.
+5. The tools' own descriptions and `crates/chan-llm/design.md` say what a read of a file over its cap answers, and that the file is not read to learn its size: `read_media` reads none of such a file, and `read_file` no more than its cap. Added on 2026-09-27 with the owner's ruling.

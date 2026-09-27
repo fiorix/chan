@@ -1,6 +1,10 @@
 # Two tests of chan-library that capture warnings fail now and then
 
-Status: raised for a decision on 2026-09-27 by the independent review of the launcher handlers' second half (`dev/v0101-team/reviews/review-Runtime-11.md` in the development tree, its answer to question 6), after one of the tests failed once in the lane's suite run and passed on a rerun (`dev/v0101-team/reports/report-Runtime-20.md`); the review read the cause in tracing-core's source. The tests read again at `b1ef073ae`; not reproduced on demand. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the independent review of the launcher handlers' second half (`dev/v0101-team/reviews/review-Runtime-11.md` in the development tree, its answer to question 6), after one of the tests failed once in the lane's suite run and passed on a rerun (`dev/v0101-team/reports/report-Runtime-20.md`); the review read the cause in tracing-core's source. The tests read again at `b1ef073ae`; not reproduced on demand.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with no shape of the fix named.
 
 ## What was seen
 

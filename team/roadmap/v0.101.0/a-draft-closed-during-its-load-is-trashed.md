@@ -1,6 +1,10 @@
 # A draft closed before its content arrives is discarded to the trash
 
-Status: raised for a decision on 2026-09-27 by the independent review of the fix that keeps a drawing on disk from becoming a scene nobody drew ([the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md); `dev/v0101-team/reviews/review-Frontend-12.md` in the development tree, finding 3), which read the code at `20f3e3e7c` and did not trace the standalone window's discard; read again in code at `dcc5670e0`, where it holds, and not run. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the independent review of the fix that keeps a drawing on disk from becoming a scene nobody drew ([the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md); `dev/v0101-team/reviews/review-Frontend-12.md` in the development tree, finding 3), which read the code at `20f3e3e7c` and did not trace the standalone window's discard; read again in code at `dcc5670e0`, where it holds, and not run.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with no shape of the fix named.
 
 ## What was seen
 

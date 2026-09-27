@@ -1,6 +1,10 @@
 # The deck offers Hide and Close on a window of another host's feed, and this host answers that it has no such window
 
-Status: raised for a decision on 2026-09-27 by the independent review of the launcher handlers' first half (`dev/v0101-team/reviews/review-Runtime-10.md` in the development tree, finding 2), which read the code at `f940f0d63`; read again in code at `b1ef073ae`, where it holds. The code path is read; how a real client reaches it is inferred, and it was not reproduced. Recommendation: a later version.
+Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 by the independent review of the launcher handlers' first half (`dev/v0101-team/reviews/review-Runtime-10.md` in the development tree, finding 2), which read the code at `f940f0d63`; read again in code at `b1ef073ae`, where it holds. The code path is read; how a real client reaches it is inferred, and it was not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for a later version, as the lead recommended: the owner accepted in one answer every recommendation the lead had put to them that day, and for this item the recommendation was a later version. It is not part of v0.101.0.
 
 ## What was seen
 

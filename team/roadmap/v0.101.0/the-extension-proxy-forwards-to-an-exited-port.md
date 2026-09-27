@@ -1,6 +1,10 @@
 # The extension proxy forwards to an exited extension's port with the extension's token
 
-Status: raised for a decision on 2026-09-27 by the code map written for the extension catalog's liveness field (`dev/v0101-team/int24-docs/codemaps/runtime-next.md` in the development tree, section B), which read the code at `4809d8d4d` and marked the risk as inferred, not shown reachable; read again in code at `b1ef073ae`, where the mechanism holds, and not reproduced. Recommendation: accept for v0.101.0. The catalog's `running` flag, which landed the same day with [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md), is what the proxy would read.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the code map written for the extension catalog's liveness field (`dev/v0101-team/int24-docs/codemaps/runtime-next.md` in the development tree, section B), which read the code at `4809d8d4d` and marked the risk as inferred, not shown reachable; read again in code at `b1ef073ae`, where the mechanism holds, and not reproduced. The catalog's `running` flag, which landed the same day with [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md), is what the proxy would read.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with no shape of the fix named.
 
 ## What was seen
 

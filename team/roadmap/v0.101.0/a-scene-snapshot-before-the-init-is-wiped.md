@@ -1,6 +1,10 @@
 # A live drawing's scene snapshot applied before the drawing library's init is wiped
 
-Status: raised for a decision on 2026-09-27 by the plan for the fix that keeps a drawing on disk from becoming a scene nobody drew ([the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md); `dev/v0101-team/followups/followup-Frontend-Lead-9.md` in the development tree, section 5, "The session's snapshot in each case", its case 2), which read the app at `b1ef073ae` and the drawing library's source at the installed `@excalidraw/excalidraw` 0.18.1, and read that the board could show empty until the next remote update; read again in the app at `dcc5670e0`, where the snapshot is still wiped and the board now shows the drawing of the tab's finished load in its place. Not run. Recommendation: accept for v0.101.0, after the work that makes the canvas seed only from the whole of a finished load, which is that item's next work.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the plan for the fix that keeps a drawing on disk from becoming a scene nobody drew ([the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md); `dev/v0101-team/followups/followup-Frontend-Lead-9.md` in the development tree, section 5, "The session's snapshot in each case", its case 2), which read the app at `b1ef073ae` and the drawing library's source at the installed `@excalidraw/excalidraw` 0.18.1, and read that the board could show empty until the next remote update; read again in the app at `dcc5670e0`, where the snapshot is still wiped and the board now shows the drawing of the tab's finished load in its place. Not run.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, built after the work that makes the canvas seed only from the whole of a finished load, the next work of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md).
 
 ## What was seen
 

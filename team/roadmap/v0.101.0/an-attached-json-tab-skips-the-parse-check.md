@@ -6,7 +6,7 @@ Status: accepted for v0.101.0 by the owner on 2026-09-27; raised during v0.101.0
 
 Accepted on 2026-09-27 for v0.101.0 as the lead recommended. The shape of the fix is still to be ruled: keep `.json` tabs out of document sync, the smaller, which gives up live co-editing of `.json` files, or have the authority hold back its flush of a `.json` document that does not parse, which needs the server's document sessions read first. It is asked of the owner when the order is cut, once those sessions have been read.
 
-On 2026-09-27, with those sessions read, the owner ruled the shape, the third of the ways "What to do" lists: the save's check is dropped for `.json`, so a `.json` buffer is saved as typed on every editor path, as any other text file the editor autosaves, and the tree view says when it does not parse. The check stays for a drawing in source mode. "Desired contract" and "Acceptance" below were written before this ruling and are rewritten to it when the order is cut.
+On 2026-09-27, with those sessions read, the owner ruled the shape, the third of the ways "What to do" lists: the save's check is dropped for `.json`, so a `.json` buffer is saved as typed on every editor path, as any other text file the editor autosaves, and the tree view says when it does not parse. The check stays for a drawing in source mode. "Desired contract" and "Acceptance" below were written before this ruling and were rewritten to it on 2026-09-27, when the order was cut.
 
 ## What was seen
 
@@ -24,20 +24,22 @@ A `.json` tab in source mode attaches. Document sync is on by default (`DOCSYNC_
 
 ## Desired contract
 
-A `.json` buffer that does not parse reaches disk from no editor path: attached to a document session or not, the tab says the JSON does not parse, as a save without a session does, and the file keeps the last content that parsed.
+A `.json` buffer is saved as typed on every editor path, attached to a document session or not, whether it parses or not, as any other text file the editor autosaves: no path sets a parse error on a `.json` tab or replaces its editor for it. The tree view says when the buffer does not parse and says nothing of saves being blocked. A drawing in source mode keeps the save's parse check. This section was rewritten on 2026-09-27 to the owner's ruling, from the order that carries it (`dev/v0101-team/tasks/task-Lead-Frontend-18.md` in the development tree); it said that a `.json` buffer that does not parse reaches disk from no editor path.
 
 ## What to do
 
-Decide the shape first. Two meet the contract: keep `.json` tabs out of document sync, as Excalidraw scenes are, so every save takes the path with the check; or have the authority hold back its flush of a `.json` document that does not parse, and have the session's save report the parse error on the tab. The first is the smaller and gives up live co-editing of `.json` files; the second keeps it and needs the server's document sessions read first. Withdrawing the item instead leaves attached `.json` tabs as they are, and then the check's comment should say that it guards only the path without a session. Red first: a `.json` tab attached to a session in source mode, a buffer that does not parse, a save, and the check shown to be skipped.
-
-A third way, which the reading above makes possible and which changes this item's contract: drop the check for `.json`, so every editor path writes a `.json` buffer as it is, as the attached path already does. It is the smallest change, the check's `.json` arm and the comment above `performSave` (`tabs.svelte.ts:5726-5731`, `:5788-5797`) and the tree's comment and hint that saves are blocked (`JsonPretty.svelte:7-10`, `:50-53`), and it removes the refusal that replaces the editor and holds a close on the path without a session. What it costs is the desired contract above: a `.json` that does not parse would reach disk from every editor path, and the typo would surface only when the tree or another tool reads the file, which is what the check's comment says it exists to prevent. The Excalidraw arm of the check would stay.
+Red first, with pins through the production save funnel and none reading source text: a `.json` tab with no session, in source mode, whose buffer does not parse, saved as typed with no error on the tab; a close of such a tab while it is dirty, which saves it and closes it; a drawing in source mode whose buffer does not parse, still refused, with nothing written and the tab saying why; a `.json` buffer that parses, saved as it was; and, mounted, the tree on a buffer that does not parse, showing the parse error and nothing of saves being blocked. Then the check's `.json` arm goes and the drawing's stays (`performSaveOnce`, `web/packages/workspace-app/src/state/tabs.svelte.ts:5803-5812`), with no new state and no new message: the tree is where a `.json` that does not parse is said. The words follow the code: the comment above `performSave`, which names JSON as the one format validated (`:5741-5746`), the tree's opening comment and its hint (`src/editor/JsonPretty.svelte:7-10`, `:50-53`), every sentence of the design documents that says a `.json` save is validated or refused, and one changelog entry that says what a user sees differently in a window with a document session and in one without. This section was rewritten on 2026-09-27 from the order; it weighed three shapes, of which the ruling took the third.
 
 ## Boundaries
 
-`web/packages/workspace-app/src/state/tabs.svelte.ts` (`performSaveOnce`) and `state/docSync.svelte.ts` (`isDocSyncEligible`, the save delegate) and their tests; for the second shape, the server's document sessions (`crates/chan-server/src/doc_sessions/`, `routes/doc.rs`), read above for what they write and when. `.json5` and the other JSON-like formats stay outside the strict check. Excalidraw scenes are unchanged.
+`web/packages/workspace-app/src/state/tabs.svelte.ts` (the check and the comment above `performSave` alone), `src/editor/JsonPretty.svelte`, new test files beside the code they test, the design documents' sentences that name the check, and `CHANGELOG.md`. Not `state/docSync.svelte.ts`, not `components/FileEditorTab.svelte`, and no Rust. Not the drawing's refusal, which in source mode still takes the editor away: that is [a-drawing-that-does-not-parse-loses-its-editor](a-drawing-that-does-not-parse-loses-its-editor.md). `.jsonc`, `.json5`, `.jsonl` and `.ndjson` have no check and gain none. A path on which a `.json` tab still ends with an error that replaces its editor, for a reason other than the check, is reported and not fixed here. This section was rewritten on 2026-09-27 from the order.
 
 ## Acceptance
 
-1. In a workspace window with document sync on, a `.json` tab in source mode whose buffer does not parse shows the parse error on save, and the file on disk keeps its last content that parsed, pinned by a test that drives the attached path, or, under the first shape, by a test that such a tab never attaches.
-2. A test pins the check's refusal on the path without a session.
-3. A `.json` buffer that parses saves as it does now, attached or not.
+1. A `.json` buffer reaches disk as typed from every editor path, with a session or without, whether it parses or not, and no path sets a parse error on a `.json` tab; pinned on the path without a session, and the attached path's save pinned by an existing test named in the report or by a new one.
+2. A drawing in source mode keeps its check, pinned.
+3. The tree's text is true of an attached tab and of one without a session, pinned with the tree mounted.
+4. Every new pin has a mutation that turns it red at its own assertion.
+5. The comments, the documents and the changelog say what the code does.
+
+This section was rewritten on 2026-09-27 from the order.
