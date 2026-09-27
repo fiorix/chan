@@ -185,22 +185,16 @@ async fn proxy_extension_websocket(
     if upstream.set_scheme("ws").is_err() {
         return (StatusCode::BAD_GATEWAY, "invalid extension websocket URL").into_response();
     }
-    let mut upstream_request = match upstream.as_str().into_client_request() {
-        Ok(request) => request,
-        Err(error) => {
-            tracing::warn!(extension_id = %id, %error, "extension websocket request invalid");
-            return (StatusCode::BAD_GATEWAY, "extension unavailable").into_response();
-        }
-    };
-    let headers = upstream_request.headers_mut();
-    let Ok(scope) = HeaderValue::from_str(&tenant.scope) else {
-        return (StatusCode::BAD_GATEWAY, "extension scope invalid").into_response();
-    };
-    let Ok(origin) = HeaderValue::from_str(&origin) else {
-        return (StatusCode::BAD_GATEWAY, "extension origin invalid").into_response();
-    };
-    headers.insert(HeaderName::from_static(EXTENSION_SCOPE_HEADER), scope);
-    headers.insert(header::ORIGIN, origin);
+    let mut upstream_request =
+        match extension_websocket_request(upstream.as_str().into_client_request(), &id) {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
+    if let Err(response) =
+        extension_websocket_headers(upstream_request.headers_mut(), &tenant.scope, &origin)
+    {
+        return response;
+    }
 
     let connection = tokio::time::timeout(
         EXTENSION_CONNECT_TIMEOUT,
@@ -226,6 +220,35 @@ async fn proxy_extension_websocket(
         .max_message_size(MAX_WS_MESSAGE_BYTES)
         .max_frame_size(MAX_WS_FRAME_BYTES)
         .on_upgrade(move |client| relay_extension_websocket(client, upstream_socket, tenant, id))
+}
+
+fn extension_websocket_request(
+    request: Result<Request<()>, tokio_tungstenite::tungstenite::Error>,
+    id: &str,
+) -> Result<Request<()>, Response> {
+    match request {
+        Ok(request) => Ok(request),
+        Err(error) => {
+            tracing::warn!(extension_id = %id, %error, "extension websocket request invalid");
+            Err((StatusCode::BAD_GATEWAY, "extension unavailable").into_response())
+        }
+    }
+}
+
+fn extension_websocket_headers(
+    headers: &mut HeaderMap,
+    scope: &str,
+    origin: &str,
+) -> Result<(), Response> {
+    let Ok(scope) = HeaderValue::from_str(scope) else {
+        return Err((StatusCode::BAD_GATEWAY, "extension scope invalid").into_response());
+    };
+    let Ok(origin) = HeaderValue::from_str(origin) else {
+        return Err((StatusCode::BAD_GATEWAY, "extension origin invalid").into_response());
+    };
+    headers.insert(HeaderName::from_static(EXTENSION_SCOPE_HEADER), scope);
+    headers.insert(header::ORIGIN, origin);
+    Ok(())
 }
 
 fn extension_websocket_config() -> WebSocketConfig {

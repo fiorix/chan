@@ -2248,10 +2248,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         };
         // Mark every tunnel request as tunnel-origin, carrying the verified
         // gateway caller; a request without a verifiable assertion is refused.
-        let tunnel_app = app.clone().layer(middleware::from_fn_with_state(
-            assertion,
-            mark_tunnel_origin,
-        ));
+        let tunnel_app = tunnel_app(app.clone(), assertion);
         spawn_devserver_tunnel(tunnel, tunnel_app, &signal_tx)
     });
 
@@ -2591,15 +2588,24 @@ async fn gate_tenant_during_startup(
     if state.startup.tenant_routes_ready() {
         return next.run(req).await;
     }
-    match state.host.owns_mounted_tenant_path(req.uri().path()) {
-        Ok(true) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::RETRY_AFTER, "1")],
-            "devserver is restoring terminal sessions",
-        )
-            .into_response(),
-        Ok(false) => next.run(req).await,
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    match startup_refusal(state.host.owns_mounted_tenant_path(req.uri().path())) {
+        Some(response) => response,
+        None => next.run(req).await,
+    }
+}
+
+fn startup_refusal(ownership: Result<bool, Error>) -> Option<Response> {
+    match ownership {
+        Ok(true) => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "1")],
+                "devserver is restoring terminal sessions",
+            )
+                .into_response(),
+        ),
+        Ok(false) => None,
+        Err(error) => Some((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()),
     }
 }
 
@@ -2609,6 +2615,13 @@ async fn gate_tenant_during_startup(
 struct TunnelAssertion {
     key: chan_tunnel_proto::gateway_assertion::AssertionKey,
     devserver_id: String,
+}
+
+fn tunnel_app(app: Router, assertion: TunnelAssertion) -> Router {
+    app.layer(middleware::from_fn_with_state(
+        assertion,
+        mark_tunnel_origin,
+    ))
 }
 
 /// Middleware that stamps every request entering the tunnel-only app clone with
@@ -3104,9 +3117,7 @@ pub(crate) mod tunnel_test_support {
     //! a test tunnel's assertion key and registration, signed callers, and a
     //! router wrapped the way `build_devserver_app` wraps its tunnel clone.
 
-    use axum::middleware;
-
-    use super::{mark_tunnel_origin, TunnelAssertion};
+    use super::{tunnel_app, TunnelAssertion};
     use crate::route_authority::test_support::Caller;
 
     /// The audience every signed test assertion names.
@@ -3164,11 +3175,7 @@ pub(crate) mod tunnel_test_support {
     /// `router` behind the devserver's tunnel layer, carrying the test
     /// tunnel's registration.
     pub(crate) fn through_the_tunnel(router: axum::Router) -> axum::Router {
-        router
-            .layer(middleware::from_fn_with_state(
-                test_tunnel_assertion(),
-                mark_tunnel_origin,
-            ))
+        tunnel_app(router, test_tunnel_assertion())
             .layer(axum::Extension(test_tunnel_registration()))
     }
 
@@ -4753,10 +4760,7 @@ mod tests {
         // The tunnel receives this same router after the gateway-origin
         // assertion layer. A segment-preserved tenant path must hit the same
         // startup gate as the direct listener.
-        let tunnel = app.clone().layer(middleware::from_fn_with_state(
-            test_tunnel_assertion(),
-            mark_tunnel_origin,
-        ));
+        let tunnel = tunnel_app(app.clone(), test_tunnel_assertion());
         let tunnel = tunnel.layer(axum::Extension(test_tunnel_registration()));
         let tunneled = tunnel
             .oneshot(
@@ -7546,10 +7550,7 @@ mod tests {
         complete_test_startup(&state).await;
         let host = state.host.clone();
         let (app, _serve_addr) = build_devserver_app(state, host);
-        let tunnel = app.clone().layer(middleware::from_fn_with_state(
-            test_tunnel_assertion(),
-            mark_tunnel_origin,
-        ));
+        let tunnel = tunnel_app(app.clone(), test_tunnel_assertion());
         let tunnel = tunnel.layer(axum::Extension(test_tunnel_registration()));
 
         let req = || {
@@ -8944,10 +8945,7 @@ mod tests {
         // serve loop, and the marker survives the host's root-fallback dispatch
         // into the launcher.
         let assertion = test_tunnel_assertion();
-        let tunnel = app.clone().layer(middleware::from_fn_with_state(
-            assertion.clone(),
-            mark_tunnel_origin,
-        ));
+        let tunnel = tunnel_app(app.clone(), assertion.clone());
         let tunnel = tunnel.layer(axum::Extension(test_tunnel_registration()));
 
         let add_req = |auth: bool| {
@@ -9081,12 +9079,7 @@ mod tests {
         let (app, serve_addr) = build_devserver_app(state, host);
         serve_addr.set(addr).unwrap();
         let assertion = test_tunnel_assertion();
-        let tunnel = app
-            .clone()
-            .layer(middleware::from_fn_with_state(
-                assertion.clone(),
-                mark_tunnel_origin,
-            ))
+        let tunnel = tunnel_app(app.clone(), assertion.clone())
             .layer(axum::Extension(test_tunnel_registration()));
 
         let send = |caller: &'static str, method: &str, uri: &str, body: Option<String>| {
@@ -9273,12 +9266,7 @@ mod tests {
         let (app, serve_addr) = build_devserver_app(state, host);
         serve_addr.set(addr).unwrap();
         let assertion = test_tunnel_assertion();
-        let tunnel = app
-            .clone()
-            .layer(middleware::from_fn_with_state(
-                assertion.clone(),
-                mark_tunnel_origin,
-            ))
+        let tunnel = tunnel_app(app.clone(), assertion.clone())
             .layer(axum::Extension(test_tunnel_registration()));
         let owner = crate::route_authority::test_support::Caller::OWNER_ID;
         let now = std::time::SystemTime::now()
@@ -9381,10 +9369,7 @@ mod tests {
         }
 
         let app = axum::Router::new().route("/ws", get(probe));
-        let tunnel = app.clone().layer(middleware::from_fn_with_state(
-            test_tunnel_assertion(),
-            mark_tunnel_origin,
-        ));
+        let tunnel = tunnel_app(app.clone(), test_tunnel_assertion());
         let tunnel = tunnel.layer(axum::Extension(test_tunnel_registration()));
 
         let req = || {
@@ -9710,10 +9695,7 @@ mod tests {
             .unwrap();
         assert_eq!(watch_bad.status(), StatusCode::UNAUTHORIZED);
 
-        let tunnel = app.layer(middleware::from_fn_with_state(
-            test_tunnel_assertion(),
-            mark_tunnel_origin,
-        ));
+        let tunnel = tunnel_app(app, test_tunnel_assertion());
         let tunnel = tunnel.layer(axum::Extension(test_tunnel_registration()));
         let tunnel_read = tunnel
             .oneshot(
