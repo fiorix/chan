@@ -5845,6 +5845,24 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn window_count_missing() {
+        let (_dir, host) = host();
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "GET",
+                "/api/library/windows/missing/live-terminals",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "window not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn launcher_bearer() {
         let (_dir, host) = host();
         let app = launcher_router(
