@@ -6889,6 +6889,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_public_open_resolves_its_key_before_it_builds_its_tenant() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace.stop_open_recovery();
+            let (entered, building) = tokio::sync::oneshot::channel();
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let host = WorkspaceHost::new(
+                library,
+                Arc::new(GatedWorkspaceBuilder {
+                    entered: std::sync::Mutex::new(Some(entered)),
+                    release: release.clone(),
+                }),
+            );
+            let (keys, resolved) = std::sync::mpsc::channel();
+            *host.blocking_thread_probe.lock().unwrap() = Some(keys);
+            let mut opening = Box::pin(host.open_workspace(workspace, serve_config("/public")));
+            tokio::select! {
+                building = building => building.unwrap(),
+                result = &mut opening => panic!("the tenant build was not held: {result:?}"),
+            }
+            assert!(
+                resolved.try_recv().is_ok(),
+                "the public open built its tenant before it resolved its root's key"
+            );
+            release.add_permits(1);
+            opening.await.unwrap();
+            host.close_workspace("/public", false).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn already_open_mount_waits_for_an_in_process_release() {
         // A hang guard, not a latency bound: the workspace opens and the close are
         // real I/O that a loaded runner can stretch to several seconds, and the
