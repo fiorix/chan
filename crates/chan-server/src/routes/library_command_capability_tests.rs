@@ -602,4 +602,64 @@ mod refusal_envelopes {
         )
         .await;
     }
+
+    async fn resolved_refusal(route: &str, dead: bool) {
+        let mut fixture = fixture().await;
+        let app = launcher_router(fixture.host.clone(), None, None);
+        let cap = if dead {
+            let cap = mint(&app, &fixture).await;
+            drop(fixture.presence.take());
+            cap
+        } else {
+            "unknown-capability".to_string()
+        };
+        let path = match route {
+            "snapshot" => format!("/api/library/command-capabilities/{cap}"),
+            "actions" => format!("/api/library/command-capabilities/{cap}/actions"),
+            suffix => format!(
+                "/api/library/command-capabilities/{cap}/windows/{}/{suffix}",
+                fixture.window_id
+            ),
+        };
+        let response = if route == "actions" {
+            send(
+                &app,
+                "POST",
+                &path,
+                None,
+                Some(serde_json::json!({"action":"new_terminal"})),
+            )
+            .await
+        } else {
+            send(&app, "GET", &path, None, None).await
+        };
+        let (status, message) = if dead {
+            (StatusCode::GONE, "the invoking window is no longer live")
+        } else {
+            (
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired library command capability",
+            )
+        };
+        check(response, status, message).await;
+    }
+
+    macro_rules! resolve_tests {
+        ($($name:ident: ($route:literal, $dead:literal)),+ $(,)?) => {$(
+            #[tokio::test]
+            async fn $name() {
+                resolved_refusal($route, $dead).await;
+            }
+        )+};
+    }
+    resolve_tests! {
+        unknown_snapshot: ("snapshot", false),
+        unknown_actions: ("actions", false),
+        unknown_launch: ("launch", false),
+        unknown_count: ("live-terminals", false),
+        dead_snapshot: ("snapshot", true),
+        dead_actions: ("actions", true),
+        dead_launch: ("launch", true),
+        dead_count: ("live-terminals", true),
+    }
 }
