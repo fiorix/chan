@@ -46,6 +46,8 @@ flowchart TB
 
 User-assigned shortcuts require Mod, Ctrl, Cmd or Alt; Shift alone does not make a key assignable. The predicate beside the grammar in `state/shortcuts.ts` is shared by key capture and config hydration. Rejected capture leaves the assignment dialog composing, and hydration drops rejected slots so a command inherits its built-in chord. The registry's own chords and keyboard-event resolution are independent of this assignment rule.
 
+Search advances its request token on every input change, including a cleared query. Content, language and path results, errors and loading completion are accepted only for the current token, so an in-flight request cannot refill a cleared panel or report an error for the discarded query.
+
 ## Frontend-only launcher demo and the workspace test transport
 
 The launcher SPA also runs with **no backend** on the public marketing site (`@chan/marketing`), so the `chan.app` manual shows a live launcher instead of a screenshot. This is a third serving path: not chan-server, but the static site embedding the *same* Svelte app against an in-memory backend. Nothing is extracted or forked. `@chan/launcher/demo` renders the real launcher `App` with `setBackend(createLauncherDemoApi())`, a backend-interface swap; the marketing build bundles it as `launcher-demo.js` under `/assets/` and scopes its global CSS to the embed frame. The launcher is mounted without an `onOpenWindow` hook, so a window tile opens nothing: the workspace app is not on the site.
