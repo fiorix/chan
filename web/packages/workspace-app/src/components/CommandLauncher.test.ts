@@ -13,6 +13,10 @@ vi.mock("../state/commands/install", () => ({}));
 vi.mock("../api/libraryCommand", () => ({
   loadScopedLibrarySnapshot: scopedLibrary.load,
   loadScopedWindowLiveTerminals: scopedLibrary.liveTerminals,
+  checkScopedWindowPage: vi.fn(async () => ({
+    response: new Response("<html></html>"),
+    readRefusal: async () => new Error("unexpected refusal"),
+  })),
   runScopedLibraryAction: scopedLibrary.run,
 }));
 
@@ -316,7 +320,7 @@ function decision(target: HTMLElement, label: string): HTMLButtonElement {
 /// the server mutation, which jsdom has no real window for.
 function stubPopup(): void {
   vi.spyOn(window, "open").mockImplementation(
-    () => ({ close: vi.fn(), focus: vi.fn(), location: { href: "" } }) as unknown as Window,
+    () => ({ close: vi.fn(), focus: vi.fn(), closed: false, document: document.implementation.createHTMLDocument(), location: { href: "about:blank" } }) as unknown as Window,
   );
 }
 
@@ -492,6 +496,8 @@ describe("contextual command deck", () => {
     let popup:
       | {
           name: string;
+          document: Document;
+          closed: boolean;
           location: { href: string };
           focus: ReturnType<typeof vi.fn>;
           close: ReturnType<typeof vi.fn>;
@@ -501,7 +507,9 @@ describe("contextual command deck", () => {
     vi.spyOn(window, "open").mockImplementation(() => {
       popup = {
         name: "",
-        location: { href: "" },
+        document: document.implementation.createHTMLDocument(),
+        closed: false,
+        location: { href: "about:blank" },
         focus: vi.fn(),
         close: vi.fn(),
         sessionStorage: clonedSessionStorage(sessionStorage),

@@ -13,6 +13,10 @@ vi.mock("../state/commands/install", () => ({}));
 vi.mock("../api/libraryCommand", () => ({
   loadScopedLibrarySnapshot: vi.fn(async () => library.snapshot),
   loadScopedWindowLiveTerminals: vi.fn(),
+  checkScopedWindowPage: vi.fn(async () => ({
+    response: new Response("<html></html>"),
+    readRefusal: async () => new Error("unexpected refusal"),
+  })),
   runScopedLibraryAction: vi.fn(async () => undefined),
 }));
 
@@ -162,7 +166,7 @@ describe("focus when the launcher closes", () => {
     };
     // Hiding a window closes its popup, which the browser path acquires by name.
     vi.spyOn(window, "open").mockImplementation(
-      () => ({ close: vi.fn(), focus: vi.fn(), location: { href: "" } }) as unknown as Window,
+      () => ({ close: vi.fn(), focus: vi.fn(), closed: false, document: document.implementation.createHTMLDocument(), location: { href: "about:blank" } }) as unknown as Window,
     );
     const target = await openFromOrigin();
     (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();

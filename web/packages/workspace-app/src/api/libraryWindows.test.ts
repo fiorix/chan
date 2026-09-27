@@ -1,3 +1,4 @@
+import type { WindowPageCheck } from "@chan/web-shared/window-page";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
@@ -15,6 +16,8 @@ type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
 /// path reads `location.href` to decide whether the named window is fresh,
 /// then names, navigates, and focuses it.
 interface FakePopup {
+  document: Document;
+  closed: boolean;
   location: { href: string };
   name: string;
   focus: ReturnType<typeof vi.fn>;
@@ -22,7 +25,15 @@ interface FakePopup {
 }
 
 function fakePopup(href = "about:blank"): FakePopup {
-  return { location: { href }, name: "", focus: vi.fn(), close: vi.fn() };
+  const popup: FakePopup = {
+    document: document.implementation.createHTMLDocument(),
+    closed: false,
+    location: { href },
+    name: "",
+    focus: vi.fn(),
+    close: vi.fn(() => { popup.closed = true; }),
+  };
+  return popup;
 }
 
 function asDesktop(invoke: (cmd: string, args?: unknown) => Promise<unknown>): void {
@@ -74,11 +85,17 @@ async function rejection(promise: Promise<unknown>): Promise<Error> {
   return outcome;
 }
 
-function bridge(overrides: Partial<LibraryWindowBridge> = {}): LibraryWindowBridge {
+type TestBridge = LibraryWindowBridge & { checkPage: WindowPageCheck };
+
+function bridge(overrides: Partial<TestBridge> = {}): TestBridge {
   return {
     runAction: vi.fn().mockResolvedValue(undefined),
     refresh: vi.fn().mockResolvedValue(undefined),
     currentWindowId: () => "w-self",
+    checkPage: vi.fn(async () => ({
+      response: new Response("<html></html>"),
+      readRefusal: async () => new Error("unexpected refusal"),
+    })),
     ...overrides,
   };
 }
@@ -94,7 +111,7 @@ function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibra
     connected: true,
     hidden: false,
     control: false,
-    launch_path: "/lib-0a1b/index.html?w=w-other",
+    launch_path: "/api/library/command-capabilities/cap/windows/w-other/launch",
     ...overrides,
   };
 }
@@ -431,7 +448,7 @@ describe("browser library windows still use window.open", () => {
     expect(open).toHaveBeenCalledWith("", "_blank");
     expect(host.runAction).toHaveBeenCalledWith({ action: "new_terminal" });
     expect(popup.name).toBe("w-other");
-    expect(popup.location.href).toBe("/lib-0a1b/index.html?w=w-other");
+    expect(popup.location.href).toBe("/api/library/command-capabilities/cap/windows/w-other/launch");
     expect(popup.focus).toHaveBeenCalled();
   });
 
@@ -461,7 +478,7 @@ describe("browser library windows still use window.open", () => {
       window_id: "w-other",
       hidden: false,
     });
-    expect(popup.location.href).toBe("/lib-0a1b/index.html?w=w-other");
+    expect(popup.location.href).toBe("/api/library/command-capabilities/cap/windows/w-other/launch");
     expect(popup.focus).toHaveBeenCalled();
   });
 
