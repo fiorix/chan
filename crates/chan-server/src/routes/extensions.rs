@@ -152,7 +152,12 @@ async fn proxy_extension_request(
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(extension_id = %id, %error, "extension proxy request failed");
-            return (StatusCode::BAD_GATEWAY, "extension unavailable").into_response();
+            return crate::error::err_code(
+                StatusCode::BAD_GATEWAY,
+                "extension unavailable".into(),
+                "extension_unavailable",
+                serde_json::json!({}),
+            );
         }
     };
 
@@ -172,6 +177,10 @@ async fn proxy_extension_request(
     let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = response_headers;
+    #[cfg(test)]
+    response
+        .extensions_mut()
+        .insert(crate::refusal_check::UpstreamResponse);
     response
 }
 
@@ -183,17 +192,22 @@ async fn proxy_extension_websocket(
 ) -> Response {
     let origin = upstream.origin().ascii_serialization();
     if upstream.set_scheme("ws").is_err() {
-        return (StatusCode::BAD_GATEWAY, "invalid extension websocket URL").into_response();
+        return crate::error::err_code(
+            StatusCode::BAD_GATEWAY,
+            "invalid extension websocket URL".into(),
+            "extension_websocket_url_invalid",
+            serde_json::json!({}),
+        );
     }
     let mut upstream_request =
         match extension_websocket_request(upstream.as_str().into_client_request(), &id) {
             Ok(request) => request,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
     if let Err(response) =
         extension_websocket_headers(upstream_request.headers_mut(), &tenant.scope, &origin)
     {
-        return response;
+        return *response;
     }
 
     let connection = tokio::time::timeout(
@@ -209,11 +223,21 @@ async fn proxy_extension_websocket(
         Ok(Ok(connection)) => connection,
         Ok(Err(error)) => {
             tracing::warn!(extension_id = %id, %error, "extension websocket connect failed");
-            return (StatusCode::BAD_GATEWAY, "extension unavailable").into_response();
+            return crate::error::err_code(
+                StatusCode::BAD_GATEWAY,
+                "extension unavailable".into(),
+                "extension_unavailable",
+                serde_json::json!({}),
+            );
         }
         Err(_) => {
             tracing::warn!(extension_id = %id, "extension websocket connect timed out");
-            return (StatusCode::BAD_GATEWAY, "extension unavailable").into_response();
+            return crate::error::err_code(
+                StatusCode::BAD_GATEWAY,
+                "extension unavailable".into(),
+                "extension_unavailable",
+                serde_json::json!({}),
+            );
         }
     };
     websocket
@@ -225,12 +249,17 @@ async fn proxy_extension_websocket(
 fn extension_websocket_request(
     request: Result<Request<()>, tokio_tungstenite::tungstenite::Error>,
     id: &str,
-) -> Result<Request<()>, Response> {
+) -> Result<Request<()>, Box<Response>> {
     match request {
         Ok(request) => Ok(request),
         Err(error) => {
             tracing::warn!(extension_id = %id, %error, "extension websocket request invalid");
-            Err((StatusCode::BAD_GATEWAY, "extension unavailable").into_response())
+            Err(Box::new(crate::error::err_code(
+                StatusCode::BAD_GATEWAY,
+                "extension unavailable".into(),
+                "extension_unavailable",
+                serde_json::json!({}),
+            )))
         }
     }
 }
@@ -239,12 +268,22 @@ fn extension_websocket_headers(
     headers: &mut HeaderMap,
     scope: &str,
     origin: &str,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let Ok(scope) = HeaderValue::from_str(scope) else {
-        return Err((StatusCode::BAD_GATEWAY, "extension scope invalid").into_response());
+        return Err(Box::new(crate::error::err_code(
+            StatusCode::BAD_GATEWAY,
+            "extension scope invalid".into(),
+            "extension_scope_invalid",
+            serde_json::json!({}),
+        )));
     };
     let Ok(origin) = HeaderValue::from_str(origin) else {
-        return Err((StatusCode::BAD_GATEWAY, "extension origin invalid").into_response());
+        return Err(Box::new(crate::error::err_code(
+            StatusCode::BAD_GATEWAY,
+            "extension origin invalid".into(),
+            "extension_origin_invalid",
+            serde_json::json!({}),
+        )));
     };
     headers.insert(HeaderName::from_static(EXTENSION_SCOPE_HEADER), scope);
     headers.insert(header::ORIGIN, origin);
@@ -1164,7 +1203,7 @@ mod tests {
             ] {
                 let (status, body) = send(method.clone(), caller).await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED, "{caller} {method}");
-                assert_eq!(body, "unauthorized", "{caller} {method}");
+                assert_eq!(body, r#"{"error":"unauthorized"}"#, "{caller} {method}");
             }
         }
         let (status, body) = send(Method::GET, "grantee").await;
@@ -1383,7 +1422,7 @@ mod tests {
                 "echo",
             );
             assert_refusal(
-                result.unwrap_err(),
+                *result.unwrap_err(),
                 "extension unavailable",
                 "extension_unavailable",
             )
@@ -1393,7 +1432,7 @@ mod tests {
         async fn proxy_websocket_origin_error_mapper() {
             let mut headers = HeaderMap::new();
             assert_refusal(
-                extension_websocket_headers(&mut headers, "scope", "invalid\norigin").unwrap_err(),
+                *extension_websocket_headers(&mut headers, "scope", "invalid\norigin").unwrap_err(),
                 "extension origin invalid",
                 "extension_origin_invalid",
             )

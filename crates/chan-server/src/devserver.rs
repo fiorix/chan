@@ -2573,7 +2573,7 @@ fn build_devserver_app(
             gate_tenant_during_startup,
         ));
     #[cfg(test)]
-    let app = crate::refusal_check::check(app);
+    let app = crate::refusal_check::check_devserver(app);
     (app, serve_addr)
 }
 
@@ -2596,16 +2596,22 @@ async fn gate_tenant_during_startup(
 
 fn startup_refusal(ownership: Result<bool, Error>) -> Option<Response> {
     match ownership {
-        Ok(true) => Some(
-            (
+        Ok(true) => {
+            let mut response = crate::error::err(
                 StatusCode::SERVICE_UNAVAILABLE,
-                [(header::RETRY_AFTER, "1")],
-                "devserver is restoring terminal sessions",
-            )
-                .into_response(),
-        ),
+                "devserver is restoring terminal sessions".into(),
+            );
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+            Some(response)
+        }
         Ok(false) => None,
-        Err(error) => Some((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()),
+        Err(error) => Some(crate::error::err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+        )),
     }
 }
 
@@ -2618,10 +2624,13 @@ struct TunnelAssertion {
 }
 
 fn tunnel_app(app: Router, assertion: TunnelAssertion) -> Router {
-    app.layer(middleware::from_fn_with_state(
+    let app = app.layer(middleware::from_fn_with_state(
         assertion,
         mark_tunnel_origin,
-    ))
+    ));
+    #[cfg(test)]
+    let app = crate::refusal_check::check(app);
+    app
 }
 
 /// Middleware that stamps every request entering the tunnel-only app clone with
@@ -2643,14 +2652,14 @@ async fn mark_tunnel_origin(
             devserver_id = %assertion.devserver_id,
             "gateway assertion missing",
         );
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        return crate::error::err(StatusCode::UNAUTHORIZED, "unauthorized".into());
     };
     let Some(registration) = req.extensions().get::<chan_tunnel_client::Registration>() else {
         tracing::warn!(
             devserver_id = %assertion.devserver_id,
             "authoritative tunnel registration context missing",
         );
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        return crate::error::err(StatusCode::UNAUTHORIZED, "unauthorized".into());
     };
     if registration.workspace != assertion.devserver_id {
         tracing::warn!(
@@ -2658,7 +2667,7 @@ async fn mark_tunnel_origin(
             registration_devserver_id = %registration.workspace,
             "tunnel registration context mismatch",
         );
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        return crate::error::err(StatusCode::UNAUTHORIZED, "unauthorized".into());
     }
     let aud = req
         .headers()
@@ -2688,7 +2697,7 @@ async fn mark_tunnel_origin(
                 devserver_id = %assertion.devserver_id,
                 "gateway assertion verification failed",
             );
-            return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+            return crate::error::err(StatusCode::UNAUTHORIZED, "unauthorized".into());
         }
     };
     // Every caller the gateway forwards is a signed-in user, and a user id is
@@ -2700,7 +2709,7 @@ async fn mark_tunnel_origin(
             devserver_id = %assertion.devserver_id,
             "gateway assertion names no user",
         );
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        return crate::error::err(StatusCode::UNAUTHORIZED, "unauthorized".into());
     }
     tracing::debug!(
         sub = %caller.sub,
@@ -2905,9 +2914,9 @@ async fn handle_open(
     match state.register_workspace(Path::new(&req.path)).await {
         Ok(prefix) => Json(MountedPrefix { prefix }).into_response(),
         Err(e @ Error::ShuttingDown(_)) => {
-            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+            crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
@@ -2921,7 +2930,9 @@ async fn handle_forget(
     let prefix = format!("/{}", prefix_tail.trim_start_matches('/'));
     match state.forget_workspace(&prefix, query.force).await {
         Ok(WorkspaceLifecycleOutcome::Completed) => StatusCode::NO_CONTENT.into_response(),
-        Ok(WorkspaceLifecycleOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(WorkspaceLifecycleOutcome::NotFound) => {
+            crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
+        }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => (
             StatusCode::CONFLICT,
             Json(ActiveTerminalsRejection {
@@ -2930,7 +2941,7 @@ async fn handle_forget(
             }),
         )
             .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2948,7 +2959,7 @@ async fn handle_set_workspace_on(
     Json(req): Json<SetWorkspaceOnRequest>,
 ) -> Response {
     let Some(prefix_tail) = captured.trim_start_matches('/').strip_suffix("/on") else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "workspace route not found".into());
     };
     let prefix = format!("/{}", prefix_tail.trim_start_matches('/'));
     // Confirm-before-off: unmounting a workspace kills the terminals running in
@@ -2971,7 +2982,9 @@ async fn handle_set_workspace_on(
     }
     match state.set_workspace_on(&prefix, req.on, req.force).await {
         Ok(SetWorkspaceOnResult::Updated(Some(entry))) => Json(entry).into_response(),
-        Ok(SetWorkspaceOnResult::Updated(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(SetWorkspaceOnResult::Updated(None)) => {
+            crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
+        }
         Ok(SetWorkspaceOnResult::Refused { active_terminals }) => (
             StatusCode::CONFLICT,
             Json(ActiveTerminalsRejection {
@@ -2981,9 +2994,9 @@ async fn handle_set_workspace_on(
         )
             .into_response(),
         Err(e @ Error::ShuttingDown(_)) => {
-            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+            crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -3025,11 +3038,10 @@ async fn require_bearer(
     if authorized {
         next.run(req).await
     } else {
-        (
+        crate::error::err(
             StatusCode::UNAUTHORIZED,
-            "missing or invalid devserver bearer token",
+            "missing or invalid devserver bearer token".into(),
         )
-            .into_response()
     }
 }
 
@@ -9523,7 +9535,7 @@ mod tests {
                 let (status, response) = send(caller, method, &uri, body).await;
                 assert_eq!(
                     (status, response.as_str()),
-                    (StatusCode::UNAUTHORIZED, "unauthorized"),
+                    (StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#),
                     "{caller} {step}"
                 );
             }
@@ -9823,7 +9835,10 @@ mod tests {
         let missing = send(None).await;
         assert_eq!(
             missing,
-            (StatusCode::UNAUTHORIZED, "unauthorized".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                r#"{"error":"unauthorized"}"#.to_string()
+            )
         );
         for subject in [
             "00000000-0000-0000-0000-000000000000",

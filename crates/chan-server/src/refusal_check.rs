@@ -1,7 +1,7 @@
 //! Inspect refusals from the assembled routers in this crate's unit tests.
 
 use axum::body::{to_bytes, Body};
-use axum::extract::{MatchedPath, Request};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -14,10 +14,15 @@ pub(crate) struct Inspected;
 pub(crate) struct UpstreamResponse;
 
 pub(crate) fn check(app: Router) -> Router {
-    app.layer(middleware::from_fn(inspect))
+    app.layer(middleware::from_fn_with_state(true, inspect))
 }
 
-async fn inspect(request: Request, next: Next) -> Response {
+pub(crate) fn check_devserver(app: Router) -> Router {
+    // Tenant and launcher navigation refusals are inspected at their own paths.
+    app.layer(middleware::from_fn_with_state(false, inspect))
+}
+
+async fn inspect(State(allow_navigation): State<bool>, request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let matched = request
@@ -26,10 +31,13 @@ async fn inspect(request: Request, next: Next) -> Response {
         .map(|p| p.as_str().to_owned());
     let is_fallback = matched.is_none();
     let response = next.run(request).await;
-    if !(response.status().is_client_error() || response.status().is_server_error()) {
+    if response.extensions().get::<Inspected>().is_some()
+        || response.extensions().get::<UpstreamResponse>().is_some()
+        || !(response.status().is_client_error() || response.status().is_server_error())
+    {
         return response;
     }
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
     let bytes = to_bytes(body, usize::MAX)
         .await
         .expect("read refusal body without changing its bytes");
@@ -60,9 +68,9 @@ async fn inspect(request: Request, next: Next) -> Response {
             || framework.is_some()
             // HEAD has no response body, including on a refusal.
             || (method == Method::HEAD && bytes.is_empty())
-            || permanent_exception(&method, &path, parts.status, is_fallback, &bytes)
+            || permanent_exception(&method, &path, parts.status, is_fallback && allow_navigation, &bytes)
             || range_refusal(&method, &path, parts.status, &parts.headers, &bytes)
-            || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes)
+            || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes, is_fallback)
             || PENDING
                 .iter()
                 .any(|(verb, route)| { method.as_str() == *verb && matches_path(route, &path) }),
@@ -70,6 +78,7 @@ async fn inspect(request: Request, next: Next) -> Response {
         parts.status,
         String::from_utf8_lossy(&bytes),
     );
+    parts.extensions.insert(Inspected);
     Response::from_parts(parts, Body::from(bytes))
 }
 
@@ -79,6 +88,7 @@ fn pending_refusal(
     status: StatusCode,
     headers: &HeaderMap,
     body: &[u8],
+    is_fallback: bool,
 ) -> bool {
     if *method == Method::PUT
         && matches_path("/api/fs/{*path}", path)
@@ -93,31 +103,10 @@ fn pending_refusal(
     {
         return true;
     }
-    if pending_handler_refusal(status, body) {
-        return true;
-    }
-    // The startup gate spans all mounted tenant routes.
-    if status == StatusCode::SERVICE_UNAVAILABLE
-        && body == b"devserver is restoring terminal sessions"
-        && headers
-            .get(header::RETRY_AFTER)
-            .is_some_and(|value| value == "1")
-    {
-        return true;
-    }
-    // These are the proxy's own refusals, not upstream response bodies.
-    path.starts_with("/_chan/extensions/")
-        && status == StatusCode::BAD_GATEWAY
-        && PENDING_PROXY_REFUSALS
-            .iter()
-            .any(|sentence| body == sentence.as_bytes())
-}
-
-fn pending_handler_refusal(status: StatusCode, body: &[u8]) -> bool {
-    // These middleware writers can refuse any tenant route. The tunnel
-    // assertion layer is normally outside the assembled router's checker.
-    (status == StatusCode::INTERNAL_SERVER_ERROR && body == b"config: workspace host lock poisoned")
-        || (status == StatusCode::UNAUTHORIZED && body == b"unauthorized")
+    // Host dispatch is a fallback; its lock error belongs to chan-library.
+    is_fallback
+        && status == StatusCode::INTERNAL_SERVER_ERROR
+        && body == b"config: workspace host lock poisoned"
 }
 
 fn range_refusal(
@@ -167,13 +156,6 @@ fn write_conflict_shape(body: &[u8]) -> bool {
             .get("current_authority_version")
             .is_none_or(|v| v.as_u64().is_some())
 }
-
-const PENDING_PROXY_REFUSALS: &[&str] = &[
-    "extension unavailable",
-    "invalid extension websocket URL",
-    "extension scope invalid",
-    "extension origin invalid",
-];
 
 fn framework_exception(
     status: StatusCode,
@@ -424,12 +406,6 @@ const PENDING: &[(&str, &str)] = &[
     ("POST", "/api/library/devservers"),
     ("PUT", "/api/library/devservers/{id}"),
     ("DELETE", "/api/library/devservers/{id}"),
-    ("GET", "/api/devserver/workspaces"),
-    ("POST", "/api/devserver/workspaces"),
-    ("DELETE", "/api/devserver/workspaces/{*prefix}"),
-    ("POST", "/api/devserver/workspaces/{*prefix}"),
-    ("POST", "/api/devserver/rotate-token"),
-    ("POST", "/api/devserver/terminal-sessions/drain"),
 ];
 
 #[cfg(test)]
@@ -796,21 +772,6 @@ mod tests {
         };
     }
 
-    pending_text_shape!(
-        inventory_startup_state_error,
-        "GET",
-        "/tenant/api/health",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "config: workspace host lock poisoned"
-    );
-    pending_text_shape!(
-        inventory_tunnel_assertion,
-        "GET",
-        "/tenant/api/health",
-        StatusCode::UNAUTHORIZED,
-        "unauthorized"
-    );
-
     #[tokio::test]
     async fn inventory_range_refusal() {
         fn range(status: StatusCode, content_range: &str, body: &'static str) -> Response {
@@ -962,72 +923,6 @@ mod tests {
                     false,
                     format!("{text} extra").as_bytes()
                 ));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn pending_startup_refusal_requires_its_sentence_and_retry_header() {
-        let sentence = "devserver is restoring terminal sessions";
-        for (status, body, retry, accepted) in [
-            (StatusCode::SERVICE_UNAVAILABLE, sentence, Some("1"), true),
-            (StatusCode::SERVICE_UNAVAILABLE, sentence, None, false),
-            (StatusCode::SERVICE_UNAVAILABLE, sentence, Some("3"), false),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "another refusal",
-                Some("1"),
-                false,
-            ),
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                sentence,
-                Some("1"),
-                false,
-            ),
-        ] {
-            assert_eq!(
-                accepts_refusal("GET", "/api/terminal/api/session", status, body, retry).await,
-                accepted,
-                "{status}: {body}, Retry-After: {retry:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn pending_extension_refusals_require_path_status_and_sentence() {
-        for sentence in [
-            "extension unavailable",
-            "invalid extension websocket URL",
-            "extension scope invalid",
-            "extension origin invalid",
-        ] {
-            for (path, status, body, accepted) in [
-                (
-                    "/_chan/extensions/echo/cap/state",
-                    StatusCode::BAD_GATEWAY,
-                    sentence,
-                    true,
-                ),
-                ("/api/unrelated", StatusCode::BAD_GATEWAY, sentence, false),
-                (
-                    "/_chan/extensions/echo/cap/state",
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    sentence,
-                    false,
-                ),
-                (
-                    "/_chan/extensions/echo/cap/state",
-                    StatusCode::BAD_GATEWAY,
-                    "another refusal",
-                    false,
-                ),
-            ] {
-                assert_eq!(
-                    accepts_refusal("POST", path, status, body, None).await,
-                    accepted,
-                    "{path}: {status}, {body}"
-                );
             }
         }
     }
