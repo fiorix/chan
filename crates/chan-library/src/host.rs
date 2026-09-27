@@ -6430,6 +6430,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_abandoned_open_result_releases_the_workspace_before_its_root_lock() {
+        struct Completion(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Completion {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        // The workspace owns its driver, so this observes real workspace
+        // destruction even when the blocking result is never received.
+        struct ReleaseObserver {
+            host: Weak<WorkspaceHost>,
+            key: PathBuf,
+            observed: Option<tokio::sync::oneshot::Sender<bool>>,
+        }
+        impl chan_workspace::RecoveryDriver for ReleaseObserver {
+            fn wake(&self, _: chan_workspace::WorkspaceGeneration) {}
+        }
+        impl Drop for ReleaseObserver {
+            fn drop(&mut self) {
+                let host = self.host.upgrade().unwrap();
+                let mut next = Box::pin(host.root_locks.lock(&self.key));
+                let held = std::future::Future::poll(
+                    next.as_mut(),
+                    &mut std::task::Context::from_waker(std::task::Waker::noop()),
+                )
+                .is_pending();
+                let _ = self.observed.take().unwrap().send(held);
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library.clone(), fake_builder()));
+            let key = canonical_key(root.path());
+            let (observed, observation) = tokio::sync::oneshot::channel();
+            let mut observer = Some(ReleaseObserver {
+                host: Arc::downgrade(&host),
+                key: key.clone(),
+                observed: Some(observed),
+            });
+            let (opened, opening) = tokio::sync::oneshot::channel();
+            let mut opened = Some(opened);
+            let (finished, completion) = tokio::sync::oneshot::channel();
+            let finished = Completion(Some(finished));
+            let (release, released) = std::sync::mpsc::channel();
+            *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+                let _ = &finished;
+                let workspace = result.as_ref().expect("the filesystem open succeeds");
+                workspace.stop_open_recovery();
+                workspace.set_recovery_driver(Arc::new(observer.take().unwrap()));
+                opened
+                    .take()
+                    .unwrap()
+                    .send(workspace.paths().lock.clone())
+                    .unwrap();
+                released.recv_timeout(Duration::from_secs(30)).unwrap();
+            }));
+            let mut mount = Box::pin(
+                host.open_or_get_registered_workspace(root.path(), serve_config("/abandoned")),
+            );
+            let lock_dir = tokio::select! {
+                opened = opening => opened.unwrap(),
+                result = &mut mount => panic!("the held open finished: {result:?}"),
+            };
+            release.send(()).unwrap();
+            // The probe's capture drops after the blocking closure has made
+            // its successful result. Leave the mount unpolled until then so
+            // cancellation cannot take the between-attempts error path.
+            completion.await.unwrap();
+            drop(mount);
+            assert!(
+                observation.await.unwrap(),
+                "an abandoned result released its root lock before its workspace"
+            );
+            let _next = host.root_locks.lock(&key).await;
+            assert!(chan_workspace::lock::is_free(&lock_dir));
+            let reopened = library
+                .open_workspace(root.path())
+                .expect("reopen without retrying");
+            reopened.stop_open_recovery();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn already_open_mount_waits_for_an_in_process_release() {
         // A hang guard, not a latency bound: the workspace opens and the close are
         // real I/O that a loaded runner can stretch to several seconds, and the
