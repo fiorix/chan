@@ -43,7 +43,9 @@ use crate::{
 };
 
 const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
-/// Shared deadline for cell teardown and writer-lock release during a drain.
+/// Budget from blocking-hop dispatch: a drain bounds cell teardown and the
+/// writer-lock check together. A close awaits teardown without a bound and
+/// gives the lock check whatever remains of this budget.
 const WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long one health probe tick waits for the mounted roots to answer.
 /// The roots are checked at once, each on a thread of its own, so a root
@@ -634,19 +636,20 @@ impl HostedWorkspaceRuntime {
         ));
         let deadline = Instant::now() + budget.unwrap_or(WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT);
         let cell = Arc::clone(&self.artifacts.cell);
+        let root = self.root.clone();
         self.clear_started = true;
         // Clear joins both recovery and watcher threads, either of which can
         // be waiting on a filesystem that has stopped answering.
         let wait = tokio::task::spawn_blocking(move || {
             if let Some((weak, lock_dir)) = cell.clear() {
-                wait_for_workspace_release(&weak, &lock_dir, deadline);
+                wait_for_workspace_release(&root, &weak, &lock_dir, deadline);
             }
         });
         let result = if budget.is_some() {
             match tokio::time::timeout_at(deadline.into(), wait).await {
                 Ok(result) => result,
                 Err(_) => {
-                    tracing::warn!("workspace teardown exceeded the shutdown deadline; leaving it in the background");
+                    tracing::warn!(root = %self.root.display(), prefix = %self.handle.prefix, "workspace teardown exceeded the shutdown deadline; leaving it in the background");
                     return;
                 }
             }
@@ -4497,7 +4500,12 @@ fn duplicate_prefix_error(prefix: &str) -> Error {
 /// teardown and the wait is typically a few milliseconds. Bounded so a
 /// wedged reindex cannot hang close: past the deadline the caller sees
 /// the same lingering-flock behavior it would have had without the wait.
-fn wait_for_workspace_release(weak: &Weak<Workspace>, lock_dir: &Path, deadline: Instant) {
+fn wait_for_workspace_release(
+    root: &Path,
+    weak: &Weak<Workspace>,
+    lock_dir: &Path,
+    deadline: Instant,
+) {
     // Two conditions, not one: the last strong `Arc` must drop, AND the
     // per-workspace flock must actually release. An `Arc`'s strong count hits
     // zero *before* `Workspace::drop` runs the `_lock` field's drop, so
@@ -4507,7 +4515,7 @@ fn wait_for_workspace_release(weak: &Weak<Workspace>, lock_dir: &Path, deadline:
     // (and releases it), proving the prior holder's Drop completed.
     while weak.strong_count() > 0 || !chan_workspace::lock::is_free(lock_dir) {
         if Instant::now() >= deadline {
-            tracing::warn!("workspace writer lock still held at the teardown deadline");
+            tracing::warn!(root = %root.display(), "workspace writer lock still held at the teardown deadline");
             return;
         }
         std::thread::sleep(Duration::from_millis(2));
