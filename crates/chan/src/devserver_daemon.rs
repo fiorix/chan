@@ -284,26 +284,85 @@ fn spawn_daemon_child(
     log_path: &Path,
 ) -> Result<Child> {
     let exe = crate::resolve_relaunchable_exe()?;
+    let home = DaemonHome::of_this_process()?;
     let (stdout, stderr) = open_daemon_log(log_path)?;
-    let mut cmd = daemon_command(&exe, addr, tunnel);
+    let mut cmd = daemon_command(&exe, addr, tunnel, &home);
     cmd.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
     detach_command(&mut cmd);
     cmd.spawn()
         .with_context(|| format!("spawning `{}` __devserver-daemon", exe.display()))
 }
 
-/// The `__devserver-daemon` command `exe` runs for a daemon bound to `addr`,
-/// without its output files and before it is detached.
+/// The chan home the detached daemon runs in, and whether the daemon has to
+/// be handed it as `CHAN_HOME` to resolve the home its parent waits on.
+#[derive(Debug)]
+struct DaemonHome {
+    /// The parent's resolved chan home, absolute: the daemon's working
+    /// directory, so it keeps no directory of the user's busy.
+    dir: PathBuf,
+    /// Set when the parent has a `CHAN_HOME` override, which the daemon gets
+    /// as the absolute `dir` because a relative one would resolve against
+    /// the daemon's own directory, or when no home resolves, where the
+    /// fallback makes a fresh directory per process. A daemon whose home
+    /// resolves finds `dir` from any directory, and a `CHAN_HOME` it did not
+    /// need would read as an override to every terminal it spawns.
+    hand_over: bool,
+}
+
+impl DaemonHome {
+    /// This process's chan home, as the daemon it starts should get it.
+    fn of_this_process() -> Result<Self> {
+        let resolved = chan_workspace::paths::config_dir();
+        let parent_dir = if resolved.is_absolute() {
+            PathBuf::new()
+        } else {
+            std::env::current_dir()
+                .context("reading the working directory a relative CHAN_HOME names")?
+        };
+        let has_override = std::env::var_os("CHAN_HOME").is_some_and(|value| !value.is_empty());
+        // With no override, `local_bin_dir` has no base exactly when no home
+        // resolves, the case in which `config_dir` falls back.
+        let home_resolves = chan_workspace::paths::local_bin_dir().is_some();
+        Ok(Self::from_parts(
+            &parent_dir,
+            &resolved,
+            has_override,
+            home_resolves,
+        ))
+    }
+
+    /// `resolved`, the parent's chan home, made absolute against
+    /// `parent_dir`, the parent's working directory.
+    fn from_parts(
+        parent_dir: &Path,
+        resolved: &Path,
+        has_override: bool,
+        home_resolves: bool,
+    ) -> Self {
+        Self {
+            dir: parent_dir.join(resolved),
+            hand_over: has_override || !home_resolves,
+        }
+    }
+}
+
+/// The `__devserver-daemon` command `exe` runs for a daemon bound to `addr`
+/// in `home`, without its output files and before it is detached.
 fn daemon_command(
     exe: &Path,
     addr: SocketAddr,
     tunnel: Option<chan_server::DevserverTunnel>,
+    home: &DaemonHome,
 ) -> Command {
     let mut cmd = Command::new(exe);
     cmd.arg("__devserver-daemon")
         .arg(format!("--bind={}", addr.ip()))
         .arg(format!("--port={}", addr.port()))
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .current_dir(&home.dir);
+    if home.hand_over {
+        cmd.env("CHAN_HOME", &home.dir);
+    }
     match tunnel {
         Some(tunnel) => {
             cmd.arg(format!("--tunnel-url={}", tunnel.tunnel_url));
@@ -644,27 +703,31 @@ mod address_tests {
 mod command_tests {
     use super::*;
 
+    /// An absolute path under the temporary directory, which is absolute on
+    /// every platform.
+    fn absolute(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    fn command_for(home: &DaemonHome) -> Command {
+        daemon_command(
+            Path::new("chan"),
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            home,
+        )
+    }
+
     /// The detached daemon runs in the resolved chan home, not in the
     /// directory the launching shell stood in, so it keeps no folder or
-    /// mount of the user's busy for as long as it runs, and it is handed
-    /// that home so it resolves the one its parent waits on.
+    /// mount of the user's busy for as long as it runs.
     #[test]
     fn the_daemon_runs_in_the_resolved_chan_home() {
-        let env = crate::test_env::ChanTestEnv::new();
-        let cmd = daemon_command(Path::new("chan"), "127.0.0.1:0".parse().unwrap(), None);
+        let home = DaemonHome::from_parts(&absolute("launch"), &absolute("home"), true, true);
         assert_eq!(
-            cmd.get_current_dir(),
-            Some(env.home()),
+            command_for(&home).get_current_dir(),
+            Some(absolute("home").as_path()),
             "the daemon keeps the launching shell's directory"
-        );
-        let chan_home = cmd
-            .get_envs()
-            .find(|(key, _)| *key == "CHAN_HOME")
-            .and_then(|(_, value)| value);
-        assert_eq!(
-            chan_home,
-            Some(env.home().as_os_str()),
-            "the daemon is not handed the resolved chan home"
         );
     }
 }
