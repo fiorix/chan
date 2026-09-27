@@ -33,6 +33,7 @@ import {
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import {
   bumpTabFocusPulse,
+  closeFind,
   ensureTabSlidePreview,
   layout,
   openFind,
@@ -1227,5 +1228,41 @@ describe("outline navigation", () => {
     await settle(2);
 
     expect(editorView(target).state.selection.main.head).toBe(content.indexOf("# C"));
+  });
+});
+
+describe("closing the editor find bar", () => {
+  test.each(["Escape", "close button"])("returns focus after %s", async (method) => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab, { focused: true });
+    openFind(tab.id);
+    await settle();
+    const input = target.querySelector<HTMLInputElement>(".find-input")!;
+    expect(document.activeElement).toBe(input);
+    if (method === "Escape") {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    } else {
+      const button = target.querySelector<HTMLButtonElement>('[aria-label="close find bar"]')!;
+      button.focus();
+      button.click();
+    }
+    await settle();
+
+    expect(tab.find?.open).toBe(false);
+    expect(target.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
+  });
+
+  test("keeps focus taken by another control when find closes", async () => {
+    const tab = seat(fileTab());
+    await render(tab, { focused: true });
+    openFind(tab.id);
+    await settle();
+    const other = document.createElement("input");
+    document.body.append(other);
+    other.focus();
+    closeFind(tab.id);
+    await settle();
+
+    expect(document.activeElement).toBe(other);
   });
 });
