@@ -1280,41 +1280,44 @@ impl WorkspaceHost {
         key: PathBuf,
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
-        // Mark the mount in flight (status `starting`) and fire the watch feed
-        // so the launcher spins this row before the (possibly slow) tenant build
-        // completes. This is the SHARED inner mount every entry point funnels
-        // through -- the `open_or_get` wrapper, the desktop's direct boot-restore
-        // (embedded.rs), the devserver `mount_at` -- so all of them surface
-        // `starting`/`error` without each routing the lifecycle themselves.
         #[cfg(test)]
         let release_budget = self.open_release_budget;
         #[cfg(not(test))]
         let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
-        // The permit's holder can be a call whose caller left and whose
-        // filesystem call has not returned. Wait for it as long as an open
-        // waits for an in-process owner to let the workspace go, then answer
-        // as for an owner that has not, so an idempotent caller gives its
-        // root's lock back to a close or a removal.
-        let Ok(permit) = tokio::time::timeout(
-            release_budget,
-            self.root_calls.lock(&(key.clone(), RootCall::Mount)),
-        )
-        .await
-        else {
-            let result = Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
-            self.settle_mount(&key, &result);
-            return result;
-        };
-        let mut permit = Some(permit.into_owned());
+        // Declared before the guard, so a caller that leaves settles its row
+        // before its permit goes to the next caller.
+        let mut permit;
+        // Mark the mount in flight (status `starting`) and fire the watch feed
+        // so the launcher spins this row while the mount waits for its permit
+        // and builds its tenant. Every registered open funnels through this
+        // body, the idempotent open that the launcher, the desktop and the
+        // devserver call and the raw registered open alike, so all of them
+        // surface `starting`/`error` without routing the lifecycle themselves.
         let mut mounting = WorkspaceMountGuard {
             host: self,
             root: key,
             armed: true,
         };
         self.mark_mount_starting_by_key(&mounting.root);
-        let result = self
-            .open_registered_workspace_inner(root, &mut permit, config, release_budget)
-            .await;
+        // The permit's holder can be a call whose caller left and whose
+        // filesystem call has not returned. Wait for it as long as an open
+        // waits for an in-process owner to let the workspace go, then answer
+        // as for an owner that has not, so an idempotent caller gives its
+        // root's lock back to a close or a removal.
+        let result = match tokio::time::timeout(
+            release_budget,
+            self.root_calls
+                .lock(&(mounting.root.clone(), RootCall::Mount)),
+        )
+        .await
+        {
+            Ok(held) => {
+                permit = Some(held.into_owned());
+                self.open_registered_workspace_inner(root, &mut permit, config, release_budget)
+                    .await
+            }
+            Err(_) => Err(Error::Core(ChanError::WorkspaceAlreadyOpen)),
+        };
         self.settle_mount(&mounting.root, &result);
         mounting.armed = false;
         result
