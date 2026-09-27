@@ -3,10 +3,16 @@
 // end of the document so a paste into an unfocused editor never
 // clobbers the first row.
 
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { buildImageInsert, moveImageSource, pasteInsertPos } from "./image_drop";
+import { buildImageInsert, imageDropHandlers, moveImageSource, pasteInsertPos } from "./image_drop";
+
+import { api } from "../../api/client";
+import { setNotifyHandler } from "../../state/notify.svelte";
+
+Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+Range.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
 
 /// Build a view over `doc` with the caret at `head` and a forced
 /// `hasFocus`. CM6's `hasFocus` reads the DOM in jsdom; we override it
@@ -220,5 +226,65 @@ describe("buildImageInsert", () => {
       // The space is percent-encoded so the ref round-trips the graph scan.
       expect(text).toBe("![](.Drafts/abc/My%20Photo.png#w=250)\n");
     });
+  });
+});
+
+const uploads: EditorView[] = [];
+let notices: string[] = [];
+
+beforeEach(() => {
+  notices = [];
+  setNotifyHandler((message) => notices.push(message));
+});
+
+afterEach(() => {
+  for (const view of uploads.splice(0)) view.destroy();
+  vi.restoreAllMocks();
+});
+
+function pasteFiles(files: File[], doc = "", head = 0): EditorView {
+  const view = new EditorView({ state: EditorState.create({
+    doc, selection: { anchor: head },
+    extensions: [imageDropHandlers({
+      getUploadDir: () => "notes", getCurrentPath: () => "notes/a.md",
+    })],
+  }) });
+  uploads.push(view);
+  Object.defineProperty(view, "hasFocus", { get: () => true, configurable: true });
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: { items: files.map((file) => ({
+    kind: "file", type: file.type, getAsFile: () => file,
+  })) } });
+  view.contentDOM.dispatchEvent(event);
+  return view;
+}
+
+describe("image upload feedback", () => {
+  test("names a failed upload and continues the remaining images", async () => {
+    const upload = vi.spyOn(api, "uploadAttachment")
+      .mockResolvedValueOnce({ path: "notes/first.png" })
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ path: "notes/last.png" });
+    const view = pasteFiles(["first.png", "failed.png", "last.png"].map(
+      (name) => new File(["image"], name, { type: "image/png" }),
+    ));
+
+    await vi.waitFor(() => expect(notices).toEqual(["Image upload failed for failed.png; skipped"]));
+    await vi.waitFor(() => expect(view.state.doc.toString()).toBe(
+      "![](./first.png#w=250)\n![](./last.png#w=250)\n",
+    ));
+    expect(upload).toHaveBeenCalledTimes(3);
+  });
+
+  test("names an oversize image and uploads the next file", async () => {
+    const upload = vi.spyOn(api, "uploadAttachment").mockResolvedValue({ path: "notes/small.png" });
+    const large = new File(["image"], "large.png", { type: "image/png" });
+    Object.defineProperty(large, "size", { value: 60 * 1024 * 1024 });
+    const small = new File(["image"], "small.png", { type: "image/png" });
+    const view = pasteFiles([large, small]);
+
+    await vi.waitFor(() => expect(view.state.doc.toString()).toBe("![](./small.png#w=250)\n"));
+    expect(notices).toEqual(["Image large.png exceeds the 50 MiB upload limit; skipped"]);
+    expect(upload).toHaveBeenCalledExactlyOnceWith(small, "notes");
   });
 });
