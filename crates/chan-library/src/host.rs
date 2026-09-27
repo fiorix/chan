@@ -584,6 +584,8 @@ fn degraded_root_reason(error: &ChanError) -> String {
 }
 
 struct HostedWorkspaceRuntime {
+    /// Fixed at construction: a workspace cell can be empty during a storage reset.
+    holds_workspace: bool,
     root: PathBuf,
     /// Normalized before publication so by-root lookups do no filesystem work
     /// while holding the shared routing map's lock.
@@ -601,7 +603,7 @@ impl HostedWorkspaceRuntime {
     /// differ for a root whose path resolves elsewhere since it was
     /// registered, and a caller holding the row asks by the stored one.
     fn found_by(&self, key: &Path) -> bool {
-        self.canonical_root == key || self.root == key
+        self.holds_workspace && (self.canonical_root == key || self.root == key)
     }
 
     fn router(&self) -> Router {
@@ -1451,7 +1453,10 @@ impl WorkspaceHost {
             if workspaces.contains_key(&prefix) {
                 return Err(duplicate_prefix_error(&prefix));
             }
-            if workspaces.values().any(|runtime| runtime.root == root) {
+            if workspaces
+                .values()
+                .any(|runtime| runtime.holds_workspace && runtime.root == root)
+            {
                 return Err(Error::Config(format!(
                     "workspace already mounted: {}",
                     root.display()
@@ -1516,6 +1521,7 @@ impl WorkspaceHost {
             ),
         };
         let runtime = HostedWorkspaceRuntime {
+            holds_workspace: true,
             canonical_root,
             root,
             handle,
@@ -1534,10 +1540,9 @@ impl WorkspaceHost {
                 shutting_down_error(&runtime.root.display().to_string())
             } else if workspaces.contains_key(&prefix) {
                 duplicate_prefix_error(&prefix)
-            } else if workspaces
-                .values()
-                .any(|existing| existing.canonical_root == runtime.canonical_root)
-            {
+            } else if workspaces.values().any(|existing| {
+                existing.holds_workspace && existing.canonical_root == runtime.canonical_root
+            }) {
                 Error::Config(format!(
                     "workspace already mounted: {}",
                     runtime.root.display()
@@ -1703,6 +1708,7 @@ impl WorkspaceHost {
             handle: handle.clone(),
         };
         let runtime = HostedWorkspaceRuntime {
+            holds_workspace: false,
             canonical_root: canonical_key(&root),
             root,
             handle,
@@ -3136,7 +3142,7 @@ impl WorkspaceHost {
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
             workspaces
                 .values()
-                .find(|runtime| runtime.canonical_root == target)
+                .find(|runtime| runtime.holds_workspace && runtime.canonical_root == target)
                 .map(|runtime| (runtime.handle.prefix.clone(), runtime.root.clone()))
         };
         match mounted {
@@ -3629,7 +3635,7 @@ impl WorkspaceHost {
         let workspaces = self.workspaces.read().ok()?;
         workspaces
             .iter()
-            .find(|(_, runtime)| runtime.canonical_root == target)
+            .find(|(_, runtime)| runtime.holds_workspace && runtime.canonical_root == target)
             .map(|(prefix, _)| prefix.clone())
     }
 
@@ -4509,6 +4515,7 @@ mod tests {
             std::fs::create_dir(&root).expect("workspace root");
             let prefix = format!("/workspace-{index}");
             let runtime = HostedWorkspaceRuntime {
+                holds_workspace: true,
                 canonical_root: canonical_key(&root),
                 root,
                 handle: ServeHandle {
@@ -6547,6 +6554,7 @@ mod tests {
             );
             artifacts.cell = Arc::new(FakeWorkspaceCell(std::sync::Mutex::new(Some(workspace))));
             host.workspaces.write().unwrap().insert("/workspace".into(), HostedWorkspaceRuntime {
+                holds_workspace: true,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_key(root.path()),
                 handle: ServeHandle {
@@ -6788,6 +6796,7 @@ mod tests {
         host.workspaces.write().expect("host map").insert(
             "/workspace".into(),
             HostedWorkspaceRuntime {
+                holds_workspace: true,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_root.clone(),
                 handle: ServeHandle {
@@ -6858,6 +6867,7 @@ mod tests {
                 workspaces.insert(
                     prefix.to_string(),
                     HostedWorkspaceRuntime {
+                        holds_workspace: prefix == "/workspace",
                         root: root.path().to_path_buf(),
                         canonical_root: canonical_root.clone(),
                         handle: ServeHandle {
@@ -9246,6 +9256,7 @@ mod tests {
             host.workspaces.write().expect("host map").insert(
                 "/terminal".to_string(),
                 HostedWorkspaceRuntime {
+                    holds_workspace: false,
                     root: PathBuf::from("/"),
                     canonical_root,
                     handle: ServeHandle {
