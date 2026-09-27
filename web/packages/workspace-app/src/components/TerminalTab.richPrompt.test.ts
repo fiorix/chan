@@ -253,15 +253,16 @@ describe("the composer's pending card", () => {
     expect(warnings()).toEqual([]);
   });
 
-  test("its cancel control clears the tab's pending message without an ownership warning", async () => {
+  test("an acknowledged cancel clears the tab's pending message without an ownership warning", async () => {
     const warnings = ownershipWarnings();
-    const { tab } = await withComposer();
+    const { tab, socket } = await withComposer();
 
     beginPendingPrompt(tab, "m-1");
     await tick();
     const cancel = document.querySelector<HTMLButtonElement>(".rich-prompt .rp-primary")!;
     expect(cancel.textContent?.trim()).toBe("esc cancel");
     cancel.click();
+    await receive(socket, { type: "prompt-cancelled", id: "m-1", removed: true });
     await tick();
     expect(tab.pendingPrompt).toBeUndefined();
     expect(warnings()).toEqual([]);

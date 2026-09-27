@@ -421,15 +421,18 @@ export type TerminalTab = {
   /// (frame out, no ack yet) -> "queued" (server ack; depth = the ack's
   /// 1-based position) -> "delivered" (last write hit the PTY) | "rejected"
   /// (queue full) | "failed" (WS close / ack timeout / session end). Cancel/
-  /// recall adds two terminal phases the bubble consumes: "recalled" (the
+  /// recall locks the composer in "recalling" until its acknowledgement,
+  /// then adds two terminal phases the bubble consumes: "recalled" (the
   /// `prompt-cancelled` ack removed a still-queued message -- unlock + keep the
   /// draft text to edit + resubmit) | "drained" (the cancel raced a drain; the
   /// message already hit the PTY -- surface it, don't silently re-edit). The
   /// bubble's $effect consumes terminal phases and clears this field.
   pendingPrompt?: {
     id: string;
-    phase: "sent" | "queued" | "delivered" | "rejected" | "failed" | "recalled" | "drained";
+    phase: "sent" | "queued" | "recalling" | "delivered" | "rejected" | "failed" | "recalled" | "drained";
     depth?: number;
+    /// Retained separately because recall may start from an empty composer.
+    recallText?: string;
   };
   cwd?: string;
   seedInput?: string;
@@ -2368,6 +2371,12 @@ export function beginPendingPrompt(tab: TerminalTab, id: string): void {
   tab.pendingPrompt = { id, phase: "sent" };
 }
 
+/// Keep the message and its text until cancellation answers. The empty
+/// composer must remain empty while the server still owns the queued text.
+export function beginPromptRecall(tab: TerminalTab, id: string, text: string): void {
+  tab.pendingPrompt = { id, phase: "recalling", recallText: text };
+}
+
 /// Resolve the in-flight prompt by id. Stale/foreign ids no-op: every
 /// attached socket sees every `prompt-delivered`, so a second window (or a
 /// reattach replay) must not flip a pending message it does not own.
@@ -2379,6 +2388,8 @@ export function resolvePendingPrompt(
 ): void {
   const pending = tab.pendingPrompt;
   if (!pending || pending.id !== id) return;
+  // Queue and delivery frames cannot settle an outstanding cancellation.
+  if (pending.phase === "recalling") return;
   tab.pendingPrompt = { ...pending, phase, ...(depth !== undefined ? { depth } : {}) };
 }
 

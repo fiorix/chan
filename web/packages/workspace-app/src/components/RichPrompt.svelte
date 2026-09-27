@@ -25,6 +25,7 @@
   import { hideRichPromptForTab } from "../state/richPrompt.svelte";
   import {
     beginPendingPrompt,
+    beginPromptRecall,
     clearPendingPrompt,
     failPendingPrompt,
     sendCancelToTerminal,
@@ -83,7 +84,7 @@
 
   const isPending = $derived.by(() => {
     const phase = tab.pendingPrompt?.phase;
-    return phase === "sent" || phase === "queued";
+    return phase === "sent" || phase === "queued" || phase === "recalling";
   });
 
   // Reactive because the strip's recall control is only offered when this
@@ -240,10 +241,12 @@
       return { label: "↑ recall", disabled: content.length > 0 };
     return null;
   });
-  // Pending is the only stop state, so one control carries both: submitting
-  // turns it into stop, and stopping turns it back into submit.
+  // One control carries submit and stop; cancellation disables it until
+  // its acknowledgement determines whether the text can be edited again.
   const primaryAction = $derived.by(() =>
-    isPending
+    tab.pendingPrompt?.phase === "recalling"
+      ? { label: "recalling...", disabled: true }
+      : isPending
       ? { label: "esc cancel", disabled: false }
       : { label: submitLabel, disabled: content.trim().length === 0 },
   );
@@ -264,17 +267,18 @@
     }, TRANSIENT_NOTE_MS);
   }
 
-  function consumeTerminalPhase(phase: "delivered" | "rejected" | "failed"): void {
+  function consumeTerminalPhase(phase: "delivered" | "rejected" | "failed" | "recalled" | "drained"): void {
     // Defer until the draft is loaded. The phase effect runs at mount before the
     // async onMount sets `draftPath` and loads `content`; consuming then would
     // clear `tab.pendingPrompt` while `flushWrite` no-ops (no draftPath), and the
     // subsequent load would restore the already-delivered text into an editable
     // composer. onMount re-runs this once loaded, when the clear actually lands.
     if (!loaded) return;
+    const recallText = tab.pendingPrompt?.recallText;
     clearPendingTimers();
     pendingChipVisible = false;
     clearPendingPrompt(tab);
-    if (phase === "delivered") {
+    if (phase === "delivered" || phase === "drained") {
       content = "";
       void flushWrite();
       lastQueued = null;
@@ -284,7 +288,17 @@
       // must not steal the keyboard.
       setRichPromptCaret(tab, 0, 0);
       if (focused) queueMicrotask(() => editor?.focusAt(0));
+      if (phase === "drained") showTransientNote("already sent");
+    } else if (phase === "recalled") {
+      content = recallText ?? content;
+      lastQueued = null;
+      void flushWrite();
+      if (focused) queueMicrotask(() => editor?.focusEnd());
     } else {
+      if (recallText !== undefined) {
+        content = recallText;
+        void flushWrite();
+      }
       showTransientNote(
         phase === "rejected"
           ? "queue full, try again"
@@ -298,7 +312,7 @@
     if (phase === "queued") {
       if (ackTimer !== null) clearTimeout(ackTimer);
       ackTimer = null;
-    } else if (phase === "delivered" || phase === "rejected" || phase === "failed") {
+    } else if (phase === "delivered" || phase === "rejected" || phase === "failed" || phase === "recalled" || phase === "drained") {
       consumeTerminalPhase(phase);
     }
   });
@@ -325,31 +339,27 @@
     editor?.focus();
   }
 
-  function recallFromView(view: EditorView): boolean {
-    if (isPending) {
-      if (lastQueued) sendCancelToTerminal(tab.id, lastQueued.id);
-      lastQueued = null;
-      enterLocalEdit();
-      view.dispatch({
-        selection: { anchor: view.state.doc.length },
-        effects: lockCompartment.reconfigure(lockExtensions(false)),
-      });
-      queueMicrotask(() => view.focus());
-      return true;
-    }
-    if (content.length > 0 || !lastQueued) return false;
-    const { id, text } = lastQueued;
-    lastQueued = null;
-    sendCancelToTerminal(tab.id, id);
-    content = text;
-    void flushWrite();
-    queueMicrotask(() => editor?.focusEnd());
+  function recallFromView(_view: EditorView): boolean {
+    const pending = tab.pendingPrompt;
+    if (pending?.phase === "recalling") return true;
+    const message = isPending && pending
+      ? { id: pending.id, text: content }
+      : content.length === 0 ? lastQueued : null;
+    if (!message) return false;
+    beginPromptRecall(tab, message.id, message.text);
+    clearPendingTimers();
+    ackTimer = setTimeout(() => {
+      ackTimer = null;
+      failPendingPrompt(tab);
+    }, PROMPT_ACK_TIMEOUT_MS);
+    if (!sendCancelToTerminal(tab.id, message.id)) failPendingPrompt(tab);
     return true;
   }
 
-  /// Typing over a pending card starts a fresh, unlocked composer holding
-  /// what was typed.
+  /// Typing over a submitted card starts a fresh composer. A cancellation
+  /// must keep tracking its message until the server answers.
   function startFreshComposer(view: EditorView, seed: string): void {
+    if (tab.pendingPrompt?.phase === "recalling") return;
     enterLocalEdit();
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: seed },
@@ -476,16 +486,16 @@
       loaded = true;
       mountError = null;
       const phase = tab.pendingPrompt?.phase;
-      if (phase === "delivered" || phase === "rejected" || phase === "failed") {
+      if (phase === "delivered" || phase === "rejected" || phase === "failed" || phase === "recalled" || phase === "drained") {
         consumeTerminalPhase(phase);
-      } else if (phase === "sent" || phase === "queued") {
+      } else if (phase === "sent" || phase === "queued" || phase === "recalling") {
         pendingChipVisible = true;
         // Seed from the id, never from whether the draft survived. The message
         // is queued on the server either way, so a blank draft must still leave
         // a bubble that can stop it; gating this on the text was what stranded
         // a queued message behind a composer that could only hide itself.
-        lastQueued = { id: tab.pendingPrompt!.id, text: content };
-        if (phase === "sent" && ackTimer === null) {
+        lastQueued = { id: tab.pendingPrompt!.id, text: tab.pendingPrompt!.recallText ?? content };
+        if ((phase === "sent" || phase === "recalling") && ackTimer === null) {
           ackTimer = setTimeout(() => {
             ackTimer = null;
             failPendingPrompt(tab);
