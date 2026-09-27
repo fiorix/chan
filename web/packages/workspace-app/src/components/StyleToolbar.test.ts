@@ -27,9 +27,10 @@ type FakeWysiwyg = {
 
 const mounted: Array<Record<string, any>> = [];
 
-afterEach(() => {
-  for (const component of mounted.splice(0)) unmount(component);
+afterEach(async () => {
+  for (const component of mounted.splice(0)) await unmount(component);
   document.body.innerHTML = "";
+  vi.useRealTimers();
 });
 
 function fakeWysiwyg(active: string[] = [], block: BlockKind = "normal"): FakeWysiwyg {
@@ -82,6 +83,28 @@ function button(target: ParentNode, name: string): HTMLButtonElement {
 }
 
 describe("StyleToolbar", () => {
+  test.each(["source", "wysiwyg"] as const)("idle visibility in %s mode", async (mode) => {
+    vi.useFakeTimers();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const onModeToggle = vi.fn();
+    mounted.push(mount(StyleToolbar, {
+      target,
+      props: { wysiwyg: undefined, selVer: 1, mode, disabled: mode === "source", onModeToggle },
+    }));
+    await tick();
+    const toolbar = target.querySelector<HTMLElement>("[role='toolbar']")!;
+    expect(toolbar.classList.contains("hidden")).toBe(false);
+    expect(target.querySelector(".fbtn-row")).toBeNull();
+    await vi.advanceTimersByTimeAsync(3100);
+    await tick();
+    expect(toolbar.classList.contains("hidden")).toBe(mode === "wysiwyg");
+    if (mode === "source") {
+      button(target, "show rendered").click();
+      expect(onModeToggle).toHaveBeenCalledWith("wysiwyg");
+    }
+  });
+
   test("file editor variant exposes and wires every formatting control", async () => {
     const { target, toolbar, wysiwyg } = await renderToolbar();
 
