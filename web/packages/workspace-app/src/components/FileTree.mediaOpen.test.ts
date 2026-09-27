@@ -15,6 +15,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
+import { tree } from "../state/store.svelte";
 import { layout, openBrowserInActivePane, type LeafNode } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -24,6 +25,10 @@ beforeEach(async () => {
     demoData([
       { path: "a.md", kind: "document", size: 5, mtime: 100, content: "hello" },
       { path: "clip.mp4", kind: "binary", size: 10, mtime: 100 },
+      { path: "NOTICE.custom", kind: "text", size: 5, mtime: 100, content: "hello" },
+      { path: "binary.md", kind: "binary", size: 10, mtime: 100 },
+      { path: "pending.md", size: 5, mtime: 100 },
+      { path: "pending.custom", size: 5, mtime: 100 },
     ]),
   );
   resetLayout([]);
@@ -98,4 +103,20 @@ describe("opening a Files row", () => {
     await vi.waitFor(() => expect(openFileTabs()).toEqual(["a.md"]));
     expect(document.querySelector(".md-video-viewer")).toBeNull();
   });
+});
+
+
+test("file rows use the server kind and fall back to the suffix while pending", async () => {
+  tree.entries = tree.entries.map((entry) => entry.path.startsWith("pending.")
+    ? { ...entry, kind: "pending" as const }
+    : entry);
+  await settle();
+  for (const path of ["NOTICE.custom", "pending.md"]) {
+    expect(row(path)?.classList.contains("non-editable"), path).toBe(false);
+    expect(row(path)?.title, path).not.toContain("(view-only)");
+  }
+  for (const path of ["clip.mp4", "binary.md", "pending.custom"]) {
+    expect(row(path)?.classList.contains("non-editable"), path).toBe(true);
+    expect(row(path)?.title, path).toContain("(view-only)");
+  }
 });
