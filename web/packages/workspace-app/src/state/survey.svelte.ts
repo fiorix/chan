@@ -167,9 +167,10 @@ export function syncSurveys(open: ReadonlyArray<{ spec: SurveySpec; slot: Survey
 /// is in flight for it (busy), the slot is left to that reply: an accepted
 /// reply clears it, and a failed one applies the close, since nothing is
 /// waiting on the survey any more. A close raced against the deadline lands
-/// here, and so does an `answered_elsewhere` fanned back to the answerer when
-/// its reply carried no windowId. A survey a sync sets aside is still open and
-/// never comes here. Returns whether the slot was cleared.
+/// here, and so does the `answered_elsewhere` close of an answer this window
+/// has in flight, since the server sends an answered survey's close to every
+/// window it targeted. A survey a sync sets aside is still open and never
+/// comes here. Returns whether the slot was cleared.
 function retire(slot: SurveySlot): boolean {
   const e = entry(slot);
   if (!e) return false;
