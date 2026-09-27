@@ -160,6 +160,18 @@ describe("keymap override store", () => {
     expect(seen[1]).toEqual({});
   });
 
+  test("hydrate drops Shift-only slots and retains Mod+Shift chords", () => {
+    hydrateOverrides({
+      "app.window.reload": { web: "Shift+K", macos: "Shift+1", linux: "Shift+F2", windows: "Shift+ArrowUp" },
+      "app.search.toggle": { web: "Mod+Shift+K", macos: "Ctrl+Shift+K", linux: "Cmd+Shift+K", windows: "Alt+Shift+K" },
+    });
+    expect(serializeOverrides()["app.window.reload"]).toBeUndefined();
+    expect(chordFor("app.window.reload")).toBe("Cmd+R");
+    expect(serializeOverrides()["app.search.toggle"]).toEqual({
+      web: "Mod+Shift+K", macos: "Ctrl+Shift+K", linux: "Cmd+Shift+K", windows: "Alt+Shift+K",
+    });
+  });
+
   test("a user-assigned override chord escapes a focused terminal", () => {
     // Importing the store registers the override-escape matcher. A user
     // assignment must escape so the app key handler can see it from terminal

@@ -150,6 +150,23 @@ describe("CommandChordAssign", () => {
     expect(target.querySelector(".swap")).toBeNull();
   });
 
+  test("keeps composing after a Shift-only letter without assigning it", async () => {
+    const target = mountAssign(cmd("app.custom.demo", "Demo"));
+    (target.querySelector(".chord-btn") as HTMLElement).click();
+    await flush();
+
+    key(target, { key: "Q", shiftKey: true });
+    await flush();
+
+    expect(overrideChordFor("app.custom.demo")).toBeUndefined();
+    expect(target.querySelector(".capture")).not.toBeNull();
+    expect(target.querySelector(".conflict")).toBeNull();
+    key(target, { key: "k", metaKey: true, shiftKey: true });
+    await flush();
+    expect(overrideChordFor("app.custom.demo")).toBe("Mod+Shift+K");
+    expect(target.querySelector(".capture")).toBeNull();
+  });
+
   test("a conflict on a chorded command offers a swap that exchanges both chords", async () => {
     // Reload holds Cmd+R; Preview slide deck holds Cmd+Enter. Capturing
     // Cmd+Enter for Reload conflicts - and Reload has a chord to give.

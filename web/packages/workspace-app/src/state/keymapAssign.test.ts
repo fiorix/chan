@@ -31,6 +31,13 @@ describe("captureChord", () => {
     const e = new KeyboardEvent("keydown", { key: "j" });
     expect(captureChord(e)).toBeNull();
   });
+
+  test.each(["K", "1", "F2", "ArrowUp"])(
+    "refuses Shift+%s without another modifier",
+    (key) => {
+      expect(captureChord(new KeyboardEvent("keydown", { key, shiftKey: true }))).toBeNull();
+    },
+  );
 });
 
 describe("keymapConflicts", () => {
