@@ -1807,6 +1807,22 @@ struct AddWorkspace {
     label: Option<String>,
 }
 
+fn add_workspace_root_error(error: crate::Error) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+}
+
+fn add_workspace_prefix_error(error: crate::Error) -> Response {
+    (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+}
+
+fn workspace_registration_task_error(error: tokio::task::JoinError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("workspace registration task failed: {error}"),
+    )
+        .into_response()
+}
+
 /// `POST /api/library/workspaces` `{path}`: register the local folder in the host
 /// library and mount it (on), persisting its on-state. Returns the new row.
 /// Loopback-only.
@@ -1824,11 +1840,11 @@ async fn handle_add_workspace(
     let root = Path::new(&req.path);
     let key = match state.host.root_key(root).await {
         Ok(key) => key,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return add_workspace_root_error(e),
     };
     let prefix = match workspace_prefix_for(root, &key) {
         Ok(prefix) => prefix,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => return add_workspace_prefix_error(e),
     };
     let registering = {
         let library = state.host.library().clone();
@@ -1839,13 +1855,7 @@ async fn handle_add_workspace(
     let registered = match registering.await {
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("workspace registration task failed: {e}"),
-            )
-                .into_response()
-        }
+        Err(e) => return workspace_registration_task_error(e),
     };
     match state
         .host
