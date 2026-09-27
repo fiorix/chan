@@ -9,6 +9,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,6 +61,8 @@ pub(crate) struct ExtensionView {
     pub entry_path: String,
     pub capabilities: Vec<ExtensionCapability>,
     pub singleton: bool,
+    /// True until the supervisor observes exit or stops the child.
+    pub running: bool,
     pub commands: Vec<ExtensionCommand>,
 }
 
@@ -88,6 +91,7 @@ pub(crate) struct ExtensionEntry {
     capability: String,
     capabilities: Vec<ExtensionCapability>,
     singleton: bool,
+    running: Arc<AtomicBool>,
     commands: Vec<ExtensionCommand>,
 }
 
@@ -101,6 +105,7 @@ impl ExtensionEntry {
                 .expect("an extension entry always shares its own upstream origin"),
             capabilities: self.capabilities.clone(),
             singleton: self.singleton,
+            running: self.running.load(Ordering::Relaxed),
             commands: self.commands.clone(),
         }
     }
@@ -169,6 +174,7 @@ impl ExtensionEntry {
             capability: capability.to_string(),
             capabilities: Vec::new(),
             singleton: false,
+            running: Arc::new(AtomicBool::new(true)),
             commands: Vec::new(),
         }
     }
@@ -202,9 +208,9 @@ impl ExtensionCatalog {
 
 /// Owns every extension supervisor for one chan process.
 ///
-/// The route builder receives only the immutable catalog. Keeping process
-/// handles here makes shutdown ownership explicit and prevents a per-tenant
-/// mount from spawning another copy of each extension.
+/// The route builder receives only the catalog and its shared running flags.
+/// Keeping process handles here makes shutdown ownership explicit and prevents
+/// a per-tenant mount from spawning another copy of each extension.
 pub struct ExtensionRuntime {
     catalog: Arc<ExtensionCatalog>,
     shutdown_tx: watch::Sender<bool>,
@@ -614,6 +620,7 @@ fn extension_entry(
         capability: random_proxy_capability(),
         capabilities,
         singleton: handshake.singleton,
+        running: Arc::new(AtomicBool::new(true)),
         commands,
     })
 }
@@ -690,6 +697,7 @@ async fn supervise_extension(started: StartedExtension, mut shutdown_rx: watch::
 
     tokio::select! {
         status = child.wait() => {
+            entry.running.store(false, Ordering::Relaxed);
             cleanup_process_group(process_group);
             match status {
                 Ok(status) => tracing::warn!(extension_id = %id, %status, "extension exited; restart chan to relaunch it"),
@@ -698,6 +706,7 @@ async fn supervise_extension(started: StartedExtension, mut shutdown_rx: watch::
         }
         _ = shutdown_rx.changed() => {
             terminate_child(&mut child, process_group).await;
+            entry.running.store(false, Ordering::Relaxed);
         }
     }
 
