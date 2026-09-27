@@ -4034,12 +4034,8 @@ fn devserver_id_for_window_label(feed: &DevserverFeed, label: &str) -> Option<St
 /// directly so a SPA-side fault (frozen Svelte runtime, JS error
 /// in the chord handler) doesn't lock the dev affordance away.
 #[tauri::command]
-fn reload_window(
-    app: tauri::AppHandle,
-    state: State<Arc<AppState>>,
-    window: tauri::WebviewWindow,
-) -> Result<(), String> {
-    if reload_devserver_window_from_feed(&app, state.inner(), window.label())? {
+fn reload_window(state: State<Arc<AppState>>, window: tauri::WebviewWindow) -> Result<(), String> {
+    if reload_devserver_window_from_feed(state.inner(), window.label())? {
         return Ok(());
     }
     // Tauri 2's `WebviewWindow::eval` runs JS inside the webview;
@@ -4053,11 +4049,7 @@ fn reload_window(
 /// navigating the existing window. Gateway windows need a fresh entry mint
 /// and WebView session. A not-ready target keeps the page; a vanished window
 /// stays closed. `Ok(false)` leaves reload to the in-page `location.reload()`.
-fn reload_devserver_window_from_feed(
-    app: &tauri::AppHandle,
-    state: &Arc<AppState>,
-    label: &str,
-) -> Result<bool, String> {
+fn reload_devserver_window_from_feed(state: &Arc<AppState>, label: &str) -> Result<bool, String> {
     if !label.starts_with("lib-") {
         return Ok(false);
     }
@@ -4067,39 +4059,12 @@ fn reload_devserver_window_from_feed(
     if record.token.is_empty() {
         return Ok(false);
     }
-    let conn = state.devservers.get(&devserver_id);
-    Ok(window_watcher_wiring::dispatch_devserver_reload(
+    let connected = state.devservers.get(&devserver_id).is_some();
+    let views = state.devserver_watcher_views.lock().unwrap();
+    Ok(window_watcher_wiring::request_devserver_reload(
         label,
-        conn.is_some(),
-        &state.retarget_tickets,
-        |ticket| {
-            let app = app.clone();
-            let label = label.to_string();
-            let record = record.clone();
-            tauri::async_runtime::spawn(async move {
-                let conn = conn.expect("connected Reload");
-                let url = match devserver::window_navigation_url(&conn, &record).await {
-                    Ok(url) => url,
-                    Err(e) => {
-                        tracing::warn!(
-                            window = %record.window_id,
-                            error = %e,
-                            "reload: resolving devserver window URL failed",
-                        );
-                        return;
-                    }
-                };
-                if let Err(e) =
-                    devserver::install_gateway_webview_session(&app, &conn, Some(label.as_str()))
-                {
-                    tracing::warn!(window = %record.window_id, error = %e, "reload: installing gateway WebView session failed");
-                    return;
-                }
-                let outcome =
-                    serve::retarget_watched_remote_window(&app, &url, &record, &ticket).await;
-                window_watcher_wiring::finish_devserver_reload(&record, outcome);
-            });
-        },
+        connected,
+        views.get(&devserver_id).map(Arc::as_ref),
     ))
 }
 

@@ -199,7 +199,7 @@ pub trait NativeSurface {
     /// Synchronize a native window that already exists for `record`. The default
     /// is a no-op; surfaces that encode launch-only data in the webview URL can
     /// rebuild in place when the authoritative record's launch data changes.
-    fn refresh(&self, _record: &WindowRecord) {}
+    fn refresh(&self, _record: &WindowRecord, _reload: bool) {}
     /// Close the native window labelled `label`.
     fn close(&self, label: &str);
     /// Drop attempts outside the desired native surface.
@@ -246,6 +246,16 @@ pub fn reconcile(
     buried: &HashSet<String>,
     surface: &impl NativeSurface,
 ) {
+    reconcile_with_reloads(library_id, snapshot, buried, &HashSet::new(), surface);
+}
+
+fn reconcile_with_reloads(
+    library_id: &str,
+    snapshot: &[WindowRecord],
+    buried: &HashSet<String>,
+    reloads: &HashSet<String>,
+    surface: &impl NativeSurface,
+) {
     debug_assert!(
         snapshot.iter().all(|r| r.library_id == library_id),
         "reconcile got a record from a different library than {library_id}",
@@ -264,9 +274,12 @@ pub fn reconcile(
     // same stable label while rotating the per-window tenant token embedded in the
     // launch URL.
     for record in snapshot.iter().filter(|r| should_show(r, buried)) {
-        if actual.contains(&native_label(record)) {
-            surface.refresh(record);
-        } else {
+        let label = native_label(record);
+        if actual.contains(&label) {
+            surface.refresh(record, reloads.contains(&label));
+        } else if !reloads.contains(&label) {
+            // A Reload only addresses the existing native window. A later
+            // authoritative reconcile may still open this desired record.
             surface.open(record);
         }
     }
@@ -304,6 +317,13 @@ pub struct WatcherViewState {
     buried: Mutex<HashSet<String>>,
     pending_deletes: Arc<PendingDeleteState>,
     changed: Notify,
+    reloads: Mutex<ReloadRequests>,
+}
+
+#[derive(Default)]
+struct ReloadRequests {
+    labels: HashSet<String>,
+    stopped: bool,
 }
 
 impl Default for WatcherViewState {
@@ -322,7 +342,30 @@ impl WatcherViewState {
             buried: Mutex::new(HashSet::new()),
             pending_deletes,
             changed: Notify::new(),
+            reloads: Mutex::new(ReloadRequests::default()),
         }
+    }
+
+    /// Queue a user-requested retarget for this watcher's next pass. The loop
+    /// checks its fresh snapshot and native presence before dispatching it.
+    pub(crate) fn request_reload(&self, label: &str) -> bool {
+        let mut requests = self.reloads.lock().unwrap();
+        if requests.stopped {
+            return false;
+        }
+        requests.labels.insert(label.to_string());
+        self.changed.notify_one();
+        true
+    }
+
+    pub(crate) fn take_reload_requests(&self) -> HashSet<String> {
+        std::mem::take(&mut self.reloads.lock().unwrap().labels)
+    }
+
+    fn stop(&self) {
+        let mut requests = self.reloads.lock().unwrap();
+        requests.stopped = true;
+        requests.labels.clear();
     }
 
     /// Bury a native window (the standalone-terminal close button): the next
@@ -356,6 +399,15 @@ impl WatcherViewState {
     }
 }
 
+// Reject requests even when the task is aborted or unwinds during a pass.
+struct WatcherLifetime(Arc<WatcherViewState>);
+
+impl Drop for WatcherLifetime {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
+
 /// Drive a library's native surface to its window set: reconcile on every feed
 /// change AND every local view change (bury/unbury), until `cancel` resolves
 /// with an explicit stop action. The reconcile is idempotent (snapshot-not-delta),
@@ -386,6 +438,7 @@ pub async fn watch_loop<F, S, C>(
     // eagerly (its id is constant). While it is unknown there are NO windows, so
     // reconcile is a no-op -- skip it. Once learned it is REMEMBERED, so a feed
     // that later empties still closes the library's windows.
+    let _lifetime = WatcherLifetime(Arc::clone(&view));
     let mut library_id = initial_library_id.map(str::to_string);
     let feed_notify = feed.change_notify();
     tokio::pin!(cancel);
@@ -401,12 +454,19 @@ pub async fn watch_loop<F, S, C>(
         tokio::pin!(view_changed);
         view_changed.as_mut().enable();
 
+        let reloads = view.take_reload_requests();
         let snapshot = feed.snapshot();
         if let Some(record) = snapshot.first() {
             library_id = Some(record.library_id.clone());
         }
         if let Some(library_id) = &library_id {
-            reconcile(library_id, &snapshot, &view.suppressed_snapshot(), &surface);
+            reconcile_with_reloads(
+                library_id,
+                &snapshot,
+                &view.suppressed_snapshot(),
+                &reloads,
+                &surface,
+            );
         }
 
         // Ask after the whole pass so record order cannot round a later
@@ -420,10 +480,9 @@ pub async fn watch_loop<F, S, C>(
         };
 
         tokio::select! {
-            _ = feed_changed => {}
-            _ = view_changed => {}
-            _ = retry => {}
+            biased;
             stop = &mut cancel => {
+                view.stop();
                 surface.retire();
                 if stop == WatchLoopStop::CloseWindows {
                     // Disconnect: reconcile to empty so the library's native
@@ -436,6 +495,9 @@ pub async fn watch_loop<F, S, C>(
                 }
                 break;
             }
+            _ = feed_changed => {}
+            _ = view_changed => {}
+            _ = retry => {}
         }
     }
 }
@@ -471,7 +533,7 @@ mod tests {
         fn open(&self, record: &WindowRecord) {
             self.opened.borrow_mut().push(native_label(record));
         }
-        fn refresh(&self, record: &WindowRecord) {
+        fn refresh(&self, record: &WindowRecord, _reload: bool) {
             self.refreshed.borrow_mut().push(native_label(record));
         }
         fn close(&self, label: &str) {

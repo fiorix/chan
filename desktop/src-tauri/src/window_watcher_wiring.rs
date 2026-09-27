@@ -32,43 +32,21 @@ use crate::{serve, AppState};
 /// Library id of the embedded local-disk library.
 const LOCAL_LIBRARY_ID: &str = "local";
 
-pub(crate) fn dispatch_devserver_reload(
+pub(crate) fn request_devserver_reload(
     label: &str,
     connected: bool,
-    tickets: &serve::RetargetTickets,
-    dispatch: impl FnOnce(serve::RetargetTicket),
+    view: Option<&WatcherViewState>,
 ) -> bool {
-    if !connected {
-        return false;
-    }
-    dispatch(tickets.begin(label));
-    true
+    connected && view.is_some_and(|view| view.request_reload(label))
 }
 
-pub(crate) fn finish_devserver_reload(
-    record: &WindowRecord,
-    outcome: Result<serve::RetargetOutcome, String>,
-) {
-    let result = match outcome {
-        Ok(serve::RetargetOutcome::Navigated) => Ok(()),
-        Ok(serve::RetargetOutcome::Gone) => {
-            tracing::debug!(window = %record.window_id, "reload: window is gone");
-            Ok(())
-        }
-        Ok(serve::RetargetOutcome::NotReady) => {
-            tracing::debug!(window = %record.window_id, "reload: target is not ready");
-            Ok(())
-        }
-        Ok(serve::RetargetOutcome::Superseded) => Ok(()),
-        Err(e) => Err(e),
-    };
-    if let Err(e) = result {
-        tracing::warn!(
-            window = %record.window_id,
-            error = %e,
-            "reload: navigating devserver window failed",
-        );
-    }
+async fn prepare_remote_navigation(
+    resolve: impl std::future::Future<Output = Result<String, String>>,
+    install: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
+    let url = resolve.await?;
+    install()?;
+    Ok(url)
 }
 
 /// How a devserver watcher should stop. Disconnect closes that devserver's
@@ -338,15 +316,16 @@ impl WindowBuilds {
 struct RemoteLaunches(Mutex<Launches>);
 
 impl RemoteLaunches {
-    fn needs_retarget(&self, record: &WindowRecord, gateway: bool) -> bool {
+    fn needs_retarget(&self, record: &WindowRecord, gateway: bool, reload: bool) -> bool {
         let label = native_label(record);
         let next = RemoteLaunchKey::from_record(record, gateway);
         let state = self.0.lock().unwrap();
         !state.retired
-            && state
-                .entries
-                .get(&label)
-                .is_none_or(|entry| entry.should_retry(&next))
+            && (reload
+                || state
+                    .entries
+                    .get(&label)
+                    .is_none_or(|entry| entry.should_retry(&next)))
     }
 
     fn begin_remote(
@@ -561,17 +540,21 @@ impl TauriNativeSurface {
                     );
                 }
             };
-            let url = match crate::devserver::window_navigation_url(&conn, &record).await {
+            let url = match prepare_remote_navigation(
+                crate::devserver::window_navigation_url(&conn, &record),
+                || {
+                    crate::devserver::install_gateway_webview_session(
+                        &app,
+                        &conn,
+                        retarget.then_some(label.as_str()),
+                    )
+                },
+            )
+            .await
+            {
                 Ok(url) => url,
                 Err(e) => return fail(e),
             };
-            if let Err(e) = crate::devserver::install_gateway_webview_session(
-                &app,
-                &conn,
-                retarget.then_some(label.as_str()),
-            ) {
-                return fail(e);
-            }
             if retarget {
                 let outcome = serve::retarget_watched_remote_window(
                     &app,
@@ -728,17 +711,19 @@ impl NativeSurface for TauriNativeSurface {
         }
     }
 
-    fn refresh(&self, record: &WindowRecord) {
+    fn refresh(&self, record: &WindowRecord, reload: bool) {
         // The caption is editable while the window is open, so every reconcile
         // reconciles the OS title too -- for local windows as well, which have
         // no other reason to be refreshed.
         self.sync_title(record);
-        if !self.opener.is_remote() {
+        if !self.opener.is_remote()
+            || (reload && self.app.get_webview_window(&native_label(record)).is_none())
+        {
             return;
         }
         if self
             .remote_launches
-            .needs_retarget(record, self.opener.is_gateway())
+            .needs_retarget(record, self.opener.is_gateway(), reload)
         {
             self.navigate_remote(record, true);
         }
@@ -1615,8 +1600,8 @@ mod tests {
             self.builds
                 .complete(&label, Err("native build refused".into()));
         }
-        fn refresh(&self, record: &WindowRecord) {
-            if !self.launches.needs_retarget(record, false) {
+        fn refresh(&self, record: &WindowRecord, reload: bool) {
+            if !self.launches.needs_retarget(record, false, reload) {
                 return;
             }
             let label = native_label(record);
@@ -1763,34 +1748,24 @@ mod tests {
             &self,
             record: &WindowRecord,
             connected: bool,
-            _view: Option<&WatcherViewState>,
+            view: Option<&WatcherViewState>,
         ) -> bool {
-            dispatch_devserver_reload(
-                &native_label(record),
-                connected,
-                &self.surface.tickets,
-                |ticket| {
-                    self.surface
-                        .attempts
-                        .lock()
-                        .unwrap()
-                        .push((native_label(record), tokio::time::Instant::now()));
-                    self.surface
-                        .held
-                        .lock()
-                        .unwrap()
-                        .push((native_label(record), ticket));
-                },
-            )
+            request_devserver_reload(&native_label(record), connected, view)
         }
 
         fn finish_requested(
             &self,
             record: &WindowRecord,
-            _ticket: &serve::RetargetTicket,
+            ticket: &serve::RetargetTicket,
             outcome: Result<serve::RetargetOutcome, String>,
         ) {
-            finish_devserver_reload(record, outcome);
+            self.surface.launches.finish_retarget(
+                &native_label(record),
+                &self.surface.tickets,
+                ticket,
+                &self.surface.builds,
+                outcome,
+            );
         }
 
         fn waiting_since(&self, record: &WindowRecord, second: u64) {
@@ -2003,7 +1978,32 @@ mod tests {
         assert!(harness.request_reload(&record, true, Some(&harness.view)));
         harness.drain().await;
         let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
-        harness.finish_requested(&record, &ticket, Err(failure.into()));
+        let prepared = prepare_remote_navigation(
+            std::future::ready(if failure == "resolve" {
+                Err("resolve".into())
+            } else {
+                Ok("https://test.invalid/".into())
+            }),
+            || {
+                if failure == "session" {
+                    Err("session".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        match prepared {
+            Err(error) => harness.surface.launches.fail(
+                &native_label(&record),
+                true,
+                &harness.surface.tickets,
+                Some(&ticket),
+                &harness.surface.builds,
+                error,
+            ),
+            Ok(_) => harness.finish_requested(&record, &ticket, Err("navigation".into())),
+        }
         harness.drain().await;
         harness.waiting_since(&record, 5);
         tokio::time::advance(Duration::from_secs(15)).await;
@@ -2119,11 +2119,15 @@ mod tests {
             let record = retry_record("reload-stopped", 0);
             let harness = RetryHarness::start(vec![record.clone()], false, true).await;
             let view = Arc::clone(&harness.view);
+            harness.drain().await;
+            assert!(harness.request_reload(&record, true, Some(&view)));
             let surface = harness.stop(stop).await;
-            let handled =
-                dispatch_devserver_reload(&native_label(&record), true, &surface.tickets, |_| {});
+            assert!(
+                view.take_reload_requests().is_empty(),
+                "stopping drops queued Reload requests"
+            );
+            let handled = request_devserver_reload(&native_label(&record), true, Some(&view));
             assert!(!handled, "a stopped watcher leaves Reload to the page");
-            let _ = view;
             let (label, ticket) = surface.held.lock().unwrap().pop().unwrap();
             surface.launches.finish_retarget(
                 &label,
@@ -2330,7 +2334,7 @@ mod tests {
             );
             tokio::time::advance(Duration::from_secs(60)).await;
             assert!(
-                !surface.launches.needs_retarget(&record, false),
+                !surface.launches.needs_retarget(&record, false, false),
                 "a stopped watcher must reject a late completion's next attempt"
             );
             assert_eq!(surface.attempts.lock().unwrap().len(), 1);

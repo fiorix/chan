@@ -2235,22 +2235,36 @@ mod tests {
             "fn navigate_remote",
             "/// Reconcile one live window",
         );
-        {
-            let (name, source) = ("Reload", reload);
-            let before_spawn = source.split("async_runtime::spawn").next().unwrap();
-            assert!(
-                before_spawn.contains("dispatch_devserver_reload("),
-                "{name} takes its ticket before mint dispatch"
-            );
-            assert!(
-                source.contains("retarget_watched_remote_window("),
-                "{name} retargets"
-            );
-        }
+        assert!(reload.contains("request_devserver_reload("));
+        assert!(reload.contains("devserver_watcher_views.lock()"));
+        assert!(reload.contains("views.get(&devserver_id)"));
+        assert!(reload.contains("state.devservers.get(&devserver_id).is_some()"));
+        assert!(!reload.contains("async_runtime::spawn"));
+        let route = source_section(
+            wiring,
+            "pub(crate) fn request_devserver_reload",
+            "async fn prepare_remote_navigation",
+        );
+        assert!(route.contains("view.request_reload(label)"));
+        let watcher = include_str!("window_watcher.rs");
+        let reconcile = source_section(
+            watcher,
+            "fn reconcile_with_reloads",
+            "/// A library's window-set feed",
+        );
+        assert!(reconcile.contains("surface.refresh(record, reloads.contains(&label))"));
+        let refresh = source_section(wiring, "fn refresh(&self, record", "fn close(&self, label");
+        assert!(refresh.contains(".needs_retarget(record, self.opener.is_gateway(), reload)"));
+        assert!(refresh
+            .contains("reload && self.app.get_webview_window(&native_label(record)).is_none()"));
+        assert!(refresh.contains("navigate_remote(record, true)"));
+        assert!(dispatch.contains("prepare_remote_navigation("));
+        assert!(dispatch.contains("window_navigation_url(&conn, &record)"));
+        assert!(dispatch.contains("install_gateway_webview_session("));
+        assert!(dispatch.contains("Err(e) => return fail(e)"));
         let before_spawn = dispatch.split("async_runtime::spawn").next().unwrap();
         assert!(before_spawn.contains("remote_launches.begin_remote("));
         assert!(dispatch.contains("retarget_watched_remote_window("));
-        assert!(reload.contains("&ticket"));
         assert!(dispatch.contains("ticket.as_ref().expect(\"retarget ticket\")"));
         let retarget = source_section(
             serve,
@@ -2570,8 +2584,8 @@ mod tests {
             "a vanished retarget must not rebuild (resurrects closed windows)",
         );
 
-        // The Cmd+R / tab-Reload path resolves its navigation URL the same
-        // way (a fresh gateway mint), never a bare origin.
+        // Reload delegates URL resolution and session installation to the
+        // watcher that owns retarget admission and retries.
         const MAIN_RS: &str = include_str!("main.rs");
         let reload = MAIN_RS
             .split("fn reload_devserver_window_from_feed")
@@ -2580,7 +2594,7 @@ mod tests {
             .split("fn open_devtools")
             .next()
             .expect("reload section ends before open_devtools");
-        assert!(reload.contains("window_navigation_url"));
+        assert!(reload.contains("request_devserver_reload"));
         assert!(!reload.contains("conn_base_origin"));
     }
 
