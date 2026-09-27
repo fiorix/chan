@@ -404,6 +404,28 @@ describe("a load whose tab is closed leaves nothing behind", () => {
     expect(activePane().tabs).toHaveLength(0);
   });
 
+  test("a draft closed during its load reopens without its partial bytes", async () => {
+    // A closed draft reopens as a fresh draft seeded with the closed buffer,
+    // and a buffer whose load never finished holds only the bytes that had
+    // arrived: carrying them would write a partial file as the new draft.
+    const { release } = pausedRead();
+    const pane = resetLayout();
+    const opened = openInPane(pane.id, DRAFT_PATH);
+    const tabId = activePane().tabs[0]!.id;
+    await vi.waitFor(() => expect(liveTab(tabId).content).toBe("# part"));
+    await closeTab(PANE_ID, tabId, { force: true });
+    release();
+    await opened;
+
+    const created = vi.spyOn(api, "createDraft").mockResolvedValue({ path: ".Drafts/fresh/draft.md", name: "fresh" });
+    const write = vi.spyOn(api, "write").mockResolvedValue({} as Awaited<ReturnType<typeof api.write>>);
+    expect(reopenClosedTab()).toBe(true);
+    await vi.waitFor(() => expect(created).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(write).not.toHaveBeenCalled();
+  });
+
   test("reopening it loads the file again", async () => {
     // The close keeps a reopen record, and a record whose load never finished
     // holds only the bytes that had arrived, not the file. The reopen reads the
