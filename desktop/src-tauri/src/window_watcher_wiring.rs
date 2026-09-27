@@ -938,14 +938,41 @@ pub(crate) fn spawn_local_window_watcher(app: AppHandle, state: Arc<AppState>) {
 /// `GET /api/library/windows/watch` WebSocket. A background task holds the
 /// latest snapshot and wakes the watcher on every push; it reconnects on a
 /// dropped socket (resubscribe + the idempotent reconcile self-heals).
+#[derive(Clone)]
 struct DevserverWindowFeed {
     snapshot: Arc<Mutex<Vec<WindowRecord>>>,
+    /// Whether the feed connection whose frame wrote `snapshot` is still up.
+    /// Written and read under `snapshot`'s lock, so no reader pairs one
+    /// connection's set with another's state.
+    live: Arc<std::sync::atomic::AtomicBool>,
     change: Arc<Notify>,
 }
 
+impl DevserverWindowFeed {
+    /// Replace the window set with a decoded frame's: the connection that
+    /// sent the frame is up.
+    fn write_frame(&self, windows: Vec<WindowRecord>) {
+        let mut set = self.snapshot.lock().unwrap();
+        *set = windows;
+        self.live.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// End a feed connection's round: the set stays as its last frame left
+    /// it, and the connection that sent that frame is gone.
+    fn end_round(&self) {
+        let _set = self.snapshot.lock().unwrap();
+        self.live.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl WindowFeed for DevserverWindowFeed {
+    /// The window set as the last frame left it.
     fn snapshot(&self) -> Vec<WindowRecord> {
-        self.snapshot.lock().unwrap().clone()
+        let snapshot = self.snapshot.lock().unwrap();
+        if !self.live.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::trace!("devserver window feed is down; reading its last frame");
+        }
+        snapshot.clone()
     }
 
     fn change_notify(&self) -> Arc<Notify> {
@@ -1142,8 +1169,7 @@ async fn run_devserver_window_feed(
     id: String,
     app: AppHandle,
     conn: DevserverConn,
-    snapshot: Arc<Mutex<Vec<WindowRecord>>>,
-    change: Arc<Notify>,
+    feed: DevserverWindowFeed,
     state: Arc<AppState>,
     mut cancel: watch::Receiver<DevserverWatcherStop>,
 ) {
@@ -1164,7 +1190,7 @@ async fn run_devserver_window_feed(
         let saw_frame = AtomicBool::new(false);
         tokio::select! {
             _ = cancel.changed() => return,
-            result = stream_window_feed(&id, &app, &conn, &snapshot, &change, &state, &saw_frame) => {
+            result = stream_window_feed(&id, &app, &conn, &feed, &state, &saw_frame) => {
                 if saw_frame.load(Ordering::Relaxed) {
                     // The feed delivered at least one frame this round: healthy.
                     consecutive_failures = 0;
@@ -1207,6 +1233,7 @@ async fn run_devserver_window_feed(
                 }
             }
         }
+        feed.end_round();
         if (*cancel.borrow_and_update()).is_stopped() {
             return;
         }
@@ -1331,8 +1358,7 @@ async fn stream_window_feed(
     id: &str,
     app: &AppHandle,
     conn: &DevserverConn,
-    snapshot: &Arc<Mutex<Vec<WindowRecord>>>,
-    change: &Arc<Notify>,
+    feed: &DevserverWindowFeed,
     state: &Arc<AppState>,
     saw_frame: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
@@ -1391,7 +1417,7 @@ async fn stream_window_feed(
                     .collect();
                 state.refresh_devserver_active_transfers(&library_id, &active);
             }
-            *snapshot.lock().unwrap() = windows;
+            feed.write_frame(windows);
             // Re-push the launcher feed: a devserver window change
             // shifts the merged launcher window set, so signal the embedded
             // host to re-assemble + re-push. The devserver only pushes on a
@@ -1399,7 +1425,7 @@ async fn stream_window_feed(
             if let Some(embedded) = state.embedded() {
                 embedded.signal_library_change();
             }
-            change.notify_one();
+            feed.change.notify_one();
         }
     })
     .await
@@ -1535,12 +1561,17 @@ pub(crate) async fn spawn_devserver_window_watcher(
     // The WS feed task owns a `conn` clone, pushes changes into `snapshot` +
     // wakes `change`, and stops when `cancel` leaves `Running` or its sender
     // drops.
+    // No frame has vouched for a socket yet: the seed is a list read once.
+    let feed = DevserverWindowFeed {
+        snapshot,
+        live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        change: Arc::clone(&change),
+    };
     tauri::async_runtime::spawn(run_devserver_window_feed(
         id,
         app.clone(),
         conn.clone(),
-        Arc::clone(&snapshot),
-        Arc::clone(&change),
+        feed.clone(),
         state,
         cancel_rx.clone(),
     ));
@@ -1556,7 +1587,6 @@ pub(crate) async fn spawn_devserver_window_watcher(
         remote_launches: Arc::new(RemoteLaunches::default()),
         applied_titles: Arc::new(Mutex::new(HashMap::new())),
     };
-    let feed = DevserverWindowFeed { snapshot, change };
     // A handle on the view for the caller so the close handler can bury THIS
     // devserver's windows through it: a bury flips `should_show` false and
     // the reconcile CLOSES the webview (drops the `/ws`), so the launcher dot
