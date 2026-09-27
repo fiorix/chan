@@ -713,6 +713,56 @@ describe("the slide chord", () => {
     expect(tab.slidePreview?.mode).toBe("play");
   });
 
+  test("Mod+Enter in a fence on a deck leaves the fence and opens no preview", async () => {
+    const doc = `${DECK}\n\`\`\`js\nx\n\`\`\`\n`;
+    const tab = seat(fileTab({ path: "talks/deck.md", content: doc, saved: doc }));
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const closer = view.state.doc.lineAt(doc.lastIndexOf("```")).number;
+    view.dispatch({ selection: { anchor: doc.indexOf("x\n```") } });
+
+    const e = press(target.querySelector(".cm-content")!, { ctrlKey: true });
+    await settle(2);
+    const caretLine = view.state.doc.lineAt(view.state.selection.main.head).number;
+    expect({ claimed: e.defaultPrevented, previews: h.previews.length, belowCloser: caretLine > closer }).toEqual({
+      claimed: true, previews: 0, belowCloser: true,
+    });
+  });
+
+  test("Mod+Enter on a date on a deck opens its calendar and no preview", async () => {
+    const doc = `${DECK}\nDue 2026-09-27 here\n`;
+    const tab = seat(fileTab({ path: "talks/deck.md", content: doc, saved: doc }));
+    const { target } = await render(tab);
+    const view = editorView(target);
+    // The calendar anchors at the caret's coordinates, which jsdom cannot lay out.
+    vi.spyOn(view, "coordsAtPos").mockReturnValue({ left: 0, right: 1, top: 0, bottom: 10 });
+    view.dispatch({ selection: { anchor: doc.indexOf("2026-09-27") + 2 } });
+
+    press(target.querySelector(".cm-content")!, { ctrlKey: true });
+    await settle(2);
+    const calendars = document.querySelectorAll(".md-date-popover").length;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect({ previews: h.previews.length, calendars }).toEqual({ previews: 0, calendars: 1 });
+  });
+
+  test("Mod+Enter with an image ring-selected on a deck goes to the image, not the preview", async () => {
+    const doc = `${DECK}\n![a](a.png)\n`;
+    const tab = seat(fileTab({ path: "talks/deck.md", content: doc, saved: doc }));
+    const { target } = await render(tab);
+    const wrap = target.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    wrap.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    expect(wrap.dataset.selected).toBe("true");
+
+    press(target.querySelector(".cm-content")!, { ctrlKey: true });
+    await settle(2);
+    const zoomed = document.querySelectorAll(".md-image-zoom").length;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect({ previews: h.previews.length, ring: wrap.dataset.selected, zoomed }).toEqual({
+      previews: 0, ring: undefined, zoomed: 1,
+    });
+    expect(document.querySelector(".md-image-zoom"), "the viewer closes on Escape").toBeNull();
+  });
+
   test("the first preview state handed out is the state the tab holds", () => {
     const tab = seat(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
     const preview = ensureTabSlidePreview(tab);
