@@ -481,3 +481,36 @@ async fn disabled_settings_refuse_a_wrong_method_first() {
 async fn enabled_settings_answer_a_wrong_method_with_the_405() {
     assert_method_refused(settings_write_with_wrong_method(false).await, "POST").await;
 }
+
+fn restart_unknown_terminal(json_body: Option<&'static str>) -> Request<Body> {
+    let request = Request::post("/api/terminals/missing/restart");
+    match json_body {
+        Some(body) => request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body)),
+        None => request.body(Body::empty()),
+    }
+    .unwrap()
+}
+
+/// The restart route's body is optional: without one the request reaches the
+/// route, and a malformed one is refused in the envelope.
+#[tokio::test]
+async fn terminal_restart_without_a_body_reaches_the_route() {
+    assert_refusal(
+        terminal_answer(restart_unknown_terminal(None)).await,
+        StatusCode::NOT_FOUND,
+        json!({"error": "terminal session not found"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_restart_with_a_malformed_body_is_json() {
+    assert_refusal(
+        terminal_answer(restart_unknown_terminal(Some("{"))).await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1"}),
+    )
+    .await;
+}

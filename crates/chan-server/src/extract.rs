@@ -408,6 +408,17 @@ mod tests {
         .await;
     }
 
+    /// A request with no content type and no body reads as no JSON, as the
+    /// framework's optional JSON does, and reaches the handler.
+    #[tokio::test]
+    async fn optional_json_absent() {
+        let request = || Request::post("/optional-json").body(Body::empty()).unwrap();
+        let framework = framework::app().oneshot(request()).await.unwrap();
+        assert_eq!(framework.status(), axum::http::StatusCode::OK);
+        let response = subject::app().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn query() {
         assert_enveloped("FailedToDeserializeQueryString", || {
