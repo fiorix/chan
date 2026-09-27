@@ -278,6 +278,26 @@ describe("mintWindow", () => {
     await pending;
   });
 
+  it("keeps the waiting window when its disconnected feed record arrives before the mint", async () => {
+    vi.useFakeTimers();
+    const rec = record({ connected: false, origin: "browser" });
+    let answerMint!: (rec: WindowRecord) => void;
+    createWindow.mockReturnValue(new Promise<WindowRecord>((resolve) => { answerMint = resolve; }));
+    checkWindowPage.mockImplementationOnce(async () => gateResponse("4"));
+    const pending = mintWindow("workspace");
+    reconcileWindows(set([rec]));
+    expect(hasWindowHandle(rec.window_id)).toBe(false);
+    answerMint(rec);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(opened[0].win.closed).toBe(false);
+    expect(discardWindow).not.toHaveBeenCalled();
+    expect(opened[0].win.location.href).toBe("about:blank");
+    expect(hasWindowHandle(rec.window_id)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await pending).toEqual(rec);
+    expect(opened[0].win.location.href).toContain("/proj-1/?w=w-1");
+  });
+
   it("bounds a Retry-After beyond the timer range without checking early", async () => {
     vi.useFakeTimers();
     createWindow.mockResolvedValue(record({}));
