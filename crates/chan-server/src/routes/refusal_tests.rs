@@ -296,6 +296,43 @@ fn session_over_the_limit() -> Request<Body> {
         .unwrap()
 }
 
+fn draft_over_the_limit() -> Request<Body> {
+    Request::post("/api/drafts/new")
+        .body(Body::from(vec![b'x'; OVER_DEFAULT_LIMIT]))
+        .unwrap()
+}
+
+async fn framework_bytes_sentence(request: Request<Body>) -> String {
+    use axum::extract::FromRequest;
+
+    axum::body::Bytes::from_request(request, &())
+        .await
+        .unwrap_err()
+        .body_text()
+}
+
+#[tokio::test]
+async fn workspace_tenant_draft_over_the_limit_is_json() {
+    let sentence = framework_bytes_sentence(draft_over_the_limit()).await;
+    assert_refusal(
+        workspace_answer(draft_over_the_limit()).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        json!({"error": sentence}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_draft_over_the_limit_is_json() {
+    let sentence = framework_bytes_sentence(draft_over_the_limit()).await;
+    assert_refusal(
+        terminal_answer(draft_over_the_limit()).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        json!({"error": sentence}),
+    )
+    .await;
+}
+
 const MISSING_CONTENT_TYPE: &str = "Expected request with `Content-Type: application/json`";
 const LENGTH_LIMIT: &str = "Failed to buffer the request body: length limit exceeded";
 
