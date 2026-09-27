@@ -3664,8 +3664,8 @@ async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     }
 }
 
-/// Match the connecting page's twenty-attempt budget while retaining the old
-/// page until the target answers or the user can try navigating after the budget.
+/// Match the connecting page's twenty-attempt budget while retaining the current
+/// page until readiness or exhaustion allows navigation.
 fn retarget_should_navigate(probe: Option<&ProbeResult>, attempts: usize) -> bool {
     probe.is_some_and(|probe| probe.reachable) || attempts >= 20
 }
