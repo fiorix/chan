@@ -138,7 +138,7 @@ pub async fn upload_files_native(
             return Err("upload refused an unexpected redirect".into());
         }
         if !response.status().is_success() {
-            return Err(response_error(response).await);
+            return Err(response_error(response, &registration.progress).await);
         }
         uploaded.push(
             response
@@ -301,22 +301,45 @@ fn validate_workspace_rel(path: &str, allow_empty: bool) -> Result<(), String> {
     Ok(())
 }
 
-async fn response_error(response: reqwest::Response) -> String {
+async fn response_error(response: reqwest::Response, progress: &TransferProgress) -> String {
     let status = response.status();
     let mut body = Vec::new();
+    const REFUSAL_BODY_LIMIT: usize = 64 * 1024;
     let mut stream = response.bytes_stream();
-    while let Some(Ok(bytes)) = stream.next().await {
-        body.extend_from_slice(&bytes);
+    let mut complete = true;
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = progress.cancelled() => return "upload cancelled".to_string(),
+            chunk = stream.next() => chunk,
+        };
+        let bytes = match chunk {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(_)) => {
+                complete = false;
+                break;
+            }
+            None => break,
+        };
+        let remaining = REFUSAL_BODY_LIMIT - body.len();
+        body.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        if bytes.len() > remaining {
+            complete = false;
+            break;
+        }
     }
-    // Parse the complete envelope before shortening a plain response for display.
+    // Only a complete body within the bound can supply an envelope sentence.
     let detail = String::from_utf8_lossy(&body[..body.len().min(512)]);
     let fallback = if detail.trim().is_empty() {
         format!("HTTP {status}")
     } else {
         format!("HTTP {status}: {}", detail.trim())
     };
-    let message =
-        crate::devserver::refusal_message(status, &String::from_utf8_lossy(&body), &fallback);
+    let message = if complete {
+        crate::devserver::refusal_message(status, &String::from_utf8_lossy(&body), &fallback)
+    } else {
+        fallback
+    };
     format!("upload failed: {message}")
 }
 
@@ -344,7 +367,7 @@ mod tests {
                     .body(body)
                     .unwrap(),
             );
-            assert_eq!(response_error(response).await, format!("upload failed: HTTP 503 Service Unavailable: {expected}"), "a refusal within 64 KiB is parsed whole; an oversized refusal keeps its plain-body excerpt");
+            assert_eq!(response_error(response, &TransferProgress::new_for_test(None)).await, format!("upload failed: HTTP 503 Service Unavailable: {expected}"), "a refusal within 64 KiB is parsed whole; an oversized refusal keeps its plain-body excerpt");
         }
     }
 
@@ -359,7 +382,7 @@ mod tests {
                 .body(reqwest::Body::wrap_stream(stream))
                 .unwrap(),
         );
-        let mut reading = Box::pin(response_error(response));
+        let mut reading = Box::pin(response_error(response, &registration.progress));
         assert!(
             futures::poll!(&mut reading).is_pending(),
             "the refusal body is still being read"
@@ -392,7 +415,7 @@ mod tests {
                     .unwrap(),
             );
             assert_eq!(
-                response_error(response).await,
+                response_error(response, &TransferProgress::new_for_test(None)).await,
                 format!("upload failed: HTTP 503 Service Unavailable{detail}"),
                 "transfers must show the sentence and preserve plain-body excerpts",
             );

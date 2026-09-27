@@ -21,7 +21,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::native_transfer::{
     endpoint_for_window, fetch_transfer_cap, http_client, request_headers, EndpointKind,
-    TransferRegistration,
+    TransferProgress, TransferRegistration,
 };
 
 /// Cooperative SPA/Rust wire limit for a generated-download JSON chunk.
@@ -154,7 +154,7 @@ pub async fn download_file_native(
         return Err("download refused an unexpected redirect".into());
     }
     if !response.status().is_success() {
-        return Err(response_error("download", response).await);
+        return Err(response_error("download", response, &registration.progress).await);
     }
     registration.progress.set_total(response.content_length());
     // Preflight BEFORE DownloadTarget::create, so an over-cap download never
@@ -194,22 +194,49 @@ pub async fn download_file_native(
     target.commit(file).await
 }
 
-async fn response_error(kind: &str, response: reqwest::Response) -> String {
+async fn response_error(
+    kind: &str,
+    response: reqwest::Response,
+    progress: &TransferProgress,
+) -> String {
     let status = response.status();
     let mut body = Vec::new();
+    const REFUSAL_BODY_LIMIT: usize = 64 * 1024;
     let mut stream = response.bytes_stream();
-    while let Some(Ok(bytes)) = stream.next().await {
-        body.extend_from_slice(&bytes);
+    let mut complete = true;
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = progress.cancelled() => return format!("{kind} cancelled"),
+            chunk = stream.next() => chunk,
+        };
+        let bytes = match chunk {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(_)) => {
+                complete = false;
+                break;
+            }
+            None => break,
+        };
+        let remaining = REFUSAL_BODY_LIMIT - body.len();
+        body.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        if bytes.len() > remaining {
+            complete = false;
+            break;
+        }
     }
-    // Parse the complete envelope before shortening a plain response for display.
+    // Only a complete body within the bound can supply an envelope sentence.
     let detail = String::from_utf8_lossy(&body[..body.len().min(512)]);
     let fallback = if detail.trim().is_empty() {
         format!("HTTP {status}")
     } else {
         format!("HTTP {status}: {}", detail.trim())
     };
-    let message =
-        crate::devserver::refusal_message(status, &String::from_utf8_lossy(&body), &fallback);
+    let message = if complete {
+        crate::devserver::refusal_message(status, &String::from_utf8_lossy(&body), &fallback)
+    } else {
+        fallback
+    };
     format!("{kind} failed: {message}")
 }
 
@@ -579,7 +606,7 @@ mod tests {
                     .body(body)
                     .unwrap(),
             );
-            assert_eq!(response_error("download", response).await, format!("download failed: HTTP 503 Service Unavailable: {expected}"), "a refusal within 64 KiB is parsed whole; an oversized refusal keeps its plain-body excerpt");
+            assert_eq!(response_error("download", response, &TransferProgress::new_for_test(None)).await, format!("download failed: HTTP 503 Service Unavailable: {expected}"), "a refusal within 64 KiB is parsed whole; an oversized refusal keeps its plain-body excerpt");
         }
     }
 
@@ -594,7 +621,7 @@ mod tests {
                 .body(reqwest::Body::wrap_stream(stream))
                 .unwrap(),
         );
-        let mut reading = Box::pin(response_error("download", response));
+        let mut reading = Box::pin(response_error("download", response, &registration.progress));
         assert!(
             futures::poll!(&mut reading).is_pending(),
             "the refusal body is still being read"
@@ -627,7 +654,7 @@ mod tests {
                     .unwrap(),
             );
             assert_eq!(
-                response_error("download", response).await,
+                response_error("download", response, &TransferProgress::new_for_test(None)).await,
                 format!("download failed: HTTP 503 Service Unavailable{detail}"),
                 "transfers must show the sentence and preserve plain-body excerpts",
             );
