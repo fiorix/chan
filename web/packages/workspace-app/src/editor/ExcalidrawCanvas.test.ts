@@ -17,7 +17,16 @@ import type {
 // React runtime (mirrors diagram.test.ts). vi.mock is hoisted and
 // intercepts dynamic imports too; the spies go through vi.hoisted so the
 // hoisted mock factory can reference them without a TDZ error.
-const { createRootMock, renderMock, unmountMock, modules } = vi.hoisted(() => {
+const { createRootMock, renderMock, unmountMock, modules, boardAppState } = vi.hoisted(() => {
+  // The appState keys the library's serializer keeps, with the defaults a
+  // board holds from its constructor and its restore gives a scene that
+  // lacks them.
+  const boardAppState: Record<string, unknown> = {
+    gridSize: 20,
+    gridStep: 5,
+    gridModeEnabled: false,
+    viewBackgroundColor: "#ffffff",
+  };
   const renderMock = vi.fn();
   const unmountMock = vi.fn();
   const createRootMock = vi.fn(() => ({ render: renderMock, unmount: unmountMock }));
@@ -26,16 +35,33 @@ const { createRootMock, renderMock, unmountMock, modules } = vi.hoisted(() => {
     react: { createElement: (type: unknown, props: unknown) => ({ type, props }) },
     "@excalidraw/excalidraw": {
       Excalidraw: () => null,
-      // Mimics the real cleaner's shape: elements + a cleaned appState
-      // (selection dropped) so the appState-baseline logic is testable.
+      // Mimics the real cleaner's shape: elements + the appState keys the
+      // library exports, so the appState-baseline logic is testable.
       serializeAsJSON: (elements: unknown, appState: Record<string, unknown>) =>
         JSON.stringify({
           elements,
           appState: Object.fromEntries(
-            Object.entries(appState).filter(([k]) => k !== "selectedElementIds"),
+            Object.entries(appState).filter(([k]) => k in boardAppState),
           ),
           files: {},
         }),
+      // Mimics the real restore's visible part: selection elements dropped, a
+      // missing version made 1, a missing appState key given its default.
+      restore: (
+        data: {
+          elements?: Record<string, unknown>[] | null;
+          appState?: Record<string, unknown> | null;
+          files?: Record<string, unknown> | null;
+        } | null,
+      ) => ({
+        elements: (data?.elements ?? [])
+          .filter((el) => el.type !== "selection")
+          .map((el) => ({ ...el, version: el.version || 1 })),
+        appState: Object.fromEntries(
+          Object.entries(boardAppState).map(([k, v]) => [k, data?.appState?.[k] ?? v]),
+        ),
+        files: data?.files ?? {},
+      }),
       CaptureUpdateAction: { IMMEDIATELY: "IMMEDIATELY", EVENTUALLY: "EVENTUALLY", NEVER: "NEVER" },
       // Test double of the vendored LWW reconcile, id-keyed with the
       // version core of the real rule (the exact rule is pinned by the
@@ -56,7 +82,7 @@ const { createRootMock, renderMock, unmountMock, modules } = vi.hoisted(() => {
       },
     },
   };
-  return { createRootMock, renderMock, unmountMock, modules };
+  return { createRootMock, renderMock, unmountMock, modules, boardAppState };
 });
 vi.mock("react-dom/client", () => modules["react-dom/client"]);
 vi.mock("react", () => modules.react);
@@ -231,7 +257,7 @@ type FakeApi = {
 
 function fakeApi(initial: WireElement[] = []): FakeApi {
   let elements: Record<string, unknown>[] = [...initial];
-  let appState: Record<string, unknown> = { selectedElementIds: {} };
+  let appState: Record<string, unknown> = { selectedElementIds: {}, ...boardAppState };
   let files: Record<string, unknown> = {};
   const updateScene = vi.fn((s: Record<string, unknown>) => {
     if (Array.isArray(s.elements)) elements = s.elements as Record<string, unknown>[];
@@ -266,8 +292,9 @@ type SessionStub = {
   peerCursorSnapshot: () => Map<number, { w: string; x: number; y: number }>;
 };
 
-/// Mount the island with a stubbed session, hand it a fake imperative
-/// API, and wait for the bind effect to hand the binding back.
+/// Mount the island with a stubbed session over a buffer that holds
+/// `initial`, hand it a fake imperative API whose board holds the same, and
+/// wait for the bind effect to hand the binding back.
 async function mountBound(
   initial: WireElement[] = [],
   onSceneChange: (json: string) => void = () => {},
@@ -288,7 +315,7 @@ async function mountBound(
     mount(ExcalidrawCanvas, {
       target,
       props: {
-        content: "",
+        content: JSON.stringify({ elements: initial }),
         dark: false,
         onSceneChange,
         session: session as unknown as SceneSession,
@@ -311,7 +338,7 @@ describe("scene session binding loop safety", () => {
     binding.applyUpdate({ elements: [wireEl("x", 5)] });
 
     const call = api.updateScene.mock.calls.find((c) =>
-      Array.isArray((c[0] as Record<string, unknown>).elements),
+      ((c[0] as { elements?: { id: string }[] }).elements ?? []).some((el) => el.id === "x"),
     );
     expect(call).toBeDefined();
     expect((call![0] as Record<string, unknown>).captureUpdate).toBe("NEVER");
@@ -369,7 +396,7 @@ describe("scene session binding loop safety", () => {
     };
 
     // The authority fans an appState; adopting it must not echo back.
-    binding.applyUpdate({ elements: [], appState: { gridSize: 5 } });
+    binding.applyUpdate({ elements: [], appState: { ...boardAppState, gridSize: 5 } });
     rendered.props.onChange();
     vi.advanceTimersByTime(300);
     expect(session.pushScene).not.toHaveBeenCalled();
