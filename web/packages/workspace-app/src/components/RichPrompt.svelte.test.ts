@@ -63,6 +63,7 @@ import {
   registerTerminalCancelSink,
   registerTerminalPromptSink,
   reproveRestoredPrompt,
+  resolvePromptCancelled,
   sendPromptToTerminal,
   type LeafNode,
   type Tab,
@@ -449,6 +450,7 @@ describe("recall", () => {
     await settle();
 
     press(content, "ArrowUp");
+    resolvePromptCancelled(tab, sent[0]!.id!, true);
     await settle();
     expect(cancelled).toEqual([sent[0]!.id]);
     expect(view.state.doc.toString()).toBe("second thoughts");

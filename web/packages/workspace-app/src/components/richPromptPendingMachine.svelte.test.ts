@@ -15,7 +15,7 @@ const writeSpy = vi.fn(async (_p: string, _c: string) => ({}) as unknown);
 const readMock = vi.fn(async (_p: string) => ({ content: "" }) as unknown);
 const createDraftMock = vi.fn(async () => ({ path: ".Drafts/t/draft.md" }));
 const sendPromptSpy = vi.fn((..._a: unknown[]) => true);
-const sendCancelSpy = vi.fn((..._a: unknown[]) => {});
+const sendCancelSpy = vi.fn((..._a: unknown[]) => true);
 
 vi.mock("../api/client", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -44,7 +44,13 @@ import {
   showRichPromptForTab,
   richPrompt,
 } from "../state/richPrompt.svelte";
-import type { TerminalTab } from "../state/tabs.svelte";
+import { resolvePromptCancelled, type TerminalTab } from "../state/tabs.svelte";
+
+function acknowledgeRecall(tab: TerminalTab): void {
+  const id = sendCancelSpy.mock.calls.at(-1)?.[1];
+  if (typeof id !== "string") throw new Error("expected a cancel message id");
+  resolvePromptCancelled(tab, id, true);
+}
 
 const mounted: Array<Record<string, unknown>> = [];
 afterEach(() => {
@@ -192,6 +198,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
     expect(labelOf(primaryOf(target))).toBe("esc cancel");
 
     primaryOf(target).click();
+    acknowledgeRecall(tab);
     await tick();
     expect(sendCancelSpy).toHaveBeenCalledTimes(1);
     expect(labelOf(primaryOf(target))).toMatch(SUBMIT_LABEL);
@@ -225,6 +232,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
 
     expect(labelOf(primaryOf(target))).toBe("esc cancel");
     primaryOf(target).click();
+    acknowledgeRecall(tab);
     await tick();
 
     // The cancel must actually reach the server, addressed by the restored
@@ -278,6 +286,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
       if (stop === "button") primaryOf(target).click();
       else if (stop === "escape") press(content!, "Escape");
       else press(content!, "ArrowUp");
+      acknowledgeRecall(tab);
       await tick();
 
       expect(sendCancelSpy).toHaveBeenCalledTimes(1);
