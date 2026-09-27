@@ -743,9 +743,14 @@ pub(crate) mod test_support {
                     .await
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                     .unwrap_or_default();
+                let json = serde_json::from_str::<serde_json::Value>(&body).ok();
+                let message = json
+                    .as_ref()
+                    .and_then(|value| value["error"].as_str())
+                    .unwrap_or(&body);
                 let refused = status == StatusCode::FORBIDDEN && body.ends_with(ROLE_REFUSAL);
                 let no_bearer =
-                    status == StatusCode::UNAUTHORIZED && body.starts_with(BEARER_REFUSAL);
+                    status == StatusCode::UNAUTHORIZED && message.starts_with(BEARER_REFUSAL);
                 let met = match expected(authority, caller) {
                     Outcome::Reach => {
                         !refused && !no_bearer && status != StatusCode::METHOD_NOT_ALLOWED

@@ -18,7 +18,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use chan_workspace::paths::WorkspacePaths;
 use rand::RngCore;
 
@@ -129,7 +129,7 @@ pub async fn auth_middleware(
         bump();
         return next.run(req).await;
     }
-    (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response()
+    crate::error::err(StatusCode::UNAUTHORIZED, "missing or invalid token".into())
 }
 
 pub fn extract_token<'a>(query: Option<&'a str>, headers: &'a HeaderMap) -> Option<&'a str> {
@@ -149,6 +149,30 @@ pub fn extract_token<'a>(query: Option<&'a str>, headers: &'a HeaderMap) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_missing_bearer_answers_the_same_sentence_as_json() {
+        use tower::ServiceExt;
+        let app = crate::terminal_router(crate::state::test_support::make_test_state_with_token(
+            "secret",
+        ));
+        let response = app
+            .oneshot(
+                Request::get("/api/terminals/roster")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap(),
+            r#"{"error":"missing or invalid token"}"#
+        );
+    }
 
     #[test]
     fn random_token_is_alphanumeric_and_long() {

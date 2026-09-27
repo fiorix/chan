@@ -23,7 +23,7 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use chan_revtunnel::server::{AttachError, ControlAttach, ReadyReport};
 use chan_revtunnel::wire::{HALF_CLOSE_MARKER, MAX_DATA_FRAME_BYTES};
 use chan_revtunnel::ControlFrame;
@@ -64,7 +64,7 @@ fn attach_refusal(error: AttachError) -> Response {
         AttachError::Unknown => StatusCode::NOT_FOUND,
         AttachError::AlreadyAttached | AttachError::NotLive => StatusCode::CONFLICT,
     };
-    (status, error.to_string()).into_response()
+    crate::error::err(status, error.to_string())
 }
 
 /// `GET CONTROL_PATH?tunnel=<id>`: attach the tunnel's one control socket.
@@ -455,8 +455,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn refusals_map_to_the_statuses_the_desktop_distinguishes() {
+    #[tokio::test]
+    async fn refusals_map_to_the_statuses_the_desktop_distinguishes() {
         // 404 = the tunnel is gone (stop retrying); 409 = it exists but this
         // attach is wrong right now (duplicate control, or data before ready).
         assert_eq!(
@@ -471,6 +471,20 @@ mod tests {
             attach_refusal(AttachError::NotLive).status(),
             StatusCode::CONFLICT
         );
+        for error in [
+            AttachError::Unknown,
+            AttachError::AlreadyAttached,
+            AttachError::NotLive,
+        ] {
+            let sentence = error.to_string();
+            let response = attach_refusal(error);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            let body = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body, serde_json::json!({"error": sentence}));
+        }
     }
 
     #[test]

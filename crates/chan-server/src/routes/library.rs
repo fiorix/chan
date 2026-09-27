@@ -385,9 +385,12 @@ pub fn launcher_router(
     // surface rather than showing buttons that 403. The hint is the router's own
     // for every caller: the gateway admits only the owner and a grantee to a
     // devserver session, and a grant carries the owner's authority.
-    Router::new()
+    let app = Router::new()
         .merge(api)
-        .fallback(move |req: Request<Body>| serve_launcher(req.uri().clone(), surface))
+        .fallback(move |req: Request<Body>| serve_launcher(req.uri().clone(), surface));
+    #[cfg(test)]
+    let app = crate::refusal_check::check(app);
+    app
 }
 
 /// Gate `/api/library/*` on the surface's launcher token. Tunnel-origin

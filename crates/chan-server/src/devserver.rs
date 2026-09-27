@@ -2575,6 +2575,8 @@ fn build_devserver_app(
             state,
             gate_tenant_during_startup,
         ));
+    #[cfg(test)]
+    let app = crate::refusal_check::check(app);
     (app, serve_addr)
 }
 

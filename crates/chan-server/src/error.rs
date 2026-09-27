@@ -23,6 +23,33 @@ pub fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
+/// A refusal a client branches on. Details serialize beside the reserved
+/// `error` and `code` fields and must not declare either of those names.
+pub(crate) fn err_code(
+    status: StatusCode,
+    msg: String,
+    code: &'static str,
+    details: impl serde::Serialize,
+) -> Response {
+    assert!(!code.is_empty(), "a refusal code must not be empty");
+    #[derive(serde::Serialize)]
+    struct Refusal<T> {
+        error: String,
+        code: &'static str,
+        #[serde(flatten)]
+        details: T,
+    }
+    (
+        status,
+        Json(Refusal {
+            error: msg,
+            code,
+            details,
+        }),
+    )
+        .into_response()
+}
+
 /// Refusal returned by `tunnel_guard::settings_guard` when the
 /// server was started with `settings_disabled = true`, i.e. a
 /// `--no-settings` serve (kiosk / shared workstation). 403 because
@@ -92,6 +119,55 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn refusal_shapes_are_pinned_bytes() {
+        for (response, expected) in [
+            (
+                err(StatusCode::NOT_FOUND, "not found".into()),
+                r#"{"error":"not found"}"#,
+            ),
+            (
+                err_code(
+                    StatusCode::NOT_FOUND,
+                    "not found".into(),
+                    "missing",
+                    serde_json::json!({}),
+                ),
+                r#"{"error":"not found","code":"missing"}"#,
+            ),
+            (
+                err_code(
+                    StatusCode::NOT_FOUND,
+                    "not found".into(),
+                    "missing",
+                    serde_json::json!({"id":"item-7"}),
+                ),
+                r#"{"error":"not found","code":"missing","id":"item-7"}"#,
+            ),
+        ] {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_TYPE],
+                "application/json"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), 8192).await.unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a refusal code must not be empty")]
+    fn an_empty_refusal_code_is_rejected() {
+        err_code(
+            StatusCode::CONFLICT,
+            "conflict".into(),
+            "",
+            serde_json::json!({}),
+        );
+    }
 
     async fn body_json(r: Response) -> serde_json::Value {
         let (parts, body) = r.into_parts();

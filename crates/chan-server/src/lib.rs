@@ -48,6 +48,8 @@ mod indexer;
 mod local_socket;
 mod mcp_bridge;
 mod preferences;
+#[cfg(test)]
+mod refusal_check;
 mod round_trip_bus;
 #[cfg(test)]
 mod route_authority;
@@ -1287,7 +1289,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
         )
         // Events / broadcast / pane bus.
         .route("/ws", get(ws_upgrade));
-    Router::new()
+    let app = Router::new()
         .merge(api)
         .fallback(serve_static)
         .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
@@ -1295,7 +1297,10 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             state.clone(),
             auth_middleware,
         ))
-        .with_state(state)
+        .with_state(state);
+    #[cfg(test)]
+    let app = crate::refusal_check::check(app);
+    app
 }
 
 /// chan-server's implementation of chan-library's tenant-construction boundary.
@@ -1961,7 +1966,7 @@ fn router_with_extensions(
         // opaque-origin frame reads true statuses instead of a CORS mask.
         .route_layer(middleware::from_fn(extension_response_policy));
     let api = api.merge(extension_proxy);
-    Router::new()
+    let app = Router::new()
         .merge(api)
         .fallback(serve_static)
         .layer(axum::Extension(extension_tenant))
@@ -1971,7 +1976,10 @@ fn router_with_extensions(
             state.clone(),
             auth_middleware,
         ))
-        .with_state(state)
+        .with_state(state);
+    #[cfg(test)]
+    let app = crate::refusal_check::check(app);
+    app
 }
 
 #[cfg(test)]

@@ -86,7 +86,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
     // Refuse to serve the SPA shell for /api or /ws misses; those
     // are programmatic surfaces, not browser navigation.
     if path.starts_with("/api") || path == "/ws" {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "not found".into());
     }
     let candidate = path.trim_start_matches('/');
     let is_index = candidate.is_empty() || candidate == "index.html";
@@ -207,7 +207,7 @@ impl LauncherSurface {
 pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> Response {
     let path = uri.path();
     if path.starts_with("/api") || path == "/ws" {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "not found".into());
     }
     let candidate = path.trim_start_matches('/');
     let is_index = candidate.is_empty() || candidate == "index.html";
@@ -433,6 +433,37 @@ pub fn content_type_for(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn api_fallbacks_return_json_in_both_bundles() {
+        use tower::ServiceExt;
+        let state = crate::state::test_support::make_test_state(false);
+        let cfg = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = Arc::new(crate::WorkspaceHost::new(library, crate::route_builder()));
+        for app in [
+            crate::router(state.clone()),
+            crate::terminal_router(state),
+            crate::routes::launcher_router(host, None, None),
+        ] {
+            let response = app
+                .oneshot(
+                    axum::http::Request::get("/api/does-not-exist")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 8192)
+                    .await
+                    .unwrap(),
+                r#"{"error":"not found"}"#
+            );
+        }
+    }
 
     #[test]
     fn inject_chan_meta_inserts_prefix_after_head() {

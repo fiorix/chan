@@ -17,7 +17,7 @@ use axum::Json;
 use chan_shell::SurveyReply;
 use serde::Deserialize;
 
-use crate::error::err;
+use crate::error::err_code;
 use crate::state::AppState;
 
 /// Body of `POST /api/survey/reply`. Internally tagged on `kind`, camelCase
@@ -79,9 +79,11 @@ pub async fn api_survey_reply(
     if state.survey_bus.complete_survey(&survey_id, reply) {
         Json(serde_json::json!({})).into_response()
     } else {
-        err(
+        err_code(
             StatusCode::NOT_FOUND,
             format!("no survey parked with id {survey_id} (already answered or stale)"),
+            "survey_not_found",
+            serde_json::json!({}),
         )
     }
 }
@@ -92,6 +94,28 @@ mod tests {
     use axum::body::Body;
     use axum::http::{header, Request};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn an_unknown_survey_has_a_sentence_and_a_code() {
+        let app = crate::terminal_router(crate::state::test_support::make_test_state(false));
+        let response = app
+            .oneshot(
+                Request::post("/api/survey/reply")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"kind":"dismissed","surveyId":"missing"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap(),
+            r#"{"error":"no survey parked with id missing (already answered or stale)","code":"survey_not_found"}"#
+        );
+    }
 
     #[test]
     fn option_reply_request_deserializes_camel_case() {

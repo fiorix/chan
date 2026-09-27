@@ -14,6 +14,7 @@ use chan_shell::{PaneSide, ResolvedSubmit, SubmitAgent};
 use portable_pty::PtySize;
 use serde::{Deserialize, Serialize};
 
+use crate::error::err;
 use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
@@ -384,7 +385,7 @@ pub async fn api_terminal_ws(
         profile,
     } = match terminal_query_spawn_overrides(&query) {
         Ok(overrides) => overrides,
-        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        Err(message) => return err(StatusCode::BAD_REQUEST, message),
     };
     let cwd = if query.session.is_some() {
         None
@@ -396,7 +397,7 @@ pub async fn api_terminal_ws(
         .await;
         match result {
             Ok(Ok(cwd)) => cwd,
-            Ok(Err(message)) => return (StatusCode::BAD_REQUEST, message).into_response(),
+            Ok(Err(message)) => return err(StatusCode::BAD_REQUEST, message),
             Err(failed) => return failed.into_response(),
         }
     } else if matches!(query.app, Some(crate::app_query::AppQuery::Files)) {
@@ -460,23 +461,27 @@ pub async fn api_create_terminal(
     let Json(body) = match body {
         Ok(body) => body,
         Err(e) => {
-            return (
+            return err(
                 StatusCode::BAD_REQUEST,
                 format!("invalid terminal create: {e}"),
             )
-                .into_response()
         }
     };
     let name = match normalize_label(&body.name, MAX_NAME_CHARS) {
         Some(name) => name,
-        None => return (StatusCode::BAD_REQUEST, "terminal name is required").into_response(),
+        None => return err(StatusCode::BAD_REQUEST, "terminal name is required".into()),
     };
     let command = match normalize_terminal_command(&body.command) {
         Some(command) => command,
-        None => return (StatusCode::BAD_REQUEST, "terminal command is required").into_response(),
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "terminal command is required".into(),
+            )
+        }
     };
     if let Err(message) = validate_terminal_env(&body.env, Some(&name)) {
-        return (StatusCode::BAD_REQUEST, message).into_response();
+        return err(StatusCode::BAD_REQUEST, message);
     }
     let opts = CreateOptions {
         size: pty_size(None, None),
@@ -522,15 +527,13 @@ pub async fn api_restart_terminal(
         let tab_name = match body.name.as_deref() {
             Some(name) => match normalize_label(name, MAX_NAME_CHARS) {
                 Some(name) => Some(name),
-                None => {
-                    return (StatusCode::BAD_REQUEST, "terminal name is required").into_response()
-                }
+                None => return err(StatusCode::BAD_REQUEST, "terminal name is required".into()),
             },
             None => None,
         };
         if let Some(env) = body.env.as_ref() {
             if let Err(message) = validate_terminal_env(env, tab_name.as_deref()) {
-                return (StatusCode::BAD_REQUEST, message).into_response();
+                return err(StatusCode::BAD_REQUEST, message);
             }
         }
         // Three-way: outer None (no `group` field) keeps the existing
@@ -541,8 +544,10 @@ pub async fn api_restart_terminal(
             Some(id) => match normalize_label(id, MAX_ID_CHARS) {
                 Some(id) => Some(id),
                 None => {
-                    return (StatusCode::BAD_REQUEST, "terminal window id is required")
-                        .into_response()
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "terminal window id is required".into(),
+                    )
                 }
             },
             None => None,
@@ -560,7 +565,7 @@ pub async fn api_restart_terminal(
     };
     match state.terminal_sessions.restart(&session, overrides) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "terminal session not found").into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "terminal session not found".into()),
         Err(e) => create_error_response(e, "restart"),
     }
 }
@@ -569,18 +574,13 @@ pub async fn api_restart_terminal(
 /// the route contract; `verb` names the failed operation in a spawn error.
 fn create_error_response(error: CreateError, verb: &str) -> Response {
     match error {
-        CreateError::Capped => {
-            (StatusCode::CONFLICT, "terminal session cap reached").into_response()
-        }
-        CreateError::FdPressure(e) => {
-            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
-        }
-        CreateError::Spawn(e) => (
+        CreateError::Capped => err(StatusCode::CONFLICT, "terminal session cap reached".into()),
+        CreateError::FdPressure(e) => err(StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        CreateError::Spawn(e) => err(
             StatusCode::BAD_REQUEST,
             format!("failed to {verb} terminal: {e}"),
-        )
-            .into_response(),
-        CreateError::Closed => (StatusCode::GONE, "terminal session was closed").into_response(),
+        ),
+        CreateError::Closed => err(StatusCode::GONE, "terminal session was closed".into()),
     }
 }
 
@@ -594,7 +594,7 @@ pub async fn api_delete_terminal(
     {
         StatusCode::NO_CONTENT.into_response()
     } else {
-        (StatusCode::NOT_FOUND, "terminal session not found").into_response()
+        err(StatusCode::NOT_FOUND, "terminal session not found".into())
     }
 }
 
@@ -620,31 +620,35 @@ pub async fn api_set_terminal_broadcast(
     let Json(body) = match body {
         Ok(body) => body,
         Err(e) => {
-            return (
+            return err(
                 StatusCode::BAD_REQUEST,
                 format!("invalid broadcast toggle: {e}"),
             )
-                .into_response()
         }
     };
     let window_id = match state.terminal_sessions.session_window_id(&session) {
         Some(Some(window_id)) => window_id,
         Some(None) => {
-            return (
+            return err(
                 StatusCode::NOT_FOUND,
-                "terminal session has no owning window",
+                "terminal session has no owning window".into(),
             )
-                .into_response()
         }
-        None => return (StatusCode::NOT_FOUND, "terminal session not found").into_response(),
+        None => return err(StatusCode::NOT_FOUND, "terminal session not found".into()),
     };
     // The typed frame is what the `/ws` pump addresses to one window; a
     // hand-built object would serialize its keys sorted, miss the pump's
     // prefix scan, and reach every socket of the tenant.
-    let frame = match crate::control_socket::terminal_broadcast_frame(&window_id, session, body.on)
-    {
+    broadcast_response(
+        &state,
+        crate::control_socket::terminal_broadcast_frame(&window_id, session, body.on),
+    )
+}
+
+fn broadcast_response(state: &AppState, frame: Result<String, String>) -> Response {
+    let frame = match frame {
         Ok(frame) => frame,
-        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
     let _ = state.events_tx.send(frame);
     StatusCode::NO_CONTENT.into_response()
@@ -1541,6 +1545,241 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    async fn refusal_message(response: Response, status: StatusCode) -> String {
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("refusal envelope");
+        assert!(
+            body.get("code").is_none(),
+            "these refusals have no branching reader"
+        );
+        body["error"].as_str().expect("sentence").to_owned()
+    }
+
+    #[tokio::test]
+    async fn terminal_validation_refusals_keep_their_sentences() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let state = crate::state::test_support::make_test_state(false);
+        let app = crate::terminal_router(state);
+        for (method, path, body, status, sentence) in [
+            (
+                "POST",
+                "/api/terminals",
+                "{",
+                StatusCode::BAD_REQUEST,
+                "invalid terminal create:",
+            ),
+            (
+                "POST",
+                "/api/terminals",
+                r#"{"name":" ","command":"sleep 5"}"#,
+                StatusCode::BAD_REQUEST,
+                "terminal name is required",
+            ),
+            (
+                "POST",
+                "/api/terminals",
+                r#"{"name":"test","command":" "}"#,
+                StatusCode::BAD_REQUEST,
+                "terminal command is required",
+            ),
+            (
+                "POST",
+                "/api/terminals",
+                r#"{"name":"test","command":"sleep 5","env":{"BAD=KEY":"x"}}"#,
+                StatusCode::BAD_REQUEST,
+                "invalid terminal env key",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/restart",
+                r#"{"name":" "}"#,
+                StatusCode::BAD_REQUEST,
+                "terminal name is required",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/restart",
+                r#"{"env":{"BAD=KEY":"x"}}"#,
+                StatusCode::BAD_REQUEST,
+                "invalid terminal env key",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/restart",
+                r#"{"window_id":" "}"#,
+                StatusCode::BAD_REQUEST,
+                "terminal window id is required",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/restart",
+                "{}",
+                StatusCode::NOT_FOUND,
+                "terminal session not found",
+            ),
+            (
+                "DELETE",
+                "/api/terminals/missing",
+                "",
+                StatusCode::NOT_FOUND,
+                "terminal session not found",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/broadcast",
+                "{",
+                StatusCode::BAD_REQUEST,
+                "invalid broadcast toggle:",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/broadcast",
+                r#"{"on":true}"#,
+                StatusCode::NOT_FOUND,
+                "terminal session not found",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let message = refusal_message(response, status).await;
+            assert!(
+                message.starts_with(sentence),
+                "{method} {path}: {message:?}, expected {sentence:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_create_error_variants_keep_status_and_sentence() {
+        use crate::terminal_sessions::FdPressure;
+        for (error, verb, status, sentence) in [
+            (
+                CreateError::Capped,
+                "start",
+                StatusCode::CONFLICT,
+                "terminal session cap reached",
+            ),
+            (
+                CreateError::FdPressure(FdPressure {
+                    open: 60,
+                    limit: 64,
+                    required: 8,
+                }),
+                "start",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many open files to start terminal: 60/64 open, need 8 fd headroom",
+            ),
+            (
+                CreateError::Spawn(anyhow::anyhow!("spawn refused")),
+                "start",
+                StatusCode::BAD_REQUEST,
+                "failed to start terminal: spawn refused",
+            ),
+            (
+                CreateError::Spawn(anyhow::anyhow!("spawn refused")),
+                "restart",
+                StatusCode::BAD_REQUEST,
+                "failed to restart terminal: spawn refused",
+            ),
+            (
+                CreateError::Closed,
+                "restart",
+                StatusCode::GONE,
+                "terminal session was closed",
+            ),
+        ] {
+            assert_eq!(
+                refusal_message(create_error_response(error, verb), status).await,
+                sentence
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_refuses_an_unowned_session_and_an_encoding_failure() {
+        let state = crate::state::test_support::make_test_state(false);
+        let handle = create_quiet_terminal(&state, "sleep 5");
+        let id = handle.id().to_owned();
+        let response = api_set_terminal_broadcast(
+            State(state.clone()),
+            AxumPath(id.clone()),
+            Ok(Json(SetBroadcastBody { on: true })),
+        )
+        .await;
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        assert_eq!(
+            refusal_message(response, StatusCode::NOT_FOUND).await,
+            "terminal session has no owning window"
+        );
+        // The encoder's current string/bool payload cannot fail. Exercise
+        // the defensive HTTP mapping without substituting a fake encoder.
+        assert_eq!(
+            refusal_message(
+                broadcast_response(&state, Err("encode window command: refused".into())),
+                StatusCode::INTERNAL_SERVER_ERROR
+            )
+            .await,
+            "encode window command: refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_upgrade_validation_refusals_are_json() {
+        let (cfg, root, workspace) = terminal_workspace_fixture();
+        let library = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            library,
+            root.path().to_path_buf(),
+            workspace,
+        ));
+        let app = crate::router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (query, sentence) in [
+            ("env=not-json", "invalid terminal env:"),
+            ("cwd=../outside", "invalid terminal cwd:"),
+        ] {
+            let result =
+                tokio_tungstenite::connect_async(format!("ws://{address}/api/terminal/ws?{query}"))
+                    .await;
+            let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
+                panic!("expected an HTTP refusal for {query}")
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_TYPE],
+                "application/json"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(response.body().as_ref().expect("refusal body")).unwrap();
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with(sentence)),
+                "{query}: {body}"
+            );
+        }
+        server.abort();
+    }
 
     #[test]
     fn label_normalizers_trim_drop_blank_and_cap_by_character() {
