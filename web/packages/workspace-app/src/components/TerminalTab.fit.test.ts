@@ -82,12 +82,34 @@ describe("the fit", () => {
 
 describe("the PTY's size", () => {
   test("is sent when the socket opens and whenever xterm resizes", async () => {
+    xterm.fit.size = { cols: 80, rows: 24 };
     const { term, socket } = await mounted();
     await attach(socket);
     expect(resizeFrames(socket)).toEqual([{ type: "resize", cols: 80, rows: 24 }]);
 
     for (const handler of term.resizeHandlers) handler({ cols: 100, rows: 30 });
     expect(resizeFrames(socket).at(-1)).toEqual({ type: "resize", cols: 100, rows: 30 });
+  });
+
+  // The renderer's grid before a fit measured it is xterm's default, which
+  // would size a live PTY that another client sized.
+  test("is not sent when the socket opens before a fit measured the grid", async () => {
+    const { socket } = await mounted();
+    await attach(socket);
+    expect(resizeFrames(socket)).toEqual([]);
+  });
+
+  test("is sent once the first fit measures it, even when it is the renderer's own", async () => {
+    const { socket } = await mounted();
+    await attach(socket);
+    const before = resizeFrames(socket).length;
+    const observer = resizeObservers.at(-1)!;
+
+    xterm.fit.size = { cols: 80, rows: 24 };
+    observer.callback();
+    observer.callback();
+
+    expect(resizeFrames(socket).slice(before)).toEqual([{ type: "resize", cols: 80, rows: 24 }]);
   });
 
   test("a size another view set is adopted by a hidden terminal only", async () => {
