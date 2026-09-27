@@ -1,12 +1,11 @@
-//! Lifecycle locks keyed by what they serialize: a workspace's canonical root
-//! for the host, a mount prefix for the devserver. Also the computation of
-//! the canonical key a root lock is taken under, one per spelling in flight.
+//! Caller-owned lifecycle locks and blocking-call permits, keyed by a
+//! workspace's canonical root for the host or a mount prefix for the
+//! devserver. Key computations share one in-flight answer per spelling.
 //!
-//! A mount, close or remove holds its root's lock across the workspace open,
-//! the tenant build, the release budget and the filesystem hops behind them,
-//! so it may wait a long time on a slow or hung root. Keying the lock by root
-//! confines that wait to callers of the same root. The devserver keys its
-//! mount attempts by prefix the same way, for the same reason.
+//! A lifecycle caller keeps its root lock through settlement. The open, its
+//! root check and mounted revalidation own call permits, so cancelling a
+//! caller releases the root lock while its abandoned work still prevents
+//! another call of the same kind.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -16,20 +15,17 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
 
-/// One asynchronous mutex per key, so the calls on one key serialize with
-/// each other and never with another key's.
+/// One asynchronous mutex per key. Callers of one key serialize while other
+/// keys remain independent. The host uses separate keys for caller-owned
+/// lifecycle locks and blocking-call permits; only call permits move into
+/// blocking work.
 ///
-/// An entry is a `Weak` to its key's mutex, and every caller waiting on or
-/// holding that mutex keeps an `Arc` to it. A caller shares the live mutex
-/// when one exists and inserts a fresh one only when no `Arc` is left, which
-/// means nobody holds or waits on the old one, so pruning never hands two
-/// callers different mutexes for one key. The last borrowed guard of a key
-/// removes its entry, and every lookup prunes the entries a cancelled waiter
-/// or a detached guard left behind after dropping its mutex.
-///
-/// The entry map's own mutex is a leaf: held only to look up, insert or
-/// prune an entry, never across an await and never while another lock is
-/// taken or released.
+/// An entry is a `Weak` to its mutex, and every waiter or holder keeps that
+/// mutex alive. A new mutex is inserted only when no holder or waiter remains.
+/// The last borrowed guard removes an unused entry; subsequent lookups prune
+/// entries left by cancelled waiters or detached guards. The entry-map mutex
+/// is a leaf, held only for lookup, insertion or pruning and never across an
+/// await or filesystem work.
 pub struct KeyedLocks<K: Eq + Hash> {
     entries: Mutex<HashMap<K, Weak<AsyncMutex<()>>>>,
 }
@@ -117,7 +113,7 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
     }
 }
 
-/// The host's registration locks, one per canonical workspace root.
+/// The host's lifecycle locks, one per canonical workspace root.
 ///
 /// The key is the root's canonical key, computed off the runtime thread
 /// before the lock is awaited, so two spellings of one root share a mutex,
@@ -126,9 +122,9 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// Lock order: a caller holds at most one root lock. The only lock it may
 /// already hold when it takes one is the devserver's mount-attempt lock for
 /// that root's prefix (below). Every other lock on its path is taken after
-/// the root lock: the routing map, the mount-state map, the overlay's and
-/// the window registry's data and save locks, and the library's registry
-/// mutex. Those are taken and released while the root lock is held and
+/// the root lock: call permits, the routing map, the mount-state map, the
+/// overlay's and window registry's data and save locks, and the library's
+/// registry mutex. Those are taken and released while the root lock is held and
 /// none is held while a root lock is awaited. The maps of key computations
 /// ([`RootKeys`]) and health checks in flight are leaves, held across no
 /// await and no filesystem call.
@@ -153,26 +149,16 @@ pub(crate) enum RootCall {
 /// its resources are released. A waiter then dispatches its own call.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 
-/// The canonical keys of workspace roots, each computed on the blocking pool
-/// by one computation per spelled path in flight.
+/// Canonical root keys computed on the blocking pool, with one computation
+/// per spelled path in flight. Concurrent callers of a spelling share its
+/// computation and receive cloned answers. A caller that gives up leaves
+/// the computation running. Two spellings can each hold a thread because
+/// their shared canonical identity is not yet known.
 ///
-/// A key asks the root's filesystem, and a hung network mount never answers.
-/// A caller that asks for a spelling whose computation is still running
-/// waits on that computation instead of starting another. Retries hold one
-/// blocking thread per spelling, leaving the rest of the pool available.
-/// Two spellings can each hold a thread: the canonical key is not known
-/// until the filesystem answers, so the computation is keyed by spelling.
-///
-/// After the key is known, the host's idempotent open and mounted-root
-/// revalidation carry the root lock into their blocking calls. A hung root
-/// holds one thread across those calls even when their callers give up.
-/// Registration does not carry that lock; a root that answers its key and
-/// then hangs in registration holds one thread per caller that stops waiting.
-///
-/// A computation drops its entry when it finishes, so a later caller asks
-/// the filesystem afresh; a caller that gives up leaves the computation to
-/// finish on its own. The entry map's mutex is a leaf, held only to look up,
-/// insert or remove an entry.
+/// Completed computations are removed, so later callers resolve afresh.
+/// This bound covers key resolution; the host uses separate call permits
+/// for its filesystem open, post-build root check and mounted revalidation.
+/// The entry-map mutex is held only for lookup, insertion and removal.
 #[derive(Default)]
 pub(crate) struct RootKeys {
     in_flight: Arc<Mutex<HashMap<PathBuf, watch::Receiver<Option<PathBuf>>>>>,

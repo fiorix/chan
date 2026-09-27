@@ -1257,10 +1257,15 @@ impl WorkspaceHost {
             .await
     }
 
-    /// [`open_registered_workspace`](Self::open_registered_workspace) for a
-    /// caller that holds `root`'s canonical `key`, which the lifecycle
-    /// bookkeeping goes by so that none of it asks the root's filesystem on
-    /// the runtime thread.
+    /// Mount a registered root using its already-resolved canonical key for
+    /// lifecycle bookkeeping. The caller retains any lifecycle root guard
+    /// through this method's settlement. A mount permit follows the filesystem
+    /// open, tenant construction and post-build root check, so an abandoned
+    /// blocking hop keeps later opens waiting until it returns.
+    ///
+    /// Starting and its success, failure or cancellation settlement share this
+    /// body. The raw public entry is non-idempotent; the idempotent entry checks
+    /// for an existing runtime under the root lock before entering it.
     async fn open_registered_workspace_keyed(
         &self,
         root: &Path,
@@ -1426,22 +1431,18 @@ impl WorkspaceHost {
             .await
     }
 
-    /// Re-check one mounted root's filesystem and publish the result through
-    /// the degraded overlay.
+    /// Recheck a mounted workspace and reconcile its root health without
+    /// turning a still-mounted tenant into a mount failure.
     ///
-    /// Reports through [`workspace_status`](Self::workspace_status) rather
-    /// than through a return value, because the callers are idempotent
-    /// registrations of a mount that is already up: turning an unusable root
-    /// into a mount FAILURE would let a caller record the tenant as gone
-    /// (`DevserverState::finish_failed_attempt`) while it is still serving
-    /// routes and holding live terminals. Tearing the tenant down is a close's
-    /// job, not this check's.
+    /// The caller owns the lifecycle root lock; the blocking stat owns a
+    /// separate revalidation permit. Cancelling the caller releases the root
+    /// lock while the stat retains its permit and workspace until it returns.
+    /// A later caller waits for the permit and checks the current mounted
+    /// workspace afresh. An abandoned answer is discarded.
     ///
-    /// Blocking: `Workspace::revalidate_root` stats the real root, which is
-    /// where a stalled network mount hangs, so it runs on the blocking pool
-    /// and can never pin a runtime worker. Nothing here bounds that stat; the
-    /// caller's own budget does, and the launcher's `add` / `on` routes have
-    /// none beyond their client.
+    /// The caller's bound limits its wait, not the filesystem operation; this
+    /// method supplies no timeout. Join failure leaves the last published
+    /// health state unchanged.
     async fn revalidate_mounted_root(&self, root: &Path, key: &Path) {
         let permit = self
             .root_calls
@@ -3169,8 +3170,8 @@ impl WorkspaceHost {
     /// resolution of the same spelling is in flight waits on that one, so a
     /// root that hangs while its key is resolved holds one blocking thread
     /// for it however many callers ask, and every caller of it waits without
-    /// holding a runtime worker. The bound is this hop's only; see
-    /// `RootKeys` for the hops after it.
+    /// holding a runtime worker. This bound covers key resolution; separate
+    /// call permits admit the open, its root check and mounted revalidation.
     pub async fn root_key(&self, root: &Path) -> Result<PathBuf, Error> {
         #[cfg(test)]
         let probe = self.blocking_thread_probe.lock().unwrap().clone();
