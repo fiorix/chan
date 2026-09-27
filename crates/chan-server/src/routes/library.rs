@@ -1200,8 +1200,8 @@ async fn handle_discard_library_window(
     }
     match host.discard_window(&window_id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(false) => crate::error::err(StatusCode::NOT_FOUND, "window not found".into()),
+        Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
