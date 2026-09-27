@@ -8,6 +8,7 @@
     "test": "vitest run"
   },
   "exports": {
+    "./modal-focus": "./src/modalFocus.ts",
     "./keyboard": "./src/keyboard.ts",
     "./keyboard-vectors": "./src/keyboardVectors.ts",
     "./api": "./src/api.ts",
