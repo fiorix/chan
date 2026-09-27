@@ -517,60 +517,51 @@ export interface LibraryApi {
 }
 
 /**
- * A non-2xx response, carrying the status and the server's text body.
+ * A non-2xx response, carrying the status and the server's refusal body.
  *
- * `body` is what the server sent; `message` is what a person reads. Some
- * refusals are plain text and some arrive in a `{"error": "<reason>"}`
- * envelope, so the message is the reason either way and the envelope never
- * reaches an error bubble. Callers that match on a refusal's SHAPE read `body`,
- * not the message.
+ * `body` is what the server sent; `data` keeps its parsed JSON and `message`
+ * is what a person reads. Non-JSON bodies stay readable as text. Callers
+ * that branch on a refusal's shape read `data` rather than the sentence.
  */
 export class ApiError extends Error {
+  readonly data: unknown;
+
   constructor(
     readonly status: number,
     readonly body: string,
   ) {
-    super(refusalReason(body) || `HTTP ${status}`);
-    this.name = "ApiError";
-  }
-}
-
-/** The reason inside a `{"error": "<reason>"}` body, or the body unchanged when
- * it is not one. The server's own text, never rewritten: a reason differs
- * between the conditions behind it and between platforms, so the launcher
- * displays whatever arrives. */
-function refusalReason(body: string): string {
-  try {
-    const parsed: unknown = JSON.parse(body);
-    if (parsed !== null && typeof parsed === "object") {
-      const reason = (parsed as { error?: unknown }).error;
-      if (typeof reason === "string") return reason;
+    let data: unknown = null;
+    let reason = body;
+    try {
+      data = JSON.parse(body);
+      if (data !== null && typeof data === "object") {
+        const error = (data as { error?: unknown }).error;
+        if (typeof error === "string") reason = error;
+      }
+    } catch {
+      // A non-JSON body is its own readable reason.
     }
-  } catch {
-    // A plain-text body (the `NO_DESKTOP` refusals) is already readable.
+    super(reason || `HTTP ${status}`);
+    this.name = "ApiError";
+    this.data = data;
   }
-  return body;
 }
 
 /**
  * The live-terminal count carried by an unforced devserver-workspace off that
  * was refused because the workspace still has live terminal sessions. Returns
- * `active_terminals` when `e` is an `ApiError` whose 409 body parses to
+ * `active_terminals` when `e` is an `ApiError` whose 409 data contains
  * `{error:"live_terminals", active_terminals:N}`, else null, so the launcher
- * can confirm-and-retry only that case and let every other 409 (the plain-text
- * refusals: `NO_DESKTOP`, a workspace another Chan process holds) fall through
- * to the generic error banner. Reads the raw `body`: the message is the
- * unwrapped reason.
+ * can confirm-and-retry only that case and let other 409s, including
+ * `NO_DESKTOP` and a locked workspace, reach the generic error banner.
+ * The parsed data keeps the count beside the unwrapped message.
  */
 export function liveTerminalsCount(e: unknown): number | null {
   if (!(e instanceof ApiError) || e.status !== 409) return null;
-  try {
-    const body = JSON.parse(e.body) as { error?: unknown; active_terminals?: unknown };
-    if (body.error === "live_terminals" && typeof body.active_terminals === "number") {
-      return body.active_terminals;
-    }
-  } catch {
-    // Not JSON (e.g. the plain `NO_DESKTOP` string body) → not the live case.
+  if (e.data === null || typeof e.data !== "object") return null;
+  const body = e.data as { error?: unknown; active_terminals?: unknown };
+  if (body.error === "live_terminals" && typeof body.active_terminals === "number") {
+    return body.active_terminals;
   }
   return null;
 }
