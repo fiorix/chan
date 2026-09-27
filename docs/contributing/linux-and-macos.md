@@ -43,7 +43,7 @@ limactl shell default sudo sdme fs import docker.io/ubuntu --name ubuntu
 
 ## Core: run the CI gate in a Linux container
 
-CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri build dependencies. Mirror that locally:
+CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri and Windows cross-check build dependencies and the Windows Rust target. It runs `make pre-push`, then the chan-library and chan-server suites under a symlinked `TMPDIR` and the Windows GNU test-target clippy check. Mirror that locally:
 
 ```sh
 # create + start a build container from the ubuntu base
@@ -58,13 +58,15 @@ limactl shell default sudo sdme exec chan-build /bin/sh -c \
 
 # install deps (same set CI installs) + the pinned Rust toolchain
 limactl shell default sudo sdme exec chan-build /bin/sh -c '
-  export DEBIAN_FRONTEND=noninteractive
+  export HOME=/root DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   apt-get install -y build-essential pkg-config curl ca-certificates \
     nodejs npm libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
     librsvg2-dev libsoup-3.0-dev patchelf xdg-utils \
-    desktop-file-utils file
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal'
+    desktop-file-utils gcc-mingw-w64-x86-64 file
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  . /root/.cargo/env
+  cd /root/chan && rustup target add x86_64-pc-windows-gnu'
 
 # run the gate (reads rust-toolchain.toml -> 1.95.0)
 limactl shell default sudo sdme exec chan-build /bin/sh -c '
