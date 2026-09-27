@@ -7,6 +7,7 @@ import {
   focusLibraryWindow,
   type LibraryWindowBridge,
 } from "./libraryWindows";
+import { readApiError } from "./errors";
 import { resetHostVocabularyForTests } from "./nativeVocabulary";
 import type { ScopedLibraryWindow } from "./libraryCommand";
 
@@ -118,6 +119,7 @@ function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibra
 
 afterEach(() => {
   delete (window as W).__TAURI_INTERNALS__;
+  vi.useRealTimers();
   vi.restoreAllMocks();
   resetHostVocabularyForTests();
 });
@@ -489,5 +491,121 @@ describe("browser library windows still use window.open", () => {
     await focusLibraryWindow(host, scopedWindow({ window_id: "w-self" }));
 
     expect(open).not.toHaveBeenCalled();
+  });
+});
+
+function pageAnswer(status = 200, message = "", retryAfter = "1"): Awaited<ReturnType<WindowPageCheck>> {
+  const response = new Response(status === 200 ? "<html></html>" : JSON.stringify({ error: message }), {
+    status, headers: { "Retry-After": retryAfter },
+  });
+  return { response, readRefusal: vi.fn(() => readApiError(response)) };
+}
+
+describe("creating a capability popup", () => {
+  test.each([
+    [401, "invalid or expired library command capability"],
+    [410, "the invoking window is no longer live"],
+    [409, "window tenant is not running"],
+    [404, "window not found"],
+  ] as const)("closes the blank popup on %i and throws the server sentence", async (status, message) => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const answer = pageAnswer(status, message);
+    const host = bridge({
+      runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }),
+      checkPage: vi.fn().mockResolvedValue(answer),
+    });
+
+    await expect(createLibraryWindow(host, { action: "new_terminal" })).rejects.toMatchObject({ status, message });
+
+    expect(popup.close).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe("about:blank");
+    expect(answer.readRefusal).toHaveBeenCalledTimes(1);
+    expect(host.runAction).toHaveBeenCalledTimes(1);
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { action: "new_terminal" } as const,
+    { action: "new_workspace_window", workspace_id: "project-a" } as const,
+  ])("opens synchronously and waits for Retry-After before navigating $action", async (action) => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockImplementation(() => {
+      calls.push("open");
+      return popup as unknown as Window;
+    });
+    let resolveAction!: (result: { window: ScopedLibraryWindow }) => void;
+    const host = bridge({
+      runAction: vi.fn(() => {
+        calls.push("action");
+        return new Promise<{ window: ScopedLibraryWindow }>((resolve) => { resolveAction = resolve; });
+      }),
+      checkPage: vi.fn()
+        .mockImplementationOnce(async () => { calls.push("503"); return pageAnswer(503, "Restoring sessions.", "2"); })
+        .mockImplementationOnce(async () => { calls.push("200"); return pageAnswer(); }),
+    });
+
+    const pending = createLibraryWindow(host, action);
+    expect(calls).toEqual(["open", "action"]);
+    expect(window.open).toHaveBeenCalledWith("", "_blank");
+    resolveAction({ window: scopedWindow() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual(["open", "action", "503"]);
+    expect(popup.location.href).toBe("about:blank");
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(host.checkPage).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe("about:blank");
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(calls).toEqual(["open", "action", "503", "200"]);
+    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(popup.name).toBe("w-other");
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(popup.focus).toHaveBeenCalled();
+    expect(host.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("bounds a refused page wait at sixty seconds with its last sentence", async () => {
+    vi.useFakeTimers();
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({
+      runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }),
+      checkPage: vi.fn(async () => pageAnswer(503, "Restoring sessions.", "30")),
+    });
+    const outcome = createLibraryWindow(host, { action: "new_terminal" }).catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(59999);
+    expect(popup.location.href).toBe("about:blank");
+    expect(popup.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await outcome).toMatchObject({ message: "Restoring sessions." });
+    expect(popup.close).toHaveBeenCalledTimes(1);
+    expect(host.checkPage).toHaveBeenCalledTimes(2);
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test("ends a stalled check when the user closes the popup", async () => {
+    vi.useFakeTimers();
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({
+      runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }),
+      checkPage: vi.fn(() => new Promise<Awaited<ReturnType<WindowPageCheck>>>(() => {})),
+    });
+    let finished = false;
+    const pending = createLibraryWindow(host, { action: "new_terminal" }).then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.checkPage).toHaveBeenCalledTimes(1);
+    expect(finished).toBe(false);
+    popup.closed = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(finished).toBe(true);
+    await pending;
+    expect(popup.location.href).toBe("about:blank");
+    expect(host.refresh).not.toHaveBeenCalled();
+    expect(vi.mocked(host.checkPage).mock.calls[0][1].aborted).toBe(true);
   });
 });
