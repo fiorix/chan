@@ -1511,10 +1511,16 @@ impl WorkspaceHost {
 
     /// Mount an already-open workspace under `config.prefix`.
     ///
-    /// Tenant builds may overlap for one root. Immediately before dispatching
-    /// the post-build root check, take the same mount permit as a registered
-    /// open. Keep it through the check and publication or result disposal, so
-    /// an abandoned check admits no second blocking call for that root.
+    /// The root's canonical key is resolved before the tenant is built, so
+    /// every failure after the build tears that tenant down. Tenant builds may
+    /// overlap for one root. After the build, before dispatching the root
+    /// check, wait for the same mount permit as a registered open, and keep it
+    /// through the check and publication or result disposal, so an abandoned
+    /// check admits no second blocking call for that root.
+    ///
+    /// That wait has no budget. This caller holds no root lock, so no close or
+    /// removal waits behind it, and giving up would mean shutting down the
+    /// tenant it has already built.
     pub async fn open_workspace(
         &self,
         workspace: Arc<Workspace>,
@@ -1556,6 +1562,11 @@ impl WorkspaceHost {
                 )));
             }
         }
+        let key = if permit.is_none() {
+            Some(self.root_key(&root).await?)
+        } else {
+            None
+        };
 
         let artifacts = self
             .builder
@@ -1580,8 +1591,7 @@ impl WorkspaceHost {
             handle: handle.clone(),
         };
 
-        if permit.is_none() {
-            let key = self.root_key(&root).await?;
+        if let Some(key) = key {
             *permit = Some(
                 self.root_calls
                     .lock(&(key, RootCall::Mount))
