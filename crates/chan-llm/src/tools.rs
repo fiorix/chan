@@ -210,7 +210,7 @@ impl ToolContext {
     /// counted file of a scan. A stopped tool fails with the workspace's
     /// cancellation error. One filesystem call, one write and one search
     /// query run to their end.
-    pub fn with_cancel(workspace: Arc<Workspace>, cancel: Arc<AtomicBool>) -> Self {
+    pub(crate) fn with_cancel(workspace: Arc<Workspace>, cancel: Arc<AtomicBool>) -> Self {
         Self { workspace, cancel }
     }
 
