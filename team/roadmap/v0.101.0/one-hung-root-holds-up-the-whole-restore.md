@@ -14,6 +14,8 @@ The review's scenario: one desired-on root whose filesystem hangs makes every re
 
 The lane's report says why it kept the attempts sequential: running them concurrently is a load decision (workspace opens, indexing and file descriptors at startup) that the round did not take. The review rates it low because it is bounded, where `main` was unbounded.
 
+The desktop's boot restore, which the Boundaries below leave unread, is a second instance of the same shape, found on 2026-09-26 with [a-hung-root-stalls-desktop-close-and-quit](a-hung-root-stalls-desktop-close-and-quit.md). `restore_on_workspaces` in `desktop/src-tauri/src/main.rs` mounts the overlay's on rows one after another, awaiting `serve::start` for each, and nothing bounds that await: it waits in the host's `open_or_get_registered_workspace` for the root's key for as long as the root hangs. So one root that does not answer holds every row behind it, with no mount bound or restore budget to end the wait, unlike the devserver's. The desktop's test of a quit during a stalled restore (`a_quit_during_a_restore_held_on_a_hung_root_keeps_its_rows_on`) parks the restore that way, on the second of three rows. Meanwhile a quit keeps the rows behind the hung root on, and a row turned off while it waits is skipped at its turn, as that item's What shipped describes.
+
 ## Desired contract
 
 A restored root that does not answer delays its own row and no other: the other rows restore, their tenants serve, and READY follows within a bound that does not grow with the number of hung roots.

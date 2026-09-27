@@ -23,3 +23,18 @@ Give terminals a stable owner keyed by tab id above the pane tree, with the pane
 ## Boundaries
 
 `web/packages/workspace-app/src/components/Workspace.svelte`, `Pane.svelte`, `TerminalTab.svelte` and the state that owns terminal tabs; the existing keep-alive test grows a pane-restructuring case. The server-side resize on reattach is its own item.
+
+## What shipped
+
+Landed on 2026-09-27. A terminal is no longer drawn by its pane. One owner at the root of the pane tree (`components/Terminals.svelte`, which `Workspace.svelte` draws at the root only) draws every terminal tab of the layout once, keyed by tab id; each pane draws a terminal layer in its body; and a dock (`dockTerminal` in `state/terminalDock.svelte.ts`) moves each terminal's element into the layer of the pane that holds it. A split, a move, a swap or a collapse therefore moves the element and keeps the renderer, its screen and the one socket, with no second dial and no replay. A terminal mounts only once it is docked, so its first fit measures the pane it is drawn in, and each of its props is a value of its own, so a change to another pane's tabs re-runs none of its effects. After a move the terminal is fitted on the next frame and again at 50 and 250 ms, and a changed grid reaches the PTY as a `resize` frame on the socket it already has. A tab switch, a side flip and Hybrid Nav keep the terminal mounted and hidden, as before. Pinned through the real app with the terminal live on its session: a split, a move to another pane (which sends that pane's size), a collapse of the pane beside it, and a positioned team spawn that swaps it into the free cell each keep its element, its renderer and its one dial.
+
+The dial and the socket's open declare a grid only once a fit has measured one: a fit that declines, throws or proposes no finite grid is not a measurement, and a dial without one declares no size, so the PTY keeps the size it has (`runTerminalFit` in `terminal/resize.ts`, `terminalWsPath` in `terminal/session.ts`). The first measured grid is sent even when the fit left the renderer's grid as it was, since an unchanged grid fires no resize event and the PTY would keep the size another client gave it. After a move the keyboard goes back to the find input, the Rich Prompt composer or the terminal, whichever last held it, when the terminal is still the focused one and nothing outside it has taken the keyboard since; the pins read which element is asked to take focus.
+
+Not fixed, or not pinned:
+
+- A survey card shown over the terminal is not given the keyboard back after a move: the return falls back to the terminal, which defers to an open survey.
+- A tab id that two panes list is drawn in the first of them only, with a console warning; where it is the other pane's active tab, that pane's body shows nothing. Nothing is known to produce one.
+- A pane whose body fails to render has no layer until its boundary retries, and its terminals stay mounted, socket open, in the detached layer they were in until "Try again" docks them again or their tabs close.
+- Relocations with no pin of their own: a Hybrid Nav draft split followed by Escape, a co-view layout rebuild (`reconcileLayout`), the reset of the pane body's failure boundary, and the `placement` frame that carries the new pane id after a move.
+
+The browser-level check was not run. How a DOM move of a focused element drops the keyboard in WebKitGTK, WKWebView and Chromium, whether the composer keeps its caret and selection and what becomes of an IME composition in flight across the move, and how cursor-addressed output renders while a pane shrinks are read from the code and the mounted tests, which run in jsdom with a stand-in renderer (`src/__tests__/xterm.ts`) that lays nothing out.
