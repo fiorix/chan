@@ -850,9 +850,10 @@ impl chan_server::DevserverFeedSource for DevserverFeed {
             .collect();
         // Override `connected` for windows the desktop has LOCALLY buried so
         // the launcher dot reflects hidden immediately -- the desktop's bury state
-        // is the truth for the dot. A workspace window's remote `/ws` drop agrees,
-        // but a standalone terminal on the shared `/terminal` tenant never pushes
-        // `connected:false`, so its dot hung without this.
+        // is the truth for the dot. The bury closes the window's webview, whose
+        // `/ws` drop reaches this set as `connected:false` only once the
+        // devserver pushes it, and never while another client holds the same
+        // window.
         {
             let buried = self.buried.lock().unwrap();
             if !buried.is_empty() {

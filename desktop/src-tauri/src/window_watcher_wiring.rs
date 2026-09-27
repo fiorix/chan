@@ -402,10 +402,11 @@ impl RemoteLaunches {
     /// it if the key moved, so no attempt is ever dispatched at an absent
     /// webview.
     ///
-    /// A try of the timer on a window whose record reads connected finds
-    /// the window's page on its target, since that page's own socket is up:
-    /// the attempt is applied and nothing navigates. Every other try
-    /// navigates when the target answers ready.
+    /// A try of the timer on a window whose record reads connected leaves
+    /// it alone: a `/ws` socket tagged with the window is live, as its
+    /// page's is once the page is on its target. The attempt is applied and
+    /// nothing navigates. Every other try navigates when the target answers
+    /// ready.
     fn admit(
         &self,
         record: &WindowRecord,
