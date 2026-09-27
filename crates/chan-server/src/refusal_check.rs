@@ -347,45 +347,23 @@ const WEBSOCKETS: &[&str] = &[
 // Each entry names an existing route whose refusals are not all envelopes.
 // Remove entries as those routes adopt the contract; new routes must obey it.
 const PENDING: &[(&str, &str)] = &[
-    ("GET", "/api/library/windows"),
     ("POST", "/api/library/windows"),
-    ("GET", "/api/library/windows/watch"),
     ("DELETE", "/api/library/windows/{window_id}"),
-    ("POST", "/api/library/windows/{window_id}/open"),
-    ("POST", "/api/library/windows/{window_id}/hide"),
     ("GET", "/api/library/windows/{window_id}/live-terminals"),
     ("POST", "/api/library/windows/{window_id}/close"),
     ("PUT", "/api/library/windows/{window_id}/label"),
     ("POST", "/api/library/windows/{window_id}/visibility"),
-    ("POST", "/api/library/devservers/{id}/connect"),
-    ("POST", "/api/library/devservers/{id}/disconnect"),
-    ("PUT", "/api/library/devservers/{id}/native-trust"),
-    ("DELETE", "/api/library/devservers/{id}/native-trust"),
-    ("POST", "/api/library/devservers/{id}/terminal"),
-    ("POST", "/api/library/devservers/{id}/workspaces/open"),
     ("POST", "/api/library/devservers/{id}/workspaces/on"),
     ("POST", "/api/library/devservers/{id}/workspaces/off"),
     ("POST", "/api/library/devservers/{id}/workspaces/forget"),
-    ("POST", "/api/library/gateways/{id}/connect"),
-    ("POST", "/api/library/gateways/{id}/disconnect"),
     ("POST", "/api/library/fs/pick-folder"),
-    ("GET", "/api/library/tunnel/control"),
-    ("GET", "/api/library/tunnel/conn"),
-    ("GET", "/api/library/workspaces"),
     ("POST", "/api/library/workspaces"),
     ("POST", "/api/library/workspaces/{id}/on"),
     ("POST", "/api/library/workspaces/{id}/off"),
     ("DELETE", "/api/library/workspaces/{id}"),
-    ("GET", "/api/library/local-color"),
     ("PUT", "/api/library/local-color"),
-    ("GET", "/api/library/local-color/watch"),
-    ("GET", "/api/library/local-theme"),
     ("PUT", "/api/library/local-theme"),
-    ("GET", "/api/library/local-theme/watch"),
-    ("GET", "/api/library/collapsed-machines"),
     ("PUT", "/api/library/collapsed-machines"),
-    ("POST", "/api/library/command-capabilities"),
-    ("GET", "/api/library/command-capabilities/{capability}"),
     (
         "POST",
         "/api/library/command-capabilities/{capability}/actions",
@@ -398,11 +376,9 @@ const PENDING: &[(&str, &str)] = &[
         "GET",
         "/api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals",
     ),
-    ("GET", "/api/library/gateways"),
     ("POST", "/api/library/gateways"),
     ("PUT", "/api/library/gateways/{id}"),
     ("DELETE", "/api/library/gateways/{id}"),
-    ("GET", "/api/library/devservers"),
     ("POST", "/api/library/devservers"),
     ("PUT", "/api/library/devservers/{id}"),
     ("DELETE", "/api/library/devservers/{id}"),
@@ -1147,23 +1123,25 @@ mod tests {
 
     #[tokio::test]
     async fn inspection_preserves_refusal_bytes_status_and_headers() {
-        for (path, body, content_type) in [
+        for (path, body, content_type, status) in [
             (
                 "/probe",
                 "{ \"error\": \"try later\", \"code\": \"busy\", \"count\": 3 }",
                 "application/json",
+                StatusCode::SERVICE_UNAVAILABLE,
             ),
             (
-                "/api/library/windows",
-                "pending refusal",
+                "/probe-framework",
+                "Failed to deserialize query string: invalid query",
                 "text/plain; charset=utf-8",
+                StatusCode::BAD_REQUEST,
             ),
         ] {
             let app = check(Router::new().route(
                 path,
                 axum::routing::get(move || async move {
                     Response::builder()
-                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .status(status)
                         .header(header::CONTENT_TYPE, content_type)
                         .header(header::RETRY_AFTER, "3")
                         .header("x-refusal-test", "kept")
@@ -1175,7 +1153,7 @@ mod tests {
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.status(), status);
             assert_eq!(response.headers()[header::RETRY_AFTER], "3");
             assert_eq!(response.headers()["x-refusal-test"], "kept");
             assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
