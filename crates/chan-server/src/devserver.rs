@@ -7775,9 +7775,11 @@ mod tests {
                     message.contains("refusing to operate on non-regular file"),
                     "the refusal must be the mount's own: {message}"
                 );
+                let stored = chan_workspace::paths::canonicalize_normalized(&not_a_root);
                 assert!(
-                    message.contains(&not_a_root.display().to_string()),
-                    "the refusal must name the root it rejected: {message}"
+                    message.ends_with(&format!("): {}", stored.display())),
+                    "the refusal must name the root as the registry stores it ({}): {message}",
+                    stored.display()
                 );
             }
             other => panic!("a mount that failed is not a registration: {other:?}"),

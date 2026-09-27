@@ -3278,9 +3278,10 @@ mod devserver_route_tests {
         let reason = added["error"]
             .as_str()
             .expect("a degraded row carries a reason");
+        let stored = added["path"].as_str().expect("the row names its root");
         assert!(
-            reason.contains(&root.display().to_string()),
-            "the reason must name the root: {reason}"
+            reason.starts_with(&format!("workspace root does not exist: {stored};")),
+            "the reason must name the root the row lists ({stored}): {reason}"
         );
 
         // Nothing was torn down: the tenant and its live state are still
@@ -3352,9 +3353,10 @@ mod devserver_route_tests {
         let reason = degraded["error"]
             .as_str()
             .expect("a degraded row carries a reason");
+        let stored = degraded["path"].as_str().expect("the row names its root");
         assert!(
-            reason.contains(&root.display().to_string()),
-            "the reason must name the root: {reason}"
+            reason.starts_with(&format!("workspace root does not exist: {stored};")),
+            "the reason must name the root the row lists ({stored}): {reason}"
         );
         assert!(
             reason.contains("chan close"),
