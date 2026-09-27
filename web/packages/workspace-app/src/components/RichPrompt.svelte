@@ -319,6 +319,12 @@
     });
   });
 
+  /// Give the composer the keyboard without touching its selection, as a focus
+  /// pulse does. Its terminal asks after a move to another pane drops it.
+  export function focus(): void {
+    editor?.focus();
+  }
+
   function recallFromView(view: EditorView): boolean {
     if (isPending) {
       if (lastQueued) sendCancelToTerminal(tab.id, lastQueued.id);

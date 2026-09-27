@@ -278,6 +278,12 @@
 
   let host: HTMLDivElement | undefined = $state();
   let searchInput: HTMLInputElement | undefined = $state();
+  let tabEl: HTMLDivElement | undefined;
+  let composerEl: HTMLDivElement | undefined = $state();
+  let composer: RichPrompt | undefined = $state();
+  // The surface inside this terminal that last took the keyboard. A move of
+  // the element to another pane drops the keyboard, and it goes back here.
+  let keyboardSurface: "terminal" | "find" | "composer" = "terminal";
   let term: Terminal | GhosttyTerminal | null = null;
   let fit: FitAddon | FitLike | null = null;
   let search: SearchAddon | null = null;
@@ -557,19 +563,50 @@
     sendFocusState();
   });
 
-  // A split or a tab move docks this terminal's element into another pane's
-  // layer with its renderer and socket intact (terminalDock.svelte.ts). The
-  // move drops the keyboard focus and the new host has a size of its own, so
-  // run the host-resume recovery: fit on the next frame, when the destination
-  // is laid out (a changed grid reaches the PTY through onResize), repaint,
-  // and give the keyboard back when this is still the focused terminal.
+  // A split rebuilds this terminal's pane and a move names another; either way
+  // the element is docked into a new layer with its renderer and socket
+  // intact (terminalDock.svelte.ts). The new host has a size of its own, so
+  // fit on the next frame, when it is laid out (a changed grid reaches the PTY
+  // through onResize), and repaint, as after a host resume. The move also
+  // drops the keyboard, which goes back to the surface that held it.
   let relocationsSeen = untrack(() => terminalRelocations(tab.id));
   $effect(() => {
     const relocations = terminalRelocations(tab.id);
     if (relocations === relocationsSeen) return;
     relocationsSeen = relocations;
-    untrack(recoverTerminalAfterHostResume);
+    untrack(() => {
+      recoverTerminalRendererAfterHostResume();
+      returnKeyboardAfterRelocation();
+    });
   });
+
+  function noteKeyboardSurface(e: FocusEvent): void {
+    const target = e.target as Node;
+    if (target === searchInput) keyboardSurface = "find";
+    else if (composerEl?.contains(target)) keyboardSurface = "composer";
+    else if (host?.contains(target)) keyboardSurface = "terminal";
+  }
+
+  // Give the keyboard back to the find input, the composer or the terminal,
+  // whichever last took it and is still open, when this is still the focused
+  // terminal and nothing outside it has taken the keyboard since the move.
+  function returnKeyboardAfterRelocation(): void {
+    queueMicrotask(() => {
+      if (!active || !focused) return;
+      const owner = document.activeElement;
+      if (
+        owner !== null &&
+        owner !== document.body &&
+        owner !== document.documentElement &&
+        !tabEl?.contains(owner)
+      ) {
+        return;
+      }
+      if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
+      else if (keyboardSurface === "composer" && composer) composer.focus();
+      else focusTerminal();
+    });
+  }
 
   // An idle terminal (visible in its pane but NOT focused, or a
   // tab just switched to in a non-active pane) renders garbled until
@@ -2498,7 +2535,9 @@
   data-terminal-tab-id={tab.id}
   role="tabpanel"
   aria-hidden={!active}
+  bind:this={tabEl}
   onkeydown={onShellKeydown}
+  onfocusin={noteKeyboardSurface}
   oncontextmenu={onTerminalContextMenu}
 >
   {#if menuOpen}
@@ -2791,7 +2830,9 @@
        the editor's autofocus/refocus so a hidden terminal's bubble never
        steals the keyboard. Toggled by Cmd+Shift+P / the right-click menu. -->
   {#if isRichPromptVisible(tab.id)}
-    <RichPrompt {tab} {focused} />
+    <div class="terminal-composer" bind:this={composerEl}>
+      <RichPrompt bind:this={composer} {tab} {focused} />
+    </div>
   {/if}
   <!-- Per-terminal survey overlay: a survey raised on THIS terminal
        (`cs terminal survey --tab-name`) renders anchored over it, keyed by
@@ -2819,6 +2860,11 @@
   .terminal-tab.active {
     visibility: visible;
     pointer-events: auto;
+  }
+  /* Marks the composer's subtree for the keyboard's return; the composer
+     positions against the terminal tab, so the wrapper adds no box. */
+  .terminal-composer {
+    display: contents;
   }
   :global(.terminal-secret-mask) {
     border-radius: 2px;
