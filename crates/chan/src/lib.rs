@@ -7026,6 +7026,32 @@ fn cmd_reports(action: ReportsAction) -> Result<()> {
     }
 }
 
+/// Ask on stderr whether to disable reports for the workspace at `root`,
+/// reading the answer from `input`. Anything but `y` or `yes`, an empty
+/// line or end of input included, is an error.
+fn confirm_reports_disable(root: &Path, input: &mut impl std::io::BufRead) -> Result<()> {
+    use std::io::Write;
+
+    eprintln!(
+        "About to disable chan-reports for workspace at {}",
+        root.display(),
+    );
+    eprintln!(
+        "This drops the persisted report.jsonl. Re-enabling later \
+         triggers a fresh scan."
+    );
+    eprint!("Continue? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    let answer = line.trim().to_ascii_lowercase();
+    if answer == "y" || answer == "yes" {
+        Ok(())
+    } else {
+        anyhow::bail!("aborted: reports stay enabled")
+    }
+}
+
 fn cmd_reports_set(path: Option<PathBuf>, enabled: bool, skip_confirm: bool) -> Result<()> {
     let lib = library()?;
     let root = path.ok_or_else(|| {
@@ -7039,28 +7065,15 @@ fn cmd_reports_set(path: Option<PathBuf>, enabled: bool, skip_confirm: bool) -> 
     let workspace = lib
         .open_workspace(&root)
         .with_context(|| format!("opening workspace at {}", root.display()))?;
-    // Destructive-action confirmation for disable. The non-
-    // interactive `-y` flag skips the prompt; an interactive TTY
-    // without `-y` blocks until the user confirms.
+    // Destructive-action confirmation for disable. `-y` skips the
+    // prompt; without it, a terminal on stdin is asked and anything but
+    // yes fails, and no terminal fails at once, so a script never reads
+    // success from a disable that changed nothing.
     if !enabled && !skip_confirm {
-        eprintln!(
-            "About to disable chan-reports for workspace at {}",
-            workspace.root().display(),
-        );
-        eprintln!(
-            "This drops the persisted report.jsonl. Re-enabling later \
-             triggers a fresh scan."
-        );
-        eprint!("Continue? [y/N] ");
-        use std::io::Write;
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        let answer = line.trim().to_ascii_lowercase();
-        if !(answer == "y" || answer == "yes") {
-            eprintln!("Aborted.");
-            return Ok(());
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            anyhow::bail!("use --yes to confirm the reports disable in non-interactive mode");
         }
+        confirm_reports_disable(workspace.root(), &mut std::io::stdin().lock())?;
     }
     workspace
         .set_reports_enabled(enabled)
