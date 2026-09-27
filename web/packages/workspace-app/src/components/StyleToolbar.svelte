@@ -268,7 +268,13 @@
     onmouseenter={onEnter}
     onfocusin={onFocusIn}
   >
-  <span class="pill" aria-hidden="true">Aa</span>
+  <button
+    type="button"
+    class="pill"
+    aria-expanded={expanded}
+    aria-label="formatting"
+    onmousedown={(e) => e.preventDefault()}
+  >Aa</button>
   {#if expanded}
     <div class="fbtn-row">
     <span class="vsep" aria-hidden="true"></span>
@@ -510,7 +516,12 @@
     min-width: var(--toolbar-control-min-w);
     height: var(--toolbar-control-h);
     padding: 0 5px;
+    background: transparent;
+    border: 0;
+    border-radius: var(--toolbar-control-radius);
     color: var(--text-secondary);
+    cursor: pointer;
+    font: inherit;
     font-weight: 600;
     line-height: 1;
     user-select: none;
@@ -562,6 +573,7 @@
     background: var(--hover-bg);
     border-color: var(--btn-border);
   }
+  .pill:focus-visible,
   .block-kind:focus-visible,
   .fbtn:focus-visible {
     outline: 2px solid var(--btn-hover);
