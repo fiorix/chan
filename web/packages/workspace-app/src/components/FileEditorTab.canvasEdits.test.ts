@@ -17,7 +17,7 @@ import {
   closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
-  type FileTab, type SerNode,
+  layout, setTabContent, type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
 const { render, unmountRoot, beforeLibrary } = vi.hoisted(() => ({
@@ -623,6 +623,187 @@ describe("a board seeded from the buffer it holds", () => {
 
     expect({ board: board.elements, dirty, writes: write.mock.calls.length }).toEqual({
       board: [ON_DISK], dirty: false, writes: 0,
+    });
+  });
+});
+
+const TINTED = { gridSize: 20, gridStep: 5, gridModeEnabled: true, viewBackgroundColor: "#ffc9c9" };
+
+/// A drawing another program wrote, holding `elements`, `appState` and `files`.
+function foreign(elements: unknown[], appState: unknown, files: unknown = {}): string {
+  return JSON.stringify(
+    { type: "excalidraw", version: 2, source: "https://elsewhere.example", elements, appState, files },
+    null,
+    2,
+  );
+}
+
+const TINTED_FILE = foreign([ON_DISK], TINTED);
+
+describe("a seed the library has not shown yet", () => {
+  test("a load that ends after the board's init, flushed by a pending timer before the library renders, publishes nothing", async () => {
+    const { pane, tab, write, reads } = await loadedTab("notes/tinted.excalidraw", TINTED_FILE);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    board.holdRenders();
+    vi.advanceTimersByTime(100);
+    await reads.finish(TINTED_FILE);
+    await loading;
+    await vi.advanceTimersByTimeAsync(100);
+    const inGap = isDirty(tab);
+    await board.render();
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ inGap, dirty, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
+      inGap: false, dirty: false, writes: [], content: TINTED_FILE,
+    });
+  });
+
+  test("a close between a seed and the library's render writes nothing", async () => {
+    const { pane, tab, write, reads } = await loadedTab("notes/tinted.excalidraw", TINTED_FILE);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    board.holdRenders();
+    vi.advanceTimersByTime(100);
+    await reads.finish(TINTED_FILE);
+    await loading;
+    await closeTab(pane.id, tab.id);
+
+    expect({ writes: write.mock.calls, content: disk.get(tab.path)?.content, open: readTab(tab.id) }).toEqual({
+      writes: [], content: TINTED_FILE, open: undefined,
+    });
+  });
+
+  test("a sibling's save mirrored into a clean pane publishes nothing there, and a close of both writes the sibling's alone", async () => {
+    const path = "notes/tinted.excalidraw";
+    const BLUE_FILE = foreign([ON_DISK], { ...TINTED, viewBackgroundColor: "#a5d8ff" });
+    const GREEN_FILE = foreign([ON_DISK], { ...TINTED, viewBackgroundColor: "#b2f2bb" });
+    const savedMtime = disk.write(path, TINTED_FILE).mtime;
+    const shown = fileTab({ id: "shown", path, fileKind: "text", mode: "canvas", content: TINTED_FILE, saved: TINTED_FILE, savedMtime });
+    const sibling = fileTab({ id: "sibling", path, fileKind: "text", mode: "source", content: TINTED_FILE, saved: TINTED_FILE, savedMtime });
+    // The sibling's pane comes first in the layout, so a close of every tab
+    // saves it before it reaches the shown board.
+    layout.nodes = {
+      root: { kind: "split", id: "root", direction: "row", ratio: 0.5, a: "pane-sibling", b: "pane-shown" },
+      "pane-sibling": { kind: "leaf", id: "pane-sibling", tabs: [sibling], activeTabId: sibling.id },
+      "pane-shown": { kind: "leaf", id: "pane-shown", tabs: [shown], activeTabId: shown.id },
+    } as typeof layout.nodes;
+    layout.rootId = "root";
+    layout.activePaneId = "pane-shown";
+    const tab = readTab(shown.id)!;
+    const other = readTab(sibling.id)!;
+    const write = vi.spyOn(api, "write");
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    board.zoomTo(1.5);
+    board.holdRenders();
+    vi.advanceTimersByTime(100);
+    setTabContent(other, BLUE_FILE);
+    await saveTab(other);
+    await vi.advanceTimersByTimeAsync(100);
+    const mirrored = isDirty(tab);
+    await board.render();
+    await vi.advanceTimersByTimeAsync(200);
+    board.zoomTo(1.25);
+    setTabContent(other, GREEN_FILE);
+    await closeAllTabs();
+    const written = write.mock.calls.map((call) => (call[1] === BLUE_FILE ? "blue" : call[1] === GREEN_FILE ? "green" : call[1]));
+
+    expect({ mirrored, written, open: [readTab(shown.id), readTab(sibling.id)] }).toEqual({
+      mirrored: false, written: ["blue", "green"], open: [undefined, undefined],
+    });
+  });
+
+  test("the seed at the library's first change keeps what it handed until the library shows it", async () => {
+    const { tab, write, reads } = await loadedTab("notes/tinted.excalidraw", TINTED_FILE, { readMode: true });
+    let loading: Promise<void> | undefined;
+    beforeLibrary.run = () => { loading = reloadTabFromDisk(tab.id); };
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await reads.finish(TINTED_FILE);
+    await loading;
+    board.holdRenders();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    const inGap = isDirty(tab);
+    await board.render();
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect({ inGap, dirty: isDirty(tab), writes: write.mock.calls.length }).toEqual({ inGap: false, dirty: false, writes: 0 });
+  });
+
+  test("a seed applies only what the serializer keeps, so a read-only board stays read-only and keeps its zoom", async () => {
+    const { tab, reads } = await loadedTab("notes/tinted.excalidraw", TINTED_FILE, { readMode: true });
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    board.zoomTo(2);
+    const loading = reloadTabFromDisk(tab.id);
+    await reads.finish(TINTED_FILE);
+    await loading;
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect({ view: board.view, shown: board.appState }).toEqual({
+      view: { viewModeEnabled: true, zoom: { value: 2 } }, shown: TINTED,
+    });
+  });
+
+  test("a scene with files, loaded after its board rendered, puts its files on the board and writes nothing", async () => {
+    const files = { picture: { id: "picture", mimeType: "image/png", dataURL: "data:image/png;base64,AAAA", created: 1 } };
+    const PICTURE_FILE = foreign([{ id: "image", type: "image", version: 1, fileId: "picture" }], {}, files);
+    const { pane, tab, write, reads } = await loadedTab("notes/picture.excalidraw", PICTURE_FILE);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await reads.finish(PICTURE_FILE);
+    await loading;
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ files: board.files, dirty, writes: write.mock.calls.length }).toEqual({ files, dirty: false, writes: 0 });
+  });
+
+  test("a board rendered again for one read-only flip before the library's App mounted is built from the drawing", async () => {
+    const { tab } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    setTabReadMode(tab, true);
+    await tick();
+    await board.start();
+
+    expect({ renders: render.mock.calls.length, built: board.mountedWith?.initialData?.elements }).toEqual({
+      renders: 2, built: [ON_DISK],
+    });
+  });
+
+  test("a background the user picks after a seed is written", async () => {
+    const { pane, tab, reads } = await loadedTab("notes/tinted.excalidraw", TINTED_FILE);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await reads.finish(TINTED_FILE);
+    await loading;
+    await vi.advanceTimersByTimeAsync(200);
+    board.pickBackground("#b2f2bb");
+    await vi.advanceTimersByTimeAsync(200);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect((JSON.parse(disk.get(tab.path)?.content ?? "{}") as { appState?: unknown }).appState).toEqual({
+      ...TINTED, viewBackgroundColor: "#b2f2bb",
     });
   });
 });
