@@ -72,8 +72,9 @@ describe("JSON tree limits", () => {
     expect(document.querySelector(".string")?.textContent).toBe(value);
   });
 
-  test("does not parse a buffer over one MiB and directs the reader to Source", () => {
-    const value = JSON.stringify({ value: "\u20ac".repeat(400_000) });
+  test("does not parse a buffer one byte over one MiB and directs the reader to Source", () => {
+    const value = JSON.stringify("\u20ac".repeat((1024 * 1024 - 1) / 3));
+    expect(new Blob([value]).size).toBe(1024 * 1024 + 1);
     const parse = vi.spyOn(JSON, "parse");
     try {
       mounted = mount(JsonPretty, { target: document.body, props: { value } });
