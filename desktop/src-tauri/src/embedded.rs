@@ -836,14 +836,26 @@ mod tests {
                 return;
             }
             let (embedded, root, window_id) = with_terminal().await;
+            let key = root.to_string_lossy().into_owned();
+            let overlay = embedded.workspace_overlay().unwrap();
+            overlay.set(&key, true);
+            assert_eq!(overlay.on_paths(), [key]);
             assert_eq!(
                 embedded.host.workspace_status(&root),
                 (chan_server::WorkspaceStatus::Stopped, None),
                 "the terminal tenant made the home row running"
             );
-            assert!(!embedded.is_workspace_mounted_by_key(&root));
-            assert!(embedded.workspace_overlay().unwrap().on_paths().is_empty());
-            assert_terminal_resolves(&embedded, &window_id);
+            let state = crate::AppState::with_store(Arc::new(Mutex::new(ConfigStore::at_path(
+                chan_workspace::paths::config_dir().join("desktop.json"),
+            ))));
+            assert!(state.embedded.set(embedded).is_ok());
+            let embedded = state.embedded().unwrap();
+            crate::snapshot_workspaces(&state);
+            assert!(
+                embedded.workspace_overlay().unwrap().on_paths().is_empty(),
+                "the terminal tenant kept the home row on in the snapshot"
+            );
+            assert_terminal_resolves(embedded, &window_id);
             embedded.shutdown_all().await.unwrap();
         }
 
