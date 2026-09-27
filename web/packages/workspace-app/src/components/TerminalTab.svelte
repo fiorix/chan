@@ -40,8 +40,10 @@
   import { openExternalUrl } from "../editor/external_links";
   import {
     chordFor,
+    consumeKey,
     currentOS,
     eventMatchesShortcut,
+    resolvedEventKey,
     shouldEscapeTerminal,
   } from "../state/shortcuts";
   import {
@@ -2467,6 +2469,22 @@
     // chan's LF fallback while its remaining keys stay on Ghostty's encoder.
     if (backend === "ghostty") {
       return handleGhosttyShiftEnter(e, sendUserInput);
+    }
+    // xterm leaves Ctrl+/ unencoded. Resolve the layout's symbol before
+    // sending the shell's Unit Separator through the user-input path.
+    const key = resolvedEventKey(e);
+    if (
+      e.type === "keydown" &&
+      e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !e.shiftKey &&
+      key?.key === "/" &&
+      !key.shiftKey
+    ) {
+      sendUserInput("\x1f");
+      consumeKey(e);
+      return false;
     }
     return handleTerminalMetaKey(e, sendUserInput, tab.keyboardProtocol);
   }

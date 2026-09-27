@@ -95,10 +95,10 @@
   // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q) -- the chords a
   // menubar would own; off-mac these windows have none -- gated on !metaKey so macOS,
   // whose menubar still owns them, never double-fires.
-  // A focused terminal takes four of these back, because their Ctrl form
+  // A focused terminal takes five of these back, because their Ctrl form
   // encodes a byte the shell reads and terminal find belongs to the tab
   // rather than to the page: Find in both modifier forms, and Find Next
-  // and Previous/Next Pane under Ctrl alone.
+  // and Previous/Next Pane and Split Right under Ctrl alone.
   function onKey(e) {
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
@@ -242,7 +242,12 @@
         // hotkey is dispatched by macOS before the key reaches this
         // webview, so chan never receives it. Web reaches splits via
         // Hybrid Nav `/` and `?`.
-        case 'Slash':        fire(e, 'app.pane.splitRight'); return;
+        // Ctrl+/ sends Unit Separator (0x1F) to a focused shell through the
+        // terminal tab's encoder; Cmd+/ keeps Split Right on macOS.
+        case 'Slash':
+          if (!e.metaKey && terminalHasFocus()) return;
+          fire(e, 'app.pane.splitRight');
+          return;
       }
       const m = code.match(/^Digit([1-9])$/);
       if (m) {

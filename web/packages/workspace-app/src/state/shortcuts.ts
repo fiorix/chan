@@ -772,6 +772,8 @@ export function eventMatchesShortcut(e: KeyboardEvent, id: string): boolean {
 ///
 /// The override arm keeps a rebound command reachable from terminal focus even
 /// after its built-in default (and its `escapeTerminal` flag) is gone.
+/// Native plain Control brackets and slash stay with the shell unless a user
+/// assignment claims them.
 ///
 /// The registry arm matches BOTH the platform-resolved chord AND the
 /// cross-platform `Cmd+` literal alias (the registry's `Mod`
@@ -784,11 +786,13 @@ export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
   const chord = resolveEventChord(e);
   if (!chord) return false;
   if (overrideEscapeMatcher?.(chord)) return true;
-  // Native Control brackets carry ESC and GS to the shell. User assignments
+  // Native Control brackets and slash carry ESC, GS and US to the shell. User assignments
   // take precedence; Command and shifted chords keep their app commands.
   if (
     currentPlatform() === "native" &&
-    (chordsEqual(chord, "Ctrl+[") || chordsEqual(chord, "Ctrl+]"))
+    (chordsEqual(chord, "Ctrl+[") ||
+      chordsEqual(chord, "Ctrl+]") ||
+      chordsEqual(chord, "Ctrl+/"))
   ) return false;
   return registryCommandId(chord, true) !== null;
 }
