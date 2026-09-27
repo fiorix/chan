@@ -4095,7 +4095,8 @@ fn reload_devserver_window_from_feed(
         let result = match serve::retarget_watched_remote_window(&app, &url, &record).await {
             Ok(true) => Ok(()),
             Ok(false) => {
-                serve::open_watched_remote_window(&app, &url, &conn.name, &record, Box::new(|_| {}))
+                tracing::debug!(window = %record.window_id, "reload: window is gone");
+                Ok(())
             }
             Err(e) => Err(e),
         };
