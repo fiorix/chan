@@ -464,6 +464,107 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc as tokio_mpsc;
 
+    #[cfg(unix)]
+    mod files_watch_shutdown {
+        use super::*;
+
+        struct HeldResolver {
+            root: PathBuf,
+            entered: mpsc::Sender<()>,
+            release: std::sync::Mutex<mpsc::Receiver<()>>,
+            _exited: mpsc::Sender<()>,
+        }
+
+        impl WatchScopeResolver for HeldResolver {
+            fn resolve_dir(&self, _rel: &str) -> Result<PathBuf, String> {
+                let _ = self.entered.send(());
+                let _ = self.release.lock().unwrap().recv();
+                Ok(self.root.clone())
+            }
+        }
+
+        #[test]
+        fn drop_bounds_a_held_attach_and_joins_a_healthy_worker() {
+            healthy_drop_releases_worker_state();
+            let tmp = tempfile::tempdir().unwrap();
+            let registry = Arc::new(ScopeRegistry::new());
+            let mutations = Arc::new(StandaloneMutationBus::new(registry.clone()));
+            let (entered, entry) = mpsc::channel();
+            let (release, held) = mpsc::channel();
+            let (exited, exit) = mpsc::channel();
+            let resolver = Arc::new(HeldResolver {
+                root: tmp.path().to_path_buf(),
+                entered,
+                release: std::sync::Mutex::new(held),
+                _exited: exited,
+            });
+            let worker_state = Arc::downgrade(&resolver);
+            let manager = ScopedWatchManager::spawn(resolver, registry.clone(), mutations).unwrap();
+            let manager_state = Arc::downgrade(&manager);
+            let (id, _frames) = registry.register();
+            manager.apply_delta(registry.subscribe(id, ""));
+            let attached = entry.recv_timeout(Duration::from_secs(5));
+            if attached.is_err() {
+                drop(release);
+                panic!("watch worker did not enter its resolver: {attached:?}");
+            }
+
+            let (done, finished) = mpsc::channel();
+            let dropping = std::thread::spawn(move || {
+                drop(manager);
+                let _ = done.send(());
+            });
+            let outcome = finished.recv_timeout(Duration::from_secs(5));
+            let manager_gone = manager_state.upgrade().is_none();
+            let worker_alive = worker_state.upgrade().is_some();
+            // Release even on a failed bound so the test never strands a worker.
+            drop(release);
+            dropping.join().unwrap();
+            let stopped = exit.recv_timeout(Duration::from_secs(5));
+            assert!(
+                outcome.is_ok(),
+                "manager drop waited for the held attach: {outcome:?}"
+            );
+            assert!(manager_gone, "the manager still has an owner");
+            assert!(
+                worker_alive,
+                "drop returned without leaving the held worker"
+            );
+            assert_eq!(stopped, Err(mpsc::RecvTimeoutError::Disconnected));
+            assert!(worker_state.upgrade().is_none(), "worker kept its resolver");
+        }
+
+        fn healthy_drop_releases_worker_state() {
+            let tmp = tempfile::tempdir().unwrap();
+            let registry = Arc::new(ScopeRegistry::new());
+            let mutations = Arc::new(StandaloneMutationBus::new(registry.clone()));
+            let resolver = Arc::new(TempResolver {
+                root: tmp.path().to_path_buf(),
+            });
+            let worker_state = Arc::downgrade(&resolver);
+            let manager = ScopedWatchManager::spawn(resolver, registry.clone(), mutations).unwrap();
+            let (id, mut frames) = registry.register();
+            manager.apply_delta(registry.subscribe(id, ""));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let frame = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                    .await
+                    .expect("watch attached")
+                    .expect("reset frame")
+            });
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(frame["reason"], "subscribed");
+            drop(manager);
+            assert!(
+                worker_state.upgrade().is_none(),
+                "healthy drop returned before releasing the worker's state"
+            );
+        }
+    }
+
     /// Temp-root resolver: scopes resolve under a tempdir, mirroring the
     /// production resolver's shape without ever watching the host tree.
     struct TempResolver {

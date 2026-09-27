@@ -3428,6 +3428,168 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    mod files_watch_shutdown {
+        use super::*;
+
+        struct TerminalStateBuilder {
+            state_tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::state::AppState>>>>,
+            bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
+        }
+
+        #[async_trait::async_trait]
+        impl chan_library::TenantBuilder for TerminalStateBuilder {
+            async fn build_workspace(
+                &self,
+                _library: Library,
+                _workspace: Arc<chan_workspace::Workspace>,
+                _config: &ServeConfig,
+                _desktop: crate::DesktopBridge,
+                _unserve: chan_library::UnserveMode,
+                _control_identity: Option<String>,
+            ) -> Result<chan_library::TenantArtifacts, Error> {
+                Err(Error::Config("expected a terminal tenant".into()))
+            }
+
+            async fn build_terminal(
+                &self,
+                library: Library,
+                config: &ServeConfig,
+                desktop: crate::DesktopBridge,
+                unserve: chan_library::UnserveMode,
+                command: Option<String>,
+                session_dir: Option<PathBuf>,
+                drafts_store_root: Option<PathBuf>,
+                control_identity: Option<String>,
+            ) -> Result<chan_library::TenantArtifacts, Error> {
+                let artifacts = crate::build_tenant_app(
+                    crate::TenantBuild {
+                        library,
+                        tenant: crate::TenantKind::Terminal {
+                            session_dir,
+                            drafts_store_root,
+                        },
+                        desktop,
+                        unserve,
+                        control_identity,
+                        bulk_transfer: self.bulk_transfer.clone(),
+                    },
+                    config,
+                )
+                .await?;
+                artifacts.terminal_sessions.set_default_command(command);
+                assert!(self
+                    .state_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one terminal tenant")
+                    .send(artifacts.state.clone())
+                    .is_ok());
+                Ok(crate::into_tenant_artifacts(artifacts))
+            }
+        }
+
+        #[test]
+        fn host_drain_leaves_a_held_files_attach() {
+            let _env = chan_home_env_read();
+            // Any last owner can drop on the sole worker; its join must not
+            // prevent the drain from finishing while the attach stays held.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            for held in [false, true] {
+                let config = tempfile::tempdir().unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let directory = chan_workspace::paths::canonicalize_normalized(root.path());
+                let wire_dir = directory.strip_prefix("/").unwrap().to_str().unwrap();
+                let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+                let host = Arc::new(WorkspaceHost::new(
+                    Library::open_at(config.path().join("config.toml")).unwrap(),
+                    Arc::new(TerminalStateBuilder {
+                        state_tx: Mutex::new(Some(state_tx)),
+                        bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                    }),
+                ));
+                let state = runtime.block_on(async {
+                    host.open_terminal_session(
+                        tenant_config("127.0.0.1:0".parse().unwrap(), "/files-shutdown"),
+                        Some(config.path().join("terminals")),
+                        None,
+                    )
+                    .await
+                    .expect("mount terminal tenant");
+                    state_rx.await.unwrap()
+                });
+                let files = state.standalone_files.as_ref().expect("Files supported");
+                let manager = Arc::downgrade(&files.watcher);
+                let worker = Arc::downgrade(&files.mutations);
+                let stall = held.then(|| root_stall::stall_matching(&directory, &["try_attach"]));
+                let (id, mut frames) = state.scope_registry.register();
+                files
+                    .watcher
+                    .apply_delta(state.scope_registry.subscribe(id, wire_dir));
+                if let Some(stall) = &stall {
+                    assert!(
+                        stall.wait_entered(Duration::from_secs(10)),
+                        "attach entered"
+                    );
+                    assert!(stall
+                        .entered()
+                        .iter()
+                        .any(|chain| chain.contains("standalone_watch::ActorState::try_attach")));
+                } else {
+                    let frame = runtime.block_on(async {
+                        tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                            .await
+                            .expect("watch attached")
+                            .expect("reset frame")
+                    });
+                    let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                    assert_eq!(frame["reason"], "subscribed");
+                }
+                drop(state);
+
+                let (done, finished) = std::sync::mpsc::channel();
+                let draining = runtime.spawn(async move {
+                    host.shutdown_all().await.expect("host drain");
+                    let _ = done.send(());
+                });
+                let outcome = finished.recv_timeout(Duration::from_secs(15));
+                let manager_gone = manager.upgrade().is_none();
+                let worker_alive = worker.upgrade().is_some();
+                // The weak handles distinguish a detached worker from a
+                // manager kept alive by an overlooked state owner. The entry
+                // trace above identifies the held call, not its lifetime.
+                drop(stall);
+                runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), draining)
+                        .await
+                        .expect("drain after release")
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while worker.upgrade().is_some() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("watch worker exits after release");
+                });
+                assert!(
+                    outcome.is_ok(),
+                    "host drain waited for the Files attach: {outcome:?}"
+                );
+                assert!(
+                    manager_gone,
+                    "host drain kept the Files watch manager alive"
+                );
+                assert_eq!(worker_alive, held, "worker lifetime at the drain's return");
+            }
+        }
+    }
+
     struct ShutdownProbeBuilder {
         state_tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::state::AppState>>>>,
     }
