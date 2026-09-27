@@ -166,7 +166,12 @@ describe("rich paste image names", () => {
     ["base64 SVG", "data:image/svg+xml;base64,AQID", "svg", "image/svg+xml"],
     ["JPEG", "data:image/jpeg;base64,AQID", "jpg", "image/jpeg"],
   ])("uses the image extension for %s", async (_label, src, ext, mime) => {
-    uploadAttachment.mockResolvedValue({ path: `notes/image.${ext}` });
+    let receiveFile!: (file: File) => void;
+    const uploaded = new Promise<File>((resolve) => { receiveFile = resolve; });
+    uploadAttachment.mockImplementation((file: File) => {
+      receiveFile(file);
+      return Promise.resolve({ path: `notes/image.${ext}` });
+    });
     const view = new EditorView({
       state: EditorState.create({ extensions: [pasteHandler(ctxTo("/ws", "notes/a.md"))] }),
     });
@@ -179,11 +184,11 @@ describe("rich paste image names", () => {
         getData: (format: string) => format === "text/html" ? `<p>${img.outerHTML}</p>` : "",
       } });
       view.contentDOM.dispatchEvent(event);
-      await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
-      const file = uploadAttachment.mock.calls[0]![0] as File;
+      const file = await uploaded;
+      await vi.waitFor(() => expect(view.state.doc.toString()).toBe(`![](./image.${ext})`));
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(file.name).toBe(`pasted-image.${ext}`);
       expect(file.type).toBe(mime);
-      await vi.waitFor(() => expect(view.state.doc.toString()).toBe(`![](./image.${ext})`));
     } finally {
       view.destroy();
     }
