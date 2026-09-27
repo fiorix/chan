@@ -1237,9 +1237,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launcher_gates_require_envelopes() {
+    async fn launcher_routes_require_envelopes() {
         let mut admitted = Vec::new();
         for (method, path) in [
+            ("POST", "/api/library/workspaces"),
+            ("POST", "/api/library/workspaces/probe/on"),
+            ("POST", "/api/library/workspaces/probe/off"),
+            ("DELETE", "/api/library/workspaces/probe"),
+            ("PUT", "/api/library/local-color"),
+            ("PUT", "/api/library/local-theme"),
+            ("PUT", "/api/library/collapsed-machines"),
+            ("POST", "/api/library/gateways"),
+            ("PUT", "/api/library/gateways/probe"),
+            ("DELETE", "/api/library/gateways/probe"),
+            ("POST", "/api/library/devservers"),
+            ("PUT", "/api/library/devservers/probe"),
+            ("DELETE", "/api/library/devservers/probe"),
             ("GET", "/api/library/windows"),
             ("GET", "/api/library/windows/watch"),
             ("POST", "/api/library/windows/probe/open"),
