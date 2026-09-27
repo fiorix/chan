@@ -121,6 +121,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
+      - name: Install Windows Rust target
+        run: rustup target add x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
@@ -133,7 +135,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: chan/web/package-lock.json
 
-      - name: Install Linux Tauri build deps
+      - name: Install Linux Tauri and Windows cross-check build deps
         # The amd64 runner pool's apt mirror intermittently hangs mid-fetch
         # (three release-day stalls on this step class, each cleared only by
         # a rerun on a fresh runner). Fetches carry a socket timeout and
@@ -155,6 +157,7 @@ jobs:
               libayatana-appindicator3-dev \
               librsvg2-dev \
               libsoup-3.0-dev \
+              gcc-mingw-w64-x86-64 \
               patchelf
           }
           if ! install_deps; then

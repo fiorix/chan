@@ -36,6 +36,8 @@ DEB_TARGET ?= $(LINUX_TARGET)
 RPM_TARGET ?= $(LINUX_TARGET)
 ARCHPKG_TARGET ?= $(LINUX_TARGET)
 CHAN_TARGET ?=
+# Crates whose test targets the native Windows arm compiles.
+CHAN_WINDOWS_TEST_CRATES := chan-workspace chan-server chan-library chan-desktop
 CHAN_SERVER_WINDOWS_TESTS := \
 	tenant_builder_tests::tenant_builders_preserve_routes_and_state \
 	handoff::tests::well_known_path_is_named_pipe_on_windows \
@@ -389,6 +391,7 @@ endif
 .PHONY: ci-linux
 ci-linux: pre-push ## Run the Linux CI validation target.
 	$(MAKE) test-symlink-tmpdir
+	$(MAKE) check-windows-test-target
 
 .PHONY: test-symlink-tmpdir
 test-symlink-tmpdir: ## Run library and server tests with a noncanonical temp path.
@@ -403,6 +406,31 @@ test-symlink-tmpdir: ## Run library and server tests with a noncanonical temp pa
 			exit 1; \
 		fi; \
 		TMPDIR="$$link" RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-server --no-fail-fast
+
+.PHONY: check-windows-test-target
+# Tauri validates the bundled CLI path even when clippy does not link it.
+check-windows-test-target: ## Lint the Windows arm's test crates for Windows GNU.
+	@set -eu; \
+		if ! command -v rustup >/dev/null 2>&1 || \
+			! installed="$$(rustup target list --installed)" || \
+			! printf '%s\n' "$$installed" | grep -Fqx x86_64-pc-windows-gnu; then \
+			echo "error: install the Windows Rust target with rustup target add x86_64-pc-windows-gnu" >&2; \
+			exit 1; \
+		fi; \
+		if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then \
+			echo "error: install the MinGW compiler with apt-get install gcc-mingw-w64-x86-64" >&2; \
+			exit 1; \
+		fi; \
+		placeholder=target/release/chan.exe; created=0; \
+		trap 'if [ "$$created" -eq 1 ]; then rm -f "$$placeholder"; fi' EXIT; \
+		trap 'exit 1' HUP INT TERM; \
+		if [ ! -e "$$placeholder" ] && [ ! -L "$$placeholder" ]; then \
+			mkdir -p target/release; \
+			(set -C; : > "$$placeholder"); \
+			created=1; \
+		fi; \
+		RUSTFLAGS="-D warnings" $(CARGO) clippy --tests --target x86_64-pc-windows-gnu \
+			$(foreach crate,$(CHAN_WINDOWS_TEST_CRATES),-p $(crate)) --no-deps -- -D warnings
 
 .PHONY: ci-macos
 ci-macos: ## Run the focused macOS CI validation target.
@@ -455,7 +483,8 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	scripts/smoke-windows-cli.sh target/release/chan.exe
 	$(MAKE) check-chan-server-windows-tests
 	$(MAKE) check-chan-workspace-windows-tests
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
+	RUSTFLAGS="-D warnings" $(CARGO) test \
+		$(foreach crate,$(filter-out chan-server chan-workspace,$(CHAN_WINDOWS_TEST_CRATES)),-p $(crate)) --all-targets
 	$(MAKE) -C desktop ci-windows WEB_ALREADY_BUILT=1
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
 	# Compile a debug-only CLI with a loopback metadata origin after every
