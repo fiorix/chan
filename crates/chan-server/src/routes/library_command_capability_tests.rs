@@ -470,3 +470,136 @@ async fn a_grantee_capability_inspects_and_acts_like_the_owner() {
         assert!(action["window"]["window_id"].is_string(), "{caller:?} act");
     }
 }
+
+mod refusal_envelopes {
+    use super::super::refusal_envelopes::assert_refusal;
+    use super::*;
+
+    async fn check(response: Response, status: StatusCode, message: &str) {
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-store, private"
+        );
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert_refusal(response, status, message).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_invoking_window() {
+        let fixture = fixture().await;
+        let app = launcher_router(fixture.host.clone(), None, None);
+        check(
+            send(
+                &app,
+                "POST",
+                "/api/library/command-capabilities",
+                None,
+                Some(serde_json::json!({"window_id":"", "tenant_prefix":fixture.prefix})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "invalid invoking window",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unowned_invoking_window() {
+        let fixture = fixture().await;
+        let app = launcher_router(
+            fixture.host.clone(),
+            Some(Arc::new(RwLock::new("launcher-secret".into()))),
+            None,
+        );
+        check(
+            send(
+                &app,
+                "POST",
+                "/api/library/command-capabilities",
+                Some("launcher-secret"),
+                Some(mint_body(&fixture)),
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "the tenant token does not own that live window",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_not_running() {
+        let fixture = fixture().await;
+        let other = tempfile::tempdir().unwrap();
+        fixture
+            .host
+            .library()
+            .register_workspace(other.path())
+            .unwrap();
+        let prefix = chan_library::allocate_workspace_prefix(other.path()).unwrap();
+        let app = launcher_router(fixture.host.clone(), None, None);
+        let cap = mint(&app, &fixture).await;
+        check(send(&app, "POST", &format!("/api/library/command-capabilities/{cap}/actions"), None, Some(serde_json::json!({"action":"new_workspace_window", "workspace_id":prefix.trim_start_matches('/')}))).await, StatusCode::CONFLICT, "workspace is not running").await;
+    }
+
+    #[tokio::test]
+    async fn control_visibility() {
+        control_refusal(true).await;
+    }
+
+    #[tokio::test]
+    async fn control_count() {
+        control_refusal(false).await;
+    }
+
+    async fn control_refusal(visibility: bool) {
+        let fixture = fixture().await;
+        fixture
+            .host
+            .mint_control_window(
+                "control-local".into(),
+                fixture.host.library_id().to_string(),
+                fixture.prefix.clone(),
+            )
+            .unwrap();
+        let app = launcher_router(fixture.host.clone(), None, None);
+        let cap = mint(&app, &fixture).await;
+        let response = if visibility {
+            send(&app, "POST", &format!("/api/library/command-capabilities/{cap}/actions"), None, Some(serde_json::json!({"action":"set_window_visibility", "window_id":"control-local", "hidden":true}))).await
+        } else {
+            send(&app, "GET", &count_path(&cap, "control-local"), None, None).await
+        };
+        check(
+            response,
+            StatusCode::FORBIDDEN,
+            "control terminals are not managed by a browser capability",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_tenant_not_running() {
+        let fixture = fixture().await;
+        let record = fixture
+            .host
+            .mint_window(WindowKind::Terminal, None)
+            .unwrap();
+        let app = launcher_router(fixture.host.clone(), None, None);
+        let cap = mint(&app, &fixture).await;
+        check(
+            send(
+                &app,
+                "GET",
+                &format!(
+                    "/api/library/command-capabilities/{cap}/windows/{}/launch",
+                    record.window_id
+                ),
+                None,
+                None,
+            )
+            .await,
+            StatusCode::CONFLICT,
+            "window tenant is not running",
+        )
+        .await;
+    }
+}
