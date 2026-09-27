@@ -336,6 +336,221 @@ mod tests {
         tokio::spawn(app.oneshot(request)).await.is_ok()
     }
 
+    async fn accepts_response(method: &str, path: &str, response: Response) -> bool {
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let app = check(Router::new().route(
+            path,
+            axum::routing::any(move || {
+                let mut response = Response::new(Body::from(bytes.clone()));
+                *response.status_mut() = parts.status;
+                *response.headers_mut() = parts.headers.clone();
+                async move { response }
+            }),
+        ));
+        tokio::spawn(
+            app.oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .is_ok()
+    }
+
+    macro_rules! handler_text_is_rejected {
+        ($name:ident, $method:literal, $path:literal, $status:expr) => {
+            #[tokio::test]
+            #[ignore = "run explicitly until refusal exceptions require their body shapes"]
+            async fn $name() {
+                assert!(
+                    !accepts_refusal($method, $path, $status, "handler-authored refusal", None)
+                        .await,
+                    "handler-authored text must be caught on {} {}",
+                    $method,
+                    $path
+                );
+            }
+        };
+    }
+
+    handler_text_is_rejected!(
+        ws_handler_text_is_rejected,
+        "GET",
+        "/ws",
+        StatusCode::BAD_REQUEST
+    );
+    handler_text_is_rejected!(
+        terminal_ws_handler_text_is_rejected,
+        "GET",
+        "/api/terminal/ws",
+        StatusCode::BAD_REQUEST
+    );
+    handler_text_is_rejected!(
+        doc_ws_handler_text_is_rejected,
+        "GET",
+        "/api/doc/ws",
+        StatusCode::UPGRADE_REQUIRED
+    );
+    handler_text_is_rejected!(
+        scene_ws_handler_text_is_rejected,
+        "GET",
+        "/api/scene/ws",
+        StatusCode::BAD_REQUEST
+    );
+    handler_text_is_rejected!(
+        config_handler_text_is_rejected,
+        "PATCH",
+        "/api/config",
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    handler_text_is_rejected!(
+        semantic_handler_text_is_rejected,
+        "POST",
+        "/api/index/semantic/enable",
+        StatusCode::CONFLICT
+    );
+    handler_text_is_rejected!(
+        write_handler_text_is_rejected,
+        "PUT",
+        "/api/fs/probe.md",
+        StatusCode::CONFLICT
+    );
+    handler_text_is_rejected!(
+        delete_handler_text_is_rejected,
+        "DELETE",
+        "/api/fs/probe.md",
+        StatusCode::CONFLICT
+    );
+    handler_text_is_rejected!(
+        move_handler_text_is_rejected,
+        "POST",
+        "/api/move",
+        StatusCode::CONFLICT
+    );
+    handler_text_is_rejected!(
+        transfer_handler_text_is_rejected,
+        "POST",
+        "/api/fs/transfer",
+        StatusCode::CONFLICT
+    );
+
+    #[tokio::test]
+    #[ignore = "run explicitly until refusal exceptions require their body shapes"]
+    async fn write_conflicts_require_their_complete_typed_shape() {
+        use axum::response::IntoResponse;
+        let full = serde_json::json!({"current_mtime":1,"current_mtime_ns":"1000000000",
+            "current_authority_version":3,"disk_conflicted":false});
+        let minimal = serde_json::json!({"current_mtime":null,"disk_conflicted":true});
+        for value in [full.clone(), minimal] {
+            for status in [StatusCode::CONFLICT, StatusCode::PRECONDITION_REQUIRED] {
+                assert!(
+                    accepts_response(
+                        "PUT",
+                        "/api/fs/probe.md",
+                        (status, axum::Json(value.clone())).into_response()
+                    )
+                    .await,
+                    "the existing write conflict shape remains pending"
+                );
+            }
+        }
+        for (field, value) in [
+            ("current_mtime", serde_json::json!("1")),
+            ("current_mtime_ns", serde_json::json!(1)),
+            ("current_authority_version", serde_json::json!(-1)),
+            ("disk_conflicted", serde_json::json!(null)),
+            ("extra", serde_json::json!(true)),
+        ] {
+            let mut invalid = full.clone();
+            invalid[field] = value;
+            assert!(
+                !accepts_response(
+                    "PUT",
+                    "/api/fs/probe.md",
+                    (StatusCode::CONFLICT, axum::Json(invalid)).into_response()
+                )
+                .await,
+                "write conflict must reject invalid field {field}"
+            );
+        }
+        for field in ["current_mtime", "disk_conflicted"] {
+            let mut invalid = full.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(
+                !accepts_response(
+                    "PUT",
+                    "/api/fs/probe.md",
+                    (StatusCode::CONFLICT, axum::Json(invalid)).into_response()
+                )
+                .await,
+                "write conflict requires {field}"
+            );
+        }
+        for (method, path, status) in [
+            ("POST", "/api/fs/probe.md", StatusCode::CONFLICT),
+            ("PUT", "/api/unrelated", StatusCode::CONFLICT),
+            ("PUT", "/api/fs/probe.md", StatusCode::BAD_REQUEST),
+        ] {
+            assert!(
+                !accepts_response(
+                    method,
+                    path,
+                    (status, axum::Json(full.clone())).into_response()
+                )
+                .await
+            );
+        }
+        assert!(
+            !accepts_response(
+                "PUT",
+                "/api/fs/probe.md",
+                (StatusCode::CONFLICT, full.to_string()).into_response()
+            )
+            .await,
+            "write conflict requires JSON content type"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "run explicitly until extension upgrades recognize framework rejection text"]
+    async fn extension_upgrade_rejections_require_framework_text() {
+        use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+        use axum::extract::{FromRequestParts, WebSocketUpgrade};
+        use axum::response::IntoResponse;
+        let (mut parts, _) = Request::get("/_chan/extensions/echo/cap/ws")
+            .header(header::UPGRADE, "websocket")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts();
+        let rejection: WebSocketUpgradeRejection =
+            WebSocketUpgrade::from_request_parts(&mut parts, &())
+                .await
+                .unwrap_err();
+        assert!(
+            accepts_response(
+                "GET",
+                "/_chan/extensions/echo/cap/ws",
+                rejection.into_response()
+            )
+            .await,
+            "the proxy's real WebSocket extractor rejection is recognized"
+        );
+        assert!(
+            !accepts_refusal(
+                "GET",
+                "/_chan/extensions/echo/cap/ws",
+                StatusCode::BAD_REQUEST,
+                "handler-authored refusal",
+                None
+            )
+            .await
+        );
+    }
+
     #[tokio::test]
     async fn pending_startup_refusal_requires_its_sentence_and_retry_header() {
         let sentence = "devserver is restoring terminal sessions";
