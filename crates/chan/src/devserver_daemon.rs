@@ -752,7 +752,8 @@ mod command_tests {
     /// directory.
     #[test]
     fn a_relative_override_is_handed_to_the_daemon_as_an_absolute_path() {
-        let home = DaemonHome::from_parts(&absolute("launch"), Path::new("relative-home"), true, true);
+        let home =
+            DaemonHome::from_parts(&absolute("launch"), Path::new("relative-home"), true, true);
         let cmd = command_for(&home);
         let expected = absolute("launch").join("relative-home");
         assert_eq!(handed_chan_home(&cmd), Some(expected.as_os_str()));

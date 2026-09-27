@@ -54,9 +54,8 @@ impl Sandbox {
 
     /// The persisted reports flag, read from the workspace the CLI wrote.
     fn reports_enabled(&self) -> bool {
-        let library =
-            chan_workspace::Library::open_at(self.chan_home.path().join("config.toml"))
-                .expect("open the sandbox library");
+        let library = chan_workspace::Library::open_at(self.chan_home.path().join("config.toml"))
+            .expect("open the sandbox library");
         library
             .open_workspace(Path::new(self.root.path()))
             .expect("open the workspace")
@@ -101,7 +100,10 @@ fn a_disable_with_yes_and_an_enable_need_no_terminal() {
         !String::from_utf8_lossy(&out.stderr).contains("Continue?"),
         "a disable with --yes prompted"
     );
-    assert!(!sandbox.reports_enabled(), "a disable with --yes left reports on");
+    assert!(
+        !sandbox.reports_enabled(),
+        "a disable with --yes left reports on"
+    );
 
     let out = sandbox.reports("enable", &[]);
     assert!(
