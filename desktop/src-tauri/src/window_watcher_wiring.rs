@@ -966,13 +966,20 @@ impl DevserverWindowFeed {
 }
 
 impl WindowFeed for DevserverWindowFeed {
-    /// The window set as the last frame left it.
+    /// The window set for the watch loop, as the last frame left it but for
+    /// one field: a record reads `connected` only when the server said so in
+    /// a frame of the feed connection that is up now. While the feed is down,
+    /// every window reads as not connected. The launcher reads the shared set
+    /// directly, as the last frame left it.
     fn snapshot(&self) -> Vec<WindowRecord> {
         let snapshot = self.snapshot.lock().unwrap();
+        let mut records = snapshot.clone();
         if !self.live.load(std::sync::atomic::Ordering::Relaxed) {
-            tracing::trace!("devserver window feed is down; reading its last frame");
+            for record in &mut records {
+                record.connected = false;
+            }
         }
-        snapshot.clone()
+        records
     }
 
     fn change_notify(&self) -> Arc<Notify> {
