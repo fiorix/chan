@@ -16,6 +16,7 @@
 // permission gating for destructive batch work is the model's
 // responsibility (it calls `AskUserQuestion` before the writes).
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use chan_workspace::{
@@ -64,10 +65,11 @@ pub const REPO_REPORT_FILES_CAP: usize = 200;
 pub const WRITE_FILE_CONTENT_CAP_BYTES: usize = 2 * 1024 * 1024;
 
 /// Context the tools see. Owns an `Arc<Workspace>` so tool calls cross
-/// thread boundaries cheaply.
+/// thread boundaries cheaply, and the flag that stops a running tool.
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace: Arc<Workspace>,
+    cancel: Arc<AtomicBool>,
 }
 
 /// Typed selector accepted by the LLM-facing workspace search tool.
@@ -197,8 +199,23 @@ impl From<WorkspaceSearchParams> for WorkspaceSearchRequest {
 }
 
 impl ToolContext {
+    /// A context whose tools run to their end.
     pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+        Self::with_cancel(workspace, Arc::default())
+    }
+
+    /// A context whose long tools stop once `cancel` is set: `list_files`
+    /// at its next walked entry, `workspace_search` at its next walked entry,
+    /// report file or seed, and `repo_report` at the next walked entry or
+    /// counted file of a scan. A stopped tool fails with the workspace's
+    /// cancellation error. One filesystem call, one write and one search
+    /// query run to their end.
+    pub fn with_cancel(workspace: Arc<Workspace>, cancel: Arc<AtomicBool>) -> Self {
+        Self { workspace, cancel }
+    }
+
+    fn cancel_flag(&self) -> Option<&AtomicBool> {
+        Some(self.cancel.as_ref())
     }
 }
 
@@ -309,8 +326,10 @@ fn exec_list_files(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let mut entries: Vec<_> = match prefix {
         Some(p) if !p.is_empty() => ctx
             .workspace
-            .list_tree_prefix_unified(p.trim_end_matches('/'))?,
-        _ => ctx.workspace.list_tree_unified()?,
+            .list_tree_prefix_unified_cancelable(p.trim_end_matches('/'), ctx.cancel_flag())?,
+        _ => ctx
+            .workspace
+            .list_tree_unified_cancelable(ctx.cancel_flag())?,
     };
     let total = entries.len();
     let truncated = total > LIST_FILES_CAP_ENTRIES;
@@ -355,7 +374,9 @@ fn exec_resolve_path(args: &Json, ctx: &ToolContext) -> Result<Json> {
 fn exec_workspace_search(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let params: WorkspaceSearchParams = serde_json::from_value(args.clone())
         .map_err(|error| LlmError::Tool(format!("invalid workspace_search args: {error}")))?;
-    let result = ctx.workspace.workspace_search(&params.into())?;
+    let result = ctx
+        .workspace
+        .workspace_search_cancelable(&params.into(), ctx.cancel_flag())?;
     serde_json::to_value(result)
         .map_err(|error| LlmError::Tool(format!("serialize workspace search: {error}")))
 }
@@ -376,11 +397,13 @@ fn exec_repo_report(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let prefix = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
 
     let mut report = if !paths.is_empty() {
-        ctx.workspace.report_for_files(&paths)?
+        ctx.workspace
+            .report_for_files_cancelable(&paths, ctx.cancel_flag())?
     } else if !prefix.is_empty() {
-        ctx.workspace.report_for_prefix(prefix)?
+        ctx.workspace
+            .report_for_prefix_cancelable(prefix, ctx.cancel_flag())?
     } else {
-        ctx.workspace.report()?
+        ctx.workspace.report_cancelable(ctx.cancel_flag())?
     };
 
     let include_files = args

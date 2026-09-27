@@ -20,6 +20,7 @@
 //! configurable by the server builder or `--max-media-bytes`).
 
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::engine::Engine as _;
@@ -627,20 +628,37 @@ async fn run_tool(
     let ct = context.ct;
     #[cfg(test)]
     tests::gate_tool(&args).await;
-    let result = tokio::task::spawn_blocking(move || {
-        if ct.is_cancelled() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let body_ct = ct.clone();
+    let body_cancel = Arc::clone(&cancel);
+    let mut body = tokio::task::spawn_blocking(move || {
+        if body_ct.is_cancelled() {
             return Err(ErrorData::internal_error("request cancelled", None));
         }
         let workspace = workspace_for()
             .ok_or_else(|| ErrorData::internal_error("workspace is closed", None))?;
-        if ct.is_cancelled() {
+        if body_ct.is_cancelled() {
             return Err(ErrorData::internal_error("request cancelled", None));
         }
-        tools::execute(name, &args, &ToolContext::new(workspace))
-            .map_err(|e| ErrorData::internal_error(mcp_safe_message(&e), None))
-    })
-    .await
-    .map_err(|e| ErrorData::internal_error(format!("tool task failed: {e}"), None))??;
+        tools::execute(
+            name,
+            &args,
+            &ToolContext::with_cancel(workspace, body_cancel),
+        )
+        .map_err(|e| ErrorData::internal_error(mcp_safe_message(&e), None))
+    });
+    // A blocking body cannot watch the token, so the token's cancellation
+    // sets the flag the body's walks, scans and seed loop read.
+    let joined = tokio::select! {
+        biased;
+        joined = &mut body => joined,
+        () = ct.cancelled() => {
+            cancel.store(true, Ordering::Relaxed);
+            body.await
+        }
+    };
+    let result =
+        joined.map_err(|e| ErrorData::internal_error(format!("tool task failed: {e}"), None))??;
     serde_json::to_string(&result)
         .map_err(|e| ErrorData::internal_error(format!("serialize result: {e}"), None))
 }
