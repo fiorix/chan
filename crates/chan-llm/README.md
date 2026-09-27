@@ -20,7 +20,8 @@ chan-llm = { version = "0.33", features = ["mcp"] }
 ```text
 StandardTool         ReadFile | WriteFile | ListFiles | ResolvePath |
                      WorkspaceSearch | RepoReport
-ToolContext          { workspace: Arc<Workspace> }
+ToolContext::new(Arc<Workspace>)  Workspace owner; tools run to completion.
+                     MCP dispatch supplies a private shared cancel flag.
 ToolOutcome          Ok(json)
 tools::execute(name, args, &ctx) -> Result<ToolOutcome>
 

@@ -893,7 +893,8 @@ pub struct Workspace {
     pending_writes: std::sync::Mutex<std::collections::HashMap<String, PendingOp>>,
     /// Single derived-state mutation boundary. Per-file index/forget,
     /// replay, reconcile as a unit, full rebuild, and warm report
-    /// watcher updates all take this lock. Queries and file I/O never do.
+    /// watcher updates all take this lock. Report scope refreshes take it
+    /// too, including those reached from queries; file I/O alone does not.
     /// The recovery coordinator is a separate short-lived mutex.
     write_serial: Arc<std::sync::Mutex<()>>,
     /// Serializes dashboard snapshots and read-modify-write publication.

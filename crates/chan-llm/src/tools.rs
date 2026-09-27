@@ -208,8 +208,13 @@ impl ToolContext {
     /// at its next walked entry, `workspace_search` at its next walked entry,
     /// report file or seed, and `repo_report` at the next walked entry or
     /// counted file of a scan. A stopped tool fails with the workspace's
-    /// cancellation error. One filesystem call, one write and one search
-    /// query run to their end.
+    /// cancellation error. Each search seed runs all its hops and closure
+    /// work without another check. Between the catalog walk and the first
+    /// seed, only a report rescan checks the flag: graph queries, report load
+    /// or snapshot, content retrieval, entity matching and seed resolution
+    /// run to completion. The final induced-relationship query, the write
+    /// serialization lock wait before a rescan, and individual filesystem
+    /// calls and whole reads and writes also run without a check.
     pub(crate) fn with_cancel(workspace: Arc<Workspace>, cancel: Arc<AtomicBool>) -> Self {
         Self { workspace, cancel }
     }

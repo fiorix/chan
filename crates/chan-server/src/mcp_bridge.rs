@@ -15,11 +15,16 @@
 //! change.
 //!
 //! Lifetime: `build_app` starts the bridge and keeps its `BridgeHandle` in
-//! the tenant keepalive. Unmount drops it, aborting the accept loop and its
-//! owned sessions before the host waits for workspace release. A dropped
-//! session cancels its requests, so a tool body already running stops at its
-//! next walked entry, report file or search seed and drops the workspace; one
-//! inside a single blocking call keeps it until that call returns.
+//! the tenant keepalive. Unmount gives tenant tasks up to five seconds of
+//! shutdown grace, then drops the keepalive, aborting the accept loop and its
+//! owned sessions before the host waits for workspace release. Dropping a
+//! session cancels its requests. A peer transport close without a cancel
+//! notification first gives rmcp up to five seconds to drain responses.
+//! JSON tool bodies stop at their next walked entry, report file or search
+//! seed after their flag is set; dropping the request future also sets it.
+//! A seed includes all its hops. Work between checks, individual blocking
+//! calls and lock waits can retain the workspace; chan-llm's design document
+//! describes those cancellation boundaries.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

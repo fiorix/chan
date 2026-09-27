@@ -2,7 +2,7 @@
 //!
 //! One serde-compatible request combines optional content retrieval, lexical entity matching or browsing, exact typed seeds, and breadth-first graph traversal. This module normalizes defaults, deduplicates selectors and filters, and enforces result and traversal budgets. Request and selector failures are structured result entries so valid seeds can still contribute; storage and search-backend failures use the outer `Result`.
 //!
-//! Queries read a filtered metadata-only tree, maintained graph rows, the ready search index, and available report snapshots. They do not read source bodies, start report scans, or initiate index rebuilds. File, directory, and contact nodes reserve their root containment spines before admission; metadata closure can add relationships without consuming another semantic hop. Returned graphs have stable ordering and explicitly report budget truncation.
+//! Queries read a filtered metadata-only tree, maintained graph rows, the ready search index, and available report snapshots. They do not initiate index rebuilds or initialize cold reports. A warm report whose scope generation changed is rescanned, which can read source bodies. File, directory, and contact nodes reserve their root containment spines before admission; metadata closure can add relationships without consuming another semantic hop. Returned graphs have stable ordering and explicitly report budget truncation.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path};
@@ -570,7 +570,12 @@ impl Workspace {
     /// [`Workspace::workspace_search`] that stops once `cancel` is set: at the
     /// next entry of its tree walk, the next file of a report rescan and the
     /// next seed of its traversal, returning [`crate::ChanError::Cancelled`].
-    /// One content query or one hop of a seed's traversal runs to its end.
+    /// Each seed runs all its hops and closure work without another check.
+    /// Between the catalog walk and the first seed, only a report rescan
+    /// checks the flag: graph queries, report load or snapshot, content
+    /// retrieval, entity matching and seed resolution run to completion.
+    /// The final induced-relationship query and the write serialization lock
+    /// wait before a report rescan also run without a check.
     pub fn workspace_search_cancelable(
         &self,
         request: &WorkspaceSearchRequest,

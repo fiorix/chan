@@ -663,8 +663,9 @@ async fn run_tool(
         test_hooks::answered(held, &answer);
         answer
     });
-    // A blocking body cannot watch the token, so the token's cancellation
-    // sets the flag the body's walks, scans and seed loop read.
+    // The body checks the token before and after resolving the workspace.
+    // During tool execution its walks, scans and seed loop read this flag,
+    // so a token cancellation must reach it while the body is still running.
     let joined = tokio::select! {
         biased;
         joined = &mut body => joined,
