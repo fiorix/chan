@@ -302,18 +302,39 @@ fn draft_over_the_limit() -> Request<Body> {
         .unwrap()
 }
 
-async fn framework_bytes_sentence(request: Request<Body>) -> String {
-    use axum::extract::FromRequest;
+async fn framework_sentence<T: axum::extract::FromRequest<()>>(request: Request<Body>) -> String {
+    let response = match T::from_request(request, &()).await {
+        Ok(_) => panic!("the framework must refuse this request"),
+        Err(rejection) => rejection.into_response(),
+    };
+    framework_refusal_sentence(response).await
+}
 
-    axum::body::Bytes::from_request(request, &())
+async fn framework_refusal_sentence(response: Response) -> String {
+    assert!(response.status().is_client_error());
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+async fn framework_path_sentence(path: &str, request: Request<Body>) -> String {
+    let response = axum::Router::new()
+        .route(
+            path,
+            axum::routing::any(|_: axum::extract::Path<String>| async {}),
+        )
+        .oneshot(request)
         .await
-        .unwrap_err()
-        .body_text()
+        .unwrap();
+    framework_refusal_sentence(response).await
 }
 
 #[tokio::test]
 async fn workspace_tenant_draft_over_the_limit_is_json() {
-    let sentence = framework_bytes_sentence(draft_over_the_limit()).await;
+    let sentence = framework_sentence::<axum::body::Bytes>(draft_over_the_limit()).await;
     assert_refusal(
         workspace_answer(draft_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
@@ -324,7 +345,7 @@ async fn workspace_tenant_draft_over_the_limit_is_json() {
 
 #[tokio::test]
 async fn terminal_tenant_draft_over_the_limit_is_json() {
-    let sentence = framework_bytes_sentence(draft_over_the_limit()).await;
+    let sentence = framework_sentence::<axum::body::Bytes>(draft_over_the_limit()).await;
     assert_refusal(
         terminal_answer(draft_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
@@ -333,142 +354,152 @@ async fn terminal_tenant_draft_over_the_limit_is_json() {
     .await;
 }
 
-const MISSING_CONTENT_TYPE: &str = "Expected request with `Content-Type: application/json`";
-const LENGTH_LIMIT: &str = "Failed to buffer the request body: length limit exceeded";
-
 #[tokio::test]
 async fn workspace_tenant_missing_json_content_type_is_json() {
+    let sentence =
+        framework_sentence::<axum::Json<Value>>(survey_reply_without_content_type()).await;
     assert_refusal(
         workspace_answer(survey_reply_without_content_type()).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        json!({"error": MISSING_CONTENT_TYPE}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn workspace_tenant_json_over_the_limit_is_json() {
+    let sentence = framework_sentence::<axum::Json<Value>>(survey_reply_over_the_limit()).await;
     assert_refusal(
         workspace_answer(survey_reply_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": LENGTH_LIMIT}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn workspace_tenant_bytes_over_the_limit_is_json() {
+    let sentence = framework_sentence::<axum::body::Bytes>(session_over_the_limit()).await;
     assert_refusal(
         workspace_answer(session_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": LENGTH_LIMIT}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn workspace_tenant_path_not_utf8_is_json() {
+    let request = || {
+        Request::get("/api/headings/%FF")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let sentence = framework_path_sentence("/api/headings/{*path}", request()).await;
     assert_refusal(
-        workspace_answer(
-            Request::get("/api/headings/%FF")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
+        workspace_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": "Invalid URL: Invalid UTF-8 in `path`"}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn workspace_tenant_multipart_boundary_is_json() {
+    let request = || {
+        Request::post("/api/attachments")
+            .header(header::CONTENT_TYPE, "multipart/form-data")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let sentence = framework_sentence::<axum::extract::Multipart>(request()).await;
     assert_refusal(
-        workspace_answer(
-            Request::post("/api/attachments")
-                .header(header::CONTENT_TYPE, "multipart/form-data")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
+        workspace_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": "Invalid `boundary` for `multipart/form-data` request"}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_missing_json_content_type_is_json() {
+    let sentence =
+        framework_sentence::<axum::Json<Value>>(survey_reply_without_content_type()).await;
     assert_refusal(
         terminal_answer(survey_reply_without_content_type()).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        json!({"error": MISSING_CONTENT_TYPE}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_json_over_the_limit_is_json() {
+    let sentence = framework_sentence::<axum::Json<Value>>(survey_reply_over_the_limit()).await;
     assert_refusal(
         terminal_answer(survey_reply_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": LENGTH_LIMIT}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_bytes_over_the_limit_is_json() {
+    let sentence = framework_sentence::<axum::body::Bytes>(session_over_the_limit()).await;
     assert_refusal(
         terminal_answer(session_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": LENGTH_LIMIT}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_path_not_utf8_is_json() {
+    let request = || {
+        Request::delete("/api/terminals/%FF")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let sentence = framework_path_sentence("/api/terminals/{session}", request()).await;
     assert_refusal(
-        terminal_answer(
-            Request::delete("/api/terminals/%FF")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
+        terminal_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": "Invalid URL: Invalid UTF-8 in `session`"}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_multipart_boundary_is_json() {
+    let request = || {
+        Request::post("/api/attachments")
+            .header(header::CONTENT_TYPE, "multipart/form-data")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let sentence = framework_sentence::<axum::extract::Multipart>(request()).await;
     assert_refusal(
-        terminal_answer(
-            Request::post("/api/attachments")
-                .header(header::CONTENT_TYPE, "multipart/form-data")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
+        terminal_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": "Invalid `boundary` for `multipart/form-data` request"}),
+        json!({"error": sentence}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_drafts_missing_json_content_type_is_json() {
+    let request = || {
+        Request::post("/api/drafts/inspect")
+            .body(Body::from("{}"))
+            .unwrap()
+    };
+    let sentence = framework_sentence::<axum::Json<Value>>(request()).await;
     assert_refusal(
-        terminal_answer(
-            Request::post("/api/drafts/inspect")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await,
+        terminal_answer(request()).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        json!({"error": MISSING_CONTENT_TYPE}),
+        json!({"error": sentence}),
     )
     .await;
 }
@@ -549,10 +580,12 @@ async fn terminal_restart_without_a_body_reaches_the_route() {
 
 #[tokio::test]
 async fn terminal_restart_with_a_malformed_body_is_json() {
+    let sentence =
+        framework_sentence::<Option<axum::Json<Value>>>(restart_unknown_terminal(Some("{"))).await;
     assert_refusal(
         terminal_answer(restart_unknown_terminal(Some("{"))).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1"}),
+        json!({"error": sentence}),
     )
     .await;
 }
