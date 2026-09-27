@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileInfoBody from "./FileInfoBody.svelte";
 import { classifyFileActions } from "../state/fileActions";
+import { ApiError } from "../api/errors";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 import type { TreeEntry } from "../api/types";
 import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
@@ -607,15 +608,50 @@ describe("the report behind the inspector", () => {
     },
   };
 
-  test("a directory prefers the report cache and falls back to the walk on a 404", async () => {
+  test("a directory prefers the report cache and falls back to the walk on report_not_found", async () => {
     h.entries = [dir("src"), file("src/main.rs", "text")];
-    vi.mocked(api.reportDir).mockRejectedValueOnce(new Error("404 not found"));
+    vi.mocked(api.reportDir).mockRejectedValueOnce(new ApiError(404, "directory report not found", {
+      error: "directory report not found", code: "report_not_found",
+    }));
     vi.mocked(api.reportPrefix).mockResolvedValueOnce(prefix);
     const target = await render({ path: "src" });
 
     expect(api.reportDir).toHaveBeenCalledWith("src");
     expect(api.reportPrefix).toHaveBeenCalledWith("src");
     expect(target.querySelector("button.lang-name")?.textContent).toBe("Rust");
+  });
+
+  test("falls back on report_not_found through the real transport", async () => {
+    const real = await vi.importActual<typeof import("../api/client")>("../api/client");
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ error: "The cached directory report is unavailable.", code: "report_not_found" }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    ));
+    h.entries = [dir("src"), file("src/main.rs", "text")];
+    vi.mocked(api.reportDir).mockImplementationOnce(real.api.reportDir);
+    vi.mocked(api.reportPrefix).mockResolvedValueOnce(prefix);
+    try {
+      const target = await render({ path: "src" });
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/report/dir?path=src"),
+        expect.objectContaining({ method: "GET" }));
+      expect(api.reportPrefix).toHaveBeenCalledWith("src");
+      expect(target.querySelector("button.lang-name")?.textContent).toBe("Rust");
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  test.each([
+    ["a plain Error", new Error("404 not found")],
+    ["an ApiError without a code", new ApiError(404, "404 not found")],
+    ["another code", new ApiError(404, "404 not found", { code: "other" })],
+    ["another status", new ApiError(500, "404 not found", { code: "report_not_found" })],
+  ])("shows the refusal without a walk for %s", async (_reason, error) => {
+    h.entries = [dir("src"), file("src/main.rs", "text")];
+    vi.mocked(api.reportDir).mockRejectedValueOnce(error);
+    const target = await render({ path: "src" });
+    expect(target.querySelector(".refs-error")?.textContent).toBe("report unavailable: 404 not found");
+    expect(api.reportPrefix).not.toHaveBeenCalled();
   });
 
   test("without a workspace behind the window, nothing is requested and no report state shows", async () => {

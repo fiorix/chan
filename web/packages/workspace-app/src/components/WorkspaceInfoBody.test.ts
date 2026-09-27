@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
 import type { GraphView, ReportPrefix } from "../api/types";
 import { graphData, invalidateGraph } from "../state/graphData.svelte";
+import { ApiError } from "../api/errors";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 
 const h = vi.hoisted(() => ({
@@ -25,7 +26,9 @@ vi.mock("../api/client", () => ({
   api: {
     inspector: vi.fn(async () => null),
     reportDir: vi.fn(async () => {
-      if (h.reportFails404) throw new Error("404 not found");
+      if (h.reportFails404) throw new ApiError(404, "directory report not found", {
+        error: "directory report not found", code: "report_not_found",
+      });
       return h.report;
     }),
     reportPrefix: vi.fn(async () => h.report),
@@ -186,7 +189,7 @@ describe("the workspace root's actions", () => {
 });
 
 describe("the languages report", () => {
-  test("prefers the directory cache and falls back to the walk on a 404", async () => {
+  test("prefers the directory cache and falls back to the walk on report_not_found", async () => {
     h.report = prefix;
     await render();
     expect(api.reportDir).toHaveBeenCalledWith("");
@@ -197,6 +200,39 @@ describe("the languages report", () => {
     const target = await render();
     expect(api.reportPrefix).toHaveBeenCalledWith("");
     expect(target.querySelectorAll("button.lang-name")).toHaveLength(2);
+  });
+
+  test("falls back on report_not_found through the real transport", async () => {
+    const real = await vi.importActual<typeof import("../api/client")>("../api/client");
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ error: "The cached directory report is unavailable.", code: "report_not_found" }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    ));
+    h.report = prefix;
+    vi.mocked(api.reportDir).mockImplementationOnce(real.api.reportDir);
+    vi.mocked(api.reportPrefix).mockResolvedValueOnce(prefix);
+    try {
+      const target = await render();
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/report/dir?path="),
+        expect.objectContaining({ method: "GET" }));
+      expect(api.reportPrefix).toHaveBeenCalledWith("");
+      expect(target.querySelectorAll("button.lang-name")).toHaveLength(2);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  test.each([
+    ["a plain Error", new Error("404 not found")],
+    ["an ApiError without a code", new ApiError(404, "404 not found")],
+    ["another code", new ApiError(404, "404 not found", { code: "other" })],
+    ["another status", new ApiError(500, "404 not found", { code: "report_not_found" })],
+  ])("shows the refusal without a walk for %s", async (_reason, error) => {
+    h.report = prefix;
+    vi.mocked(api.reportDir).mockRejectedValueOnce(error);
+    const target = await render();
+    expect(target.querySelector(".refs-error")?.textContent).toBe("report unavailable: 404 not found");
+    expect(api.reportPrefix).not.toHaveBeenCalled();
   });
 
   test("each language opens the graph scoped to it, through the host when it asks", async () => {

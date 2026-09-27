@@ -39,7 +39,10 @@ const REPLIES: Array<[string, (slot: SurveySlot) => Promise<void>]> = [
 ];
 
 // What the reply route answers once no survey is parked under the id.
-const REFUSED = new ApiError(404, "no survey parked with id survey-7 (already answered or stale)");
+const REFUSED = new ApiError(404, "no survey parked with id survey-7 (already answered or stale)", {
+  error: "no survey parked with id survey-7 (already answered or stale)",
+  code: "survey_not_found",
+});
 
 let notices: string[] = [];
 
@@ -177,6 +180,36 @@ describe("a reply the server refuses as unknown", () => {
     await send("t1");
     expect(surveyFor("t1")).toBeNull();
     expect(notices).toEqual([expect.stringMatching(/^survey expired/)]);
+  });
+});
+
+describe("survey refusal codes", () => {
+  test("retires a survey_not_found response through the real transport", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ error: "This survey has expired.", code: "survey_not_found" }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    ));
+    showSurvey(spec(), "t1");
+
+    await dismissSurvey("t1");
+
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/survey/reply"),
+      expect.objectContaining({ method: "POST" }));
+    expect(surveyFor("t1")).toBeNull();
+    expect(notices).toEqual(["survey expired: nothing is waiting for its answer"]);
+  });
+
+  test.each([
+    ["no code", new ApiError(404, "no survey parked")],
+    ["another code", new ApiError(404, "no survey parked", { code: "other" })],
+    ["another status", new ApiError(500, "no survey parked", { code: "survey_not_found" })],
+  ])("keeps the survey when the refusal has %s", async (_reason, error) => {
+    vi.spyOn(api, "surveyReply").mockRejectedValue(error);
+    showSurvey(spec(), "t1");
+    await dismissSurvey("t1");
+    expect(surveyFor("t1")?.surveyId).toBe("survey-7");
+    expect(surveyBusy("t1")).toBe(false);
+    expect(notices).toEqual(["survey dismiss failed: no survey parked"]);
   });
 });
 
