@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::fs::Metadata;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use ignore::gitignore::Gitignore;
@@ -2001,15 +2001,19 @@ fn list_tree_scoped_inner(
 
 /// Collect walked entries into tree entries, refusing with
 /// `ListingTooLarge` when an entry arrives after `limit` entries are collected.
-/// Entries whose metadata read fails are skipped and not counted.
+/// Entries whose metadata read fails are skipped and not counted. Once
+/// `cancel` is set, the next entry returns `Cancelled` instead.
 fn tree_entries<'a>(
     root: &Path,
     iter: impl Iterator<Item = DirEntry> + 'a,
     limit: usize,
-    _cancel: Option<&AtomicBool>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
     let mut out = Vec::new();
     for entry in iter {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return Err(ChanError::Cancelled);
+        }
         if out.len() >= limit {
             return Err(ChanError::ListingTooLarge {
                 observed: out.len(),

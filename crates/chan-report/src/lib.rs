@@ -26,7 +26,7 @@ pub use summary::{
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -180,6 +180,11 @@ impl Index {
         let mut rels = walk::walk_root(opts, cancel)?;
         let mut files = HashMap::with_capacity(rels.paths.len());
         for rel in rels.paths {
+            // Read here, not in `count`: a count cut short by a cancel is
+            // not a file the scan failed to read.
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+                return Err(ChanReportError::Cancelled);
+            }
             match count(&opts.root, &rel) {
                 Ok(Some(fs)) => {
                     files.insert(rel, fs);

@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use chan_report::{CocomoParams, Index, Report, ReportOptions, Scope, UpdateOutcome};
+use chan_report::{
+    ChanReportError, CocomoParams, Index, Report, ReportOptions, Scope, UpdateOutcome,
+};
 
 use crate::error::{ChanError, Result};
 use crate::fs_ops::{atomic_write, IndexScopePolicy};
@@ -73,8 +75,7 @@ impl ReportState {
         };
         let index = match loaded {
             Some(idx) => idx,
-            None => Index::scan_cancelable(&opts, cancel)
-                .map_err(|e| ChanError::Report(e.to_string()))?,
+            None => Index::scan_cancelable(&opts, cancel).map_err(scan_error)?,
         };
 
         if index.skipped_entries() != 0 {
@@ -214,8 +215,7 @@ impl ReportState {
         cancel: Option<&AtomicBool>,
     ) -> Result<()> {
         let opts = report_options(workspace_root, policy);
-        let replacement = Index::scan_cancelable(&opts, cancel)
-            .map_err(|error| ChanError::Report(error.to_string()))?;
+        let replacement = Index::scan_cancelable(&opts, cancel).map_err(scan_error)?;
         if replacement.skipped_entries() != 0 {
             tracing::warn!(
                 root = %workspace_root.display(),
@@ -265,6 +265,15 @@ pub(crate) fn load_snapshot_if_available(
         return Ok(None);
     };
     Ok(Some(index.snapshot(&Scope::All, &opts.cocomo)))
+}
+
+/// A cancelled scan is the workspace's cancellation, which callers match on;
+/// every other scan failure is a report error carried as text.
+fn scan_error(error: ChanReportError) -> ChanError {
+    match error {
+        ChanReportError::Cancelled => ChanError::Cancelled,
+        error => ChanError::Report(error.to_string()),
+    }
 }
 
 fn report_options(workspace_root: &Path, policy: Arc<IndexScopePolicy>) -> ReportOptions {

@@ -13,7 +13,7 @@ use ignore::gitignore::Gitignore;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::error::ChanReportError;
@@ -208,11 +208,14 @@ pub(crate) fn walk_root(
 fn collect_entries(
     root: &Path,
     entries: impl IntoIterator<Item = Result<(bool, PathBuf), ignore::Error>>,
-    _cancel: Option<&AtomicBool>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<WalkResult, ChanReportError> {
     let mut out = Vec::new();
     let mut skipped = 0;
     for entry in entries {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return Err(ChanReportError::Cancelled);
+        }
         let (is_file, abs) = match entry {
             Ok(entry) => entry,
             Err(error) if is_root_error(&error, root) => {

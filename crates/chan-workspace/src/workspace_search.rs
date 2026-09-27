@@ -675,6 +675,9 @@ impl Workspace {
             &mut warnings,
         );
         for seed in seeds {
+            if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Err(crate::ChanError::Cancelled);
+            }
             #[cfg(test)]
             seed_turn_probe(self, &seed, cancel);
             traverse_seed(&mut traversal, &normalized, seed)?;
