@@ -23,11 +23,7 @@ import {
 const { render, unmountRoot } = vi.hoisted(() => ({ render: vi.fn(), unmountRoot: vi.fn() }));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render, unmount: unmountRoot }) }));
 vi.mock("react", () => ({ createElement: (_kind: unknown, props: unknown) => props }));
-vi.mock("@excalidraw/excalidraw", () => ({
-  Excalidraw: () => null,
-  serializeAsJSON: (elements: unknown) => JSON.stringify({ elements, appState: {}, files: {} }),
-  CaptureUpdateAction: { IMMEDIATELY: "IMMEDIATELY", EVENTUALLY: "EVENTUALLY", NEVER: "NEVER" },
-}));
+vi.mock("@excalidraw/excalidraw", async () => (await import("../__tests__/excalidrawLibrary")).excalidrawModule);
 vi.mock("../state/sceneSync.svelte", async (original) => ({
   ...await original<typeof import("../state/sceneSync.svelte")>(),
   isSceneSyncEligible: () => false,
@@ -122,8 +118,9 @@ async function mountBoard(tab: FileTab) {
   document.body.append(target);
   const component = mount(FileEditorTab, { target, props: { tab, active: true, focused: true } });
   mounted.push(component);
-  const board = excalidrawBoard(await canvasReady);
-  return { target, component, board, lastRender: () => render.mock.calls.at(-1)![0] as BoardProps };
+  await canvasReady;
+  const lastRender = () => render.mock.calls.at(-1)![0] as BoardProps;
+  return { target, component, board: excalidrawBoard(lastRender), lastRender };
 }
 
 async function mountDuringLoad(exists = true) {
@@ -243,16 +240,10 @@ async function draw(over: Partial<FileTab> = {}) {
   initial.savedMtime = disk.write(initial.path, initial.saved).mtime;
   const pane = resetLayout([initial]);
   const tab = readTab(initial.id)!;
-  const target = document.createElement("div");
-  document.body.append(target);
-  mounted.push(mount(FileEditorTab, { target, props: { tab, active: true, focused: true } }));
-  const props = await canvasReady;
-  let elements: unknown[] = [];
-  props.excalidrawAPI({ getSceneElements: () => elements, getAppState: () => ({}), getFiles: () => ({}) });
-  await tick();
+  const { target, board } = await mountBoard(tab);
   vi.useFakeTimers();
-  elements = [{ id: "last-stroke", version: 1 }];
-  props.onChange();
+  await board.start();
+  board.stroke({ id: "last-stroke", version: 1 });
   vi.advanceTimersByTime(50);
   expect(tab.content).toBe(tab.saved);
   return { pane, tab, target, strokeAt: Date.now() - 50 };
