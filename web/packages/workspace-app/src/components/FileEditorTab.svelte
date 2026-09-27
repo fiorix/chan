@@ -179,8 +179,8 @@
   $effect(() => registerPendingEditFlush(tab.id, () => canvasRef?.flushPendingEdits()));
 
   function onCanvasSceneChange(json: string): void {
-    // A loading or failed read holds a placeholder scene. Read the live
-    // tab state because a close or teardown can flush before effects run.
+    // Loading, failed, or missing reads do not supply a drawing. This
+    // guard covers both close-time and teardown serialization.
     if (tab.loading || tab.error || tab.fileMissing) return;
     setTabContent(tab, json);
   }
