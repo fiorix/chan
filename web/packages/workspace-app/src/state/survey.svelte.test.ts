@@ -79,7 +79,6 @@ describe("survey store", () => {
       kind: "option",
       optionIndex: 1,
       optionLabel: "No",
-      windowId: expect.any(String),
     });
     // t1 cleared; t2 untouched (independence).
     expect(surveyFor("t1")).toBeNull();
@@ -102,7 +101,6 @@ describe("survey store", () => {
     expect(reply).toHaveBeenCalledWith({
       surveyId: "survey-7",
       kind: "followup",
-      windowId: expect.any(String),
     });
     expect(surveyFor("t1")).toBeNull();
   });
@@ -116,7 +114,6 @@ describe("survey store", () => {
     expect(reply).toHaveBeenCalledWith({
       surveyId: "survey-a",
       kind: "dismissed",
-      windowId: expect.any(String),
     });
     // t1 cleared; t2 untouched (independence).
     expect(surveyFor("t1")).toBeNull();
