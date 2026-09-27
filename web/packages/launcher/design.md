@@ -7,7 +7,7 @@ How the launcher is built and reached. The [`README`](README.md) covers the stac
 ```mermaid
 flowchart TB
     subgraph spa["web-launcher SPA (one bundle)"]
-        LIB["launcher API client: pure /api/library/* HTTP<br/>workspaces · windows · devservers · gateways<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
+        LIB["launcher API client: library HTTP and tenant page checks<br/>workspaces / windows / devservers / gateways<br/>library bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
         UI["TopBar · ScreenFlip (Library | Gateways) · shared Command deck · SelectionBar · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
     end
 
@@ -35,6 +35,7 @@ flowchart TB
         GW["gateway-proxied = the devserver reached via<br/>devserver-proxy at {owner}--{disc}.{proxy}.proxy.{domain}/<br/>(proxy strips browser credentials and gates at edge)"]
         LOOP["desktop loopback<br/>bearer=Some(per-launch token) · serve_addr=Some(addr) full mutation"]
     end
+    LIB -->|"tenant page check (self-managed)"| DEV
     DEV --- GW
     IRF --- DEV
     IRF --- LOOP
@@ -42,7 +43,11 @@ flowchart TB
 
 ## What the launcher is
 
-In its ordinary launcher-window role, the SPA is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes; the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
+In its ordinary launcher-window role, the SPA is an HTTP client of the serving library: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes; the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
+
+On a self-managed devserver surface, creating a workspace or terminal window opens a blank browser window synchronously in the user's gesture. After the library mints its record, the launcher names the window by its record id and stores the handle before waiting, so disconnected-feed reconciliation keeps it. Re-opening a record opens its named window with no URL; a window already showing a page is focused without a reload. A blank window shows one waiting line while the launcher's API fetches its same-origin tenant URL with `cache: "no-store"`. The page is public, and the check carries the same URL and same-origin cookies as the navigation.
+
+A 503 retries according to `Retry-After` (seconds or an HTTP date), with one second for a missing or invalid header. The wait is bounded at sixty seconds, including a stalled request or body, and stops when the user closes the window. Repeated clicks share the pending check and navigate once. A successful check navigates the window; another refusal closes it and reaches the caller's existing action error surface through `ApiError`. The bound reports the last refusal's sentence, or a timeout message if no refusal arrived. Cancellation or refusal discards a newly minted record unless a replacement window holds it; re-opening an existing record keeps that record. The check cannot make the later navigation atomic: a devserver that starts stopping between them can still refuse the navigation.
 
 ## One command deck, two authority hosts
 
