@@ -209,6 +209,32 @@ describe("mintWindow", () => {
     expect(child.closed).toBe(false);
   });
 
+  it.each([
+    ["zero", "0"],
+    ["negative zero", "-0"],
+    ["fractional", "0.001"],
+    ["past date", "Sun, 27 Sep 2026 11:00:00 GMT"],
+    ["near date", "Sun, 27 Sep 2026 12:00:01 GMT"],
+    ["invalid", "not a date"],
+  ])("waits a full second after the answer with a %s Retry-After", async (_kind, header) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    createWindow.mockResolvedValue(record({}));
+    checkWindowPage.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return gateResponse(header);
+    });
+    const pending = mintWindow("workspace");
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(opened[0].win.location.href).toBe("about:blank");
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(checkWindowPage).toHaveBeenCalledTimes(2);
+    expect(opened[0].win.location.href).toContain("/proj-1/?w=w-1");
+  });
+
   it.each([404, 409, 500])("closes and discards on a page's %s refusal with its sentence", async (status) => {
     createWindow.mockResolvedValue(record({}));
     checkWindowPage.mockResolvedValue(new Response(JSON.stringify({ error: "Page is unavailable." }), { status }));
