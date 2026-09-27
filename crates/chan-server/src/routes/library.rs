@@ -1976,7 +1976,7 @@ async fn handle_remove_workspace(
         return *resp;
     }
     let Some((_allocated, root)) = resolve_workspace(&state.host, &id) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     match state
         .host
@@ -1984,11 +1984,13 @@ async fn handle_remove_workspace(
         .await
     {
         Ok(WorkspaceLifecycleOutcome::Completed) => StatusCode::NO_CONTENT.into_response(),
-        Ok(WorkspaceLifecycleOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(WorkspaceLifecycleOutcome::NotFound) => {
+            crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
+        }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
             live_terminals_response(active_terminals)
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
