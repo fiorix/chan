@@ -78,6 +78,10 @@ Each subcommand handler is orchestration only: it opens a `Library`, resolves a 
 
 Workspace search and status distinguish an observed foreign writer from a lock whose state cannot be determined. An open failure or a lock-test failure other than contention refuses the command with a diagnostic instead of treating the workspace as free or claiming a live holder. Search returns `workspace_lock_unknown`; status reports `cannot determine workspace lock status`. A real holder keeps the live-server path, and a free workspace keeps the local-open path.
 
+### Devserver HTTP refusals
+
+The terminal drain used by systemd `stop` and destructive `restart --force`, and the running-server arm of `rotate-token`, show a refusal envelope's nonempty `error` sentence after its HTTP status. The sentence is preserved verbatim; an optional `code` is not displayed. Other bodies keep each command's fallback: drain includes the raw body after the status, while token rotation shows the status alone. Token rotation's 401 response always gives the persisted-token mismatch explanation and the instructions to restart the devserver and rotate again.
+
 ### Workspace status
 
 `chan workspace status PATH` looks up an existing registration without registering or refreshing it. An unregistered path fails with the `chan workspace add` hint. If the writer lock is held, including a holder that wins between lookup and open, status reports that holder and exits successfully. It reads the lock record for the pid and uses the same control-socket identity and devserver HTTP activity probes as `chan ps`. Each identity probe and each HTTP request, including its response body, has a two-second budget. An unreachable holder or activity endpoint leaves those details unknown. A free workspace is opened for the existing readiness and derived-state snapshots; missing metadata lock directories take this normal open path and are recreated.
