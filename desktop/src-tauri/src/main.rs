@@ -1205,12 +1205,11 @@ fn snapshot_workspaces(state: &AppState) {
             }
         }
     }
-    tracing::info!(
-        on = rows.len(),
-        paths = ?rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
-        "persisting the on workspace set"
-    );
+    // Logged after the write: stderr can block, and the reads above and the
+    // replace are the window in which a concurrent close is lost.
+    let on: Vec<String> = rows.iter().map(|row| row.path.clone()).collect();
     overlay.replace(rows);
+    tracing::info!(on = on.len(), paths = ?on, "persisted the on workspace set");
 }
 
 fn devserver_url_token(raw: &str) -> Option<String> {
