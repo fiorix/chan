@@ -211,6 +211,7 @@
   function scheduleSearch(): void {
     if (debounceTimer) clearTimeout(debounceTimer);
     const q = searchPanel.query.trim();
+    queryToken += 1;
     if (!q) {
       chunkHits = [];
       languageHits = [];
@@ -220,7 +221,6 @@
       return;
     }
     const limit = 25;
-    queryToken += 1;
     const myToken = queryToken;
     loading = true;
     debounceTimer = setTimeout(async () => {
