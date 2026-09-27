@@ -5662,6 +5662,43 @@ mod refusal_envelopes {
         .await;
     }
 
+    fn window_host(registry: bool) -> (tempfile::TempDir, Arc<WorkspaceHost>) {
+        let (dir, host) = host();
+        if registry {
+            host.install_window_registry(
+                Arc::new(chan_library::windows::WindowRegistry::open(
+                    dir.path().join("windows.json"),
+                )),
+                "local".into(),
+            );
+        }
+        (dir, host)
+    }
+
+    #[tokio::test]
+    async fn window_discard_missing() {
+        let (_dir, host) = window_host(true);
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(&app, "DELETE", "/api/library/windows/missing", None).await,
+            StatusCode::NOT_FOUND,
+            "window not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_discard_registry() {
+        let (_dir, host) = window_host(false);
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(&app, "DELETE", "/api/library/windows/missing", None).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config: window registry not installed",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn launcher_bearer() {
         let (_dir, host) = host();
