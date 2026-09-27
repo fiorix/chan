@@ -6530,6 +6530,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_waiting_open_uses_its_own_cancellation_and_configuration() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (release, released) = std::sync::mpsc::channel();
+        *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+            let workspace = result.as_ref().unwrap();
+            entered
+                .take()
+                .unwrap()
+                .send(Arc::downgrade(workspace))
+                .unwrap();
+            released.recv().unwrap();
+        }));
+        let opening = Arc::clone(&host);
+        let opening_root = root.path().to_path_buf();
+        let first = tokio::spawn(async move {
+            opening
+                .open_or_get_registered_workspace(opening_root, serve_config("/cancelled"))
+                .await
+        });
+        let abandoned = entry.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let mut later =
+            Box::pin(host.open_or_get_registered_workspace(root.path(), serve_config("/fresh")));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut later)
+                .await
+                .is_err(),
+            "a later open did not wait for the abandoned open to release its workspace"
+        );
+        release.send(()).unwrap();
+        let mounted = tokio::time::timeout(Duration::from_secs(10), later)
+            .await
+            .unwrap()
+            .expect("a waiting open inherited the abandoned open's cancellation");
+        assert_eq!(
+            mounted.prefix, "/fresh",
+            "a waiting open adopted the abandoned caller's configuration"
+        );
+        assert!(
+            abandoned.upgrade().is_none(),
+            "a waiting open adopted the abandoned workspace"
+        );
+        assert_eq!(host.mounted_prefixes().unwrap(), vec!["/fresh"]);
+        host.close_workspace_for_root(root.path(), false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn a_cancelled_open_releases_the_workspace_before_its_root_lock() {
         tokio::time::timeout(Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
