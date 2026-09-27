@@ -1724,12 +1724,15 @@ mod tests {
         records: Arc<Mutex<Vec<WindowRecord>>>,
         nudge: Arc<Notify>,
         reads: Arc<std::sync::atomic::AtomicUsize>,
+        // The production feed over `records`, so a pass reads what the
+        // watcher reads from a devserver's feed, up or down.
+        inner: DevserverWindowFeed,
     }
 
     impl WindowFeed for RetryFeed {
         fn snapshot(&self) -> Vec<WindowRecord> {
             self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.records.lock().unwrap().clone()
+            self.inner.snapshot()
         }
         fn change_notify(&self) -> Arc<Notify> {
             Arc::clone(&self.nudge)
@@ -1918,10 +1921,17 @@ mod tests {
         ) -> Self {
             let library_id = records[0].library_id.clone();
             let nudge = Arc::new(Notify::new());
+            // The feed's connection is up until a test ends its round.
+            let inner = DevserverWindowFeed {
+                snapshot: Arc::new(Mutex::new(records.clone())),
+                live: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                change: Arc::clone(&nudge),
+            };
             let feed = RetryFeed {
-                records: Arc::new(Mutex::new(records.clone())),
+                records: Arc::clone(&inner.snapshot),
                 nudge: Arc::clone(&nudge),
                 reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                inner,
             };
             let pending_deletes = Arc::new(PendingDeleteState::default());
             let view = Arc::new(WatcherViewState::with_pending_deletes(Arc::clone(
@@ -2869,6 +2879,80 @@ mod tests {
             );
             harness.stop(WatchLoopStop::KeepWindows).await;
         }
+    }
+
+    // While its feed is down the watcher vouches for no socket: a try reads
+    // the window as not connected, whatever the last frame said, and carries
+    // out the Reload when the target answers ready.
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_inside_a_feed_outage_reads_no_socket() {
+        let record = retry_record("outage", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        harness.navigate_first(&record).await;
+        // The last frame before the outage says the page is connected.
+        harness.set_connected(&record, true).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(harness.request_reload(&record, true, Some(&harness.view)));
+        harness.drain().await;
+        let (_, ticket) = harness
+            .surface
+            .held
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("a Reload of a connected window is dispatched");
+        harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
+        harness.drain().await;
+        harness.feed.inner.end_round();
+        tokio::time::advance(RETRY_NUDGE).await;
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5, 20],
+            "a try inside a feed outage carries out the Reload"
+        );
+        assert_eq!(
+            harness.raised(&record),
+            vec![true, true, false],
+            "a timer's try raises nothing"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[test]
+    fn the_watcher_reads_a_socket_only_from_a_feed_that_is_up() {
+        let mut record = rec();
+        record.connected = true;
+        let feed = DevserverWindowFeed {
+            snapshot: Arc::new(Mutex::new(vec![record.clone()])),
+            live: Arc::default(),
+            change: Arc::default(),
+        };
+        assert!(
+            !feed.snapshot()[0].connected,
+            "the seed, read before any frame, vouches for no socket"
+        );
+        feed.write_frame(vec![record.clone()]);
+        assert!(
+            feed.snapshot()[0].connected,
+            "a frame written reads as the frame says"
+        );
+        feed.end_round();
+        let down = feed.snapshot();
+        assert_eq!(down.len(), 1, "a round that ended keeps the set");
+        assert!(
+            !down[0].connected,
+            "a round that ended reads every window as not connected"
+        );
+        assert!(
+            feed.snapshot.lock().unwrap()[0].connected,
+            "the launcher's set keeps what the last frame said"
+        );
+        feed.write_frame(vec![record]);
+        assert!(
+            feed.snapshot()[0].connected,
+            "the next frame reads as it says"
+        );
     }
 
     #[tokio::test(start_paused = true)]

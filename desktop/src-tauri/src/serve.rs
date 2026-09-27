@@ -2232,6 +2232,22 @@ mod tests {
             .expect("section end")
     }
 
+    // The feed task needs a Wry `AppHandle` and the app's state, which no test
+    // builds, so only its two calls are asserted here. What each call does is
+    // pinned by `the_watcher_reads_a_socket_only_from_a_feed_that_is_up`.
+    #[test]
+    fn the_feed_task_marks_its_frames_and_the_end_of_its_rounds() {
+        let wiring = include_str!("window_watcher_wiring.rs");
+        let rounds = source_section(
+            wiring,
+            "async fn run_devserver_window_feed(",
+            "/// Pump a devserver feed WS",
+        );
+        assert!(rounds.contains("feed.end_round();"));
+        let frames = source_section(wiring, "async fn stream_window_feed(", "\n}\n");
+        assert!(frames.contains("feed.write_frame(windows);"));
+    }
+
     #[test]
     fn retarget_tickets_cover_dispatch_navigation_and_window_lifetime() {
         let main = include_str!("main.rs");
