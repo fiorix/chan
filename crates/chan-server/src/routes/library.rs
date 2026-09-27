@@ -5784,6 +5784,12 @@ mod refusal_envelopes {
         let root = dir.path().join("notes");
         std::fs::create_dir(&root).unwrap();
         let prefix = registered_root(&host, &root);
+        // The route names the row's canonical root. Resolve it before the
+        // removal: a missing path canonicalizes to itself.
+        let sentence = format!(
+            "chan-workspace: workspace root does not exist: {}",
+            chan_workspace::paths::canonicalize_normalized(&root).display()
+        );
         std::fs::remove_dir(&root).unwrap();
         assert_refusal(
             send(
@@ -5794,10 +5800,7 @@ mod refusal_envelopes {
             )
             .await,
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!(
-                "chan-workspace: workspace root does not exist: {}",
-                root.display()
-            ),
+            &sentence,
         )
         .await;
     }
