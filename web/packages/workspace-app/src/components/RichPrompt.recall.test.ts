@@ -49,7 +49,10 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 8; i += 1) await tick();
 }
 
-async function recall(origin: Origin) {
+async function recall(origin: Origin | "unacknowledged") {
+  if (origin === "unacknowledged") {
+    vi.mocked(api.read).mockResolvedValueOnce({ path: ".Drafts/recall/draft.md", content: "", mtime: 0 });
+  }
   const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: ".Drafts/recall/draft.md" })]);
   const { target } = await mountTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
@@ -61,6 +64,11 @@ async function recall(origin: Origin) {
   expect(content).not.toBeNull();
   const view = EditorView.findFromDOM(content)!;
   await flush();
+  if (origin === "unacknowledged") {
+    expect(view.state.doc.toString()).toBe("");
+    view.dispatch({ changes: { from: 0, insert: TEXT } });
+    await flush();
+  }
   expect(view.state.doc.toString()).toBe(TEXT);
   socket.sent.splice(0);
   press(content, "Enter", { ctrlKey: true });
@@ -68,8 +76,10 @@ async function recall(origin: Origin) {
   const prompts = sentFrames(socket).filter((f) => f.type === "prompt");
   expect(prompts).toHaveLength(1);
   const id = prompts[0]!.id as string;
-  await receive(socket, { type: "prompt-ack", id, queued: true, depth: 1 });
-  await flush();
+  if (origin !== "unacknowledged") {
+    await receive(socket, { type: "prompt-ack", id, queued: true, depth: 1 });
+    await flush();
+  }
   if (origin === "empty composer") {
     press(content, "x");
     await flush();
@@ -84,6 +94,42 @@ async function recall(origin: Origin) {
 function cancels(socket: TerminalSocket) {
   return sentFrames(socket).filter((f) => f.type === "cancel-prompt");
 }
+
+describe("recall before prompt acknowledgement", () => {
+  test("a refused prompt keeps its text after the cancellation reply", async () => {
+    const { tab, socket, id, target, view } = await recall("unacknowledged");
+    expect(view.state.readOnly).toBe(true);
+    expect(tab.pendingPrompt).toEqual({ id, phase: "recalling", recallText: TEXT });
+    expect(cancels(socket)).toEqual([{ type: "cancel-prompt", id }]);
+
+    await receive(socket, { type: "prompt-ack", id, queued: false, depth: 100 });
+    await flush();
+    expect(target.textContent).not.toContain("already sent");
+    await receive(socket, { type: "prompt-cancelled", id, removed: false });
+    await flush();
+    expect(view.state.doc.toString()).toBe(TEXT);
+    expect(view.state.readOnly).toBe(false);
+    expect(target.querySelector(".rp-text")?.textContent).toBe("queue full, try again");
+    expect(target.textContent).not.toContain("already sent");
+    expect(tab.pendingPrompt).toBeUndefined();
+    expect(api.write).toHaveBeenLastCalledWith(".Drafts/recall/draft.md", TEXT);
+  });
+
+  test("a cancellation reply without rejection clears the text as already sent", async () => {
+    const { tab, socket, id, target, view } = await recall("unacknowledged");
+    expect(view.state.readOnly).toBe(true);
+    expect(tab.pendingPrompt).toEqual({ id, phase: "recalling", recallText: TEXT });
+    expect(cancels(socket)).toEqual([{ type: "cancel-prompt", id }]);
+
+    await receive(socket, { type: "prompt-cancelled", id, removed: false });
+    await flush();
+    expect(view.state.doc.toString()).toBe("");
+    expect(view.state.readOnly).toBe(false);
+    expect(target.querySelector(".rp-text")?.textContent).toBe("already sent");
+    expect(tab.pendingPrompt).toBeUndefined();
+    expect(api.write).toHaveBeenLastCalledWith(".Drafts/recall/draft.md", "");
+  });
+});
 
 describe("recall acknowledgement", () => {
   test.each(ORIGINS)("removed true unlocks the %s with its text", async (origin) => {

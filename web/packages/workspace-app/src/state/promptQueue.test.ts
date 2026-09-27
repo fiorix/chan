@@ -3,6 +3,7 @@
 import { describe, expect, test } from "vitest";
 import {
   beginPendingPrompt,
+  beginPromptRecall,
   failPendingPrompt,
   resolvePendingPrompt,
   setTerminalQueueDepth,
@@ -51,6 +52,21 @@ describe("a batch does not disturb a pending Rich Prompt", () => {
 });
 
 describe("pending prompt state machine", () => {
+  test("rejection settles recall with its text while queue and delivery wait", () => {
+    const tab = terminalTab();
+    beginPendingPrompt(tab, "msg-1");
+    beginPromptRecall(tab, "msg-1", "keep this refused prompt");
+    const recalling = { id: "msg-1", phase: "recalling", recallText: "keep this refused prompt" };
+
+    resolvePendingPrompt(tab, "msg-1", "queued", 1);
+    expect(tab.pendingPrompt).toEqual(recalling);
+    resolvePendingPrompt(tab, "msg-1", "delivered", 0);
+    expect(tab.pendingPrompt).toEqual(recalling);
+
+    resolvePendingPrompt(tab, "msg-1", "rejected", 100);
+    expect(tab.pendingPrompt).toEqual({ ...recalling, phase: "rejected", depth: 100 });
+  });
+
   test("begin -> queued (ack depth = position) -> delivered", () => {
     const tab = terminalTab();
     beginPendingPrompt(tab, "msg-1");
