@@ -101,6 +101,7 @@
   } from "../state/store.svelte";
   import {
     openInActivePane,
+    registerPendingEditFlush,
     openLinkTarget,
     saveDraftTabToWorkspace,
     tabFocusPulse,
@@ -174,7 +175,8 @@
   // whiteboards do not all spin up a React root at once (Pane keeps every
   // file-tab body mounted). The typeof import(...) below is a type-only
   // query and does not pull the module into the eager graph.
-  let canvasRef: { focusCanvas: () => void } | undefined = $state();
+  let canvasRef: { focusCanvas: () => void; flushPendingEdits: () => void } | undefined = $state();
+  $effect(() => registerPendingEditFlush(tab.id, () => canvasRef?.flushPendingEdits()));
   let ExcalidrawCanvas =
     $state<typeof import("../editor/ExcalidrawCanvas.svelte").default | null>(null);
   $effect(() => {

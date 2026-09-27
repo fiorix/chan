@@ -2617,6 +2617,16 @@ export function sendCancelToTerminal(tabId: string, id: string): boolean {
   return sink(id);
 }
 
+const pendingEditFlushes = new Map<string, () => void>();
+
+/// Commit a mounted editor's buffered input before close inspects the file.
+export function registerPendingEditFlush(tabId: string, flush: () => void): () => void {
+  pendingEditFlushes.set(tabId, flush);
+  return () => {
+    if (pendingEditFlushes.get(tabId) === flush) pendingEditFlushes.delete(tabId);
+  };
+}
+
 export function registerTerminalCloseSink(tabId: string, sink: TerminalCloseSink): () => void {
   terminalCloseSinks.set(tabId, sink);
   return () => {
@@ -2848,6 +2858,7 @@ async function confirmCloseTabs(
   }
   for (const tab of tabs) {
     if (tab.kind !== "file") continue;
+    pendingEditFlushes.get(tab.id)?.();
     if (!isDirty(tab)) continue;
     // The save takes a turn or more, so `tab` is not necessarily the object
     // the layout holds afterwards: a message written on the old one is never
@@ -3509,6 +3520,8 @@ async function closeTabOnce(
   const movingOut = tab.kind === "terminal" && terminalsMovingOut.has(tabId);
   const movedSession = tab.kind === "terminal" ? (tab.terminalSessionId ?? null) : null;
   let discarded = false;
+  // Draft and empty-file closes inspect the buffer before the save funnel.
+  if (tab.kind === "file" && !opts?.force) pendingEditFlushes.get(tab.id)?.();
   if (isDraftTab(tab) && !opts?.force) {
     if (!(await handleDraftTabClose(tab))) return;
   } else if (
@@ -6865,6 +6878,7 @@ export async function closeFileTabAfterMove(
   const node = layout.nodes[paneId];
   if (!node || node.kind !== "leaf") return;
   const tab = allPaneTabs(node).find((t) => t.id === tabId);
+  if (tab?.kind === "file") pendingEditFlushes.get(tab.id)?.();
   if (tab?.kind === "file" && isDirty(tab)) {
     try {
       await performSave(tab);

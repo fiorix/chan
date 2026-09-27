@@ -415,8 +415,14 @@
     host?.focus();
   }
 
+  export function flushPendingEdits(): void {
+    if (serializeTimer === null) return;
+    clearTimeout(serializeTimer);
+    flushSerialize();
+  }
+
   onDestroy(() => {
-    if (serializeTimer !== null) clearTimeout(serializeTimer);
+    flushPendingEdits();
     root?.unmount();
     root = null;
     api = null;
