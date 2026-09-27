@@ -3553,8 +3553,15 @@ mod tests {
                 drop(state);
 
                 let (done, finished) = std::sync::mpsc::channel();
+                let dropped_manager = manager.clone();
                 let draining = runtime.spawn(async move {
                     host.shutdown_all().await.expect("host drain");
+                    // The control socket's aborted task can drop its state
+                    // after the drain returns. Drive that cancellation on the
+                    // sole worker so the watchdog covers the last owner's drop.
+                    while dropped_manager.upgrade().is_some() {
+                        tokio::task::yield_now().await;
+                    }
                     let _ = done.send(());
                 });
                 let outcome = finished.recv_timeout(Duration::from_secs(15));
