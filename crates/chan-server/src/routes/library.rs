@@ -1111,13 +1111,10 @@ async fn watch_library_windows(mut socket: WebSocket, host: Arc<WorkspaceHost>) 
 /// e.g. the desktop launcher) are both allowed.
 fn leader_gate(target_leader: Option<String>, acting: Option<&str>) -> Result<(), Box<Response>> {
     match (target_leader, acting) {
-        (Some(leader), Some(claim)) if claim != leader => Err(Box::new(
-            (
-                StatusCode::FORBIDDEN,
-                "not the session leader for this window",
-            )
-                .into_response(),
-        )),
+        (Some(leader), Some(claim)) if claim != leader => Err(Box::new(crate::error::err(
+            StatusCode::FORBIDDEN,
+            "not the session leader for this window".into(),
+        ))),
         _ => Ok(()),
     }
 }
