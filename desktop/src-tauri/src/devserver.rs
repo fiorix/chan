@@ -4174,6 +4174,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_lifecycle_reads_refusals_per_arm() {
+        use axum::http::StatusCode;
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for gateway in [false, true] {
+            for operation in ["forget", "on", "off"] {
+                for (body, detail) in [
+                    ("plain refusal", ""),
+                    (
+                        r#"{"error":"launcher not ready","code":"starting"}"#,
+                        ": launcher not ready",
+                    ),
+                ] {
+                    let server = MockManagementServer::start(vec![mock_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        body,
+                    )])
+                    .await;
+                    let conn = if gateway {
+                        server.gateway_conn()
+                    } else {
+                        server.raw_conn()
+                    };
+                    let (message, label) = match operation {
+                        "forget" => (
+                            other_message(
+                                forget_workspace(&conn, "/notes", false).await.unwrap_err(),
+                            ),
+                            if gateway {
+                                "gateway workspace delete"
+                            } else {
+                                "devserver workspace delete"
+                            },
+                        ),
+                        "on" => (
+                            other_message(
+                                set_workspace_on(&conn, "/notes", true, false)
+                                    .await
+                                    .unwrap_err(),
+                            ),
+                            if gateway {
+                                "gateway workspace on/off"
+                            } else {
+                                "devserver workspace on/off"
+                            },
+                        ),
+                        "off" => (
+                            other_message(
+                                set_workspace_on(&conn, "/notes", false, false)
+                                    .await
+                                    .unwrap_err(),
+                            ),
+                            if gateway {
+                                "gateway workspace on/off"
+                            } else {
+                                "devserver workspace on/off"
+                            },
+                        ),
+                        _ => unreachable!(),
+                    };
+                    actual.push(format!("{operation}: {message}"));
+                    expected.push(format!(
+                        "{operation}: {label} returned HTTP 503 Service Unavailable{detail}"
+                    ));
+                    server.assert_responses_drained();
+                }
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "refusals must retain the server sentence on both transports"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_workspaces_request_contract_per_arm() {
         use axum::http::{Method, StatusCode};
 
