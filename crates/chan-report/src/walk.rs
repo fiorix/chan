@@ -337,4 +337,27 @@ mod tests {
         assert_eq!(result.paths, ["a.rs"]);
         assert_eq!(result.skipped, 1);
     }
+
+    #[test]
+    fn a_cancel_during_the_walk_stops_it_at_the_next_entry() {
+        let root = Path::new("workspace");
+        let cancel = AtomicBool::new(false);
+        let mut yielded = 0;
+        let entries = ["a.rs", "b.rs", "c.rs", "d.rs"]
+            .map(|name| Ok((true, root.join(name))))
+            .into_iter()
+            .inspect(|_| {
+                yielded += 1;
+                if yielded == 2 {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        let result = collect_entries(root, entries, Some(&cancel));
+        assert!(
+            matches!(result, Err(ChanReportError::Cancelled)),
+            "a cancelled walk returned {:?}",
+            result.as_ref().map(|walk| &walk.paths)
+        );
+        assert_eq!(yielded, 2, "the walk read past the cancel");
+    }
 }

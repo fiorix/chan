@@ -675,6 +675,8 @@ impl Workspace {
             &mut warnings,
         );
         for seed in seeds {
+            #[cfg(test)]
+            seed_turn_probe(self, &seed, cancel);
             traverse_seed(&mut traversal, &normalized, seed)?;
         }
         traversal.retain_induced_relationships(&normalized.relationship_kinds, normalized.depth)?;
@@ -1969,6 +1971,25 @@ impl<'a> TraversalBuilder<'a> {
     }
 }
 
+/// Seeds a search took a turn for, per armed workspace root. The probe also
+/// sets the search's cancel flag at every turn it records, so a test can tell
+/// a traversal that stops at its next seed from one that runs on.
+#[cfg(test)]
+static SEED_TURNS: std::sync::OnceLock<
+    std::sync::Mutex<BTreeMap<std::path::PathBuf, Vec<String>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn seed_turn_probe(workspace: &Workspace, seed: &ResolvedSeed, cancel: Option<&AtomicBool>) {
+    let slot = SEED_TURNS.get_or_init(Default::default);
+    if let Some(turns) = slot.lock().unwrap().get_mut(workspace.root()) {
+        turns.push(seed.node_id.clone());
+        if let Some(cancel) = cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 fn traverse_seed(
     builder: &mut TraversalBuilder<'_>,
     request: &NormalizedRequest,
@@ -2742,6 +2763,49 @@ mod tests {
             !exact.truncation.content_hits,
             "a window the matches fill exactly holds every match: {:?}",
             exact.truncation
+        );
+    }
+
+    #[test]
+    fn a_cancel_during_the_traversal_stops_it_at_the_next_seed() {
+        let (_config, _root, workspace) = open_workspace();
+        let names = ["a.md", "b.md", "c.md"];
+        for name in names {
+            workspace.write_text(name, "# Note\n").unwrap();
+            workspace.index_file(name).unwrap();
+        }
+        let root = workspace.root().to_path_buf();
+        SEED_TURNS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(root.clone(), Vec::new());
+        let cancel = AtomicBool::new(false);
+        let result = workspace.workspace_search_cancelable(
+            &WorkspaceSearchRequest {
+                from: names
+                    .map(|name| WorkspaceSelector {
+                        kind: WorkspaceSelectorKind::File,
+                        value: name.into(),
+                    })
+                    .to_vec(),
+                depth: Some(1),
+                ..WorkspaceSearchRequest::default()
+            },
+            Some(&cancel),
+        );
+        let turns = SEED_TURNS.get().unwrap().lock().unwrap().remove(&root);
+        assert!(
+            matches!(result, Err(crate::ChanError::Cancelled)),
+            "a cancelled traversal returned {:?} profiles",
+            result
+                .as_ref()
+                .map(|result| result.traversal.profiles.len())
+        );
+        assert_eq!(
+            turns.unwrap().len(),
+            1,
+            "the traversal took turns past the cancel"
         );
     }
 }

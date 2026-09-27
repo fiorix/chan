@@ -11455,4 +11455,41 @@ mod tests {
             "clearing the installed driver uninstalls it"
         );
     }
+
+    // Both scans the report runs on a caller's behalf stop on its flag: the
+    // cold one and the rescan after a scope change. Neither leaves a
+    // replacement behind, so the next call scans again.
+    #[test]
+    fn a_cancelled_report_scan_keeps_the_cached_report() {
+        let (_cfg, _dir, workspace) = fixture();
+        workspace.stop_open_recovery();
+        workspace.write_text("a.rs", "fn a() {}\n").unwrap();
+        let cancel = AtomicBool::new(true);
+        let cold = workspace.report_cancelable(Some(&cancel));
+        assert!(
+            matches!(cold, Err(ChanError::Cancelled)),
+            "a cancelled cold scan returned {:?}",
+            cold.as_ref().map(|report| report.files.len())
+        );
+        assert!(
+            workspace.report.get().is_none(),
+            "a cancelled cold scan cached a report"
+        );
+        assert_eq!(workspace.report().unwrap().files.len(), 1);
+        let scanned = workspace.report.get().unwrap().policy_generation();
+        workspace.refresh_repository_scope().unwrap();
+        let rescan = workspace.report_for_prefix_cancelable("", Some(&cancel));
+        assert!(
+            matches!(rescan, Err(ChanError::Cancelled)),
+            "a cancelled rescan returned {:?}",
+            rescan.as_ref().map(|report| report.files.len())
+        );
+        assert_eq!(
+            workspace.report.get().unwrap().policy_generation(),
+            scanned,
+            "a cancelled rescan replaced the cached report"
+        );
+        assert_eq!(workspace.report().unwrap().files.len(), 1);
+        assert_ne!(workspace.report.get().unwrap().policy_generation(), scanned);
+    }
 }

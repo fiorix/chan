@@ -663,6 +663,34 @@ mod tests {
         );
     }
 
+    // A cancel is read by the loop that counts, so it ends the scan instead
+    // of costing a skipped file: the count it cut short reports an error the
+    // loop would otherwise record as a skip.
+    #[test]
+    fn a_cancel_during_the_count_stops_the_scan_at_the_next_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            std::fs::write(dir.path().join(name), "fn f() {}\n").unwrap();
+        }
+        let opts = ReportOptions::new(dir.path());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut counted = 0;
+        let result = Index::scan_with(&opts, Some(&cancel), |root, rel| {
+            counted += 1;
+            if counted == 2 {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                return Err(ChanReportError::Io("count cut short".into()));
+            }
+            count::count_file_impl(root, rel)
+        });
+        assert!(
+            matches!(result, Err(ChanReportError::Cancelled)),
+            "a cancelled scan returned an index with skipped entries {:?}",
+            result.as_ref().map(Index::skipped_entries)
+        );
+        assert_eq!(counted, 2, "the scan counted past the cancel");
+    }
+
     // Every spelling `dir_report` accepts for a directory selects the same
     // files as a snapshot prefix, and a bare `/` is the whole index.
     #[test]

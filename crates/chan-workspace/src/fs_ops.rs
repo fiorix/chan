@@ -2370,6 +2370,33 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_during_the_walk_stops_it_at_the_next_entry() {
+        let root = TempDir::new().unwrap();
+        for name in ["a.md", "b.md", "c.md", "d.md"] {
+            std::fs::write(root.path().join(name), "x").unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let mut yielded = 0;
+        let walk = WalkDir::new(root.path())
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .inspect(|_| {
+                yielded += 1;
+                if yielded == 2 {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        let result = tree_entries(root.path(), walk, LIST_TREE_LIMIT, Some(&cancel));
+        assert!(
+            matches!(result, Err(ChanError::Cancelled)),
+            "a cancelled walk returned {:?}",
+            result.as_ref().map(Vec::len)
+        );
+        assert_eq!(yielded, 2, "the walk read past the cancel");
+    }
+
+    #[test]
     fn list_tree_skips_internal_dirs() {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join(".chan")).unwrap();
