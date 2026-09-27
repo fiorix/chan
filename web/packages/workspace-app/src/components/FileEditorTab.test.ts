@@ -1214,3 +1214,18 @@ describe("the status line after a file action", () => {
     expect(ui.status).toBeNull();
   });
 });
+
+describe("outline navigation", () => {
+  test.each(["wysiwyg", "source"] as const)("jumps to the outline line in %s when an indented heading is omitted", async (mode) => {
+    const content = "# A\n\n   # B\n\n# C\n";
+    const tab = seat(fileTab({ mode, outlineOpen: true, content, saved: content }));
+    const { target } = await render(tab);
+    const heading = [...target.querySelectorAll<HTMLButtonElement>(".outline-list button")]
+      .find((button) => button.textContent?.trim() === "C");
+    expect(heading).toBeDefined();
+    heading!.click();
+    await settle(2);
+
+    expect(editorView(target).state.selection.main.head).toBe(content.indexOf("# C"));
+  });
+});
