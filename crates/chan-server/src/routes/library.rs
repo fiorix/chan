@@ -949,7 +949,7 @@ async fn handle_library_command_launch(
             record.library_id == state.host.library_id() && record.window_id == window_id
         })
     else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
     };
     if record.token.is_empty() {
         return command_capability_error(StatusCode::CONFLICT, "window tenant is not running");
