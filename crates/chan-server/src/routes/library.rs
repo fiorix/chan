@@ -1931,6 +1931,10 @@ async fn handle_workspace_on(
     }
 }
 
+fn workspace_off_error(error: crate::Error) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+}
+
 /// `POST /api/library/workspaces/{id}/off`: unmount (release the per-workspace
 /// flock), keep the registration, and persist off. Live terminal sessions return 409 with `LiveTerminalsRejection` unless the optional JSON body sets `force: true`. Requires a mutable launcher.
 async fn handle_workspace_off(
@@ -1955,7 +1959,7 @@ async fn handle_workspace_off(
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
             live_terminals_response(active_terminals)
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => workspace_off_error(e),
     }
 }
 
