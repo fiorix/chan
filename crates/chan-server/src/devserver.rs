@@ -9609,7 +9609,7 @@ mod tests {
             } else {
                 assert_eq!(status, StatusCode::FORBIDDEN, "{caller} tunnel leg");
                 assert_eq!(
-                    body, "reverse tunnels are not available for this gateway role",
+                    body, r#"{"error":"reverse tunnels are not available for this gateway role"}"#,
                     "{caller} tunnel leg"
                 );
             }
@@ -9719,7 +9719,7 @@ mod tests {
                         (status, body.as_str()),
                         (
                             StatusCode::FORBIDDEN,
-                            "reverse tunnels are not available for this gateway role"
+                            r#"{"error":"reverse tunnels are not available for this gateway role"}"#
                         ),
                         "{caller} {leg}"
                     );

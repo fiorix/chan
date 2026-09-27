@@ -84,6 +84,10 @@ proxy_curl() {
     --resolve "$HOST_NAME:$PROXY_TLS_PORT:$PROXY_IP" "$@"
 }
 
+refusal_error_matches() {
+  python3 -c 'import json,sys; body=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(body,dict) and body.get("error")==sys.argv[2] else 1)' "$1" "$2"
+}
+
 cleanup() {
   $SDME rm -f "$C_PROXY" "$C_DS" >/dev/null 2>&1 || true
   info "removed containers $C_PROXY $C_DS"
@@ -504,7 +508,7 @@ tunnel_leg_case() { # tunnel_leg_case <label> <gate> <subject uuid> <client> <re
       [ "$code" = 400 ] && ! grep -q 'reverse tunnels' "$LEG_B" \
         || die "$label ${leg%%\?*}: expected the leg's own 400 past the gate, got $code ($(head -c 120 "$LEG_B"))"
     else
-      [ "$code" = 403 ] && [ "$(cat "$LEG_B")" = 'reverse tunnels are not available for this gateway role' ] \
+      [ "$code" = 403 ] && refusal_error_matches "$LEG_B" 'reverse tunnels are not available for this gateway role'  \
         || die "$label ${leg%%\?*}: expected the 403 refusal, got $code ($(head -c 120 "$LEG_B"))"
     fi
   done

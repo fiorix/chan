@@ -748,7 +748,7 @@ pub(crate) mod test_support {
                     .as_ref()
                     .and_then(|value| value["error"].as_str())
                     .unwrap_or(&body);
-                let refused = status == StatusCode::FORBIDDEN && body.ends_with(ROLE_REFUSAL);
+                let refused = status == StatusCode::FORBIDDEN && message.ends_with(ROLE_REFUSAL);
                 let no_bearer =
                     status == StatusCode::UNAUTHORIZED && message.starts_with(BEARER_REFUSAL);
                 let met = match expected(authority, caller) {

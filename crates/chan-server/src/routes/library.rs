@@ -1014,11 +1014,10 @@ async fn require_owner_desktop(req: Request<Body>, next: Next) -> Response {
                 path = %req.uri().path(),
                 "reverse tunnel leg refused: not the owner's desktop app",
             );
-            return (
+            return crate::error::err(
                 StatusCode::FORBIDDEN,
-                "reverse tunnels are not available for this gateway role",
-            )
-                .into_response();
+                "reverse tunnels are not available for this gateway role".into(),
+            );
         }
     }
     next.run(req).await
@@ -5190,7 +5189,7 @@ mod window_op_route_tests {
                 .unwrap();
             assert_eq!(
                 String::from_utf8_lossy(&body),
-                "reverse tunnels are not available for this gateway role",
+                r#"{"error":"reverse tunnels are not available for this gateway role"}"#,
                 "{uri}"
             );
 
@@ -5319,7 +5318,8 @@ mod window_op_route_tests {
                 } else {
                     assert_eq!(status, StatusCode::FORBIDDEN, "{caller:?} {uri}");
                     assert_eq!(
-                        body, "reverse tunnels are not available for this gateway role",
+                        body,
+                        r#"{"error":"reverse tunnels are not available for this gateway role"}"#,
                         "{caller:?} {uri}"
                     );
                 }
