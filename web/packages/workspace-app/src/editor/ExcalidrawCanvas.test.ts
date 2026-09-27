@@ -499,6 +499,28 @@ describe("a dropped push is not recorded as sent", () => {
 });
 
 describe("the buffer the classic PUT would carry", () => {
+  test("flushes the last stroke before unmounting the React root", async () => {
+    vi.useFakeTimers();
+    try {
+      const onSceneChange = vi.fn();
+      const { api, session } = await mountBound([], onSceneChange);
+      const rendered = renderMock.mock.calls.at(-1)![0] as { props: { onChange: () => void } };
+      api.setElements([wireEl("last-stroke", 1)]);
+      rendered.props.onChange();
+      vi.advanceTimersByTime(50);
+      expect(onSceneChange).not.toHaveBeenCalled();
+      await unmount(mounted.pop()!);
+
+      expect(onSceneChange).toHaveBeenCalledWith(expect.stringContaining("last-stroke"));
+      expect(session.pushScene).toHaveBeenCalled();
+      expect(onSceneChange.mock.invocationCallOrder[0]).toBeLessThan(unmountMock.mock.invocationCallOrder[0]!);
+      vi.advanceTimersByTime(250);
+      expect(onSceneChange).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // Whether the element is lost turns on what reaches the server, and the
   // classic PUT writes `tab.content`. The serialize mirror runs whether or
   // not a session is bound and whether or not the push was taken, so the
