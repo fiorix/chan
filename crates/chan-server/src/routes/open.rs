@@ -28,12 +28,12 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 
 use chan_shell::GRAPH_LINK_PREFIX;
 
 use crate::error::err;
+use crate::extract::Json;
 use crate::routes::run_blocking;
 use crate::state::AppState;
 

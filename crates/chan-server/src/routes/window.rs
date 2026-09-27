@@ -13,10 +13,10 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 
 use crate::error::err;
+use crate::extract::Json;
 use crate::state::AppState;
 
 /// Body of `POST /api/window/reply`. camelCase to match the SPA

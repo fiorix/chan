@@ -11,11 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use chan_workspace::{
     fs_ops, EffectiveSearchMode, SearchMode, SearchOpts, TreeEntry, WorkspaceReadiness,
     WorkspaceSearchRequest,
@@ -23,6 +21,7 @@ use chan_workspace::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err_from, err_state};
+use crate::extract::{Json, Query, Rejection};
 use crate::indexer::IndexStatus;
 use crate::routes::blocking_response;
 use crate::state::AppState;
@@ -240,12 +239,12 @@ async fn search_content_with_mode_resolver(
 /// successful partial fields.
 pub async fn api_search_workspace(
     State(state): State<Arc<AppState>>,
-    payload: Result<Json<WorkspaceSearchRequest>, JsonRejection>,
+    payload: Result<Json<WorkspaceSearchRequest>, Rejection>,
 ) -> Response {
     let Json(request) = match payload {
         Ok(payload) => payload,
         Err(rejection) => {
-            return (StatusCode::BAD_REQUEST, rejection.body_text()).into_response();
+            return crate::error::err(StatusCode::BAD_REQUEST, rejection.body_text());
         }
     };
     let workspace = match state.try_workspace() {

@@ -42,7 +42,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -53,6 +53,7 @@ use chan_workspace::contacts::{
 };
 
 use crate::error::{err, err_from, err_state};
+use crate::extract::{Multipart, Query};
 use crate::routes::{blocking_response, run_blocking};
 use crate::state::AppState;
 

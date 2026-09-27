@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::ws::{Message as ClientMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{FromRequestParts, OriginalUri, Path as AxumPath};
+use axum::extract::{FromRequestParts, OriginalUri};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use crate::extensions::{
     ExtensionCatalog, ExtensionEntry, ExtensionTenantContext, ExtensionView, EXTENSION_PROXY_PREFIX,
 };
+use crate::extract::Path as AxumPath;
 
 const EXTENSION_FRAME_POLICY: &str = "frame-ancestors 'self'";
 const EXTENSION_SCOPE_HEADER: &str = "x-chan-extension-scope";

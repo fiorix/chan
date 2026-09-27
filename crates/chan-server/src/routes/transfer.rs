@@ -27,7 +27,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State};
+use axum::extract::{multipart::Field, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::stream;
@@ -36,6 +36,7 @@ use tokio::sync::mpsc;
 
 use crate::bulk_transfer::{BulkCancel, BulkOutcome, BulkTransferTenant};
 use crate::error::{err, err_from};
+use crate::extract::{Multipart, Path as AxumPath, Query};
 use crate::routes::files::{
     consume_transfer_body, content_disposition_archive, content_disposition_attachment,
     download_filename, is_active_content_path, query_flag, stream_upload_tracked,

@@ -27,12 +27,12 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use chan_workspace::paths::strip_verbatim_prefix;
 use chan_workspace::{Member, TeamConfig};
 use serde::Deserialize;
 
 use crate::error::{err, err_state};
+use crate::extract::Json;
 use crate::routes::run_blocking;
 use crate::state::AppState;
 

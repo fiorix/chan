@@ -11,7 +11,6 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use chan_workspace::SearchAggression;
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +19,7 @@ use crate::config::{
     TERMINAL_SCROLLBACK_MB_MIN,
 };
 use crate::error::{err, Error};
+use crate::extract::Json;
 use crate::preferences::{
     BubbleOverlayMode, GraphColorPrefs, TerminalColorMode, TerminalColorPrefs,
     EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN,

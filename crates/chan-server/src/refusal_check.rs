@@ -791,13 +791,18 @@ mod tests {
         .await;
         assert!(
             result.is_ok(),
-            "the search route's remapped missing JSON content type is pending"
+            "the search route answers a missing JSON content type with its 400 in the envelope"
         );
         let response = result.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&header::HeaderValue::from_static("application/json"))
+        );
+        assert_eq!(
             to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-            "Expected request with `Content-Type: application/json`"
+            serde_json::json!({"error": "Expected request with `Content-Type: application/json`"})
+                .to_string()
         );
     }
 

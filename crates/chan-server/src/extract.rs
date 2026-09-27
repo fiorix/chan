@@ -9,7 +9,8 @@
 
 use std::ops::{Deref, DerefMut};
 
-use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::multipart::MultipartRejection;
+use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, OptionalFromRequest, Request};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -23,6 +24,8 @@ pub(crate) enum Rejection {
     Json(JsonRejection),
     Query(QueryRejection),
     Path(PathRejection),
+    Bytes(BytesRejection),
+    Multipart(MultipartRejection),
 }
 
 impl Rejection {
@@ -31,16 +34,20 @@ impl Rejection {
             Self::Json(rejection) => rejection.status(),
             Self::Query(rejection) => rejection.status(),
             Self::Path(rejection) => rejection.status(),
+            Self::Bytes(rejection) => rejection.status(),
+            Self::Multipart(rejection) => rejection.status(),
         }
     }
 
     /// The sentence the framework answers. For a path rejection it differs
     /// from the display, which leaves out the "Invalid URL" prefix.
-    fn body_text(&self) -> String {
+    pub(crate) fn body_text(&self) -> String {
         match self {
             Self::Json(rejection) => rejection.body_text(),
             Self::Query(rejection) => rejection.body_text(),
             Self::Path(rejection) => rejection.body_text(),
+            Self::Bytes(rejection) => rejection.body_text(),
+            Self::Multipart(rejection) => rejection.body_text(),
         }
     }
 }
@@ -51,6 +58,8 @@ impl std::fmt::Display for Rejection {
             Self::Json(rejection) => rejection.fmt(f),
             Self::Query(rejection) => rejection.fmt(f),
             Self::Path(rejection) => rejection.fmt(f),
+            Self::Bytes(rejection) => rejection.fmt(f),
+            Self::Multipart(rejection) => rejection.fmt(f),
         }
     }
 }
@@ -149,6 +158,66 @@ where
     }
 }
 
+/// A request body as [`axum::body::Bytes`], with the envelope for its
+/// rejection.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Bytes(pub axum::body::Bytes);
+
+impl<S> FromRequest<S> for Bytes
+where
+    S: Send + Sync,
+{
+    type Rejection = Rejection;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        <axum::body::Bytes as FromRequest<S>>::from_request(req, state)
+            .await
+            .map(Self)
+            .map_err(Rejection::Bytes)
+    }
+}
+
+impl Deref for Bytes {
+    type Target = axum::body::Bytes;
+
+    fn deref(&self) -> &axum::body::Bytes {
+        &self.0
+    }
+}
+
+/// [`axum::extract::Multipart`] with the envelope for its rejection. Its
+/// fields are read through the framework's own, which it dereferences to.
+#[derive(Debug)]
+pub(crate) struct Multipart(pub axum::extract::Multipart);
+
+impl<S> FromRequest<S> for Multipart
+where
+    S: Send + Sync,
+{
+    type Rejection = Rejection;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        <axum::extract::Multipart as FromRequest<S>>::from_request(req, state)
+            .await
+            .map(Self)
+            .map_err(Rejection::Multipart)
+    }
+}
+
+impl Deref for Multipart {
+    type Target = axum::extract::Multipart;
+
+    fn deref(&self) -> &axum::extract::Multipart {
+        &self.0
+    }
+}
+
+impl DerefMut for Multipart {
+    fn deref_mut(&mut self) -> &mut axum::extract::Multipart {
+        &mut self.0
+    }
+}
+
 macro_rules! deref_to_inner {
     ($($extractor:ident),+) => {
         $(
@@ -237,9 +306,7 @@ mod tests {
     mod subject {
         use super::*;
         // The extractors under test.
-        use crate::extract::{Json, Path, Query};
-        use axum::body::Bytes;
-        use axum::extract::Multipart;
+        use crate::extract::{Bytes, Json, Multipart, Path, Query};
 
         pub(super) fn app() -> Router {
             probe_routes!()

@@ -16,13 +16,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::Response;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{Duration, Instant};
 
 use crate::bus::{ScopeRegistry, SubId};
+use crate::extract::Query;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::window_transfers::TransferGuard;

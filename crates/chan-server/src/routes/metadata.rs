@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Multipart, State};
+use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -19,6 +19,7 @@ use chan_workspace::{
 
 use crate::bus::{make_progress_broadcast, make_watch_bridge};
 use crate::error::{err, err_from};
+use crate::extract::Multipart;
 use crate::indexer::Indexer;
 use crate::routes::run_blocking;
 use crate::state::{AppState, WorkspaceCell};

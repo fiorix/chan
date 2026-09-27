@@ -3,13 +3,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{FileClass, PathClass, ReportFileStats, ReportLanguageStats, ReportTotals};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err_from, err_state};
+use crate::extract::Query;
 use crate::routes::run_blocking;
 use crate::state::AppState;
 

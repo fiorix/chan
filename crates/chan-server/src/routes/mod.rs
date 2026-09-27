@@ -182,9 +182,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use axum::extract::{Query, State};
+    use crate::extract::{Json, Query};
+    use axum::extract::State;
     use axum::http::header;
-    use axum::Json;
     use tempfile::TempDir;
 
     use crate::state::AppState;

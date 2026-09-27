@@ -29,7 +29,6 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use chan_workspace::index::config::{self, EmbeddingModelInfo};
 use chan_workspace::index::embeddings::{
     global_models_dir, model_downloaded, repo_dir_name, resolve_model, Embedder,
@@ -37,6 +36,7 @@ use chan_workspace::index::embeddings::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
+use crate::extract::Json;
 use crate::routes::{blocking_response, run_blocking};
 use crate::state::AppState;
 

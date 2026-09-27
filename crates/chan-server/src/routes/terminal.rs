@@ -5,9 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Json, Path as AxumPath, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chan_shell::{PaneSide, ResolvedSubmit, SubmitAgent};
@@ -15,6 +14,7 @@ use portable_pty::PtySize;
 use serde::{Deserialize, Serialize};
 
 use crate::error::err;
+use crate::extract::{Json, Path as AxumPath, Query, Rejection};
 use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
@@ -456,7 +456,7 @@ pub async fn api_terminal_ws(
 
 pub async fn api_create_terminal(
     State(state): State<Arc<AppState>>,
-    body: Result<Json<CreateTerminalBody>, JsonRejection>,
+    body: Result<Json<CreateTerminalBody>, Rejection>,
 ) -> Response {
     let Json(body) = match body {
         Ok(body) => body,
@@ -615,7 +615,7 @@ pub struct SetBroadcastBody {
 pub async fn api_set_terminal_broadcast(
     State(state): State<Arc<AppState>>,
     AxumPath(session): AxumPath<String>,
-    body: Result<Json<SetBroadcastBody>, JsonRejection>,
+    body: Result<Json<SetBroadcastBody>, Rejection>,
 ) -> Response {
     let Json(body) = match body {
         Ok(body) => body,
@@ -1848,14 +1848,16 @@ mod tests {
     #[test]
     fn terminal_query_parses_the_files_app_marker() {
         let uri: axum::http::Uri = "/api/terminal/ws?app=files&cwd=home/user".parse().unwrap();
-        let Query(query) = Query::<TerminalQuery>::try_from_uri(&uri).expect("files marker");
+        let axum::extract::Query(query) =
+            axum::extract::Query::<TerminalQuery>::try_from_uri(&uri).expect("files marker");
         assert!(matches!(query.app, Some(crate::app_query::AppQuery::Files)));
         assert_eq!(query.cwd.as_deref(), Some("home/user"));
 
         // Absent app stays None so plain Terminal spawns keep the
         // drop-cwd behavior on workspace-less tenants.
         let uri: axum::http::Uri = "/api/terminal/ws?cols=80".parse().unwrap();
-        let Query(query) = Query::<TerminalQuery>::try_from_uri(&uri).expect("plain terminal");
+        let axum::extract::Query(query) =
+            axum::extract::Query::<TerminalQuery>::try_from_uri(&uri).expect("plain terminal");
         assert!(query.app.is_none());
     }
 

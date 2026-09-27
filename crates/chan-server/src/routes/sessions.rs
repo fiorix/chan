@@ -7,13 +7,14 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
 use crate::error::{err, err_from};
+use crate::extract::Query;
 use crate::routes::blocking_response;
 use crate::state::AppState;
 use crate::util::raw_json_response;
@@ -137,7 +138,7 @@ pub async fn api_get_session(
 pub async fn api_put_session(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SessionQuery>,
-    body: Bytes,
+    crate::extract::Bytes(body): crate::extract::Bytes,
 ) -> Response {
     let response = put_session_response(&state, q.w.clone(), q.app, body).await;
     if response.status().is_success() {
@@ -270,8 +271,9 @@ pub async fn api_list_sessions(
 mod tests {
     use std::sync::Arc;
 
+    use crate::extract::Query;
     use axum::body::{to_bytes, Bytes};
-    use axum::extract::{Query, State};
+    use axum::extract::State;
     use axum::http::StatusCode;
     use tempfile::TempDir;
 
@@ -313,7 +315,7 @@ mod tests {
         let resp = api_put_session(
             State(state.clone()),
             files_query("w-files"),
-            Bytes::from_static(b"{\"files\":true}"),
+            crate::extract::Bytes(Bytes::from_static(b"{\"files\":true}")),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -362,7 +364,7 @@ mod tests {
         let resp = api_put_session(
             State(state.clone()),
             files_query("w-files"),
-            Bytes::from_static(b"{}"),
+            crate::extract::Bytes(Bytes::from_static(b"{}")),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -389,7 +391,7 @@ mod tests {
         let resp = api_put_session(
             State(state),
             query("w-abc", Some("nonce-1")),
-            Bytes::from_static(b"{}"),
+            crate::extract::Bytes(Bytes::from_static(b"{}")),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -408,7 +410,7 @@ mod tests {
         let resp = api_put_session(
             State(state),
             query("w-abc", None),
-            Bytes::from_static(b"{}"),
+            crate::extract::Bytes(Bytes::from_static(b"{}")),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -453,8 +455,11 @@ mod tests {
         let uri: axum::http::Uri = format!("/api/session?w=w-source&moved=1&session={moved_id}")
             .parse()
             .unwrap();
-        let resp =
-            api_delete_session(State(state.clone()), Query::try_from_uri(&uri).unwrap()).await;
+        let resp = api_delete_session(
+            State(state.clone()),
+            Query(axum::extract::Query::try_from_uri(&uri).unwrap().0),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             state.terminal_sessions.len(),
@@ -488,8 +493,11 @@ mod tests {
         drop(first);
         drop(second);
         let uri: axum::http::Uri = "/api/session?w=w-unbound&moved=1".parse().unwrap();
-        let resp =
-            api_delete_session(State(state.clone()), Query::try_from_uri(&uri).unwrap()).await;
+        let resp = api_delete_session(
+            State(state.clone()),
+            Query(axum::extract::Query::try_from_uri(&uri).unwrap().0),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             state.terminal_sessions.forget_window("w-unbound"),
@@ -521,7 +529,7 @@ mod tests {
         let resp = api_put_session(
             State(state),
             query("w-\"quote\\", Some("n\"1")),
-            Bytes::from_static(b"{}"),
+            crate::extract::Bytes(Bytes::from_static(b"{}")),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -546,7 +554,7 @@ mod tests {
         let resp = api_put_session(
             State(state),
             query("../escape", Some("nonce-1")),
-            Bytes::from_static(b"{}"),
+            crate::extract::Bytes(Bytes::from_static(b"{}")),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -602,7 +610,7 @@ mod tests {
             let resp = assert_uses_blocking_pool(api_put_session(
                 State(state),
                 query("win-1", None),
-                Bytes::from_static(b"{\"saved\":true}"),
+                crate::extract::Bytes(Bytes::from_static(b"{\"saved\":true}")),
             ))
             .await;
             assert_eq!(resp.status(), StatusCode::NO_CONTENT);

@@ -17,12 +17,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::doc_sessions::changes::{ApplyError, UpdateJson};
 use crate::doc_sessions::PushError;
+use crate::extract::Query;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 
