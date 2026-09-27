@@ -65,15 +65,16 @@ function handleState(id: string): "live" | "closed" | "none" {
 
 const WINDOW_PAGE_WAIT_MS = 60_000;
 const WINDOW_CLOSED_POLL_MS = 100;
+const WINDOW_PAGE_RETRY_MIN_MS = 1000;
 const waitingPages = new WeakMap<Window, Promise<boolean>>();
 const navigatingDocuments = new WeakMap<Window, Document>();
 
 function retryAfterMs(header: string | null): number {
-  if (header === null || header.trim() === "") return 1000;
+  if (header === null || header.trim() === "") return WINDOW_PAGE_RETRY_MIN_MS;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(WINDOW_PAGE_WAIT_MS, Math.max(1, seconds * 1000));
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(WINDOW_PAGE_WAIT_MS, Math.max(WINDOW_PAGE_RETRY_MIN_MS, seconds * 1000));
   const date = Date.parse(header);
-  return Number.isFinite(date) ? Math.min(WINDOW_PAGE_WAIT_MS, Math.max(1, date - Date.now())) : 1000;
+  return Number.isFinite(date) ? Math.min(WINDOW_PAGE_WAIT_MS, Math.max(WINDOW_PAGE_RETRY_MIN_MS, date - Date.now())) : WINDOW_PAGE_RETRY_MIN_MS;
 }
 
 function navigateWindowWhenReady(h: Window, url: string): Promise<boolean> {
