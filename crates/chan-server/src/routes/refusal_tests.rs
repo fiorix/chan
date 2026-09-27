@@ -502,12 +502,17 @@ async fn settings_write_with_wrong_method(settings_disabled: bool) -> Response {
         .unwrap()
 }
 
-/// The settings gate answers a wrong method on a settings write before the
-/// 405, as it answers the right one.
+/// The settings gate's refusal keeps the route's Allow on a wrong method.
 #[tokio::test]
 async fn disabled_settings_refuse_a_wrong_method_first() {
+    let response = settings_write_with_wrong_method(true).await;
+    assert_eq!(
+        response.headers().get(header::ALLOW),
+        Some(&header::HeaderValue::from_static("POST")),
+        "the settings refusal carries the route's Allow"
+    );
     assert_refusal(
-        settings_write_with_wrong_method(true).await,
+        response,
         StatusCode::FORBIDDEN,
         json!({"error": "settings are disabled on this server (started with --no-settings); configuration changes are not permitted here"}),
     )

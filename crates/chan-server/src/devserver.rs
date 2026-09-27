@@ -5047,8 +5047,7 @@ mod tests {
             .await;
         }
 
-        /// The bearer gate answers a wrong method on a management route
-        /// before the 405, as it answers the right one.
+        /// The bearer gate's refusal keeps the route's Allow on a wrong method.
         #[tokio::test]
         async fn wrong_method_without_the_bearer() {
             let _env = chan_home_env_read();
@@ -5063,6 +5062,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            assert_eq!(
+                response.headers().get(header::ALLOW),
+                Some(&header::HeaderValue::from_static("GET,HEAD,POST")),
+                "the bearer refusal carries the route's Allow"
+            );
             assert_refusal(
                 response,
                 StatusCode::UNAUTHORIZED,
