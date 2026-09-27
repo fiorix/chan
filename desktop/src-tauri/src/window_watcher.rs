@@ -198,7 +198,8 @@ pub trait NativeSurface {
     fn open(&self, record: &WindowRecord);
     /// Synchronize a native window that already exists for `record`. The default
     /// is a no-op; surfaces that encode launch-only data in the webview URL can
-    /// rebuild in place when the authoritative record's launch data changes.
+    /// retarget when the authoritative record's launch data changes. `reload`
+    /// requests immediate admission even for an unchanged target.
     fn refresh(&self, _record: &WindowRecord, _reload: bool) {}
     /// Close the native window labelled `label`.
     fn close(&self, label: &str);

@@ -4045,10 +4045,10 @@ fn reload_window(state: State<Arc<AppState>>, window: tauri::WebviewWindow) -> R
         .map_err(|e| format!("reloading window: {e}"))
 }
 
-/// Resolve a devserver window's current feed URL and probe it once before
-/// navigating the existing window. Gateway windows need a fresh entry mint
-/// and WebView session. A not-ready target keeps the page; a vanished window
-/// stays closed. `Ok(false)` leaves reload to the in-page `location.reload()`.
+/// Ask the connection's watcher to retarget this existing native window from
+/// its fresh feed snapshot. A not-ready attempt keeps the page and waits for
+/// the watcher's next try. Missing connections or absent/stopped watchers leave
+/// Reload to the in-page `location.reload()` through `Ok(false)`.
 fn reload_devserver_window_from_feed(state: &Arc<AppState>, label: &str) -> Result<bool, String> {
     if !label.starts_with("lib-") {
         return Ok(false);

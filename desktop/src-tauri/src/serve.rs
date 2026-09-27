@@ -443,9 +443,10 @@ async fn retarget_window<F: std::future::Future<Output = crate::ProbeResult>>(
 }
 
 /// Probe a live watched remote window once and navigate it in place if ready.
-/// A not-ready target keeps the current page for the watcher's next try. Gone
-/// windows stay closed, and a superseded ticket cannot navigate. Navigation
-/// keeps the native window and its geometry.
+/// A not-ready target keeps the current page; the watcher settles its current
+/// attempt as waiting for another try. A gone window is never built here, and
+/// a superseded ticket cannot navigate. Navigation keeps the native window and
+/// its geometry.
 pub(crate) async fn retarget_watched_remote_window(
     app: &AppHandle,
     url: &str,

@@ -103,10 +103,9 @@ struct RemoteLaunchKey {
     prefix: String,
     /// Raw-tunnel devservers only: their per-tenant token is stable, and a
     /// rotation (devserver restart) invalidates the loaded page, so it forces
-    /// a retarget. Gateway windows blank this field -- their entry credential
-    /// is single-use and minted fresh per navigation, and the page's standing
-    /// auth is the opaque devserver-gate cookie, so a re-mint must
-    /// NOT retarget (that churn was a per-feed-push reload loop).
+    /// a retarget. Gateway windows blank this field because their standing
+    /// authentication is the opaque devserver-gate cookie; a token change in
+    /// the feed must not trigger navigation for that session.
     token: String,
     kind: chan_server::WindowKind,
     workspace_path: Option<String>,
@@ -515,9 +514,9 @@ struct TauriNativeSurface {
 }
 
 impl TauriNativeSurface {
-    /// Open or retarget a remote window: resolve the navigation URL (a fresh
-    /// gateway entry mint, or the raw tenant URL) off the reconcile path, then
-    /// build/navigate.
+    /// Open or retarget a remote window off the reconcile path. Resolve the raw
+    /// tenant URL or gateway URL, reusing a fresh gateway session or refreshing
+    /// a stale one, then install that session before building or navigating.
     ///
     /// Remember the key and dispatch time before the async work. A failed
     /// retarget keeps that deadline, and its completion wakes this watcher to
