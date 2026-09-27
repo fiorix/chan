@@ -16,8 +16,10 @@
 //!
 //! Lifetime: `build_app` starts the bridge and keeps its `BridgeHandle` in
 //! the tenant keepalive. Unmount drops it, aborting the accept loop and its
-//! owned sessions before the host waits for workspace release. A blocking
-//! tool body already running can retain the workspace until it returns.
+//! owned sessions before the host waits for workspace release. A dropped
+//! session cancels its requests, so a tool body already running stops at its
+//! next walked entry, report file or search seed and drops the workspace; one
+//! inside a single blocking call keeps it until that call returns.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
