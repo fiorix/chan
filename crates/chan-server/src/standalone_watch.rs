@@ -210,7 +210,7 @@ impl ActorState {
         // Re-attaching a scope that already holds a registration must not
         // claim a second reference against it.
         self.release_scope(dir);
-        let canonical = std::fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
+        let canonical = chan_workspace::paths::canonicalize_normalized(&abs);
         // A directory already watched under another spelling needs no
         // second OS registration; see [`Watch`] for why asking for one
         // would silence both scopes rather than serve them.
