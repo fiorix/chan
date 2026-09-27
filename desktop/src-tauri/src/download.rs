@@ -560,6 +560,54 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn transfer_error_body_limit_preserves_whole_envelopes() {
+        let empty = r#"{"error":"try again","padding":""}"#;
+        for size in [64 * 1024, 64 * 1024 + 1] {
+            let body = format!(
+                r#"{{"error":"try again","padding":"{}"}}"#,
+                "x".repeat(size - empty.len())
+            );
+            assert_eq!(body.len(), size);
+            let expected = if size == 64 * 1024 {
+                "try again".to_string()
+            } else {
+                body[..512].to_string()
+            };
+            let response = reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(503)
+                    .body(body)
+                    .unwrap(),
+            );
+            assert_eq!(response_error("download", response).await, format!("download failed: HTTP 503 Service Unavailable: {expected}"), "a refusal within 64 KiB is parsed whole; an oversized refusal keeps its plain-body excerpt");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_transfer_leaves_an_unfinished_refusal_body() {
+        let id = "download-refusal-cancel".to_string();
+        let registration = TransferRegistration::new(id.clone(), None).unwrap();
+        let stream = futures::stream::pending::<Result<Vec<u8>, std::io::Error>>();
+        let response = reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(503)
+                .body(reqwest::Body::wrap_stream(stream))
+                .unwrap(),
+        );
+        let mut reading = Box::pin(response_error("download", response));
+        assert!(
+            futures::poll!(&mut reading).is_pending(),
+            "the refusal body is still being read"
+        );
+        assert!(crate::native_transfer::cancel_native_transfer(id));
+        assert!(registration.progress.is_cancelled());
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), reading)
+            .await
+            .expect("cancellation must interrupt an unfinished refusal body");
+        assert_eq!(message, "download cancelled");
+    }
+
+    #[tokio::test]
     async fn transfer_errors_show_refusal_sentences() {
         let padded = format!(r#"{{"padding":"{}","error":"try again"}}"#, "x".repeat(600));
         for (body, detail) in [
