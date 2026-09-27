@@ -2331,7 +2331,10 @@ async fn handle_set_local_theme(
     Json(body): Json<LocalTheme>,
 ) -> Response {
     let Some(store) = state.host.local_theme_store() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(
+            StatusCode::NOT_FOUND,
+            "local theme is not available on this surface".into(),
+        );
     };
     match store.set(body.theme) {
         Ok(()) => {
@@ -2340,7 +2343,7 @@ async fn handle_set_local_theme(
             state.host.notify_local_theme_change();
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+        Err(msg) => crate::error::err(StatusCode::BAD_REQUEST, msg),
     }
 }
 
