@@ -770,6 +770,14 @@ mod tests {
         "unauthorized"
     );
 
+    pending_text_shape!(
+        inventory_session_temporary_name_exhaustion,
+        "PUT",
+        "/api/session",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "too many temporary files exist at path \"/tmp/sessions\""
+    );
+
     #[tokio::test]
     #[ignore = "run explicitly until the refusal inventory recognizes this shape"]
     async fn inventory_blocking_task_failure() {
