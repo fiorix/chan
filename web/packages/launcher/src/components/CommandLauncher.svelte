@@ -35,7 +35,7 @@
   import { requestDesktopQuit } from "../api/desktop";
   import { basename, LOCAL_LIBRARY_ID, windowRowLabel } from "../lib/windowLabel";
   import { buildMachineTree } from "../lib/machineTree";
-  import { library, clearError, disconnectDevserver } from "../state/library.svelte";
+  import { library, clearError, reportError, disconnectDevserver } from "../state/library.svelte";
   import {
     canManageWindow,
     canOpenWorkspaceWindow,
@@ -640,12 +640,19 @@
       return;
     }
     clearError();
-    const result = await entry.run?.();
-    if (!entry.awaitResult) {
-      closeDeck();
-      clearDeck();
+    const executionDraft = draft;
+    try {
+      const result = await entry.run?.();
+      if (!entry.awaitResult) {
+        closeDeck();
+        clearDeck();
+      }
+      return result;
+    } catch (error) {
+      const currentDraft = activeCommandLauncherDraft();
+      if (!currentDraft.visible || currentDraft !== executionDraft) reportError(error);
+      throw error;
     }
-    return result;
   }
 
   function succeeded(): void {
