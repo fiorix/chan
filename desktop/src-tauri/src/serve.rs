@@ -365,6 +365,30 @@ pub(crate) fn open_watched_remote_window(
     )
 }
 
+async fn retarget_window<F: std::future::Future<Output = crate::ProbeResult>>(
+    mut probe: impl FnMut() -> F,
+    exists: impl Fn() -> bool,
+    navigate: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    let mut last_probe = None;
+    let mut attempts = 0;
+    while !crate::retarget_should_navigate(last_probe.as_ref(), attempts) {
+        if attempts > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if !exists() {
+            return Ok(false);
+        }
+        last_probe = Some(probe().await);
+        attempts += 1;
+    }
+    if !exists() {
+        return Ok(false);
+    }
+    navigate()?;
+    Ok(true)
+}
+
 /// Retarget a live watched REMOTE window in place after its devserver rotated
 /// tenant tokens. This keeps the same native window and lets the existing
 /// reconnecting/retry surface navigate to the fresh target instead of destroying
@@ -387,28 +411,20 @@ pub(crate) async fn retarget_watched_remote_window(
         url,
         kind,
     )?;
-    let mut last_probe = None;
-    let mut attempts = 0;
-    while !crate::retarget_should_navigate(last_probe.as_ref(), attempts) {
-        if attempts > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-        if app.get_webview_window(&label).is_none() {
-            return Ok(false);
-        }
-        last_probe = Some(crate::probe_url(window.clone(), url.to_string()).await);
-        attempts += 1;
-    }
-    if app.get_webview_window(&label).is_none() {
-        return Ok(false);
-    }
-    window
-        .navigate(target)
-        .map_err(|e| format!("retargeting {label}: {e}"))?;
-    if let Err(e) = window.show() {
-        tracing::warn!(label = %label, error = %e, "showing retargeted devserver window failed");
-    }
-    Ok(true)
+    retarget_window(
+        || crate::probe_url(window.clone(), url.to_string()),
+        || app.get_webview_window(&label).is_some(),
+        || {
+            window
+                .navigate(target)
+                .map_err(|e| format!("retargeting {label}: {e}"))?;
+            if let Err(e) = window.show() {
+                tracing::warn!(label = %label, error = %e, "showing retargeted devserver window failed");
+            }
+            Ok(())
+        },
+    )
+    .await
 }
 
 /// Mint a standalone terminal window. Like every local window it is a library
