@@ -640,19 +640,17 @@
       return;
     }
     clearError();
-    const executionDraft = draft;
-    try {
-      const result = await entry.run?.();
-      if (!entry.awaitResult) {
-        closeDeck();
-        clearDeck();
-      }
-      return result;
-    } catch (error) {
-      const currentDraft = activeCommandLauncherDraft();
-      if (!currentDraft.visible || currentDraft !== executionDraft) reportError(error);
-      throw error;
+    const result = await entry.run?.();
+    if (!entry.awaitResult) {
+      closeDeck();
+      clearDeck();
     }
+    return result;
+  }
+
+  function commandFailed(item: DeckItem, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    reportError(new Error(`${item.title}: ${message}`));
   }
 
   function succeeded(): void {
@@ -716,6 +714,7 @@
     {direction}
     onClose={closeDeck}
     onChoose={choose}
+    onError={commandFailed}
     onBack={back}
     {onScope}
     onClearScope={clearScope}

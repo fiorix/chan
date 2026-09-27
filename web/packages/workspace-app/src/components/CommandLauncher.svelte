@@ -50,6 +50,7 @@
   import { chordFor } from "../state/shortcuts";
   import { sessionWindowId } from "../api/client";
   import { ApiError } from "../api/errors";
+  import { notify } from "../state/notify.svelte";
   import {
     checkScopedWindowPage,
     loadScopedLibrarySnapshot,
@@ -730,6 +731,10 @@
     clearLauncherDraft();
   }
 
+  function commandFailed(item: DeckItem, error: unknown): void {
+    notify(`${item.title}: ${errorMessage(error)}`);
+  }
+
   function onScope(scope: DeckScopeId): void {
     direction = "still";
     launcherDraft.scope = scope;
@@ -755,6 +760,7 @@
   {direction}
   onClose={closeCommandLauncher}
   onChoose={choose}
+  onError={commandFailed}
   onBack={back}
   {onScope}
   onClearScope={clearScope}
