@@ -1030,7 +1030,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
 fn standalone_files_supported() -> bool {
     #[cfg(not(unix))]
     {
-        return false;
+        false
     }
     #[cfg(unix)]
     {
