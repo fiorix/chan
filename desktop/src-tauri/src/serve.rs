@@ -2132,6 +2132,104 @@ mod tests {
         assert_eq!(resolve_label_from("lib-z::w-3", &[]), "lib-z::w-3");
     }
 
+    fn scripted_probe(reachable: bool) -> crate::ProbeResult {
+        crate::ProbeResult {
+            reachable,
+            status: Some(if reachable { 200 } else { 503 }),
+            detail: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retarget_ready_navigates_once() {
+        let probes = std::cell::Cell::new(0);
+        let navigations = std::cell::Cell::new(0);
+        retarget_window(
+            || {
+                probes.set(probes.get() + 1);
+                std::future::ready(scripted_probe(true))
+            },
+            || true,
+            || {
+                navigations.set(navigations.get() + 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(probes.get(), 1, "ready retarget probes once");
+        assert_eq!(navigations.get(), 1, "ready retarget navigates once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retarget_not_ready_keeps_the_page_after_one_probe() {
+        let probes = std::cell::Cell::new(0);
+        let navigations = std::cell::Cell::new(0);
+        retarget_window(
+            || {
+                probes.set(probes.get() + 1);
+                std::future::ready(scripted_probe(probes.get() > 1))
+            },
+            || true,
+            || {
+                navigations.set(navigations.get() + 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            probes.get(),
+            1,
+            "not-ready retarget returns after one probe"
+        );
+        assert_eq!(navigations.get(), 0, "not-ready retarget keeps the page");
+    }
+
+    #[tokio::test]
+    async fn retarget_vanished_during_probe_does_not_navigate() {
+        let exists = std::cell::Cell::new(true);
+        let navigations = std::cell::Cell::new(0);
+        retarget_window(
+            || {
+                exists.set(false);
+                std::future::ready(scripted_probe(true))
+            },
+            || exists.get(),
+            || {
+                navigations.set(navigations.get() + 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(navigations.get(), 0, "a vanished retarget never navigates");
+    }
+
+    #[test]
+    fn retarget_has_no_wait_loop_or_budget() {
+        let source = include_str!("serve.rs");
+        let driver = source
+            .split("async fn retarget_window")
+            .nth(1)
+            .unwrap()
+            .split("/// Mint a standalone terminal window")
+            .next()
+            .unwrap();
+        assert!(
+            !driver.contains("while ")
+                && !driver.contains("loop {")
+                && !driver.contains("sleep(")
+                && !driver.contains("attempts"),
+            "the retarget driver must neither wait nor spend an attempt budget",
+        );
+        let main = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(!main.contains("fn retarget_should_navigate"));
+    }
+
     #[test]
     fn reload_leaves_a_vanished_window_closed() {
         let reload = include_str!("main.rs")
