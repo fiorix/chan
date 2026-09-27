@@ -6955,6 +6955,102 @@ mod tests {
         });
     }
 
+    #[test]
+    fn opens_of_a_hung_root_hold_one_blocking_thread() {
+        hung_root_hop_holds_one_blocking_thread(false);
+    }
+
+    #[test]
+    fn revalidations_of_a_hung_root_hold_one_blocking_thread() {
+        hung_root_hop_holds_one_blocking_thread(true);
+    }
+
+    fn hung_root_hop_holds_one_blocking_thread(mounted: bool) {
+        const RETRIES: usize = 3;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(RETRIES + 1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let hung = tempfile::tempdir().expect("hung root");
+            let other = tempfile::tempdir().expect("other root");
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            for root in [hung.path(), other.path()] {
+                state
+                    .host
+                    .library()
+                    .register_workspace(root)
+                    .expect("register");
+            }
+            let config = tenant_config(state.addr, "/hung");
+            if mounted {
+                state
+                    .host
+                    .open_or_get_registered_workspace(hung.path(), config.clone())
+                    .await
+                    .expect("mount before revalidation");
+            }
+            let hop = if mounted {
+                "Workspace::revalidate_root"
+            } else {
+                "Library::open_workspace"
+            };
+            // Every key lookup must pass so later callers reach the same
+            // lifecycle lock, even after an earlier caller stops waiting.
+            let stall = root_stall::stall_matching(hung.path(), &[hop]);
+            for _ in 0..RETRIES {
+                tokio::time::timeout(
+                    Duration::from_millis(500),
+                    state
+                        .host
+                        .open_or_get_registered_workspace(hung.path(), config.clone()),
+                )
+                .await
+                .expect_err("the hung root request must expire");
+            }
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "no call reached {hop}"
+            );
+            eprintln!("held calls at {hop}: {:#?}", stall.entered());
+
+            let host = Arc::clone(&state.host);
+            let other_root = other.path().to_path_buf();
+            let outcome = completes_beside(
+                &stall,
+                "a close of another root beside expired mount requests",
+                async move { host.close_workspace_for_root(&other_root, false).await },
+            )
+            .await
+            .expect("close the other root");
+            assert_eq!(outcome, WorkspaceLifecycleOutcome::NotFound);
+            assert_eq!(
+                stall.entered().len(),
+                1,
+                "each expired caller held a thread at {hop}"
+            );
+
+            drop(stall);
+            tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                state
+                    .host
+                    .open_or_get_registered_workspace(hung.path(), config),
+            )
+            .await
+            .expect("the root lock is released once the filesystem answers")
+            .expect("the workspace lock is released before the next open");
+            state
+                .host
+                .close_workspace_for_root(hung.path(), false)
+                .await
+                .expect("close");
+        });
+    }
+
     /// A serve request resolves its own root off the runtime, so a request
     /// for a root that stopped answering holds no runtime worker while it
     /// waits: on a runtime with one worker, a serve request for another root

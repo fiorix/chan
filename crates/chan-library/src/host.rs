@@ -6352,6 +6352,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_open_releases_the_workspace_before_its_root_lock() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library.clone(), fake_builder()));
+            let key = canonical_key(root.path());
+            let (opened, opening) = tokio::sync::oneshot::channel();
+            let mut opened = Some(opened);
+            let (release, released) = std::sync::mpsc::channel();
+            *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+                let workspace = result.as_ref().expect("the filesystem open succeeds");
+                opened
+                    .take()
+                    .unwrap()
+                    .send((Arc::downgrade(workspace), workspace.paths().lock.clone()))
+                    .unwrap();
+                released.recv_timeout(Duration::from_secs(30)).unwrap();
+            }));
+            let mounting = Arc::clone(&host);
+            let mounting_root = root.path().to_path_buf();
+            let mount = tokio::spawn(async move {
+                mounting
+                    .open_or_get_registered_workspace(mounting_root, serve_config("/cancelled"))
+                    .await
+            });
+            let (workspace, lock_dir) = opening.await.unwrap();
+            mount.abort();
+            assert!(mount.await.unwrap_err().is_cancelled());
+            let mut next = Box::pin(host.root_locks.lock(&key));
+            assert!(
+                std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(next.as_mut(), cx).is_pending(),
+                    )
+                })
+                .await,
+                "cancelling an open released its root lock before its filesystem call returned"
+            );
+            release.send(()).unwrap();
+            let next = next.await;
+            assert!(
+                workspace.upgrade().is_none(),
+                "the next root-lock holder still sees the cancelled open's workspace"
+            );
+            assert!(
+                chan_workspace::lock::is_free(&lock_dir),
+                "the next root-lock holder still meets the cancelled open's workspace lock"
+            );
+            let reopened = library
+                .open_workspace(root.path())
+                .expect("reopen without retrying");
+            reopened.stop_open_recovery();
+            drop(reopened);
+            drop(next);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn already_open_mount_waits_for_an_in_process_release() {
         // A hang guard, not a latency bound: the workspace opens and the close are
         // real I/O that a loaded runner can stretch to several seconds, and the
