@@ -117,13 +117,17 @@
   // Seeded: the library, past its own init (whose apply replaces every
   // element set before it), holds the whole buffer of a finished load as
   // its init would restore it: the elements, the files, and the appState
-  // its serializer keeps. `lastSerialized` holds the library's serialization
-  // of it. Only a seeded board publishes, and the serialization a seed takes
-  // is the baseline rather than an edit, so a board nobody drew on writes
-  // nothing: neither the empty or partial scene of a load in flight nor the
-  // library's rewrite of a file it did not write (its indentation, its
-  // `source`, the fields it restores). Set by `seed`; cleared when a load
-  // starts.
+  // its serializer keeps; a file whose id the board already holds keeps its
+  // bytes. `lastSerialized` holds the library's serialization of it. Only a
+  // seeded board publishes, and the serialization a seed takes is the
+  // baseline rather than an edit, so a board nobody drew on writes nothing:
+  // neither the empty or partial scene of a load in flight nor the library's
+  // rewrite of a file it did not write (its indentation, its `source`, the
+  // fields it restores). The one exception is an image whose file fails to
+  // decode: the library marks it after the load, and that change is
+  // published. Set by `seed`; cleared when a load starts or the buffer
+  // changes without the board (a reload, a conflict's resolution, a sibling
+  // pane's mirror).
   let seeded = false;
 
   // Serialization is debounced: excalidraw's onChange fires per pointer
@@ -359,7 +363,8 @@
   /// applied (the grid and the background), so the board's zoom, scroll,
   /// selection, theme and view mode stay as they are. `updateScene` replaces
   /// the elements at once and shows its appState only at the library's next
-  /// render, so that appState is kept as handed until then.
+  /// render, so that appState is kept as handed until then. `addFiles` adds
+  /// the scene's files whose ids the board does not hold.
   function seed(): void {
     if (seeded || !loaded || !api || !ex) return;
     if (api.getAppState().isLoading) return;
@@ -418,11 +423,13 @@
   }
 
   // The library's App reads its initial data once, when it mounts, from the
-  // props of the render in effect then, and the API its constructor hands
-  // over is the sign that it has mounted. Every render until then carries
-  // the buffer as it is at that render, so the App is built from the buffer
-  // whichever render it mounts with; once it has mounted it would ignore
-  // the initial data. The buffer is read untracked, so the render effect
+  // props of the render in effect then. Its constructor hands the API over
+  // before the mount and that read, but in the same synchronous React
+  // commit, so no code of the canvas runs between them: once the API is set,
+  // the App has read its initial data. Every render until then carries the
+  // buffer as it is at that render, so the App is built from the buffer
+  // whichever render it mounts with; a render after it passes none, which
+  // the App would ignore. The buffer is read untracked, so the render effect
   // below does not re-render when it changes.
   function renderExcalidraw(): void {
     if (!root || !react || !ex) return;
