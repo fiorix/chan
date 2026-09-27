@@ -3445,9 +3445,11 @@ mod tests {
                 "CWD_HOME",
             )
             .await;
-            assert!(
-                out.contains(&cwd.display().to_string()),
-                "terminal should start at workspace root cwd, got {out:?}"
+            let canonical_cwd = cwd.canonicalize().expect("canonical start directory");
+            assert_eq!(
+                out.lines().find(|line| !line.is_empty()),
+                Some(canonical_cwd.to_str().expect("UTF-8 start directory")),
+                "terminal pwd should print its canonical start directory, got {out:?}"
             );
             assert!(
                 !out.contains(&format!("<HOME={}>", cwd.display())),
