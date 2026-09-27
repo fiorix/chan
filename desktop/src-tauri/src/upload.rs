@@ -303,24 +303,21 @@ fn validate_workspace_rel(path: &str, allow_empty: bool) -> Result<(), String> {
 
 async fn response_error(response: reqwest::Response) -> String {
     let status = response.status();
-    let mut detail = Vec::new();
+    let mut body = Vec::new();
     let mut stream = response.bytes_stream();
-    while detail.len() < 512 {
-        let Some(next) = stream.next().await else {
-            break;
-        };
-        let Ok(bytes) = next else {
-            break;
-        };
-        let remaining = 512 - detail.len();
-        detail.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    while let Some(Ok(bytes)) = stream.next().await {
+        body.extend_from_slice(&bytes);
     }
-    let detail = String::from_utf8_lossy(&detail);
-    if detail.trim().is_empty() {
-        format!("upload failed: HTTP {status}")
+    // Parse the complete envelope before shortening a plain response for display.
+    let detail = String::from_utf8_lossy(&body[..body.len().min(512)]);
+    let fallback = if detail.trim().is_empty() {
+        format!("HTTP {status}")
     } else {
-        format!("upload failed: HTTP {status}: {}", detail.trim())
-    }
+        format!("HTTP {status}: {}", detail.trim())
+    };
+    let message =
+        crate::devserver::refusal_message(status, &String::from_utf8_lossy(&body), &fallback);
+    format!("upload failed: {message}")
 }
 
 #[cfg(test)]
