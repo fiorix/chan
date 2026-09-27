@@ -6,7 +6,6 @@
   import { onDestroy, onMount } from "svelte";
   import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
   import { EditorView, drawSelection, keymap, placeholder } from "@codemirror/view";
-  import { syntaxTree } from "@codemirror/language";
   import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
   import { currentPreferences, workspace, effectiveHybridSurfaceTheme } from "../state/store.svelte";
   import { parentDir } from "../state/format";
@@ -873,30 +872,15 @@
     });
   });
 
-  /// Scroll to the i-th heading (0-based, document order). Called by
-  /// the inspector outline when the user picks a heading.
-  export function scrollToHeading(i: number): void {
+  /// Scroll to a zero-based source line selected in the outline.
+  export function scrollToLine(line: number): void {
     if (!view) return;
-    const headings: number[] = [];
-    syntaxTree(view.state).iterate({
-      enter(node) {
-        if (
-          node.name === "ATXHeading1" ||
-          node.name === "ATXHeading2" ||
-          node.name === "ATXHeading3" ||
-          node.name === "ATXHeading4" ||
-          node.name === "ATXHeading5" ||
-          node.name === "ATXHeading6"
-        ) {
-          headings.push(node.from);
-        }
-      },
-    });
-    const target = headings[Math.max(0, Math.min(i, headings.length - 1))];
-    if (target === undefined) return;
+    const total = view.state.doc.lines;
+    const target = Math.min(Math.max(0, line), Math.max(0, total - 1));
+    const pos = view.state.doc.line(target + 1).from;
     view.dispatch({
-      selection: { anchor: target },
-      effects: EditorView.scrollIntoView(target, { y: "start" }),
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "start" }),
     });
     view.focus();
   }

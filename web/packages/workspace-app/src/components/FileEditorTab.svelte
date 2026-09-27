@@ -161,8 +161,7 @@
   } = $props();
   let editorTabEl: HTMLDivElement | undefined = $state();
 
-  // Editor refs so the outline body can call scrollToHeading /
-  // scrollToLine on whichever editor variant is showing, and so
+  // Editor refs so the outline can jump by line in either mode, and so
   // the toolbar can call into the Wysiwyg formatting API.
   let wysiwygRef: Wysiwyg | undefined = $state();
   let sourceRef: Source | undefined = $state();
@@ -422,7 +421,7 @@
   let selVer = $state(0);
 
   function jumpTo(h: Heading): void {
-    if (tab.mode === "wysiwyg") wysiwygRef?.scrollToHeading(h.index);
+    if (tab.mode === "wysiwyg") wysiwygRef?.scrollToLine(h.line);
     else sourceRef?.scrollToLine(h.line);
   }
 
