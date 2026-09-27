@@ -4,7 +4,7 @@
 // clobbers the first row.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { buildImageInsert, imageDropHandlers, moveImageSource, pasteInsertPos } from "./image_drop";
 
@@ -286,5 +286,33 @@ describe("image upload feedback", () => {
     await vi.waitFor(() => expect(view.state.doc.toString()).toBe("![](./small.png#w=250)\n"));
     expect(notices).toEqual(["Image large.png exceeds the 50 MiB upload limit; skipped"]);
     expect(upload).toHaveBeenCalledExactlyOnceWith(small, "notes");
+  });
+});
+
+describe("pending image positions", () => {
+  test("maps an edit between uploads so the second image follows the first", async () => {
+    let resolveSecond!: (result: { path: string }) => void;
+    const second = new Promise<{ path: string }>((resolve) => { resolveSecond = resolve; });
+    let startSecond!: () => void;
+    const secondStarted = new Promise<void>((resolve) => { startSecond = resolve; });
+    vi.spyOn(api, "uploadAttachment")
+      .mockResolvedValueOnce({ path: "notes/first.png" })
+      .mockImplementationOnce(() => { startSecond(); return second; });
+    const view = pasteFiles(
+      ["first.png", "second.png"].map((name) => new File(["image"], name, { type: "image/png" })),
+      "tail\n",
+    );
+    await secondStarted;
+    expect(view.state.doc.toString()).toBe("![](./first.png#w=250)\ntail\n");
+    view.dispatch({
+      changes: { from: 0, insert: "typed " },
+      annotations: Transaction.userEvent.of("input.type"),
+    });
+    resolveSecond({ path: "notes/second.png" });
+
+    await vi.waitFor(() => expect(view.state.doc.toString()).toBe(
+      "typed ![](./first.png#w=250)\n![](./second.png#w=250)\ntail\n",
+    ));
+    expect(notices).toEqual([]);
   });
 });
