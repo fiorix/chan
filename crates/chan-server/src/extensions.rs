@@ -1102,6 +1102,63 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn catalog_reports_each_process_exit_and_shutdown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (id, after_handshake) in [("exits", "exit 0"), ("stays", "exec sleep 60")] {
+            std::fs::write(
+                dir.path().join(format!("{id}.toml")),
+                format!("name = \"{id}\"\ncommand = \"/bin/sh\"\nargs = [\"{id}.sh\"]\n"),
+            )
+            .expect("write config");
+            std::fs::write(
+                dir.path().join(format!("{id}.sh")),
+                format!(
+                    "printf '%s\\n' '{}'\n{after_handshake}\n",
+                    r#"CHAN_EXTENSION_V1={"url":"http://127.0.0.1:9/","token":"test"}"#,
+                ),
+            )
+            .expect("write extension script");
+        }
+
+        let runtime = ExtensionRuntime::start_in(dir.path()).await;
+        let catalog = runtime.catalog();
+        let exited = catalog
+            .views()
+            .iter()
+            .position(|view| view.id == "exits")
+            .expect("exiting extension is in the catalog");
+        let observed = timeout(Duration::from_secs(5), async {
+            loop {
+                if runtime.supervisors.lock().unwrap()[exited].is_finished() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let before_shutdown = serde_json::to_value(catalog.views()).expect("catalog JSON");
+        runtime.shutdown().await;
+        let after_shutdown = serde_json::to_value(catalog.views()).expect("catalog JSON");
+
+        assert!(observed.is_ok(), "supervisor did not observe the exit");
+        assert_eq!(before_shutdown.as_array().unwrap().len(), 2);
+        for view in before_shutdown.as_array().unwrap() {
+            assert_eq!(
+                view["running"],
+                view["id"] == "stays",
+                "the catalog must report each supervisor's process state: {view}"
+            );
+        }
+        for view in after_shutdown.as_array().unwrap() {
+            assert_eq!(
+                view["running"], false,
+                "shutdown must clear the catalog's process state: {view}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn runtime_starts_and_reaps_a_declared_process() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(

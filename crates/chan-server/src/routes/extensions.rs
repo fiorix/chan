@@ -766,6 +766,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_route_serializes_running() {
+        let app = Router::new()
+            .route("/api/extensions", get(api_extensions))
+            .layer(Extension(catalog()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/extensions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value[0]["running"], true, "running is always serialized");
+    }
+
+    #[tokio::test]
     async fn catalog_exposes_only_a_same_tenant_proxy_capability() {
         let response = api_extensions(Extension(catalog())).await;
         assert_eq!(response.status(), StatusCode::OK);
