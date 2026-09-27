@@ -87,7 +87,7 @@ fn pending_refusal(
     {
         return true;
     }
-    if pending_handler_refusal(method, path, status, headers, body) {
+    if pending_handler_refusal(status, body) {
         return true;
     }
     // The startup gate spans all mounted tenant routes.
@@ -107,128 +107,11 @@ fn pending_refusal(
             .any(|sentence| body == sentence.as_bytes())
 }
 
-// Fixed handler messages are scoped by method, path and status. Prefixes
-// belong only to writers that append an underlying error to a fixed label.
-const PENDING_HANDLER_REFUSALS: &[(&str, &str, u16, &str, bool)] = &[
-    ("GET", "/api/resolve-link", 404, "", false),
-    ("GET", "/api/report/dir", 404, "", false),
-    ("GET", "/api/graph", 500, "graph stream cancelled", false),
-    (
-        "GET",
-        "/api/graph",
-        500,
-        "graph stream ended before metadata",
-        false,
-    ),
-    ("GET", "/api/graph", 500, "graph stream meta encode: ", true),
-    (
-        "GET",
-        "/api/backlinks/{*path}",
-        500,
-        "backlinks stream ended before metadata",
-        false,
-    ),
-    (
-        "GET",
-        "/api/backlinks/{*path}",
-        500,
-        "backlinks stream meta encode: ",
-        true,
-    ),
-];
-
-fn pending_handler_refusal(
-    method: &Method,
-    path: &str,
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> bool {
-    if PENDING_HANDLER_REFUSALS
-        .iter()
-        .any(|&(verb, route, code, text, prefix)| {
-            method.as_str() == verb
-                && matches_path(route, path)
-                && status.as_u16() == code
-                && if prefix {
-                    body.starts_with(text.as_bytes()) && body.len() > text.len()
-                } else {
-                    body == text.as_bytes()
-                }
-        })
-    {
-        return true;
-    }
+fn pending_handler_refusal(status: StatusCode, body: &[u8]) -> bool {
     // These middleware writers can refuse any tenant route. The tunnel
     // assertion layer is normally outside the assembled router's checker.
-    if (status == StatusCode::INTERNAL_SERVER_ERROR
-        && body == b"config: workspace host lock poisoned")
+    (status == StatusCode::INTERNAL_SERVER_ERROR && body == b"config: workspace host lock poisoned")
         || (status == StatusCode::UNAUTHORIZED && body == b"unauthorized")
-    {
-        return true;
-    }
-    if status != StatusCode::INTERNAL_SERVER_ERROR
-        || headers
-            .get(header::CONTENT_TYPE)
-            .is_none_or(|v| v != "text/plain; charset=utf-8")
-    {
-        return false;
-    }
-    let Ok(text) = std::str::from_utf8(body) else {
-        return false;
-    };
-    if blocking_failure_text(text) {
-        return true;
-    }
-    if matches!(
-        (method.as_str(), path),
-        ("GET" | "PUT" | "DELETE", "/api/session") | ("GET", "/api/sessions")
-    ) {
-        return io_error_text(text) || (*method == Method::PUT && text == "invalid session key");
-    }
-    *method == Method::POST
-        && path == "/api/index/semantic/download"
-        && text
-            .strip_prefix("creating model cache ")
-            .and_then(|rest| rest.rsplit_once(": "))
-            .is_some_and(|(path, error)| !path.is_empty() && io_error_text(error))
-}
-
-fn blocking_failure_text(text: &str) -> bool {
-    let Some((label, task)) = text.split_once(" task panicked: task ") else {
-        return false;
-    };
-    let Some((id, reason)) = task.split_once(' ') else {
-        return false;
-    };
-    !label.is_empty()
-        && id.parse::<u64>().is_ok()
-        && (matches!(reason, "was cancelled" | "panicked")
-            || reason
-                .strip_prefix("panicked with message ")
-                .is_some_and(|message| message.starts_with('"') && message.ends_with('"')))
-}
-
-fn io_error_text(text: &str) -> bool {
-    // tempfile adds a debug-quoted path to the underlying I/O error.
-    let text = if let Some((error, path)) = text.split_once(" at path ") {
-        if !path.starts_with('"') || !path.ends_with('"') {
-            return false;
-        }
-        if error == "too many temporary files exist" {
-            return true;
-        }
-        error
-    } else {
-        text
-    };
-    let Some((message, number)) = text.rsplit_once(" (os error ") else {
-        return false;
-    };
-    !message.is_empty()
-        && number
-            .strip_suffix(')')
-            .is_some_and(|n| n.parse::<i32>().is_ok())
 }
 
 fn range_refusal(
@@ -541,7 +424,6 @@ const PENDING: &[(&str, &str)] = &[
     ("POST", "/api/devserver/workspaces/{*prefix}"),
     ("POST", "/api/devserver/rotate-token"),
     ("POST", "/api/devserver/terminal-sessions/drain"),
-    ("GET", "/api/report/file"),
 ];
 
 #[cfg(test)]
@@ -904,111 +786,6 @@ mod tests {
     }
 
     pending_text_shape!(
-        inventory_resolve_link,
-        "GET",
-        "/api/resolve-link",
-        StatusCode::NOT_FOUND,
-        ""
-    );
-    pending_text_shape!(
-        inventory_report_dir,
-        "GET",
-        "/api/report/dir",
-        StatusCode::NOT_FOUND,
-        ""
-    );
-    pending_text_shape!(
-        inventory_graph_cancelled,
-        "GET",
-        "/api/graph",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "graph stream cancelled"
-    );
-    pending_text_shape!(
-        inventory_graph_metadata,
-        "GET",
-        "/api/graph",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "graph stream ended before metadata"
-    );
-    pending_text_shape!(
-        inventory_backlinks_metadata,
-        "GET",
-        "/api/backlinks/probe.md",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "backlinks stream ended before metadata"
-    );
-    pending_text_shape!(
-        inventory_graph_encoder,
-        "GET",
-        "/api/graph",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "graph stream meta encode: injected error"
-    );
-    pending_text_shape!(
-        inventory_backlinks_encoder,
-        "GET",
-        "/api/backlinks/probe.md",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "backlinks stream meta encode: injected error"
-    );
-    pending_text_shape!(
-        inventory_model_cache,
-        "POST",
-        "/api/index/semantic/download",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!(
-            "creating model cache /tmp/models: {}",
-            std::io::Error::from_raw_os_error(5)
-        )
-    );
-    pending_text_shape!(
-        inventory_session_get,
-        "GET",
-        "/api/session",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        std::io::Error::from_raw_os_error(5).to_string()
-    );
-    pending_text_shape!(
-        inventory_session_put,
-        "PUT",
-        "/api/session",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        std::io::Error::from_raw_os_error(5).to_string()
-    );
-    pending_text_shape!(
-        inventory_session_delete,
-        "DELETE",
-        "/api/session",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        std::io::Error::from_raw_os_error(5).to_string()
-    );
-    pending_text_shape!(
-        inventory_sessions_list,
-        "GET",
-        "/api/sessions",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        std::io::Error::from_raw_os_error(5).to_string()
-    );
-    pending_text_shape!(
-        inventory_session_invalid_key,
-        "PUT",
-        "/api/session",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "invalid session key"
-    );
-    pending_text_shape!(
-        inventory_session_temporary_path,
-        "PUT",
-        "/api/session",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!(
-            "{} at path {:?}",
-            std::io::Error::from_raw_os_error(5),
-            "/tmp/session"
-        )
-    );
-    pending_text_shape!(
         inventory_startup_state_error,
         "GET",
         "/tenant/api/health",
@@ -1022,62 +799,6 @@ mod tests {
         StatusCode::UNAUTHORIZED,
         "unauthorized"
     );
-
-    pending_text_shape!(
-        inventory_session_temporary_name_exhaustion,
-        "PUT",
-        "/api/session",
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "too many temporary files exist at path \"/tmp/sessions\""
-    );
-
-    #[tokio::test]
-    async fn session_io_path_can_contain_the_context_delimiter() {
-        use axum::response::IntoResponse;
-        let body = format!(
-            "{} at path {:?}",
-            std::io::Error::from_raw_os_error(5),
-            "/tmp/session at path archive"
-        );
-        assert!(
-            accepts_response(
-                "PUT",
-                "/api/session",
-                (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
-            )
-            .await,
-            "a quoted session path may contain the I/O context delimiter"
-        );
-    }
-
-    #[tokio::test]
-    async fn inventory_blocking_task_failure() {
-        let response = crate::routes::blocking_response("refusal probe", || {
-            panic!("injected blocking failure")
-        })
-        .await;
-        assert!(
-            accepts_response("GET", "/api/probe", response).await,
-            "inventory must recognize the real blocking-task failure"
-        );
-        for body in [
-            "task panicked",
-            "probe task panicked: arbitrary text",
-            "probe task panicked: task nope panicked",
-            "probe task panicked: task 1 arbitrary text",
-        ] {
-            assert!(
-                !accepts_refusal(
-                    "GET",
-                    "/api/probe",
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    body,
-                    None
-                )
-                .await
-            );
-        }
-    }
 
     #[tokio::test]
     async fn inventory_range_refusal() {
@@ -1258,21 +979,6 @@ mod tests {
                 accepts_refusal("GET", "/api/terminal/api/session", status, body, retry).await,
                 accepted,
                 "{status}: {body}, Retry-After: {retry:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn pending_report_refusal_is_limited_to_get_file() {
-        for (method, path, accepted) in [
-            ("GET", "/api/report/file", true),
-            ("POST", "/api/report/file", false),
-            ("GET", "/api/report/prefix", false),
-        ] {
-            assert_eq!(
-                accepts_refusal(method, path, StatusCode::BAD_REQUEST, "", None).await,
-                accepted,
-                "{method} {path}"
             );
         }
     }

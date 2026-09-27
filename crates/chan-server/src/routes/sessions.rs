@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::error::err_from;
+use crate::error::{err, err_from};
 use crate::routes::blocking_response;
 use crate::state::AppState;
 use crate::util::raw_json_response;
@@ -113,7 +113,7 @@ pub async fn api_get_session(
                 move || match crate::terminal_blob::get(&dir, &key) {
                     Ok(Some(bytes)) => raw_json_response(bytes),
                     Ok(None) => StatusCode::NO_CONTENT.into_response(),
-                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                    Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 },
             )
             .await;
@@ -163,7 +163,7 @@ async fn put_session_response(
                 "put terminal session",
                 move || match crate::terminal_blob::put(&dir, &key, &body) {
                     Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                    Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 },
             )
             .await;
@@ -225,7 +225,7 @@ async fn delete_session_response(
             return blocking_response("delete terminal session", move || {
                 match crate::terminal_blob::delete(&dir, &key) {
                     Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                    Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 }
             })
             .await;
@@ -251,7 +251,7 @@ pub async fn api_list_sessions(
             return blocking_response("list terminal sessions", move || {
                 match crate::terminal_blob::list(&dir) {
                     Ok(keys) => Json(keys).into_response(),
-                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                    Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 }
             })
             .await;

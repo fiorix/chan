@@ -27,7 +27,7 @@ use chan_workspace::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err_from, err_state};
+use crate::error::{err, err_code, err_from, err_state};
 use crate::routes::blocking_response;
 use crate::routes::fs_graph::{build_fs_graph, FsGraphScope};
 use crate::state::AppState;
@@ -154,7 +154,12 @@ pub async fn api_resolve_link(
     blocking_response("resolve link", move || {
         match workspace.resolve_link(&p.target) {
             Some(resolved) => Json(resolved).into_response(),
-            None => StatusCode::NOT_FOUND.into_response(),
+            None => err_code(
+                StatusCode::NOT_FOUND,
+                "link target not found".into(),
+                "link_not_found",
+                serde_json::json!({}),
+            ),
         }
     })
     .await
@@ -250,9 +255,10 @@ impl GraphBuildError {
         match self {
             GraphBuildError::Workspace(e) => err_from(&e),
             GraphBuildError::Fs(e) => e.into_response(),
-            GraphBuildError::Cancelled => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "graph stream cancelled").into_response()
-            }
+            GraphBuildError::Cancelled => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "graph stream cancelled".into(),
+            ),
         }
     }
 }
@@ -1458,11 +1464,10 @@ fn empty_graph_stream_from_metadata(metadata: Result<Bytes, serde_json::Error>) 
     let mut bytes = match metadata {
         Ok(b) => b.to_vec(),
         Err(e) => {
-            return (
+            return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("graph stream meta encode: {e}"),
             )
-                .into_response()
         }
     };
     bytes.extend_from_slice(&graph_ndjson_error_bytes_or_done());
@@ -1546,11 +1551,10 @@ async fn stream_graph_response(
         Some(GraphStreamMessage::Data(bytes)) => bytes,
         Some(GraphStreamMessage::Error(e)) => return e.into_response(),
         None => {
-            return (
+            return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "graph stream ended before metadata",
+                "graph stream ended before metadata".into(),
             )
-                .into_response()
         }
     };
     let body = bridge.into_body(first, |message| match message {
@@ -1965,11 +1969,10 @@ fn empty_backlinks_stream_from_metadata(metadata: Result<Bytes, serde_json::Erro
     let mut bytes = match metadata {
         Ok(b) => b.to_vec(),
         Err(e) => {
-            return (
+            return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("backlinks stream meta encode: {e}"),
             )
-                .into_response()
         }
     };
     let done = match backlinks_ndjson_bytes(&BacklinksStreamEvent::Done) {
@@ -2071,11 +2074,10 @@ async fn stream_backlinks_response(
         Some(BacklinksStreamMessage::Data(bytes)) => bytes,
         Some(BacklinksStreamMessage::Error(e)) => return err_from(&e),
         None => {
-            return (
+            return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "backlinks stream ended before metadata",
+                "backlinks stream ended before metadata".into(),
             )
-                .into_response()
         }
     };
     let body = bridge.into_body(first, |message| match message {

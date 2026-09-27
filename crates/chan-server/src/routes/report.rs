@@ -41,7 +41,7 @@ use axum::Json;
 use chan_workspace::{CocomoSummary, ReportFileStats, ReportLanguageStats, ReportTotals};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err_from, err_state};
+use crate::error::{err, err_code, err_from, err_state};
 use crate::routes::blocking_response;
 use crate::state::AppState;
 
@@ -156,7 +156,10 @@ pub async fn api_report_file(
     Query(p): Query<ReportFileParams>,
 ) -> Response {
     if p.path.trim().is_empty() {
-        return StatusCode::BAD_REQUEST.into_response();
+        return err(
+            StatusCode::BAD_REQUEST,
+            "file report path is required".into(),
+        );
     }
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
@@ -173,7 +176,12 @@ pub async fn api_report_file(
         };
         match report.files.into_iter().find(|f| f.path == p.path) {
             Some(stats) => Json(stats).into_response(),
-            None => StatusCode::NOT_FOUND.into_response(),
+            None => err_code(
+                StatusCode::NOT_FOUND,
+                "file report not found".into(),
+                "report_not_found",
+                serde_json::json!({}),
+            ),
         }
     })
     .await
@@ -197,11 +205,10 @@ async fn stream_report_file_response(
         Some(ReportFileStreamMessage::Data(bytes)) => bytes,
         Some(ReportFileStreamMessage::Error(e)) => return err_from(&e),
         None => {
-            return (
+            return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "report stream ended before metadata",
+                "report stream ended before metadata".into(),
             )
-                .into_response()
         }
     };
     let body = bridge.into_body(first, |message| match message {
@@ -257,7 +264,14 @@ pub async fn api_report_dir(
     blocking_response("report dir", move || {
         let report = match workspace.report_for_dir(&p.path) {
             Ok(Some(r)) => r,
-            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Ok(None) => {
+                return err_code(
+                    StatusCode::NOT_FOUND,
+                    "directory report not found".into(),
+                    "report_not_found",
+                    serde_json::json!({}),
+                )
+            }
             Err(e) => return err_from(&e),
         };
         Json(PrefixReport {

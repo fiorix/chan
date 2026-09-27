@@ -71,7 +71,7 @@ use axum::response::{IntoResponse, Response};
 use tokio::task::JoinError;
 
 /// A blocking task that did not return: its closure panicked, or the runtime
-/// cancelled it before it ran. It answers as a text/plain 500 carrying the
+/// cancelled it before it ran. It answers as a JSON 500 carrying the
 /// route's label.
 pub(crate) struct BlockingTaskFailed {
     label: &'static str,
@@ -80,11 +80,10 @@ pub(crate) struct BlockingTaskFailed {
 
 impl IntoResponse for BlockingTaskFailed {
     fn into_response(self) -> Response {
-        (
+        crate::error::err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{} task panicked: {}", self.label, self.error),
         )
-            .into_response()
     }
 }
 
@@ -100,7 +99,7 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
 }
 
 /// Runs a response-producing closure on the blocking pool and maps a panicked
-/// task to a text/plain 500 carrying `label`.
+/// task to a JSON 500 carrying `label`.
 pub(crate) async fn blocking_response(
     label: &'static str,
     f: impl FnOnce() -> Response + Send + 'static,
@@ -201,13 +200,14 @@ mod tests {
             .unwrap_or_default()
             .to_owned();
         assert!(
-            content_type.starts_with("text/plain"),
+            content_type == "application/json",
             "unexpected content type: {content_type:?}"
         );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body = std::str::from_utf8(&body).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let body = body["error"].as_str().unwrap();
         assert!(
             body.starts_with("probe task panicked: "),
             "unexpected body: {body:?}"
@@ -266,12 +266,15 @@ mod tests {
             .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
     }
 
-    /// Assert `response` is the text/plain 500 a failed blocking task gets,
+    /// Assert `response` is the JSON 500 a failed blocking task gets,
     /// naming `label` and the cancelled task.
     async fn assert_blocking_task_failed(response: Response, label: &str) {
         let (status, content_type, body) = response_parts(response).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-        assert_eq!(content_type, "text/plain; charset=utf-8", "{body}");
+        assert_eq!(content_type, "application/json", "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body.as_object().unwrap().len(), 1);
+        let body = body["error"].as_str().unwrap();
         assert!(
             body.strip_prefix(&format!("{label} task panicked: "))
                 .is_some_and(is_cancelled_task),
@@ -295,7 +298,7 @@ mod tests {
     }
 
     // Each pin drives one route to its join-error arm and checks the whole
-    // answer: a 500, text/plain, the route's label, then the task's
+    // answer: a 500, JSON, the route's label, then the task's
     // `JoinError`. The routes include `run_blocking` arms, one whose label is
     // a parameter, and a `blocking_response` caller.
 

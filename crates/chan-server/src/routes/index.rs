@@ -345,7 +345,7 @@ pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Respon
         };
         let cache_dir = global_models_dir();
         if let Err(response) = create_model_cache(&cache_dir) {
-            return response;
+            return *response;
         }
         if let Err(e) = Embedder::open(&model_name, &cache_dir).map(|_| ()) {
             // EmbedError → IndexError::Embed → ChanError → `err_from`
@@ -365,13 +365,12 @@ pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Respon
     .await
 }
 
-fn create_model_cache(cache_dir: &std::path::Path) -> Result<(), Response> {
+fn create_model_cache(cache_dir: &std::path::Path) -> Result<(), Box<Response>> {
     std::fs::create_dir_all(cache_dir).map_err(|e| {
-        (
+        Box::new(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("creating model cache {}: {e}", cache_dir.display()),
-        )
-            .into_response()
+        ))
     })
 }
 
@@ -393,7 +392,7 @@ mod tests {
         std::fs::write(&cache, b"occupied").unwrap();
         let error = std::fs::create_dir_all(&cache).unwrap_err();
         super::super::refusal_tests::assert_refusal(
-            create_model_cache(&cache).unwrap_err(),
+            *create_model_cache(&cache).unwrap_err(),
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"error": format!("creating model cache {}: {error}", cache.display())}),
         ).await;
