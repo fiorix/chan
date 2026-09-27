@@ -5494,6 +5494,13 @@ async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), 
     let Some(token) = chan_server::persisted_devserver_token() else {
         return Err("could not read the devserver token".to_string());
     };
+    drain_devserver_terminals_with_token(addr, &token).await
+}
+
+async fn drain_devserver_terminals_with_token(
+    addr: SocketAddr,
+    token: &str,
+) -> std::result::Result<(), String> {
     let url = format!("http://{addr}/api/devserver/terminal-sessions/drain");
     let client = reqwest::Client::new();
     let request = client.post(&url).bearer_auth(token).send();
@@ -5596,35 +5603,10 @@ async fn cmd_rotate_devserver_token() -> Result<()> {
     };
     let dial = local_devserver_dial_addr();
     if let Some(addr) = dial {
-        let url = format!("http://{addr}/api/devserver/rotate-token");
-        let client = reqwest::Client::new();
-        let request = client.post(&url).bearer_auth(&current).send();
-        match tokio::time::timeout(Duration::from_secs(5), request).await {
-            Ok(Ok(response)) if response.status().is_success() => {
-                let rotated: chan_server::devserver_api::RotatedToken = response
-                    .json()
-                    .await
-                    .context("parsing the rotate-token response")?;
-                eprintln!("chan devserver: token rotated; the old bearer no longer authorizes");
-                print!("{}", rotated_token_output(Some(addr), &rotated.token));
-                return Ok(());
-            }
-            Ok(Ok(response)) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                anyhow::bail!(
-                    "chan devserver rotate-token: the running devserver rejected the \
-                     persisted token (401): its in-memory token and \
-                     ~/.chan/devserver/config.json disagree. Restart the devserver, \
-                     then rotate again."
-                );
-            }
-            Ok(Ok(response)) => {
-                anyhow::bail!(
-                    "chan devserver rotate-token: the running devserver answered HTTP {}",
-                    response.status()
-                );
-            }
-            // Nothing listening (or too slow): rotate the file instead.
-            Ok(Err(_)) | Err(_) => {}
+        if let Some(rotated) = rotate_devserver_token_at(addr, &current).await? {
+            eprintln!("chan devserver: token rotated; the old bearer no longer authorizes");
+            print!("{}", rotated_token_output(Some(addr), &rotated.token));
+            return Ok(());
         }
     }
     match chan_server::rotate_persisted_devserver_token()
@@ -5643,6 +5625,40 @@ async fn cmd_rotate_devserver_token() -> Result<()> {
             "chan devserver rotate-token: no devserver config with a token \
              found (~/.chan/devserver/config.json); start a devserver first"
         ),
+    }
+}
+
+async fn rotate_devserver_token_at(
+    addr: SocketAddr,
+    current: &str,
+) -> Result<Option<chan_server::devserver_api::RotatedToken>> {
+    let url = format!("http://{addr}/api/devserver/rotate-token");
+    let client = reqwest::Client::new();
+    let request = client.post(&url).bearer_auth(current).send();
+    match tokio::time::timeout(Duration::from_secs(5), request).await {
+        Ok(Ok(response)) if response.status().is_success() => {
+            let rotated = response
+                .json()
+                .await
+                .context("parsing the rotate-token response")?;
+            Ok(Some(rotated))
+        }
+        Ok(Ok(response)) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+            anyhow::bail!(
+                "chan devserver rotate-token: the running devserver rejected the \
+                 persisted token (401): its in-memory token and \
+                 ~/.chan/devserver/config.json disagree. Restart the devserver, \
+                 then rotate again."
+            );
+        }
+        Ok(Ok(response)) => {
+            anyhow::bail!(
+                "chan devserver rotate-token: the running devserver answered HTTP {}",
+                response.status()
+            );
+        }
+        // Nothing listening (or too slow): rotate the file instead.
+        Ok(Err(_)) | Err(_) => Ok(None),
     }
 }
 
@@ -11403,6 +11419,117 @@ mod tests {
         // Non-tunnel keeps the shared default the `chan serve` handoff and the
         // serve-path collision hint rely on.
         assert_eq!(resolve_devserver_port(None, false, true), DEFAULT_PORT);
+    }
+
+    async fn devserver_refusal_peer(
+        status: u16,
+        body: &str,
+        path: &str,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_owned();
+        let path = path.to_owned();
+        let peer = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert_ne!(n, 0, "client sends a complete request");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
+                assert!(request.to_ascii_lowercase().contains("authorization: bearer test-token\r\n"));
+                let response = format!(
+                    "HTTP/1.1 {status} Refused\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            })
+            .await
+            .expect("client and refusal peer finish");
+        });
+        (addr, peer)
+    }
+
+    fn devserver_refusal_bodies() -> Vec<(String, Option<String>)> {
+        let mut cases = vec![
+            ("plain refusal\n".to_owned(), None),
+            (String::new(), None),
+            (r#"{"message":"not an envelope"}"#.to_owned(), None),
+            (r#"["not an envelope"]"#.to_owned(), None),
+            (r#"{"error":42}"#.to_owned(), None),
+            (r#"{"error":""}"#.to_owned(), None),
+            (r#"{"error":"unfinished"#.to_owned(), None),
+        ];
+        for sentence in ["drain refused", "  keep this sentence\n", &"x".repeat(600)] {
+            for code in [None, Some("operation_refused")] {
+                let mut body = serde_json::json!({ "error": sentence });
+                if let Some(code) = code {
+                    body["code"] = code.into();
+                }
+                cases.push((body.to_string(), Some(sentence.to_owned())));
+            }
+        }
+        cases
+    }
+
+    #[tokio::test]
+    async fn drain_devserver_refusal_keeps_the_sentence_or_raw_body() {
+        for (body, sentence) in devserver_refusal_bodies() {
+            let (addr, peer) =
+                devserver_refusal_peer(401, &body, "/api/devserver/terminal-sessions/drain").await;
+            let result = drain_devserver_terminals_with_token(addr, "test-token").await;
+            peer.await.unwrap();
+            assert_eq!(
+                result.unwrap_err(),
+                format!(
+                    "HTTP 401 Unauthorized: {}",
+                    sentence.as_deref().unwrap_or(&body)
+                ),
+                "drain refusal body {body:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rotate_devserver_refusal_keeps_the_sentence_or_status() {
+        let (addr, peer) = devserver_refusal_peer(
+            401,
+            r#"{"error":"a server sentence","code":"unauthorized"}"#,
+            "/api/devserver/rotate-token",
+        )
+        .await;
+        let result = rotate_devserver_token_at(addr, "test-token").await;
+        peer.await.unwrap();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "chan devserver rotate-token: the running devserver rejected the \
+             persisted token (401): its in-memory token and \
+             ~/.chan/devserver/config.json disagree. Restart the devserver, \
+             then rotate again.",
+            "rotate-token 401 keeps the recovery instructions"
+        );
+
+        for (body, sentence) in devserver_refusal_bodies() {
+            let (addr, peer) =
+                devserver_refusal_peer(500, &body, "/api/devserver/rotate-token").await;
+            let result = rotate_devserver_token_at(addr, "test-token").await;
+            peer.await.unwrap();
+            let suffix = sentence
+                .map(|sentence| format!(": {sentence}"))
+                .unwrap_or_default();
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                format!("chan devserver rotate-token: the running devserver answered HTTP 500 Internal Server Error{suffix}"),
+                "rotate-token refusal body {body:?}"
+            );
+        }
     }
 
     /// A rotation MUST re-emit the locked marker line -- it is the desktop
