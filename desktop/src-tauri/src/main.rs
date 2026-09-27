@@ -1266,6 +1266,17 @@ async fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppStat
     }
 }
 
+/// Cancel the retarget tickets of a devserver's windows, so an attempt in
+/// flight cannot navigate a window kept after its watcher retires. Tickets
+/// are keyed by native label, `{library_id}::{window_id}`.
+fn cancel_devserver_retargets(state: &AppState, id: &str) {
+    if let Some(library_id) = state.devserver_feed.library_id_of(id) {
+        state
+            .retarget_tickets
+            .cancel_prefix(&format!("{library_id}::"));
+    }
+}
+
 /// Stop a devserver's window watcher and forget its view. The view refuses
 /// Reload before the stop is sent, so a Reload from the send on answers "not
 /// handled" and the page reloads itself, instead of queueing to a loop that
@@ -1456,11 +1467,7 @@ fn mark_devserver_control_exited(app: &tauri::AppHandle, state: &AppState, id: &
     if !state.control_terminal_runs.lock().unwrap().contains_key(id) {
         return;
     }
-    if let Some(library_id) = state.devserver_feed.library_id_of(id) {
-        state
-            .retarget_tickets
-            .cancel_prefix(&format!("{library_id}::"));
-    }
+    cancel_devserver_retargets(state, id);
     state.devservers.remove(id);
     state
         .control_terminal_dead
@@ -7657,6 +7664,42 @@ mod tests {
             "\n/// Error marker for native access",
         );
         assert!(disconnect.contains("DevserverWatcherStop::CloseWindows"));
+    }
+
+    #[test]
+    fn retirement_cancels_the_retargets_of_its_library_only() {
+        let state = empty_state();
+        let record = chan_server::WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "lib-fed".into(),
+            kind: chan_server::WindowKind::Terminal,
+            title: "Terminal".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/terminal".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: true,
+            active_transfer: false,
+            control: false,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+        };
+        state
+            .devserver_feed
+            .register_windows("ds-1".to_string(), Arc::new(Mutex::new(vec![record])));
+        let ours = state.retarget_tickets.begin("lib-fed::w-1");
+        let other = state.retarget_tickets.begin("lib-other::w-1");
+        cancel_devserver_retargets(&state, "ds-1");
+        assert!(
+            state.retarget_tickets.with_current(&ours, || ()).is_none(),
+            "retirement must cancel the library label prefix, not the connection id"
+        );
+        assert!(
+            state.retarget_tickets.with_current(&other, || ()).is_some(),
+            "another library's retargets stay current"
+        );
     }
 
     #[test]

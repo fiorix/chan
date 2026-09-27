@@ -2315,20 +2315,6 @@ mod tests {
     }
 
     #[test]
-    fn retirement_cancels_the_library_label_prefix() {
-        let retired = source_section(
-            include_str!("main.rs"),
-            "fn mark_devserver_control_exited",
-            "fn close_devserver_control_terminal",
-        );
-        assert!(
-            retired.contains("if let Some(library_id) = state.devserver_feed.library_id_of(id)")
-                && retired.contains(".cancel_prefix(&format!(\"{library_id}::\"))"),
-            "retirement must cancel the library label prefix, not the connection id"
-        );
-    }
-
-    #[test]
     fn a_stale_retarget_leaves_the_remembered_key_alone() {
         let navigator = source_section(
             include_str!("window_watcher_wiring.rs"),
