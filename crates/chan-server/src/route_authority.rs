@@ -413,8 +413,8 @@ pub(crate) mod test_support {
     use super::{Authority, RouteTable, Verb, FALLBACK};
 
     /// The concrete verbs a route reaches when it answers every method (an
-    /// `any()` handler, a method fallback, or a mounted service). HEAD is
-    /// folded into GET, as for a plain GET route.
+    /// `any()` handler or a mounted service). HEAD is folded into GET, as for
+    /// a plain GET route.
     const EVERY_VERB: [Verb; 8] = [
         Verb::Get,
         Verb::Post,
@@ -437,6 +437,13 @@ pub(crate) mod test_support {
     /// method endpoints print each verb as set or `None`, and its
     /// `RouteId -> path` map. The format is not a stability promise, so any
     /// deviation panics rather than yielding a partial set.
+    ///
+    /// A method router that names verbs counts only those. Its fallback, when
+    /// it has its own, is taken for the crate's 405 answer, which the text
+    /// cannot tell from any other fallback, so
+    /// [`assert_uncounted_verbs_refused`] sends every verb not counted to the
+    /// assembled routers and fails on any answer other than that 405. A method
+    /// router that names no verb is an `any()` handler and counts every verb.
     pub(crate) fn mounted_routes<S>(router: &axum::Router<S>) -> BTreeSet<(Verb, String)> {
         let text = format!("{router:?}");
         let body = text
@@ -494,9 +501,6 @@ pub(crate) mod test_support {
                 .unwrap_or_else(|| panic!("{FORMAT}: no `{name}` in {fields:.120}"));
             tail.split([',', ' ']).next().unwrap_or_default()
         };
-        if !field("fallback").starts_with("Default(") {
-            return EVERY_VERB.to_vec();
-        }
         let named = [
             ("get", Verb::Get),
             ("head", Verb::Head),
@@ -517,7 +521,13 @@ pub(crate) mod test_support {
             })
             .map(|(_, verb)| verb)
             .collect();
-        assert!(!verbs.is_empty(), "{FORMAT}: a method router with no verb");
+        if verbs.is_empty() {
+            assert!(
+                !field("fallback").starts_with("Default("),
+                "{FORMAT}: a method router with no verb"
+            );
+            return EVERY_VERB.to_vec();
+        }
         verbs
     }
 
@@ -771,6 +781,84 @@ pub(crate) mod test_support {
         );
     }
 
+    /// Send each verb [`mounted_routes`] did not count for a route of
+    /// `router` once, as a local caller with the router's bearer, and fail
+    /// unless every answer is 405 with an `Allow` header and the envelope's
+    /// "method not allowed". This is what holds the walker to its reading of a
+    /// method router's own fallback as the crate's 405 answer.
+    ///
+    /// Captures are filled with a placeholder: the method is refused before
+    /// any extractor runs.
+    pub(crate) async fn assert_uncounted_verbs_refused(
+        name: &str,
+        router: axum::Router,
+        local_bearer: Option<crate::routes::LauncherBearer>,
+    ) {
+        use axum::http::{header, StatusCode};
+        use tower::ServiceExt;
+
+        let mut counted = std::collections::BTreeMap::<String, BTreeSet<Verb>>::new();
+        for (verb, path) in mounted_routes(&router) {
+            if verb != Verb::Any {
+                counted.entry(path).or_default().insert(verb);
+            }
+        }
+        let expected = serde_json::json!({"error": "method not allowed"}).to_string();
+        let mut sent = 0;
+        let mut contradictions = Vec::new();
+        for (path, verbs) in &counted {
+            for verb in EVERY_VERB.into_iter().filter(|verb| !verbs.contains(verb)) {
+                let bearer = local_bearer
+                    .as_ref()
+                    .map(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
+                let request = Caller::Local
+                    .stamp(
+                        axum::http::Request::builder()
+                            .method(method(verb))
+                            .uri(fill_captures(path)),
+                        bearer.as_deref(),
+                    )
+                    .body(axum::body::Body::empty())
+                    .expect("probe request");
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    router.clone().oneshot(request),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{verb:?} {path} did not answer"))
+                .expect("infallible router");
+                sent += 1;
+                let status = response.status();
+                let allow = response
+                    .headers()
+                    .get(header::ALLOW)
+                    .is_some_and(|value| !value.is_empty());
+                let json = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|value| value == "application/json");
+                let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
+                if status != StatusCode::METHOD_NOT_ALLOWED || !allow || !json || body != expected {
+                    contradictions.push(format!(
+                        "{verb:?} {path} answered {status} allow={allow} json={json} {body:.120}"
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "uncounted-verbs\t{name}\t{} routes\t{sent} requests",
+            counted.len()
+        );
+        assert!(sent > 0, "the {name} router has no uncounted verb to send");
+        assert!(
+            contradictions.is_empty(),
+            "the {name} router answers a verb the walker did not count with something other than its 405: {contradictions:#?}"
+        );
+    }
+
     fn method(verb: Verb) -> axum::http::Method {
         use axum::http::Method;
         match verb {
@@ -817,7 +905,10 @@ mod tests {
     use axum::routing::{any, get, put};
     use axum::Router;
 
-    use super::test_support::{assert_callers_meet_table, assert_table_matches, mounted_routes};
+    use super::test_support::{
+        assert_callers_meet_table, assert_table_matches, assert_uncounted_verbs_refused,
+        mounted_routes,
+    };
     use super::{Verb, FALLBACK, LAUNCHER, TERMINAL_TENANT, WORKSPACE_TENANT};
 
     /// The ratchet is only as good as the walk, so pin the walk against a
@@ -940,6 +1031,34 @@ mod tests {
         assert_table_matches("terminal tenant", &router, TERMINAL_TENANT);
     }
 
+    /// A method router that names verbs counts only those past its 405
+    /// fallback; one that names none, an `any()` handler, counts every verb.
+    #[test]
+    fn the_walker_counts_named_verbs_past_the_method_fallback() {
+        async fn ok() {}
+        let router: Router = Router::new()
+            .route("/a", get(ok).post(ok))
+            .route("/c/{id}", any(ok))
+            .method_not_allowed_fallback(crate::error::method_not_allowed);
+        let mut expected: BTreeSet<(Verb, String)> = [(Verb::Get, "/a"), (Verb::Post, "/a")]
+            .into_iter()
+            .map(|(verb, path)| (verb, path.to_string()))
+            .collect();
+        for verb in [
+            Verb::Get,
+            Verb::Post,
+            Verb::Put,
+            Verb::Patch,
+            Verb::Delete,
+            Verb::Options,
+            Verb::Trace,
+            Verb::Connect,
+        ] {
+            expected.insert((verb, "/c/{id}".to_string()));
+        }
+        assert_eq!(mounted_routes(&router), expected);
+    }
+
     #[test]
     fn every_launcher_route_declares_its_authority() {
         for (surface, router, _) in launcher_surfaces() {
@@ -966,6 +1085,28 @@ mod tests {
             "terminal tenant",
             crate::terminal_router(state),
             TERMINAL_TENANT,
+            Some(bearer_cell("terminal-bearer")),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn uncounted_verbs_are_refused_on_every_workspace_tenant_route() {
+        let state = crate::state::test_support::make_test_state_with_token("workspace-bearer");
+        assert_uncounted_verbs_refused(
+            "workspace tenant",
+            crate::router(state),
+            Some(bearer_cell("workspace-bearer")),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn uncounted_verbs_are_refused_on_every_terminal_tenant_route() {
+        let state = crate::state::test_support::make_test_state_with_token("terminal-bearer");
+        assert_uncounted_verbs_refused(
+            "terminal tenant",
+            crate::terminal_router(state),
             Some(bearer_cell("terminal-bearer")),
         )
         .await;

@@ -23,6 +23,14 @@ pub fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
+/// The answer to a method a route does not serve. A router takes it with
+/// `method_not_allowed_fallback` after its last route, since the framework
+/// gives it only to the routes registered before the call. The framework
+/// adds the `Allow` header to its answer.
+pub(crate) async fn method_not_allowed() -> Response {
+    err(StatusCode::METHOD_NOT_ALLOWED, "method not allowed".into())
+}
+
 /// A refusal a client branches on. Details serialize beside the reserved
 /// `error` and `code` fields. Invalid details or an empty code produce a
 /// JSON 500, since a caller's construction error must not corrupt the wire.

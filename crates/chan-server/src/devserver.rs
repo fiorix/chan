@@ -2589,6 +2589,7 @@ fn build_devserver_app(
     let app = public
         .merge(authed)
         .merge(host.router())
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .layer(middleware::from_fn_with_state(
             state,
             gate_tenant_during_startup,
@@ -5507,6 +5508,21 @@ mod tests {
             &app,
             crate::route_authority::DEVSERVER,
         );
+    }
+
+    #[tokio::test]
+    async fn uncounted_verbs_are_refused_on_every_devserver_route() {
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let host = state.host.clone();
+        let bearer = state.token.clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        crate::route_authority::test_support::assert_uncounted_verbs_refused(
+            "devserver",
+            app,
+            Some(bearer),
+        )
+        .await;
     }
 
     #[tokio::test]

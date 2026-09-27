@@ -1293,6 +1293,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
     let app = Router::new()
         .merge(api)
         .fallback(serve_static)
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1970,6 +1971,7 @@ fn router_with_extensions(
     let app = Router::new()
         .merge(api)
         .fallback(serve_static)
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .layer(axum::Extension(extension_tenant))
         .layer(axum::Extension(extension_catalog))
         .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
