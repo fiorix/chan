@@ -1266,12 +1266,18 @@ async fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppStat
     }
 }
 
-/// Stop a devserver's window watcher and forget its view.
+/// Stop a devserver's window watcher and forget its view. The view refuses
+/// Reload before the stop is sent, so a Reload from the send on answers "not
+/// handled" and the page reloads itself, instead of queueing to a loop that
+/// drops it on reading the stop. A Reload holding the view map finishes
+/// before the view is stopped.
 fn stop_devserver_watcher(state: &AppState, id: &str, stop: DevserverWatcherStop) {
+    if let Some(view) = state.devserver_watcher_views.lock().unwrap().remove(id) {
+        view.stop();
+    }
     if let Some(cancel) = state.devserver_watchers.lock().unwrap().remove(id) {
         let _ = cancel.send(stop);
     }
-    state.devserver_watcher_views.lock().unwrap().remove(id);
 }
 
 /// Drop a devserver's live connection windows: stop its window watcher and

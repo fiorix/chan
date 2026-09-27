@@ -372,7 +372,8 @@ impl WatcherViewState {
         std::mem::take(&mut self.requests.lock().unwrap().labels)
     }
 
-    fn stop(&self) {
+    /// Refuse every later Reload and drop the queued ones.
+    pub(crate) fn stop(&self) {
         let mut requests = self.requests.lock().unwrap();
         requests.stopped = true;
         requests.labels.clear();
