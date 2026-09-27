@@ -1706,19 +1706,18 @@ fn workspace_label(root: &Path) -> String {
 /// The `Response` is boxed to keep the `Err` variant small (`clippy::result_large_err`).
 fn require_mutable(state: &LauncherState) -> Result<SocketAddr, Box<Response>> {
     match state.serve_addr.as_ref() {
-        None => Err(Box::new(
-            (
-                StatusCode::FORBIDDEN,
-                "workspace mutation is available only on the desktop loopback; manage a devserver's \
-                 workspaces from the desktop app or the CLI",
-            )
-                .into_response(),
-        )),
+        None => Err(Box::new(crate::error::err(
+            StatusCode::FORBIDDEN,
+            "workspace mutation is available only on the desktop loopback; manage a devserver's \
+                 workspaces from the desktop app or the CLI"
+                .into(),
+        ))),
         Some(cell) => match cell.get() {
             Some(addr) => Ok(*addr),
-            None => Err(Box::new(
-                (StatusCode::SERVICE_UNAVAILABLE, "launcher not ready").into_response(),
-            )),
+            None => Err(Box::new(crate::error::err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "launcher not ready".into(),
+            ))),
         },
     }
 }
