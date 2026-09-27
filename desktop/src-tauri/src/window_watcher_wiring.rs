@@ -1758,6 +1758,387 @@ mod tests {
         }
     }
 
+    impl RetryHarness {
+        fn request_reload(
+            &self,
+            record: &WindowRecord,
+            connected: bool,
+            _view: Option<&WatcherViewState>,
+        ) -> bool {
+            dispatch_devserver_reload(
+                &native_label(record),
+                connected,
+                &self.surface.tickets,
+                |ticket| {
+                    self.surface
+                        .attempts
+                        .lock()
+                        .unwrap()
+                        .push((native_label(record), tokio::time::Instant::now()));
+                    self.surface
+                        .held
+                        .lock()
+                        .unwrap()
+                        .push((native_label(record), ticket));
+                },
+            )
+        }
+
+        fn finish_requested(
+            &self,
+            record: &WindowRecord,
+            _ticket: &serve::RetargetTicket,
+            outcome: Result<serve::RetargetOutcome, String>,
+        ) {
+            finish_devserver_reload(record, outcome);
+        }
+
+        fn waiting_since(&self, record: &WindowRecord, second: u64) {
+            let state = self.surface.launches.0.lock().unwrap();
+            assert_eq!(
+                state.entries.len(),
+                1,
+                "one window keeps exactly one attempt"
+            );
+            let attempt = state.entries.get(&native_label(record)).unwrap();
+            assert!(
+                attempt.phase == LaunchPhase::Waiting,
+                "the newest refusal must leave the watcher waiting"
+            );
+            assert_eq!(
+                attempt.key,
+                RemoteLaunchKey::from_record(record, false),
+                "the newest target keeps retry ownership"
+            );
+            assert_eq!(
+                attempt.attempted_at.duration_since(self.started).as_secs(),
+                second,
+                "the newest dispatch sets the automatic retry deadline"
+            );
+        }
+
+        async fn drain(&self) {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    async fn reload_race(reload_first: bool, newer_finishes_first: bool) {
+        let mut record = retry_record(
+            if reload_first {
+                "reload-then-feed"
+            } else {
+                "feed-then-reload"
+            },
+            usize::from(newer_finishes_first),
+        );
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        let (_, initial) = harness.surface.held.lock().unwrap().pop().unwrap();
+        let first = if reload_first {
+            harness.surface.launches.finish_retarget(
+                &native_label(&record),
+                &harness.surface.tickets,
+                &initial,
+                &harness.surface.builds,
+                Ok(serve::RetargetOutcome::Navigated),
+            );
+            harness.drain().await;
+            tokio::time::advance(Duration::from_secs(5)).await;
+            assert!(harness.request_reload(&record, true, Some(&harness.view)));
+            harness.drain().await;
+            harness.surface.held.lock().unwrap().pop().unwrap().1
+        } else {
+            initial
+        };
+        tokio::time::advance(Duration::from_secs(if reload_first { 1 } else { 5 })).await;
+        if reload_first {
+            record.token = "new-feed-token".into();
+            *harness.feed.records.lock().unwrap() = vec![record.clone()];
+            harness.feed_wake().await;
+        } else {
+            assert!(harness.request_reload(&record, true, Some(&harness.view)));
+            harness.drain().await;
+        }
+        let (_, second) = harness.surface.held.lock().unwrap().pop().unwrap();
+        for newer in [newer_finishes_first, !newer_finishes_first] {
+            let ticket = if newer { &second } else { &first };
+            if newer != reload_first {
+                harness.finish_requested(&record, ticket, Ok(serve::RetargetOutcome::NotReady));
+            } else {
+                harness.surface.launches.finish_retarget(
+                    &native_label(&record),
+                    &harness.surface.tickets,
+                    ticket,
+                    &harness.surface.builds,
+                    Ok(serve::RetargetOutcome::NotReady),
+                );
+            }
+            harness.drain().await;
+        }
+        let last = if reload_first { 6 } else { 5 };
+        harness.waiting_since(&record, last);
+        let expected = if reload_first {
+            vec![0, 5, 6]
+        } else {
+            vec![0, 5]
+        };
+        tokio::time::advance(Duration::from_secs(14)).await;
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            expected,
+            "stale completion cannot advance the newer deadline"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness.drain().await;
+        let mut expected = expected;
+        expected.push(last + 15);
+        assert_eq!(
+            harness.times(&record),
+            expected,
+            "the newest refusal must retry automatically at its dispatch deadline"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_after_watcher_old_completion_first() {
+        reload_race(false, false).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_after_watcher_new_completion_first() {
+        reload_race(false, true).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_before_feed_old_completion_first() {
+        reload_race(true, false).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_before_feed_new_completion_first() {
+        reload_race(true, true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_inside_interval_resets_automatic_deadline() {
+        let record = retry_record("reload-interval", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, false).await;
+        harness
+            .surface
+            .hold
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(harness.request_reload(&record, true, Some(&harness.view)));
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "Reload bypasses the same-target interval"
+        );
+        let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
+        harness.drain().await;
+        harness.waiting_since(&record, 5);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness.feed_wake().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "an unrelated wake adds no requested attempt"
+        );
+        tokio::time::advance(Duration::from_secs(13)).await;
+        harness.drain().await;
+        assert_eq!(harness.times(&record), vec![0, 5]);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5, 20],
+            "Reload owns the next fifteen-second interval"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_requests_coalesce_until_the_next_pass() {
+        let record = retry_record("reload-coalesce", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        for _ in 0..3 {
+            assert!(harness.request_reload(&record, true, Some(&harness.view)));
+        }
+        assert_eq!(
+            harness.times(&record),
+            vec![0],
+            "Reload queues without dispatching before the watcher pass"
+        );
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "one pass consumes repeated Reload requests once"
+        );
+        harness.feed_wake().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5],
+            "a consumed request does not survive the pass"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    async fn requested_failure(failure: &str) {
+        let record = retry_record(&format!("reload-{failure}"), 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        let (_, initial) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.surface.launches.finish_retarget(
+            &native_label(&record),
+            &harness.surface.tickets,
+            &initial,
+            &harness.surface.builds,
+            Ok(serve::RetargetOutcome::Navigated),
+        );
+        harness.drain().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(harness.request_reload(&record, true, Some(&harness.view)));
+        harness.drain().await;
+        let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.finish_requested(&record, &ticket, Err(failure.into()));
+        harness.drain().await;
+        harness.waiting_since(&record, 5);
+        tokio::time::advance(Duration::from_secs(15)).await;
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5, 20],
+            "{failure}: a requested failure keeps an automatic retry"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_resolve_failure_keeps_retry() {
+        requested_failure("resolve").await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_session_failure_keeps_retry() {
+        requested_failure("session").await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_navigation_failure_keeps_retry() {
+        requested_failure("navigation").await;
+    }
+
+    async fn rejected_reload(action: &str) {
+        let record = retry_record(&format!("reload-{action}"), 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, false).await;
+        harness.drain().await;
+        let label = native_label(&record);
+        match action {
+            "gone" => {
+                harness.surface.live.lock().unwrap().remove(&label);
+            }
+            "removed" => harness.feed.records.lock().unwrap().clear(),
+            "closed" => {
+                harness.pending_deletes.queue("test-connection", &record);
+                harness.view.bury(&label);
+                harness.surface.close(&label);
+            }
+            "buried" => harness.view.bury(&label),
+            "hidden" => harness.feed.records.lock().unwrap()[0].hidden = true,
+            "delete" => harness.pending_deletes.queue("test-connection", &record),
+            _ => unreachable!(),
+        }
+        assert!(harness.request_reload(&record, true, Some(&harness.view)));
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0],
+            "{action}: a Reload must neither dispatch nor build an ineligible window"
+        );
+        // A bare native disappearance leaves a desired feed record. Only a
+        // later authoritative feed wake may rebuild it.
+        if action != "gone" {
+            tokio::time::advance(Duration::from_secs(60)).await;
+            harness.feed_wake().await;
+            assert_eq!(harness.times(&record), vec![0]);
+        }
+        harness.stop(WatchLoopStop::CloseWindows).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_does_not_build_a_gone_window() {
+        rejected_reload("gone").await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_does_not_dispatch_a_removed_record() {
+        rejected_reload("removed").await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_does_not_dispatch_a_closed_window() {
+        rejected_reload("closed").await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_does_not_dispatch_a_buried_window() {
+        rejected_reload("buried").await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_does_not_dispatch_a_hidden_window() {
+        rejected_reload("hidden").await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_does_not_dispatch_a_pending_delete() {
+        rejected_reload("delete").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_without_a_connection_is_not_handled() {
+        let record = retry_record("reload-disconnected", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        assert!(
+            !harness.request_reload(&record, false, Some(&harness.view)),
+            "a gone connection leaves Reload to the page"
+        );
+        harness.drain().await;
+        assert_eq!(harness.times(&record), vec![0]);
+        harness.stop(WatchLoopStop::CloseWindows).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_without_a_view_is_not_handled() {
+        let record = retry_record("reload-no-view", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        assert!(
+            !harness.request_reload(&record, true, None),
+            "an absent watcher view leaves Reload to the page"
+        );
+        harness.drain().await;
+        assert_eq!(harness.times(&record), vec![0]);
+        harness.stop(WatchLoopStop::CloseWindows).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reload_after_stop_is_not_handled() {
+        for stop in [WatchLoopStop::KeepWindows, WatchLoopStop::CloseWindows] {
+            let record = retry_record("reload-stopped", 0);
+            let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+            let view = Arc::clone(&harness.view);
+            let surface = harness.stop(stop).await;
+            let handled =
+                dispatch_devserver_reload(&native_label(&record), true, &surface.tickets, |_| {});
+            assert!(!handled, "a stopped watcher leaves Reload to the page");
+            let _ = view;
+            let (label, ticket) = surface.held.lock().unwrap().pop().unwrap();
+            surface.launches.finish_retarget(
+                &label,
+                &surface.tickets,
+                &ticket,
+                &surface.builds,
+                Ok(serve::RetargetOutcome::NotReady),
+            );
+            tokio::time::advance(Duration::from_secs(60)).await;
+            assert!(surface.launches.0.lock().unwrap().entries.is_empty());
+            assert!(surface.retry_deadline().is_none());
+            assert_eq!(surface.attempts.lock().unwrap().len(), 1);
+        }
+    }
+
     async fn cadence_with_other_wakes(library: &str, offsets: &[u64]) {
         let records: Vec<_> = (0..offsets.len())
             .map(|i| retry_record(library, i))
