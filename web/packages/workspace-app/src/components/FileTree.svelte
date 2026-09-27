@@ -30,7 +30,7 @@
   import { isEditableText } from "../state/fileTypes";
   import { parentDir } from "../state/format";
   import { openMediaViewer } from "../state/mediaOpen";
-  import { classifyFile, iconFor } from "../state/kinds";
+  import { classifyFile, iconFor, isOpenableTextKind } from "../state/kinds";
   import { windowCaps } from "../state/windowCaps";
   import {
     classifyFileActions,
@@ -326,6 +326,7 @@
   };
   type File = {
     kind: "file";
+    fileKind?: TreeEntry["kind"];
     name: string;
     path: string;
     size: number;
@@ -479,6 +480,7 @@
       } else {
         parent.children.push({
           kind: "file",
+          fileKind: e.kind,
           name,
           path: e.path,
           size: e.size,
@@ -1469,7 +1471,9 @@
         </ul>
       {/if}
     {:else}
-      {@const editable = isEditableText(node.path)}
+      {@const editable = node.fileKind && node.fileKind !== "pending"
+        ? isOpenableTextKind(node.fileKind)
+        : isEditableText(node.path)}
       {@const contact = contactPaths.has(node.path)}
       {@const kind = classifyFile(node.path, contact ? "contact" : undefined)}
       {@const Icon = iconFor(kind)}
