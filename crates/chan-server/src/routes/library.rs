@@ -820,7 +820,7 @@ async fn handle_library_command_action(
         }
         ScopedLibraryAction::NewWorkspaceWindow { workspace_id } => {
             let Some((_, root)) = resolve_workspace(&state.host, &workspace_id) else {
-                return StatusCode::NOT_FOUND.into_response();
+                return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
             };
             if state.host.canonical_root_status(&root).0 != WorkspaceStatus::Running {
                 return command_capability_error(StatusCode::CONFLICT, "workspace is not running");
@@ -840,7 +840,7 @@ async fn handle_library_command_action(
                     record.library_id == state.host.library_id() && record.window_id == window_id
                 })
             else {
-                return StatusCode::NOT_FOUND.into_response();
+                return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
             };
             if record.control {
                 return command_capability_error(
@@ -850,9 +850,9 @@ async fn handle_library_command_action(
             }
             return match state.host.set_window_hidden(&window_id, hidden) {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
-                Ok(false) => StatusCode::NOT_FOUND.into_response(),
+                Ok(false) => crate::error::err(StatusCode::NOT_FOUND, "window not found".into()),
                 Err(error) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                    crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
                 }
             };
         }
@@ -867,13 +867,13 @@ async fn handle_library_command_action(
                         && !record.control
                 });
             if !local {
-                return StatusCode::NOT_FOUND.into_response();
+                return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
             }
             return match state.host.discard_window(&window_id) {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
-                Ok(false) => StatusCode::NOT_FOUND.into_response(),
+                Ok(false) => crate::error::err(StatusCode::NOT_FOUND, "window not found".into()),
                 Err(error) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                    crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
                 }
             };
         }
@@ -883,7 +883,7 @@ async fn handle_library_command_action(
             window: Some(scoped_window(&capability, record)),
         })
         .into_response(),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+        Err(error) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
 }
 
