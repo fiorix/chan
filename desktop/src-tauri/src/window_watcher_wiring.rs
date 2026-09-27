@@ -1632,6 +1632,60 @@ mod tests {
         attempts: Mutex<Vec<(String, tokio::time::Instant)>>,
         held: Mutex<Vec<(String, serve::RetargetTicket)>>,
         hold: std::sync::atomic::AtomicBool,
+        // Opens held by the test: first while their URL resolves, then as
+        // builds queued on the main thread.
+        hold_opens: bool,
+        resolving: Mutex<Vec<String>>,
+        queued: Mutex<Vec<(String, BuildCompletion)>>,
+    }
+
+    impl RetrySurface {
+        /// Finish every held open's URL resolution through the production
+        /// marker check, queueing its build.
+        fn resolve_opens(self: &Arc<Self>) {
+            let labels = std::mem::take(&mut *self.resolving.lock().unwrap());
+            for label in labels {
+                let fail = {
+                    let surface = Arc::clone(self);
+                    let label = label.clone();
+                    move |error: String| {
+                        surface.launches.fail(
+                            &label,
+                            false,
+                            &surface.tickets,
+                            None,
+                            &surface.builds,
+                            error,
+                        )
+                    }
+                };
+                let destroy = {
+                    let surface = Arc::clone(self);
+                    let label = label.clone();
+                    move || {
+                        surface.live.lock().unwrap().remove(&label);
+                    }
+                };
+                self.launches
+                    .build_resolved(&label, &self.builds, fail, destroy, |completion| {
+                        self.queued
+                            .lock()
+                            .unwrap()
+                            .push((label.clone(), completion));
+                        Ok(())
+                    });
+            }
+        }
+
+        /// Run every queued build on the main thread: the window exists
+        /// before its completion runs.
+        fn land_builds(&self) {
+            let queued = std::mem::take(&mut *self.queued.lock().unwrap());
+            for (label, completion) in queued {
+                self.live.lock().unwrap().insert(label);
+                completion(Ok(()));
+            }
+        }
     }
 
     impl NativeSurface for Arc<RetrySurface> {
@@ -1662,6 +1716,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((label.clone(), tokio::time::Instant::now()));
+            if self.hold_opens {
+                self.launches
+                    .begin_remote(record, false, false, &self.tickets);
+                self.resolving.lock().unwrap().push(label);
+                return;
+            }
             self.builds
                 .complete(&label, Err("native build refused".into()));
         }
@@ -1710,6 +1770,15 @@ mod tests {
 
     impl RetryHarness {
         async fn start(records: Vec<WindowRecord>, build: bool, hold: bool) -> Self {
+            Self::start_with(records, build, hold, false).await
+        }
+
+        async fn start_with(
+            records: Vec<WindowRecord>,
+            build: bool,
+            hold: bool,
+            hold_opens: bool,
+        ) -> Self {
             let library_id = records[0].library_id.clone();
             let nudge = Arc::new(Notify::new());
             let feed = RetryFeed {
@@ -1733,6 +1802,9 @@ mod tests {
                 attempts: Mutex::new(Vec::new()),
                 held: Mutex::new(Vec::new()),
                 hold: std::sync::atomic::AtomicBool::new(hold),
+                hold_opens,
+                resolving: Mutex::new(Vec::new()),
+                queued: Mutex::new(Vec::new()),
             });
             let (stop, stopped) = tokio::sync::oneshot::channel();
             let task = tokio::spawn({
@@ -2397,6 +2469,49 @@ mod tests {
             "settling an overdue refusal must wake the next try immediately"
         );
         harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    /// Stop the watcher while its first pass's open is in flight, then let
+    /// the open finish. `queued` says whether its build had passed the
+    /// marker check before the stop. Answers whether the window is open.
+    async fn a_build_in_flight_at_the_stop(stop: WatchLoopStop, queued: bool) -> bool {
+        let record = retry_record(if queued { "queued" } else { "resolving" }, 0);
+        let harness = RetryHarness::start_with(vec![record.clone()], true, false, true).await;
+        assert_eq!(harness.times(&record), vec![0], "the first pass opens");
+        if queued {
+            harness.surface.resolve_opens();
+        }
+        let surface = harness.stop(stop).await;
+        surface.resolve_opens();
+        surface.land_builds();
+        let open = surface
+            .live
+            .lock()
+            .unwrap()
+            .contains(&native_label(&record));
+        open
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_disconnect_closes_a_build_that_lands_after_it() {
+        for queued in [true, false] {
+            assert!(
+                !a_build_in_flight_at_the_stop(WatchLoopStop::CloseWindows, queued).await,
+                "queued={queued}: no window of a devserver is left open after a disconnect"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_keep_windows_stop_keeps_a_build_that_lands_after_it() {
+        assert!(
+            a_build_in_flight_at_the_stop(WatchLoopStop::KeepWindows, true).await,
+            "a stop that keeps the windows keeps the one that lands"
+        );
+        assert!(
+            !a_build_in_flight_at_the_stop(WatchLoopStop::KeepWindows, false).await,
+            "an open still resolving at the stop is never built"
+        );
     }
 
     #[tokio::test(start_paused = true)]
