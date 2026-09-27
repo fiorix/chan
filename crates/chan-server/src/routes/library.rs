@@ -489,11 +489,10 @@ async fn require_surface_bearer(
     if authorized {
         next.run(req).await
     } else {
-        (
+        crate::error::err(
             StatusCode::UNAUTHORIZED,
-            "missing or invalid surface bearer token",
+            "missing or invalid surface bearer token".into(),
         )
-            .into_response()
     }
 }
 
