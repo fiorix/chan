@@ -5597,6 +5597,73 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn window_create_required() {
+        let (_dir, host) = host();
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "POST",
+                "/api/library/windows",
+                Some(serde_json::json!({"kind":"workspace"})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "workspace_path is required",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_create_root() {
+        let error = crate::Error::Io(std::io::Error::other(
+            "workspace host blocking task failed: resolving root ended without an answer",
+        ));
+        assert_refusal(
+            create_window_root_error(error),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "io: workspace host blocking task failed: resolving root ended without an answer",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_create_stopped() {
+        let (dir, host) = host();
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "POST",
+                "/api/library/windows",
+                Some(serde_json::json!({"kind":"workspace", "workspace_path":dir.path()})),
+            )
+            .await,
+            StatusCode::CONFLICT,
+            "workspace is not running; turn it on before opening a window",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_create_registry() {
+        let (_dir, host) = host();
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "POST",
+                "/api/library/windows",
+                Some(serde_json::json!({"kind":"terminal"})),
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config: window registry not installed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn launcher_bearer() {
         let (_dir, host) = host();
         let app = launcher_router(
