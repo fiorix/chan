@@ -1440,16 +1440,21 @@ def check_aur_artifact(path: str, recipe: str, package: str) -> None:
                     sources = words[2:-1]
                     if sources and sources[-1] == "-t":
                         sources = sources[:-1]
-                    if sources and package_destination(words[-1]) and all(
+                    if (
+                        sources and package_destination(words[-1])
+                        and words[-1].startswith(("$pkgdir/usr/share/", "$pkgdir/usr/lib/"))
+                        and all(
                         re.fullmatch(r"[A-Za-z0-9_./@+-]+", source)
                         and not source.startswith(("/", "package-bin/"))
                         and ".." not in source.split("/")
                         for source in sources
+                        )
                     ):
                         continue
                 if (
                     len(words) == 4 and words[:2] == ["ln", "-s"]
-                    and words[2] == package and package_destination(words[3])
+                    and words[2] == package
+                    and words[3] in {f"$pkgdir/usr/bin/{name}" for name in ("chan", "cs") if name != package}
                 ):
                     continue
             raise ContractError(
