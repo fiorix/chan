@@ -5716,6 +5716,95 @@ mod refusal_envelopes {
         .await;
     }
 
+    fn registered_root(host: &WorkspaceHost, root: &Path) -> String {
+        let row = host.library().register_workspace(root).unwrap();
+        registered_workspace_prefix(&row.root_path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn workspace_on_missing() {
+        let (_dir, host) = host();
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                "/api/library/workspaces/missing/on",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "workspace not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_on_stopping() {
+        let (dir, host) = host();
+        let prefix = registered_root(&host, dir.path());
+        host.shutdown_all().await.unwrap();
+        let sentence = format!(
+            "the workspace host is shutting down; {} was not mounted",
+            chan_workspace::paths::canonicalize_normalized(dir.path()).display()
+        );
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                &format!("/api/library/workspaces{prefix}/on"),
+                None,
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &sentence,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_on_open() {
+        let (dir, host) = host();
+        let root = dir.path().join("notes");
+        std::fs::create_dir(&root).unwrap();
+        let prefix = registered_root(&host, &root);
+        std::fs::remove_dir(&root).unwrap();
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                &format!("/api/library/workspaces{prefix}/on"),
+                None,
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(
+                "chan-workspace: workspace root does not exist: {}",
+                root.display()
+            ),
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_on_locked() {
+        let (dir, host) = host();
+        let prefix = registered_root(&host, dir.path());
+        let _foreign = super::devserver_route_tests::hold_foreign_lock(host.library(), dir.path());
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                &format!("/api/library/workspaces{prefix}/on"),
+                None,
+            )
+            .await,
+            StatusCode::CONFLICT,
+            "workspace is open in another Chan process",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
