@@ -211,3 +211,51 @@ async fn session_list_refusal_is_json() {
     )
     .await;
 }
+
+/// A wrong method on a real route keeps the framework's 405 and the `Allow`
+/// header naming the route's methods, with the envelope for its body.
+async fn assert_method_refused(response: Response, allow: &str) {
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|value| value.to_str().ok()),
+        Some(allow),
+        "the Allow header names the route's methods"
+    );
+    assert_refusal(
+        response,
+        StatusCode::METHOD_NOT_ALLOWED,
+        json!({"error": "method not allowed"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn workspace_tenant_wrong_method_is_json() {
+    let (_cfg, _root, state) = served_state();
+    let response = crate::router(state)
+        .oneshot(
+            Request::post("/api/resolve-link")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_method_refused(response, "GET,HEAD").await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_wrong_method_is_json() {
+    let state = crate::state::test_support::make_test_state(false);
+    let response = crate::terminal_router(state)
+        .oneshot(
+            Request::delete("/api/survey/reply")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_method_refused(response, "POST").await;
+}

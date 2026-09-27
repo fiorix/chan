@@ -5013,6 +5013,38 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn wrong_method() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let response = app
+                .oneshot(
+                    HttpRequest::put("/api/devserver/workspaces")
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::ALLOW)
+                    .and_then(|value| value.to_str().ok()),
+                Some("GET,HEAD,POST"),
+                "the Allow header names the route's methods"
+            );
+            assert_refusal(
+                response,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method not allowed",
+            )
+            .await;
+        }
+
+        #[tokio::test]
         async fn forget_query() {
             framework_rejection(
                 "DELETE",
