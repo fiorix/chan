@@ -52,6 +52,9 @@ import {
   openCommandLauncher,
 } from "../state/commandLauncher.svelte";
 import { screen } from "../state/screen.svelte";
+import { backend } from "../api/backend";
+import { mintWindow, resetWindowManager } from "../state/windowManager.svelte";
+import { notices, clearNotices } from "../state/notices.svelte";
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -166,6 +169,9 @@ function closeDecision(): HTMLButtonElement {
 
 beforeEach(() => {
   sessionStorage.clear();
+  clearNotices();
+  resetWindowManager();
+  library.error = null;
   target = document.createElement("div");
   document.body.appendChild(target);
   library.workspaces = [{ ...workspace }];
@@ -186,7 +192,9 @@ afterEach(() => {
   unmount(app);
   target.remove();
   closeCommandLauncher();
+  vi.useRealTimers();
   vi.resetAllMocks();
+  vi.restoreAllMocks();
 });
 
 describe("Computers command deck", () => {
@@ -738,5 +746,79 @@ describe("focus around the deck", () => {
     await flushPromises();
     expect(document.activeElement).toBe(control);
     control.remove();
+  });
+});
+
+
+describe("Waiting command refusals", () => {
+  it.each([
+    ["refusal", "dismissed"],
+    ["refusal", "replaced"],
+    ["refusal", "visible"],
+    ["timeout", "dismissed"],
+    ["timeout", "replaced"],
+    ["timeout", "visible"],
+  ])("shows a %s once when the deck is %s", async (outcome, surface) => {
+    vi.useFakeTimers();
+    const sentence = outcome === "refusal" ? "This window cannot open." : "The window is still restoring.";
+    const child = {
+      closed: false,
+      name: "",
+      location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
+      sessionStorage: { length: 0 },
+      close: vi.fn(() => { child.closed = true; }),
+    };
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    vi.spyOn(backend, "createWindow").mockResolvedValue({ ...windowRecord, origin: "browser", connected: false });
+    vi.spyOn(backend, "discardWindow").mockResolvedValue(undefined);
+    vi.spyOn(backend, "checkWindowPage")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "The window is still restoring." }), {
+        status: 503, headers: { "Retry-After": outcome === "timeout" ? "120" : "1" },
+      }))
+      .mockResolvedValue(new Response(JSON.stringify({ error: sentence }), { status: 409 }));
+    actions.newWorkspace.mockImplementation(() => mintWindow("workspace").then(() => {}));
+    openCommandLauncher("computers");
+    flushSync();
+    result("New window").click();
+    await tick();
+    result("Project").click();
+    await vi.advanceTimersByTimeAsync(0);
+    const executionDraft = activeCommandLauncherDraft();
+    expect(executionDraft.operation?.kind).toBe("pending");
+    expect(child.location.href).toBe("about:blank");
+    if (surface !== "visible") {
+      await key("Escape");
+      await key("Escape");
+      expect(activeCommandLauncherDraft().visible).toBe(false);
+    }
+    if (surface === "replaced") {
+      openCommandLauncher("computers");
+      flushSync();
+      await key("ArrowLeft");
+      expect(activeCommandLauncherDraft().path).toEqual([]);
+      await query("focus deploy shell");
+      result("Focus").click();
+      await flushPromises();
+      expect(actions.focus).toHaveBeenCalledOnce();
+      expect(activeCommandLauncherDraft()).not.toBe(executionDraft);
+      openCommandLauncher("computers");
+      flushSync();
+    }
+    await vi.advanceTimersByTimeAsync(outcome === "timeout" ? 60_000 : 1000);
+    await flushPromises();
+    if (surface === "visible") {
+      expect(target.querySelector(".deck-operation")?.textContent).toContain(sentence);
+      expect(target.querySelectorAll(".deck-operation-icon.error")).toHaveLength(1);
+      expect(notices.items).toHaveLength(0);
+      expect(activeCommandLauncherDraft().visible).toBe(true);
+    } else {
+      expect(notices.items.map((notice) => notice.message)).toEqual([sentence]);
+      expect(library.error).toBe(sentence);
+      if (surface === "replaced") expect(target.querySelector(".deck-operation-icon.error")).toBeNull();
+      else expect(activeCommandLauncherDraft().visible).toBe(false);
+    }
+    expect(child.closed).toBe(true);
+    expect(backend.discardWindow).toHaveBeenCalledExactlyOnceWith(windowRecord.window_id);
   });
 });
