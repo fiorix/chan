@@ -103,8 +103,8 @@ function parseOperation(value: unknown): DeckOperation | null {
   if (!itemId || !title) return null;
   // `preparing`, `pending`, and `success` describe work backed by a promise
   // that does not survive a hide, reload, or handover to another source.
-  // Restoring one would paint a state nothing can clear. A background
-  // execution that really failed is persisted by the host as `error`.
+  // Restoring one would paint a state nothing can clear. An `error` is kept
+  // only when the deck showed it on a card; host-reported errors stay out.
   if (raw.kind === "preparing" || raw.kind === "pending" || raw.kind === "success") return null;
   if (raw.kind === "confirm") {
     const message = boundedString(raw.message, 1024);
