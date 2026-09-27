@@ -465,3 +465,163 @@ describe("CommandDeck non-awaited rejection", () => {
     expect(unhandled).toEqual([]);
   });
 });
+
+describe("command rejection ownership", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  function host(method: "open" | "close" | "resetDraft"): void {
+    (app[method] as () => void)();
+  }
+
+  function draft(): import("../command-deck/model").DeckDraft {
+    return (app.currentDraft as () => import("../command-deck/model").DeckDraft)();
+  }
+
+  function start(id: string, awaitResult: boolean, onChoose: (entry: DeckItem) => Promise<void>): {
+    entry: DeckItem;
+    onError: ReturnType<typeof vi.fn>;
+  } {
+    const entry = { ...item(undefined), id, title: id, awaitResult };
+    const onError = vi.fn();
+    app = mount(CommandDeckHarness, { target, props: { items: [entry], onChoose, onError } });
+    closeResult().click();
+    return { entry, onError };
+  }
+
+  for (const awaitResult of [false, true]) {
+    const path = awaitResult ? "awaited" : "plain";
+    for (const state of ["owned", "hidden", "hidden replacement", "visible replacement"] as const) {
+      it(`${path} rejection on ${state} uses exactly one destination`, async () => {
+        const pending = deferred<void>();
+        const { entry, onError } = start(`${path} ${state}`, awaitResult, () => pending.promise);
+        await flush();
+        const original = draft();
+        if (state !== "owned") host("close");
+        if (state.includes("replacement")) {
+          (app.replaceDraft as (visible: boolean) => void)(state === "visible replacement");
+        }
+        await flush();
+        const error = new Error(`${path} ${state} refused`);
+        pending.reject(error);
+        await flush();
+        if (state === "owned") {
+          expect(target.querySelector(".deck-operation")?.textContent).toContain(error.message);
+          expect(target.querySelectorAll(".deck-operation-icon.error")).toHaveLength(1);
+          expect(onError).not.toHaveBeenCalled();
+        } else {
+          expect(onError).toHaveBeenCalledExactlyOnceWith(entry, error);
+          expect(original.operation).toBeNull();
+          expect(draft().operation).toBeNull();
+          host("open");
+          await flush();
+          expect(target.querySelector(".deck-operation")).toBeNull();
+          expect(closeResult()).not.toBeNull();
+        }
+      });
+    }
+  }
+
+  it("released pending rejection stays off the card after reopening", async () => {
+    const pending = deferred<void>();
+    const { entry, onError } = start("released", true, () => pending.promise);
+    await flush();
+    escape();
+    await flush();
+    host("close");
+    await flush();
+    host("open");
+    await flush();
+    const error = new Error("released refused");
+    pending.reject(error);
+    await flush();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(entry, error);
+    expect(draft().operation).toBeNull();
+    expect(closeResult()).not.toBeNull();
+  });
+
+  it("plain rejection remembers a flushed close and reopen", async () => {
+    const pending = deferred<void>();
+    const { entry, onError } = start("reopened", false, () => pending.promise);
+    await flush();
+    host("close");
+    await flush();
+    host("open");
+    await flush();
+    const error = new Error("reopened refused");
+    pending.reject(error);
+    await flush();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(entry, error);
+    expect(draft().operation).toBeNull();
+  });
+
+  for (const firstAwaited of [false, true]) {
+    for (const secondAwaited of [false, true]) {
+      it(`first ${firstAwaited ? "awaited" : "plain"} rejection preserves a newer ${secondAwaited ? "pending" : "plain"} run`, async () => {
+        const first = deferred<void>();
+        const second = deferred<void>();
+        const onChoose = vi.fn().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+        const { entry, onError } = start(`overlap ${firstAwaited} ${secondAwaited}`, firstAwaited, onChoose);
+        await flush();
+        if (firstAwaited) { escape(); await flush(); }
+        (app.setItems as (entries: DeckItem[]) => void)([{ ...entry, awaitResult: secondAwaited }]);
+        await flush();
+        closeResult().click();
+        await flush();
+        const newerOperation = draft().operation;
+        const error = new Error("first refused");
+        first.reject(error);
+        await flush();
+        expect(onError).toHaveBeenCalledExactlyOnceWith(entry, error);
+        expect(draft().operation).toBe(newerOperation);
+        expect(draft().operation?.kind ?? null).toBe(secondAwaited ? "pending" : null);
+        host("close");
+        second.resolve();
+        await flush();
+        await vi.advanceTimersByTimeAsync(260);
+      });
+    }
+  }
+
+  for (const lazy of [false, true]) {
+    it(`a newer ${lazy ? "preparation" : "confirmation"} keeps its card when a plain run rejects`, async () => {
+      const pending = deferred<void>();
+      const preparing = deferred<DeckConfirm>();
+      const { entry, onError } = start(`question ${lazy}`, false, () => pending.promise);
+      await flush();
+      (app.setItems as (entries: DeckItem[]) => void)([{
+        ...entry, confirm: lazy ? () => preparing.promise : confirmation("Current question"),
+      }]);
+      await flush();
+      closeResult().click();
+      await flush();
+      const question = draft().operation;
+      const error = new Error("old command refused");
+      pending.reject(error);
+      await flush();
+      expect(onError).toHaveBeenCalledExactlyOnceWith(entry, error);
+      expect(draft().operation).toBe(question);
+      expect(draft().operation?.kind).toBe(lazy ? "preparing" : "confirm");
+      preparing.resolve(confirmation("Current question"));
+      await flush();
+    });
+  }
+
+  it("remembers the host closing before the run even when reopened before effects", async () => {
+    const pending = deferred<void>();
+    const { entry, onError } = start("synchronous close", false, () => {
+      host("close");
+      host("resetDraft");
+      return pending.promise;
+    });
+    // Both host writes happen before Svelte can observe a closed prop in an effect.
+    host("open");
+    await flush();
+    const error = new Error("reset command refused");
+    pending.reject(error);
+    await flush();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(entry, error);
+    expect(draft().operation).toBeNull();
+    expect(closeResult()).not.toBeNull();
+  });
+});

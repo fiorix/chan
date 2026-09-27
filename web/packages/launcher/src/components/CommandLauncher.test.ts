@@ -11,6 +11,13 @@ const actions = vi.hoisted(() => ({
   newWorkspace: vi.fn(),
   setShown: vi.fn(),
   setPower: vi.fn(),
+  theme: vi.fn(),
+  desktop: false,
+}));
+
+vi.mock("../state/theme.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/theme.svelte")>()),
+  toggleTheme: actions.theme,
 }));
 
 vi.mock("../api/backend", async () => {
@@ -22,7 +29,7 @@ vi.mock("../state/capabilities", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/capabilities")>()),
   surface: "devserver",
   canMutateRegistry: true,
-  hasDesktopBridge: false,
+  get hasDesktopBridge() { return actions.desktop; },
   selfManagedWindows: true,
   readOnly: false,
   hostOs: "linux",
@@ -50,7 +57,9 @@ import {
   closeCommandLauncher,
   commandLauncher,
   openCommandLauncher,
+  persistCommandLauncherDraft,
 } from "../state/commandLauncher.svelte";
+import { loadSessionDeckDraft } from "@chan/web-shared/command-deck";
 import { screen } from "../state/screen.svelte";
 import { backend } from "../api/backend";
 import { mintWindow, resetWindowManager } from "../state/windowManager.svelte";
@@ -168,6 +177,7 @@ function closeDecision(): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  actions.desktop = false;
   sessionStorage.clear();
   clearNotices();
   resetWindowManager();
@@ -813,12 +823,50 @@ describe("Waiting command refusals", () => {
       expect(notices.items).toHaveLength(0);
       expect(activeCommandLauncherDraft().visible).toBe(true);
     } else {
-      expect(notices.items.map((notice) => notice.message)).toEqual([sentence]);
-      expect(library.error).toBe(sentence);
+      expect(notices.items.map((notice) => notice.message)).toEqual([`Project: ${sentence}`]);
+      expect(library.error).toBe(`Project: ${sentence}`);
       if (surface === "replaced") expect(target.querySelector(".deck-operation-icon.error")).toBeNull();
       else expect(activeCommandLauncherDraft().visible).toBe(false);
+      expect(executionDraft.operation).toBeNull();
+      openCommandLauncher("computers");
+      await flushPromises();
+      expect(target.querySelector(".deck-operation")).toBeNull();
+      persistCommandLauncherDraft();
+      unmount(app);
+      commandLauncher.drafts.computers = loadSessionDeckDraft("chan.command-launcher.v1:computers", "computers");
+      app = mount(CommandLauncher, { target }) as Record<string, unknown>;
+      await flushPromises();
+      expect(target.querySelector(".deck-operation")).toBeNull();
+      expect(notices.items.map((notice) => notice.message)).toEqual([`Project: ${sentence}`]);
     }
     expect(child.closed).toBe(true);
     expect(backend.discardWindow).toHaveBeenCalledExactlyOnceWith(windowRecord.window_id);
+  });
+
+  it("reports a hidden plain launcher rejection once with its title", async () => {
+    vi.useFakeTimers();
+    unmount(app);
+    actions.desktop = true;
+    let reject!: (reason: unknown) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    actions.theme.mockImplementation(() => pending);
+    app = mount(CommandLauncher, { target }) as Record<string, unknown>;
+    openCommandLauncher("computers");
+    flushSync();
+    await query("switch theme");
+    const row = target.querySelector<HTMLButtonElement>("button.deck-result")!;
+    const title = row.querySelector(".deck-result-title")!.textContent!;
+    row.click();
+    await flushPromises();
+    expect(actions.theme).toHaveBeenCalledOnce();
+    closeCommandLauncher();
+    await flushPromises();
+    reject(new Error("Theme write refused"));
+    await flushPromises();
+    expect(notices.items.map((notice) => notice.message)).toEqual([`${title}: Theme write refused`]);
+    expect(activeCommandLauncherDraft().operation).toBeNull();
+    openCommandLauncher("computers");
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")).toBeNull();
   });
 });
