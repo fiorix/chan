@@ -30,6 +30,7 @@ import { setDemoReset } from "./demo.svelte";
 
 interface FakeWin {
   closed: boolean;
+  name: string;
   close: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   location: { href: string };
@@ -60,6 +61,7 @@ function clonedSessionStorage(source: Storage): Storage {
 function fakeWin(): FakeWin {
   const w: FakeWin = {
     closed: false,
+    name: "",
     close: vi.fn(() => {
       w.closed = true;
     }),
@@ -109,7 +111,9 @@ beforeEach(() => {
   setWindowVisibility.mockReset().mockResolvedValue(undefined);
   opened = [];
   vi.spyOn(window, "open").mockImplementation((url, name) => {
-    const win = fakeWin();
+    const win = opened.find((entry) => entry.win.name === name && name !== "_blank" && !entry.win.closed)?.win ?? fakeWin();
+    if (name !== "_blank") win.name = String(name ?? "");
+    if (url) win.location.href = String(url);
     opened.push({ win, url: String(url ?? ""), name: String(name ?? "") });
     return win as unknown as Window;
   });
@@ -282,23 +286,82 @@ describe("mintWindow", () => {
 });
 
 describe("openWindowRecord", () => {
-  it("opens the record URL named by window_id, stores the handle, clears attention", () => {
+  it("opens blank by name in the gesture, checks, then navigates", async () => {
     const rec = record({ window_id: "w-2", prefix: "proj-2" });
-    reconcileWindows(set([{ ...rec, origin: "browser" }])); // flags it orphan first
-    expect(hasWindowAttention("w-2")).toBe(true);
-    const h = openWindowRecord(rec);
-    expect(h).not.toBeNull();
-    expect(opened.at(-1)!.url).toContain("/proj-2/");
-    expect(opened.at(-1)!.name).toBe("w-2");
+    reconcileWindows(set([{ ...rec, origin: "browser" }]));
+    const pending = openWindowRecord(rec);
+    expect(opened).toHaveLength(1);
+    expect(opened[0].url).toBe("");
+    expect(opened[0].name).toBe("w-2");
+    expect(window.open).toHaveBeenCalledBefore(checkWindowPage);
+    const h = await pending;
+    expect(h).toBe(opened[0].win);
+    expect(opened[0].win.location.href).toContain("/proj-2/");
     expect(hasWindowHandle("w-2")).toBe(true);
     expect(hasWindowAttention("w-2")).toBe(false);
+  });
+
+  it("focuses an existing page without navigating or checking it", async () => {
+    const live = fakeWin();
+    live.location.href = "http://localhost:3000/proj-1/?w=w-1#editor";
+    vi.spyOn(window, "open").mockImplementation((url) => {
+      if (url) live.location.href = String(url);
+      return live as unknown as Window;
+    });
+    const h = await openWindowRecord(record({}));
+    expect(h).toBe(live);
+    expect(live.focus).toHaveBeenCalledOnce();
+    expect(live.location.href).toBe("http://localhost:3000/proj-1/?w=w-1#editor");
+    expect(checkWindowPage).not.toHaveBeenCalled();
+  });
+
+  it("reuses a minted window by its record name", async () => {
+    createWindow.mockResolvedValue(record({}));
+    await mintWindow("workspace");
+    const child = opened[0].win;
+    checkWindowPage.mockClear();
+    await openWindowRecord(record({}));
+    expect(opened[1].win).toBe(child);
+    expect(checkWindowPage).not.toHaveBeenCalled();
+  });
+
+  it("keeps a re-opened window blank until the gate opens", async () => {
+    vi.useFakeTimers();
+    checkWindowPage.mockImplementationOnce(async () => gateResponse());
+    const pending = openWindowRecord(record({}));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(opened[0].win.location.href).toBe("");
+    expect(hasWindowHandle("w-1")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(opened[0].win.location.href).toContain("/proj-1/");
+    expect(checkWindowPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes a refused re-open and raises the server sentence", async () => {
+    checkWindowPage.mockResolvedValue(new Response('{"error":"This page cannot open."}', { status: 409 }));
+    const outcome = await Promise.resolve(openWindowRecord(record({}))).then(() => null, (error: unknown) => error);
+    expect(outcome).toMatchObject({ status: 409, message: "This page cannot open." });
+    expect(opened[0].win.closed).toBe(true);
+    expect(opened[0].win.location.href).toBe("");
+    expect(hasWindowHandle("w-1")).toBe(false);
+  });
+
+  it("ends a re-open wait at sixty seconds with the server sentence", async () => {
+    vi.useFakeTimers();
+    checkWindowPage.mockImplementation(async () => gateResponse("120"));
+    const pending = Promise.resolve(openWindowRecord(record({}))).then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(await pending).toMatchObject({ status: 503, message: "devserver is restoring terminal sessions" });
+    expect(opened[0].win.closed).toBe(true);
+    expect(opened[0].win.location.href).toBe("");
   });
 });
 
 describe("closeWindowRecord", () => {
   it("discards via the web op and closes the local handle by default", async () => {
     const rec = record({ window_id: "w-3" });
-    openWindowRecord(rec);
+    await openWindowRecord(rec);
     const handle = opened.at(-1)!.win;
     await closeWindowRecord(rec, { actingWindowId: "w-leader" });
     expect(discardWindow).toHaveBeenCalledWith("w-3", "w-leader");
@@ -309,7 +372,7 @@ describe("closeWindowRecord", () => {
 
   it("hides via visibility when opts.hide is set", async () => {
     const rec = record({ window_id: "w-4" });
-    openWindowRecord(rec);
+    await openWindowRecord(rec);
     await closeWindowRecord(rec, { hide: true, actingWindowId: "w-leader" });
     expect(setWindowVisibility).toHaveBeenCalledWith("w-4", true, "w-leader");
     expect(discardWindow).not.toHaveBeenCalled();
@@ -336,18 +399,18 @@ describe("reconcileWindows", () => {
     expect(hasWindowAttention("w-hidden")).toBe(false);
   });
 
-  it("clears the orphan flag once the record has a live handle", () => {
+  it("clears the orphan flag once the record has a live handle", async () => {
     const rec = record({ window_id: "w-b", origin: "browser" });
     reconcileWindows(set([rec]));
     expect(hasWindowAttention("w-b")).toBe(true);
-    openWindowRecord(rec);
+    await openWindowRecord(rec);
     reconcileWindows(set([rec]));
     expect(hasWindowAttention("w-b")).toBe(false);
   });
 
-  it("discards a browser-origin record whose local browser handle was closed", () => {
+  it("discards a browser-origin record whose local browser handle was closed", async () => {
     const rec = record({ window_id: "w-local-closed", origin: "browser" });
-    openWindowRecord(rec);
+    await openWindowRecord(rec);
     const handle = opened.at(-1)!.win;
     handle.closed = true;
 
@@ -385,9 +448,9 @@ describe("reconcileWindows", () => {
     expect(hasWindowAttention("w-reconnect")).toBe(true);
   });
 
-  it("closes the handle and clears attention when a record leaves the feed", () => {
+  it("closes the handle and clears attention when a record leaves the feed", async () => {
     const rec = record({ window_id: "w-c", origin: "browser" });
-    openWindowRecord(rec);
+    await openWindowRecord(rec);
     const handle = opened.at(-1)!.win;
     reconcileWindows(set([rec])); // present
     reconcileWindows(set([])); // gone => discard

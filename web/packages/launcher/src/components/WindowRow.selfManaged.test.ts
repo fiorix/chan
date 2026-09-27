@@ -6,6 +6,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import WindowRow from "./WindowRow.svelte";
+import { resetWindowManager } from "../state/windowManager.svelte";
+import { focusComputerWindow } from "../state/computerActions";
 import { library } from "../state/library.svelte";
 import type { WindowRecord } from "../api/library";
 
@@ -56,9 +58,47 @@ afterEach(() => {
   target = null;
   app = null;
   library.leaders = {};
+  library.error = null;
+  resetWindowManager();
+  vi.restoreAllMocks();
 });
 
 describe("WindowRow self-managed actions", () => {
+  it("reports a page refusal from the Open button", async () => {
+    const { backend } = await import("../api/backend");
+    vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response('{"error":"This window is unavailable."}', { status: 500 }));
+    const child = {
+      closed: false,
+      location: { href: "" },
+      document: document.implementation.createHTMLDocument(),
+      focus: vi.fn(),
+      close: vi.fn(),
+    };
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const el = render(win({ window_id: "w", library_id: "local" }));
+    (el.querySelector('[aria-label="Open window"]') as HTMLButtonElement).click();
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "w");
+    await vi.waitFor(() => expect(library.error).toBe("This window is unavailable."));
+    expect(child.close).toHaveBeenCalled();
+  });
+
+  it("awaits a page refusal in the Computers focus action", async () => {
+    const { backend } = await import("../api/backend");
+    vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response('{"error":"Window focus was refused."}', { status: 404 }));
+    const child = {
+      closed: false,
+      location: { href: "" },
+      document: document.implementation.createHTMLDocument(),
+      focus: vi.fn(),
+      close: vi.fn(),
+    };
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const pending = focusComputerWindow(win({ window_id: "w", library_id: "local" }));
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "w");
+    const outcome = await pending.then(() => null, (error: unknown) => error);
+    expect(outcome).toMatchObject({ message: "Window focus was refused." });
+  });
+
   it("renders OPEN plus a leader-allowed HIDE toggle when leaderless", () => {
     const el = render(win({ window_id: "w", library_id: "local" }));
     expect(el.querySelector('[aria-label="Open window"]')).not.toBeNull();
