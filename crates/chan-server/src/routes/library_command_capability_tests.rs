@@ -45,6 +45,25 @@ impl DevserverFeedSource for RemoteFeed {
     }
 }
 
+struct LocalFeed(String);
+
+impl DevserverFeedSource for LocalFeed {
+    fn windows(&self) -> Vec<WindowRecord> {
+        let mut rows = RemoteFeed.windows();
+        rows[0].library_id = self.0.clone();
+        rows[0].window_id = "feed-window".into();
+        rows
+    }
+
+    fn workspaces(&self) -> Vec<LauncherWorkspace> {
+        Vec::new()
+    }
+
+    fn pane_color(&self, _library_id: &str) -> Option<String> {
+        None
+    }
+}
+
 struct Fixture {
     _config: tempfile::TempDir,
     _store: tempfile::TempDir,
@@ -57,17 +76,27 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with_registry(true, false).await
+}
+
+async fn fixture_with_registry(registry: bool, local_feed: bool) -> Fixture {
     let config = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let library = Library::open_at(config.path().join("config.toml")).unwrap();
     let row = library.register_workspace(workspace.path()).unwrap();
     let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
-    host.install_window_registry(
-        Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
-        "local".into(),
-    );
-    host.install_devserver_feed(Arc::new(RemoteFeed));
+    if registry {
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
+            "local".into(),
+        );
+    }
+    if local_feed {
+        host.install_devserver_feed(Arc::new(LocalFeed(host.library_id().into())));
+    } else {
+        host.install_devserver_feed(Arc::new(RemoteFeed));
+    }
     let prefix = chan_library::allocate_workspace_prefix(workspace.path()).unwrap();
     host.open_or_get_registered_workspace(
         workspace.path(),
@@ -78,15 +107,20 @@ async fn fixture() -> Fixture {
     // The record stores the registry row's root, as the window route does;
     // the tempdir's own spelling is only an alias of it wherever the temp
     // path is not canonical.
-    let record = host
-        .mint_window_with_origin(
-            WindowKind::Workspace,
-            Some(row.root_path.to_string_lossy().into_owned()),
-            WindowOrigin::Browser,
-        )
-        .expect("mint invoking window");
+    let (window_id, tenant_token) = if registry {
+        let record = host
+            .mint_window_with_origin(
+                WindowKind::Workspace,
+                Some(row.root_path.to_string_lossy().into_owned()),
+                WindowOrigin::Browser,
+            )
+            .expect("mint invoking window");
+        (record.window_id, record.token)
+    } else {
+        ("unregistered-invoker".into(), String::new())
+    };
     let presence = host
-        .test_connect_window_presence(&prefix, &record.window_id)
+        .test_connect_window_presence(&prefix, &window_id)
         .expect("connect invoking window");
     Fixture {
         _config: config,
@@ -94,8 +128,8 @@ async fn fixture() -> Fixture {
         _workspace: workspace,
         host,
         prefix,
-        window_id: record.window_id,
-        tenant_token: record.token,
+        window_id,
+        tenant_token,
         presence: Some(presence),
     }
 }
@@ -482,6 +516,50 @@ mod refusal_envelopes {
         );
         assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
         assert_refusal(response, status, message).await;
+    }
+
+    async fn action_refusal(
+        action: serde_json::Value,
+        registry: bool,
+        status: StatusCode,
+        message: &str,
+    ) {
+        let fixture = fixture_with_registry(registry, true).await;
+        let app = launcher_router(fixture.host.clone(), None, None);
+        let cap = mint(&app, &fixture).await;
+        check(
+            send(
+                &app,
+                "POST",
+                &format!("/api/library/command-capabilities/{cap}/actions"),
+                None,
+                Some(action),
+            )
+            .await,
+            status,
+            message,
+        )
+        .await;
+    }
+
+    macro_rules! action_refusals {
+        ($($name:ident: ($action:tt, $registry:literal, $status:ident, $message:literal)),+ $(,)?) => {$(
+            #[tokio::test]
+            async fn $name() {
+                action_refusal(serde_json::json!($action), $registry, StatusCode::$status, $message).await;
+            }
+        )+};
+    }
+
+    action_refusals! {
+        action_workspace_missing: ({"action":"new_workspace_window", "workspace_id":"missing"}, true, NOT_FOUND, "workspace not found"),
+        action_visibility_missing: ({"action":"set_window_visibility", "window_id":"missing", "hidden":true}, true, NOT_FOUND, "window not found"),
+        action_visibility_unregistered: ({"action":"set_window_visibility", "window_id":"feed-window", "hidden":true}, true, NOT_FOUND, "window not found"),
+        action_visibility_no_registry: ({"action":"set_window_visibility", "window_id":"feed-window", "hidden":true}, false, INTERNAL_SERVER_ERROR, "config: window registry not installed"),
+        action_close_missing: ({"action":"close_window", "window_id":"missing"}, true, NOT_FOUND, "window not found"),
+        action_close_unregistered: ({"action":"close_window", "window_id":"feed-window"}, true, NOT_FOUND, "window not found"),
+        action_close_no_registry: ({"action":"close_window", "window_id":"feed-window"}, false, INTERNAL_SERVER_ERROR, "config: window registry not installed"),
+        action_mint_no_registry: ({"action":"new_terminal"}, false, INTERNAL_SERVER_ERROR, "config: window registry not installed"),
     }
 
     #[tokio::test]
