@@ -445,6 +445,39 @@ describe("openWindowRecord", () => {
     expect(navigation).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["mint", "re-open", "JSON page"])("keeps one navigation while a %s load commits", async (action) => {
+    vi.useFakeTimers();
+    const child = fakeWin();
+    let href = action === "JSON page" ? "http://localhost:3000/proj-1/?w=w-1" : "about:blank";
+    if (action === "JSON page") Object.defineProperty(child.document, "contentType", { value: "application/json" });
+    const navigate = vi.fn();
+    Object.defineProperty(child.location, "href", { get: () => href, set: navigate });
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const rec = record({});
+    createWindow.mockResolvedValue(rec);
+    await (action === "mint" ? mintWindow("workspace") : openWindowRecord(rec));
+    child.document.body.textContent = "Navigation committing";
+    await openWindowRecord(rec);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(child.document.body.textContent).toBe("Navigation committing");
+
+    // A later refusal is a different document on the same window object.
+    href = "http://localhost:3000/proj-1/?w=w-1";
+    child.document = document.implementation.createHTMLDocument();
+    Object.defineProperty(child.document, "contentType", { value: "application/json" });
+    await openWindowRecord(rec);
+    expect(checkWindowPage).toHaveBeenCalledTimes(2);
+    expect(navigate).toHaveBeenCalledTimes(2);
+
+    child.closed = true;
+    const replacement = fakeWin();
+    open.mockReturnValue(replacement as unknown as Window);
+    expect(await openWindowRecord(rec)).toBe(replacement);
+    expect(checkWindowPage).toHaveBeenCalledTimes(3);
+    expect(replacement.location.href).toContain("/proj-1/?w=w-1");
+  });
+
   it.each(["mint", "re-open"] as const)("keeps a replacement handle when a %s wait ends", async (action) => {
     vi.useFakeTimers();
     const rec = record({});
