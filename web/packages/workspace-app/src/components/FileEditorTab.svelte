@@ -177,6 +177,14 @@
   // query and does not pull the module into the eager graph.
   let canvasRef: { focusCanvas: () => void; flushPendingEdits: () => void } | undefined = $state();
   $effect(() => registerPendingEditFlush(tab.id, () => canvasRef?.flushPendingEdits()));
+
+  function onCanvasSceneChange(json: string): void {
+    // A loading or failed read holds a placeholder scene. Read the live
+    // tab state because a close or teardown can flush before effects run.
+    if (tab.loading || tab.error || tab.fileMissing) return;
+    setTabContent(tab, json);
+  }
+
   let ExcalidrawCanvas =
     $state<typeof import("../editor/ExcalidrawCanvas.svelte").default | null>(null);
   $effect(() => {
@@ -1444,7 +1452,7 @@
             {active}
             content={tab.content}
             dark={effectiveHybridSurfaceTheme("editor") === "dark"}
-            onSceneChange={(json) => setTabContent(tab, json)}
+            onSceneChange={onCanvasSceneChange}
             session={sceneSession}
             readonly={readOnly}
           />
