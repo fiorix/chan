@@ -332,7 +332,17 @@ impl TauriNativeSurface {
                         return;
                     }
                     Ok(serve::RetargetOutcome::Navigated) => Ok(()),
-                    Ok(serve::RetargetOutcome::NotReady) => Err("target is not ready".into()),
+                    Ok(serve::RetargetOutcome::NotReady) => {
+                        state.retarget_tickets.with_current(
+                            ticket.as_ref().expect("retarget ticket"),
+                            || {
+                                remote_launches.lock().unwrap().remove(&label);
+                                tracing::debug!(window = %label, "window watcher: target is not ready");
+                                builds.retry();
+                            },
+                        );
+                        return;
+                    }
                     Ok(serve::RetargetOutcome::Superseded) => return,
                     Err(e) => Err(e),
                 }
