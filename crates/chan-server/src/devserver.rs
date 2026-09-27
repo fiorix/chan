@@ -7028,6 +7028,11 @@ mod tests {
         let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
         restore_prepared_workspaces(Arc::clone(&restarted), attempts, shutdown_rx).await;
         let entries = restarted.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the restarted library must retain its one off row: {entries:?}"
+        );
         assert!(
             entries.iter().all(|entry| !entry.on),
             "the relinked root turned off is on after a restart: {entries:?}"
