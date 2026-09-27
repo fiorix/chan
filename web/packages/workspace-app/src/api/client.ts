@@ -1596,19 +1596,15 @@ export interface SurveySpec {
 /// from an answer. `followup` is dismiss-shaped: a bare "host will follow up
 /// later" signal telling the asking agent an answer is coming in a separate
 /// prompt.
-/// `windowId` (the answering window's own session id) lets the server exclude
-/// this window from the `close_survey` fan-out, so the window that just replied
-/// does not race a `answered_elsewhere` close against its own local clear.
 export type SurveyReplyRequest =
   | {
       surveyId: string;
       kind: "option";
       optionIndex: number;
       optionLabel: string;
-      windowId?: string;
     }
-  | { surveyId: string; kind: "followup"; windowId?: string }
-  | { surveyId: string; kind: "dismissed"; windowId?: string };
+  | { surveyId: string; kind: "followup" }
+  | { surveyId: string; kind: "dismissed" };
 
 /// Body of `POST /api/window/reply` (the `cs pane` reply). camelCase to match
 /// the server's `WindowReplyRequest`. `payload` is opaque to the server (the

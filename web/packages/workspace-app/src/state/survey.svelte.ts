@@ -32,7 +32,6 @@
 
 import {
   api,
-  sessionWindowId,
   type SurveySpec,
   type SurveyReplyRequest,
 } from "../api/client";
@@ -240,14 +239,13 @@ export async function pickOption(slot: SurveySlot, index: number): Promise<void>
     kind: "option",
     optionIndex: index,
     optionLabel: label,
-    windowId: sessionWindowId(),
   };
   await send(slot, e, reply, "survey reply failed");
 }
 
 /// Reply with [F] for the survey on `slot`. F is standard on every survey,
 /// not an opt-in affordance: a bare "host will follow up later" signal,
-/// dismiss-shaped (surveyId + windowId only), telling the asking agent an
+/// dismiss-shaped (the surveyId only), telling the asking agent an
 /// answer is coming in a separate prompt.
 export async function requestFollowup(slot: SurveySlot): Promise<void> {
   const e = entry(slot);
@@ -255,7 +253,6 @@ export async function requestFollowup(slot: SurveySlot): Promise<void> {
   const reply: SurveyReplyRequest = {
     surveyId: e.spec.surveyId,
     kind: "followup",
-    windowId: sessionWindowId(),
   };
   await send(slot, e, reply, "survey followup failed");
 }
@@ -270,7 +267,6 @@ export async function dismissSurvey(slot: SurveySlot): Promise<void> {
   const reply: SurveyReplyRequest = {
     surveyId: e.spec.surveyId,
     kind: "dismissed",
-    windowId: sessionWindowId(),
   };
   await send(slot, e, reply, "survey dismiss failed");
 }
