@@ -363,9 +363,11 @@ impl RemoteLaunches {
     }
 
     /// Whether a refresh dispatches a retarget. `present` says whether the
-    /// window's webview exists; a Reload addresses only an existing one.
+    /// window's webview exists. A window still being built has none: its
+    /// build owns it, and the pass after the build lands retargets it if the
+    /// key moved, so no attempt is ever dispatched at an absent webview.
     fn admit(&self, record: &WindowRecord, gateway: bool, reload: bool, present: bool) -> bool {
-        (present || !reload) && self.needs_retarget(record, gateway, reload)
+        present && self.needs_retarget(record, gateway, reload)
     }
 
     fn begin_remote(
