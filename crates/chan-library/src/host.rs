@@ -3108,6 +3108,7 @@ impl WorkspaceHost {
         let _root_lock = self.root_locks.lock(&target).await;
         self.close_workspace_for_root_locked(root, &target, force, record_off)
             .await
+            .map(|(outcome, _stored)| outcome)
     }
 
     /// Close-by-root body while the lock of the root keyed `target` is held.
@@ -3118,14 +3119,17 @@ impl WorkspaceHost {
     /// under the same guard so its unregister cannot race an open of that
     /// root. `target` is `root`'s canonical key, which the caller computed off
     /// the runtime thread before taking the lock.
+    ///
+    /// Also returns the root the workspace's registry row stores, when the
+    /// close found the row, for a removal to forget its overlay rows by.
     async fn close_workspace_for_root_locked(
         &self,
         root: &Path,
         target: &Path,
         force: bool,
         record_off: bool,
-    ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let prefix = {
+    ) -> Result<(WorkspaceLifecycleOutcome, Option<PathBuf>), Error> {
+        let mounted = {
             let workspaces = self
                 .workspaces
                 .read()
@@ -3133,27 +3137,28 @@ impl WorkspaceHost {
             workspaces
                 .values()
                 .find(|runtime| runtime.canonical_root == target)
-                .map(|runtime| runtime.handle.prefix.clone())
+                .map(|runtime| (runtime.handle.prefix.clone(), runtime.root.clone()))
         };
-        match prefix {
-            Some(prefix) => {
+        match mounted {
+            Some((prefix, stored)) => {
                 let outcome = self
                     .close_workspace_impl(&prefix, force, record_off.then_some(target))
                     .await?;
                 if record_off && outcome.not_found() {
                     if let Some(overlay) = self.workspace_overlay() {
-                        overlay.set(&target.to_string_lossy(), false);
+                        overlay.set_each(&overlay_spellings(target, Some(&stored)), false);
                     }
                 }
-                Ok(outcome)
+                Ok((outcome, Some(stored)))
             }
             None => {
-                let registered = {
+                let stored = {
                     let library = self.library.clone();
                     let root = root.to_path_buf();
-                    self.off_runtime(move || registered_workspace_paths(&library, &root).is_some())
+                    self.off_runtime(move || registered_stored_root(&library, &root))
                         .await?
                 };
+                let registered = stored.is_some();
                 let starting = self
                     .mount_state
                     .lock()
@@ -3162,15 +3167,16 @@ impl WorkspaceHost {
                     .is_some_and(|state| matches!(state, MountState::Starting));
                 if record_off && registered {
                     if let Some(overlay) = self.workspace_overlay() {
-                        overlay.set(&target.to_string_lossy(), false);
+                        overlay.set_each(&overlay_spellings(target, stored.as_deref()), false);
                     }
                 }
                 self.clear_workspace_lifecycle_by_key(target);
-                if registered && starting {
-                    Ok(WorkspaceLifecycleOutcome::Completed)
+                let outcome = if registered && starting {
+                    WorkspaceLifecycleOutcome::Completed
                 } else {
-                    Ok(WorkspaceLifecycleOutcome::NotFound)
-                }
+                    WorkspaceLifecycleOutcome::NotFound
+                };
+                Ok((outcome, stored))
             }
         }
     }
@@ -3203,15 +3209,17 @@ impl WorkspaceHost {
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
         // here. Refusal leaves the runtime, registry, overlay, and windows intact.
-        match self
+        let stored = match self
             .close_workspace_for_root_locked(root, &target, force, true)
             .await?
         {
-            WorkspaceLifecycleOutcome::Refused { active_terminals } => {
+            (WorkspaceLifecycleOutcome::Refused { active_terminals }, _) => {
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
             }
-            WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
-        }
+            (WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound, stored) => {
+                stored
+            }
+        };
 
         let mut removing = WorkspaceRemoveGuard::new(self, target.clone());
         self.mark_mount_removing_by_key(&target);
@@ -3222,7 +3230,7 @@ impl WorkspaceHost {
         //
         // Forget the on/off state so a devserver restart doesn't re-mount it.
         if let Some(overlay) = self.workspace_overlay() {
-            overlay.forget(&target.to_string_lossy());
+            overlay.forget_each(&overlay_spellings(&target, stored.as_deref()));
         }
         // FORGET is the ONLY path that purges the window records: the workspace is
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
@@ -3344,7 +3352,7 @@ impl WorkspaceHost {
         // yield so cancellation cannot restore this workspace on the next boot.
         if let Some(path) = off_path {
             if let Some(overlay) = self.workspace_overlay() {
-                overlay.set(&path.to_string_lossy(), false);
+                overlay.set_each(&overlay_spellings(path, Some(&runtime.root)), false);
             }
         }
         // Turning a workspace OFF (unmount) PRESERVES its persisted window records
@@ -4333,6 +4341,32 @@ fn canonical_key(root: &Path) -> PathBuf {
 /// root's filesystem, which the window feed must not do for every record.
 fn stored_window_key(path: &Path) -> PathBuf {
     chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(path))
+}
+
+/// The overlay rows one workspace is kept under: the key a user's action
+/// resolved, where its off is recorded, and the root its registry row stores
+/// when that differs, where its on-row is kept (the launcher's on and the
+/// desktop's snapshot write the stored root). A root that moved under a
+/// symlink after it was registered has both.
+fn overlay_spellings(key: &Path, stored: Option<&Path>) -> Vec<String> {
+    let mut paths = vec![key.to_string_lossy().into_owned()];
+    if let Some(stored) = stored.filter(|stored| *stored != key) {
+        paths.push(stored.to_string_lossy().into_owned());
+    }
+    paths
+}
+
+/// The root the registry row matching `root` stores, found by the lookup
+/// [`registered_workspace_paths`] makes: the row whose metadata directory
+/// that lookup names, read from the rows as listed, which asks no
+/// filesystem. `None` when no row matches.
+fn registered_stored_root(library: &Library, root: &Path) -> Option<PathBuf> {
+    let paths = registered_workspace_paths(library, root)?;
+    library
+        .list_workspaces()
+        .into_iter()
+        .find(|row| library.workspace_paths_for_row(row).root == paths.root)
+        .map(|row| row.root_path)
 }
 
 /// [`Library::workspace_paths_for`] for the close path, which must call it

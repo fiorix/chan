@@ -96,29 +96,36 @@ impl WorkspaceOverlay {
     pub fn set(&self, path: &str, desired_on: bool) -> u64 {
         let generation = {
             let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
-            match rows.iter_mut().find(|r| r.path == path) {
-                Some(row) => {
-                    row.desired_on = desired_on;
-                    row.generation = row.generation.wrapping_add(1);
-                    row.generation
-                }
-                None => {
-                    let mut row = PersistedWorkspace::new(path, desired_on);
-                    row.generation = 1;
-                    rows.push(row);
-                    1
-                }
-            }
+            upsert(&mut rows, path, desired_on)
         };
         self.persist();
         generation
     }
 
-    /// Forget a workspace entirely (it left the library) and persist.
-    pub fn forget(&self, path: &str) {
+    /// [`set`](Self::set) for every path in `paths` under one lock and one
+    /// save, for a workspace kept under more than one spelling: no snapshot
+    /// sees one of them changed and not the others.
+    pub(crate) fn set_each(&self, paths: &[String], desired_on: bool) {
         {
             let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
-            rows.retain(|r| r.path != path);
+            for path in paths {
+                upsert(&mut rows, path, desired_on);
+            }
+        }
+        self.persist();
+    }
+
+    /// Forget a workspace entirely (it left the library) and persist.
+    pub fn forget(&self, path: &str) {
+        self.forget_each(&[path.to_string()]);
+    }
+
+    /// [`forget`](Self::forget) for every path in `paths` under one lock and
+    /// one save.
+    pub(crate) fn forget_each(&self, paths: &[String]) {
+        {
+            let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            rows.retain(|r| !paths.contains(&r.path));
         }
         self.persist();
     }
@@ -192,6 +199,24 @@ impl WorkspaceOverlay {
         *latest_save = generation;
         if let Err(e) = save_atomic(&self.store_path, &snapshot) {
             tracing::warn!("persisting workspace overlay: {e}");
+        }
+    }
+}
+
+/// Upsert `path`'s desired state in `rows`, advancing its generation, and
+/// return the accepted generation.
+fn upsert(rows: &mut Vec<PersistedWorkspace>, path: &str, desired_on: bool) -> u64 {
+    match rows.iter_mut().find(|r| r.path == path) {
+        Some(row) => {
+            row.desired_on = desired_on;
+            row.generation = row.generation.wrapping_add(1);
+            row.generation
+        }
+        None => {
+            let mut row = PersistedWorkspace::new(path, desired_on);
+            row.generation = 1;
+            rows.push(row);
+            1
         }
     }
 }
