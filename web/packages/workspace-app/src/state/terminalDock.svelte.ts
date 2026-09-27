@@ -95,8 +95,11 @@ export function terminalLayer(paneId: string): Attachment<HTMLElement> {
 
 /// Attach to the element that carries one terminal, and keep it docked in the
 /// layer of the pane `paneId` names. While that pane has no layer the element
-/// stays where it is; the pane tree is rebuilt within one update, so no layout
-/// runs in between.
+/// stays where it is. A split, a move or a collapse rebuilds the layers within
+/// one update, so no layout runs before the element is docked again. A pane
+/// whose body failed to render has no layer until its boundary retries: its
+/// terminals stay mounted in the detached layer they were in, until a retry
+/// docks them again or their tabs close.
 export function dockTerminal(tabId: string, paneId: () => string | undefined): Attachment<HTMLElement> {
   return (node) => {
     $effect(() => {

@@ -1,7 +1,8 @@
 export type FitLike = {
   fit(): void;
-  /// The grid the host would hold. Nothing, or NaN from a host with no
-  /// computed size, while the host cannot be measured.
+  /// The grid the host would hold. Nothing while the host cannot be measured,
+  /// or NaN from a detached or `display: none` host, which has no computed
+  /// size.
   proposeDimensions(): { cols: number; rows: number } | null | undefined;
 };
 
@@ -34,10 +35,11 @@ export function proposeGhosttyDimensions(
   };
 }
 
-/// Fit `term` to its host and say whether the host was measured. A detached or
-/// hidden host, or one whose cell metrics are not known yet, has no grid: the
-/// fitter declines it and the terminal keeps the grid it had. A throw is
-/// absorbed the same way while layout settles.
+/// Fit `term` to its host and say whether the host was measured. A detached
+/// host, one in a `display: none` subtree, or one whose cell metrics are not
+/// known yet has no grid: the fitter declines it and the terminal keeps the
+/// grid it had. A `visibility: hidden` host, as an inactive tab's is, keeps its
+/// box and is measured. A throw is absorbed the same way while layout settles.
 export function runTerminalFit(
   fit: FitLike | null,
   term: SizedTerminal | null,
