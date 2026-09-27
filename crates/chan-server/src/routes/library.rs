@@ -6171,6 +6171,60 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn gateway_remove_unavailable() {
+        let (_dir, host) = host();
+
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                "/api/library/gateways/configured",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "gateway registry is not available on this surface",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gateway_remove_missing() {
+        let (_dir, host) = host();
+        host.install_gateway_registry(Arc::new(RefusingRegistry));
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                "/api/library/gateways/missing",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "gateway not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gateway_remove_rejected() {
+        let (_dir, host) = host();
+        host.install_gateway_registry(Arc::new(RefusingRegistry));
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                "/api/library/gateways/configured",
+                None,
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "registry rejected removal",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
         let app = launcher_router(host, None, None);
