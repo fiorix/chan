@@ -172,6 +172,10 @@
     return null;
   });
 
+  const entryPath = $derived(entry?.path ?? null);
+  const entryIsDir = $derived(entry?.is_dir ?? false);
+  const entryMtime = $derived(entry?.mtime ?? null);
+
   /// The file tree lazy-loads directory contents, so opening a file
   /// the user hasn't yet drilled into via the browser (a direct URL,
   /// the editor tab's "Show Details", a search result) leaves the
@@ -382,20 +386,20 @@
   // is not restarted; the next mount or an explicit reload retries it.
   const graphDropped = $derived(graphData.view === null);
   $effect(() => {
-    if (!showRefs || !entry || entry.is_dir) return;
+    if (!showRefs || entryPath === null || entryIsDir) return;
     void graphDropped;
     untrack(() => void ensureGraphLoaded());
   });
 
   $effect(() => {
-    if (!showRefs || !entry || entry.is_dir) {
+    if (!showRefs || entryPath === null || entryIsDir) {
       backlinks = [];
       backlinksLoading = false;
       backlinksError = null;
       return;
     }
     const req = ++backlinkReq;
-    const target = entry.path;
+    const target = entryPath;
     const controller = new AbortController();
     backlinks = [];
     backlinksLoading = true;
@@ -710,7 +714,7 @@
     prefixReport = null;
     reportError = null;
     langExpanded = false;
-    if (!entry) {
+    if (entryPath === null) {
       reportLoading = false;
       return;
     }
@@ -723,22 +727,24 @@
     }
 
     const req = ++reportReq;
-    const target = entry;
+    const target = entryPath;
+    const isDir = entryIsDir;
+    if (!isDir) void entryMtime;
     const controller = new AbortController();
     reportLoading = true;
-    const fetcher: Promise<ReportFileStats | ReportPrefix | null> = target.is_dir
+    const fetcher: Promise<ReportFileStats | ReportPrefix | null> = isDir
       ? // Prefer the O(1) /api/report/dir cache (what the graph folder
         // inspector used) and fall back to the walking /api/report/prefix
         // when the cache has no entry yet, so a folder inspected on any
         // surface gets the same cheap path.
-        api.reportDir(target.path).catch((e) => {
+        api.reportDir(target).catch((e) => {
           const msg = (e as Error)?.message ?? "";
           if (/404/.test(msg) || /not found/i.test(msg)) {
-            return api.reportPrefix(target.path);
+            return api.reportPrefix(target);
           }
           throw e;
         })
-      : api.reportFileStream(target.path, {
+      : api.reportFileStream(target, {
           signal: controller.signal,
           onReport(stats) {
             if (req !== reportReq) return;
@@ -752,7 +758,7 @@
     void fetcher
       .then((res) => {
         if (req !== reportReq) return;
-        if (target.is_dir) {
+        if (isDir) {
           prefixReport = (res as ReportPrefix | null) ?? null;
         } else {
           fileReport = (res as ReportFileStats | null) ?? null;
