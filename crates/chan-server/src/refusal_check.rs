@@ -1279,4 +1279,51 @@ mod tests {
             .expect("the checked router answers malformed JSON");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+
+    #[tokio::test]
+    async fn launcher_gates_require_envelopes() {
+        let mut admitted = Vec::new();
+        for (method, path) in [
+            ("GET", "/api/library/windows"),
+            ("GET", "/api/library/windows/watch"),
+            ("POST", "/api/library/windows/probe/open"),
+            ("POST", "/api/library/windows/probe/hide"),
+            ("POST", "/api/library/devservers/probe/connect"),
+            ("POST", "/api/library/devservers/probe/disconnect"),
+            ("POST", "/api/library/devservers/probe/terminal"),
+            ("POST", "/api/library/devservers/probe/workspaces/open"),
+            ("PUT", "/api/library/devservers/probe/native-trust"),
+            ("DELETE", "/api/library/devservers/probe/native-trust"),
+            ("POST", "/api/library/gateways/probe/connect"),
+            ("POST", "/api/library/gateways/probe/disconnect"),
+            ("GET", "/api/library/tunnel/control"),
+            ("GET", "/api/library/tunnel/conn"),
+            ("GET", "/api/library/workspaces"),
+            ("GET", "/api/library/local-color"),
+            ("GET", "/api/library/local-color/watch"),
+            ("GET", "/api/library/local-theme"),
+            ("GET", "/api/library/local-theme/watch"),
+            ("GET", "/api/library/collapsed-machines"),
+            ("GET", "/api/library/gateways"),
+            ("GET", "/api/library/devservers"),
+            ("POST", "/api/library/command-capabilities"),
+            ("GET", "/api/library/command-capabilities/probe"),
+        ] {
+            if accepts_refusal(
+                method,
+                path,
+                StatusCode::FORBIDDEN,
+                "plain launcher refusal",
+                None,
+            )
+            .await
+            {
+                admitted.push(format!("{method} {path}"));
+            }
+        }
+        assert!(
+            admitted.is_empty(),
+            "launcher routes admitted plain refusals: {admitted:?}"
+        );
+    }
 }
