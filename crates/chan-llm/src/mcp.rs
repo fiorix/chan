@@ -629,6 +629,7 @@ async fn run_tool(
     #[cfg(test)]
     tests::gate_tool(&args).await;
     let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelToolOnDrop(Arc::clone(&cancel));
     let body_ct = ct.clone();
     let body_cancel = Arc::clone(&cancel);
     let mut body = tokio::task::spawn_blocking(move || {
@@ -676,6 +677,16 @@ async fn run_tool(
         joined.map_err(|e| ErrorData::internal_error(format!("tool task failed: {e}"), None))??;
     serde_json::to_string(&result)
         .map_err(|e| ErrorData::internal_error(format!("serialize result: {e}"), None))
+}
+
+// The blocking task outlives a dropped handler, including during runtime
+// shutdown. Keep its cancellation tied to the request future's lifetime.
+struct CancelToolOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelToolOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 async fn read_media_content(
