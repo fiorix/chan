@@ -642,6 +642,17 @@ struct StartupInner {
     pending: HashSet<MountAttemptKey>,
 }
 
+impl StartupInner {
+    fn refuse_mount_at_stop(&self, what: impl std::fmt::Display) -> Result<(), Error> {
+        if matches!(self.phase, StartupPhase::Stopping | StartupPhase::Stopped) {
+            return Err(Error::ShuttingDown(format!(
+                "the devserver is stopping; {what} was not mounted"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Serializes startup effects and the READY boundary. Mount intents register
 /// before they spawn; READY atomically closes registration for startup work
 /// only after every registered attempt has settled.
@@ -687,8 +698,16 @@ impl StartupCoordinator {
         Ok(())
     }
 
-    fn track(&self, attempt: MountAttemptKey) -> Result<(), String> {
+    fn refuse_mount_at_stop(&self, root: &Path) -> Result<(), Error> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refuse_mount_at_stop(root.display())
+    }
+
+    fn track(&self, attempt: MountAttemptKey) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.refuse_mount_at_stop(&attempt.prefix)?;
         if matches!(
             inner.phase,
             StartupPhase::ApplyingFdstore | StartupPhase::Ready
@@ -702,10 +721,10 @@ impl StartupCoordinator {
             inner.phase,
             StartupPhase::PreparingRows | StartupPhase::ServingAndRestoring
         ) {
-            return Err(format!(
+            return Err(Error::Config(format!(
                 "cannot start workspace mount while devserver is {:?}",
                 inner.phase
-            ));
+            )));
         }
         inner.pending.insert(attempt);
         drop(inner);
@@ -984,6 +1003,7 @@ impl DevserverState {
         prefix: &str,
         started: tokio::time::Instant,
     ) -> Result<String, Error> {
+        self.startup.refuse_mount_at_stop(root)?;
         reject_reserved_prefix(prefix)?;
         let library = self.host.library().clone();
         let registering = root.to_path_buf();
@@ -1078,7 +1098,7 @@ impl DevserverState {
                 prefix: prefix.to_string(),
                 generation,
             };
-            self.startup.track(attempt.key()).map_err(Error::Config)?;
+            self.startup.track(attempt.key())?;
             workspaces.insert(prefix.to_string(), record);
             attempt
         };
@@ -1809,7 +1829,7 @@ impl DevserverState {
             }
             if let Some(attempt) = attempt {
                 if let Err(reason) = self.startup.track(attempt.key()) {
-                    self.finish_failed_attempt(&attempt, reason);
+                    self.finish_failed_attempt(&attempt, reason.to_string());
                     continue;
                 }
                 self.host.mark_canonical_root_starting(&root);
@@ -4643,6 +4663,8 @@ mod tests {
                         path = format!("/api/devserver/workspaces{prefix}/on");
                         body = serde_json::json!({"on":true});
                     }
+                    // Keep the coordinator Ready to isolate the host's
+                    // publication refusal.
                     state.host.shutdown_all().await.unwrap();
                     status = StatusCode::SERVICE_UNAVAILABLE;
                     sentence = format!(
