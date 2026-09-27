@@ -563,6 +563,19 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn command_count_missing() {
+        let fixture = fixture().await;
+        let app = launcher_router(fixture.host.clone(), None, None);
+        let cap = mint(&app, &fixture).await;
+        check(
+            send(&app, "GET", &count_path(&cap, "missing"), None, None).await,
+            StatusCode::NOT_FOUND,
+            "window not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn invalid_invoking_window() {
         let fixture = fixture().await;
         let app = launcher_router(fixture.host.clone(), None, None);
