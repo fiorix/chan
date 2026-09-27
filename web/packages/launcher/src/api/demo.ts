@@ -578,6 +578,7 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
     // `chan serve ./your-project` walkthrough.
     pickFolder: () => tick(startsEmpty ? "/Users/you/dev/your-project" : "/Users/hacker/demo-reset"),
     listWindows: () => tick(windows.map((w) => ({ ...w }))),
+    checkWindowPage: async () => new Response(),
     createWindow: (kind, opts) => {
       const workspacePath = opts?.workspacePath;
       const ordinal = windows.filter((w) => w.library_id === "local" && w.kind === kind && (kind === "terminal" || w.workspace_path === workspacePath)).length + 1;
