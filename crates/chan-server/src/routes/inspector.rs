@@ -372,13 +372,23 @@ mod tests {
     fn inspector_payload_surfaces_read_only_directory_class() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
         let (_cfg, root, workspace) = open_workspace();
-        std::fs::create_dir(root.path().join("locked")).unwrap();
-        std::fs::set_permissions(
-            root.path().join("locked"),
-            std::fs::Permissions::from_mode(0o555),
-        )
-        .unwrap();
+        let locked = root.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let _restore = ModeRestore(
+            locked.clone(),
+            std::fs::metadata(&locked).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let payload = build_inspector_payload(&workspace, "locked").unwrap();
         assert_eq!(payload.kind, InspectorKind::Directory);

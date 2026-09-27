@@ -3199,6 +3199,16 @@ mod file_browser_listing_tests {
     #[test]
     fn canonical_preflight_rejects_an_unwritable_upload_destination() {
         use std::os::unix::fs::PermissionsExt;
+
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -3206,10 +3216,13 @@ mod file_browser_listing_tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         workspace.create_dir("locked").unwrap();
         let locked = root.path().join("locked");
+        let _restore = ModeRestore(
+            locked.clone(),
+            std::fs::metadata(&locked).unwrap().permissions(),
+        );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
         let err = workspace_upload(&workspace, "locked", None, "x.txt", b"data").unwrap_err();
         let message = err.to_string();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(message.contains("read-only"), "{message}");
         assert!(
             !root.path().join("locked/x.txt").exists(),

@@ -3302,13 +3302,23 @@ mod tests {
     fn merged_graph_keeps_read_only_directories_as_dead_ends() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
         let (_cfg, root, workspace) = open_workspace();
         put(root.path(), "locked/hidden.md", b"# Hidden\n");
-        std::fs::set_permissions(
-            root.path().join("locked"),
-            std::fs::Permissions::from_mode(0o555),
-        )
-        .unwrap();
+        let locked = root.path().join("locked");
+        let _restore = ModeRestore(
+            locked.clone(),
+            std::fs::metadata(&locked).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let params = GraphParams {
             scope: GraphScope::Workspace,

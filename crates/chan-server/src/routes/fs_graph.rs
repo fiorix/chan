@@ -1658,9 +1658,20 @@ mod tests {
     fn read_only_directory_is_a_dead_end() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
         let tmp = TempDir::new().unwrap();
         write(&tmp.path().join("locked/hidden.md"), "# hidden");
-        fs::set_permissions(tmp.path().join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+        let locked = tmp.path().join("locked");
+        let _restore = ModeRestore(locked.clone(), fs::metadata(&locked).unwrap().permissions());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
 
         let resp = walk(tmp.path(), FsGraphScope::Directory, "", 2);
         let locked = node(&resp, "locked").expect("locked directory node");
