@@ -3664,8 +3664,10 @@ async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     }
 }
 
-fn retarget_should_navigate(_probe: Option<&ProbeResult>, _attempts: usize) -> bool {
-    true
+/// Match the connecting page's twenty-attempt budget while retaining the old
+/// page until the target answers or the user can try navigating after the budget.
+fn retarget_should_navigate(probe: Option<&ProbeResult>, attempts: usize) -> bool {
+    probe.is_some_and(|probe| probe.reachable) || attempts >= 20
 }
 
 /// Collapse a reqwest error to the transport-failure class the
