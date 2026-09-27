@@ -2078,12 +2078,15 @@ async fn handle_remove_devserver(
         return *resp;
     }
     let Some(reg) = state.host.devserver_registry() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(
+            StatusCode::NOT_FOUND,
+            "devserver registry is not available on this surface".into(),
+        );
     };
     match reg.remove(&id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+        Ok(false) => crate::error::err(StatusCode::NOT_FOUND, "devserver not found".into()),
+        Err(msg) => crate::error::err(StatusCode::BAD_REQUEST, msg),
     }
 }
 
