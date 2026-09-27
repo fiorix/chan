@@ -395,6 +395,22 @@ describe("openWindowRecord", () => {
     expect(navigation).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["mint", "re-open"] as const)("keeps a replacement handle when a %s wait ends", async (action) => {
+    vi.useFakeTimers();
+    const rec = record({});
+    createWindow.mockResolvedValue(rec);
+    checkWindowPage.mockImplementationOnce(async () => gateResponse("30"));
+    const first = action === "mint" ? mintWindow("workspace") : openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(0);
+    opened[0].win.closed = true;
+    const replacement = await openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(100);
+    await first;
+    expect(hasWindowHandle("w-1")).toBe(true);
+    expect(replacement?.closed).toBe(false);
+    expect(discardWindow).not.toHaveBeenCalled();
+  });
+
   it("closes a refused re-open and raises the server sentence", async () => {
     checkWindowPage.mockResolvedValue(new Response('{"error":"This page cannot open."}', { status: 409 }));
     const outcome = await Promise.resolve(openWindowRecord(record({}))).then(() => null, (error: unknown) => error);
