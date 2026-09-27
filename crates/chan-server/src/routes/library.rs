@@ -1272,21 +1272,20 @@ async fn handle_set_library_window_label(
 ) -> Response {
     let label = match normalize_window_label(&req.label) {
         Ok(label) => label,
-        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        Err(message) => return crate::error::err(StatusCode::BAD_REQUEST, message.into()),
     };
     let Some(record) = host
         .assemble_window_records()
         .into_iter()
         .find(|record| record.window_id == window_id)
     else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
     };
     if record.control {
-        return (
+        return crate::error::err(
             StatusCode::BAD_REQUEST,
-            "control terminals cannot have a label",
-        )
-            .into_response();
+            "control terminals cannot have a label".into(),
+        );
     }
     if let Err(resp) = leader_gate(
         host.window_tenant_leader(&window_id),
@@ -1304,7 +1303,7 @@ async fn handle_set_library_window_label(
             })
             .await
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
