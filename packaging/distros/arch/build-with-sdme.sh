@@ -65,6 +65,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# The container's unprivileged builder must traverse this read-only source
+# mount; mktemp creates its root accessible only to the host's invoking user.
+chmod 0755 "$SOURCE_SNAPSHOT"
+
 echo ">> running AUR checks in sdme rootfs '$AUR_ROOTFS' disk=$SDME_BUILD_DISK revision=$revision" >&2
 # Pass the build environment to the joined command itself. sdme's `--env`
 # configures the container service, but the auto-join command does not inherit
