@@ -471,19 +471,33 @@ pub(crate) async fn retarget_watched_remote_window(
     retarget_window(
         || crate::probe_url(window.clone(), url.to_string()),
         || app.get_webview_window(&label).is_some(),
-        || state.retarget_tickets.with_current(ticket, || {
-            window
-                .navigate(target)
-                .map_err(|e| format!("retargeting {label}: {e}"))?;
-            if raise {
-                if let Err(e) = window.show() {
-                    tracing::warn!(label = %label, error = %e, "showing retargeted devserver window failed");
-                }
-            }
-            Ok(RetargetOutcome::Navigated)
-        }).unwrap_or(Ok(RetargetOutcome::Superseded)),
+        || {
+            state
+                .retarget_tickets
+                .with_current(ticket, || {
+                    navigate_in_place(&label, || window.navigate(target), || window.show(), raise)
+                })
+                .unwrap_or(Ok(RetargetOutcome::Superseded))
+        },
     )
     .await
+}
+
+/// Navigate a window in place, then show it when its dispatch raises it. A
+/// window that fails to show stays navigated; the failure is logged.
+fn navigate_in_place(
+    label: &str,
+    navigate: impl FnOnce() -> tauri::Result<()>,
+    show: impl FnOnce() -> tauri::Result<()>,
+    raise: bool,
+) -> Result<RetargetOutcome, String> {
+    navigate().map_err(|e| format!("retargeting {label}: {e}"))?;
+    if raise {
+        if let Err(e) = show() {
+            tracing::warn!(label = %label, error = %e, "showing retargeted devserver window failed");
+        }
+    }
+    Ok(RetargetOutcome::Navigated)
 }
 
 /// Mint a standalone terminal window. Like every local window it is a library
@@ -2246,6 +2260,54 @@ mod tests {
         assert!(rounds.contains("feed.end_round();"));
         let frames = source_section(wiring, "async fn stream_window_feed(", "\n}\n");
         assert!(frames.contains("feed.write_frame(windows);"));
+    }
+
+    #[test]
+    fn a_navigation_in_place_shows_its_window_only_when_it_raises() {
+        for raise in [false, true] {
+            let navigated = std::cell::Cell::new(false);
+            let shown = std::cell::Cell::new(false);
+            let outcome = navigate_in_place(
+                "lib-test::w-1",
+                || {
+                    navigated.set(true);
+                    Ok(())
+                },
+                || {
+                    shown.set(true);
+                    Ok(())
+                },
+                raise,
+            );
+            assert_eq!(outcome, Ok(RetargetOutcome::Navigated));
+            assert!(navigated.get(), "raise={raise}: the window navigates");
+            assert_eq!(
+                shown.get(),
+                raise,
+                "raise={raise}: the window shows only when its dispatch raises it"
+            );
+        }
+    }
+
+    // Both hand-offs need a live Tauri window, which no test builds: the
+    // raise `run_retarget` computes from the reason reaches
+    // `retarget_watched_remote_window`, which hands it to `navigate_in_place`
+    // with the window's own navigation and show.
+    #[test]
+    fn the_raise_reaches_the_native_show() {
+        let wiring = include_str!("window_watcher_wiring.rs");
+        let dispatch = source_section(wiring, "fn navigate_remote(", "fn sync_title(");
+        assert!(dispatch.contains("|url, raise| {"));
+        assert!(dispatch.contains("app, &url, record, ticket, raise,"));
+        let serve = include_str!("serve.rs");
+        let retarget = source_section(
+            serve,
+            "pub(crate) async fn retarget_watched_remote_window(",
+            "/// Navigate a window in place",
+        );
+        let flat = retarget.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("navigate_in_place("));
+        assert!(flat.contains("|| window.navigate(target), || window.show(), raise"));
     }
 
     #[test]

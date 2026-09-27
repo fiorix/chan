@@ -551,6 +551,9 @@ impl RemoteLaunches {
         }
     }
 
+    /// Prepare a retarget's URL, then navigate: the navigation raises its
+    /// window when the dispatch's `reason` does.
+    #[allow(clippy::too_many_arguments)]
     async fn run_retarget<
         F: std::future::Future<Output = Result<serve::RetargetOutcome, String>>,
     >(
@@ -559,11 +562,12 @@ impl RemoteLaunches {
         tickets: &serve::RetargetTickets,
         ticket: &serve::RetargetTicket,
         builds: &WindowBuilds,
+        reason: Retarget,
         prepare: impl std::future::Future<Output = Result<String, String>>,
-        navigate: impl FnOnce(String) -> F,
+        navigate: impl FnOnce(String, bool) -> F,
     ) {
         let outcome = match prepare.await {
-            Ok(url) => navigate(url).await,
+            Ok(url) => navigate(url, reason.raises()).await,
             Err(error) => Err(error),
         };
         self.finish_retarget(label, tickets, ticket, builds, outcome);
@@ -661,8 +665,8 @@ impl TauriNativeSurface {
         let WindowOpener::Remote { conn } = &self.opener else {
             return;
         };
-        let raise = retarget.is_some_and(Retarget::raises);
-        let retarget = retarget.is_some();
+        let reason = retarget;
+        let retarget = reason.is_some();
         let app = self.app.clone();
         let conn = conn.clone();
         let record = record.clone();
@@ -701,7 +705,7 @@ impl TauriNativeSurface {
                     )
                 },
             );
-            if retarget {
+            if let Some(reason) = reason {
                 let ticket = ticket.as_ref().expect("retarget ticket");
                 remote_launches
                     .run_retarget(
@@ -709,8 +713,9 @@ impl TauriNativeSurface {
                         &state.retarget_tickets,
                         ticket,
                         &builds,
+                        reason,
                         navigation,
-                        |url| {
+                        |url, raise| {
                             let app = &app;
                             let record = &record;
                             async move {
@@ -2351,8 +2356,9 @@ mod tests {
                 &harness.surface.tickets,
                 &ticket,
                 &harness.surface.builds,
+                Retarget::Requested,
                 prepared,
-                |_| {
+                |_, _| {
                     navigations.set(navigations.get() + 1);
                     std::future::ready(Err("navigation".into()))
                 },
@@ -2960,6 +2966,66 @@ mod tests {
             feed.snapshot()[0].connected,
             "the next frame reads as it says"
         );
+    }
+
+    // The raise a navigation receives is the one its dispatch's reason
+    // computes: a try of the timer never raises its window.
+    #[tokio::test]
+    async fn a_retarget_hands_its_reasons_raise_to_the_navigation() {
+        for (reason, raises) in [
+            (Retarget::Requested, true),
+            (Retarget::Changed, true),
+            (Retarget::Retry, false),
+        ] {
+            let launches = RemoteLaunches::default();
+            let tickets = serve::RetargetTickets::default();
+            let builds = WindowBuilds::new(
+                Arc::new(Notify::new()),
+                Arc::new(WatcherViewState::default()),
+            );
+            let record = rec();
+            let ticket = launches
+                .begin_remote(&record, false, true, &tickets)
+                .unwrap();
+            let raised = std::cell::Cell::new(None);
+            launches
+                .run_retarget(
+                    &native_label(&record),
+                    &tickets,
+                    &ticket,
+                    &builds,
+                    reason,
+                    std::future::ready(Ok("https://test.invalid/".into())),
+                    |_, raise| {
+                        raised.set(Some(raise));
+                        std::future::ready(Ok(serve::RetargetOutcome::Navigated))
+                    },
+                )
+                .await;
+            assert_eq!(
+                raised.get(),
+                Some(raises),
+                "{reason:?}: the navigation's raise comes from its reason"
+            );
+        }
+    }
+
+    // A window still being built has no webview: its build owns it, so a
+    // Reload of it dispatches nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_reload_of_a_window_still_being_built_dispatches_nothing() {
+        let record = retry_record("reload-during-build", 0);
+        let harness = RetryHarness::start_with(vec![record.clone()], true, true, true).await;
+        harness.surface.resolve_opens();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(harness.request_reload(&record, true, Some(&harness.view)));
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0],
+            "a Reload dispatches nothing at a window whose webview is not there"
+        );
+        harness.stop(WatchLoopStop::KeepWindows).await;
     }
 
     #[tokio::test(start_paused = true)]

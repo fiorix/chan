@@ -7702,6 +7702,29 @@ mod tests {
         );
     }
 
+    // No test can observe the order in which retirement cancels its library's
+    // retarget tickets and sends the watcher its stop, so the source is
+    // asserted: the tickets are cancelled first.
+    #[test]
+    fn retirement_cancels_its_retargets_before_it_sends_the_stop() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let exited = source_region(
+            MAIN_RS,
+            "\nfn mark_devserver_control_exited(",
+            "\n/// The user explicitly closed the control terminal window.",
+        );
+        let cancel = exited
+            .find("cancel_devserver_retargets(state, id);")
+            .expect("retirement cancels its library's retargets");
+        let stop = exited
+            .find("stop_devserver_watcher(state, id, DevserverWatcherStop::RetireKeepWindows);")
+            .expect("retirement stops the watcher");
+        assert!(
+            cancel < stop,
+            "retirement cancels the tickets before it sends the stop"
+        );
+    }
+
     #[test]
     fn a_reload_after_the_watcher_stop_is_sent_is_not_handled() {
         for stop in [
