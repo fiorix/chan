@@ -39,7 +39,6 @@ import {
   openInPane,
   paneModeSetGrab,
   registerTerminalInputSink,
-  reloadTabFromDisk,
   reopenClosedTab,
   splitPane,
   type FileTab,
@@ -258,30 +257,31 @@ describe("a load whose tab is closed leaves nothing behind", () => {
   });
 
   test("a closed read cannot write into whatever holds its id next", async () => {
-    // A reopen replays the closed buffer under the same tab id, so a load
-    // still parked from before the close would find that id and write a stale
-    // download over whatever the user has done since.
-    const { release, signal } = pausedRead();
+    // A reopen brings the closed tab's id back, so a load still parked from
+    // before the close would find that id and write a stale download over
+    // whatever the user has done since.
+    const stale = pausedRead();
     const { tabId, opened } = await startLoad();
 
     await closeTab(PANE_ID, tabId, { force: true });
+    const live = pausedRead("after-first-chunk", ["# re", "loaded"]);
     expect(reopenClosedTab()).toBe(true);
-    const reopened = activePane().tabs[0] as FileTab;
-    expect(reopened.id, "the reopen reuses the closed tab's id").toBe(tabId);
-    expect(reopened.loading).toBe(false);
-    reopened.content = "# edited after reopen";
+    expect(activePane().tabs[0]!.id, "the reopen reuses the closed tab's id").toBe(tabId);
+    live.release();
+    await vi.waitFor(() => expect(liveTab(tabId).loading).toBe(false));
+    liveTab(tabId).content = "# edited after reopen";
 
-    release();
+    stale.release();
     await opened;
 
     expect(
-      reopened.content,
+      liveTab(tabId).content,
       "a late completion must not replace edits made after the reopen",
     ).toBe("# edited after reopen");
-    expect(reopened.loading, "and must not put the tab back into loading").toBe(
+    expect(liveTab(tabId).loading, "and must not put the tab back into loading").toBe(
       false,
     );
-    expect(signal()?.aborted).toBe(true);
+    expect(stale.signal()?.aborted).toBe(true);
   });
 
   test("a cancelled bulk close leaves the load running", async () => {
@@ -348,25 +348,24 @@ describe("a load whose tab is closed leaves nothing behind", () => {
 
   test("a load started after the reopen is not overwritten by the closed one", async () => {
     // Why the generation is retired rather than deleted. The reopen brings the
-    // id back and the user reloads, so two reads exist for one id: the one the
-    // close ended, still parked, and the live one. Counting a fresh load up
+    // id back and loads the file again, so two reads exist for one id: the one
+    // the close ended, still parked, and the live one. Counting a fresh load up
     // from a deleted entry would hand it the number the parked read carries,
     // and the stale completion would land on the new tab.
     const first = pausedRead();
     const { tabId, opened } = await startLoad();
     await closeTab(PANE_ID, tabId, { force: true });
-    expect(reopenClosedTab()).toBe(true);
-    expect(activePane().tabs[0]!.id, "the reopen reuses the id").toBe(tabId);
 
     // Its own content, so a completion from the closed read is visible rather
     // than indistinguishable from the live one's.
     const second = pausedRead("after-first-chunk", ["# re", "loaded"]);
-    const reloaded = reloadTabFromDisk(tabId);
-    await vi.waitFor(() => expect(liveTab(tabId).loading).toBe(true));
+    expect(reopenClosedTab()).toBe(true);
+    expect(activePane().tabs[0]!.id, "the reopen reuses the id").toBe(tabId);
+    expect(liveTab(tabId).loading).toBe(true);
 
     // The closed read finishes last, so it has every chance to win.
     second.release();
-    await reloaded;
+    await vi.waitFor(() => expect(liveTab(tabId).loading).toBe(false));
     expect(liveTab(tabId).content, "the live read landed").toBe("# reloaded");
     first.release();
     await opened;
@@ -405,10 +404,11 @@ describe("a load whose tab is closed leaves nothing behind", () => {
     expect(activePane().tabs).toHaveLength(0);
   });
 
-  test("reopening it does not restore a tab that claims to be loading", async () => {
-    // The close keeps a reopen record, and a reopen replays that buffer
-    // instead of reading the file again. A record that carries `loading` puts
-    // a tab on screen waiting for a download nobody is running.
+  test("reopening it loads the file again", async () => {
+    // The close keeps a reopen record, and a record whose load never finished
+    // holds only the bytes that had arrived, not the file. The reopen reads the
+    // file again rather than replay those, so the tab it puts on screen waits
+    // for a download that is running.
     const { release } = pausedRead();
     const { tabId, opened } = await startLoad();
 
@@ -416,11 +416,13 @@ describe("a load whose tab is closed leaves nothing behind", () => {
     release();
     await opened;
 
+    const again = pausedRead("after-first-chunk", ["# re", "loaded"]);
     expect(canReopenClosedTab()).toBe(true);
     expect(reopenClosedTab()).toBe(true);
-    const reopened = activePane().tabs[0] as FileTab;
-    expect(reopened.kind).toBe("file");
-    expect(reopened.loading).toBe(false);
-    expect(reopened.loadProgress).toBeUndefined();
+    expect(liveTab(tabId).loading).toBe(true);
+    again.release();
+    await vi.waitFor(() => expect(liveTab(tabId).loading).toBe(false));
+    expect(liveTab(tabId).content).toBe("# reloaded");
+    expect(liveTab(tabId).loadProgress).toBeUndefined();
   });
 });
