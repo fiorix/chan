@@ -942,6 +942,26 @@ mod tests {
     );
 
     #[tokio::test]
+    #[ignore = "run explicitly until the quoted path keeps its delimiter text"]
+    async fn session_io_path_can_contain_the_context_delimiter() {
+        use axum::response::IntoResponse;
+        let body = format!(
+            "{} at path {:?}",
+            std::io::Error::from_raw_os_error(5),
+            "/tmp/session at path archive"
+        );
+        assert!(
+            accepts_response(
+                "PUT",
+                "/api/session",
+                (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+            )
+            .await,
+            "a quoted session path may contain the I/O context delimiter"
+        );
+    }
+
+    #[tokio::test]
     async fn inventory_blocking_task_failure() {
         let response = crate::routes::blocking_response("refusal probe", || {
             panic!("injected blocking failure")
