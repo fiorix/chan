@@ -452,3 +452,32 @@ async fn terminal_tenant_drafts_query_is_json() {
     )
     .await;
 }
+
+async fn settings_write_with_wrong_method(settings_disabled: bool) -> Response {
+    let state = crate::state::test_support::make_test_state(settings_disabled);
+    crate::router(state)
+        .oneshot(
+            Request::put("/api/storage/reset")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// The settings gate answers a wrong method on a settings write before the
+/// 405, as it answers the right one.
+#[tokio::test]
+async fn disabled_settings_refuse_a_wrong_method_first() {
+    assert_refusal(
+        settings_write_with_wrong_method(true).await,
+        StatusCode::FORBIDDEN,
+        json!({"error": "settings are disabled on this server (started with --no-settings); configuration changes are not permitted here"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn enabled_settings_answer_a_wrong_method_with_the_405() {
+    assert_method_refused(settings_write_with_wrong_method(false).await, "POST").await;
+}

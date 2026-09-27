@@ -5045,6 +5045,30 @@ mod tests {
             .await;
         }
 
+        /// The bearer gate answers a wrong method on a management route
+        /// before the 405, as it answers the right one.
+        #[tokio::test]
+        async fn wrong_method_without_the_bearer() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let response = app
+                .oneshot(
+                    HttpRequest::put("/api/devserver/workspaces")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_refusal(
+                response,
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid devserver bearer token",
+            )
+            .await;
+        }
+
         #[tokio::test]
         async fn forget_query() {
             framework_rejection(
