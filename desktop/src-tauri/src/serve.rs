@@ -695,13 +695,28 @@ fn window_title_or_label(app: &AppHandle, label: &str) -> String {
 /// burying. Guard the URL read because a dead webview's `url()` can panic on a
 /// nil URL; any failure reads as "not the connecting screen".
 pub fn window_on_connecting_screen(app: &AppHandle, label: &str) -> bool {
-    let Some(window) = app.get_webview_window(label) else {
-        return false;
-    };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.url())) {
-        Ok(Ok(url)) => url.path().ends_with("connecting.html"),
-        _ => false,
-    }
+    webview_url(app, label).is_some_and(|url| on_connecting_page(&url))
+}
+
+/// What a window's webview reports as its own URL, or `None` when there is
+/// no such window or its URL cannot be read. A dead webview's `url()` can
+/// panic on a nil URL.
+pub(crate) fn webview_url(app: &AppHandle, label: &str) -> Option<tauri::Url> {
+    let window = app.get_webview_window(label)?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.url()))
+        .ok()?
+        .ok()
+}
+
+fn on_connecting_page(url: &tauri::Url) -> bool {
+    url.path().ends_with("connecting.html")
+}
+
+/// Whether a devserver window's own URL shows a page that booted: off the
+/// connecting screen, and without the `t` pair the SPA deletes from its URL
+/// when it boots. A page that never got past loading still carries it.
+pub(crate) fn page_booted(url: &tauri::Url) -> bool {
+    !on_connecting_page(url) && !url.query_pairs().any(|(key, _)| key == "t")
 }
 
 /// Inputs for one SPA webview window build: identity (label/title),
@@ -2258,10 +2273,9 @@ mod tests {
         );
         assert!(reconcile.contains("surface.refresh(record, reloads.contains(&label))"));
         let refresh = source_section(wiring, "fn refresh(&self, record", "fn close(&self, label");
-        assert!(refresh.contains(".admit(record, self.opener.is_gateway(), reload, present)"));
-        assert!(refresh.contains(
-            "let present = self.app.get_webview_window(&native_label(record)).is_some();"
-        ));
+        assert!(refresh.contains(".admit(record, self.opener.is_gateway(), reload, present, url)"));
+        assert!(refresh.contains("let present = self.app.get_webview_window(&label).is_some();"));
+        assert!(refresh.contains("let url = || serve::webview_url(&self.app, &label);"));
         assert!(refresh.contains("navigate_remote(record, Some(retarget))"));
         assert!(dispatch.contains("prepare_remote_navigation("));
         assert!(dispatch.contains("window_navigation_url(&conn, &record)"));

@@ -178,9 +178,10 @@ enum Retarget {
 }
 
 impl Retarget {
-    /// Whether the navigation shows and raises the window.
+    /// Whether the navigation shows and raises the window. A try of the
+    /// timer is quiet: it never raises a window or takes its focus.
     fn raises(self) -> bool {
-        true
+        self != Retarget::Retry
     }
 }
 
@@ -188,6 +189,10 @@ struct RemoteLaunch {
     key: RemoteLaunchKey,
     attempted_at: tokio::time::Instant,
     phase: LaunchPhase,
+    /// The key last loaded into the window's webview, by its open or by a
+    /// navigation in place. A devserver window's page deletes its token from
+    /// its own URL, so only the watcher knows which token the page holds.
+    loaded: Option<RemoteLaunchKey>,
 }
 
 impl RemoteLaunch {
@@ -274,6 +279,7 @@ impl WindowBuilds {
                 key,
                 attempted_at: tokio::time::Instant::now(),
                 phase: LaunchPhase::InFlight,
+                loaded: None,
             },
         );
         true
@@ -400,17 +406,56 @@ impl RemoteLaunches {
     /// none: its build owns it, and the pass after the build lands retargets
     /// it if the key moved, so no attempt is ever dispatched at an absent
     /// webview.
+    ///
+    /// A try of the timer finds its window on its target when the webview
+    /// was last loaded with the attempt's key and its own URL (`url`, read
+    /// only then) shows a page that booted: the attempt is applied and
+    /// nothing navigates. That cannot tell a page whose socket never heals
+    /// on an unchanged token from a healthy one; the user's Reload navigates
+    /// it. A try that falls between the connecting page's own navigation and
+    /// the page's boot navigates once more.
     fn admit(
         &self,
         record: &WindowRecord,
         gateway: bool,
         reload: bool,
         present: bool,
+        url: impl FnOnce() -> Option<tauri::Url>,
     ) -> Option<Retarget> {
         if !present {
             return None;
         }
-        self.retarget(record, gateway, reload)
+        let retarget = self.retarget(record, gateway, reload)?;
+        if retarget == Retarget::Retry
+            && self.loaded_with(record, gateway)
+            && url().is_some_and(|url| serve::page_booted(&url))
+        {
+            self.apply(record, gateway);
+            return None;
+        }
+        Some(retarget)
+    }
+
+    /// Whether the window's webview was last loaded with `record`'s key.
+    fn loaded_with(&self, record: &WindowRecord, gateway: bool) -> bool {
+        let next = RemoteLaunchKey::from_record(record, gateway);
+        self.0
+            .lock()
+            .unwrap()
+            .entries
+            .get(&native_label(record))
+            .is_some_and(|entry| entry.loaded.as_ref() == Some(&next))
+    }
+
+    /// Mark the waiting attempt for `record`'s key applied.
+    fn apply(&self, record: &WindowRecord, gateway: bool) {
+        let next = RemoteLaunchKey::from_record(record, gateway);
+        let mut state = self.0.lock().unwrap();
+        if let Some(attempt) = state.entries.get_mut(&native_label(record)) {
+            if attempt.key == next && attempt.phase == LaunchPhase::Waiting {
+                attempt.phase = LaunchPhase::Applied;
+            }
+        }
     }
 
     fn begin_remote(
@@ -429,10 +474,18 @@ impl RemoteLaunches {
             if state.retired.is_some() {
                 return;
             }
+            let key = RemoteLaunchKey::from_record(record, gateway);
+            // The open loads its own key; a retarget leaves the webview on
+            // what it was loaded with until it navigates.
+            let loaded = state
+                .entries
+                .get(&label)
+                .and_then(|entry| entry.loaded.clone());
             state.entries.insert(
                 label.clone(),
                 RemoteLaunch {
-                    key: RemoteLaunchKey::from_record(record, gateway),
+                    loaded: if retarget { loaded } else { Some(key.clone()) },
+                    key,
                     attempted_at: tokio::time::Instant::now(),
                     phase: if retarget {
                         LaunchPhase::InFlight
@@ -514,6 +567,7 @@ impl RemoteLaunches {
                         return;
                     };
                     attempt.phase = LaunchPhase::Applied;
+                    attempt.loaded = Some(attempt.key.clone());
                     drop(state);
                     builds.retry();
                 });
@@ -841,10 +895,14 @@ impl NativeSurface for TauriNativeSurface {
         if !self.opener.is_remote() {
             return;
         }
-        let present = self.app.get_webview_window(&native_label(record)).is_some();
+        let label = native_label(record);
+        let present = self.app.get_webview_window(&label).is_some();
+        // Reading a webview's URL is a main-thread round trip, taken only for
+        // a try of the timer on a window loaded with the same key.
+        let url = || serve::webview_url(&self.app, &label);
         if let Some(retarget) =
             self.remote_launches
-                .admit(record, self.opener.is_gateway(), reload, present)
+                .admit(record, self.opener.is_gateway(), reload, present, url)
         {
             self.navigate_remote(record, Some(retarget));
         }
@@ -1788,7 +1846,11 @@ mod tests {
         fn refresh(&self, record: &WindowRecord, reload: bool) {
             let label = native_label(record);
             let present = self.live.lock().unwrap().contains(&label);
-            let Some(retarget) = self.launches.admit(record, false, reload, present) else {
+            let url = || {
+                let urls = self.urls.lock().unwrap();
+                urls.get(&label).and_then(|url| url.parse().ok())
+            };
+            let Some(retarget) = self.launches.admit(record, false, reload, present, url) else {
                 return;
             };
             self.raises
