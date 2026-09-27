@@ -191,8 +191,8 @@ mod tests {
         count: u64,
     }
 
-    /// The same routes over whichever `Json`, `Query` and `Path` are in scope
-    /// where the macro is invoked.
+    /// The same routes over whichever `Json`, `Query`, `Path`, `Bytes` and
+    /// `Multipart` are in scope where the macro is invoked.
     macro_rules! probe_routes {
         () => {
             Router::new()
@@ -217,13 +217,16 @@ mod tests {
                         },
                     ),
                 )
+                .route("/bytes", post(|_: Bytes| async {}))
+                .route("/multipart", post(|_: Multipart| async {}))
                 .layer(DefaultBodyLimit::max(LIMIT))
         };
     }
 
     mod framework {
         use super::*;
-        use axum::extract::{Path, Query};
+        use axum::body::Bytes;
+        use axum::extract::{Multipart, Path, Query};
         use axum::Json;
 
         pub(super) fn app() -> Router {
@@ -235,6 +238,8 @@ mod tests {
         use super::*;
         // The extractors under test.
         use crate::extract::{Json, Path, Query};
+        use axum::body::Bytes;
+        use axum::extract::Multipart;
 
         pub(super) fn app() -> Router {
             probe_routes!()
@@ -351,6 +356,37 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn bytes_length_limit() {
+        assert_enveloped("LengthLimitError (Bytes)", || {
+            Request::post("/bytes")
+                .body(Body::from("x".repeat(LIMIT + 1)))
+                .unwrap()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bytes_broken_body() {
+        assert_enveloped("UnknownBodyError (Bytes)", || {
+            Request::post("/bytes").body(broken_body()).unwrap()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn multipart_boundary() {
+        assert_enveloped("InvalidBoundary", || {
+            Request::post("/multipart")
+                .header(header::CONTENT_TYPE, "multipart/form-data")
+                .body(Body::empty())
+                .unwrap()
+        })
+        .await;
+    }
+
+    /// The rejection a handler formats itself reads as the framework's does:
+    /// for the path, its display drops the prefix its response carries.
     #[tokio::test]
     async fn rejections_display_as_the_framework_does() {
         let requests: [fn() -> Request<Body>; 2] = [

@@ -259,3 +259,148 @@ async fn terminal_tenant_wrong_method_is_json() {
         .unwrap();
     assert_method_refused(response, "POST").await;
 }
+
+/// One byte over the framework's default body limit, which the survey reply
+/// and the session routes keep.
+const OVER_DEFAULT_LIMIT: usize = 2 * 1024 * 1024 + 1;
+
+async fn workspace_answer(request: Request<Body>) -> Response {
+    let (_cfg, _root, state) = served_state();
+    crate::router(state).oneshot(request).await.unwrap()
+}
+
+async fn terminal_answer(request: Request<Body>) -> Response {
+    let state = crate::state::test_support::make_test_state(false);
+    crate::terminal_router(state)
+        .oneshot(request)
+        .await
+        .unwrap()
+}
+
+fn survey_reply_without_content_type() -> Request<Body> {
+    Request::post("/api/survey/reply")
+        .body(Body::from("{}"))
+        .unwrap()
+}
+
+fn survey_reply_over_the_limit() -> Request<Body> {
+    Request::post("/api/survey/reply")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(vec![b' '; OVER_DEFAULT_LIMIT]))
+        .unwrap()
+}
+
+fn session_over_the_limit() -> Request<Body> {
+    Request::put("/api/session?w=probe")
+        .body(Body::from(vec![b'x'; OVER_DEFAULT_LIMIT]))
+        .unwrap()
+}
+
+const MISSING_CONTENT_TYPE: &str = "Expected request with `Content-Type: application/json`";
+const LENGTH_LIMIT: &str = "Failed to buffer the request body: length limit exceeded";
+
+#[tokio::test]
+async fn workspace_tenant_missing_json_content_type_is_json() {
+    assert_refusal(
+        workspace_answer(survey_reply_without_content_type()).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        json!({"error": MISSING_CONTENT_TYPE}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn workspace_tenant_json_over_the_limit_is_json() {
+    assert_refusal(
+        workspace_answer(survey_reply_over_the_limit()).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        json!({"error": LENGTH_LIMIT}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn workspace_tenant_bytes_over_the_limit_is_json() {
+    assert_refusal(
+        workspace_answer(session_over_the_limit()).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        json!({"error": LENGTH_LIMIT}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn workspace_tenant_path_not_utf8_is_json() {
+    assert_refusal(
+        workspace_answer(
+            Request::get("/api/headings/%FF")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": "Invalid URL: Invalid UTF-8 in `path`"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn workspace_tenant_multipart_boundary_is_json() {
+    assert_refusal(
+        workspace_answer(
+            Request::post("/api/attachments")
+                .header(header::CONTENT_TYPE, "multipart/form-data")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": "Invalid `boundary` for `multipart/form-data` request"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_missing_json_content_type_is_json() {
+    assert_refusal(
+        terminal_answer(survey_reply_without_content_type()).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        json!({"error": MISSING_CONTENT_TYPE}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_json_over_the_limit_is_json() {
+    assert_refusal(
+        terminal_answer(survey_reply_over_the_limit()).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        json!({"error": LENGTH_LIMIT}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_bytes_over_the_limit_is_json() {
+    assert_refusal(
+        terminal_answer(session_over_the_limit()).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        json!({"error": LENGTH_LIMIT}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_path_not_utf8_is_json() {
+    assert_refusal(
+        terminal_answer(
+            Request::delete("/api/terminals/%FF")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": "Invalid URL: Invalid UTF-8 in `session`"}),
+    )
+    .await;
+}
