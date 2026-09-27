@@ -1808,19 +1808,18 @@ struct AddWorkspace {
 }
 
 fn add_workspace_root_error(error: crate::Error) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+    crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
 fn add_workspace_prefix_error(error: crate::Error) -> Response {
-    (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+    crate::error::err(StatusCode::BAD_REQUEST, error.to_string())
 }
 
 fn workspace_registration_task_error(error: tokio::task::JoinError) -> Response {
-    (
+    crate::error::err(
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("workspace registration task failed: {error}"),
     )
-        .into_response()
 }
 
 /// `POST /api/library/workspaces` `{path}`: register the local folder in the host
@@ -1854,7 +1853,7 @@ async fn handle_add_workspace(
     };
     let registered = match registering.await {
         Ok(Ok(ws)) => ws,
-        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Ok(Err(e)) => return crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
         Err(e) => return workspace_registration_task_error(e),
     };
     match state
@@ -1878,9 +1877,9 @@ async fn handle_add_workspace(
             crate::error::err_from(&e)
         }
         Err(e @ crate::Error::ShuttingDown(_)) => {
-            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+            crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
