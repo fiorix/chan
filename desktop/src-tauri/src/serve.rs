@@ -2117,6 +2117,21 @@ mod tests {
     }
 
     #[test]
+    fn reload_leaves_a_vanished_window_closed() {
+        let reload = include_str!("main.rs")
+            .split("fn reload_devserver_window_from_feed")
+            .nth(1)
+            .expect("Reload exists")
+            .split("fn open_devtools")
+            .next()
+            .unwrap();
+        assert!(
+            !reload.contains("open_watched_remote_window"),
+            "Reload must not rebuild a window closed, hidden, disconnected or forgotten during its task",
+        );
+    }
+
+    #[test]
     fn devserver_token_refresh_retargets_existing_window_before_rebuild() {
         const SERVE_RS: &str = include_str!("serve.rs");
         const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
