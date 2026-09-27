@@ -2170,6 +2170,133 @@ mod tests {
         assert_eq!(resolve_label_from("lib-z::w-3", &[]), "lib-z::w-3");
     }
 
+    #[test]
+    fn a_newer_retarget_ticket_supersedes_the_older_one() {
+        let tickets = RetargetTickets::default();
+        let old = tickets.begin("lib-a::w");
+        let new = tickets.begin("lib-a::w");
+        assert_eq!(tickets.with_current(&new, || "new"), Some("new"));
+        assert_eq!(
+            tickets.with_current(&old, || "old"),
+            None,
+            "an older dispatch cannot navigate or settle after a newer dispatch",
+        );
+    }
+
+    #[test]
+    fn retarget_tickets_of_two_windows_do_not_meet() {
+        let tickets = RetargetTickets::default();
+        let a = tickets.begin("lib-a::w");
+        let b = tickets.begin("lib-b::w");
+        assert_eq!(tickets.with_current(&a, || "a"), Some("a"));
+        assert_eq!(tickets.with_current(&b, || "b"), Some("b"));
+    }
+
+    fn source_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        source
+            .split(start)
+            .nth(1)
+            .expect("section start")
+            .split(end)
+            .next()
+            .expect("section end")
+    }
+
+    #[test]
+    fn retarget_tickets_cover_dispatch_navigation_and_window_lifetime() {
+        let main = include_str!("main.rs");
+        let wiring = include_str!("window_watcher_wiring.rs");
+        let serve = include_str!("serve.rs");
+        let reload = source_section(
+            main,
+            "fn reload_devserver_window_from_feed",
+            "fn open_devtools",
+        );
+        let dispatch = source_section(
+            wiring,
+            "fn navigate_remote",
+            "/// Reconcile one live window",
+        );
+        for (name, source) in [("Reload", reload), ("watcher", dispatch)] {
+            let before_spawn = source.split("async_runtime::spawn").next().unwrap();
+            assert!(
+                before_spawn.contains("retarget_tickets.begin("),
+                "{name} takes its ticket before mint dispatch"
+            );
+            assert!(
+                source.contains("retarget_watched_remote_window("),
+                "{name} retargets"
+            );
+        }
+        assert!(reload.contains("&ticket"));
+        assert!(dispatch.contains("ticket.as_ref().expect(\"retarget ticket\")"));
+        let retarget = source_section(
+            serve,
+            "pub(crate) async fn retarget_watched_remote_window",
+            "/// Mint a standalone terminal window",
+        );
+        assert!(
+            retarget.contains(".with_current(ticket, || {"),
+            "native navigation must use the dispatched ticket"
+        );
+        let guarded = source_section(
+            retarget,
+            ".with_current(ticket, || {",
+            ".unwrap_or(Ok(RetargetOutcome::Superseded))",
+        );
+        assert!(
+            guarded.contains(".navigate(target)"),
+            "only the current ticket navigates"
+        );
+        let destroyed = source_section(
+            serve,
+            "fn on_destroyed",
+            "/// Compose the browser-facing URL",
+        );
+        assert!(
+            destroyed.contains("retarget_tickets.cancel(label)"),
+            "destroy cancels a pending retarget before a label can be reused"
+        );
+        let retired = source_section(
+            main,
+            "fn mark_devserver_control_exited",
+            "fn close_devserver_control_terminal",
+        );
+        assert!(
+            retired.contains("cancel_prefix"),
+            "retiring a watcher cancels retargets of its kept windows"
+        );
+    }
+
+    #[test]
+    fn a_stale_retarget_leaves_the_remembered_key_alone() {
+        let navigator = source_section(
+            include_str!("window_watcher_wiring.rs"),
+            "fn navigate_remote",
+            "/// Reconcile one live window",
+        );
+        let failure = source_section(navigator, "let fail = {", "let url = match");
+        assert!(
+            failure.contains(".with_current(ticket, rollback)"),
+            "a stale mint or navigation failure cannot erase the newer key"
+        );
+        let gone = source_section(
+            navigator,
+            "Ok(serve::RetargetOutcome::Gone) => {",
+            "Ok(serve::RetargetOutcome::Navigated)",
+        );
+        assert!(
+            gone.contains(".with_current("),
+            "a vanished stale retarget cannot erase the newer key"
+        );
+        assert!(navigator.contains("Ok(serve::RetargetOutcome::Superseded) => return"));
+        let remember = navigator.split("async_runtime::spawn").next().unwrap();
+        assert!(
+            remember.contains(".with_current(ticket, remember)"),
+            "dispatch cannot remember an older key after a newer ticket"
+        );
+    }
+
     fn scripted_probe(reachable: bool) -> crate::ProbeResult {
         crate::ProbeResult {
             reachable,
