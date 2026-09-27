@@ -7411,15 +7411,28 @@ mod tests {
                 .expect_err("the hung root request must expire");
             first.abort();
             assert!(first.await.unwrap_err().is_cancelled());
+            // A later open of an unmounted root waits for the held open's
+            // permit and expires; one of a mounted root finds the revalidation
+            // in flight and returns the mount without a check of its own.
             for _ in 1..RETRIES {
-                tokio::time::timeout(
-                    Duration::from_millis(500),
+                let retry = tokio::time::timeout(
+                    if mounted {
+                        Duration::from_secs(10)
+                    } else {
+                        Duration::from_millis(500)
+                    },
                     state
                         .host
                         .open_or_get_registered_workspace(hung.path(), config.clone()),
                 )
-                .await
-                .expect_err("the hung root request must expire");
+                .await;
+                if mounted {
+                    retry
+                        .expect("an open of a mounted root waited for a revalidation in flight")
+                        .expect("an open of a mounted root returns its mount");
+                } else {
+                    retry.expect_err("the hung root request must expire");
+                }
             }
             eprintln!("held calls at {hop}: {:#?}", stall.entered());
 
