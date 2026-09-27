@@ -1632,7 +1632,7 @@ async fn handle_forget_devserver_workspace(
         Ok(SetWorkspaceOnOutcome::NeedsForce { active_terminals }) => {
             live_terminals_response(active_terminals)
         }
-        Err(msg) => (StatusCode::CONFLICT, msg).into_response(),
+        Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
     }
 }
 
@@ -5150,12 +5150,11 @@ mod window_op_route_tests {
         ] {
             let (status, body) = send(&router, "POST", uri, Some(r#"{"prefix":"myws"}"#)).await;
             assert_eq!(status, StatusCode::CONFLICT, "{uri}");
-            let expected = if uri.ends_with("/forget") {
-                NO_DESKTOP.to_string()
-            } else {
-                serde_json::json!({"error": NO_DESKTOP}).to_string()
-            };
-            assert_eq!(body, expected, "{uri}");
+            assert_eq!(
+                body,
+                serde_json::json!({"error": NO_DESKTOP}).to_string(),
+                "{uri}"
+            );
         }
         // Pick-folder is inert without a desktop too -- 409 NO_DESKTOP, so the
         // launcher falls back to plain text entry.
