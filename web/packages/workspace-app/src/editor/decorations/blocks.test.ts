@@ -241,6 +241,23 @@ describe("list marker rendering (real positioned markers)", () => {
     parent.remove();
   });
 
+  test("keeps the number of a nested ordered task beside its checkbox", () => {
+    const doc = "1. x\n   1. [ ] nested";
+    const { parent, view } = mountDecorated(doc);
+    const nested = parent.querySelectorAll<HTMLElement>(".cm-line")[1]!;
+
+    const slots = [...nested.querySelectorAll(".cm-md-list-marker")];
+    expect(slots.map((el) => (el.classList.contains("cm-md-ol-marker") ? el.textContent : "checkbox"))).toEqual([
+      "1.",
+      "checkbox",
+    ]);
+    expect(nested.textContent).toBe("1.nested");
+    expect(view.state.doc.toString()).toBe(doc);
+
+    view.destroy();
+    parent.remove();
+  });
+
   test("tags every list line with its syntactic depth for the hanging indent", () => {
     const parent = document.createElement("div");
     document.body.appendChild(parent);
