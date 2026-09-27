@@ -12,7 +12,7 @@ when_to_use: >-
 
 # The pre-push gate
 
-`scripts/pre-push` is the git hook; it `cd`s to the repo root and runs `make pre-push`, teeing the output to `target/pre-push.log` so a red gate stays diagnosable after the push. Keeping the target list in the Makefile keeps the local hook and CI from drifting. Install the hook with `./scripts/install-hooks`.
+`scripts/pre-push` is the git hook; it `cd`s to the repo root and runs `make pre-push`, teeing the output to `target/pre-push.log` so a red gate stays diagnosable after the push. The Makefile shares these steps with CI; `make ci-linux` adds the two checks described below. Install the hook with `./scripts/install-hooks`.
 
 ## What `make pre-push` runs
 
@@ -43,9 +43,27 @@ Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additiona
 
 The sdme in step 4 is the project's systemd-nspawn container manager, a third-party tool (installed from sdme.io) that drives the disposable local builds: the containerized Nix recipes, `make windows-cross-check`, the COPR matrix builds, and the Linux desktop bundles. It is local-dev tooling; CI never uses it. The contract check runs only the driver script against a stub and never starts a container; the real containerized Nix build (`make nix-sdme-check`, the release-time hash-harvesting tool) is deliberately NOT part of `pre-push`; step 5 only checks that the lock is the one the pins were harvested for, never that the pins are right. `scripts/lint-static.sh` fetches both linters at a pinned version, each verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools` (override with `CHAN_LINT_TOOLS_DIR`). The cache is deliberately outside `target/`, which the gate discipline wipes: a per-worktree cache under `target/` would mean a fresh download for every isolated or GA gate. Only a cold cache needs network. The severity and the exclude list, with the reason for each exclude, live in `.shellcheckrc`.
 
-`make pre-push` is host-native, not a cross-platform gate. The release gate runs on Linux, so it cannot see Windows or macOS breakage. `make windows-cross-check` deliberately remains outside `pre-push` and is a mandatory release-checklist step; it compiles and lints the CLI crate graph for Windows GNU inside a disposable sdme container (so it needs sdme and an imported Ubuntu rootfs on the host) but does not link or smoke a Windows binary. The mandatory `release.yml` dry run supplies the macOS compile. Neither release check changes the per-push gate.
+`make pre-push` validates the host platform. `make ci-linux` also checks Windows GNU test targets and symlinked temp paths as described below. `make windows-cross-check` remains a separate, mandatory release-checklist step: it compiles the CLI and selected test targets for Windows GNU with warnings denied inside a disposable sdme container, so it needs sdme and an imported Ubuntu rootfs on the host. Its test list covers chan-library, chan-server and chan-desktop; it lacks chan-workspace. Native Windows CI supplies Windows execution and packaging, and the mandatory `release.yml` dry run supplies the macOS compile.
 
 The gateway is a separate Cargo workspace and is NOT a member of the root workspace. A `crates/`-scoped check misses it, plus the `chan-desktop` (`desktop/src-tauri`) construction sites. When a change touches a cross-workspace struct, build the whole repo, not just the default workspace.
+
+## What `make ci-linux` adds
+
+`ci-linux` keeps `pre-push` as its prerequisite, then calls two Make targets in order. Both the `linux` job in `ci.yml` and `linux-validate` in `release.yml` run it. The pre-push hook runs only the shared prerequisite.
+
+1. `make test-symlink-tmpdir` runs `cargo test -p chan-library -p chan-server --no-fail-fast` with `TMPDIR` pointing through a short symlink under `/tmp` and `RUSTFLAGS=-D warnings`. It refuses to start unless the link resolves to a different directory, and removes both temporary paths on exit. This exposes raw temp-path comparisons that pass when Linux's temp directory already has its canonical spelling. Selecting these two crates can rebuild dependencies with different features from the workspace test build.
+2. `make check-windows-test-target` runs `cargo clippy --tests --target x86_64-pc-windows-gnu --no-deps -- -D warnings` with `RUSTFLAGS=-D warnings` over `CHAN_WINDOWS_TEST_CRATES`. The native Windows arm reads the same variable for its full-suite subset. The target refuses when the Rust target or MinGW compiler is absent, naming `rustup target add x86_64-pc-windows-gnu` or `apt-get install gcc-mingw-w64-x86-64`; both Linux workflow jobs install them. Tauri validates `target/release/chan.exe` as a bundle resource during the check, so the target creates an empty placeholder only when the path is absent and removes only that placeholder on exit.
+
+The native Linux and macOS arms run each crate's full suite with `--all-targets`. The symlink arm runs the full library and server suites. The native Windows arm compiles the entire library test binary even when it executes only named tests. The GNU check compiles and lints tests without running a Windows binary:
+
+| Crate | Linux/macOS | Symlink | Native Windows | GNU check |
+| --- | --- | --- | --- | --- |
+| chan-library | full | full | full | library tests |
+| chan-server | full | full | 6 named | library tests |
+| chan-workspace | full | none | 8 named | library + integration |
+| chan-desktop | full | none | full | binary tests |
+
+The GNU check includes chan-workspace's eleven integration-test targets, which the native Windows arm does not select, and excludes chan-server's example target. Rustc warnings in compiled workspace path dependencies are also denied. Neither Windows arm runs the `chan` crate's own tests.
 
 ## The browser smokes are outside the gate, deliberately
 
