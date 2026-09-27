@@ -3290,7 +3290,10 @@ async fn desktop_handle_upgrade(
                         tracing::info!(%version, "chan-desktop update downloaded; installing and relaunching");
                         if begin_normal_shutdown(
                             app_bg.clone(),
-                            ShutdownAction::InstallUpdate { update, bytes },
+                            ShutdownAction::InstallUpdate {
+                                update: Box::new(update),
+                                bytes,
+                            },
                         )
                         .is_err()
                         {
@@ -3511,13 +3514,19 @@ fn restart_desktop_after_update(app: tauri::AppHandle) -> Result<(), String> {
         );
     };
     tracing::info!(%version, "installing the staged update and relaunching");
-    match begin_normal_shutdown(app, ShutdownAction::InstallUpdate { update, bytes }) {
+    match begin_normal_shutdown(
+        app,
+        ShutdownAction::InstallUpdate {
+            update: Box::new(update),
+            bytes,
+        },
+    ) {
         Ok(()) => Ok(()),
         // A quit or an earlier install is already draining: keep the staged
         // bytes so the dialog can retry once it settles, and say so.
         Err(ShutdownAction::InstallUpdate { update, bytes }) => {
             *state.pending_update.lock().unwrap() = Some(PendingUpdate {
-                update,
+                update: *update,
                 bytes,
                 version,
             });
@@ -6636,7 +6645,7 @@ enum ShutdownAction {
     /// relaunches the app.
     #[cfg(windows)]
     InstallUpdate {
-        update: tauri_plugin_updater::Update,
+        update: Box<tauri_plugin_updater::Update>,
         bytes: Vec<u8>,
     },
 }
