@@ -13,6 +13,7 @@ import type {
   WorkspaceEntry,
 } from "../api/library";
 import { selfManagedWindows } from "./capabilities";
+import { demoState } from "./demo.svelte";
 import { pushLocalError } from "./notices.svelte";
 import { beginPending, clearPending, dsKey, reconcile, servedKey, wsKey } from "./pending.svelte";
 import { closeWindowRecord, reconcileWindows } from "./windowManager.svelte";
@@ -43,6 +44,9 @@ export const library = $state<LibraryState>({
 let unwatch: (() => void) | null = null;
 let removeVisibilityResync: (() => void) | null = null;
 let workspacePoll: ReturnType<typeof setInterval> | null = null;
+// Foreign writer locks can change without a window-feed event. Listing probes
+// them again; two seconds is the refresh budget for those external changes
+// while visible, alongside immediate feed refreshes for host-owned transitions.
 const WORKSPACE_POLL_MS = 2000;
 
 function errorText(e: unknown): string {
@@ -176,7 +180,7 @@ function installVisibilityResync(): void {
 }
 
 function startWorkspacePolling(): void {
-  if (workspacePoll !== null || typeof document === "undefined") return;
+  if (demoState.enabled || workspacePoll !== null || typeof document === "undefined") return;
   workspacePoll = setInterval(() => {
     if (document.visibilityState === "visible") void refreshWorkspacesLive();
   }, WORKSPACE_POLL_MS);
