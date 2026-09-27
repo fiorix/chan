@@ -45,6 +45,7 @@ import { decodePercent, normalizeHref } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
 import { openPreviewPopover } from "../overlays/preview_popover";
+import { resolvePreviewTarget } from "../link_preview";
 import { windowCaps } from "../../state/windowCaps";
 
 export type LinkKind =
@@ -315,9 +316,12 @@ class WikiLinkWidget extends WidgetType {
         }
         const parsed = this.parsed;
         const onClick = this.onClick;
+        // A hand-written `[[Note]]` names the note by its stem, which the
+        // file route cannot read; preview the path the body menu's
+        // Preview reads for the same pill.
         openPreviewPopover({
           anchor: el,
-          path: parsed.target,
+          path: resolvePreviewTarget(parsed.target),
           onOpen: (openInNewPane) =>
             onClick({ ...parsed, openInNewPane }),
         });
