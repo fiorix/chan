@@ -1662,7 +1662,7 @@ async fn dispatch_window_op(
 ) -> Response {
     match host.desktop_bridge().dispatch(make_op).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(msg) => (StatusCode::CONFLICT, msg).into_response(),
+        Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
     }
 }
 
@@ -5068,13 +5068,21 @@ mod window_op_route_tests {
         for verb in ["open", "hide"] {
             let (status, body) = post(&router, &format!("/api/library/windows/w-1/{verb}")).await;
             assert_eq!(status, StatusCode::CONFLICT, "{verb}");
-            assert_eq!(body, NO_DESKTOP, "{verb}");
+            assert_eq!(
+                body,
+                serde_json::json!({"error":NO_DESKTOP}).to_string(),
+                "{verb}"
+            );
         }
         // Connect is inert without a desktop too -- 409 NO_DESKTOP, so the
         // launcher button is safe to show even where it can't act.
         let (status, body) = post(&router, "/api/library/devservers/ds1/connect").await;
         assert_eq!(status, StatusCode::CONFLICT, "connect");
-        assert_eq!(body, NO_DESKTOP, "connect");
+        assert_eq!(
+            body,
+            serde_json::json!({"error":NO_DESKTOP}).to_string(),
+            "connect"
+        );
         for method in ["PUT", "DELETE"] {
             let (status, body) = send(
                 &router,
@@ -5084,7 +5092,11 @@ mod window_op_route_tests {
             )
             .await;
             assert_eq!(status, StatusCode::CONFLICT, "native trust {method}");
-            assert_eq!(body, NO_DESKTOP, "native trust {method}");
+            assert_eq!(
+                body,
+                serde_json::json!({"error":NO_DESKTOP}).to_string(),
+                "native trust {method}"
+            );
         }
         // The new devserver bridge ops are inert without a desktop too -- 409
         // NO_DESKTOP, so the launcher's row buttons are safe to show everywhere.
@@ -5094,7 +5106,11 @@ mod window_op_route_tests {
         ] {
             let (status, body) = post(&router, uri).await;
             assert_eq!(status, StatusCode::CONFLICT, "{uri}");
-            assert_eq!(body, NO_DESKTOP, "{uri}");
+            assert_eq!(
+                body,
+                serde_json::json!({"error":NO_DESKTOP}).to_string(),
+                "{uri}"
+            );
         }
         // Gateway connect/disconnect are inert without a desktop -- 409
         // NO_DESKTOP with the pinned body, distinguishable from the
@@ -5105,7 +5121,11 @@ mod window_op_route_tests {
         ] {
             let (status, body) = post(&router, uri).await;
             assert_eq!(status, StatusCode::CONFLICT, "{uri}");
-            assert_eq!(body, NO_DESKTOP, "{uri}");
+            assert_eq!(
+                body,
+                serde_json::json!({"error":NO_DESKTOP}).to_string(),
+                "{uri}"
+            );
         }
         let (status, body) = send(
             &router,
@@ -5115,7 +5135,11 @@ mod window_op_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "workspaces/open");
-        assert_eq!(body, NO_DESKTOP, "workspaces/open");
+        assert_eq!(
+            body,
+            serde_json::json!({"error":NO_DESKTOP}).to_string(),
+            "workspaces/open"
+        );
         for uri in [
             "/api/library/devservers/ds1/workspaces/on",
             "/api/library/devservers/ds1/workspaces/off",
@@ -5151,7 +5175,11 @@ mod window_op_route_tests {
                 )
                 .await;
                 assert_eq!(status, StatusCode::CONFLICT, "{caller:?} {method}");
-                assert_eq!(body, NO_DESKTOP, "{caller:?} {method}");
+                assert_eq!(
+                    body,
+                    serde_json::json!({"error":NO_DESKTOP}).to_string(),
+                    "{caller:?} {method}"
+                );
             }
         }
     }
