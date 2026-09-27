@@ -2315,6 +2315,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_not_ready_retarget_retries_at_debug_level() {
+        let navigator = source_section(
+            include_str!("window_watcher_wiring.rs"),
+            "fn navigate_remote",
+            "/// Reconcile one live window",
+        );
+        let not_ready = source_section(
+            navigator,
+            "Ok(serve::RetargetOutcome::NotReady) =>",
+            "Ok(serve::RetargetOutcome::Superseded)",
+        );
+        assert!(
+            not_ready.contains("tracing::debug!") && !not_ready.contains("tracing::warn!"),
+            "not-ready retargets log below warn"
+        );
+        assert!(
+            not_ready.contains("remote_launches.lock().unwrap().remove(&label)"),
+            "readiness refusal forgets the key for reconciliation"
+        );
+        assert!(
+            not_ready.contains("builds.retry()"),
+            "readiness refusal uses the existing retry cadence"
+        );
+        assert!(
+            not_ready.contains(".with_current("),
+            "a stale readiness refusal leaves newer work alone"
+        );
+    }
+
     fn scripted_probe(reachable: bool) -> crate::ProbeResult {
         crate::ProbeResult {
             reachable,
