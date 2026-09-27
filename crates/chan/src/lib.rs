@@ -1355,13 +1355,16 @@ enum ReportsAction {
     /// Disable code reports for a workspace
     ///
     /// Destructive: drops the persisted report, so re-enabling later
-    /// triggers a fresh scan. Pass `-y` to skip the confirmation prompt.
+    /// triggers a fresh scan. Asks for confirmation on a terminal; pass
+    /// `-y` to skip it. Without a terminal and without `-y` it refuses
+    /// and exits nonzero, as does a declined prompt.
     #[command(verbatim_doc_comment)]
     Disable {
         /// Workspace root.
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
-        /// Skip the destructive-action confirmation prompt.
+        /// Skip the destructive-action confirmation prompt; required
+        /// without a terminal.
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
