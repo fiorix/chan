@@ -7007,6 +7007,354 @@ mod tests {
         );
     }
 
+    mod home_workspace {
+        use super::*;
+
+        fn registered() -> (
+            Arc<WorkspaceHost>,
+            chan_workspace::KnownWorkspace,
+            tempfile::TempDir,
+        ) {
+            let config = tempfile::tempdir().unwrap();
+            let library = Library::open_at(config.path().join("config.toml")).unwrap();
+            let row = library
+                .register_workspace(&dirs::home_dir().unwrap())
+                .unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            host.install_window_registry(
+                Arc::new(WindowRegistry::open(config.path().join("windows.json"))),
+                "local".into(),
+            );
+            (host, row, config)
+        }
+
+        async fn with_terminal() -> (
+            Arc<WorkspaceHost>,
+            chan_workspace::KnownWorkspace,
+            tempfile::TempDir,
+        ) {
+            let fixture = registered();
+            fixture
+                .0
+                .open_terminal_session(serve_config("/terminal"), None, None)
+                .await
+                .unwrap();
+            fixture
+        }
+
+        #[tokio::test]
+        async fn open_or_get_returns_the_home_workspace() {
+            let (host, row, _config) = with_terminal().await;
+            let mounted = host
+                .open_or_get_registered_workspace(&row.root_path, serve_config("/home"))
+                .await
+                .unwrap();
+            assert_eq!(
+                mounted.prefix, "/home",
+                "a workspace lookup returned the terminal tenant"
+            );
+            let again = host
+                .open_or_get_registered_workspace(&row.root_path, serve_config("/another"))
+                .await
+                .unwrap();
+            assert_eq!(again.prefix, "/home");
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn the_precheck_accepts_home_beside_a_terminal() {
+            let (host, row, _config) = with_terminal().await;
+            let mounted = host
+                .open_registered_workspace(&row.root_path, serve_config("/home"))
+                .await;
+            assert!(
+                mounted.is_ok(),
+                "the terminal cwd refused a home workspace: {mounted:?}"
+            );
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn publication_accepts_a_terminal_inserted_during_the_build() {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let (host, row, _config) = registered();
+                let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
+                    entered: entered_tx,
+                    release: release_rx,
+                });
+                let mounting = host.clone();
+                let mount = tokio::spawn(async move {
+                    mounting
+                        .open_registered_workspace(&row.root_path, serve_config("/home"))
+                        .await
+                });
+                entered_rx.await.unwrap();
+                host.open_terminal_session(serve_config("/terminal"), None, None)
+                    .await
+                    .unwrap();
+                release_tx.send(()).unwrap();
+                let mounted = mount.await.unwrap();
+                assert!(
+                    mounted.is_ok(),
+                    "the terminal cwd refused workspace publication: {mounted:?}"
+                );
+                assert_eq!(mounted.unwrap().prefix, "/home");
+                host.shutdown_all().await.unwrap();
+            })
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn windows_resolve_to_the_home_workspace() {
+            let (host, row, _config) = with_terminal().await;
+            host.open_or_get_registered_workspace(&row.root_path, serve_config("/home"))
+                .await
+                .unwrap();
+            // Distinct mount handles make both pieces of the window's address observable.
+            for runtime in host.workspaces.write().unwrap().values_mut() {
+                runtime.handle.token = Some(format!("token-{}", runtime.handle.prefix));
+            }
+            let window = host.window_registry().unwrap().create(
+                WindowKind::Workspace,
+                Some(row.root_path.to_string_lossy().into_owned()),
+            );
+            let records = host.assemble_window_records();
+            let resolved = records
+                .iter()
+                .find(|record| record.window_id == window.window_id)
+                .unwrap();
+            assert_eq!(
+                resolved.prefix, "/home",
+                "the home window resolved to a terminal tenant"
+            );
+            assert_eq!(resolved.token, "token-/home");
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn the_home_workspace_has_its_own_leader() {
+            let (host, row, _config) = with_terminal().await;
+            host.open_or_get_registered_workspace(&row.root_path, serve_config("/home"))
+                .await
+                .unwrap();
+            let guards: Vec<_> = host
+                .workspaces
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(prefix, runtime)| {
+                    runtime
+                        .artifacts
+                        .session_registry
+                        .join(prefix, true, None)
+                        .guard
+                })
+                .collect();
+            assert_eq!(
+                host.tenant_leader(WindowKind::Workspace, row.root_path.to_str())
+                    .as_deref(),
+                Some("/home"),
+                "the home workspace borrowed the terminal leader"
+            );
+            assert_eq!(
+                host.tenant_leader(WindowKind::Terminal, None).as_deref(),
+                Some("/terminal")
+            );
+            drop(guards);
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_off_home_window_is_hidden_but_preserved() {
+            let (host, row, _config) = with_terminal().await;
+            let registry = host.window_registry().unwrap();
+            let window = registry.create(
+                WindowKind::Workspace,
+                Some(row.root_path.to_string_lossy().into_owned()),
+            );
+            let terminal = registry.create(WindowKind::Terminal, None);
+            let records = host.assemble_window_records();
+            assert!(
+                !records
+                    .iter()
+                    .any(|record| record.window_id == window.window_id),
+                "an off home window entered the live feed"
+            );
+            assert!(records
+                .iter()
+                .any(|record| record.window_id == terminal.window_id));
+            assert!(registry
+                .snapshot()
+                .iter()
+                .any(|record| record.window_id == window.window_id));
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn health_does_not_degrade_an_unmounted_home() {
+            let (host, row, _config) = with_terminal().await;
+            let result = host.reconcile_root_health(
+                &row.root_path,
+                &row.root_path,
+                Err(ChanError::Io("home health failure".into())),
+            );
+            assert!(result.is_err());
+            assert!(
+                !host
+                    .mount_state
+                    .lock()
+                    .unwrap()
+                    .contains_key(&row.root_path),
+                "health published a state for an unmounted home"
+            );
+            assert_eq!(
+                host.registered_workspace_status(&row),
+                (WorkspaceStatus::Stopped, None)
+            );
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn queries_find_home_beside_shared_and_command_terminals() {
+            let (host, row, _config) = with_terminal().await;
+            for prefix in ["/command-1", "/command-2"] {
+                host.open_terminal_session_with_command(
+                    serve_config(prefix),
+                    Some("echo ready".into()),
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            host.open_or_get_registered_workspace(&row.root_path, serve_config("/home"))
+                .await
+                .unwrap();
+            assert!(
+                host.is_root_mounted(&row.root_path),
+                "the terminal tenants hid the live home workspace"
+            );
+            assert!(host.is_canonical_root_mounted(&row.root_path));
+            assert!(host.is_workspace_mounted_by_key(&row.root_path));
+            assert_eq!(
+                host.live_workspace(&row.root_path).unwrap().root(),
+                row.root_path
+            );
+            assert_eq!(
+                host.mounted_root(&row.root_path),
+                Some(row.root_path.clone())
+            );
+            assert_eq!(
+                host.mounted_canonical_root(&row.root_path),
+                Some(row.root_path.clone())
+            );
+            assert_eq!(
+                host.mounted_prefix_for_root(&row.root_path).as_deref(),
+                Some("/home")
+            );
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_unmounted_home_has_no_workspace_prefix() {
+            let (host, row, _config) = with_terminal().await;
+            assert_eq!(
+                host.mounted_prefix_for_root(&row.root_path),
+                None,
+                "the terminal prefix answered for an unmounted home"
+            );
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_unmounted_home_reads_stopped() {
+            let (host, row, _config) = with_terminal().await;
+            assert_eq!(
+                host.registered_workspace_status(&row),
+                (WorkspaceStatus::Stopped, None),
+                "the terminal tenant made the home row running"
+            );
+            assert_eq!(
+                host.workspace_status(&row.root_path),
+                (WorkspaceStatus::Stopped, None)
+            );
+            assert_eq!(
+                host.canonical_root_status(&row.root_path),
+                (WorkspaceStatus::Stopped, None)
+            );
+            assert!(!host.is_canonical_root_mounted(&row.root_path));
+            assert_eq!(host.mounted_root(&row.root_path), None);
+            assert_eq!(host.mounted_canonical_root(&row.root_path), None);
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_unmounted_home_can_be_marked_starting() {
+            let (host, row, _config) = with_terminal().await;
+            host.mark_workspace_starting(&row.root_path);
+            assert!(
+                matches!(
+                    host.mount_state.lock().unwrap().get(&row.root_path),
+                    Some(MountState::Starting)
+                ),
+                "the terminal tenant suppressed the starting mark"
+            );
+            assert_eq!(
+                host.registered_workspace_status(&row),
+                (WorkspaceStatus::Starting, None)
+            );
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn closing_an_unmounted_home_keeps_the_terminal() {
+            let (host, row, _config) = with_terminal().await;
+            let closed = host
+                .close_workspace_for_root(&row.root_path, false)
+                .await
+                .unwrap();
+            assert!(
+                closed.not_found(),
+                "closing an unmounted home found a terminal tenant: {closed:?}"
+            );
+            assert_eq!(host.mounted_prefixes().unwrap(), ["/terminal"]);
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn forgetting_an_unmounted_home_keeps_the_terminal() {
+            let (host, row, _config) = with_terminal().await;
+            assert!(host
+                .remove_workspace_for_root(&row.root_path, false)
+                .await
+                .unwrap()
+                .completed());
+            assert_eq!(
+                host.mounted_prefixes().unwrap(),
+                ["/terminal"],
+                "forgetting home closed the terminal tenant"
+            );
+            assert!(host.library().list_workspaces().is_empty());
+            host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_workspace_cannot_take_the_terminal_prefix() {
+            let (host, row, _config) = with_terminal().await;
+            let result = host
+                .open_registered_workspace(&row.root_path, serve_config("/terminal"))
+                .await;
+            assert!(
+                matches!(result, Err(Error::Config(ref reason)) if reason.contains("prefix")),
+                "a workspace took the terminal prefix: {result:?}"
+            );
+            assert_eq!(host.mounted_prefixes().unwrap(), ["/terminal"]);
+            host.shutdown_all().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn by_root_resolution_sees_a_non_slug_mount() {
         // The desktop mounts a workspace tenant at `workspace-<hash>`, not at its

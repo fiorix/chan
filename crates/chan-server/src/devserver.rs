@@ -6881,6 +6881,109 @@ mod tests {
         );
     }
 
+    mod home_workspace {
+        use super::*;
+
+        async fn with_terminal(config: &Path) -> (Arc<DevserverState>, PathBuf, String) {
+            let state = devserver_with_windows(config).await;
+            // The same shared tenant, with layouts and drafts in this test's store.
+            state
+                .host
+                .open_terminal_session(
+                    tenant_config(state.addr, DEVSERVER_SHARED_TERMINAL_PREFIX),
+                    Some(config.join("terminals")),
+                    Some(config.to_path_buf()),
+                )
+                .await
+                .unwrap();
+            let row = state
+                .host
+                .library()
+                .register_workspace(&dirs::home_dir().unwrap())
+                .unwrap();
+            let terminal = state.host.mint_window(WindowKind::Terminal, None).unwrap();
+            assert_eq!(terminal.prefix, DEVSERVER_SHARED_TERMINAL_PREFIX);
+            assert!(!terminal.token.is_empty());
+            (state, row.root_path, terminal.window_id)
+        }
+
+        fn assert_terminal_resolves(state: &DevserverState, window_id: &str) {
+            assert!(
+                state
+                    .host
+                    .mounted_prefixes()
+                    .unwrap()
+                    .iter()
+                    .any(|prefix| prefix == DEVSERVER_SHARED_TERMINAL_PREFIX),
+                "the home operation closed the shared terminal tenant"
+            );
+            let records = state.host.assemble_window_records();
+            let terminal = records
+                .iter()
+                .find(|record| record.window_id == window_id)
+                .unwrap();
+            assert_eq!(terminal.prefix, DEVSERVER_SHARED_TERMINAL_PREFIX);
+            assert!(
+                !terminal.token.is_empty(),
+                "the terminal window lost its tenant token"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unmounted_home_lists_stopped_and_off() {
+            let _env = chan_home_env_read();
+            let config = tempfile::tempdir().unwrap();
+            let (state, root, window_id) = with_terminal(config.path()).await;
+            let entries = state.workspace_entries();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].path, root.to_string_lossy());
+            assert_eq!(
+                entries[0].status,
+                WorkspaceStatus::Stopped,
+                "the terminal tenant made the home row running"
+            );
+            assert!(!entries[0].on);
+            assert!(entries[0].token.is_empty());
+            assert_terminal_resolves(&state, &window_id);
+            state.host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn closing_an_unmounted_home_keeps_terminal_windows() {
+            let _env = chan_home_env_read();
+            let config = tempfile::tempdir().unwrap();
+            let (state, root, window_id) = with_terminal(config.path()).await;
+            let outcome = state
+                .host
+                .close_workspace_for_root(&root, false)
+                .await
+                .unwrap();
+            assert!(
+                outcome.not_found(),
+                "an unmounted home close found the terminal tenant: {outcome:?}"
+            );
+            assert_terminal_resolves(&state, &window_id);
+            assert_eq!(state.workspace_entries().len(), 1);
+            state.host.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn forgetting_an_unmounted_home_keeps_terminal_windows() {
+            let _env = chan_home_env_read();
+            let config = tempfile::tempdir().unwrap();
+            let (state, root, window_id) = with_terminal(config.path()).await;
+            let prefix = registered_workspace_prefix(&root).unwrap();
+            assert!(state
+                .forget_workspace(&prefix, false)
+                .await
+                .unwrap()
+                .completed());
+            assert_terminal_resolves(&state, &window_id);
+            assert!(state.workspace_entries().is_empty());
+            state.host.shutdown_all().await.unwrap();
+        }
+    }
+
     /// A relinked root turned off through the host, as the launcher's off
     /// route turns it off, reads off after a devserver restart: its on-row,
     /// kept under the root its registry row stores, is written off too.

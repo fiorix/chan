@@ -761,6 +761,125 @@ async fn serve_router(
 mod tests {
     use super::*;
 
+    mod home_workspace {
+        use super::*;
+
+        // The production registry installer uses CHAN_HOME. A child process
+        // gives it a private store without racing other tests' environment reads.
+        fn isolated(test: &str) -> bool {
+            const CHILD: &str = "CHAN_TEST_HOME_WORKSPACE";
+            if std::env::var(CHILD).as_deref() == Ok(test) {
+                return true;
+            }
+            let config = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    &format!("embedded::tests::home_workspace::{test}"),
+                    "--nocapture",
+                ])
+                .env(CHILD, test)
+                .env("CHAN_HOME", config.path())
+                .output()
+                .unwrap();
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "the isolated desktop test failed");
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("test result: ok. 1 passed; 0 failed;"),
+                "the child did not run exactly one test"
+            );
+            false
+        }
+
+        async fn with_terminal() -> (EmbeddedServer, std::path::PathBuf, String) {
+            let config = chan_workspace::paths::config_dir();
+            let library = chan_workspace::Library::open_at(config.join("config.toml")).unwrap();
+            let embedded = EmbeddedServer::for_tests(library).await;
+            chan_server::install_local_window_registry(&embedded.host);
+            embedded.install_workspace_overlay_for_tests(config.join("workspaces.json"));
+            embedded.open_terminal_in(config).await.unwrap();
+            let row = embedded
+                .library()
+                .register_workspace(&dirs::home_dir().unwrap())
+                .unwrap();
+            let terminal = embedded
+                .mint_window(chan_server::WindowKind::Terminal, None)
+                .unwrap();
+            assert_eq!(terminal.prefix, "/terminal");
+            assert!(!terminal.token.is_empty());
+            (embedded, row.root_path, terminal.window_id)
+        }
+
+        fn assert_terminal_resolves(embedded: &EmbeddedServer, window_id: &str) {
+            assert_eq!(
+                embedded.host.mounted_prefixes().unwrap(),
+                ["/terminal"],
+                "the home operation closed the shared terminal tenant"
+            );
+            let records = embedded.assemble_window_records();
+            let terminal = records
+                .iter()
+                .find(|record| record.window_id == window_id)
+                .unwrap();
+            assert_eq!(terminal.prefix, "/terminal");
+            assert!(
+                !terminal.token.is_empty(),
+                "the terminal window lost its tenant token"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unmounted_home_reads_stopped_and_off() {
+            if !isolated("an_unmounted_home_reads_stopped_and_off") {
+                return;
+            }
+            let (embedded, root, window_id) = with_terminal().await;
+            assert_eq!(
+                embedded.host.workspace_status(&root),
+                (chan_server::WorkspaceStatus::Stopped, None),
+                "the terminal tenant made the home row running"
+            );
+            assert!(!embedded.is_workspace_mounted_by_key(&root));
+            assert!(embedded.workspace_overlay().unwrap().on_paths().is_empty());
+            assert_terminal_resolves(&embedded, &window_id);
+            embedded.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn closing_an_unmounted_home_keeps_terminal_windows() {
+            if !isolated("closing_an_unmounted_home_keeps_terminal_windows") {
+                return;
+            }
+            let (embedded, root, window_id) = with_terminal().await;
+            let outcome = embedded.close_workspace_root(&root, false).await.unwrap();
+            assert!(
+                outcome.not_found(),
+                "an unmounted home close found the terminal tenant: {outcome:?}"
+            );
+            assert_terminal_resolves(&embedded, &window_id);
+            assert_eq!(embedded.library().list_workspaces().len(), 1);
+            embedded.shutdown_all().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn forgetting_an_unmounted_home_keeps_terminal_windows() {
+            if !isolated("forgetting_an_unmounted_home_keeps_terminal_windows") {
+                return;
+            }
+            let (embedded, root, window_id) = with_terminal().await;
+            assert!(embedded
+                .remove_workspace_root(&root, false)
+                .await
+                .unwrap()
+                .completed());
+            assert_terminal_resolves(&embedded, &window_id);
+            assert!(embedded.library().list_workspaces().is_empty());
+            embedded.shutdown_all().await.unwrap();
+        }
+    }
+
     /// One probe period, written out rather than read from the cadence
     /// constant. A bound that takes its limit from the thing under test moves
     /// with it, so a slower cadence would pass; this one has to fail.
