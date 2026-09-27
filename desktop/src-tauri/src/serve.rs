@@ -2235,7 +2235,8 @@ mod tests {
             "fn navigate_remote",
             "/// Reconcile one live window",
         );
-        for (name, source) in [("Reload", reload), ("watcher", dispatch)] {
+        {
+            let (name, source) = ("Reload", reload);
             let before_spawn = source.split("async_runtime::spawn").next().unwrap();
             assert!(
                 before_spawn.contains("retarget_tickets.begin("),
@@ -2246,6 +2247,9 @@ mod tests {
                 "{name} retargets"
             );
         }
+        let before_spawn = dispatch.split("async_runtime::spawn").next().unwrap();
+        assert!(before_spawn.contains("remote_launches.begin_remote("));
+        assert!(dispatch.contains("retarget_watched_remote_window("));
         assert!(reload.contains("&ticket"));
         assert!(dispatch.contains("ticket.as_ref().expect(\"retarget ticket\")"));
         let retarget = source_section(
@@ -2295,17 +2299,17 @@ mod tests {
     fn a_stale_retarget_leaves_the_remembered_key_alone() {
         let navigator = source_section(
             include_str!("window_watcher_wiring.rs"),
-            "fn navigate_remote",
-            "/// Reconcile one live window",
+            "impl RemoteLaunches",
+            "/// The Tauri native-window surface",
         );
-        let failure = source_section(navigator, "let fail = {", "let url = match");
+        let failure = source_section(navigator, "fn fail(", "fn finish_retarget(");
         assert!(
             failure.contains(".with_current(ticket, rollback)"),
             "a stale mint or navigation failure cannot erase the newer key"
         );
         let rollback = source_section(failure, "let rollback = || {", "};");
         assert!(
-            rollback.contains("remote_launches.lock().unwrap().remove(&label)")
+            rollback.contains("self.0.lock().unwrap().remove(label)")
                 && rollback.contains("builds.retry()"),
             "failure removal and retry must be inside the guarded rollback"
         );
@@ -2318,9 +2322,9 @@ mod tests {
             gone.contains(".with_current("),
             "a vanished stale retarget cannot erase the newer key"
         );
-        let gone_guard = source_section(gone, "|| {", "},");
+        let gone_guard = source_section(gone, "|| {", "});");
         assert!(
-            gone_guard.contains("remote_launches.lock().unwrap().remove(&label)")
+            gone_guard.contains("self.0.lock().unwrap().remove(label)")
                 && gone_guard.contains("nudge.notify_one()"),
             "Gone removal and nudge must be inside the currency guard"
         );
@@ -2331,20 +2335,22 @@ mod tests {
     fn retarget_dispatch_remembers_only_with_a_current_ticket() {
         let navigator = source_section(
             include_str!("window_watcher_wiring.rs"),
-            "fn navigate_remote",
-            "/// Reconcile one live window",
+            "fn begin_remote",
+            "fn forget",
         );
-        let remember = navigator.split("async_runtime::spawn").next().unwrap();
+        let remember = navigator;
         assert!(
-            remember
-                .contains("let ticket = retarget.then(|| state.retarget_tickets.begin(&label));")
+            remember.contains("let ticket = retarget.then(|| tickets.begin(&label));")
                 && remember.contains("if let Some(ticket) = &ticket {")
                 && remember.contains(".with_current(ticket, remember)"),
             "dispatch cannot remember an older key after a newer ticket"
         );
         let guarded_write = source_section(remember, "let remember = || {", "};");
         assert!(
-            guarded_write.contains("remote_launches.lock().unwrap().insert("),
+            guarded_write
+                .split_whitespace()
+                .collect::<String>()
+                .contains("self.0.lock().unwrap().insert("),
             "dispatch must insert the key inside the guarded remember closure"
         );
     }
@@ -2353,8 +2359,8 @@ mod tests {
     fn a_not_ready_retarget_retries_at_debug_level() {
         let navigator = source_section(
             include_str!("window_watcher_wiring.rs"),
-            "fn navigate_remote",
-            "/// Reconcile one live window",
+            "fn finish_retarget",
+            "/// The Tauri native-window surface",
         );
         let not_ready = source_section(
             navigator,
@@ -2365,9 +2371,9 @@ mod tests {
             not_ready.contains("tracing::debug!") && !not_ready.contains("tracing::warn!"),
             "not-ready retargets log below warn"
         );
-        let guarded = source_section(not_ready, "|| {", "},");
+        let guarded = source_section(not_ready, "|| {", "});");
         assert!(
-            guarded.contains("remote_launches.lock().unwrap().remove(&label)"),
+            guarded.contains("self.0.lock().unwrap().remove(label)"),
             "readiness refusal forgets the key for reconciliation"
         );
         assert!(
@@ -2534,12 +2540,18 @@ mod tests {
             .split("async_runtime::spawn")
             .next()
             .expect("navigator has a pre-spawn section");
-        assert!(pre_spawn.contains("RemoteLaunchKey::from_record"));
+        assert!(pre_spawn.contains("remote_launches.begin_remote("));
         // Open-path cancellation: a close() during the mint removes the
         // in-flight marker and the task must bail instead of building.
         assert!(navigator.contains("if !builds.contains(&label)"));
         // Vanished-retarget arm bails without a rebuild.
-        let vanished = navigator
+        let settlement = source_section(
+            WIRING_RS,
+            "fn finish_retarget",
+            "/// The Tauri native-window surface",
+        );
+        assert!(navigator.contains("remote_launches.finish_retarget("));
+        let vanished = settlement
             .split("Ok(serve::RetargetOutcome::Gone) => {")
             .nth(1)
             .expect("vanished-retarget arm exists")

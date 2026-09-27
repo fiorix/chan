@@ -207,6 +207,111 @@ impl WindowBuilds {
     }
 }
 
+#[derive(Default)]
+struct RemoteLaunches(Mutex<HashMap<String, RemoteLaunchKey>>);
+
+impl RemoteLaunches {
+    fn needs_retarget(&self, record: &WindowRecord, gateway: bool) -> bool {
+        let label = native_label(record);
+        let next = RemoteLaunchKey::from_record(record, gateway);
+        let current = self.0.lock().unwrap().get(&label).cloned();
+        current.as_ref() != Some(&next)
+    }
+
+    fn begin_remote(
+        &self,
+        record: &WindowRecord,
+        gateway: bool,
+        retarget: bool,
+        tickets: &serve::RetargetTickets,
+    ) -> Option<serve::RetargetTicket> {
+        let label = native_label(record);
+        let ticket = retarget.then(|| tickets.begin(&label));
+        // Dispatch-time remember: refreshes during the gap compare equal and
+        // skip; rolled back on failure so a retry pass can fire again.
+        let remember = || {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(label.clone(), RemoteLaunchKey::from_record(record, gateway));
+        };
+        if let Some(ticket) = &ticket {
+            tickets.with_current(ticket, remember);
+        } else {
+            remember();
+        }
+        ticket
+    }
+
+    fn forget(&self, label: &str) {
+        self.0.lock().unwrap().remove(label);
+    }
+
+    fn fail(
+        &self,
+        label: &str,
+        retarget: bool,
+        tickets: &serve::RetargetTickets,
+        ticket: Option<&serve::RetargetTicket>,
+        builds: &WindowBuilds,
+        error: String,
+    ) {
+        let rollback = || {
+            self.0.lock().unwrap().remove(label);
+            if retarget {
+                // A retarget does not own a concurrent open's marker.
+                tracing::warn!(window = %label, %error, "window watcher: retargeting a window failed");
+                builds.retry();
+            } else {
+                builds.complete(label, Err(error));
+            }
+        };
+        if let Some(ticket) = ticket {
+            tickets.with_current(ticket, rollback);
+        } else {
+            rollback();
+        }
+    }
+
+    fn finish_retarget(
+        &self,
+        label: &str,
+        tickets: &serve::RetargetTickets,
+        ticket: &serve::RetargetTicket,
+        builds: &WindowBuilds,
+        outcome: Result<serve::RetargetOutcome, String>,
+    ) {
+        let nudge = &builds.nudge;
+        let result = match outcome {
+            // The webview vanished mid-gap: a close raced this
+            // retarget. Do NOT rebuild here -- if the record still
+            // wants a window, the nudged reconcile below reopens it.
+            Ok(serve::RetargetOutcome::Gone) => {
+                tickets.with_current(ticket, || {
+                    self.0.lock().unwrap().remove(label);
+                    nudge.notify_one();
+                });
+                return;
+            }
+            Ok(serve::RetargetOutcome::Navigated) => Ok(()),
+            Ok(serve::RetargetOutcome::NotReady) => {
+                tickets.with_current(ticket, || {
+                    self.0.lock().unwrap().remove(label);
+                    tracing::debug!(window = %label, "window watcher: target is not ready");
+                    builds.retry();
+                });
+                return;
+            }
+            Ok(serve::RetargetOutcome::Superseded) => return,
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(()) => nudge.notify_one(),
+            Err(e) => self.fail(label, true, tickets, Some(ticket), builds, e),
+        }
+    }
+}
+
 /// The Tauri native-window surface: opens windows via the shared SPA builder,
 /// closes them by destroying the OS window, and enumerates the open native
 /// windows for a library by their `{library_id}::` label prefix.
@@ -218,7 +323,7 @@ struct TauriNativeSurface {
     /// restart keeps the same `{library_id}::{window_id}` label but rotates the
     /// tenant token in the URL, so an existing webview may need an in-place
     /// rebuild even though it is already "open" to the reconciler.
-    remote_launches: Arc<Mutex<HashMap<String, RemoteLaunchKey>>>,
+    remote_launches: Arc<RemoteLaunches>,
     /// Native label -> the OS title that window is known to be carrying. The
     /// reconcile calls `refresh` for every shown window on every feed change
     /// (which includes every connect/disconnect), and reading a Tauri title
@@ -256,23 +361,10 @@ impl TauriNativeSurface {
         let gateway = self.opener.is_gateway();
         let builds = self.builds.clone();
         let remote_launches = Arc::clone(&self.remote_launches);
-        let nudge = Arc::clone(&self.builds.nudge);
         let label = native_label(&record);
         let state = Arc::clone(self.app.state::<Arc<AppState>>().inner());
-        let ticket = retarget.then(|| state.retarget_tickets.begin(&label));
-        // Dispatch-time remember: refreshes during the gap compare equal and
-        // skip; rolled back on failure so a retry pass can fire again.
-        let remember = || {
-            remote_launches.lock().unwrap().insert(
-                label.clone(),
-                RemoteLaunchKey::from_record(&record, gateway),
-            );
-        };
-        if let Some(ticket) = &ticket {
-            state.retarget_tickets.with_current(ticket, remember);
-        } else {
-            remember();
-        }
+        let ticket =
+            remote_launches.begin_remote(&record, gateway, retarget, &state.retarget_tickets);
         tauri::async_runtime::spawn(async move {
             let fail = {
                 let remote_launches = Arc::clone(&remote_launches);
@@ -281,21 +373,14 @@ impl TauriNativeSurface {
                 let state = Arc::clone(&state);
                 let ticket = ticket.clone();
                 move |error: String| {
-                    let rollback = || {
-                        remote_launches.lock().unwrap().remove(&label);
-                        if retarget {
-                            // A retarget does not own a concurrent open's marker.
-                            tracing::warn!(window = %label, %error, "window watcher: retargeting a window failed");
-                            builds.retry();
-                        } else {
-                            builds.complete(&label, Err(error));
-                        }
-                    };
-                    if let Some(ticket) = &ticket {
-                        state.retarget_tickets.with_current(ticket, rollback);
-                    } else {
-                        rollback();
-                    }
+                    remote_launches.fail(
+                        &label,
+                        retarget,
+                        &state.retarget_tickets,
+                        ticket.as_ref(),
+                        &builds,
+                        error,
+                    );
                 }
             };
             let url = match crate::devserver::window_navigation_url(&conn, &record).await {
@@ -309,49 +394,29 @@ impl TauriNativeSurface {
             ) {
                 return fail(e);
             }
-            let result = if retarget {
-                match serve::retarget_watched_remote_window(
+            if retarget {
+                let outcome = serve::retarget_watched_remote_window(
                     &app,
                     &url,
                     &record,
                     ticket.as_ref().expect("retarget ticket"),
                 )
-                .await
-                {
-                    // The webview vanished mid-gap: a close raced this
-                    // retarget. Do NOT rebuild here -- if the record still
-                    // wants a window, the nudged reconcile below reopens it.
-                    Ok(serve::RetargetOutcome::Gone) => {
-                        state.retarget_tickets.with_current(
-                            ticket.as_ref().expect("retarget ticket"),
-                            || {
-                                remote_launches.lock().unwrap().remove(&label);
-                                nudge.notify_one();
-                            },
-                        );
-                        return;
-                    }
-                    Ok(serve::RetargetOutcome::Navigated) => Ok(()),
-                    Ok(serve::RetargetOutcome::NotReady) => {
-                        state.retarget_tickets.with_current(
-                            ticket.as_ref().expect("retarget ticket"),
-                            || {
-                                remote_launches.lock().unwrap().remove(&label);
-                                tracing::debug!(window = %label, "window watcher: target is not ready");
-                                builds.retry();
-                            },
-                        );
-                        return;
-                    }
-                    Ok(serve::RetargetOutcome::Superseded) => return,
-                    Err(e) => Err(e),
-                }
-            } else {
+                .await;
+                remote_launches.finish_retarget(
+                    &label,
+                    &state.retarget_tickets,
+                    ticket.as_ref().expect("retarget ticket"),
+                    &builds,
+                    outcome,
+                );
+                return;
+            }
+            let result = {
                 // Cancellation check: a close()/disconnect during the mint
                 // removed the marker; building now would resurrect a window
                 // the user just closed.
                 if !builds.contains(&label) {
-                    remote_launches.lock().unwrap().remove(&label);
+                    remote_launches.forget(&label);
                     return;
                 }
                 let completion = {
@@ -366,7 +431,6 @@ impl TauriNativeSurface {
                 serve::open_watched_remote_window(&app, &url, &conn.name, &record, completion)
             };
             match result {
-                Ok(()) if retarget => nudge.notify_one(),
                 Ok(()) => {}
                 Err(e) => fail(e),
             }
@@ -479,10 +543,10 @@ impl NativeSurface for TauriNativeSurface {
         if !self.opener.is_remote() {
             return;
         }
-        let label = native_label(record);
-        let next = RemoteLaunchKey::from_record(record, self.opener.is_gateway());
-        let current = self.remote_launches.lock().unwrap().get(&label).cloned();
-        if current.as_ref() != Some(&next) {
+        if self
+            .remote_launches
+            .needs_retarget(record, self.opener.is_gateway())
+        {
             self.navigate_remote(record, true);
         }
     }
@@ -490,7 +554,7 @@ impl NativeSurface for TauriNativeSurface {
     fn close(&self, label: &str) {
         // No longer in-flight (also covers a close before the build landed).
         self.builds.remove(label);
-        self.remote_launches.lock().unwrap().remove(label);
+        self.remote_launches.forget(label);
         // A rebuilt window at this label starts from whatever the build path
         // composes, so a remembered title must not outlive the window.
         self.applied_titles.lock().unwrap().remove(label);
@@ -526,7 +590,7 @@ pub(crate) fn spawn_local_window_watcher(app: AppHandle, state: Arc<AppState>) {
         app,
         opener: WindowOpener::Local { addr },
         builds: WindowBuilds::new(Arc::clone(&change)),
-        remote_launches: Arc::new(Mutex::new(HashMap::new())),
+        remote_launches: Arc::new(RemoteLaunches::default()),
         applied_titles: Arc::new(Mutex::new(HashMap::new())),
     };
     let view = Arc::new(WatcherViewState::default());
@@ -1163,7 +1227,7 @@ pub(crate) async fn spawn_devserver_window_watcher(
         app,
         opener: WindowOpener::Remote { conn },
         builds: WindowBuilds::new(Arc::clone(&change)),
-        remote_launches: Arc::new(Mutex::new(HashMap::new())),
+        remote_launches: Arc::new(RemoteLaunches::default()),
         applied_titles: Arc::new(Mutex::new(HashMap::new())),
     };
     let feed = DevserverWindowFeed { snapshot, change };
