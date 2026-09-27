@@ -46,7 +46,9 @@ const { createRootMock, renderMock, unmountMock, modules, boardAppState } = vi.h
           files: {},
         }),
       // Mimics the real restore's visible part: selection elements dropped, a
-      // missing version made 1, a missing appState key given its default.
+      // missing version made 1, and every appState key it knows answered, a
+      // missing one at its default, the view keys the serializer drops among
+      // them.
       restore: (
         data: {
           elements?: Record<string, unknown>[] | null;
@@ -58,7 +60,15 @@ const { createRootMock, renderMock, unmountMock, modules, boardAppState } = vi.h
           .filter((el) => el.type !== "selection")
           .map((el) => ({ ...el, version: el.version || 1 })),
         appState: Object.fromEntries(
-          Object.entries(boardAppState).map(([k, v]) => [k, data?.appState?.[k] ?? v]),
+          Object.entries({
+            ...boardAppState,
+            viewModeEnabled: false,
+            zoom: { value: 1 },
+            scrollX: 0,
+            scrollY: 0,
+            selectedElementIds: {},
+            activeTool: { type: "selection" },
+          }).map(([k, v]) => [k, data?.appState?.[k] ?? v]),
         ),
         files: data?.files ?? {},
       }),
@@ -255,15 +265,20 @@ type FakeApi = {
   setFiles: (next: Record<string, unknown>) => void;
 };
 
-function fakeApi(initial: WireElement[] = []): FakeApi {
+/// A board whose `updateScene` replaces the elements at once and shows the
+/// appState it is handed only at a later task, as the library's render does
+/// for an update from outside it, reporting the change through `report` then.
+function fakeApi(initial: WireElement[] = [], report: () => void = () => {}): FakeApi {
   let elements: Record<string, unknown>[] = [...initial];
   let appState: Record<string, unknown> = { selectedElementIds: {}, ...boardAppState };
   let files: Record<string, unknown> = {};
   const updateScene = vi.fn((s: Record<string, unknown>) => {
     if (Array.isArray(s.elements)) elements = s.elements as Record<string, unknown>[];
-    if (s.appState && typeof s.appState === "object") {
-      appState = { ...appState, ...(s.appState as Record<string, unknown>) };
-    }
+    const next = s.appState && typeof s.appState === "object" ? (s.appState as Record<string, unknown>) : null;
+    setTimeout(() => {
+      if (next) appState = { ...appState, ...next };
+      report();
+    }, 0);
   });
   return {
     getSceneElementsIncludingDeleted: () => elements,
@@ -324,9 +339,9 @@ async function mountBound(
   );
   await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
   const rendered = renderMock.mock.calls.at(-1)![0] as {
-    props: { excalidrawAPI: (a: unknown) => void };
+    props: { excalidrawAPI: (a: unknown) => void; onChange: () => void };
   };
-  const api = fakeApi(initial);
+  const api = fakeApi(initial, () => rendered.props.onChange());
   rendered.props.excalidrawAPI(api);
   await vi.waitFor(() => expect(session.bindCanvas).toHaveBeenCalled());
   return { api, session, binding: bound! };

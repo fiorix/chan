@@ -20,7 +20,13 @@
 //   5. After the init, `updateScene` replaces the elements at once, but sets
 //      its appState through `setState` (:25957-25961), which `getAppState()`
 //      shows only at the render the update schedules (:29433); its `onChange`
-//      follows that render.
+//      follows that render. An update from outside an event takes React's
+//      default priority (react-dom:10992-10999), which React renders in a
+//      later task, so a timer can run first; `holdRenders` keeps that render
+//      until the test runs it.
+//   6. The init applies the restored appState through `syncActionResult`,
+//      which keeps the `viewModeEnabled` prop over the restored value
+//      (:25139-25146); `updateScene` applies whatever it is handed.
 //
 // The restore and the serializer are read from dist/dev/chunk-4FTI6OG3.js.
 //
@@ -44,14 +50,26 @@ type AppState = Record<string, unknown>;
 type Files = Record<string, unknown>;
 type Scene = { elements?: Element[] | null; appState?: AppState | null; files?: Files | null };
 
+/// Keys of the board's appState the serializer drops, with the defaults the
+/// library's restore gives them (chunk:465, :499-501, :520): view mode, zoom,
+/// scroll, selection and the active tool.
+const VIEW_APP_STATE: Record<string, unknown> = {
+  viewModeEnabled: false,
+  zoom: { value: 1 },
+  scrollX: 0,
+  scrollY: 0,
+  selectedElementIds: {},
+  activeTool: { type: "selection" },
+};
+
 /// The library's `restore` (chunk:20669-20851), reduced to what a test can
 /// see: it drops `selection` elements (:20674), gives an element without a
-/// version the version 1 (:20454), and fills each appState key the scene lacks
-/// with its default.
+/// version the version 1 (:20454), and answers every appState key it knows,
+/// each one the scene lacks at its default (chunk:20793-20843).
 function restore(data: Scene | null): { elements: Element[]; appState: AppState; files: Files } {
   const supplied = data?.appState ?? {};
   const appState: AppState = {};
-  for (const [key, fallback] of Object.entries(SERIALIZED_APP_STATE)) {
+  for (const [key, fallback] of Object.entries({ ...SERIALIZED_APP_STATE, ...VIEW_APP_STATE })) {
     appState[key] = supplied[key] !== undefined ? supplied[key] : fallback;
   }
   return {
@@ -100,6 +118,10 @@ export type Board = {
   readonly elements: unknown[];
   /// The appState keys the serializer keeps, as `getAppState()` shows them.
   readonly appState: AppState;
+  /// View mode and zoom, as `getAppState()` shows them.
+  readonly view: { viewModeEnabled: unknown; zoom: unknown };
+  /// The files on the board.
+  readonly files: Files;
   /// The props of the render App was built with, from the handover on.
   readonly mountedWith: BoardProps | null;
   /// Steps 1 and 2: the locale import, then the API handover.
@@ -111,6 +133,14 @@ export type Board = {
   start(): Promise<void>;
   /// A user's stroke: the library adds the element and reports the change.
   stroke(element: unknown): void;
+  /// A user's zoom or pick of a background, in the library's own render: the
+  /// state shows it at once and the change is reported.
+  zoomTo(value: number): void;
+  pickBackground(color: string): void;
+  /// Keep the renders that show an update's appState until `render` runs them.
+  holdRenders(): void;
+  /// Run the held renders: each shows its appState and reports the change.
+  render(): Promise<void>;
 };
 
 /// A board whose App is built, at the handover, with the props of the render
@@ -118,9 +148,20 @@ export type Board = {
 export function excalidrawBoard(latest: () => BoardProps): Board {
   let mountedWith: BoardProps | null = null;
   let elements: Element[] = [];
-  let appState: AppState = { ...SERIALIZED_APP_STATE };
+  let appState: AppState = { ...SERIALIZED_APP_STATE, ...VIEW_APP_STATE };
   let files: Files = {};
   let loading = true;
+  let held: (() => void)[] | null = null;
+  // The render an update schedules: it shows the update's appState and
+  // reports the change, at a later task or when the test runs held renders.
+  const scheduleRender = (next: AppState | undefined) => {
+    const run = () => {
+      if (next) appState = { ...appState, ...next };
+      if (!loading) latest().onChange();
+    };
+    if (held) held.push(run);
+    else setTimeout(run, 0);
+  };
   const api = {
     getSceneElements: () => elements.filter((element) => !element.isDeleted),
     getSceneElementsIncludingDeleted: () => elements,
@@ -131,11 +172,7 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
     },
     updateScene(scene: { elements?: Element[]; appState?: AppState }) {
       if (scene.elements) elements = scene.elements;
-      const next = scene.appState;
-      queueMicrotask(() => {
-        if (next) appState = { ...appState, ...next };
-        if (!loading) latest().onChange();
-      });
+      scheduleRender(scene.appState);
     },
   };
   return {
@@ -144,6 +181,12 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
     },
     get appState() {
       return Object.fromEntries(Object.keys(SERIALIZED_APP_STATE).map((key) => [key, appState[key]]));
+    },
+    get view() {
+      return { viewModeEnabled: appState.viewModeEnabled, zoom: appState.zoom };
+    },
+    get files() {
+      return files;
     },
     get mountedWith() {
       return mountedWith;
@@ -156,7 +199,7 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
     async init() {
       const scene = restore((await mountedWith!.initialData) ?? null);
       elements = scene.elements;
-      appState = { ...appState, ...scene.appState };
+      appState = { ...appState, ...scene.appState, viewModeEnabled: mountedWith!.viewModeEnabled ?? false };
       files = { ...scene.files };
       loading = false;
       latest().onChange();
@@ -168,6 +211,23 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
     stroke(element) {
       elements = [...elements, element as Element];
       latest().onChange();
+    },
+    zoomTo(value) {
+      appState = { ...appState, zoom: { value } };
+      latest().onChange();
+    },
+    pickBackground(color) {
+      appState = { ...appState, viewBackgroundColor: color };
+      latest().onChange();
+    },
+    holdRenders() {
+      held ??= [];
+    },
+    async render() {
+      const runs = held ?? [];
+      held = null;
+      for (const run of runs) run();
+      await Promise.resolve();
     },
   };
 }
