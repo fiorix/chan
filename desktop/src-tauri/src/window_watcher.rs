@@ -202,6 +202,14 @@ pub trait NativeSurface {
     fn refresh(&self, _record: &WindowRecord) {}
     /// Close the native window labelled `label`.
     fn close(&self, label: &str);
+    /// Drop attempts outside the desired native surface.
+    fn retain_attempts(&self, _desired: &HashSet<String>, _actual: &HashSet<String>) {}
+    /// Earliest retry reserved by this surface, independent of feed wakes.
+    fn retry_deadline(&self) -> Option<tokio::time::Instant> {
+        None
+    }
+    /// Prevent late completions from creating work after the loop stops.
+    fn retire(&self) {}
 }
 
 /// Whether the reconcile surfaces `record` as a native window: persisted,
@@ -248,6 +256,7 @@ pub fn reconcile(
         .map(native_label)
         .collect();
     let actual = surface.open_labels(library_id);
+    surface.retain_attempts(&desired, &actual);
 
     // Open every desired window that has no native surface yet (reattach reuses the
     // existing label -- the builder rebuilds in place, never a second window).
@@ -304,6 +313,10 @@ impl Default for WatcherViewState {
 }
 
 impl WatcherViewState {
+    pub(crate) fn wake(&self) {
+        self.changed.notify_one();
+    }
+
     pub(crate) fn with_pending_deletes(pending_deletes: Arc<PendingDeleteState>) -> Self {
         Self {
             buried: Mutex::new(HashSet::new()),
@@ -396,10 +409,22 @@ pub async fn watch_loop<F, S, C>(
             reconcile(library_id, &snapshot, &view.suppressed_snapshot(), &surface);
         }
 
+        // Ask after the whole pass so record order cannot round a later
+        // window's deadline up to another window's retry interval.
+        let deadline = surface.retry_deadline();
+        let retry = async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+
         tokio::select! {
             _ = feed_changed => {}
             _ = view_changed => {}
+            _ = retry => {}
             stop = &mut cancel => {
+                surface.retire();
                 if stop == WatchLoopStop::CloseWindows {
                     // Disconnect: reconcile to empty so the library's native
                     // windows close (detach, NOT reap -- the library keeps its set

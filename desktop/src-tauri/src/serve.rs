@@ -2309,9 +2309,13 @@ mod tests {
         );
         let rollback = source_section(failure, "let rollback = || {", "};");
         assert!(
-            rollback.contains("self.0.lock().unwrap().remove(label)")
-                && rollback.contains("builds.retry()"),
-            "failure removal and retry must be inside the guarded rollback"
+            rollback.contains("self.wait(label, builds)"),
+            "failure settlement must be inside the guarded rollback"
+        );
+        let waiting = source_section(navigator, "fn wait(", "fn fail(");
+        assert!(
+            waiting.contains("attempt.phase = LaunchPhase::Waiting")
+                && waiting.contains("builds.retry()")
         );
         let gone = source_section(
             navigator,
@@ -2324,11 +2328,12 @@ mod tests {
         );
         let gone_guard = source_section(gone, "|| {", "});");
         assert!(
-            gone_guard.contains("self.0.lock().unwrap().remove(label)")
-                && gone_guard.contains("nudge.notify_one()"),
+            gone_guard.contains("self.forget(label)") && gone_guard.contains("builds.retry()"),
             "Gone removal and nudge must be inside the currency guard"
         );
-        assert!(navigator.contains("Ok(serve::RetargetOutcome::Superseded) => return"));
+        let forgetting = source_section(navigator, "fn forget(", "fn wait(");
+        assert!(forgetting.contains(".entries.remove(label)"));
+        assert!(navigator.contains("Ok(serve::RetargetOutcome::Superseded) => {}"));
     }
 
     #[test]
@@ -2350,7 +2355,7 @@ mod tests {
             guarded_write
                 .split_whitespace()
                 .collect::<String>()
-                .contains("self.0.lock().unwrap().insert("),
+                .contains("state.entries.insert("),
             "dispatch must insert the key inside the guarded remember closure"
         );
     }
@@ -2359,7 +2364,7 @@ mod tests {
     fn a_not_ready_retarget_retries_at_debug_level() {
         let navigator = source_section(
             include_str!("window_watcher_wiring.rs"),
-            "fn finish_retarget",
+            "impl RemoteLaunches",
             "/// The Tauri native-window surface",
         );
         let not_ready = source_section(
@@ -2373,12 +2378,14 @@ mod tests {
         );
         let guarded = source_section(not_ready, "|| {", "});");
         assert!(
-            guarded.contains("self.0.lock().unwrap().remove(label)"),
-            "readiness refusal forgets the key for reconciliation"
+            guarded.contains("self.wait(label, builds)"),
+            "readiness refusal settles inside the currency guard"
         );
+        let waiting = source_section(navigator, "fn wait(", "fn fail(");
         assert!(
-            guarded.contains("builds.retry()"),
-            "readiness refusal uses the existing retry cadence"
+            waiting.contains("attempt.phase = LaunchPhase::Waiting")
+                && waiting.contains("builds.retry()"),
+            "readiness refusal retains the attempt and wakes its watcher"
         );
         assert!(
             not_ready.contains(".with_current("),
@@ -2515,9 +2522,8 @@ mod tests {
 
         // The refresh path routes through the async navigator, which
         // retargets in place; a vanished webview mid-gap means a close raced
-        // the retarget, so that arm BAILS (rebuilding would resurrect a
-        // window the user just closed) and leaves reopening to the nudged
-        // reconcile.
+        // the retarget. That arm never builds a window; authoritative
+        // reconciliation decides whether the record should still be open.
         let refresh = WIRING_RS
             .split("fn refresh(&self, record")
             .nth(1)
@@ -2558,7 +2564,7 @@ mod tests {
             .split("Ok(serve::RetargetOutcome::Navigated)")
             .next()
             .expect("vanished arm ends before Navigated");
-        assert!(vanished.contains("return;"));
+        assert!(vanished.contains("self.forget(label)"));
         assert!(
             !vanished.contains("open_watched_remote_window"),
             "a vanished retarget must not rebuild (resurrects closed windows)",

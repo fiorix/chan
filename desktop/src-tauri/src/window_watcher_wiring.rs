@@ -142,59 +142,147 @@ const RETRY_NUDGE: Duration = Duration::from_secs(15);
 
 type BuildCompletion = serve::WindowBuildCompletion;
 
-/// Tracks builds between dispatch and the native window becoming observable.
-#[derive(Clone)]
-struct WindowBuilds {
-    pending: Arc<Mutex<HashSet<String>>>,
-    nudge: Arc<Notify>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchPhase {
+    InFlight,
+    Waiting,
+    Applied,
 }
 
-impl WindowBuilds {
-    fn new(nudge: Arc<Notify>) -> Self {
-        Self {
-            pending: Arc::new(Mutex::new(HashSet::new())),
-            nudge,
+struct RemoteLaunch {
+    key: RemoteLaunchKey,
+    attempted_at: tokio::time::Instant,
+    phase: LaunchPhase,
+}
+
+impl RemoteLaunch {
+    fn retry_deadline(&self, now: tokio::time::Instant) -> Option<tokio::time::Instant> {
+        let deadline = self.attempted_at + RETRY_NUDGE;
+        match self.phase {
+            LaunchPhase::Applied => None,
+            // The completion wakes the loop if it finishes past this deadline.
+            LaunchPhase::InFlight if deadline <= now => None,
+            LaunchPhase::InFlight | LaunchPhase::Waiting => Some(deadline),
         }
     }
 
-    fn begin(&self, label: String) {
-        self.pending.lock().unwrap().insert(label);
+    fn should_retry(&self, next: &RemoteLaunchKey) -> bool {
+        self.key != *next
+            || (self.phase == LaunchPhase::Waiting
+                && tokio::time::Instant::now() >= self.attempted_at + RETRY_NUDGE)
+    }
+}
+
+#[derive(Default)]
+struct Launches {
+    entries: HashMap<String, RemoteLaunch>,
+    retired: bool,
+}
+
+impl Launches {
+    fn retry_deadline(&self) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        self.entries
+            .values()
+            .filter_map(|entry| entry.retry_deadline(now))
+            .min()
+    }
+
+    fn retire(&mut self) {
+        self.retired = true;
+        self.entries.clear();
+    }
+}
+
+/// Tracks native builds and retains failed attempts until their retry deadline.
+#[derive(Clone)]
+struct WindowBuilds {
+    pending: Arc<Mutex<Launches>>,
+    nudge: Arc<Notify>,
+    view: Arc<WatcherViewState>,
+}
+
+impl WindowBuilds {
+    fn new(nudge: Arc<Notify>, view: Arc<WatcherViewState>) -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(Launches::default())),
+            nudge,
+            view,
+        }
+    }
+
+    fn begin(&self, record: &WindowRecord, gateway: bool) -> bool {
+        let label = native_label(record);
+        let key = RemoteLaunchKey::from_record(record, gateway);
+        let mut pending = self.pending.lock().unwrap();
+        if pending.retired
+            || pending
+                .entries
+                .get(&label)
+                .is_some_and(|entry| !entry.should_retry(&key))
+        {
+            return false;
+        }
+        pending.entries.insert(
+            label,
+            RemoteLaunch {
+                key,
+                attempted_at: tokio::time::Instant::now(),
+                phase: LaunchPhase::InFlight,
+            },
+        );
+        true
     }
 
     fn remove(&self, label: &str) {
-        self.pending.lock().unwrap().remove(label);
+        self.pending.lock().unwrap().entries.remove(label);
     }
 
     fn contains(&self, label: &str) -> bool {
-        self.pending.lock().unwrap().contains(label)
+        self.pending
+            .lock()
+            .unwrap()
+            .entries
+            .get(label)
+            .is_some_and(|entry| entry.phase == LaunchPhase::InFlight)
     }
 
     fn open_labels(&self, prefix: &str, mut built: HashSet<String>) -> HashSet<String> {
         let mut pending = self.pending.lock().unwrap();
-        pending.retain(|label| !built.contains(label));
+        pending.entries.retain(|label, _| !built.contains(label));
         built.extend(
             pending
+                .entries
                 .iter()
-                .filter(|label| label.starts_with(prefix))
-                .cloned(),
+                .filter(|(label, entry)| {
+                    label.starts_with(prefix) && entry.phase == LaunchPhase::InFlight
+                })
+                .map(|(label, _)| label.clone()),
         );
         built
     }
 
     fn retry(&self) {
-        let nudge = Arc::clone(&self.nudge);
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(RETRY_NUDGE).await;
-            // The local feed shares this signal with WebSocket subscribers.
-            nudge.notify_waiters();
-        });
+        self.view.wake();
     }
 
     fn complete(&self, label: &str, result: Result<(), String>) {
-        self.remove(label);
+        let mut pending = self.pending.lock().unwrap();
+        if pending.retired {
+            return;
+        }
         match result {
-            Ok(()) => self.nudge.notify_waiters(),
+            Ok(()) => {
+                pending.entries.remove(label);
+                drop(pending);
+                self.nudge.notify_waiters();
+            }
             Err(error) => {
+                let Some(attempt) = pending.entries.get_mut(label) else {
+                    return;
+                };
+                attempt.phase = LaunchPhase::Waiting;
+                drop(pending);
                 tracing::warn!(window = %label, %error, "window watcher: opening a window failed");
                 self.retry();
             }
@@ -208,14 +296,18 @@ impl WindowBuilds {
 }
 
 #[derive(Default)]
-struct RemoteLaunches(Mutex<HashMap<String, RemoteLaunchKey>>);
+struct RemoteLaunches(Mutex<Launches>);
 
 impl RemoteLaunches {
     fn needs_retarget(&self, record: &WindowRecord, gateway: bool) -> bool {
         let label = native_label(record);
         let next = RemoteLaunchKey::from_record(record, gateway);
-        let current = self.0.lock().unwrap().get(&label).cloned();
-        current.as_ref() != Some(&next)
+        let state = self.0.lock().unwrap();
+        !state.retired
+            && state
+                .entries
+                .get(&label)
+                .is_none_or(|entry| entry.should_retry(&next))
     }
 
     fn begin_remote(
@@ -227,13 +319,25 @@ impl RemoteLaunches {
     ) -> Option<serve::RetargetTicket> {
         let label = native_label(record);
         let ticket = retarget.then(|| tickets.begin(&label));
-        // Dispatch-time remember: refreshes during the gap compare equal and
-        // skip; rolled back on failure so a retry pass can fire again.
+        // Reserve the deadline before URL resolution so completion order cannot
+        // move an attempt's next eligible dispatch behind another window's.
         let remember = || {
-            self.0
-                .lock()
-                .unwrap()
-                .insert(label.clone(), RemoteLaunchKey::from_record(record, gateway));
+            let mut state = self.0.lock().unwrap();
+            if state.retired {
+                return;
+            }
+            state.entries.insert(
+                label.clone(),
+                RemoteLaunch {
+                    key: RemoteLaunchKey::from_record(record, gateway),
+                    attempted_at: tokio::time::Instant::now(),
+                    phase: if retarget {
+                        LaunchPhase::InFlight
+                    } else {
+                        LaunchPhase::Applied
+                    },
+                },
+            );
         };
         if let Some(ticket) = &ticket {
             tickets.with_current(ticket, remember);
@@ -244,7 +348,17 @@ impl RemoteLaunches {
     }
 
     fn forget(&self, label: &str) {
-        self.0.lock().unwrap().remove(label);
+        self.0.lock().unwrap().entries.remove(label);
+    }
+
+    fn wait(&self, label: &str, builds: &WindowBuilds) {
+        let mut state = self.0.lock().unwrap();
+        let Some(attempt) = state.entries.get_mut(label) else {
+            return;
+        };
+        attempt.phase = LaunchPhase::Waiting;
+        drop(state);
+        builds.retry();
     }
 
     fn fail(
@@ -257,12 +371,12 @@ impl RemoteLaunches {
         error: String,
     ) {
         let rollback = || {
-            self.0.lock().unwrap().remove(label);
             if retarget {
                 // A retarget does not own a concurrent open's marker.
                 tracing::warn!(window = %label, %error, "window watcher: retargeting a window failed");
-                builds.retry();
+                self.wait(label, builds);
             } else {
+                self.forget(label);
                 builds.complete(label, Err(error));
             }
         };
@@ -281,34 +395,65 @@ impl RemoteLaunches {
         builds: &WindowBuilds,
         outcome: Result<serve::RetargetOutcome, String>,
     ) {
-        let nudge = &builds.nudge;
-        let result = match outcome {
-            // The webview vanished mid-gap: a close raced this
-            // retarget. Do NOT rebuild here -- if the record still
-            // wants a window, the nudged reconcile below reopens it.
+        match outcome {
+            // Only a current attempt may forget its state. Native destruction
+            // can already have cancelled the ticket, leaving this arm inert.
             Ok(serve::RetargetOutcome::Gone) => {
                 tickets.with_current(ticket, || {
-                    self.0.lock().unwrap().remove(label);
-                    nudge.notify_one();
-                });
-                return;
-            }
-            Ok(serve::RetargetOutcome::Navigated) => Ok(()),
-            Ok(serve::RetargetOutcome::NotReady) => {
-                tickets.with_current(ticket, || {
-                    self.0.lock().unwrap().remove(label);
-                    tracing::debug!(window = %label, "window watcher: target is not ready");
+                    self.forget(label);
                     builds.retry();
                 });
-                return;
             }
-            Ok(serve::RetargetOutcome::Superseded) => return,
-            Err(e) => Err(e),
-        };
-        match result {
-            Ok(()) => nudge.notify_one(),
+            Ok(serve::RetargetOutcome::Navigated) => {
+                tickets.with_current(ticket, || {
+                    let mut state = self.0.lock().unwrap();
+                    let Some(attempt) = state.entries.get_mut(label) else {
+                        return;
+                    };
+                    attempt.phase = LaunchPhase::Applied;
+                    drop(state);
+                    builds.retry();
+                });
+            }
+            Ok(serve::RetargetOutcome::NotReady) => {
+                tickets.with_current(ticket, || {
+                    tracing::debug!(window = %label, "window watcher: target is not ready");
+                    self.wait(label, builds);
+                });
+            }
+            Ok(serve::RetargetOutcome::Superseded) => {}
             Err(e) => self.fail(label, true, tickets, Some(ticket), builds, e),
         }
+    }
+
+    fn retain_attempts(
+        &self,
+        builds: &WindowBuilds,
+        desired: &HashSet<String>,
+        actual: &HashSet<String>,
+    ) {
+        self.0
+            .lock()
+            .unwrap()
+            .entries
+            .retain(|label, _| desired.contains(label) && actual.contains(label));
+        builds
+            .pending
+            .lock()
+            .unwrap()
+            .entries
+            .retain(|label, _| desired.contains(label));
+    }
+
+    fn retry_deadline(&self, builds: &WindowBuilds) -> Option<tokio::time::Instant> {
+        let remote = self.0.lock().unwrap().retry_deadline();
+        let native = builds.pending.lock().unwrap().retry_deadline();
+        remote.into_iter().chain(native).min()
+    }
+
+    fn retire(&self, builds: &WindowBuilds) {
+        self.0.lock().unwrap().retire();
+        builds.pending.lock().unwrap().retire();
     }
 }
 
@@ -338,19 +483,13 @@ impl TauriNativeSurface {
     /// gateway entry mint, or the raw tenant URL) off the reconcile path, then
     /// build/navigate.
     ///
-    /// Bookkeeping is settled around the async gap so racing reconciles stay
-    /// coherent: the launch key is remembered at DISPATCH time (a reconcile
-    /// during the mint sees the intended key and does not spawn a duplicate
-    /// task) and rolled back on failure; the open path's in-flight marker
-    /// doubles as a cancellation token (a `close()` during the mint removes
-    /// it, and the task re-checks it before building, so a closed or
-    /// disconnected window is never resurrected by a late build); a retarget
-    /// whose webview vanished mid-gap BAILS instead of rebuilding (the close
-    /// was deliberate -- reconcile owns reopening). Every settled task nudges
-    /// the watch loop: immediately on success (one cheap idempotent reconcile
-    /// validates the outcome against the current snapshot) and after a delay
-    /// on failure (a bounded retry driver for transient mint failures, since
-    /// the feed only pushes on real changes).
+    /// Remember the key and dispatch time before the async work. A failed
+    /// retarget keeps that deadline, and its completion wakes this watcher to
+    /// arm the loop's timer. Ticket currency guards each retarget settlement.
+    /// The open path checks its in-flight marker before building; closing or
+    /// retiring the watcher removes that marker. A vanished retarget never
+    /// builds a window: authoritative reconciliation owns reopening, subject
+    /// to the current visibility and pending-delete state.
     fn navigate_remote(&self, record: &WindowRecord, retarget: bool) {
         let WindowOpener::Remote { conn } = &self.opener else {
             return;
@@ -501,6 +640,19 @@ impl TauriNativeSurface {
 }
 
 impl NativeSurface for TauriNativeSurface {
+    fn retain_attempts(&self, desired: &HashSet<String>, actual: &HashSet<String>) {
+        self.remote_launches
+            .retain_attempts(&self.builds, desired, actual);
+    }
+
+    fn retry_deadline(&self) -> Option<tokio::time::Instant> {
+        self.remote_launches.retry_deadline(&self.builds)
+    }
+
+    fn retire(&self) {
+        self.remote_launches.retire(&self.builds);
+    }
+
     fn open_labels(&self, library_id: &str) -> HashSet<String> {
         let prefix = format!("{library_id}::");
         let labels = self
@@ -516,7 +668,9 @@ impl NativeSurface for TauriNativeSurface {
         // Mark the label in-flight BEFORE dispatching the (async) build, so a
         // reconcile that runs before the build lands won't re-open it.
         let label = native_label(record);
-        self.builds.begin(label.clone());
+        if !self.builds.begin(record, self.opener.is_gateway()) {
+            return;
+        }
         match &self.opener {
             // The local builder dispatches to the Tauri main thread
             // internally, so this returns promptly.
@@ -586,14 +740,14 @@ pub(crate) fn spawn_local_window_watcher(app: AppHandle, state: Arc<AppState>) {
         state: Arc::clone(&state),
         change: Arc::clone(&change),
     };
+    let view = Arc::new(WatcherViewState::default());
     let surface = TauriNativeSurface {
         app,
         opener: WindowOpener::Local { addr },
-        builds: WindowBuilds::new(Arc::clone(&change)),
+        builds: WindowBuilds::new(Arc::clone(&change), Arc::clone(&view)),
         remote_launches: Arc::new(RemoteLaunches::default()),
         applied_titles: Arc::new(Mutex::new(HashMap::new())),
     };
-    let view = Arc::new(WatcherViewState::default());
     // Share the view state so the desktop close handlers can bury/unbury
     // through the watcher, then hand the same Arc to the loop.
     state.set_local_watcher_view(Arc::clone(&view));
@@ -1223,15 +1377,15 @@ pub(crate) async fn spawn_devserver_window_watcher(
     // session expiry silently, so nothing else on this connection would notice
     // the cap passing.
     tauri::async_runtime::spawn(run_gateway_session_refresh(conn.clone(), cancel_rx.clone()));
+    let view = Arc::new(WatcherViewState::with_pending_deletes(pending_deletes));
     let surface = TauriNativeSurface {
         app,
         opener: WindowOpener::Remote { conn },
-        builds: WindowBuilds::new(Arc::clone(&change)),
+        builds: WindowBuilds::new(Arc::clone(&change), Arc::clone(&view)),
         remote_launches: Arc::new(RemoteLaunches::default()),
         applied_titles: Arc::new(Mutex::new(HashMap::new())),
     };
     let feed = DevserverWindowFeed { snapshot, change };
-    let view = Arc::new(WatcherViewState::with_pending_deletes(pending_deletes));
     // A handle on the view for the caller so the close handler can bury THIS
     // devserver's windows through it: a bury flips `should_show` false and
     // the reconcile CLOSES the webview (drops the `/ws`), so the launcher dot
@@ -1289,7 +1443,9 @@ mod tests {
         }
         fn open(&self, record: &WindowRecord) {
             let label = native_label(record);
-            self.builds.begin(label.clone());
+            if !self.builds.begin(record, false) {
+                return;
+            }
             self.opens.set(self.opens.get() + 1);
             *self.completion.borrow_mut() = Some(self.builds.completion(label));
         }
@@ -1298,10 +1454,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn failed_window_build_reopens_on_next_reconcile() {
+    #[tokio::test(start_paused = true)]
+    async fn failed_window_build_reopens_after_its_dispatch_deadline() {
         let surface = BuildSurface {
-            builds: WindowBuilds::new(Arc::new(Notify::new())),
+            builds: WindowBuilds::new(
+                Arc::new(Notify::new()),
+                Arc::new(WatcherViewState::default()),
+            ),
             opens: std::cell::Cell::new(0),
             completion: std::cell::RefCell::new(None),
         };
@@ -1324,6 +1483,13 @@ mod tests {
             "a failed native build must release the pending label"
         );
         reconcile();
+        assert_eq!(
+            surface.opens.get(),
+            1,
+            "a failed build must keep its dispatch deadline"
+        );
+        tokio::time::advance(RETRY_NUDGE).await;
+        reconcile();
         assert_eq!(surface.opens.get(), 2, "the desired window must be retried");
         // A successful retry leaves only the observed native window in the set.
         surface.completion.borrow_mut().take().unwrap()(Ok(()));
@@ -1336,26 +1502,20 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn failed_window_build_nudges_feed_after_retry_delay() {
-        let nudge = Arc::new(Notify::new());
-        let builds = WindowBuilds::new(Arc::clone(&nudge));
-        // The local watcher shares this signal with WebSocket feed subscribers.
-        // An older subscriber must not consume the native watcher's retry.
-        let subscriber = nudge.notified();
-        tokio::pin!(subscriber);
-        subscriber.as_mut().enable();
-        let feed_changed = nudge.notified();
-        tokio::pin!(feed_changed);
-        feed_changed.as_mut().enable();
-        let label = native_label(&rec());
-        builds.begin(label.clone());
-        let started = std::time::Instant::now();
-        builds.completion(label)(Err("native builder failed".into()));
-        tokio::time::timeout(RETRY_NUDGE + Duration::from_secs(5), feed_changed)
-            .await
-            .expect("a failed build must wake the feed without a record change");
-        assert!(started.elapsed() >= RETRY_NUDGE);
+    #[tokio::test(start_paused = true)]
+    async fn failed_window_build_retries_without_a_feed_change() {
+        let record = retry_record("native-build-timer", 0);
+        let harness = RetryHarness::start(vec![record.clone()], true, false).await;
+        tokio::time::advance(RETRY_NUDGE).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 15],
+            "a failed build must retry without a feed change"
+        );
+        harness.stop(WatchLoopStop::CloseWindows).await;
     }
 
     #[derive(Clone)]
@@ -1386,6 +1546,18 @@ mod tests {
     }
 
     impl NativeSurface for Arc<RetrySurface> {
+        fn retain_attempts(&self, desired: &HashSet<String>, actual: &HashSet<String>) {
+            self.launches.retain_attempts(&self.builds, desired, actual);
+        }
+
+        fn retry_deadline(&self) -> Option<tokio::time::Instant> {
+            self.launches.retry_deadline(&self.builds)
+        }
+
+        fn retire(&self) {
+            self.launches.retire(&self.builds);
+        }
+
         fn open_labels(&self, library_id: &str) -> HashSet<String> {
             self.builds.open_labels(
                 &format!("{library_id}::"),
@@ -1394,7 +1566,9 @@ mod tests {
         }
         fn open(&self, record: &WindowRecord) {
             let label = native_label(record);
-            self.builds.begin(label.clone());
+            if !self.builds.begin(record, false) {
+                return;
+            }
             self.attempts
                 .lock()
                 .unwrap()
@@ -1460,7 +1634,7 @@ mod tests {
             )));
             let surface = Arc::new(RetrySurface {
                 launches: RemoteLaunches::default(),
-                builds: WindowBuilds::new(nudge),
+                builds: WindowBuilds::new(nudge, Arc::clone(&view)),
                 tickets: serve::RetargetTickets::default(),
                 live: Mutex::new(if build {
                     HashSet::new()
