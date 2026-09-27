@@ -26,6 +26,7 @@
   // up. Owner re-emits selVer from the editor's selectionChange
   // callback so this toolbar reflects the live cursor position.
 
+  import { onDestroy } from "svelte";
   import {
     Bold,
     Code2,
@@ -147,6 +148,11 @@
     void selVer;
     visible = true;
     scheduleHide();
+  });
+
+  onDestroy(() => {
+    cancelCollapse();
+    cancelHide();
   });
 
   function onEnter(): void {
