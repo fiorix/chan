@@ -662,4 +662,73 @@ mod refusal_envelopes {
         dead_launch: ("launch", true),
         dead_count: ("live-terminals", true),
     }
+
+    #[tokio::test]
+    async fn session_leader() {
+        use futures::StreamExt;
+        let fixture = fixture().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = fixture.host.clone().router();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!(
+            "ws://{addr}{}/ws?t={}&w={}",
+            fixture.prefix, fixture.tenant_token, fixture.window_id
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let roster = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let frame = socket.next().await.unwrap().unwrap();
+                if let Ok(text) = frame.to_text() {
+                    let value: serde_json::Value = serde_json::from_str(text).unwrap();
+                    if value["type"] == "session_roster" {
+                        break value;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(roster["leader"], fixture.window_id);
+        let app = launcher_router(fixture.host.clone(), None, None);
+        for (method, path, body) in [
+            (
+                "POST",
+                "/api/library/windows".to_string(),
+                Some(
+                    serde_json::json!({"kind":"workspace", "workspace_path":fixture._workspace.path(), "acting_window_id":"follower"}),
+                ),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "/api/library/windows/{}?acting_window_id=follower",
+                    fixture.window_id
+                ),
+                None,
+            ),
+            (
+                "POST",
+                format!("/api/library/windows/{}/visibility", fixture.window_id),
+                Some(serde_json::json!({"hidden":true, "acting_window_id":"follower"})),
+            ),
+            (
+                "PUT",
+                format!("/api/library/windows/{}/label", fixture.window_id),
+                Some(serde_json::json!({"label":"caption", "acting_window_id":"follower"})),
+            ),
+        ] {
+            assert_refusal(
+                send(&app, method, &path, None, body).await,
+                StatusCode::FORBIDDEN,
+                "not the session leader for this window",
+            )
+            .await;
+        }
+        socket.close(None).await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
 }
