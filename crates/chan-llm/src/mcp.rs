@@ -640,12 +640,17 @@ async fn run_tool(
         if body_ct.is_cancelled() {
             return Err(ErrorData::internal_error("request cancelled", None));
         }
-        tools::execute(
+        #[cfg(any(test, feature = "test-hooks"))]
+        let held = test_hooks::hold_tool(&workspace, &body_cancel);
+        let answer = tools::execute(
             name,
             &args,
             &ToolContext::with_cancel(workspace, body_cancel),
         )
-        .map_err(|e| ErrorData::internal_error(mcp_safe_message(&e), None))
+        .map_err(|e| ErrorData::internal_error(mcp_safe_message(&e), None));
+        #[cfg(any(test, feature = "test-hooks"))]
+        test_hooks::answered(held, &answer);
+        answer
     });
     // A blocking body cannot watch the token, so the token's cancellation
     // sets the flag the body's walks, scans and seed loop read.
@@ -771,6 +776,103 @@ fn mcp_safe_message(err: &LlmError) -> String {
         LlmError::Io(_) => "i/o error".to_string(),
         LlmError::Tool(msg) => format!("tool error: {msg}"),
         LlmError::Mcp(_) => "mcp error".to_string(),
+    }
+}
+
+/// Test-only seams into a running tool body, compiled for this crate's tests
+/// and for downstream test builds that enable the `test-hooks` feature.
+/// Production builds compile none of it.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_hooks {
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use chan_workspace::Workspace;
+    use rmcp::ErrorData;
+    use tokio::sync::oneshot;
+
+    struct Armed {
+        root: PathBuf,
+        entered: oneshot::Sender<Arc<AtomicBool>>,
+        release: mpsc::Receiver<()>,
+        answered: oneshot::Sender<Result<(), String>>,
+    }
+
+    static ARMED: Mutex<Vec<Armed>> = Mutex::new(Vec::new());
+
+    /// Holds the next JSON tool body against one workspace root after its
+    /// request's cancellation checks, before the tool runs, and reports what
+    /// the body answered. Dropping the hold lets a held body run.
+    pub struct ToolHold {
+        entered: Option<oneshot::Receiver<Arc<AtomicBool>>>,
+        release: mpsc::Sender<()>,
+        answered: Option<oneshot::Receiver<Result<(), String>>>,
+    }
+
+    /// Arm a hold for the next tool body that resolves the workspace at `root`.
+    pub fn arm_tool_hold(root: PathBuf) -> ToolHold {
+        let (entered, entered_rx) = oneshot::channel();
+        let (release_tx, release) = mpsc::channel();
+        let (answered, answered_rx) = oneshot::channel();
+        ARMED.lock().unwrap().push(Armed {
+            root,
+            entered,
+            release,
+            answered,
+        });
+        ToolHold {
+            entered: Some(entered_rx),
+            release: release_tx,
+            answered: Some(answered_rx),
+        }
+    }
+
+    impl ToolHold {
+        /// Wait until the body is held, and return the flag its tool reads.
+        pub async fn entered(&mut self) -> Arc<AtomicBool> {
+            let entered = self.entered.take().expect("a hold is entered once");
+            entered.await.expect("the held tool body went away")
+        }
+
+        /// Let the held body run.
+        pub fn release(&self) {
+            let _ = self.release.send(());
+        }
+
+        /// Wait for the body's answer: `Ok` for a result, or its error's message.
+        pub async fn answered(&mut self) -> Result<(), String> {
+            let answered = self.answered.take().expect("a hold answers once");
+            answered.await.expect("the held tool body did not answer")
+        }
+    }
+
+    pub(crate) struct Held(oneshot::Sender<Result<(), String>>);
+
+    pub(crate) fn hold_tool(workspace: &Workspace, cancel: &Arc<AtomicBool>) -> Option<Held> {
+        let armed = {
+            let mut armed = ARMED.lock().unwrap();
+            let index = armed
+                .iter()
+                .position(|armed| armed.root == workspace.root())?;
+            armed.swap_remove(index)
+        };
+        let _ = armed.entered.send(Arc::clone(cancel));
+        // Returns on a release, or when the test drops its hold.
+        let _ = armed.release.recv();
+        Some(Held(armed.answered))
+    }
+
+    pub(crate) fn answered<T>(held: Option<Held>, answer: &Result<T, ErrorData>) {
+        if let Some(Held(answered)) = held {
+            let _ = answered.send(
+                answer
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| error.message.to_string()),
+            );
+        }
     }
 }
 
@@ -1794,5 +1896,120 @@ mod tests {
         writer.write_all(header.as_bytes()).await?;
         writer.write_all(body).await?;
         writer.flush().await
+    }
+
+    fn open_idle_workspace() -> (TempDir, TempDir, Arc<Workspace>) {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.stop_open_recovery();
+        (cfg, root, workspace)
+    }
+
+    /// Hold `tool` after its request's cancellation checks, cancel the
+    /// request, wait until the cancel reaches the body's flag, then let the
+    /// body run. Returns the reply and the workspace's strong count at it.
+    async fn cancel_a_held_call(
+        workspace: &Arc<Workspace>,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> (serde_json::Value, usize) {
+        let weak = Arc::downgrade(workspace);
+        let mut hold = test_hooks::arm_tool_hold(workspace.root().to_path_buf());
+        let (client, peer) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(peer);
+        let session = tokio::spawn(weak_server(weak.clone()).serve_io(read, write));
+        let (read, mut write) = tokio::io::split(client);
+        let mut read = BufReader::new(read);
+        initialize(&mut read, &mut write).await;
+        write_rpc(
+            &mut write,
+            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments}}),
+        )
+        .await;
+        let cancel = hold.entered().await;
+        write_rpc(
+            &mut write,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": 3, "reason": "test cancellation"}}),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cancel.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the request's cancellation did not reach its tool body");
+        hold.release();
+        let reply = read_rpc(&mut read).await;
+        let strong = weak.strong_count();
+        session.abort();
+        (reply, strong)
+    }
+
+    #[tokio::test]
+    async fn mcp_cancel_stops_a_running_list_files() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (_cfg, _root, workspace) = open_idle_workspace();
+            workspace.write_text("a.md", "a").unwrap();
+            let (reply, strong) =
+                cancel_a_held_call(&workspace, "list_files", serde_json::json!({})).await;
+            assert_eq!(reply["error"]["message"], "request cancelled", "{reply}");
+            assert_eq!(strong, 1, "the cancelled body kept its workspace");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_cancel_stops_a_running_workspace_search() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (_cfg, _root, workspace) = open_idle_workspace();
+            workspace.write_text("a.md", "a").unwrap();
+            // No seed: the search's tree walk is the only loop that can stop it.
+            let arguments = serde_json::json!({"query": "absent-token"});
+            let (reply, strong) =
+                cancel_a_held_call(&workspace, "workspace_search", arguments).await;
+            assert_eq!(reply["error"]["message"], "request cancelled", "{reply}");
+            assert_eq!(strong, 1, "the cancelled body kept its workspace");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_cancel_stops_a_running_cold_repo_report() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (_cfg, _root, workspace) = open_idle_workspace();
+            workspace.write_text("a.rs", "fn a() {}\n").unwrap();
+            let (reply, strong) =
+                cancel_a_held_call(&workspace, "repo_report", serde_json::json!({})).await;
+            assert_eq!(reply["error"]["message"], "request cancelled", "{reply}");
+            assert_eq!(strong, 1, "the cancelled body kept its workspace");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_cancel_does_not_undo_a_finished_write() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (_cfg, _root, workspace) = open_idle_workspace();
+            let arguments = serde_json::json!({"path": "done.md", "content": "landed"});
+            let (reply, strong) = cancel_a_held_call(&workspace, "write_file", arguments).await;
+            assert!(
+                reply.get("error").is_none(),
+                "a finished write answered {reply}"
+            );
+            assert!(reply["result"]["content"][0]["text"].is_string(), "{reply}");
+            assert_eq!(workspace.read_text("done.md").unwrap(), "landed");
+            assert_eq!(strong, 1, "the finished body kept its workspace");
+        })
+        .await
+        .unwrap();
     }
 }

@@ -513,6 +513,81 @@ mod tests {
         .unwrap();
     }
 
+    // Dropping the bridge's handle, as unmount does, cancels the requests of
+    // its sessions: a tool body already running stops at its next walked
+    // entry and drops its workspace.
+    #[tokio::test]
+    async fn mcp_unmount_stops_a_running_tool_body_inside_its_walk() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let config = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library =
+                chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace.stop_open_recovery();
+            workspace.create_dir("notes").unwrap();
+            workspace.write_text("notes/a.md", "a").unwrap();
+            let weak = Arc::downgrade(&workspace);
+            let lock_dir = workspace.paths().lock.clone();
+            let mut hold = chan_llm::mcp::test_hooks::arm_tool_hold(workspace.root().to_path_buf());
+            let resolver = weak.clone();
+            let handle = start(pick_socket_path(), move || resolver.upgrade()).unwrap();
+            let client = tokio::net::UnixStream::connect(handle.socket_path())
+                .await
+                .unwrap();
+            let (read, mut write) = client.into_split();
+            let mut read = BufReader::new(read);
+            let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                    "clientInfo": {"name": "unmount-cancel-test", "version": "0"}}});
+            write
+                .write_all(format!("{initialize}\n").as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(
+                read_rpc(&mut read).await["result"]["serverInfo"]["name"],
+                "chan"
+            );
+            let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "list_files", "arguments": {"prefix": "notes"}}});
+            write
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+                .await
+                .unwrap();
+            write
+                .write_all(format!("{call}\n").as_bytes())
+                .await
+                .unwrap();
+            let cancel = hold.entered().await;
+            drop(handle);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("unmount did not reach the running request's token");
+            hold.release();
+            assert_eq!(hold.answered().await, Err("request cancelled".to_string()));
+            assert_eq!(
+                weak.strong_count(),
+                1,
+                "the stopped body kept its workspace"
+            );
+            drop(workspace);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the workspace was not released after the body stopped");
+        })
+        .await
+        .unwrap();
+    }
+
     struct SocketObservingBuilder(tokio::sync::mpsc::UnboundedSender<PathBuf>);
 
     #[async_trait::async_trait]

@@ -98,6 +98,10 @@ chan-workspace = { workspace = true, default-features = false, features = ["test
 # uses `WorkspaceHost::test_connect_window_presence`. Enable it for the test
 # build.
 chan-library = { workspace = true, features = ["test-util"] }
+# The MCP bridge's tests hold a tool body inside chan-llm's blocking closure
+# with the seam behind chan-llm's `test-hooks` feature; enable it for the test
+# build.
+chan-llm = { workspace = true, features = ["mcp", "test-hooks"] }
 # The clipboard round-trip timeout test runs on a paused tokio clock
 # (`#[tokio::test(start_paused = true)]`) so the 30s reply window elapses
 # instantly; `start_paused` lives behind tokio's own `test-util` feature.
