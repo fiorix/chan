@@ -17,6 +17,7 @@ import {
   currentOS,
   currentPlatform,
   formatChord,
+  isAssignableChord,
   osChord,
   registerOverrideEscapeMatcher,
   registerOverrideResolver,
@@ -263,7 +264,7 @@ export function hydrateOverrides(
     const clean: CommandOverride = {};
     for (const slot of slots) {
       const chord = override?.[slot];
-      if (typeof chord === "string" && chord) clean[slot] = chord;
+      if (typeof chord === "string" && isAssignableChord(chord)) clean[slot] = chord;
     }
     if (Object.keys(clean).length > 0) keymapOverrides.byId[id] = clean;
   }

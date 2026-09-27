@@ -30,6 +30,14 @@ import { shiftedPunctuationBase, shortcutKey } from "@chan/web-shared/keyboard";
 
 export type Chord = string;
 
+/// Assignments need a modifier other than Shift so capital letters and
+/// Shift-modified editing keys remain available for ordinary input.
+export function isAssignableChord(chord: Chord): boolean {
+  return chord.split("+").slice(0, -1).some(
+    (part) => part === "Mod" || part === "Ctrl" || part === "Cmd" || part === "Alt",
+  );
+}
+
 /// The two surfaces chan ships. `web` is the in-browser fallback
 /// chord set; `native` is the chord set chan-desktop's init script
 /// binds (which layers VS Code-shaped chords on top of the web set).

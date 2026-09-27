@@ -9,6 +9,7 @@ import {
   chordFromEvent,
   chordsEqual,
   eventChordCandidates,
+  isAssignableChord,
   type Chord,
 } from "./shortcuts";
 
@@ -22,11 +23,12 @@ export type KeymapEntry = { id: string; chord: Chord };
 /// Capture a candidate chord from a rebinding keydown. Returns the
 /// chord in the registry's grammar (`"Mod+J"`, `"Mod+Shift+K"`), or
 /// `null` while the keystroke is not yet a bindable chord: a
-/// modifier-only press (still composing) or a bare key with no
-/// modifier. Requiring a modifier keeps a plain letter from shadowing
-/// ordinary typing once bound, matching the registry's chorded set.
+/// modifier-only press (still composing), a bare key, or a key modified
+/// only by Shift. Mod, Ctrl, Cmd or Alt is required so an assignment
+/// cannot shadow ordinary typing and Shift-modified editing keys.
 export function captureChord(e: KeyboardEvent): Chord | null {
-  return chordFromEvent(e);
+  const chord = chordFromEvent(e);
+  return chord && isAssignableChord(chord) ? chord : null;
 }
 
 /// The chords a rebinding keydown competes for, in the matcher's order: the

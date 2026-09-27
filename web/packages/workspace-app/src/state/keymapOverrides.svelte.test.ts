@@ -273,11 +273,8 @@ describe("slide deck chords (registry + override layer)", () => {
     expect(conflicts.map((c) => c.id)).toEqual(["app.slides.preview"]);
   });
 
-  test("Shift+Tab is assignable to a deck action with no reported conflict", () => {
-    // The containment acceptance line's premise: CodeMirror owns Shift-Tab
-    // (list outdent) and the registry does not, so the dialog accepts it.
-    // What keeps outdent alive on a deck is pinned in
-    // editor/wysiwygModEnter.test.ts, not here.
+  test("Shift+Tab has no registry conflict with a deck action", () => {
+    // Conflict lookup is independent of whether capture permits a chord.
     const conflicts = keymapConflicts(
       "Shift+Tab",
       resolvedKeymapEntriesForSlot([], "web"),
