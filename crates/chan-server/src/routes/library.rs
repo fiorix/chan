@@ -6018,6 +6018,60 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn devserver_remove_unavailable() {
+        let (_dir, host) = host();
+
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                "/api/library/devservers/configured",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "devserver registry is not available on this surface",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn devserver_remove_missing() {
+        let (_dir, host) = host();
+        host.install_devserver_registry(Arc::new(RefusingRegistry));
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                "/api/library/devservers/missing",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "devserver not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn devserver_remove_rejected() {
+        let (_dir, host) = host();
+        host.install_devserver_registry(Arc::new(RefusingRegistry));
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                "/api/library/devservers/configured",
+                None,
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "registry rejected removal",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
         let app = launcher_router(host, None, None);
