@@ -38,7 +38,7 @@ import {
   type LeafNode,
   type Tab,
 } from "../state/tabs.svelte";
-import { ui } from "../state/store.svelte";
+import { persistStateToHash, ui } from "../state/store.svelte";
 import { dragScopeMimeToken, sessionWindowId, windowDragScope, windowLibraryId } from "../api/client";
 import { fileTab, terminalTab } from "../__tests__/tabs";
 
@@ -66,11 +66,12 @@ globalThis.cancelAnimationFrame ??= ((handle: number) =>
   window.clearTimeout(handle)) as any;
 HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
 
-afterEach(() => {
-  for (const component of mounted.splice(0)) unmount(component);
+afterEach(async () => {
+  for (const component of mounted.splice(0)) await unmount(component);
   document.body.innerHTML = "";
   cancelPaneMode();
   paneSideToggleFlash.versions = {};
+  persistStateToHash();
 });
 
 function graphTab(partial: Partial<GraphTab> = {}): GraphTab {
