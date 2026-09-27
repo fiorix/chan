@@ -436,3 +436,43 @@ describe("a drawing nobody drew on", () => {
     expect(disk.get(tab.path)?.content).toContain("first-stroke");
   });
 });
+
+describe("a board during its tab's load", () => {
+  test("a board mounted during its tab's load becomes editable when the load ends", async () => {
+    const { tab, reads } = await loadedTab("notes/loading.excalidraw", DRAWING);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board, lastRender } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    expect(lastRender().viewModeEnabled).toBe(true);
+    await reads.finish(DRAWING);
+    await loading;
+
+    expect({ viewMode: lastRender().viewModeEnabled, board: board.elements }).toEqual({ viewMode: false, board: [ON_DISK] });
+  });
+
+  test("a reload keeps the drawing on screen, locked and unpublished, and seeds again when it ends", async () => {
+    const reloaded = { id: "reloaded", version: 3 };
+    const RELOADED = JSON.stringify({ elements: [reloaded], appState: {}, files: {} });
+    const { pane, tab, write, reads } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board, lastRender } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    const loading = reloadTabFromDisk(tab.id);
+    await reads.chunk(RELOADED.slice(0, 10));
+    await vi.advanceTimersByTimeAsync(200);
+    const during = { viewMode: lastRender().viewModeEnabled, board: board.elements, content: tab.content };
+    await reads.finish(RELOADED);
+    await loading;
+    await vi.advanceTimersByTimeAsync(200);
+    const after = { viewMode: lastRender().viewModeEnabled, board: board.elements, dirty: isDirty(tab) };
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ during, after, writes: write.mock.calls }).toEqual({
+      during: { viewMode: true, board: [ON_DISK], content: RELOADED.slice(0, 10) },
+      after: { viewMode: false, board: [reloaded], dirty: false },
+      writes: [],
+    });
+  });
+});
