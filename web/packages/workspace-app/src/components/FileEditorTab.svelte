@@ -1456,6 +1456,7 @@
            Wysiwyg view. -->
       <div
         class="editor-host"
+        style:--editor-top-pad={tab.styleToolbarOpen && hasRenderedMode ? "2.5rem" : null}
         oncontextmenu={onEditorContext}
         onkeydowncapture={onSlideShortcutKeydown}
         role="presentation"
@@ -1903,10 +1904,4 @@
     min-height: 0;
     min-width: 0;
   }
-  /* `--editor-top-pad` is read by .md-wysiwyg (Wysiwyg.svelte) to
-     set its padding-top. We bump it to 1.5rem while the style
-     toolbar is enabled in the tab menu so the first line clears
-     the floating toolbar pill (top: 8px, ~30px tall); when the
-     toolbar is hidden we reclaim that space back to the 1rem
-     baseline so the first line sits at the top of the doc. */
 </style>

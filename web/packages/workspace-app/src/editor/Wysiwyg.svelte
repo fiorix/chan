@@ -926,15 +926,9 @@
     max-width: var(--chan-page-max-width, none);
     margin-inline: auto;
     min-height: 100%;
-    /* `--editor-top-pad` is set by the host (FileEditorTab on its
-       .editor-host, InlineAssist on the prompt wrap) and consumed
-       here so the first line of the editor clears the floating
-       style toolbar pill when it's enabled (2.5rem) and reclaims
-       that space when it's hidden (0.5rem). The variable was
-       orphaned during the CM6 migration - its old consumer lived
-       on the legacy `.md-wysiwyg` class. Restoring the wiring
-       lets the file editor's "Show Style Toolbar" toggle actually
-       shift the document. */
+    /* FileEditorTab sets --editor-top-pad on .editor-host so the
+       first line clears its floating toolbar (2.5rem) or keeps the
+       baseline spacing when the toolbar is off (0.5rem). */
     padding-top: var(--editor-top-pad, 0.5rem) !important;
     /* Always keep 60px below the last line. Combined with the 60px
        bottom scrollMargin in breathing_room.ts, this is what gives

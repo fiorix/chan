@@ -512,6 +512,9 @@
   }
   :global(.md-source .cm-content) {
     font-family: var(--chan-editor-code-family);
+    /* The host reserves space for its floating toolbar; other source
+       editors keep CodeMirror's default top padding. */
+    padding-top: var(--editor-top-pad, 4px) !important;
     /* Always keep 60px below the last line. See the matching rule
        in Wysiwyg.svelte for rationale. */
     padding-bottom: 60px;
