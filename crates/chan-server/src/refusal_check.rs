@@ -168,9 +168,9 @@ fn pending_handler_refusal(
         return true;
     }
     if status != StatusCode::INTERNAL_SERVER_ERROR
-        || !headers
+        || headers
             .get(header::CONTENT_TYPE)
-            .is_some_and(|v| v == "text/plain; charset=utf-8")
+            .is_none_or(|v| v != "text/plain; charset=utf-8")
     {
         return false;
     }
