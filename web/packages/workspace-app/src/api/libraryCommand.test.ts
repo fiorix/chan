@@ -1,12 +1,19 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import type { WindowPageCheck } from "@chan/web-shared/window-page";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError } from "./errors";
 
 const transport = vi.hoisted(() => ({ requestRoot: vi.fn() }));
 
-vi.mock("./transport", () => ({ requestRoot: transport.requestRoot }));
+vi.mock("./transport", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./transport")>(),
+  requestRoot: transport.requestRoot,
+}));
 vi.mock("./client", () => ({ sessionWindowId: () => "window-live-1" }));
+
+import * as libraryCommand from "./libraryCommand";
+import { setFetchImpl } from "./transport";
 
 import {
   loadScopedLibrarySnapshot,
@@ -95,5 +102,73 @@ describe("scoped library command client", () => {
       "/api/library/command-capabilities/cap-action/actions",
       { action: "set_window_visibility", window_id: "window-2", hidden: true },
     );
+  });
+});
+
+afterEach(() => {
+  setFetchImpl(null);
+  vi.restoreAllMocks();
+});
+
+function pageCheck(): WindowPageCheck {
+  const check = Reflect.get(libraryCommand, "checkScopedWindowPage");
+  expect(check).toBeTypeOf("function");
+  return check as WindowPageCheck;
+}
+
+const launchPath = "/api/library/command-capabilities/cap/windows/w-other/launch";
+
+describe("capability page check", () => {
+  test("follows the launch redirect with one uncached abortable GET", async () => {
+    const response = new Response("<html>window</html>");
+    const fetch = vi.fn(async () => response);
+    setFetchImpl(fetch);
+    const controller = new AbortController();
+
+    const result = await pageCheck()(launchPath, controller.signal);
+
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(launchPath, {
+      method: "GET", cache: "no-store", redirect: "follow", signal: controller.signal,
+    });
+    expect(result.response).toBe(response);
+    expect(response.bodyUsed).toBe(false);
+    expect(transport.requestRoot).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [401, "invalid or expired library command capability"],
+    [410, "the invoking window is no longer live"],
+    [409, "window tenant is not running"],
+    [404, "window not found"],
+  ] as const)("reads the %i envelope once without minting again", async (status, message) => {
+    const body = JSON.stringify({ error: message });
+    const response = new Response(body, { status });
+    const read = vi.spyOn(response, "text");
+    const parse = vi.spyOn(JSON, "parse");
+    const fetch = vi.fn(async () => response);
+    setFetchImpl(fetch);
+
+    const result = await pageCheck()(launchPath, new AbortController().signal);
+    expect(read).not.toHaveBeenCalled();
+    expect(await result.readRefusal()).toMatchObject({ status, message, data: { error: message } });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(parse.mock.calls.filter(([text]) => text === body)).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(transport.requestRoot).not.toHaveBeenCalled();
+  });
+
+  test("retains the redirected gate's Retry-After and sentence", async () => {
+    const response = new Response('{"error":"devserver is restoring terminal sessions"}', {
+      status: 503, headers: { "Retry-After": "3" },
+    });
+    setFetchImpl(async () => response);
+
+    const result = await pageCheck()(launchPath, new AbortController().signal);
+
+    expect(result.response.status).toBe(503);
+    expect(result.response.headers.get("Retry-After")).toBe("3");
+    expect(await result.readRefusal()).toMatchObject({
+      status: 503, message: "devserver is restoring terminal sessions",
+    });
   });
 });
