@@ -1089,7 +1089,7 @@ describe("an edit in a pane's editor", () => {
       fileTab({ path: "notes/stock.csv", fileKind: "text", mode: "table", content: csv, saved: csv }),
     );
 
-    target.querySelector<HTMLElement>("tbody td")!.click();
+    target.querySelector<HTMLElement>("tbody td > button")!.click();
     await settle(2);
     const input = target.querySelector<HTMLInputElement>("tbody td input")!;
     input.value = "plums";
