@@ -5,6 +5,7 @@ export type WindowPageCheck = (url: string, signal: AbortSignal) => Promise<{
   readRefusal: () => Promise<Error>;
 }>;
 
+const WINDOW_PAGE_OWNER_ATTRIBUTE = "data-chan-window-page-owner";
 const WINDOW_PAGE_WAIT_MS = 60_000;
 const WINDOW_CLOSED_POLL_MS = 100;
 const WINDOW_PAGE_RETRY_MIN_MS = 1000;
@@ -24,7 +25,13 @@ export function navigateWindowWhenReady(h: Window, url: string, checkPage: Windo
   if (waiting) return waiting;
   if (h.closed) return Promise.resolve(false);
   const page = h.document;
+  // Other opener pages have their own module state but share this document.
+  if (page.documentElement.hasAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE)) {
+    h.focus?.();
+    return Promise.resolve(true);
+  }
   page.body.textContent = "Waiting for the window to be ready...";
+  page.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "waiting");
   const controller = new AbortController();
   let lastRefusal: Error = new Error("Timed out waiting for the window page");
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -60,6 +67,7 @@ export function navigateWindowWhenReady(h: Window, url: string, checkPage: Windo
     if (!ready || h.closed) return false;
     h.location.href = url;
     navigatingDocuments.set(h, page);
+    page.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "navigating");
     return true;
   }).finally(() => {
     clearTimeout(retryTimer);
@@ -67,6 +75,10 @@ export function navigateWindowWhenReady(h: Window, url: string, checkPage: Windo
     clearInterval(closedPoll);
     controller.abort();
     waitingPages.delete(h);
+    // Keep ownership through navigation commit, when the document is replaced.
+    if (page.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) === "waiting") {
+      page.documentElement.removeAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE);
+    }
   });
   waitingPages.set(h, pending);
   return pending;
