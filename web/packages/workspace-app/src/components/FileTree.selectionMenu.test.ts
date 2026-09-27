@@ -34,7 +34,7 @@ import { exportMarkdownToPdf } from "../editor/pdf_export";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
 import { chordFor } from "../state/shortcuts";
-import { browserSidePanes } from "../state/store.svelte";
+import { browserSidePanes, ui } from "../state/store.svelte";
 import { layout, openBrowserInActivePane, type LeafNode, type Tab } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -203,4 +203,30 @@ describe("the docked tree", () => {
 
     expect(docked).toEqual(inTab.slice(0, inTab.lastIndexOf("---")));
   });
+});
+
+
+test("Copy Path reports an unavailable or refused clipboard and confirms a successful write", async () => {
+  const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  try {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    item(await menuFor("a.md"), "Copy Path").click();
+    await settle();
+    expect(ui.status).toBe("copy failed: Clipboard unavailable");
+
+    const writeText = vi.fn(async (_text: string): Promise<void> => { throw new Error("denied"); });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    item(await menuFor("a.md"), "Copy Path").click();
+    await settle();
+    expect(ui.status).toBe("copy failed: denied");
+
+    writeText.mockResolvedValueOnce(undefined);
+    item(await menuFor("a.md"), "Copy Path").click();
+    await settle();
+    expect(writeText).toHaveBeenLastCalledWith("a.md");
+    expect(ui.status).toBe("Copied path");
+  } finally {
+    if (original) Object.defineProperty(navigator, "clipboard", original);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
 });
