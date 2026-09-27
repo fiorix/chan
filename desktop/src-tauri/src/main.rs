@@ -1445,6 +1445,11 @@ fn mark_devserver_control_exited(app: &tauri::AppHandle, state: &AppState, id: &
     if !state.control_terminal_runs.lock().unwrap().contains_key(id) {
         return;
     }
+    if let Some(library_id) = state.devserver_feed.library_id_of(id) {
+        state
+            .retarget_tickets
+            .cancel_prefix(&format!("{library_id}::"));
+    }
     state.devservers.remove(id);
     state
         .control_terminal_dead

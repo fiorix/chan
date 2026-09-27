@@ -377,13 +377,30 @@ pub(crate) struct RetargetTicket {
 
 impl RetargetTickets {
     pub(crate) fn begin(&self, label: &str) -> RetargetTicket {
-        let identity = Arc::clone(self.0.lock().unwrap().entry(label.to_string()).or_default());
+        let identity = Arc::new(());
+        self.0
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), Arc::clone(&identity));
         RetargetTicket {
             label: label.to_string(),
             identity,
         }
     }
 
+    pub(crate) fn cancel(&self, label: &str) {
+        self.0.lock().unwrap().remove(label);
+    }
+
+    pub(crate) fn cancel_prefix(&self, prefix: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|label, _| !label.starts_with(prefix));
+    }
+
+    // Dispatch and navigation share this lock so a new ticket cannot arrive
+    // between the currency check and enqueueing the native navigation.
     pub(crate) fn with_current<T>(
         &self,
         ticket: &RetargetTicket,
@@ -1112,6 +1129,7 @@ fn on_close_requested(
 /// registry entry if the window died while hidden.
 fn on_destroyed(app: &AppHandle, label: &str) {
     let state = app.state::<Arc<AppState>>();
+    state.retarget_tickets.cancel(label);
     state.release_window_number(label);
     // Drop the registered OS title so `cs window list`
     // stops showing one for a window that's gone. The

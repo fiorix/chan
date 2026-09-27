@@ -262,23 +262,39 @@ impl TauriNativeSurface {
         let ticket = retarget.then(|| state.retarget_tickets.begin(&label));
         // Dispatch-time remember: refreshes during the gap compare equal and
         // skip; rolled back on failure so a retry pass can fire again.
-        remote_launches.lock().unwrap().insert(
-            label.clone(),
-            RemoteLaunchKey::from_record(&record, gateway),
-        );
+        let remember = || {
+            remote_launches.lock().unwrap().insert(
+                label.clone(),
+                RemoteLaunchKey::from_record(&record, gateway),
+            );
+        };
+        if let Some(ticket) = &ticket {
+            state.retarget_tickets.with_current(ticket, remember);
+        } else {
+            remember();
+        }
         tauri::async_runtime::spawn(async move {
             let fail = {
                 let remote_launches = Arc::clone(&remote_launches);
                 let builds = builds.clone();
                 let label = label.clone();
+                let state = Arc::clone(&state);
+                let ticket = ticket.clone();
                 move |error: String| {
-                    remote_launches.lock().unwrap().remove(&label);
-                    if retarget {
-                        // A retarget does not own a concurrent open's marker.
-                        tracing::warn!(window = %label, %error, "window watcher: retargeting a window failed");
-                        builds.retry();
+                    let rollback = || {
+                        remote_launches.lock().unwrap().remove(&label);
+                        if retarget {
+                            // A retarget does not own a concurrent open's marker.
+                            tracing::warn!(window = %label, %error, "window watcher: retargeting a window failed");
+                            builds.retry();
+                        } else {
+                            builds.complete(&label, Err(error));
+                        }
+                    };
+                    if let Some(ticket) = &ticket {
+                        state.retarget_tickets.with_current(ticket, rollback);
                     } else {
-                        builds.complete(&label, Err(error));
+                        rollback();
                     }
                 }
             };
@@ -306,8 +322,13 @@ impl TauriNativeSurface {
                     // retarget. Do NOT rebuild here -- if the record still
                     // wants a window, the nudged reconcile below reopens it.
                     Ok(serve::RetargetOutcome::Gone) => {
-                        remote_launches.lock().unwrap().remove(&label);
-                        nudge.notify_one();
+                        state.retarget_tickets.with_current(
+                            ticket.as_ref().expect("retarget ticket"),
+                            || {
+                                remote_launches.lock().unwrap().remove(&label);
+                                nudge.notify_one();
+                            },
+                        );
                         return;
                     }
                     Ok(serve::RetargetOutcome::Navigated) => Ok(()),
