@@ -6498,6 +6498,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_retry_answers_beside_an_abandoned_open_that_holds_the_workspace() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let mut host = WorkspaceHost::new(library.clone(), fake_builder());
+        let budget = Duration::from_millis(200);
+        host.open_release_budget = budget;
+        let host = Arc::new(host);
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (release, released) = std::sync::mpsc::channel();
+        *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+            let workspace = result.as_ref().unwrap();
+            entered
+                .take()
+                .unwrap()
+                .send(Arc::downgrade(workspace))
+                .unwrap();
+            let _ = released.recv();
+        }));
+        let mounting = Arc::clone(&host);
+        let mounting_root = root.path().to_path_buf();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/held"))
+                .await
+        });
+        let workspace = entry.await.unwrap();
+        mount.abort();
+        assert!(mount.await.unwrap_err().is_cancelled());
+        let started = Instant::now();
+        let retry = tokio::time::timeout(
+            Duration::from_secs(5),
+            host.open_or_get_registered_workspace(root.path(), serve_config("/retry")),
+        )
+        .await;
+        let waited = started.elapsed();
+        let status = host.workspace_status(root.path());
+        let closed = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.close_workspace_for_root(root.path(), false),
+        )
+        .await;
+        let removed = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.remove_workspace_for_root(root.path(), false),
+        )
+        .await;
+        release.send(()).unwrap();
+        let retry = retry.expect("a retry waited past the release budget for an abandoned open");
+        assert!(
+            matches!(retry, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+            "a retry beside an abandoned owner answered {retry:?}"
+        );
+        assert!(
+            waited >= budget,
+            "a retry answered before the release budget"
+        );
+        assert_eq!(
+            status,
+            (
+                WorkspaceStatus::Error,
+                Some("workspace is still releasing; retry".into())
+            )
+        );
+        assert_eq!(
+            closed
+                .expect("a close waited behind a retry of an abandoned open")
+                .unwrap(),
+            WorkspaceLifecycleOutcome::NotFound
+        );
+        assert!(
+            matches!(
+                removed.expect("a removal waited behind a retry of an abandoned open"),
+                Err(Error::Core(ChanError::WorkspaceAlreadyOpen))
+            ),
+            "a live workspace must retain its typed removal error"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while workspace.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(host
+            .remove_workspace_for_root(root.path(), false)
+            .await
+            .unwrap()
+            .completed());
+        assert!(library.workspace_paths_for(root.path()).is_none());
+    }
+
+    #[tokio::test]
     async fn a_panicked_open_keeps_its_root_locked_until_mount_settlement() {
         struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
         impl Drop for Finished {
@@ -6559,7 +6654,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
         library.register_workspace(root.path()).unwrap();
-        let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        // The later open's wait starts before the abandoned open is let go, so
+        // keep its budget far above that release on a loaded runner.
+        host.open_release_budget = Duration::from_secs(10);
+        let host = Arc::new(host);
         let (entered, entry) = tokio::sync::oneshot::channel();
         let mut entered = Some(entered);
         let (release, released) = std::sync::mpsc::channel();
