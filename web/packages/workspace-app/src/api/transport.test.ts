@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { api } from "./client";
+import { ApiError } from "./errors";
 import {
   chanFetch,
+  request,
   gatewayCsrfHeaderPairs,
   setFetchImpl,
   setGatewayCsrfTokenReader,
@@ -203,5 +206,15 @@ describe("gatewayCsrfHeaderPairs", () => {
 
   test("is empty without a desktop token or cookie (loopback)", async () => {
     await expect(gatewayCsrfHeaderPairs("POST")).resolves.toEqual([]);
+  });
+});
+
+describe.each([
+  ["request", () => request("GET", "/api/report/dir?path=src")],
+  ["stream", () => api.reportFileStream("src/main.rs")],
+] as const)("%s refusal message", (_transport, send) => {
+  test("uses the numeric HTTP fallback for an empty body and status text", async () => {
+    setFetchImpl(async () => new Response("", { status: 500, statusText: "" }));
+    await expect(send()).rejects.toEqual(new ApiError(500, "HTTP 500"));
   });
 });

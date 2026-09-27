@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "./client";
+import { ApiError } from "./errors";
 import {
   gatewayCsrfHeaderPairs,
   setGatewayCsrfTokenReader,
@@ -18,7 +19,10 @@ import {
 /// Minimal XHR stand-in: records the request headers and answers each send with
 /// its configured status.
 class FakeXhr {
-  constructor(private readonly responseStatus = 200) {}
+  constructor(
+    private readonly responseStatus = 200,
+    private readonly responseBody = JSON.stringify({ path: "a.txt", size: 1 }),
+  ) {}
 
   headers: Record<string, string> = {};
   body: Document | XMLHttpRequestBodyInit | null = null;
@@ -42,7 +46,7 @@ class FakeXhr {
   send(body: Document | XMLHttpRequestBodyInit | null = null): void {
     this.body = body;
     this.status = this.responseStatus;
-    this.responseText = JSON.stringify({ path: "a.txt", size: 1 });
+    this.responseText = this.responseBody;
     queueMicrotask(() => {
       this.onload?.();
       this.onloadend?.();
@@ -187,5 +191,20 @@ describe("XHR multipart gateway CSRF mirror", () => {
 
     expect(created).toHaveLength(1);
     expect(created[0].headers["x-chan-csrf"]).toBeUndefined();
+  });
+});
+
+describe("upload refusal", () => {
+  test("uses the numeric HTTP fallback for an empty body and status text", async () => {
+    setXhrFactory(() => new FakeXhr(500, "") as unknown as XMLHttpRequest);
+    await expect(api.uploadFile(new File(["x"], "a.txt"), "inbox"))
+      .rejects.toEqual(new ApiError(500, "HTTP 500"));
+  });
+
+  test("keeps the parsed refusal body beside its message", async () => {
+    const body = { error: "Upload refused.", code: "upload_refused" };
+    setXhrFactory(() => new FakeXhr(409, JSON.stringify(body)) as unknown as XMLHttpRequest);
+    await expect(api.uploadFile(new File(["x"], "a.txt"), "inbox"))
+      .rejects.toMatchObject({ status: 409, message: body.error, data: body });
   });
 });
