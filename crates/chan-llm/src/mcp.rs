@@ -2006,6 +2006,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_cancel_stops_a_cold_repo_report_scoped_by_prefix_or_paths() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for arguments in [
+                serde_json::json!({"prefix": "src"}),
+                serde_json::json!({"paths": ["src/a.rs"]}),
+            ] {
+                let (_cfg, _root, workspace) = open_idle_workspace();
+                workspace.create_dir("src").unwrap();
+                workspace.write_text("src/a.rs", "fn a() {}\n").unwrap();
+                let (reply, strong) =
+                    cancel_a_held_call(&workspace, "repo_report", arguments.clone()).await;
+                assert_eq!(
+                    reply["error"]["message"], "request cancelled",
+                    "{arguments}: {reply}"
+                );
+                assert_eq!(
+                    strong, 1,
+                    "{arguments}: the cancelled body kept its workspace"
+                );
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn mcp_cancel_does_not_undo_a_finished_write() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (_cfg, _root, workspace) = open_idle_workspace();
