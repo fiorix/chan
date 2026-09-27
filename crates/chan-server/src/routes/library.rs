@@ -2614,7 +2614,7 @@ mod devserver_route_tests {
     }
 
     #[cfg(unix)]
-    fn hold_foreign_lock(
+    pub(super) fn hold_foreign_lock(
         lib: &Library,
         root: &std::path::Path,
     ) -> chan_workspace::lock::WorkspaceLock {
@@ -5610,6 +5610,111 @@ mod refusal_envelopes {
             serde_json::to_vec(&serde_json::json!({"error": message})).unwrap(),
             "refusal envelope"
         );
+    }
+
+    fn mutable_app(host: Arc<WorkspaceHost>) -> Router {
+        let address = std::sync::OnceLock::new();
+        address.set("127.0.0.1:9605".parse().unwrap()).unwrap();
+        launcher_router(host, None, Some(Arc::new(address)))
+    }
+
+    #[tokio::test]
+    async fn workspace_add_root() {
+        let error = crate::Error::Io(std::io::Error::other(
+            "workspace host blocking task failed: resolving root ended without an answer",
+        ));
+        assert_refusal(
+            add_workspace_root_error(error),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "io: workspace host blocking task failed: resolving root ended without an answer",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_add_prefix() {
+        assert_refusal(
+            add_workspace_prefix_error(crate::Error::Config("invalid prefix segment".into())),
+            StatusCode::BAD_REQUEST,
+            "config: invalid prefix segment",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_add_registration_task() {
+        let error = tokio::spawn(async { panic!("registration aborted") })
+            .await
+            .unwrap_err();
+        let message = format!("workspace registration task failed: {error}");
+        assert_refusal(
+            workspace_registration_task_error(error),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &message,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_add_registration() {
+        let (dir, host) = host();
+        let root = dir.path().join("missing");
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                "/api/library/workspaces",
+                Some(serde_json::json!({"path":root})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            &format!("workspace root does not exist: {}", root.display()),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn workspace_add_stopping() {
+        let (dir, host) = host();
+        host.shutdown_all().await.unwrap();
+        let root = dir.path();
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                "/api/library/workspaces",
+                Some(serde_json::json!({"path":root})),
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "the workspace host is shutting down; {} was not mounted",
+                chan_workspace::paths::canonicalize_normalized(root).display()
+            ),
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_add_mount() {
+        let (dir, host) = host();
+        let root = dir.path().join("notes");
+        std::fs::create_dir(&root).unwrap();
+        host.library().register_workspace(&root).unwrap();
+        let _foreign = super::devserver_route_tests::hold_foreign_lock(host.library(), &root);
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "POST",
+                "/api/library/workspaces",
+                Some(serde_json::json!({"path":root})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "chan-workspace: workspace is locked by another process",
+        )
+        .await;
     }
 
     #[tokio::test]
