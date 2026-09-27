@@ -4067,57 +4067,40 @@ fn reload_devserver_window_from_feed(
     if record.token.is_empty() {
         return Ok(false);
     }
-    let Some(conn) = state.devservers.get(&devserver_id) else {
-        return Ok(false);
-    };
-    // A gateway entry mint needs a network round trip, so the command returns
-    // "handled" before the task resolves and probes the URL. Only a ready
-    // target and a current ticket allow that task to navigate.
-    let ticket = state.retarget_tickets.begin(label);
-    let app = app.clone();
-    let label = label.to_string();
-    let record = record.clone();
-    tauri::async_runtime::spawn(async move {
-        let url = match devserver::window_navigation_url(&conn, &record).await {
-            Ok(url) => url,
-            Err(e) => {
-                tracing::warn!(
-                    window = %record.window_id,
-                    error = %e,
-                    "reload: resolving devserver window URL failed",
-                );
-                return;
-            }
-        };
-        if let Err(e) =
-            devserver::install_gateway_webview_session(&app, &conn, Some(label.as_str()))
-        {
-            tracing::warn!(window = %record.window_id, error = %e, "reload: installing gateway WebView session failed");
-            return;
-        }
-        let result = match serve::retarget_watched_remote_window(&app, &url, &record, &ticket).await
-        {
-            Ok(serve::RetargetOutcome::Navigated) => Ok(()),
-            Ok(serve::RetargetOutcome::Gone) => {
-                tracing::debug!(window = %record.window_id, "reload: window is gone");
-                Ok(())
-            }
-            Ok(serve::RetargetOutcome::NotReady) => {
-                tracing::debug!(window = %record.window_id, "reload: target is not ready");
-                Ok(())
-            }
-            Ok(serve::RetargetOutcome::Superseded) => Ok(()),
-            Err(e) => Err(e),
-        };
-        if let Err(e) = result {
-            tracing::warn!(
-                window = %record.window_id,
-                error = %e,
-                "reload: navigating devserver window failed",
-            );
-        }
-    });
-    Ok(true)
+    let conn = state.devservers.get(&devserver_id);
+    Ok(window_watcher_wiring::dispatch_devserver_reload(
+        label,
+        conn.is_some(),
+        &state.retarget_tickets,
+        |ticket| {
+            let app = app.clone();
+            let label = label.to_string();
+            let record = record.clone();
+            tauri::async_runtime::spawn(async move {
+                let conn = conn.expect("connected Reload");
+                let url = match devserver::window_navigation_url(&conn, &record).await {
+                    Ok(url) => url,
+                    Err(e) => {
+                        tracing::warn!(
+                            window = %record.window_id,
+                            error = %e,
+                            "reload: resolving devserver window URL failed",
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) =
+                    devserver::install_gateway_webview_session(&app, &conn, Some(label.as_str()))
+                {
+                    tracing::warn!(window = %record.window_id, error = %e, "reload: installing gateway WebView session failed");
+                    return;
+                }
+                let outcome =
+                    serve::retarget_watched_remote_window(&app, &url, &record, &ticket).await;
+                window_watcher_wiring::finish_devserver_reload(&record, outcome);
+            });
+        },
+    ))
 }
 
 /// Open the DevTools inspector on the calling webview. Mirrors

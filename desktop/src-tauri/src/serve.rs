@@ -2239,7 +2239,7 @@ mod tests {
             let (name, source) = ("Reload", reload);
             let before_spawn = source.split("async_runtime::spawn").next().unwrap();
             assert!(
-                before_spawn.contains("retarget_tickets.begin("),
+                before_spawn.contains("dispatch_devserver_reload("),
                 "{name} takes its ticket before mint dispatch"
             );
             assert!(

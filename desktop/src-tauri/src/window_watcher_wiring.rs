@@ -32,6 +32,45 @@ use crate::{serve, AppState};
 /// Library id of the embedded local-disk library.
 const LOCAL_LIBRARY_ID: &str = "local";
 
+pub(crate) fn dispatch_devserver_reload(
+    label: &str,
+    connected: bool,
+    tickets: &serve::RetargetTickets,
+    dispatch: impl FnOnce(serve::RetargetTicket),
+) -> bool {
+    if !connected {
+        return false;
+    }
+    dispatch(tickets.begin(label));
+    true
+}
+
+pub(crate) fn finish_devserver_reload(
+    record: &WindowRecord,
+    outcome: Result<serve::RetargetOutcome, String>,
+) {
+    let result = match outcome {
+        Ok(serve::RetargetOutcome::Navigated) => Ok(()),
+        Ok(serve::RetargetOutcome::Gone) => {
+            tracing::debug!(window = %record.window_id, "reload: window is gone");
+            Ok(())
+        }
+        Ok(serve::RetargetOutcome::NotReady) => {
+            tracing::debug!(window = %record.window_id, "reload: target is not ready");
+            Ok(())
+        }
+        Ok(serve::RetargetOutcome::Superseded) => Ok(()),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            window = %record.window_id,
+            error = %e,
+            "reload: navigating devserver window failed",
+        );
+    }
+}
+
 /// How a devserver watcher should stop. Disconnect closes that devserver's
 /// native windows; the control-exit path retires the watcher while preserving
 /// its windows for the user's reconnect or abandon decision.
