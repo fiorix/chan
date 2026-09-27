@@ -2124,11 +2124,14 @@ async fn handle_add_gateway(
         return *resp;
     }
     let Some(reg) = state.host.gateway_registry() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(
+            StatusCode::NOT_FOUND,
+            "gateway registry is not available on this surface".into(),
+        );
     };
     match reg.add(input) {
         Ok(entry) => Json(entry).into_response(),
-        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+        Err(msg) => crate::error::err(StatusCode::BAD_REQUEST, msg),
     }
 }
 
