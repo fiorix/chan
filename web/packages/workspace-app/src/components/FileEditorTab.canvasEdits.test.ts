@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
@@ -9,6 +10,7 @@ import { ApiError } from "../api/errors";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { EXCALIDRAW_VERSION } from "../__tests__/excalidrawLibrary";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { refreshWorkspace } from "../state/store.svelte";
 import {
@@ -24,6 +26,7 @@ vi.mock("react", () => ({ createElement: (_kind: unknown, props: unknown) => pro
 vi.mock("@excalidraw/excalidraw", () => ({
   Excalidraw: () => null,
   serializeAsJSON: (elements: unknown) => JSON.stringify({ elements, appState: {}, files: {} }),
+  CaptureUpdateAction: { IMMEDIATELY: "IMMEDIATELY", EVENTUALLY: "EVENTUALLY", NEVER: "NEVER" },
 }));
 vi.mock("../state/sceneSync.svelte", async (original) => ({
   ...await original<typeof import("../state/sceneSync.svelte")>(),
@@ -263,5 +266,14 @@ describe("pending drawing edits", () => {
     expect(disk.get(tab.path)?.content).toContain("last-stroke");
     expect(reconcileLayout(remote)).toBe("applied");
     expect(readTab(tab.id)).toBeUndefined();
+  });
+});
+
+describe("the drawing library stand-in", () => {
+  // Reads the installed package's manifest, not source: the stand-in keeps the
+  // order of events of the version it was read from.
+  test("models the installed version of the drawing library", () => {
+    const manifest = readFileSync("../../node_modules/@excalidraw/excalidraw/package.json", "utf8");
+    expect(JSON.parse(manifest).version).toBe(EXCALIDRAW_VERSION);
   });
 });
