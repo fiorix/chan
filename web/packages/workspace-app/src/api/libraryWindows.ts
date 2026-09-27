@@ -12,7 +12,7 @@
 // the popup dance stays exactly as it was. This module owns that split so it
 // can be driven directly by tests, rather than only through the deck UI.
 
-import { navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
+import { isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import {
   blockedWindowMessage,
@@ -122,9 +122,11 @@ function popupFor(window: ScopedLibraryWindow, bridge: LibraryWindowBridge): Win
 
 function popupNeedsNavigation(popup: Window): boolean {
   try {
+    if (isWindowNavigating(popup)) return false;
     return popup.location.href === "about:blank" || popup.location.href === "";
   } catch {
-    return true;
+    // A window on another origin belongs to the user who navigated it there.
+    return false;
   }
 }
 
@@ -186,15 +188,20 @@ export async function focusLibraryWindow(
     return;
   }
   const popup = popupFor(window, bridge);
+  if (popup !== globalThis.window && popupNeedsNavigation(popup)) {
+    try {
+      if (!(await navigateWindowWhenReady(popup, window.launch_path, bridge.checkPage))) return;
+    } catch (error) {
+      popup.close();
+      throw error;
+    }
+  }
   if (window.hidden) {
     await bridge.runAction({
       action: "set_window_visibility",
       window_id: window.window_id,
       hidden: false,
     });
-  }
-  if (popup !== globalThis.window && popupNeedsNavigation(popup)) {
-    popup.location.href = window.launch_path;
   }
   popup.focus();
   await bridge.refresh();
