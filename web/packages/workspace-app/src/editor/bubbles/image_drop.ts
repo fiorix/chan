@@ -8,8 +8,8 @@
 // This module only handles IMAGE files. Plain text drops / pastes
 // fall through to CM6's defaults (markdown text, etc.).
 
-import { EditorView } from "@codemirror/view";
-import type { Extension } from "@codemirror/state";
+import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { StateEffect, type Extension } from "@codemirror/state";
 import { api } from "../../api/client";
 import { notify } from "../../state/notify.svelte";
 import { convertHeicForUpload, isHeicFile } from "./heic";
@@ -232,57 +232,76 @@ function posFromEvent(view: EditorView, event: DragEvent): number {
   return view.state.selection.main.head;
 }
 
+const uploadPositions = ViewPlugin.fromClass(class {
+  readonly pending = new Set<{ pos: number }>();
+
+  update(update: ViewUpdate): void {
+    if (!update.docChanged) return;
+    for (const cursor of this.pending) {
+      cursor.pos = update.changes.mapPos(cursor.pos, 1);
+    }
+  }
+});
+
 function uploadAndInsertAll(
   view: EditorView,
   files: File[],
   pos: number,
   ctx: InsertCtx,
 ): void {
-  // Upload sequentially so we can chain the inserts at adjacent
-  // positions (each insert shifts subsequent positions; we map
-  // through view.state.tr.changes' resolution after each).
-  let cursor = pos;
+  // Keep the tracker outside the writable compartment so a read-only
+  // toggle cannot detach anchors for uploads still in flight.
+  if (!view.plugin(uploadPositions)) {
+    view.dispatch({ effects: StateEffect.appendConfig.of(uploadPositions) });
+  }
+  const pending = view.plugin(uploadPositions)!.pending;
+  const cursor = { pos };
+  pending.add(cursor);
+  // Upload sequentially; each insert and intervening edit maps the next position.
   void (async () => {
-    for (const original of files) {
-      if (original.size > MAX_UPLOAD_BYTES) {
-        notify(`Image ${original.name} exceeds the 50 MiB upload limit; skipped`);
-        continue;
-      }
-      // HEIC -> WebP conversion happens here so a mixed batch
-      // (some PNG, some HEIC) converts only the ones that need it
-      // without blocking the others; non-HEIC inputs return from
-      // `convertHeicForUpload` untouched and synchronously.
-      let file: File;
-      try {
-        file = await convertHeicForUpload(original, (msg) => {
-          if (msg) notify(msg);
+    try {
+      for (const original of files) {
+        if (original.size > MAX_UPLOAD_BYTES) {
+          notify(`Image ${original.name} exceeds the 50 MiB upload limit; skipped`);
+          continue;
+        }
+        // HEIC -> WebP conversion happens here so a mixed batch
+        // (some PNG, some HEIC) converts only the ones that need it
+        // without blocking the others; non-HEIC inputs return from
+        // `convertHeicForUpload` untouched and synchronously.
+        let file: File;
+        try {
+          file = await convertHeicForUpload(original, (msg) => {
+            if (msg) notify(msg);
+          });
+        } catch (err) {
+          console.error("[chan] HEIC conversion failed", err);
+          notify(`HEIC conversion failed for ${original.name}; skipped`);
+          continue;
+        }
+        let res: { path: string };
+        try {
+          res = await api.uploadAttachment(file, ctx.uploadDir);
+        } catch (err) {
+          console.error("[chan] image upload failed", err);
+          notify(`Image upload failed for ${original.name}; skipped`);
+          continue;
+        }
+        invalidateImageCatalog();
+        const onListLine = listLineAt(view.state, cursor.pos) !== null;
+        const { text: insert, caret } = buildImageInsert(res.path, {
+          currentPath: ctx.currentPath,
+          onListLine,
         });
-      } catch (err) {
-        console.error("[chan] HEIC conversion failed", err);
-        notify(`HEIC conversion failed for ${original.name}; skipped`);
-        continue;
+        view.dispatch({
+          changes: { from: cursor.pos, to: cursor.pos, insert },
+          selection: { anchor: cursor.pos + caret },
+          // Pasting at the bottom can push the caret off-screen.
+          scrollIntoView: true,
+        });
       }
-      let res: { path: string };
-      try {
-        res = await api.uploadAttachment(file, ctx.uploadDir);
-      } catch (err) {
-        console.error("[chan] image upload failed", err);
-        notify(`Image upload failed for ${original.name}; skipped`);
-        continue;
-      }
-      invalidateImageCatalog();
-      const onListLine = listLineAt(view.state, cursor) !== null;
-      const { text: insert, caret } = buildImageInsert(res.path, {
-        currentPath: ctx.currentPath,
-        onListLine,
-      });
-      view.dispatch({
-        changes: { from: cursor, to: cursor, insert },
-        selection: { anchor: cursor + caret },
-        // Pasting at the bottom can push the caret off-screen.
-        scrollIntoView: true,
-      });
-      cursor += insert.length;
+    } finally {
+      pending.delete(cursor);
     }
   })();
 }
