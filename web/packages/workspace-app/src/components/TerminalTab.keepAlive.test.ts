@@ -214,11 +214,12 @@ describe("a live terminal under a pane restructure", () => {
 /// fit (120ms), so a fit a focus change queued has run before a test moves on.
 const RECOVERY_SETTLED = 400;
 
-/// The pane the layout lists a tab in, by the tab's title.
+/// The pane the layout lists a terminal tab in, by the tab's title.
 function paneListing(title: string): string | null {
   for (const node of Object.values(layout.nodes)) {
     if (node.kind !== "leaf") continue;
-    if ([...node.tabs, ...(node.bTabs ?? [])].some((tab) => tab.title === title)) return node.id;
+    const tabs = [...node.tabs, ...(node.bTabs ?? [])];
+    if (tabs.some((tab) => tab.kind === "terminal" && tab.title === title)) return node.id;
   }
   return null;
 }
