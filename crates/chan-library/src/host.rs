@@ -8194,9 +8194,14 @@ mod tests {
             "a tenant over a replaced root still reports {status:?}"
         );
         let reason = reason.expect("a degraded row carries a reason");
+        let stored = chan_workspace::paths::canonicalize_normalized(&root);
         assert!(
-            reason.contains(&root.display().to_string()),
-            "the reason must name the root: {reason}"
+            reason.starts_with(&format!(
+                "workspace root does not exist: {};",
+                stored.display()
+            )),
+            "the reason must name the root as the registry stores it ({}): {reason}",
+            stored.display()
         );
         assert!(
             reason.contains("chan close"),
@@ -8309,9 +8314,16 @@ mod tests {
             WorkspaceStatus::Unavailable,
             "the mount path handed back the stale tenant as {status:?}"
         );
+        let stored = chan_workspace::paths::canonicalize_normalized(&root);
         assert!(
-            reason.is_some_and(|reason| reason.contains(&root.display().to_string())),
-            "the degraded row carries no reason naming the root"
+            reason.is_some_and(|reason| {
+                reason.starts_with(&format!(
+                    "workspace root does not exist: {};",
+                    stored.display()
+                ))
+            }),
+            "the degraded row carries no reason naming the stored root ({})",
+            stored.display()
         );
         // Idempotent, never an implicit teardown: the tenant and its live
         // state are still there for `off` / `chan close` to clear.
