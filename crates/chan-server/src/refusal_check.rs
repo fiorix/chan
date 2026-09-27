@@ -197,7 +197,8 @@ const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
         "Failed to deserialize the JSON body into the target type: ",
         true,
     ),
-    // The search handler re-emits this rejection with a 400 status.
+    // No route emits this plain-text 400: search answers JSON data errors
+    // in the envelope.
     (
         "JsonDataError",
         400,
@@ -216,7 +217,8 @@ const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
         "Failed to deserialize query string: ",
         true,
     ),
-    // The search handler maps every JsonRejection to 400.
+    // No route emits this plain-text 400: search answers content-type errors
+    // in the envelope.
     (
         "MissingJsonContentType",
         400,

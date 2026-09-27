@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- **Malformed requests and unrouted methods are refused in the JSON envelope.** In a workspace, in a standalone terminal window and on the devserver's management API, a body, query, path or multipart request the server cannot read answers `{"error": ...}` with the status and sentence it answered in plain text, and a method a route does not serve answers 405 with `{"error": "method not allowed"}` and its `Allow` header where it answered an empty body. The launcher's routes are unchanged.
+- **Malformed requests and unrouted methods are refused in the JSON envelope.** In a workspace, in a standalone terminal window and on the devserver's management API, a body, query, path or multipart request the server cannot read answers `{"error": ...}` with the status and sentence it answered in plain text, including oversized bodies on both draft-create routes. Once its gates admit the request, a route answers a method it does not serve with 405, `{"error": "method not allowed"}` and its `Allow` header where it answered an empty body. A gate that refuses a wrong method keeps its refusal status and body with the route's `Allow` header. The launcher's routes are unchanged.
 
 ## [v0.100.0] - 2026-09-23
 
