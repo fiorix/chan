@@ -3,6 +3,7 @@ import ConcentricPulse from "./ConcentricPulse.svelte";
 import {
   buildConcentricPulseRings,
   concentricPulseGap,
+  CONCENTRIC_PULSE_MAX_RADIUS,
 } from "./concentricPulse";
 import {
   recordingContext2d,
@@ -31,6 +32,20 @@ function drawnPhases(): () => number[] {
 }
 
 describe("Concentric Pulse", () => {
+  test("bounds the ring radius in wide panes while preserving the square pane", () => {
+    const { callbacks } = startAnimation(ConcentricPulse, recordingContext2d().ctx);
+    const build = vi.mocked(buildConcentricPulseRings);
+    build.mockClear();
+    const denseTime = Math.PI / 0.1885 * 1000;
+    callbacks.resize(900, 900, false, denseTime);
+    expect(build.mock.calls.at(-1)![1]).toBeCloseTo(Math.hypot(900, 900) / (2 * 900 / 800) + 100);
+    for (const [width, height] of [[1600, 400], [2000, 300], [300, 2000]]) {
+      callbacks.resize(width!, height!, false, denseTime);
+      expect(build.mock.calls.at(-1)![1]).toBe(CONCENTRIC_PULSE_MAX_RADIUS * 2);
+      expect(build.mock.results.at(-1)!.value.length).toBeLessThanOrEqual(1130);
+    }
+  });
+
   test("pulses 0.1885 radians per second of animation time", () => {
     const { callbacks } = startAnimation(ConcentricPulse, recordingContext2d().ctx);
     callbacks.resize(400, 300, false, 0);
