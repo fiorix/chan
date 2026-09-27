@@ -5735,6 +5735,116 @@ mod refusal_envelopes {
         .await;
     }
 
+    struct RefusalWindowFeed(WindowRecord);
+
+    impl chan_library::DevserverFeedSource for RefusalWindowFeed {
+        fn windows(&self) -> Vec<WindowRecord> {
+            vec![self.0.clone()]
+        }
+        fn workspaces(&self) -> Vec<LauncherWorkspace> {
+            Vec::new()
+        }
+        fn pane_color(&self, _library_id: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn window_label_long() {
+        let (_dir, host) = window_host(true);
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "PUT",
+                "/api/library/windows/missing/label",
+                Some(serde_json::json!({"label":"x".repeat(65)})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "window label must be 64 characters or fewer",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_label_control_character() {
+        let (_dir, host) = window_host(true);
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "PUT",
+                "/api/library/windows/missing/label",
+                Some(serde_json::json!({"label":"line\nbreak"})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "window label cannot contain control characters",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_label_missing() {
+        let (_dir, host) = window_host(true);
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "PUT",
+                "/api/library/windows/missing/label",
+                Some(serde_json::json!({"label":"caption"})),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "window not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_label_control() {
+        let (_dir, host) = window_host(true);
+        host.mint_control_window("control".into(), "remote".into(), "/terminal".into())
+            .unwrap();
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "PUT",
+                "/api/library/windows/control/label",
+                Some(serde_json::json!({"label":"caption"})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "control terminals cannot have a label",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_label_registry() {
+        let (_source_dir, source) = window_host(true);
+        let record = source.mint_window(WindowKind::Terminal, None).unwrap();
+        let (_dir, host) = window_host(false);
+        let path = format!("/api/library/windows/{}/label", record.window_id);
+        host.install_devserver_feed(Arc::new(RefusalWindowFeed(record)));
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "PUT",
+                &path,
+                Some(serde_json::json!({"label":"caption"})),
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config: window registry not installed",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn launcher_bearer() {
         let (_dir, host) = host();
