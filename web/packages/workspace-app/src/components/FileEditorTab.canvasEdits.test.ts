@@ -10,7 +10,7 @@ import { ApiError } from "../api/errors";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
-import { EXCALIDRAW_VERSION } from "../__tests__/excalidrawLibrary";
+import { EXCALIDRAW_VERSION, excalidrawBoard, type BoardProps } from "../__tests__/excalidrawLibrary";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { refreshWorkspace } from "../state/store.svelte";
 import {
@@ -42,7 +42,7 @@ const INITIAL = '{"type":"excalidraw","version":2,"source":"chan","elements":[],
 const mounted: ReturnType<typeof mount>[] = [];
 let timers: TimerTrack;
 let disk: ReturnType<typeof installDemoWorkspace>;
-type CanvasProps = { excalidrawAPI: (value: unknown) => void; onChange: () => void };
+type CanvasProps = BoardProps;
 let canvasReady: Promise<CanvasProps>;
 
 beforeEach(async () => {
@@ -70,7 +70,61 @@ afterEach(async () => {
 });
 
 const PARTIAL = '{"type":"excalidraw","elements":[';
-const DRAWING = JSON.stringify({ elements: [{ id: "on-disk", version: 1 }], appState: {}, files: {} });
+const ON_DISK = { id: "on-disk", version: 1 };
+const DRAWING = JSON.stringify({ elements: [ON_DISK], appState: {}, files: {} });
+// A drawing another program wrote: the stand-in's serializer never reproduces
+// its bytes, as the library's does not reproduce a file it did not write.
+const FOREIGN = JSON.stringify(
+  { type: "excalidraw", version: 2, source: "https://elsewhere.example", elements: [ON_DISK], appState: {}, files: {} },
+  null,
+  2,
+);
+
+/// Hold every read of the tab's file until the test answers it: `chunk`
+/// streams bytes into the read in flight, `finish` completes it.
+function holdReads() {
+  let options: Parameters<typeof api.readStream>[1];
+  let complete: (content: string) => void = () => {};
+  vi.spyOn(api, "readStream").mockImplementation((_path, o) => {
+    options = o;
+    return new Promise((resolve, reject) => {
+      complete = (content) => resolve({ content } as Awaited<ReturnType<typeof api.readStream>>);
+      o?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    });
+  });
+  return {
+    chunk: async (bytes: string) => {
+      options?.onChunk?.(bytes, { loadedBytes: bytes.length, totalBytes: null });
+      await tick();
+    },
+    finish: async (content: string) => {
+      complete(content);
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+    },
+  };
+}
+
+/// A loaded canvas tab over `content` on disk, with its reads held and its
+/// writes recorded.
+async function loadedTab(path: string, content: string, over: Partial<FileTab> = {}) {
+  const initial = fileTab({ path, fileKind: "text", mode: "canvas", content, saved: content, ...over });
+  initial.savedMtime = disk.write(path, content).mtime;
+  const pane = resetLayout([initial]);
+  const tab = readTab(initial.id)!;
+  return { pane, tab, write: vi.spyOn(api, "write"), reads: holdReads() };
+}
+
+/// Mount the tab's editor and hand its board to the library stand-in.
+async function mountBoard(tab: FileTab) {
+  canvasReady = new Promise((resolve) => { render.mockImplementation(resolve); });
+  const target = document.createElement("div");
+  document.body.append(target);
+  const component = mount(FileEditorTab, { target, props: { tab, active: true, focused: true } });
+  mounted.push(component);
+  const board = excalidrawBoard(await canvasReady);
+  return { target, component, board, lastRender: () => render.mock.calls.at(-1)![0] as BoardProps };
+}
 
 async function mountDuringLoad(exists = true) {
   const initial = fileTab({
@@ -152,26 +206,32 @@ describe("drawing loads", () => {
     expect(tab.fileMissing?.path).toBe(tab.path);
   });
 
-  test("closing during a mounted canvas load and reopening writes no placeholder", async () => {
-    const { pane, tab, component, loading, write, chunk } = await mountDuringLoad();
-    await chunk();
+  test("a close during a load and a reopen load the drawing again and write nothing", async () => {
+    const { pane, tab, write, reads } = await loadedTab("notes/loading.excalidraw", DRAWING);
+    const loading = reloadTabFromDisk(tab.id);
+    const first = await mountBoard(tab);
+    vi.useFakeTimers();
+    await first.board.start();
+    await reads.chunk(PARTIAL);
     vi.advanceTimersByTime(50);
     await closeTab(pane.id, tab.id);
     await loading;
-    await unmount(component);
-    mounted.splice(mounted.indexOf(component), 1);
-    expect(readTab(tab.id)).toBeUndefined();
+    await unmount(first.component);
+    mounted.splice(mounted.indexOf(first.component), 1);
     expect(reopenClosedTab()).toBe(true);
     const reopened = readTab(tab.id)!;
+    const second = await mountBoard(reopened);
+    await second.board.start();
+    await reads.finish(DRAWING);
+    await vi.advanceTimersByTimeAsync(200);
     const dirty = isDirty(reopened);
     scheduleAutosave(pane.id, reopened.id);
     await vi.advanceTimersByTimeAsync(800);
 
-    expect({ dirty, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
-      dirty: true, writes: [], content: DRAWING,
+    expect({ board: second.board.elements, dirty, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
+      board: [ON_DISK], dirty: false, writes: [], content: DRAWING,
     });
-    expect(reopened.content).toBe(PARTIAL);
-    expect(reopened.error).toContain("JSON parse error");
+    expect({ loading: reopened.loading, content: reopened.content }).toEqual({ loading: false, content: DRAWING });
   });
 });
 
@@ -275,5 +335,104 @@ describe("the drawing library stand-in", () => {
   test("models the installed version of the drawing library", () => {
     const manifest = readFileSync("../../node_modules/@excalidraw/excalidraw/package.json", "utf8");
     expect(JSON.parse(manifest).version).toBe(EXCALIDRAW_VERSION);
+  });
+});
+
+describe("a drawing nobody drew on", () => {
+  test("a load that lands before the library's init shows the drawing and writes nothing", async () => {
+    const { pane, tab, write, reads } = await loadedTab("notes/late.excalidraw", DRAWING);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await reads.finish(DRAWING);
+    await loading;
+    expect(tab.loading).toBe(false);
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ board: board.elements, dirty, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
+      board: [ON_DISK], dirty: false, writes: [], content: DRAWING,
+    });
+  });
+
+  test("a drawing opened and not touched is never dirty and writes nothing", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", FOREIGN);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ dirty, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
+      dirty: false, writes: [], content: FOREIGN,
+    });
+  });
+
+  test("a close inside the first debounce writes nothing and asks nothing", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", FOREIGN);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    vi.advanceTimersByTime(50);
+    await closeTab(pane.id, tab.id);
+
+    expect({ writes: write.mock.calls, content: disk.get(tab.path)?.content, open: readTab(tab.id) }).toEqual({
+      writes: [], content: FOREIGN, open: undefined,
+    });
+  });
+
+  test("an empty file opened in the canvas is discarded on close", async () => {
+    const { pane, tab, write } = await loadedTab("notes/empty.excalidraw", "", { openedEmpty: true });
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    await closeTab(pane.id, tab.id);
+
+    expect({ writes: write.mock.calls, file: disk.get(tab.path), open: readTab(tab.id) }).toEqual({
+      writes: [], file: undefined, open: undefined,
+    });
+  });
+
+  test("a new diagram draft is discarded on close without a dialog", async () => {
+    const { pane, tab, write } = await loadedTab(".Drafts/drawing/diagram.excalidraw", INITIAL);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path: tab.path, name: "drawing", file_count: 1, dir_count: 0, total_size: 100, has_attachments: false,
+    });
+    const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    const closing = closeTab(pane.id, tab.id);
+    try {
+      await vi.waitFor(() => expect(draftCloseState.open || discard.mock.calls.length > 0).toBe(true));
+      expect({ writes: write.mock.calls, discarded: discard.mock.calls.length, dialog: draftCloseState.open }).toEqual({
+        writes: [], discarded: 1, dialog: false,
+      });
+    } finally {
+      resolveDraftClose("cancel");
+      await closing;
+    }
+  });
+
+  test("a stroke inside the first debounce is saved by the timer", async () => {
+    const { pane, tab } = await loadedTab("notes/board.excalidraw", FOREIGN);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    vi.advanceTimersByTime(50);
+    board.stroke({ id: "first-stroke", version: 1 });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(isDirty(tab)).toBe(true);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(disk.get(tab.path)?.content).toContain("first-stroke");
   });
 });
