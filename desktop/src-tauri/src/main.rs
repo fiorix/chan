@@ -9093,8 +9093,9 @@ mod tests {
                     let holder = tempfile::tempdir().expect("relinked holder");
                     let parent = holder.path().join("parent");
                     std::fs::create_dir_all(parent.join("ws")).expect("relinked root");
-                    let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
-                        .expect("library");
+                    let library =
+                        chan_workspace::Library::open_at(config.path().join("config.toml"))
+                            .expect("library");
                     let stored = |root: &Path| {
                         library
                             .register_workspace(root)
@@ -9103,15 +9104,20 @@ mod tests {
                             .to_string_lossy()
                             .into_owned()
                     };
-                    let (hung_root, relinked, plain_root) =
-                        (stored(hung.path()), stored(&parent.join("ws")), stored(plain.path()));
+                    let (hung_root, relinked, plain_root) = (
+                        stored(hung.path()),
+                        stored(&parent.join("ws")),
+                        stored(plain.path()),
+                    );
                     let moved = holder.path().join("moved");
                     std::fs::rename(&parent, &moved).expect("move the parent");
                     symlink(&moved, &parent).expect("link the old parent");
                     let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
                     embedded
                         .install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
-                    let overlay = embedded.workspace_overlay().expect("the overlay is installed");
+                    let overlay = embedded
+                        .workspace_overlay()
+                        .expect("the overlay is installed");
                     for path in [&hung_root, &relinked, &plain_root] {
                         overlay.set(path, true);
                     }
@@ -9169,7 +9175,10 @@ mod tests {
                 /// root.
                 fn launcher_off(&self, stored: &str) {
                     self.runtime
-                        .block_on(self.embedded().close_workspace_root(Path::new(stored), false))
+                        .block_on(
+                            self.embedded()
+                                .close_workspace_root(Path::new(stored), false),
+                        )
                         .expect("the launcher's off");
                 }
 

@@ -3216,9 +3216,10 @@ impl WorkspaceHost {
             (WorkspaceLifecycleOutcome::Refused { active_terminals }, _) => {
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
             }
-            (WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound, stored) => {
-                stored
-            }
+            (
+                WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound,
+                stored,
+            ) => stored,
         };
 
         let mut removing = WorkspaceRemoveGuard::new(self, target.clone());
