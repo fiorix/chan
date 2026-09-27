@@ -12,7 +12,7 @@
 // actions instead.
 
 import { api, sessionWindowId } from "../api/client";
-import { ApiError } from "../api/errors";
+import { ApiError, apiErrorCode } from "../api/errors";
 import type {
   DraftPromoteResponse,
   FileResponse,
@@ -3254,18 +3254,9 @@ export function openInActivePane(
   return openInPane(layout.activePaneId, path, opts);
 }
 
-/// Open a wiki / markdown-link target, resolving an extension-less stem
-/// to the real on-disk file before opening. A `[[note]]` pill (and a
-/// `[[` picker pick) carries the raw stem `note`; the pill's kind probe
-/// resolves it through `/api/resolve-link` (which tries `note.md` /
-/// `note.txt` / `note`), so the pill renders as a valid link. But the
-/// click previously handed that raw stem straight to `openInActivePane`,
-/// and the file read route opens the path verbatim (no extension probe)
-/// -- so it 404'd and the tab flashed a false "document not found" for a
-/// file that's right there on disk. Resolve through the SAME probe here
-/// so the click opens `note.md`. A failed resolve falls back to the raw
-/// target so a genuinely broken link still lands on the missing-file
-/// banner with the real cause rather than swallowing the click.
+/// Resolve a wiki / markdown-link stem before opening, since the file read
+/// route takes a path verbatim. Only a confirmed missing link falls back to
+/// the raw target and its missing-file banner; other failures leave tabs alone.
 export async function openLinkTarget(
   target: string,
   opts: OpenFileOptions = {},
@@ -3280,9 +3271,11 @@ export async function openLinkTarget(
       return;
     }
     path = res.path;
-  } catch {
-    // Unresolvable (broken link / network): open the raw target so the
-    // editor surfaces the missing file instead of silently no-op'ing.
+  } catch (e) {
+    if (!(e instanceof ApiError && e.status === 404 && apiErrorCode(e) === "link_not_found")) {
+      notify(e instanceof Error ? e.message : String(e));
+      return;
+    }
   }
   await openInActivePane(path, opts);
 }
