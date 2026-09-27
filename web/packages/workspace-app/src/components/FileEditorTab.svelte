@@ -178,13 +178,6 @@
   let canvasRef: { focusCanvas: () => void; flushPendingEdits: () => void } | undefined = $state();
   $effect(() => registerPendingEditFlush(tab.id, () => canvasRef?.flushPendingEdits()));
 
-  function onCanvasSceneChange(json: string): void {
-    // Loading, failed, or missing reads do not supply a drawing. This
-    // guard covers both close-time and teardown serialization.
-    if (tab.loading || tab.error || tab.fileMissing) return;
-    setTabContent(tab, json);
-  }
-
   let ExcalidrawCanvas =
     $state<typeof import("../editor/ExcalidrawCanvas.svelte").default | null>(null);
   $effect(() => {
@@ -1452,9 +1445,10 @@
             {active}
             content={tab.content}
             dark={effectiveHybridSurfaceTheme("editor") === "dark"}
-            onSceneChange={onCanvasSceneChange}
+            onSceneChange={(json) => setTabContent(tab, json)}
             session={sceneSession}
             readonly={readOnly}
+            loaded={!tab.loading}
           />
         {/if}
       </div>
