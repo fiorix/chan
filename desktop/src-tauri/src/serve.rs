@@ -442,10 +442,10 @@ async fn retarget_window<F: std::future::Future<Output = crate::ProbeResult>>(
     navigate()
 }
 
-/// Retarget a live watched REMOTE window in place after its devserver rotated
-/// tenant tokens. This keeps the same native window and lets the existing
-/// reconnecting/retry surface navigate to the fresh target instead of destroying
-/// the webview and rebuilding it under the same label.
+/// Probe a live watched remote window once and navigate it in place if ready.
+/// A not-ready target keeps the current page for the watcher's next try. Gone
+/// windows stay closed, and a superseded ticket cannot navigate. Navigation
+/// keeps the native window and its geometry.
 pub(crate) async fn retarget_watched_remote_window(
     app: &AppHandle,
     url: &str,

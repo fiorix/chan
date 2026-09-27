@@ -3556,7 +3556,8 @@ fn restart_desktop_after_update() -> Result<(), String> {
     ))
 }
 
-/// Result of a connecting-screen reachability probe. Loopback targets wait on
+/// Result of a reachability probe for the connecting page or an open window
+/// retarget. Loopback targets wait on
 /// 503 while the devserver restores its tenants. Non-loopback targets also wait
 /// on gateway upstream failures (502 and 504). `detail` is a
 /// short ASCII reason shown in the per-attempt row; `status` is the HTTP code
@@ -3614,15 +3615,14 @@ fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::Sta
     })
 }
 
-/// Reachability probe for the chan-desktop connecting screen. Devserver
-/// windows load the bundled local `connecting.html` instead of pointing the
-/// webview straight at the remote (a down remote paints a blank white webview);
-/// that trusted local page calls this command on a retry loop until the remote
-/// answers, then navigates. Runs from Rust because the page's CSP
-/// (`default-src 'self'`) blocks a cross-origin `fetch`. Authentication cookies
-/// for the target origin are copied from the calling webview when available so
-/// the probe can distinguish a registered-but-not-answering gateway devserver
-/// from a live one.
+/// Reachability probe used by the connecting page and directly by Rust when
+/// retargeting an open window. A new devserver window loads the bundled local
+/// `connecting.html`, whose retry loop calls this command before navigating.
+/// Open-window retargets call it once and keep their page if it is not ready.
+/// Runs from Rust because the connecting page's CSP (`default-src 'self'`)
+/// blocks cross-origin `fetch`. Authentication cookies for the target origin
+/// are copied from the webview when available so the probe can distinguish a
+/// registered-but-not-answering gateway devserver from a live one.
 #[tauri::command]
 async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     let target = probe_target_kind(&url);
@@ -4049,9 +4049,10 @@ fn reload_window(
         .map_err(|e| format!("reloading window: {e}"))
 }
 
-/// Reload a devserver window by navigating it to a freshly resolved URL for
-/// its feed record (a gateway window needs a new entry mint and WebView
-/// session). `Ok(false)` leaves the reload to the in-page `location.reload()`.
+/// Resolve a devserver window's current feed URL and probe it once before
+/// navigating the existing window. Gateway windows need a fresh entry mint
+/// and WebView session. A not-ready target keeps the page; a vanished window
+/// stays closed. `Ok(false)` leaves reload to the in-page `location.reload()`.
 fn reload_devserver_window_from_feed(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -4069,9 +4070,9 @@ fn reload_devserver_window_from_feed(
     let Some(conn) = state.devservers.get(&devserver_id) else {
         return Ok(false);
     };
-    // Resolving the navigation URL can be a network round trip (a gateway
-    // entry mint), so the reload is fire-and-forget: the command returns
-    // "handled" and the task navigates when the URL lands.
+    // A gateway entry mint needs a network round trip, so the command returns
+    // "handled" before the task resolves and probes the URL. Only a ready
+    // target and a current ticket allow that task to navigate.
     let ticket = state.retarget_tickets.begin(label);
     let app = app.clone();
     let label = label.to_string();

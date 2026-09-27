@@ -3949,8 +3949,8 @@ mod tests {
             }
         }
 
-        // The launcher route's locked refusal is plain text. It must reach the
-        // user as itself, over either arm, and must never read as a count.
+        // A peer's plain-text locked refusal keeps its sentence over either
+        // transport; this fallback body must never read as a terminal count.
         let error = refusal("workspace is open in another Chan process", true, true).await;
         assert_eq!(message(&error), "workspace is open in another Chan process");
         let error = refusal("workspace is open in another Chan process", false, false).await;
