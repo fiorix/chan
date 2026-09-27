@@ -5,9 +5,10 @@
 // desktop, the Clipboard API in a browser, and a report when neither can
 // write.
 
-import { mount, unmount } from "svelte";
+import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import JsonNode from "./JsonNode.svelte";
+import JsonPretty from "./JsonPretty.svelte";
 import { setNotifyHandler } from "../state/notify.svelte";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
@@ -60,5 +61,42 @@ describe("a right-click on a JSON node", () => {
     rightClickRoot();
 
     await vi.waitFor(() => expect(notes).toEqual(["Copy failed: Clipboard unavailable"]));
+  });
+});
+
+describe("JSON tree limits", () => {
+  test("renders a buffer of exactly one MiB", () => {
+    const value = `"${"a".repeat(1024 * 1024 - 2)}"`;
+    mounted = mount(JsonPretty, { target: document.body, props: { value } });
+    expect(document.querySelectorAll(".node")).toHaveLength(1);
+    expect(document.querySelector(".string")?.textContent).toBe(value);
+  });
+
+  test("does not parse a buffer over one MiB and directs the reader to Source", () => {
+    const value = JSON.stringify({ value: "\u20ac".repeat(400_000) });
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      mounted = mount(JsonPretty, { target: document.body, props: { value } });
+      expect(document.body.textContent).toContain("too large for the tree");
+      expect(document.body.textContent).toContain("Source");
+      expect(document.querySelectorAll(".node")).toHaveLength(0);
+      expect(parse).not.toHaveBeenCalledWith(value);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  test.each([
+    ["objects", { first: { second: { leaf: 1 } } }, "$.first.second", "$.first.second.leaf"],
+    ["arrays", [[[1]]], "$[0][0]", "$[0][0][0]"],
+  ])("collapses %s below the root's direct members", async (_kind, value, path, leaf) => {
+    mounted = mount(JsonPretty, { target: document.body, props: { value: JSON.stringify(value) } });
+    const node = [...document.querySelectorAll<HTMLElement>(".node")].find((n) => n.title === path)!;
+    const toggle = node.querySelector<HTMLButtonElement>(":scope > .toggle")!;
+    expect(toggle.getAttribute("aria-label")).toBe("Expand");
+    expect([...document.querySelectorAll<HTMLElement>(".node")].some((n) => n.title === leaf)).toBe(false);
+    toggle.click();
+    await tick();
+    expect([...document.querySelectorAll<HTMLElement>(".node")].some((n) => n.title === leaf)).toBe(true);
   });
 });
