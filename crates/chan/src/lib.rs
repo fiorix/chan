@@ -5486,6 +5486,20 @@ async fn force_teardown_before_restart(
     }
 }
 
+fn devserver_refusal(status: reqwest::StatusCode, body: &str, fallback: String) -> String {
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
+        return fallback;
+    };
+    match body
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sentence| !sentence.is_empty())
+    {
+        Some(sentence) => format!("HTTP {status}: {sentence}"),
+        None => fallback,
+    }
+}
+
 /// POST the drain endpoint: every terminal session is closed and the child
 /// processes waited on before this returns Ok. Err carries the reason the
 /// drain could not be confirmed (no token, connect failure, timeout, or
@@ -5513,7 +5527,11 @@ async fn drain_devserver_terminals_with_token(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("HTTP {status}: {body}"));
+        return Err(devserver_refusal(
+            status,
+            &body,
+            format!("HTTP {status}: {body}"),
+        ));
     }
     let drained: chan_server::devserver_api::DrainedTerminals = response
         .json()
@@ -5652,10 +5670,10 @@ async fn rotate_devserver_token_at(
             );
         }
         Ok(Ok(response)) => {
-            anyhow::bail!(
-                "chan devserver rotate-token: the running devserver answered HTTP {}",
-                response.status()
-            );
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let refusal = devserver_refusal(status, &body, format!("HTTP {status}"));
+            anyhow::bail!("chan devserver rotate-token: the running devserver answered {refusal}");
         }
         // Nothing listening (or too slow): rotate the file instead.
         Ok(Err(_)) | Err(_) => Ok(None),
