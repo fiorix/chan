@@ -7093,6 +7093,140 @@ mod tests {
     }
 
     #[test]
+    fn registered_mounts_retain_admission_through_an_abandoned_root_check() {
+        abandoned_root_check_holds_mount_admission(false);
+    }
+
+    #[test]
+    fn already_open_mounts_share_admission_with_an_abandoned_root_check() {
+        abandoned_root_check_holds_mount_admission(true);
+    }
+
+    fn abandoned_root_check_holds_mount_admission(already_open: bool) {
+        const CHECK: &str =
+            "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(5)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            for root in [root.path(), other.path()] {
+                state.host.library().register_workspace(root).unwrap();
+            }
+            let workspace =
+                already_open.then(|| state.host.library().open_workspace(root.path()).unwrap());
+            let stall =
+                root_stall::stall_matching(root.path(), &[CHECK, "Library::open_workspace"]);
+            let opening = Arc::clone(&state.host);
+            let opening_root = root.path().to_path_buf();
+            let supplied = workspace.clone();
+            let config = tenant_config(state.addr, "/check");
+            let mut first = tokio::spawn(async move {
+                match supplied {
+                    Some(workspace) => opening.open_workspace(workspace, config).await,
+                    None => {
+                        opening
+                            .open_or_get_registered_workspace(opening_root, config)
+                            .await
+                    }
+                }
+            });
+            // Let the first mount's open finish, then hold its post-build
+            // check and all later filesystem opens at their real root hops.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let mut released = 0;
+                loop {
+                    let entered = stall.entered();
+                    if entered.last().is_some_and(|call| call.contains(CHECK)) {
+                        break;
+                    }
+                    if entered.len() > released {
+                        released = entered.len();
+                        stall.release_held();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the first mount never reached its root check");
+            let initial = stall.entered().len();
+            tokio::time::timeout(Duration::from_millis(100), &mut first)
+                .await
+                .expect_err("the first caller expires with its root check held");
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            for _ in 0..3 {
+                tokio::time::timeout(Duration::from_millis(100), async {
+                    let config = tenant_config(state.addr, "/later");
+                    match workspace.clone() {
+                        Some(workspace) => state.host.open_workspace(workspace, config).await,
+                        None => {
+                            state
+                                .host
+                                .open_or_get_registered_workspace(root.path(), config)
+                                .await
+                        }
+                    }
+                })
+                .await
+                .expect_err("later callers expire behind the abandoned root check");
+            }
+            assert_eq!(
+                stall.entered().len(),
+                initial,
+                "expired mounts dispatched another blocking call beside an abandoned root check"
+            );
+            let other_host = Arc::clone(&state.host);
+            let other_root = other.path().to_path_buf();
+            assert_eq!(
+                completes_beside(
+                    &stall,
+                    "another root beside an abandoned root check",
+                    async move {
+                        other_host
+                            .close_workspace_for_root(&other_root, false)
+                            .await
+                    }
+                )
+                .await
+                .unwrap(),
+                WorkspaceLifecycleOutcome::NotFound
+            );
+            assert!(
+                state.host.mounted_prefixes().unwrap().is_empty(),
+                "an abandoned root check published a mount"
+            );
+            drop(stall);
+            let config = tenant_config(state.addr, "/fresh");
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
+                match workspace {
+                    Some(workspace) => state.host.open_workspace(workspace, config).await,
+                    None => {
+                        state
+                            .host
+                            .open_or_get_registered_workspace(root.path(), config)
+                            .await
+                    }
+                }
+            })
+            .await
+            .unwrap()
+            .expect("a fresh caller mounts after the abandoned check drains");
+            state
+                .host
+                .close_workspace_for_root(root.path(), false)
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
     fn opens_of_a_hung_root_hold_one_blocking_thread() {
         hung_root_hop_holds_one_blocking_thread(false);
     }
