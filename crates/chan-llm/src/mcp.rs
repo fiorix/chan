@@ -1962,6 +1962,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_a_request_sets_its_running_body_cancel_flag() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (_cfg, _root, workspace) = open_idle_workspace();
+            workspace.write_text("a.md", "a").unwrap();
+            let weak = Arc::downgrade(&workspace);
+            let resolver = weak.clone();
+            let context = request_context();
+            let token = context.ct.clone();
+            let mut hold = test_hooks::arm_tool_hold(workspace.root().to_path_buf());
+            let request = tokio::spawn(run_tool(
+                "list_files",
+                serde_json::json!({}),
+                Arc::new(move || resolver.upgrade()),
+                context,
+            ));
+            let cancel = hold.entered().await;
+            request.abort();
+            assert!(request.await.unwrap_err().is_cancelled());
+            let was_cancelled = cancel.load(Ordering::Relaxed);
+            hold.release();
+            let answer = hold.answered().await;
+
+            assert!(
+                !token.is_cancelled(),
+                "the token must not mask a dropped future"
+            );
+            assert!(
+                was_cancelled,
+                "dropping the request left its body uncancelled"
+            );
+            assert_eq!(answer, Err("request cancelled".into()));
+            assert_eq!(weak.strong_count(), 1, "the body kept its workspace");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn mcp_cancel_stops_a_running_list_files() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (_cfg, _root, workspace) = open_idle_workspace();
