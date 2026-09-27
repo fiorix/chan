@@ -59,7 +59,7 @@ function clonedSessionStorage(source: Storage): Storage {
 }
 
 function fakeWin(): FakeWin {
-  let href = "";
+  let href = "about:blank";
   const w: FakeWin = {
     closed: false,
     name: "",
@@ -197,10 +197,10 @@ describe("mintWindow", () => {
     const pending = mintWindow("workspace");
     await vi.advanceTimersByTimeAsync(0);
     const child = opened[0].win;
-    expect(child.location.href).toBe("");
+    expect(child.location.href).toBe("about:blank");
     await vi.advanceTimersByTimeAsync(delay - 1);
     expect(checkWindowPage).toHaveBeenCalledTimes(1);
-    expect(child.location.href).toBe("");
+    expect(child.location.href).toBe("about:blank");
     await vi.advanceTimersByTimeAsync(1);
     await pending;
     expect(checkWindowPage).toHaveBeenCalledTimes(2);
@@ -214,7 +214,7 @@ describe("mintWindow", () => {
     checkWindowPage.mockResolvedValue(new Response(JSON.stringify({ error: "Page is unavailable." }), { status }));
     const outcome = await mintWindow("workspace").then(() => null, (error: unknown) => error);
     expect(outcome).toMatchObject({ status, message: "Page is unavailable." });
-    expect(opened[0].win.location.href).toBe("");
+    expect(opened[0].win.location.href).toBe("about:blank");
     expect(opened[0].win.closed).toBe(true);
     expect(discardWindow).toHaveBeenCalledWith("w-1");
     expect(hasWindowHandle("w-1")).toBe(false);
@@ -231,7 +231,7 @@ describe("mintWindow", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(settled).toBe(true);
     expect(await pending).toBeNull();
-    expect(opened[0].win.location.href).toBe("");
+    expect(opened[0].win.location.href).toBe("about:blank");
     expect(checkWindowPage).toHaveBeenCalledTimes(1);
     expect(discardWindow).toHaveBeenCalledWith("w-1");
     expect(vi.getTimerCount()).toBe(0);
@@ -253,7 +253,7 @@ describe("mintWindow", () => {
     expect(settled).toBe(true);
     expect(await pending).toMatchObject({ status: 503, message: "devserver is restoring terminal sessions" });
     expect(opened[0].win.closed).toBe(true);
-    expect(opened[0].win.location.href).toBe("");
+    expect(opened[0].win.location.href).toBe("about:blank");
     expect(discardWindow).toHaveBeenCalledWith("w-1");
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -373,11 +373,27 @@ describe("openWindowRecord", () => {
     checkWindowPage.mockImplementationOnce(async () => gateResponse());
     const pending = openWindowRecord(record({}));
     await vi.advanceTimersByTimeAsync(999);
-    expect(opened[0].win.location.href).toBe("");
+    expect(opened[0].win.location.href).toBe("about:blank");
     expect(hasWindowHandle("w-1")).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
     await pending;
     expect(opened[0].win.location.href).toContain("/proj-1/");
+    expect(checkWindowPage).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["about:blank", ""])("waits and navigates a window whose location reads %j", async (href) => {
+    vi.useFakeTimers();
+    const child = fakeWin();
+    child.location.href = href;
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    checkWindowPage.mockImplementationOnce(async () => gateResponse());
+    const pending = openWindowRecord(record({}));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(child.location.href).toBe(href);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(child.location.href).toContain("/proj-1/?w=w-1");
     expect(checkWindowPage).toHaveBeenCalledTimes(2);
   });
 
@@ -416,7 +432,7 @@ describe("openWindowRecord", () => {
     const outcome = await Promise.resolve(openWindowRecord(record({}))).then(() => null, (error: unknown) => error);
     expect(outcome).toMatchObject({ status: 409, message: "This page cannot open." });
     expect(opened[0].win.closed).toBe(true);
-    expect(opened[0].win.location.href).toBe("");
+    expect(opened[0].win.location.href).toBe("about:blank");
     expect(hasWindowHandle("w-1")).toBe(false);
   });
 
@@ -432,7 +448,7 @@ describe("openWindowRecord", () => {
     expect(settled).toBe(true);
     expect(await pending).toMatchObject({ status: 503, message: "devserver is restoring terminal sessions" });
     expect(opened[0].win.closed).toBe(true);
-    expect(opened[0].win.location.href).toBe("");
+    expect(opened[0].win.location.href).toBe("about:blank");
   });
 });
 
