@@ -793,7 +793,7 @@ async fn handle_library_command_snapshot(
 ) -> Response {
     let capability = match resolve_command_capability(&state, &capability) {
         Ok(capability) => capability,
-        Err(error) => return error.into_response(),
+        Err((status, message)) => return command_capability_error(status, message),
     };
     Json(ScopedLibrarySnapshot {
         library_id: state.host.library_id().to_string(),
@@ -810,7 +810,7 @@ async fn handle_library_command_action(
 ) -> Response {
     let capability = match resolve_command_capability(&state, &capability) {
         Ok(capability) => capability,
-        Err(error) => return error.into_response(),
+        Err((status, message)) => return command_capability_error(status, message),
     };
     let record = match action {
         ScopedLibraryAction::NewTerminal => {
@@ -905,8 +905,8 @@ async fn handle_library_command_live_terminals(
     AxumPath((capability, window_id)): AxumPath<(String, String)>,
 ) -> Response {
     // The capability is the whole credential; nothing below reads its fields.
-    if let Err(error) = resolve_command_capability(&state, &capability) {
-        return error.into_response();
+    if let Err((status, message)) = resolve_command_capability(&state, &capability) {
+        return command_capability_error(status, message);
     }
     let Some(record) = state
         .host
@@ -939,7 +939,7 @@ async fn handle_library_command_launch(
     // not from the resolved value.
     let _capability = match resolve_command_capability(&state, &capability) {
         Ok(capability) => capability,
-        Err(error) => return error.into_response(),
+        Err((status, message)) => return command_capability_error(status, message),
     };
     let Some(record) = state
         .host
