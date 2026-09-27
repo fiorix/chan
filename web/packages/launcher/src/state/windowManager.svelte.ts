@@ -17,7 +17,7 @@
 
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import { backend } from "../api/backend";
-import type { WindowKind, WindowRecord, WindowSet } from "../api/library";
+import { ApiError, type WindowKind, type WindowRecord, type WindowSet } from "../api/library";
 import { windowUrl } from "../lib/windowUrl";
 import { demoState } from "./demo.svelte";
 import { clearWindowAttention, markWindowAttention } from "./windowAttention.svelte";
@@ -63,6 +63,61 @@ function handleState(id: string): "live" | "closed" | "none" {
   return "closed";
 }
 
+const WINDOW_PAGE_WAIT_MS = 60_000;
+const WINDOW_CLOSED_POLL_MS = 100;
+
+function retryAfterMs(header: string | null): number {
+  if (header === null || header.trim() === "") return 1000;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1, seconds * 1000);
+  const date = Date.parse(header);
+  return Number.isFinite(date) ? Math.max(1, date - Date.now()) : 1000;
+}
+
+async function waitForWindowPage(h: Window, url: string): Promise<boolean> {
+  if (h.closed) return false;
+  h.document.body.textContent = "Waiting for the window to be ready...";
+  const controller = new AbortController();
+  let lastRefusal: Error = new Error("Timed out waiting for the window page");
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  let closedPoll: ReturnType<typeof setInterval> | undefined;
+  const stopped = new Promise<boolean>((resolve, reject) => {
+    deadline = setTimeout(() => reject(lastRefusal), WINDOW_PAGE_WAIT_MS);
+    closedPoll = setInterval(() => {
+      if (h.closed) resolve(false);
+    }, WINDOW_CLOSED_POLL_MS);
+  });
+  const check = async (): Promise<boolean> => {
+    while (!h.closed && !controller.signal.aborted) {
+      const response = await backend.checkWindowPage(url, controller.signal);
+      if (h.closed || controller.signal.aborted) return false;
+      if (response.ok) {
+        await response.body?.cancel();
+        return true;
+      }
+      const text = await response.text().catch(() => response.statusText);
+      const refusal = new ApiError(response.status, text);
+      if (response.status !== 503) throw refusal;
+      lastRefusal = refusal;
+      if (h.closed || controller.signal.aborted) return false;
+      await new Promise<void>((resolve) => {
+        retryTimer = setTimeout(resolve, retryAfterMs(response.headers.get("Retry-After")));
+      });
+    }
+    return false;
+  };
+  try {
+    // The deadline and close check also cover a fetch or response body that stalls.
+    return await Promise.race([check(), stopped]);
+  } finally {
+    clearTimeout(retryTimer);
+    clearTimeout(deadline);
+    clearInterval(closedPoll);
+    controller.abort();
+  }
+}
+
 /** Mint a browser window of the local library and open it in-app. Call this
  * DIRECTLY from a user gesture: it opens the blank window synchronously, before
  * the mint await, so the browser does not treat the later navigation as a popup.
@@ -76,15 +131,22 @@ export async function mintWindow(
   if (demoState.enabled) return null;
   const blank = servingOrigin() ? window.open("", "_blank") : null;
   clearClonedSessionDeckDrafts(blank);
+  let rec: WindowRecord | undefined;
   try {
-    const rec = await backend.createWindow(kind, {
+    rec = await backend.createWindow(kind, {
       workspacePath: opts.workspacePath,
       origin: "browser",
       actingWindowId: opts.actingWindowId,
     });
     if (blank) {
-      blank.location.href = windowUrl(rec, servingOrigin());
       handles.set(rec.window_id, blank);
+      pendingDiscards.delete(rec.window_id);
+      const url = windowUrl(rec, servingOrigin());
+      if (!(await waitForWindowPage(blank, url)) || blank.closed) {
+        discardBrowserWindow(rec.window_id);
+        return null;
+      }
+      blank.location.href = url;
     }
     // A blocked popup leaves no handle; if the record never gets a /ws presence
     // the reconciler treats it like any other stale browser row and discards it.
@@ -93,6 +155,7 @@ export async function mintWindow(
     return rec;
   } catch (e) {
     blank?.close();
+    if (rec) discardBrowserWindow(rec.window_id);
     throw e;
   }
 }

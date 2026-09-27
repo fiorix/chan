@@ -285,6 +285,7 @@ function tick<T>(value: T): Promise<T> {
 }
 
 export const mockApi: LibraryApi = {
+  checkWindowPage: async () => new Response(),
   listWorkspaces: () => tick(mergedWorkspaces()),
 
   addLocalWorkspace: (path, label) => {

@@ -491,6 +491,10 @@ export interface LibraryApi {
    * leader claim for the per-tenant mint gate); desktop paths omit both (absent
    * origin => native, absent claim allowed when leaderless). */
   createWindow(kind: WindowKind, opts?: CreateWindowOptions): Promise<WindowRecord>;
+  /** Read a same-origin tenant page before navigating a browser window. Keep
+   * the response intact: success carries HTML, and a startup refusal carries
+   * Retry-After beside the envelope that ApiError reads. */
+  checkWindowPage(url: string, signal: AbortSignal): Promise<Response>;
   /** Open (focus a live window / un-hide a buried one) via the desktop window
    * bridge. Rejects on a surface with no desktop attached. */
   openWindow(id: string): Promise<void>;
@@ -616,6 +620,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 /** The live HTTP client. Ships once the /api/library/* handlers are deployed. */
 export const liveApi: LibraryApi = {
+  checkWindowPage: (url, signal) => fetch(url, { cache: "no-store", signal }),
   listWorkspaces: () => req("GET", "/api/library/workspaces"),
   addLocalWorkspace: (path, label) => req("POST", "/api/library/workspaces", { path, label }),
   setWorkspaceOn: (id, on, force) =>
