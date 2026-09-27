@@ -5821,6 +5821,70 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn workspace_remove_missing() {
+        let (_dir, host) = host();
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                "/api/library/workspaces/missing",
+                None,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "workspace not found",
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_remove_locked() {
+        let (dir, host) = host();
+        let prefix = registered_root(&host, dir.path());
+        let _foreign = super::devserver_route_tests::hold_foreign_lock(host.library(), dir.path());
+        assert_refusal(
+            send(
+                &mutable_app(host),
+                "DELETE",
+                &format!("/api/library/workspaces{prefix}"),
+                None,
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "chan-workspace: workspace is locked by another process",
+        )
+        .await;
+    }
+
+    #[test]
+    fn workspace_remove_unregistered() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (dir, host) = host();
+            let prefix = registered_root(&host, dir.path());
+            // Hold the filesystem hop so the row disappears after the route's
+            // lookup and before the host's unregister, without a timing race.
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                held.recv().unwrap();
+            });
+            let app = mutable_app(host.clone());
+            let path = format!("/api/library/workspaces{prefix}");
+            let mut request = Box::pin(send(&app, "DELETE", &path, None));
+            assert!(futures::poll!(&mut request).is_pending());
+            assert!(host.library().unregister_workspace(dir.path()).unwrap());
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            assert_refusal(request.await, StatusCode::NOT_FOUND, "workspace not found").await;
+        });
+    }
+
+    #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
         let app = launcher_router(host, None, None);
