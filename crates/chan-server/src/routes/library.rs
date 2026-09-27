@@ -435,11 +435,10 @@ async fn require_launcher_bearer(
     if authorized {
         next.run(req).await
     } else {
-        (
+        crate::error::err(
             StatusCode::UNAUTHORIZED,
-            "missing or invalid launcher bearer token",
+            "missing or invalid launcher bearer token".into(),
         )
-            .into_response()
     }
 }
 
