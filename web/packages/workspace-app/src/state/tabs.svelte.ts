@@ -1377,7 +1377,8 @@ export function reopenClosedTab(): boolean {
 /// longer exists (discarded or promoted during the close), so mint a new
 /// draft of the same kind (markdown or diagram) and seed it with the
 /// closed buffer's content when that content is more than the default
-/// seed. Async: draft creation is a server round-trip, so reopenClosedTab
+/// seed and its load had finished (an unfinished one holds only the bytes
+/// that had arrived). Async: draft creation is a server round-trip, so reopenClosedTab
 /// fires this and returns.
 async function recoverClosedDraft(
   paneId: string,
@@ -1390,7 +1391,7 @@ async function recoverClosedDraft(
       ? await api.createDiagram()
       : await api.createDraft();
     const seed = diagram ? NEW_DIAGRAM_SEED : NEW_DRAFT_SEED;
-    if (closed.content.trim().length > 0 && closed.content !== seed) {
+    if (!closed.loading && closed.content.trim().length > 0 && closed.content !== seed) {
       await api.write(path, closed.content);
     }
     // Lazy import to break the eager cyclic dependency with store.svelte
