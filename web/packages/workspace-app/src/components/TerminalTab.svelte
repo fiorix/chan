@@ -1429,7 +1429,7 @@
       if (!ui.terminalControl) {
         pingTimer = setInterval(() => send({ type: "ping" }), WS_PING_MS);
       }
-      if (term) send({ type: "resize", cols: term.cols, rows: term.rows });
+      if (term && gridMeasured) send({ type: "resize", cols: term.cols, rows: term.rows });
       sendFocusState();
     };
     ws.onmessage = async (event) => {
@@ -2009,10 +2009,19 @@
   }
 
   function fitToHost(): void {
+    const firstMeasure = !gridMeasured;
+    const before = term ? { cols: term.cols, rows: term.rows } : null;
     const measured = runTerminalFit(fit, term, (detail) => {
       statusDetail = detail;
     });
-    if (measured) gridMeasured = true;
+    if (!measured) return;
+    gridMeasured = true;
+    // The socket's open sends no grid until one is measured, and a fit that
+    // leaves the grid as it was fires no resize, so the first measured grid
+    // goes to the PTY here when the fit kept it.
+    if (firstMeasure && term && before && term.cols === before.cols && term.rows === before.rows) {
+      send({ type: "resize", cols: term.cols, rows: term.rows });
+    }
   }
 
   function queueFit(): void {
