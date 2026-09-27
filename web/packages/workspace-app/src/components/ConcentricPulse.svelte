@@ -3,6 +3,7 @@
   import {
     buildConcentricPulseRings,
     CONCENTRIC_PULSE_REFERENCE_SIZE,
+    CONCENTRIC_PULSE_MAX_RADIUS,
   } from "./concentricPulse";
   import {
     canvasCssNumber,
@@ -43,9 +44,10 @@
         );
         const scale =
           Math.min(width, height) / CONCENTRIC_PULSE_REFERENCE_SIZE;
-        const maxRadius =
-          Math.hypot(width, height) / (2 * scale) +
-          100;
+        const maxRadius = Math.min(
+          CONCENTRIC_PULSE_MAX_RADIUS * 2,
+          Math.hypot(width, height) / (2 * scale) + 100,
+        );
         const rings = buildConcentricPulseRings(phase, maxRadius);
 
         ctx.clearRect(0, 0, width, height);
