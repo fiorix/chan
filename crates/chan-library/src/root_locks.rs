@@ -141,6 +141,18 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// lock, and nothing that holds a root lock takes a prefix lock.
 pub(crate) type RootLocks = KeyedLocks<PathBuf>;
 
+/// Filesystem operations with independent admission for one canonical root.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub(crate) enum RootCall {
+    Mount,
+    Revalidate,
+}
+
+/// A permit moves into blocking work and returns with its result. A caller
+/// that leaves drops its lifecycle lock; the work keeps this permit until
+/// its resources are released. A waiter then dispatches its own call.
+pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
+
 /// The canonical keys of workspace roots, each computed on the blocking pool
 /// by one computation per spelled path in flight.
 ///

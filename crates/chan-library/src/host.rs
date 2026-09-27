@@ -24,7 +24,7 @@ use tokio::sync::{Notify, OwnedMutexGuard};
 use tower::ServiceExt;
 
 use crate::desktop_window_ops::DesktopBridge;
-use crate::root_locks::{RootKeys, RootLocks};
+use crate::root_locks::{RootCall, RootCalls, RootKeys, RootLocks};
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
 use crate::tenant::{
@@ -397,6 +397,8 @@ pub struct WorkspaceHost {
     /// open, the release budget and the blocking hops, so it is asynchronous;
     /// the lock order is stated on [`RootLocks`].
     root_locks: RootLocks,
+    /// Blocking work admission, independent of caller-owned lifecycle locks.
+    root_calls: RootCalls,
     /// The health checks in flight, one per mounted root's canonical key.
     /// A check whose root hangs stays here until the root answers, and
     /// later ticks wait on it instead of starting another, so a hung root
@@ -892,6 +894,7 @@ impl WorkspaceHost {
             publication_closed: std::sync::atomic::AtomicBool::new(false),
             desktop,
             root_locks: RootLocks::default(),
+            root_calls: RootCalls::default(),
             root_probes: Arc::default(),
             root_keys: RootKeys::default(),
             #[cfg(test)]
@@ -1250,7 +1253,7 @@ impl WorkspaceHost {
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
         let key = self.root_key(root).await?;
-        self.open_registered_workspace_keyed(root, key, None, config)
+        self.open_registered_workspace_keyed(root, key, config)
             .await
     }
 
@@ -1262,7 +1265,6 @@ impl WorkspaceHost {
         &self,
         root: &Path,
         key: PathBuf,
-        mut root_lock: Option<OwnedMutexGuard<()>>,
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
         // Mark the mount in flight (status `starting`) and fire the watch feed
@@ -1271,6 +1273,12 @@ impl WorkspaceHost {
         // through -- the `open_or_get` wrapper, the desktop's direct boot-restore
         // (embedded.rs), the devserver `mount_at` -- so all of them surface
         // `starting`/`error` without each routing the lifecycle themselves.
+        let mut permit = Some(
+            self.root_calls
+                .lock(&(key.clone(), RootCall::Mount))
+                .await
+                .into_owned(),
+        );
         let mut mounting = WorkspaceMountGuard {
             host: self,
             root: key,
@@ -1278,7 +1286,7 @@ impl WorkspaceHost {
         };
         self.mark_mount_starting_by_key(&mounting.root);
         let result = self
-            .open_registered_workspace_inner(root, &mut root_lock, config)
+            .open_registered_workspace_inner(root, &mut permit, config)
             .await;
         self.settle_mount(&mounting.root, &result);
         mounting.armed = false;
@@ -1292,7 +1300,7 @@ impl WorkspaceHost {
     async fn open_registered_workspace_inner(
         &self,
         root: &Path,
-        root_lock: &mut Option<OwnedMutexGuard<()>>,
+        permit: &mut Option<OwnedMutexGuard<()>>,
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
         let library = self.library.clone();
@@ -1309,8 +1317,9 @@ impl WorkspaceHost {
         let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _cancel_on_drop = WorkspaceOpenCancellation(cancelled.clone());
-        let owned_root_lock = root_lock.take();
-        let (workspace, returned_root_lock) = tokio::task::spawn_blocking(move || {
+        let call_permit = permit.take();
+        let (workspace, returned_permit) = tokio::task::spawn_blocking(move || {
+            let held_permit = call_permit;
             #[cfg(test)]
             if let Some(probe) = probe {
                 probe.send(std::thread::current().id()).unwrap();
@@ -1363,13 +1372,13 @@ impl WorkspaceHost {
                 std::thread::sleep(remaining.min(WORKSPACE_OPEN_RELEASE_POLL_INTERVAL));
             };
             // Tuple fields drop in order: an abandoned workspace stops its
-            // recovery and releases its flock before the next root-lock holder
-            // can open it. A live caller keeps the guard through mount settlement.
-            (result, owned_root_lock)
+            // recovery and releases its flock before the next permit holder
+            // can open it. A live caller keeps the permit through settlement.
+            (result, held_permit)
         })
         .await
         .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))?;
-        *root_lock = returned_root_lock;
+        *permit = returned_permit;
         let workspace = workspace?;
         self.open_workspace(workspace.into_workspace(), config)
             .await
@@ -1408,12 +1417,12 @@ impl WorkspaceHost {
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
         let key = self.root_key(root).await?;
-        let root_lock = self.root_locks.lock(&key).await.into_owned();
+        let _root_lock = self.root_locks.lock(&key).await;
         if let Some(existing) = self.hosted_for_key(&key)? {
-            self.revalidate_mounted_root(root, &key, root_lock).await;
+            self.revalidate_mounted_root(root, &key).await;
             return Ok(existing);
         }
-        self.open_registered_workspace_keyed(root, key, Some(root_lock), config)
+        self.open_registered_workspace_keyed(root, key, config)
             .await
     }
 
@@ -1433,27 +1442,31 @@ impl WorkspaceHost {
     /// and can never pin a runtime worker. Nothing here bounds that stat; the
     /// caller's own budget does, and the launcher's `add` / `on` routes have
     /// none beyond their client.
-    async fn revalidate_mounted_root(
-        &self,
-        root: &Path,
-        key: &Path,
-        root_lock: OwnedMutexGuard<()>,
-    ) {
+    async fn revalidate_mounted_root(&self, root: &Path, key: &Path) {
+        let permit = self
+            .root_calls
+            .lock(&(key.to_path_buf(), RootCall::Revalidate))
+            .await
+            .into_owned();
         let Some(workspace) = self.live_workspace_by_key(key) else {
             return;
         };
         #[cfg(test)]
         let probe = self.revalidate_thread_probe.lock().unwrap().take();
         let joined = tokio::task::spawn_blocking(move || {
+            let held_permit = permit;
+            let checked_workspace = workspace;
             #[cfg(test)]
             if let Some(probe) = probe {
                 let _ = probe.send(std::thread::current().id());
             }
-            (workspace.revalidate_root(), root_lock)
+            let outcome = checked_workspace.revalidate_root();
+            drop(checked_workspace);
+            (outcome, held_permit)
         })
         .await;
         match joined {
-            Ok((outcome, _root_lock)) => {
+            Ok((outcome, _permit)) => {
                 let _ = self.reconcile_root_health(root, key, outcome);
             }
             // A join failure (a panicked blocking task, or a runtime shutting
@@ -6516,7 +6529,8 @@ mod tests {
             let (workspace, lock_dir) = opening.await.unwrap();
             mount.abort();
             assert!(mount.await.unwrap_err().is_cancelled());
-            let mut next = Box::pin(host.root_locks.lock(&key));
+            let call_key = (key.clone(), RootCall::Mount);
+            let mut next = Box::pin(host.root_calls.lock(&call_key));
             assert!(
                 std::future::poll_fn(|cx| {
                     std::task::Poll::Ready(
@@ -6524,7 +6538,7 @@ mod tests {
                     )
                 })
                 .await,
-                "cancelling an open released its root lock before its filesystem call returned"
+                "cancelling an open released its call permit before its filesystem call returned"
             );
             release.send(()).unwrap();
             let next = next.await;
@@ -6568,7 +6582,8 @@ mod tests {
         impl Drop for ReleaseObserver {
             fn drop(&mut self) {
                 let host = self.host.upgrade().unwrap();
-                let mut next = Box::pin(host.root_locks.lock(&self.key));
+                let call_key = (self.key.clone(), RootCall::Mount);
+                let mut next = Box::pin(host.root_calls.lock(&call_key));
                 let held = std::future::Future::poll(
                     next.as_mut(),
                     &mut std::task::Context::from_waker(std::task::Waker::noop()),
@@ -6622,9 +6637,9 @@ mod tests {
             drop(mount);
             assert!(
                 observation.await.unwrap(),
-                "an abandoned result released its root lock before its workspace"
+                "an abandoned result released its call permit before its workspace"
             );
-            let _next = host.root_locks.lock(&key).await;
+            let _next = host.root_calls.lock(&(key.clone(), RootCall::Mount)).await;
             assert!(chan_workspace::lock::is_free(&lock_dir));
             let reopened = library
                 .open_workspace(root.path())
