@@ -683,9 +683,12 @@ impl TauriNativeSurface {
     /// retarget keeps that deadline, and its completion wakes this watcher to
     /// arm the loop's timer. Ticket currency guards each retarget settlement.
     /// The open path checks its in-flight marker before building; closing or
-    /// retiring the watcher removes that marker. A vanished retarget never
-    /// builds a window: authoritative reconciliation owns reopening, subject
-    /// to the current visibility and pending-delete state.
+    /// retiring the watcher removes that marker. A build that passed the check
+    /// is already queued on the main thread: if a disconnect retires the
+    /// watcher before it lands, its completion destroys the window it built.
+    /// A vanished retarget never builds a window: authoritative
+    /// reconciliation owns reopening, subject to the current visibility and
+    /// pending-delete state.
     fn navigate_remote(&self, record: &WindowRecord, retarget: Option<Retarget>) {
         let WindowOpener::Remote { conn } = &self.opener else {
             return;
