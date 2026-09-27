@@ -5700,6 +5700,42 @@ mod refusal_envelopes {
     }
 
     #[tokio::test]
+    async fn window_visibility_missing() {
+        let (_dir, host) = window_host(true);
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "POST",
+                "/api/library/windows/missing/visibility",
+                Some(serde_json::json!({"hidden":true})),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "window not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn window_visibility_registry() {
+        let (_dir, host) = window_host(false);
+        let app = launcher_router(host, None, None);
+        assert_refusal(
+            send(
+                &app,
+                "POST",
+                "/api/library/windows/missing/visibility",
+                Some(serde_json::json!({"hidden":true})),
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config: window registry not installed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn launcher_bearer() {
         let (_dir, host) = host();
         let app = launcher_router(
