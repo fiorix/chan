@@ -139,6 +139,7 @@ export async function mintWindow(
       actingWindowId: opts.actingWindowId,
     });
     if (blank) {
+      blank.name = rec.window_id;
       handles.set(rec.window_id, blank);
       pendingDiscards.delete(rec.window_id);
       const url = windowUrl(rec, servingOrigin());
@@ -163,16 +164,35 @@ export async function mintWindow(
 /** Open (or re-focus) an existing record's window in-app. The window is named by
  * window_id so a second click focuses the same same-origin window instead of
  * opening a duplicate. Used by the follower open-click and orphan re-open. */
-export function openWindowRecord(record: WindowRecord): Window | null {
+export async function openWindowRecord(record: WindowRecord): Promise<Window | null> {
   if (demoState.enabled || !servingOrigin()) return null;
-  const h = window.open(windowUrl(record, servingOrigin()), record.window_id);
-  if (h) {
-    handles.set(record.window_id, h);
-    pendingDiscards.delete(record.window_id);
-    clearWindowAttention(record.window_id);
-    h.focus?.();
+  const h = window.open("", record.window_id);
+  if (!h) return null;
+  handles.set(record.window_id, h);
+  pendingDiscards.delete(record.window_id);
+  clearWindowAttention(record.window_id);
+  h.focus?.();
+  let blank: boolean;
+  try {
+    blank = h.location.href === "" || h.location.href === "about:blank";
+  } catch {
+    // A window navigated to another origin still belongs to its user.
+    return h;
   }
-  return h;
+  if (!blank) return h;
+  try {
+    const url = windowUrl(record, servingOrigin());
+    if (!(await waitForWindowPage(h, url)) || h.closed) {
+      handles.delete(record.window_id);
+      return null;
+    }
+    h.location.href = url;
+    return h;
+  } catch (e) {
+    h.close();
+    handles.delete(record.window_id);
+    throw e;
+  }
 }
 
 /** Leader-side close/hide of a record from the launcher: run the bridgeless web

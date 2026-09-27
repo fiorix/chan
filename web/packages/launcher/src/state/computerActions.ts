@@ -129,7 +129,7 @@ export async function focusComputerWindow(window: WindowRecord): Promise<void> {
     await focusWindow(window);
     return;
   }
-  openWindowRecord(window);
+  await openWindowRecord(window);
   if (window.hidden) {
     await toggleWindowVisibility(window, actingFor(window.prefix));
   }

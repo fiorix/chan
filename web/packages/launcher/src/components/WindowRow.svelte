@@ -219,7 +219,7 @@
         type="button"
         title="Open window"
         aria-label={hasWindowAttention(w.window_id) ? "Open window (not open here)" : "Open window"}
-        onclick={() => openWindowRecord(w)}>
+        onclick={async () => { await run(w, openWindowRecord(w).then(() => {})); }}>
         <ExternalLink size={16} />
       </button>
     </div>
