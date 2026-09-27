@@ -70,10 +70,7 @@ async fn inspect(State(allow_navigation): State<bool>, request: Request, next: N
             || (method == Method::HEAD && bytes.is_empty())
             || permanent_exception(&method, &path, parts.status, is_fallback && allow_navigation, &bytes)
             || range_refusal(&method, &path, parts.status, &parts.headers, &bytes)
-            || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes, is_fallback)
-            || PENDING
-                .iter()
-                .any(|(verb, route)| { method.as_str() == *verb && matches_path(route, &path) }),
+            || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes, is_fallback),
         "refusal envelope violated: {method} {path} returned {} with body {:?}",
         parts.status,
         String::from_utf8_lossy(&bytes),
@@ -342,24 +339,6 @@ const WEBSOCKETS: &[&str] = &[
     "/api/library/local-theme/watch",
     "/api/library/tunnel/control",
     "/api/library/tunnel/conn",
-];
-
-// Each entry names an existing route whose refusals are not all envelopes.
-// Remove entries as those routes adopt the contract; new routes must obey it.
-const PENDING: &[(&str, &str)] = &[
-    ("POST", "/api/library/workspaces"),
-    ("POST", "/api/library/workspaces/{id}/on"),
-    ("POST", "/api/library/workspaces/{id}/off"),
-    ("DELETE", "/api/library/workspaces/{id}"),
-    ("PUT", "/api/library/local-color"),
-    ("PUT", "/api/library/local-theme"),
-    ("PUT", "/api/library/collapsed-machines"),
-    ("POST", "/api/library/gateways"),
-    ("PUT", "/api/library/gateways/{id}"),
-    ("DELETE", "/api/library/gateways/{id}"),
-    ("POST", "/api/library/devservers"),
-    ("PUT", "/api/library/devservers/{id}"),
-    ("DELETE", "/api/library/devservers/{id}"),
 ];
 
 #[cfg(test)]
