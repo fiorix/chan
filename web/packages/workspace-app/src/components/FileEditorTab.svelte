@@ -472,6 +472,20 @@
     const slideAction = e.shiftKey ? "app.slides.present" : "app.slides.preview";
     if (builtInChordSuperseded(slideAction)) return;
 
+    // In the rendered editor the plain chord is the editor's own first: it
+    // opens the calendar of a date under the caret or leaves a fenced block,
+    // and a ring-selected image takes it to view the image (its listener sits
+    // past this host). Only a chord none of them takes previews the deck.
+    // Source mode keeps the preview ahead of CodeMirror's blank line.
+    if (!e.shiftKey && tab.mode === "wysiwyg") {
+      if ((e.currentTarget as Element | null)?.querySelector(".cm-md-image-wrap[data-selected]")) return;
+      if (wysiwygRef?.runOwnModEnter()) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    }
+
     e.preventDefault();
     e.stopPropagation();
     if (e.shiftKey) playSlides();
