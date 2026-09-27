@@ -6227,6 +6227,52 @@ mod refusal_envelopes {
         .await;
     }
 
+    struct RefusingLocalColorStore;
+    impl chan_library::LocalColorStore for RefusingLocalColorStore {
+        fn get(&self) -> Option<String> {
+            None
+        }
+        fn set(&self, _value: Option<String>) -> Result<(), String> {
+            Err("store could not persist the value".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_color_unavailable() {
+        let (_dir, host) = host();
+
+        assert_refusal(
+            send(
+                &launcher_router(host, None, None),
+                "PUT",
+                "/api/library/local-color",
+                Some(serde_json::json!({"color":"#112233"})),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "local color is not available on this surface",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn local_color_rejected() {
+        let (_dir, host) = host();
+        host.install_local_color_store(Arc::new(RefusingLocalColorStore));
+        assert_refusal(
+            send(
+                &launcher_router(host, None, None),
+                "PUT",
+                "/api/library/local-color",
+                Some(serde_json::json!({"color":"#112233"})),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "store could not persist the value",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn window_create_required() {
         let (_dir, host) = host();
