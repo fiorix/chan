@@ -394,10 +394,24 @@ ci-linux: pre-push ## Run the Linux CI validation target.
 	$(MAKE) check-windows-test-target
 
 .PHONY: test-symlink-tmpdir
+# A test can leave a directory without write permission, which stops a user who
+# is not root from removing what is inside it. The cleanup restores owner
+# permissions first, reports anything it still cannot remove, and exits with
+# the suites' status either way.
 test-symlink-tmpdir: ## Run library and server tests with a noncanonical temp path.
 	@set -eu; \
 		real="$$(mktemp -d /tmp/chan-tmp-XXXXXX)"; link="$$real-l"; \
-		trap 'rm -f "$$link"; rm -rf "$$real"' EXIT; \
+		cleanup() { \
+			status=$$?; set +e; \
+			rm -f "$$link"; chmod -R u+rwX "$$real"; rm -rf "$$real"; \
+			for path in "$$link" "$$real"; do \
+				if [ -e "$$path" ] || [ -L "$$path" ]; then \
+					echo "warning: test-symlink-tmpdir could not remove $$path" >&2; \
+				fi; \
+			done; \
+			exit "$$status"; \
+		}; \
+		trap cleanup EXIT; \
 		trap 'exit 1' HUP INT TERM; \
 		if ! ln -s "$$real" "$$link" || [ ! -L "$$link" ] || \
 			! resolved="$$(cd "$$link" && pwd -P)" || \
