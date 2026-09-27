@@ -1873,9 +1873,12 @@ pub async fn fetch_workspaces(conn: &DevserverConn) -> Result<Vec<DevserverWorks
     if conn.gateway.is_some() {
         let resp = gateway_get(conn, "/api/library/workspaces").await?;
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let fallback = format!("HTTP {status}");
             return Err(format!(
-                "gateway workspaces returned HTTP {}",
-                resp.status()
+                "gateway workspaces returned {}",
+                refusal_message(status, &body, &fallback)
             ));
         }
         let entries = resp
@@ -1902,9 +1905,12 @@ pub async fn fetch_workspaces(conn: &DevserverConn) -> Result<Vec<DevserverWorks
     )
     .await?;
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let fallback = format!("HTTP {status}");
         return Err(format!(
-            "devserver workspaces returned HTTP {}",
-            resp.status()
+            "devserver workspaces returned {}",
+            refusal_message(status, &body, &fallback)
         ));
     }
     let entries = resp
