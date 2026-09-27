@@ -65,17 +65,20 @@ function handleState(id: string): "live" | "closed" | "none" {
 
 const WINDOW_PAGE_WAIT_MS = 60_000;
 const WINDOW_CLOSED_POLL_MS = 100;
+const waitingPages = new WeakMap<Window, Promise<boolean>>();
 
 function retryAfterMs(header: string | null): number {
   if (header === null || header.trim() === "") return 1000;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1, seconds * 1000);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(WINDOW_PAGE_WAIT_MS, Math.max(1, seconds * 1000));
   const date = Date.parse(header);
-  return Number.isFinite(date) ? Math.max(1, date - Date.now()) : 1000;
+  return Number.isFinite(date) ? Math.min(WINDOW_PAGE_WAIT_MS, Math.max(1, date - Date.now())) : 1000;
 }
 
-async function waitForWindowPage(h: Window, url: string): Promise<boolean> {
-  if (h.closed) return false;
+function navigateWindowWhenReady(h: Window, url: string): Promise<boolean> {
+  const waiting = waitingPages.get(h);
+  if (waiting) return waiting;
+  if (h.closed) return Promise.resolve(false);
   h.document.body.textContent = "Waiting for the window to be ready...";
   const controller = new AbortController();
   let lastRefusal: Error = new Error("Timed out waiting for the window page");
@@ -107,15 +110,21 @@ async function waitForWindowPage(h: Window, url: string): Promise<boolean> {
     }
     return false;
   };
-  try {
-    // The deadline and close check also cover a fetch or response body that stalls.
-    return await Promise.race([check(), stopped]);
-  } finally {
+  // The deadline and close check also cover a fetch or response body that stalls.
+  // One pending navigation owns a named window even when the user clicks twice.
+  const pending = Promise.race([check(), stopped]).then((ready) => {
+    if (!ready || h.closed) return false;
+    h.location.href = url;
+    return true;
+  }).finally(() => {
     clearTimeout(retryTimer);
     clearTimeout(deadline);
     clearInterval(closedPoll);
     controller.abort();
-  }
+    waitingPages.delete(h);
+  });
+  waitingPages.set(h, pending);
+  return pending;
 }
 
 /** Mint a browser window of the local library and open it in-app. Call this
@@ -143,11 +152,10 @@ export async function mintWindow(
       handles.set(rec.window_id, blank);
       pendingDiscards.delete(rec.window_id);
       const url = windowUrl(rec, servingOrigin());
-      if (!(await waitForWindowPage(blank, url)) || blank.closed) {
+      if (!(await navigateWindowWhenReady(blank, url)) || blank.closed) {
         discardBrowserWindow(rec.window_id);
         return null;
       }
-      blank.location.href = url;
     }
     // A blocked popup leaves no handle; if the record never gets a /ws presence
     // the reconciler treats it like any other stale browser row and discards it.
@@ -182,11 +190,10 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   if (!blank) return h;
   try {
     const url = windowUrl(record, servingOrigin());
-    if (!(await waitForWindowPage(h, url)) || h.closed) {
+    if (!(await navigateWindowWhenReady(h, url)) || h.closed) {
       handles.delete(record.window_id);
       return null;
     }
-    h.location.href = url;
     return h;
   } catch (e) {
     h.close();
