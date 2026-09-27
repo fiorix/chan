@@ -1,0 +1,49 @@
+# The desktop takes Ctrl+] from a focused shell
+
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised during v0.101.0 on 2026-09-27 by the owner, who pressed Ctrl+] three times in a chan terminal on the macOS desktop to leave a container session (`Connected to machine ... Press ^] three times within 1s to exit session`) and saw nothing happen. The mechanism is read in code at `7504a5f9c` and not reproduced: the box the code was read on has no display.
+
+## Owner ruling
+
+Accepted on 2026-09-27 with the contract in the owner's words, a terminal's behaviour as iTerm2 has it: Ctrl+] sends the Group Separator, 0x1D, and three presses that leave a container session are the test. Ctrl+] and Ctrl+/ are released to a focused terminal on every desktop, and Command+] and Command+/ keep their claims on macOS. Off macOS the workspace app's own shortcut rule also takes Ctrl+[, Ctrl+] and Ctrl+/ from a focused terminal, which the clients lane found first for Ctrl+[; the three stay with the terminal there too. The terminal library has no encoding for Ctrl+/, so the owner accepted the same day, as the lead recommended, that the terminal sends 0x1F for it on every client, the browser included. Off macOS this takes the native chords of Next Pane and Split Right from a focused terminal, as the owner was told; with focus anywhere else they keep them. The wider rule, the bridge claiming only the Command forms on macOS, is decided with the platform-modifier pattern of the frontend review's remainder. The clients lane's.
+
+## What was seen
+
+Two things take the key from the shell: the desktop's key bridge on every desktop, and the workspace app's own shortcut rule off macOS.
+
+The desktop's key bridge admits a key event when either the Command key or the Control key is down (`const meta = e.metaKey || e.ctrlKey`, `desktop/src-tauri/src/key_bridge.js:103-104`), and a chord it claims is stopped before the page sees it (`fire`, `:3-5`: `preventDefault` and `stopImmediatePropagation`). In its unshifted branch the right bracket is claimed with no condition: `case 'BracketRight': fire(e, 'app.pane.next'); return;` (`:233`). So Ctrl+] typed into a focused terminal becomes Next Pane, which does nothing visible in a window with one pane, and the byte the shell reads for it, 0x1D, is never sent.
+
+The case above it is the same chord's pair and has the release this one lacks: `BracketLeft` returns without claiming when the Command key is up and a terminal has focus (`:229-232`, with `terminalHasFocus` at `:42-47`), with the comment "Ctrl+[ is ESC to a focused shell, so the Ctrl form is released there" (`:227-228`). That release, and those of Find and Find Next, came with [terminal-chords-run-twice-or-not-at-all](../done/terminal-chords-run-twice-or-not-at-all.md) in v0.100.0, on the owner's ruling of 2026-09-20 that the shell keeps its Ctrl keys. Its acceptance names Ctrl+F, Ctrl+G and Ctrl+[ and no other key, and the finding it answered did not name Ctrl+] either. A Rust test reads the bridge's script as text and pins the release set at those three chords, counting the uses of `terminalHasFocus()` (`key_bridge_releases_a_focused_terminals_chords`, `desktop/src-tauri/src/serve.rs:2486-2560`, the count at `:2551-2559`).
+
+Read in the same handler, and claimed under Control alone with a terminal focused in the same way:
+
+- Ctrl+/ splits the pane right (`:240`). Terminals send 0x1F for it, which readline binds to undo. The terminal library chan ships does not: the installed `@xterm/xterm` 6.0.0 maps Control with the two brackets to ESC and the Group Separator and has no arm for the slash (`src/common/input/Keyboard.ts:308-323` of that package), so a released Ctrl+/ is handed to the terminal and nothing is sent. The frontend review's finding that the fix answered named this chord; the fix did not release it.
+- Ctrl+1 to Ctrl+9 jump to a tab (`:242-246`).
+- Ctrl+=, Ctrl+- and Ctrl+0 zoom (`:139-152`).
+
+Ctrl+Q is claimed on purpose as Quit for Linux and Windows, and its comment says what that costs a terminal (`:155-163`); it is not part of this item. Its arm tests only that the Command key is up (`:163`), so it claims Ctrl+Q on macOS as well.
+
+Off macOS the workspace app takes the three chords as well. The shortcut registry gives Previous Pane, Next Pane and Split Right the native chords `Mod+[`, `Mod+]` and `Mod+/` with `escapeTerminal: true` (`web/packages/workspace-app/src/state/shortcuts.ts:199-228`). Off macOS an event's Control is read as `Mod` (`eventCandidates`, `:702-706`; `canonicalChordTokens`, `:856-859`), so `shouldEscapeTerminal` answers true for Ctrl+[, Ctrl+] and Ctrl+/ (`:783-788`, through `registryCommandId`, `:809-832`), and the terminal's key handler then returns `false` (`handleTerminalKeyEvent`, `web/packages/workspace-app/src/components/TerminalTab.svelte:2465`), which lets the key out of xterm for the app's own keymap (the flag's comment, `shortcuts.ts:73-80`). So on the Linux and Windows desktop a release in the bridge alone leaves the shell without these keys: Ctrl+[, which the bridge already releases, does not reach it there either. On macOS an event's `Mod` is Command and its Control is read as `Ctrl`, so this rule does not take the Control forms there.
+
+In a browser no bridge is injected, and the three commands have other chords (`Alt+[`, `Alt+]`, `Ctrl+Alt+/`, `shortcuts.ts:202`, `:210`, `:224`), so the rule does not take Ctrl+] there; what the browser itself does with the key was not read.
+
+## Desired contract
+
+Ctrl+[, Ctrl+] and Ctrl+/ typed into a focused terminal reach the shell as 0x1B, 0x1D and 0x1F on every desktop platform, and Ctrl+/ sends its byte in a browser as well, where the key reaches the terminal today and nothing is sent. Command+] and Command+/ stay Next Pane and Split Right on macOS, and every form keeps its command with focus anywhere else.
+
+## What to do
+
+Give `BracketRight` the release `BracketLeft` has. Give `Slash` the same together with an encoding in the terminal tab, which sends the one byte 0x1F when it is handed Control with the slash and no other modifier, behind the override and registry checks: without the encoding the release would turn a chord that splits the pane into a key that does nothing. Move the Rust pin of the release set to five chords. Off macOS, keep the three chords with a focused terminal in the workspace app's shortcut rule, said in one place: the registry's entries, `registryCommandId` or `shouldEscapeTerminal`. Pin the bridge in the test that runs its script (`web/packages/workspace-app/src/state/desktopBridgeLayout.test.ts`): with a terminal focused the Control form is not claimed and the Command form is; with focus elsewhere both are. Pin the rule with mounted terminal tests on native macOS, Linux and Windows clients. Correct the comment above the bridge's handler, which lists the chords released (`key_bridge.js:98-101`).
+
+Whether the bridge should claim only the Command forms on macOS, so that every Control chord reaches the focused surface there, is a wider ruling: it also frees the digits and the zoom chords, and it changes pane navigation for a user who presses Ctrl+] in an editor on macOS. The frontend review's remainder carries that pattern (the platform modifier re-derived by hand in three places) and it is decided there.
+
+## Boundaries
+
+`desktop/src-tauri/src/key_bridge.js` and the Rust test that reads it in `desktop/src-tauri/src/serve.rs`; the workspace app's shortcut rule (`web/packages/workspace-app/src/state/shortcuts.ts`) and the terminal's key handling in `TerminalTab.svelte`; and the tests that run them. In a browser the three commands keep their own chords, and a chord the user assigned still leaves the terminal (`shouldEscapeTerminal`'s override arm, `shortcuts.ts:786`).
+
+## Acceptance
+
+1. With a terminal focused, the bridge claims neither Ctrl+] nor Ctrl+/, on macOS and off it, pinned by a test that runs the bridge's script.
+2. On the native macOS, Linux and Windows clients, a Ctrl+[, Ctrl+] or Ctrl+/ keydown on a focused terminal stays with the terminal, pinned by mounted tests.
+3. A Control and slash keydown on a focused terminal sends exactly one 0x1F to the session's input and is not also encoded by xterm, on the native clients and in a browser, pinned by mounted tests.
+4. Command+] and Command+/ keep their claims on macOS with a terminal focused, every form keeps its command with focus anywhere else, and the browser's chords and a chord the user assigned still leave the terminal; each is pinned.
+5. On the macOS desktop, Ctrl+] pressed three times leaves a container session. This is a reading on a display host.

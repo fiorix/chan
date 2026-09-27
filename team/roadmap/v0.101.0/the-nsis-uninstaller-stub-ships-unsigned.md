@@ -4,7 +4,7 @@ Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0
 
 ## Owner ruling
 
-Accepted on 2026-09-24 as the lead recommended: scheduled at rc1 rather than as a lane now, because only a release dry run can validate it. Sign the stub after a PE rename or in a post-build step; if it cannot be signed, record the limitation in `.agents/desktop.md` and close the item with that reason.
+Accepted on 2026-09-24 as the lead recommended: scheduled at the version's first release candidate, rc0, rather than as a lane now, because only a release dry run can validate it. Sign the stub after a PE rename or in a post-build step; if it cannot be signed, record the limitation in `.agents/desktop.md` and close the item with that reason. The ruling named the first candidate rc1; on 2026-09-27 the owner ruled that a version's first release candidate is rc0.
 
 ## What was seen
 

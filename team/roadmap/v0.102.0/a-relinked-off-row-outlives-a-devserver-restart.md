@@ -1,6 +1,10 @@
 # A relinked root's off row outlives a devserver restart as a record no list shows
 
-Status: raised for a decision on 2026-09-27 while the fix for [a-hung-root-stalls-desktop-close-and-quit](a-hung-root-stalls-desktop-close-and-quit.md) was built; read in code and not reproduced, a source reading at `72578a59b`. Recommendation: accept for a later version: no user-visible effect is known.
+Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 while the fix for [a-hung-root-stalls-desktop-close-and-quit](../v0.101.0/a-hung-root-stalls-desktop-close-and-quit.md) was built; read in code and not reproduced, a source reading at `72578a59b`.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for a later version, as the lead recommended: no user-visible effect is known. It is not part of v0.101.0.
 
 ## What was seen
 

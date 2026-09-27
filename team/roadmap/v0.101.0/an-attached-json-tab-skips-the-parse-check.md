@@ -1,6 +1,10 @@
 # A JSON tab attached to a document session skips the save's parse check
 
-Status: raised for a decision on 2026-09-27; read in code and not reproduced, a source reading at `3f60c072d`. Recommendation: accept for v0.101.0.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised during v0.101.0 on 2026-09-27; read in code and not reproduced, a source reading at `3f60c072d`.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0 as the lead recommended. The shape of the fix is still to be ruled: keep `.json` tabs out of document sync, the smaller, which gives up live co-editing of `.json` files, or have the authority hold back its flush of a `.json` document that does not parse, which needs the server's document sessions read first. It is asked of the owner when the order is cut, once those sessions have been read.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # A stopping devserver refuses a new mount with a config error before its host is asked
 
-Status: raised for a decision on 2026-09-27 by an independent reading of the fix for [a-late-http-mount-escapes-the-shutdown-sweep](a-late-http-mount-escapes-the-shutdown-sweep.md); read in code and not reproduced, a source reading at `72578a59b`. Recommendation: accept for v0.101.0, built with the conversion of the devserver's routes to the refusal envelope in [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md), which changes the same handlers.
+Status: accepted for v0.101.0 by the owner on 2026-09-27; raised during v0.101.0 on 2026-09-27 by an independent reading of the fix for [a-late-http-mount-escapes-the-shutdown-sweep](a-late-http-mount-escapes-the-shutdown-sweep.md); read in code and not reproduced, a source reading at `72578a59b`.
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0 as the lead recommended. The lead's ruling on what the item leaves open: the coordinator's phase is checked before the root is registered, so a mount refused at stop leaves no registered row behind its error. In the runtime lane after the launcher's refusals in [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md), since it changes the devserver handlers that lane converted.
 
 ## What was seen
 
