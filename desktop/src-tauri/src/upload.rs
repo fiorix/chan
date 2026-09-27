@@ -327,6 +327,33 @@ async fn response_error(response: reqwest::Response) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn transfer_errors_show_refusal_sentences() {
+        let padded = format!(r#"{{"padding":"{}","error":"try again"}}"#, "x".repeat(600));
+        for (body, detail) in [
+            (" plain refusal ".to_string(), ": plain refusal".to_string()),
+            (String::new(), String::new()),
+            (
+                r#"{"error":"try again","code":"starting"}"#.to_string(),
+                ": try again".to_string(),
+            ),
+            (padded, ": try again".to_string()),
+            ("x".repeat(600), format!(": {}", "x".repeat(512))),
+        ] {
+            let response = reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(503)
+                    .body(body)
+                    .unwrap(),
+            );
+            assert_eq!(
+                response_error(response).await,
+                format!("upload failed: HTTP 503 Service Unavailable{detail}"),
+                "transfers must show the sentence and preserve plain-body excerpts",
+            );
+        }
+    }
+
     #[test]
     fn desktop_upload_never_reads_or_returns_whole_file_bytes() {
         let rust = include_str!("upload.rs");
