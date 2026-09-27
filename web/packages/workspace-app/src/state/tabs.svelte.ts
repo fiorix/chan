@@ -1367,6 +1367,9 @@ export function reopenClosedTab(): boolean {
   setPaneActiveTabId(target, tab.id, side);
   target.side = side;
   layout.activePaneId = target.id;
+  // The close retired the load that was running (`endTabLoad`), so a tab
+  // whose load never finished starts a new one.
+  if (tab.kind === "file" && tab.loading) void loadTabContent(tab.id, tab.path);
   return true;
 }
 
@@ -1445,10 +1448,10 @@ function tabForReopen(src: Tab): Tab {
     // never read, which after an auto-discard is a file something else
     // recreated.
     tab.openedEmpty = undefined;
-    // A reopen replays a buffer and runs no load, and the close retired the
-    // one that was running, so nothing is downloading into this tab and
-    // nothing is going to. The content it carries is whatever had arrived.
-    tab.loading = false;
+    // `loading` stays as the close found it. A finished load's buffer is
+    // replayed as it is; a load that never finished left only the bytes that
+    // had arrived, which are not the file, so `reopenClosedTab` loads the
+    // file again.
   }
   return tab;
 }
