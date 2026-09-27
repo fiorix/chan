@@ -1889,6 +1889,10 @@ async fn handle_add_workspace(
 /// one idempotent verb has one answer: a mount whose root is unreachable, gone
 /// or replaced comes back `on: true` with `status: "unavailable"` and the reason
 /// in `error`, which the caller acts on instead of reading a bare 204 as health.
+/// The row carries the health last published: an already-mounted root is
+/// rechecked before the answer unless an earlier recheck whose caller left is
+/// still in flight, and then a root that has stopped answering reads running
+/// until the health probe marks it.
 /// Loopback-only.
 async fn handle_workspace_on(
     State(state): State<Arc<LauncherState>>,

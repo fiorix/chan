@@ -5,7 +5,9 @@
 //! A lifecycle caller keeps its root lock through settlement. The open, its
 //! root check and mounted revalidation own call permits, so cancelling a
 //! caller releases the root lock while its abandoned work still prevents
-//! another call of the same kind.
+//! another call of the same kind. A registered open waits for its permit at
+//! most the open's release budget, and an open of a mounted root skips a
+//! revalidation already in flight.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -159,8 +161,10 @@ pub(crate) enum RootCall {
 }
 
 /// A permit moves into blocking work and returns with its result. A caller
-/// that leaves drops its lifecycle lock; the work keeps this permit until
-/// its resources are released. A waiter then dispatches its own call.
+/// that leaves drops its lifecycle lock; the work keeps this permit until it
+/// has dropped its own workspace reference, and references held elsewhere,
+/// such as the tasks of a tenant its caller dropped, can outlast it. A
+/// waiter then dispatches its own call.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 
 /// Canonical root keys computed on the blocking pool, with one computation
