@@ -7469,12 +7469,19 @@ mod tests {
                     );
                     assert!(state.workspace_entries().is_empty());
                 }
+                // The on route mounts the root the library stored, its
+                // canonical form; the others name the path the request gave.
+                let named = if route == "on" {
+                    key.as_path()
+                } else {
+                    root.path()
+                };
                 assert_eq!(
                     body,
                     serde_json::json!({
                         "error": format!(
                             "the devserver is stopping; {} was not mounted",
-                            root.path().display()
+                            named.display()
                         )
                     })
                     .to_string(),
