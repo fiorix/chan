@@ -1359,7 +1359,7 @@ async fn handle_library_window_live_terminals(
         .iter()
         .any(|record| record.window_id == window_id)
     {
-        return StatusCode::NOT_FOUND.into_response();
+        return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
     }
     let local = host.window_registry().is_some_and(|registry| {
         registry
