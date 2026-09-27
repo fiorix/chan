@@ -7884,29 +7884,18 @@ mod tests {
             ProbeTargetKind::Gateway,
         );
 
-        for status in [
-            StatusCode::BAD_GATEWAY,
-            StatusCode::SERVICE_UNAVAILABLE,
-            StatusCode::GATEWAY_TIMEOUT,
-        ] {
-            assert!(!probe_response_reachable(
-                ProbeTargetKind::Gateway,
-                Some(status),
-            ));
-            assert!(probe_response_reachable(
-                ProbeTargetKind::Loopback,
-                Some(status),
-            ));
-        }
-        for status in [
-            StatusCode::UNAUTHORIZED,
-            StatusCode::FORBIDDEN,
-            StatusCode::NOT_FOUND,
-        ] {
-            assert!(probe_response_reachable(
-                ProbeTargetKind::Gateway,
-                Some(status),
-            ));
+        for code in 100..600 {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(
+                probe_response_reachable(ProbeTargetKind::Gateway, Some(status)),
+                !matches!(code, 502..=504),
+                "gateway HTTP {code}",
+            );
+            assert_eq!(
+                probe_response_reachable(ProbeTargetKind::Loopback, Some(status)),
+                code != 503,
+                "loopback HTTP {code}",
+            );
         }
         assert!(!probe_response_reachable(ProbeTargetKind::Gateway, None));
         assert!(!probe_response_reachable(ProbeTargetKind::Loopback, None,));
