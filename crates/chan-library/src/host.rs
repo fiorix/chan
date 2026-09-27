@@ -363,6 +363,8 @@ pub struct WorkspaceHost {
     revalidate_thread_probe:
         std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
     #[cfg(test)]
+    revalidate_probe: std::sync::Mutex<Option<RootCheckProbe>>,
+    #[cfg(test)]
     blocking_thread_probe: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
     #[cfg(test)]
     open_release_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -901,6 +903,8 @@ impl WorkspaceHost {
             open_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             revalidate_thread_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            revalidate_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             blocking_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1454,12 +1458,21 @@ impl WorkspaceHost {
         };
         #[cfg(test)]
         let probe = self.revalidate_thread_probe.lock().unwrap().take();
+        #[cfg(test)]
+        let hold = self.revalidate_probe.lock().unwrap().take();
         let joined = tokio::task::spawn_blocking(move || {
             let held_permit = permit;
             let checked_workspace = workspace;
             #[cfg(test)]
             if let Some(probe) = probe {
                 let _ = probe.send(std::thread::current().id());
+            }
+            #[cfg(test)]
+            if let Some(hold) = hold {
+                let _ = hold.entered.send(());
+                let _ = hold
+                    .release
+                    .recv_timeout(std::time::Duration::from_secs(30));
             }
             let outcome = checked_workspace.revalidate_root();
             drop(checked_workspace);
@@ -6587,7 +6600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancelled_open_releases_the_workspace_before_its_root_lock() {
+    async fn a_cancelled_open_releases_the_workspace_before_its_permit() {
         tokio::time::timeout(Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
@@ -6632,11 +6645,11 @@ mod tests {
             let next = next.await;
             assert!(
                 workspace.upgrade().is_none(),
-                "the next root-lock holder still sees the cancelled open's workspace"
+                "the next permit holder still sees the cancelled open's workspace"
             );
             assert!(
                 chan_workspace::lock::is_free(&lock_dir),
-                "the next root-lock holder still meets the cancelled open's workspace lock"
+                "the next permit holder still meets the cancelled open's workspace lock"
             );
             let reopened = library
                 .open_workspace(root.path())
@@ -6650,7 +6663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_abandoned_open_result_releases_the_workspace_before_its_root_lock() {
+    async fn an_abandoned_open_result_releases_the_workspace_before_its_permit() {
         struct Completion(Option<tokio::sync::oneshot::Sender<()>>);
         impl Drop for Completion {
             fn drop(&mut self) {
@@ -6733,6 +6746,143 @@ mod tests {
                 .open_workspace(root.path())
                 .expect("reopen without retrying");
             reopened.stop_open_recovery();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A recovery driver that reports, when its workspace is destroyed,
+    /// whether the call permit `call` is still held. The workspace owns its
+    /// driver, so this observes the workspace's release on whichever thread
+    /// drops the last reference, even when nobody receives the call's result.
+    struct PermitReleaseObserver {
+        host: Weak<WorkspaceHost>,
+        call: (PathBuf, RootCall),
+        observed: Option<tokio::sync::oneshot::Sender<bool>>,
+    }
+
+    impl chan_workspace::RecoveryDriver for PermitReleaseObserver {
+        fn wake(&self, _: chan_workspace::WorkspaceGeneration) {}
+    }
+
+    impl Drop for PermitReleaseObserver {
+        fn drop(&mut self) {
+            let host = self.host.upgrade().unwrap();
+            let mut next = Box::pin(host.root_calls.lock(&self.call));
+            let held = std::future::Future::poll(
+                next.as_mut(),
+                &mut std::task::Context::from_waker(std::task::Waker::noop()),
+            )
+            .is_pending();
+            let _ = self.observed.take().unwrap().send(held);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_revalidation_releases_the_workspace_before_its_permit() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            // The drain's release check waits on the held revalidation's
+            // workspace, which cannot be released until the test lets it go.
+            host.shutdown_release_budget = Duration::from_millis(50);
+            let host = Arc::new(host);
+            let key = canonical_key(root.path());
+            host.open_or_get_registered_workspace(root.path(), serve_config("/mounted"))
+                .await
+                .unwrap();
+            let workspace = host.live_workspace(root.path()).unwrap();
+            workspace.stop_open_recovery();
+            let (observed, observation) = tokio::sync::oneshot::channel();
+            workspace.set_recovery_driver(Arc::new(PermitReleaseObserver {
+                host: Arc::downgrade(&host),
+                call: (key, RootCall::Revalidate),
+                observed: Some(observed),
+            }));
+            let checked = Arc::downgrade(&workspace);
+            drop(workspace);
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            *host.revalidate_probe.lock().unwrap() = Some(RootCheckProbe {
+                entered,
+                release: released,
+            });
+            let mut revalidating = Box::pin(
+                host.open_or_get_registered_workspace(root.path(), serve_config("/mounted")),
+            );
+            tokio::select! {
+                entry = entry => entry.unwrap(),
+                result = &mut revalidating => panic!("the revalidation was not held: {result:?}"),
+            }
+            drop(revalidating);
+            // Tear the tenant down so the held revalidation's clone is the
+            // workspace's last reference.
+            host.shutdown_all().await.unwrap();
+            while checked.strong_count() > 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            release.send(()).unwrap();
+            assert!(
+                observation.await.unwrap(),
+                "an abandoned revalidation released its call permit before its workspace"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_root_check_releases_the_workspace_before_its_permit() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            let key = canonical_key(root.path());
+            let (observed, observation) = tokio::sync::oneshot::channel();
+            let mut observer = Some(PermitReleaseObserver {
+                host: Arc::downgrade(&host),
+                call: (key, RootCall::Mount),
+                observed: Some(observed),
+            });
+            let (opened, opening) = std::sync::mpsc::channel();
+            *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+                let workspace = result.as_ref().expect("the filesystem open succeeds");
+                workspace.stop_open_recovery();
+                workspace.set_recovery_driver(Arc::new(observer.take().unwrap()));
+                opened.send(Arc::downgrade(workspace)).unwrap();
+            }));
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
+                entered,
+                release: released,
+            });
+            let mut mount = Box::pin(
+                host.open_or_get_registered_workspace(root.path(), serve_config("/checked")),
+            );
+            tokio::select! {
+                entry = entry => entry.unwrap(),
+                result = &mut mount => panic!("the root check was not held: {result:?}"),
+            }
+            let checked = opening.try_recv().unwrap();
+            // Leaving drops the caller's tenant and the workspace it holds, so
+            // the held check's clone is the workspace's last reference.
+            drop(mount);
+            assert_eq!(
+                checked.strong_count(),
+                1,
+                "fixture: the abandoned caller's tenant kept its workspace"
+            );
+            release.send(()).unwrap();
+            assert!(
+                observation.await.unwrap(),
+                "an abandoned root check released its call permit before its workspace"
+            );
         })
         .await
         .unwrap();
