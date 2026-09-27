@@ -5862,6 +5862,88 @@ mod refusal_envelopes {
         .await;
     }
 
+    fn bridge_host(
+        registry: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<WorkspaceHost>,
+        tokio::sync::mpsc::Receiver<DesktopWindowOp>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open_at(dir.path().join("config.toml")).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let bridge = crate::DesktopBridge {
+            window_ops: Some(tx),
+            window_titles: Default::default(),
+        };
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            library,
+            bridge,
+            crate::route_builder(),
+        ));
+        if registry {
+            host.install_window_registry(
+                Arc::new(chan_library::windows::WindowRegistry::open(
+                    dir.path().join("windows.json"),
+                )),
+                "local".into(),
+            );
+        }
+        (dir, host, rx)
+    }
+
+    #[tokio::test]
+    async fn window_close_refused() {
+        let (_dir, host, mut rx) = bridge_host(true);
+        let app = launcher_router(host, None, None);
+        let request = send(&app, "POST", "/api/library/windows/missing/close", None);
+        let reply = async {
+            let DesktopWindowOp::Close { reply, .. } = rx.recv().await.unwrap() else {
+                panic!("close op expected")
+            };
+            reply
+                .send(Err("desktop refused this close".into()))
+                .unwrap();
+        };
+        let (response, ()) = tokio::join!(request, reply);
+        assert_refusal(response, StatusCode::CONFLICT, "desktop refused this close").await;
+    }
+
+    #[tokio::test]
+    async fn window_close_missing() {
+        let (_dir, host, mut rx) = bridge_host(true);
+        let app = launcher_router(host, None, None);
+        let request = send(&app, "POST", "/api/library/windows/missing/close", None);
+        let reply = async {
+            let DesktopWindowOp::Close { reply, .. } = rx.recv().await.unwrap() else {
+                panic!("close op expected")
+            };
+            reply.send(Ok(false)).unwrap();
+        };
+        let (response, ()) = tokio::join!(request, reply);
+        assert_refusal(response, StatusCode::NOT_FOUND, "window not found").await;
+    }
+
+    #[tokio::test]
+    async fn window_close_registry() {
+        let (_dir, host, mut rx) = bridge_host(false);
+        let app = launcher_router(host, None, None);
+        let request = send(&app, "POST", "/api/library/windows/missing/close", None);
+        let reply = async {
+            let DesktopWindowOp::Close { reply, .. } = rx.recv().await.unwrap() else {
+                panic!("close op expected")
+            };
+            reply.send(Ok(false)).unwrap();
+        };
+        let (response, ()) = tokio::join!(request, reply);
+        assert_refusal(
+            response,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config: window registry not installed",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn launcher_bearer() {
         let (_dir, host) = host();
