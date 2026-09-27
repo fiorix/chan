@@ -343,14 +343,18 @@ const handleTask: TokenHandler = (ctx) => {
   // A GFM task list item: `[-*+] [ ] text`, or ordered, `1. [ ] text` /
   // `1) [ ] text`. lezer-markdown emits a Task block-level node with a
   // TaskMarker child covering exactly `[ ]` / `[x]` / `[X]` (3 chars). We hide
-  // the source list marker AND the leading indent, render the checkbox in the
-  // shared list marker column, and tag the line so the same `.cm-md-list-hang`
-  // rule that handles plain lists gives it a depth-driven indent and a hanging
-  // indent (wrapped text under the item).
+  // a bullet marker AND the leading indent, render the checkbox in the shared
+  // list marker column, and tag the line so the same `.cm-md-list-hang` rule
+  // that handles plain lists gives it a depth-driven indent and a hanging
+  // indent (wrapped text under the item). An ordered marker stays in front of
+  // the checkbox: the ordered list's own decorations render it and hide the
+  // indent before it and the gap after it, and a hide over the whole prefix
+  // here would overlap it and swallow the marker of an indented item.
   const line = ctx.state.doc.lineAt(ctx.node.from);
   const prefix = /^([ \t]*)([-*+]|\d+[.)])[ \t]+/.exec(line.text);
   if (!prefix) return;
-  ctx.push(HIDE, line.from, line.from + prefix[0].length);
+  const ordered = /\d/.test(prefix[2]!);
+  if (!ordered) ctx.push(HIDE, line.from, line.from + prefix[0].length);
   const cursor = ctx.node.node.cursor();
   if (!cursor.firstChild()) return;
   do {
