@@ -97,6 +97,7 @@ pub struct AppState {
     store: Arc<Mutex<ConfigStore>>,
     /// Live embedded local workspaces keyed by canonical workspace path.
     serves: Mutex<HashMap<String, ServeHandle>>,
+    retarget_tickets: serve::RetargetTickets,
     /// In-process chan-server host for normal local workspaces.
     /// Initialized during Tauri setup, after the async runtime is
     /// available for Tokio listener registration.
@@ -270,6 +271,7 @@ impl AppState {
         Self {
             store,
             serves: Mutex::new(HashMap::new()),
+            retarget_tickets: serve::RetargetTickets::default(),
             embedded: OnceLock::new(),
             local_watcher_view: OnceLock::new(),
             live_window_zooms: Mutex::new(HashMap::new()),
@@ -4065,6 +4067,7 @@ fn reload_devserver_window_from_feed(
     // Resolving the navigation URL can be a network round trip (a gateway
     // entry mint), so the reload is fire-and-forget: the command returns
     // "handled" and the task navigates when the URL lands.
+    let ticket = state.retarget_tickets.begin(label);
     let app = app.clone();
     let label = label.to_string();
     let record = record.clone();
@@ -4086,7 +4089,8 @@ fn reload_devserver_window_from_feed(
             tracing::warn!(window = %record.window_id, error = %e, "reload: installing gateway WebView session failed");
             return;
         }
-        let result = match serve::retarget_watched_remote_window(&app, &url, &record).await {
+        let result = match serve::retarget_watched_remote_window(&app, &url, &record, &ticket).await
+        {
             Ok(serve::RetargetOutcome::Navigated) => Ok(()),
             Ok(serve::RetargetOutcome::Gone) => {
                 tracing::debug!(window = %record.window_id, "reload: window is gone");
@@ -4096,6 +4100,7 @@ fn reload_devserver_window_from_feed(
                 tracing::debug!(window = %record.window_id, "reload: target is not ready");
                 Ok(())
             }
+            Ok(serve::RetargetOutcome::Superseded) => Ok(()),
             Err(e) => Err(e),
         };
         if let Err(e) = result {

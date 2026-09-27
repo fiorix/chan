@@ -258,6 +258,8 @@ impl TauriNativeSurface {
         let remote_launches = Arc::clone(&self.remote_launches);
         let nudge = Arc::clone(&self.builds.nudge);
         let label = native_label(&record);
+        let state = Arc::clone(self.app.state::<Arc<AppState>>().inner());
+        let ticket = retarget.then(|| state.retarget_tickets.begin(&label));
         // Dispatch-time remember: refreshes during the gap compare equal and
         // skip; rolled back on failure so a retry pass can fire again.
         remote_launches.lock().unwrap().insert(
@@ -292,7 +294,14 @@ impl TauriNativeSurface {
                 return fail(e);
             }
             let result = if retarget {
-                match serve::retarget_watched_remote_window(&app, &url, &record).await {
+                match serve::retarget_watched_remote_window(
+                    &app,
+                    &url,
+                    &record,
+                    ticket.as_ref().expect("retarget ticket"),
+                )
+                .await
+                {
                     // The webview vanished mid-gap: a close raced this
                     // retarget. Do NOT rebuild here -- if the record still
                     // wants a window, the nudged reconcile below reopens it.
@@ -303,6 +312,7 @@ impl TauriNativeSurface {
                     }
                     Ok(serve::RetargetOutcome::Navigated) => Ok(()),
                     Ok(serve::RetargetOutcome::NotReady) => Err("target is not ready".into()),
+                    Ok(serve::RetargetOutcome::Superseded) => return,
                     Err(e) => Err(e),
                 }
             } else {

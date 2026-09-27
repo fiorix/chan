@@ -8,10 +8,11 @@
 //! in-process against the embedded host's shared `Library`, and
 //! local serving never spawns `chan serve`.
 
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chan_server::{WindowKind, WindowRecord, WorkspaceLifecycleOutcome};
 
@@ -365,17 +366,51 @@ pub(crate) fn open_watched_remote_window(
     )
 }
 
+#[derive(Default)]
+pub(crate) struct RetargetTickets(Mutex<HashMap<String, Arc<()>>>);
+
+#[derive(Clone)]
+pub(crate) struct RetargetTicket {
+    label: String,
+    identity: Arc<()>,
+}
+
+impl RetargetTickets {
+    pub(crate) fn begin(&self, label: &str) -> RetargetTicket {
+        let identity = Arc::clone(self.0.lock().unwrap().entry(label.to_string()).or_default());
+        RetargetTicket {
+            label: label.to_string(),
+            identity,
+        }
+    }
+
+    pub(crate) fn with_current<T>(
+        &self,
+        ticket: &RetargetTicket,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let entries = self.0.lock().unwrap();
+        let result = entries
+            .get(&ticket.label)
+            .filter(|identity| Arc::ptr_eq(identity, &ticket.identity))
+            .map(|_| action());
+        drop(entries);
+        result
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetargetOutcome {
     Navigated,
     Gone,
     NotReady,
+    Superseded,
 }
 
 async fn retarget_window<F: std::future::Future<Output = crate::ProbeResult>>(
     mut probe: impl FnMut() -> F,
     exists: impl Fn() -> bool,
-    navigate: impl FnOnce() -> Result<(), String>,
+    navigate: impl FnOnce() -> Result<RetargetOutcome, String>,
 ) -> Result<RetargetOutcome, String> {
     if !exists() {
         return Ok(RetargetOutcome::Gone);
@@ -387,8 +422,7 @@ async fn retarget_window<F: std::future::Future<Output = crate::ProbeResult>>(
     if !result.reachable {
         return Ok(RetargetOutcome::NotReady);
     }
-    navigate()?;
-    Ok(RetargetOutcome::Navigated)
+    navigate()
 }
 
 /// Retarget a live watched REMOTE window in place after its devserver rotated
@@ -399,6 +433,7 @@ pub(crate) async fn retarget_watched_remote_window(
     app: &AppHandle,
     url: &str,
     record: &WindowRecord,
+    ticket: &RetargetTicket,
 ) -> Result<RetargetOutcome, String> {
     let label = crate::window_watcher::native_label(record);
     let Some(window) = app.get_webview_window(&label) else {
@@ -413,18 +448,19 @@ pub(crate) async fn retarget_watched_remote_window(
         url,
         kind,
     )?;
+    let state = app.state::<Arc<AppState>>();
     retarget_window(
         || crate::probe_url(window.clone(), url.to_string()),
         || app.get_webview_window(&label).is_some(),
-        || {
+        || state.retarget_tickets.with_current(ticket, || {
             window
                 .navigate(target)
                 .map_err(|e| format!("retargeting {label}: {e}"))?;
             if let Err(e) = window.show() {
                 tracing::warn!(label = %label, error = %e, "showing retargeted devserver window failed");
             }
-            Ok(())
-        },
+            Ok(RetargetOutcome::Navigated)
+        }).unwrap_or(Ok(RetargetOutcome::Superseded)),
     )
     .await
 }
@@ -2154,7 +2190,7 @@ mod tests {
             || true,
             || {
                 navigations.set(navigations.get() + 1);
-                Ok(())
+                Ok(RetargetOutcome::Navigated)
             },
         )
         .await
@@ -2175,7 +2211,7 @@ mod tests {
             || true,
             || {
                 navigations.set(navigations.get() + 1);
-                Ok(())
+                Ok(RetargetOutcome::Navigated)
             },
         )
         .await
@@ -2200,7 +2236,7 @@ mod tests {
             || exists.get(),
             || {
                 navigations.set(navigations.get() + 1);
-                Ok(())
+                Ok(RetargetOutcome::Navigated)
             },
         )
         .await
