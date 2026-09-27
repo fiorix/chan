@@ -20,7 +20,7 @@ use axum::Router;
 use chan_workspace::lock::ForeignHolder;
 use chan_workspace::{ChanError, Library, Workspace};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedMutexGuard};
 use tower::ServiceExt;
 
 use crate::desktop_window_ops::DesktopBridge;
@@ -1250,7 +1250,7 @@ impl WorkspaceHost {
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
         let key = self.root_key(root).await?;
-        self.open_registered_workspace_keyed(root, key, config)
+        self.open_registered_workspace_keyed(root, key, None, config)
             .await
     }
 
@@ -1262,6 +1262,7 @@ impl WorkspaceHost {
         &self,
         root: &Path,
         key: PathBuf,
+        mut root_lock: Option<OwnedMutexGuard<()>>,
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
         // Mark the mount in flight (status `starting`) and fire the watch feed
@@ -1276,7 +1277,9 @@ impl WorkspaceHost {
             armed: true,
         };
         self.mark_mount_starting_by_key(&mounting.root);
-        let result = self.open_registered_workspace_inner(root, config).await;
+        let result = self
+            .open_registered_workspace_inner(root, &mut root_lock, config)
+            .await;
         self.settle_mount(&mounting.root, &result);
         mounting.armed = false;
         result
@@ -1289,6 +1292,7 @@ impl WorkspaceHost {
     async fn open_registered_workspace_inner(
         &self,
         root: &Path,
+        root_lock: &mut Option<OwnedMutexGuard<()>>,
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
         let library = self.library.clone();
@@ -1305,15 +1309,16 @@ impl WorkspaceHost {
         let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _cancel_on_drop = WorkspaceOpenCancellation(cancelled.clone());
-        let workspace = tokio::task::spawn_blocking(move || {
+        let owned_root_lock = root_lock.take();
+        let (workspace, returned_root_lock) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if let Some(probe) = probe {
                 probe.send(std::thread::current().id()).unwrap();
             }
             let mut release_deadline = None;
-            loop {
+            let result = loop {
                 if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(ChanError::from(std::io::Error::new(
+                    break Err(ChanError::from(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "workspace open cancelled",
                     )));
@@ -1331,7 +1336,7 @@ impl WorkspaceHost {
                     if let Ok(workspace) = result {
                         workspace.stop_open_recovery();
                     }
-                    return Err(ChanError::from(std::io::Error::new(
+                    break Err(ChanError::from(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "workspace open cancelled",
                     )));
@@ -1341,7 +1346,7 @@ impl WorkspaceHost {
                     // The lock record is cleared before the flock is released.
                     // Keep waiting if this follows an in-process owner.
                     Err(ChanError::WorkspaceLocked) if release_deadline.is_some() => {}
-                    _ => return result.map(|workspace| OpenedWorkspace(Some(workspace))),
+                    _ => break result.map(|workspace| OpenedWorkspace(Some(workspace))),
                 }
                 #[cfg(test)]
                 if let Some(probe) = release_probe.take() {
@@ -1351,15 +1356,21 @@ impl WorkspaceHost {
                     *release_deadline.get_or_insert_with(|| Instant::now() + release_budget);
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return result.map(|workspace| OpenedWorkspace(Some(workspace)));
+                    break result.map(|workspace| OpenedWorkspace(Some(workspace)));
                 }
                 // A synchronous retry stays on the blocking pool so the host
                 // can keep publishing Starting while an in-process owner exits.
                 std::thread::sleep(remaining.min(WORKSPACE_OPEN_RELEASE_POLL_INTERVAL));
-            }
+            };
+            // Tuple fields drop in order: an abandoned workspace stops its
+            // recovery and releases its flock before the next root-lock holder
+            // can open it. A live caller keeps the guard through mount settlement.
+            (result, owned_root_lock)
         })
         .await
-        .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))??;
+        .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))?;
+        *root_lock = returned_root_lock;
+        let workspace = workspace?;
         self.open_workspace(workspace.into_workspace(), config)
             .await
     }
@@ -1397,12 +1408,12 @@ impl WorkspaceHost {
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
         let key = self.root_key(root).await?;
-        let _root_lock = self.root_locks.lock(&key).await;
+        let root_lock = self.root_locks.lock(&key).await.into_owned();
         if let Some(existing) = self.hosted_for_key(&key)? {
-            self.revalidate_mounted_root(root, &key).await;
+            self.revalidate_mounted_root(root, &key, root_lock).await;
             return Ok(existing);
         }
-        self.open_registered_workspace_keyed(root, key, config)
+        self.open_registered_workspace_keyed(root, key, Some(root_lock), config)
             .await
     }
 
@@ -1422,7 +1433,12 @@ impl WorkspaceHost {
     /// and can never pin a runtime worker. Nothing here bounds that stat; the
     /// caller's own budget does, and the launcher's `add` / `on` routes have
     /// none beyond their client.
-    async fn revalidate_mounted_root(&self, root: &Path, key: &Path) {
+    async fn revalidate_mounted_root(
+        &self,
+        root: &Path,
+        key: &Path,
+        root_lock: OwnedMutexGuard<()>,
+    ) {
         let Some(workspace) = self.live_workspace_by_key(key) else {
             return;
         };
@@ -1433,11 +1449,11 @@ impl WorkspaceHost {
             if let Some(probe) = probe {
                 let _ = probe.send(std::thread::current().id());
             }
-            workspace.revalidate_root()
+            (workspace.revalidate_root(), root_lock)
         })
         .await;
         match joined {
-            Ok(outcome) => {
+            Ok((outcome, _root_lock)) => {
                 let _ = self.reconcile_root_health(root, key, outcome);
             }
             // A join failure (a panicked blocking task, or a runtime shutting

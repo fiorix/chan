@@ -88,6 +88,14 @@ pub struct KeyedLockGuard<'a, K: Eq + Hash> {
     guard: Option<OwnedMutexGuard<()>>,
 }
 
+impl<K: Eq + Hash> KeyedLockGuard<'_, K> {
+    /// Keep the key locked without borrowing the entry map. The owned guard
+    /// keeps its weak entry alive; a lookup prunes it after the guard drops.
+    pub(crate) fn into_owned(mut self) -> OwnedMutexGuard<()> {
+        self.guard.take().expect("a keyed guard owns its lock")
+    }
+}
+
 impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
     fn drop(&mut self) {
         // Release before taking the entry map's mutex, which stays a leaf. A
@@ -302,6 +310,29 @@ mod tests {
             1,
             "a lookup kept the entry of a root whose last caller was cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn a_detached_guard_keeps_its_key_locked_and_is_pruned_after_drop() {
+        let locks = RootLocks::default();
+        let key = Path::new("/roots/a");
+        let held = locks.lock(key).await.into_owned();
+        assert_eq!(locks.len(), 1, "detaching removed a live entry");
+        let mut next = Box::pin(locks.lock(key));
+        assert!(
+            still_pending(&mut next).await,
+            "a caller bypassed the detached guard for its key"
+        );
+        drop(held);
+        drop(next.await);
+        assert_eq!(locks.len(), 0, "the last caller left its entry behind");
+
+        let held = locks.lock(key).await.into_owned();
+        drop(held);
+        let other = locks.lock(Path::new("/roots/b")).await;
+        assert_eq!(locks.len(), 1, "a lookup kept the dead detached entry");
+        drop(other);
+        assert_eq!(locks.len(), 0);
     }
 
     /// Count the computations `compute` stands for, and answer `root`
