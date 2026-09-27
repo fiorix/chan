@@ -1291,13 +1291,19 @@
     }
   }
 
+  function detachBandListeners(): void {
+    window.removeEventListener("mousemove", onBandMove, true);
+    window.removeEventListener("mouseup", onBandUp, true);
+  }
+
+  $effect(() => detachBandListeners);
+
   function onBandUp(): void {
     const wasDrag = band !== null;
     bandActive = false;
     band = null;
     bandBaseSelection = [];
-    window.removeEventListener("mousemove", onBandMove, true);
-    window.removeEventListener("mouseup", onBandUp, true);
+    detachBandListeners();
     // A click on empty space with no drag clears the selection (matches
     // a desktop file browser); an additive (cmd) click leaves it alone.
     if (!wasDrag && !bandAdditive) fbClearSelection();
