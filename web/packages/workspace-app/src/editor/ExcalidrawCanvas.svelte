@@ -106,6 +106,14 @@
   // a write we did not make. Mirrors CsvTable's lastSerialized guard.
   let lastSerialized: string | null = null;
 
+  // The appState the canvas has handed to the board and the library does
+  // not show yet. `updateScene` shows an appState only at the library's next
+  // render, so every serialization, the baseline's and the flush's alike,
+  // lays this over what the library reports; the library's next reported
+  // change follows that render and drops it. It holds what came out of the
+  // serializer, so it names no key.
+  let handedAppState: Partial<AppState> | null = null;
+
   // Seeded: the library, past its own init (whose apply replaces every
   // element set before it), holds the whole buffer of a finished load as
   // its init would restore it: the elements, the files, and the appState
@@ -327,16 +335,13 @@
     serializeTimer = setTimeout(flushSerialize, 200);
   }
 
-  /// `appState` is laid over what the library reports, for a value it has
-  /// been handed but does not show yet.
   function serializeScene(
     a: ExcalidrawImperativeAPI,
     e: typeof import("@excalidraw/excalidraw"),
-    appState: Partial<AppState> = {},
   ): string {
     return e.serializeAsJSON(
       a.getSceneElements(),
-      { ...a.getAppState(), ...appState },
+      { ...a.getAppState(), ...(handedAppState ?? {}) },
       a.getFiles(),
       "local",
     );
@@ -352,9 +357,9 @@
   ///
   /// Of the restored appState, only what the library's serializer keeps is
   /// applied (the grid and the background), so the board's zoom, scroll,
-  /// selection, theme and view mode stay as they are. `updateScene` puts the
-  /// elements and files on the board at once but its appState only at the
-  /// render it schedules, which is why the baseline is handed that appState.
+  /// selection, theme and view mode stay as they are. `updateScene` replaces
+  /// the elements at once and shows its appState only at the library's next
+  /// render, so that appState is kept as handed until then.
   function seed(): void {
     if (seeded || !loaded || !api || !ex) return;
     if (api.getAppState().isLoading) return;
@@ -368,16 +373,20 @@
       appState,
       captureUpdate: ex.CaptureUpdateAction.NEVER,
     } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
+    handedAppState = { ...(handedAppState ?? {}), ...appState };
     const files = Object.values(scene.files);
     if (files.length > 0) api.addFiles(files);
-    lastSerialized = serializeScene(api, ex, appState);
+    lastSerialized = serializeScene(api, ex);
     seeded = true;
   }
 
   /// Every change the library reports. The first comes from its init, and
   /// none comes before it, so it is where a board whose buffer was loaded
-  /// before the init finished is seeded.
+  /// before the init finished is seeded. A change follows the render that
+  /// shows what was handed before it, so that is dropped first; a seed here
+  /// hands its own after the drop, and it lasts until the next change.
   function onLibraryChange(): void {
+    handedAppState = null;
     seed();
     scheduleSerialize();
   }
