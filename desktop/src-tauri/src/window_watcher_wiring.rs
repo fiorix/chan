@@ -292,7 +292,7 @@ impl TauriNativeSurface {
                 return fail(e);
             }
             let result = if retarget {
-                match serve::retarget_watched_remote_window(&app, &url, &record) {
+                match serve::retarget_watched_remote_window(&app, &url, &record).await {
                     // The webview vanished mid-gap: a close raced this
                     // retarget. Do NOT rebuild here -- if the record still
                     // wants a window, the nudged reconcile below reopens it.

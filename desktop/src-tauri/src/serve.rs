@@ -369,7 +369,7 @@ pub(crate) fn open_watched_remote_window(
 /// tenant tokens. This keeps the same native window and lets the existing
 /// reconnecting/retry surface navigate to the fresh target instead of destroying
 /// the webview and rebuilding it under the same label.
-pub(crate) fn retarget_watched_remote_window(
+pub(crate) async fn retarget_watched_remote_window(
     app: &AppHandle,
     url: &str,
     record: &WindowRecord,
@@ -387,6 +387,21 @@ pub(crate) fn retarget_watched_remote_window(
         url,
         kind,
     )?;
+    let mut last_probe = None;
+    let mut attempts = 0;
+    while !crate::retarget_should_navigate(last_probe.as_ref(), attempts) {
+        if attempts > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if app.get_webview_window(&label).is_none() {
+            return Ok(false);
+        }
+        last_probe = Some(crate::probe_url(window.clone(), url.to_string()).await);
+        attempts += 1;
+    }
+    if app.get_webview_window(&label).is_none() {
+        return Ok(false);
+    }
     window
         .navigate(target)
         .map_err(|e| format!("retargeting {label}: {e}"))?;
