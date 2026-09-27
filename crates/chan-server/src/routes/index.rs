@@ -344,12 +344,8 @@ pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Respon
             Err(e) => return err_from(&e),
         };
         let cache_dir = global_models_dir();
-        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("creating model cache {}: {e}", cache_dir.display()),
-            )
-                .into_response();
+        if let Err(response) = create_model_cache(&cache_dir) {
+            return response;
         }
         if let Err(e) = Embedder::open(&model_name, &cache_dir).map(|_| ()) {
             // EmbedError → IndexError::Embed → ChanError → `err_from`
@@ -369,6 +365,16 @@ pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Respon
     .await
 }
 
+fn create_model_cache(cache_dir: &std::path::Path) -> Result<(), Response> {
+    std::fs::create_dir_all(cache_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("creating model cache {}: {e}", cache_dir.display()),
+        )
+            .into_response()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +385,19 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::state::test_support::workspace_app_state;
+
+    #[tokio::test]
+    async fn model_cache_refusal_is_json() {
+        let root = TempDir::new().unwrap();
+        let cache = root.path().join("models");
+        std::fs::write(&cache, b"occupied").unwrap();
+        let error = std::fs::create_dir_all(&cache).unwrap_err();
+        super::super::refusal_tests::assert_refusal(
+            create_model_cache(&cache).unwrap_err(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": format!("creating model cache {}: {error}", cache.display())}),
+        ).await;
+    }
 
     struct RouteTestApp {
         _cfg: TempDir,

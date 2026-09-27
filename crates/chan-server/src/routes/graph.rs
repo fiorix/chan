@@ -1447,11 +1447,15 @@ pub async fn api_graph(
 /// `?stream=1` response so the SPA's stream consumer completes cleanly
 /// and simply renders nothing until its post-index re-fetch.
 async fn empty_graph_stream_response(p: GraphParams) -> Response {
-    let mut bytes = match graph_ndjson_bytes(&GraphStreamEvent::Meta {
+    empty_graph_stream_from_metadata(graph_ndjson_bytes(&GraphStreamEvent::Meta {
         scope: p.scope,
         path: p.path.clone(),
         depth: p.depth,
-    }) {
+    }))
+}
+
+fn empty_graph_stream_from_metadata(metadata: Result<Bytes, serde_json::Error>) -> Response {
+    let mut bytes = match metadata {
         Ok(b) => b.to_vec(),
         Err(e) => {
             return (
@@ -1952,9 +1956,13 @@ pub async fn api_backlinks(
 /// first index builds. Same wire shape as a normal `?stream=1` response
 /// so the SPA consumer completes cleanly with no edges.
 async fn empty_backlinks_stream_response(path: String) -> Response {
-    let mut bytes = match backlinks_ndjson_bytes(&BacklinksStreamEvent::Meta {
+    empty_backlinks_stream_from_metadata(backlinks_ndjson_bytes(&BacklinksStreamEvent::Meta {
         path: path.as_str(),
-    }) {
+    }))
+}
+
+fn empty_backlinks_stream_from_metadata(metadata: Result<Bytes, serde_json::Error>) -> Response {
+    let mut bytes = match metadata {
         Ok(b) => b.to_vec(),
         Err(e) => {
             return (
@@ -2135,6 +2143,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_graph_refusal_is_json() {
+        super::super::refusal_tests::assert_refusal(
+            GraphBuildError::Cancelled.into_response(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "graph stream cancelled"}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn graph_metadata_encode_refusal_is_json() {
+        let error = <serde_json::Error as serde::ser::Error>::custom("metadata unavailable");
+        super::super::refusal_tests::assert_refusal(
+            empty_graph_stream_from_metadata(Err(error)),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "graph stream meta encode: metadata unavailable"}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn backlinks_metadata_encode_refusal_is_json() {
+        let error = <serde_json::Error as serde::ser::Error>::custom("metadata unavailable");
+        super::super::refusal_tests::assert_refusal(
+            empty_backlinks_stream_from_metadata(Err(error)),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "backlinks stream meta encode: metadata unavailable"}),
+        )
+        .await;
+    }
 
     fn report_file(path: &str, language: &str, code: u64) -> ReportFileStats {
         ReportFileStats {

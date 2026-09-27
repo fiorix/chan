@@ -788,6 +788,96 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn converted_tenant_shapes_require_the_envelope() {
+        for (method, path, status, body) in [
+            ("GET", "/api/resolve-link", 404, ""),
+            ("GET", "/api/report/dir", 404, ""),
+            ("GET", "/api/report/file", 404, ""),
+            ("GET", "/api/report/file", 400, ""),
+            (
+                "GET",
+                "/api/report/file",
+                500,
+                "report stream ended before metadata",
+            ),
+            ("GET", "/api/graph", 500, "graph stream cancelled"),
+            (
+                "GET",
+                "/api/graph",
+                500,
+                "graph stream ended before metadata",
+            ),
+            (
+                "GET",
+                "/api/graph",
+                500,
+                "graph stream meta encode: encode failed",
+            ),
+            (
+                "GET",
+                "/api/backlinks/file.md",
+                500,
+                "backlinks stream ended before metadata",
+            ),
+            (
+                "GET",
+                "/api/backlinks/file.md",
+                500,
+                "backlinks stream meta encode: encode failed",
+            ),
+            (
+                "GET",
+                "/api/preflight",
+                500,
+                "preflight task panicked: task 1 was cancelled",
+            ),
+            (
+                "GET",
+                "/api/session",
+                500,
+                "Input/output error (os error 5)",
+            ),
+            (
+                "PUT",
+                "/api/session",
+                500,
+                "Input/output error (os error 5)",
+            ),
+            (
+                "DELETE",
+                "/api/session",
+                500,
+                "Input/output error (os error 5)",
+            ),
+            (
+                "GET",
+                "/api/sessions",
+                500,
+                "Input/output error (os error 5)",
+            ),
+            ("PUT", "/api/session", 500, "invalid session key"),
+            (
+                "POST",
+                "/api/index/semantic/download",
+                500,
+                "creating model cache /models: Input/output error (os error 5)",
+            ),
+        ] {
+            assert!(
+                !accepts_refusal(
+                    method,
+                    path,
+                    StatusCode::from_u16(status).unwrap(),
+                    body,
+                    None
+                )
+                .await,
+                "converted refusal must require the envelope: {method} {path}: {body}"
+            );
+        }
+    }
+
     macro_rules! pending_text_shape {
         ($name:ident, $method:literal, $path:literal, $status:expr, $body:expr) => {
             #[tokio::test]

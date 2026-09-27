@@ -30,6 +30,8 @@ mod metadata;
 mod open;
 mod preferences;
 mod preflight;
+#[cfg(test)]
+mod refusal_tests;
 mod report;
 mod reports_toggle;
 // pub(crate) so the server-side scene-session authority (registry,
@@ -222,7 +224,7 @@ mod tests {
     /// so this reaches the route's join-error arm with no seam in the route.
     /// Only the route's own polls see the shut-down runtime; the test's runtime
     /// keeps driving every other task.
-    async fn with_blocking_tasks_cancelled<F: Future>(future: F) -> F::Output {
+    pub(super) async fn with_blocking_tasks_cancelled<F: Future>(future: F) -> F::Output {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -278,7 +280,7 @@ mod tests {
     }
 
     /// State for a served workspace: a workspace cell with its indexer.
-    fn served_state() -> (TempDir, TempDir, Arc<AppState>) {
+    pub(super) fn served_state() -> (TempDir, TempDir, Arc<AppState>) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
