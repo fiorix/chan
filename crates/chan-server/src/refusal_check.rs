@@ -54,8 +54,8 @@ async fn inspect(request: Request, next: Next) -> Response {
             || framework.is_some()
             // HEAD has no response body, including on a refusal.
             || (method == Method::HEAD && bytes.is_empty())
-            || permanent_exception(&method, &path, parts.status, is_fallback)
-            || pending_refusal(&path, parts.status, &parts.headers, &bytes)
+            || permanent_exception(&method, &path, parts.status, is_fallback, &bytes)
+            || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes)
             || PENDING
                 .iter()
                 .any(|(verb, route)| { method.as_str() == *verb && matches_path(route, &path) }),
@@ -66,7 +66,26 @@ async fn inspect(request: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::from(bytes))
 }
 
-fn pending_refusal(path: &str, status: StatusCode, headers: &HeaderMap, body: &[u8]) -> bool {
+fn pending_refusal(
+    method: &Method,
+    path: &str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
+    if *method == Method::PUT
+        && matches_path("/api/fs/{*path}", path)
+        && matches!(
+            status,
+            StatusCode::CONFLICT | StatusCode::PRECONDITION_REQUIRED
+        )
+        && headers
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|v| v == "application/json")
+        && write_conflict_shape(body)
+    {
+        return true;
+    }
     // The startup gate spans all mounted tenant routes.
     if status == StatusCode::SERVICE_UNAVAILABLE
         && body == b"devserver is restoring terminal sessions"
@@ -82,6 +101,29 @@ fn pending_refusal(path: &str, status: StatusCode, headers: &HeaderMap, body: &[
         && PENDING_PROXY_REFUSALS
             .iter()
             .any(|sentence| body == sentence.as_bytes())
+}
+
+fn write_conflict_shape(body: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_slice(body) else {
+        return false;
+    };
+    fields.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "current_mtime" | "current_mtime_ns" | "current_authority_version" | "disk_conflicted"
+        )
+    }) && fields
+        .get("current_mtime")
+        .is_some_and(|v| v.is_null() || v.as_i64().is_some())
+        && fields
+            .get("disk_conflicted")
+            .is_some_and(serde_json::Value::is_boolean)
+        && fields
+            .get("current_mtime_ns")
+            .is_none_or(serde_json::Value::is_string)
+        && fields
+            .get("current_authority_version")
+            .is_none_or(|v| v.as_u64().is_some())
 }
 
 const PENDING_PROXY_REFUSALS: &[&str] = &[
@@ -201,7 +243,13 @@ fn matches_path(pattern: &str, path: &str) -> bool {
     actual.next().is_none()
 }
 
-fn permanent_exception(method: &Method, path: &str, status: StatusCode, is_fallback: bool) -> bool {
+fn permanent_exception(
+    method: &Method,
+    path: &str,
+    status: StatusCode,
+    is_fallback: bool,
+    body: &[u8],
+) -> bool {
     // Navigation and asset failures have no JSON reader.
     if is_fallback && status == StatusCode::NOT_FOUND && !path.starts_with("/api") && path != "/ws"
     {
@@ -209,13 +257,47 @@ fn permanent_exception(method: &Method, path: &str, status: StatusCode, is_fallb
     }
     // A WebSocket extractor rejects before a handler can upgrade; the
     // browser WebSocket API exposes the failed connection, never its body.
-    *method == Method::GET
-        && matches!(
-            status,
-            StatusCode::BAD_REQUEST | StatusCode::UPGRADE_REQUIRED
-        )
-        && WEBSOCKETS.contains(&path)
+    ((*method == Method::GET && WEBSOCKETS.contains(&path))
+        || path.starts_with("/_chan/extensions/"))
+        && WEBSOCKET_REJECTIONS
+            .iter()
+            .any(|&(_, code, text)| status.as_u16() == code && body == text.as_bytes())
 }
+
+// axum::extract::ws::rejection types have fixed response bodies. A handler's
+// own refusal on an upgrade route must still satisfy the JSON contract.
+const WEBSOCKET_REJECTIONS: &[(&str, u16, &str)] = &[
+    (
+        "InvalidConnectionHeader",
+        400,
+        "Connection header did not include 'upgrade'",
+    ),
+    (
+        "InvalidUpgradeHeader",
+        400,
+        "`Upgrade` header did not include 'websocket'",
+    ),
+    (
+        "InvalidProtocolPseudoheader",
+        400,
+        "`:protocol` pseudo-header did not include 'websocket'",
+    ),
+    (
+        "InvalidWebSocketVersionHeader",
+        400,
+        "`Sec-WebSocket-Version` header did not include '13'",
+    ),
+    (
+        "WebSocketKeyHeaderMissing",
+        400,
+        "`Sec-WebSocket-Key` header missing",
+    ),
+    (
+        "ConnectionNotUpgradable",
+        426,
+        "WebSocket request couldn't be upgraded since no upgrade state was present",
+    ),
+];
 
 const WEBSOCKETS: &[&str] = &[
     "/ws",
@@ -298,12 +380,6 @@ const PENDING: &[(&str, &str)] = &[
     ("POST", "/api/devserver/rotate-token"),
     ("POST", "/api/devserver/terminal-sessions/drain"),
     ("GET", "/api/report/file"),
-    ("PATCH", "/api/config"),
-    ("POST", "/api/index/semantic/enable"),
-    ("PUT", "/api/fs/{*path}"),
-    ("DELETE", "/api/fs/{*path}"),
-    ("POST", "/api/move"),
-    ("POST", "/api/fs/transfer"),
 ];
 
 #[cfg(test)]
@@ -364,7 +440,6 @@ mod tests {
     macro_rules! handler_text_is_rejected {
         ($name:ident, $method:literal, $path:literal, $status:expr) => {
             #[tokio::test]
-            #[ignore = "run explicitly until refusal exceptions require their body shapes"]
             async fn $name() {
                 assert!(
                     !accepts_refusal($method, $path, $status, "handler-authored refusal", None)
@@ -439,7 +514,6 @@ mod tests {
     );
 
     #[tokio::test]
-    #[ignore = "run explicitly until refusal exceptions require their body shapes"]
     async fn write_conflicts_require_their_complete_typed_shape() {
         use axum::response::IntoResponse;
         let full = serde_json::json!({"current_mtime":1,"current_mtime_ns":"1000000000",
@@ -516,7 +590,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "run explicitly until extension upgrades recognize framework rejection text"]
     async fn extension_upgrade_rejections_require_framework_text() {
         use axum::extract::ws::rejection::WebSocketUpgradeRejection;
         use axum::extract::{FromRequestParts, WebSocketUpgrade};
