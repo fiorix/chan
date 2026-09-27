@@ -420,3 +420,35 @@ async fn terminal_tenant_multipart_boundary_is_json() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn terminal_tenant_drafts_missing_json_content_type_is_json() {
+    assert_refusal(
+        terminal_answer(
+            Request::post("/api/drafts/inspect")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        json!({"error": MISSING_CONTENT_TYPE}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_drafts_query_is_json() {
+    let uri: axum::http::Uri = "/api/drafts/new?w=a&w=b".parse().unwrap();
+    let Err(rejection) = axum::extract::Query::<
+        crate::routes::standalone_fs::StandaloneMutationQuery,
+    >::try_from_uri(&uri) else {
+        panic!("a repeated field is not a query the route takes");
+    };
+    let sentence = rejection.body_text();
+    assert_refusal(
+        terminal_answer(Request::post(uri).body(Body::empty()).unwrap()).await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": sentence}),
+    )
+    .await;
+}
