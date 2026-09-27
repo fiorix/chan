@@ -6608,6 +6608,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_caller_waiting_for_the_mount_permit_shows_starting_and_settles_when_it_leaves() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        // Far above the waits below, so the later caller is still waiting for
+        // the permit when its row is read.
+        host.open_release_budget = Duration::from_secs(10);
+        let host = Arc::new(host);
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (release, released) = std::sync::mpsc::channel();
+        *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |_| {
+            entered.take().unwrap().send(()).unwrap();
+            let _ = released.recv();
+        }));
+        let mounting = Arc::clone(&host);
+        let mounting_root = root.path().to_path_buf();
+        let first = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/held"))
+                .await
+        });
+        entry.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let releasing = (
+            WorkspaceStatus::Error,
+            Some("workspace is still releasing; retry".into()),
+        );
+        assert_eq!(host.workspace_status(root.path()), releasing);
+        let waiting_host = Arc::clone(&host);
+        let waiting_root = root.path().to_path_buf();
+        let waiting = tokio::spawn(async move {
+            waiting_host
+                .open_or_get_registered_workspace(waiting_root, serve_config("/waiting"))
+                .await
+        });
+        let shown = tokio::time::timeout(Duration::from_secs(5), async {
+            while host.workspace_status(root.path()).0 != WorkspaceStatus::Starting {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        waiting.abort();
+        let left = waiting.await;
+        let settled = host.workspace_status(root.path());
+        release.send(()).unwrap();
+        assert!(
+            shown.is_ok(),
+            "a caller waiting for the mount permit did not show starting"
+        );
+        assert!(left.unwrap_err().is_cancelled());
+        assert_eq!(
+            settled, releasing,
+            "a caller that left its permit wait did not settle its row"
+        );
+    }
+
+    #[tokio::test]
     async fn a_panicked_open_keeps_its_root_locked_until_mount_settlement() {
         struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
         impl Drop for Finished {
