@@ -4671,6 +4671,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_workspace_reads_refusals_per_arm() {
+        use axum::http::StatusCode;
+
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for gateway in [false, true] {
+            for (body, message) in [
+                (" plain refusal ", "plain refusal"),
+                (
+                    r#"{"error":"launcher not ready","code":"starting"}"#,
+                    "launcher not ready",
+                ),
+                (r#"{"error":""}"#, r#"{"error":""}"#),
+                (r#"{"error":42}"#, r#"{"error":42}"#),
+                ("", ""),
+                (r#"{"error":"  try\nagain\u001b  "}"#, "try again"),
+            ] {
+                let server = MockManagementServer::start(vec![mock_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    body,
+                )])
+                .await;
+                let conn = if gateway {
+                    server.gateway_conn()
+                } else {
+                    server.raw_conn()
+                };
+                actual.push(add_workspace(&conn, "/repo/notes").await.unwrap_err());
+                let label = if gateway {
+                    "gateway workspace add"
+                } else {
+                    "devserver workspace mount"
+                };
+                expected.push(format!(
+                    "{label} returned HTTP 503 Service Unavailable: {message}"
+                ));
+                server.assert_responses_drained();
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "workspace add must show the refusal sentence on both transports"
+        );
+    }
+
+    #[tokio::test]
     async fn add_workspace_status_request_contract_per_arm() {
         use axum::http::{Method, StatusCode};
 
