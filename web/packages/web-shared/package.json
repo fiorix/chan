@@ -17,6 +17,7 @@
     "./CommandDeck.svelte": "./src/components/CommandDeck.svelte",
     "./theme.css": "./src/styles/theme.css",
     "./Topbar.svelte": "./src/components/Topbar.svelte",
+    "./window-page": "./src/window-page.ts",
     "./window-label": "./src/window-label.ts"
   }
 }

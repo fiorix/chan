@@ -16,6 +16,7 @@
 // Inert under demoState.enabled: a marketing embed never spawns windows.
 
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
+import { isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
 import { backend } from "../api/backend";
 import { ApiError, type WindowKind, type WindowRecord, type WindowSet } from "../api/library";
 import { windowUrl } from "../lib/windowUrl";
@@ -63,73 +64,16 @@ function handleState(id: string): "live" | "closed" | "none" {
   return "closed";
 }
 
-const WINDOW_PAGE_WAIT_MS = 60_000;
-const WINDOW_CLOSED_POLL_MS = 100;
-const WINDOW_PAGE_RETRY_MIN_MS = 1000;
-const waitingPages = new WeakMap<Window, Promise<boolean>>();
-const navigatingDocuments = new WeakMap<Window, Document>();
-
-function retryAfterMs(header: string | null): number {
-  if (header === null || header.trim() === "") return WINDOW_PAGE_RETRY_MIN_MS;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(WINDOW_PAGE_WAIT_MS, Math.max(WINDOW_PAGE_RETRY_MIN_MS, seconds * 1000));
-  const date = Date.parse(header);
-  return Number.isFinite(date) ? Math.min(WINDOW_PAGE_WAIT_MS, Math.max(WINDOW_PAGE_RETRY_MIN_MS, date - Date.now())) : WINDOW_PAGE_RETRY_MIN_MS;
-}
-
-function navigateWindowWhenReady(h: Window, url: string): Promise<boolean> {
-  const waiting = waitingPages.get(h);
-  if (waiting) return waiting;
-  if (h.closed) return Promise.resolve(false);
-  const page = h.document;
-  page.body.textContent = "Waiting for the window to be ready...";
-  const controller = new AbortController();
-  let lastRefusal: Error = new Error("Timed out waiting for the window page");
-  let retryTimer: ReturnType<typeof setTimeout> | undefined;
-  let deadline: ReturnType<typeof setTimeout> | undefined;
-  let closedPoll: ReturnType<typeof setInterval> | undefined;
-  const stopped = new Promise<boolean>((resolve, reject) => {
-    deadline = setTimeout(() => reject(lastRefusal), WINDOW_PAGE_WAIT_MS);
-    closedPoll = setInterval(() => {
-      if (h.closed) resolve(false);
-    }, WINDOW_CLOSED_POLL_MS);
-  });
-  const check = async (): Promise<boolean> => {
-    while (!h.closed && !controller.signal.aborted) {
-      const response = await backend.checkWindowPage(url, controller.signal);
-      if (h.closed || controller.signal.aborted) return false;
-      if (response.ok) {
-        await response.body?.cancel();
-        return true;
-      }
-      const text = await response.text().catch(() => response.statusText);
-      const refusal = new ApiError(response.status, text);
-      if (response.status !== 503) throw refusal;
-      lastRefusal = refusal;
-      if (h.closed || controller.signal.aborted) return false;
-      await new Promise<void>((resolve) => {
-        retryTimer = setTimeout(resolve, retryAfterMs(response.headers.get("Retry-After")));
-      });
-    }
-    return false;
+const checkWindowPage: WindowPageCheck = async (url, signal) => {
+  const response = await backend.checkWindowPage(url, signal);
+  return {
+    response,
+    readRefusal: async () => new ApiError(
+      response.status,
+      await response.text().catch(() => response.statusText),
+    ),
   };
-  // The deadline and close check also cover a fetch or response body that stalls.
-  // One pending navigation owns a named window even when the user clicks twice.
-  const pending = Promise.race([check(), stopped]).then((ready) => {
-    if (!ready || h.closed) return false;
-    h.location.href = url;
-    navigatingDocuments.set(h, page);
-    return true;
-  }).finally(() => {
-    clearTimeout(retryTimer);
-    clearTimeout(deadline);
-    clearInterval(closedPoll);
-    controller.abort();
-    waitingPages.delete(h);
-  });
-  waitingPages.set(h, pending);
-  return pending;
-}
+};
 
 /** Mint a browser window of the local library and open it in-app. Call this
  * DIRECTLY from a user gesture: it opens the blank window synchronously, before
@@ -156,7 +100,7 @@ export async function mintWindow(
       handles.set(rec.window_id, blank);
       pendingDiscards.delete(rec.window_id);
       const url = windowUrl(rec, servingOrigin());
-      if (!(await navigateWindowWhenReady(blank, url)) || blank.closed) {
+      if (!(await navigateWindowWhenReady(blank, url, checkWindowPage)) || blank.closed) {
         if (handles.get(rec.window_id) === blank) discardBrowserWindow(rec.window_id);
         return null;
       }
@@ -187,10 +131,7 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   let blank: boolean;
   try {
     const page = h.document;
-    // Location can still describe the old page until navigation commits.
-    // A later refusal document on this window must remain retryable.
-    if (navigatingDocuments.get(h) === page) return h;
-    navigatingDocuments.delete(h);
+    if (isWindowNavigating(h)) return h;
     blank = h.location.href === "" || h.location.href === "about:blank" || page.contentType !== "text/html";
   } catch {
     // A window navigated to another origin still belongs to its user.
@@ -199,7 +140,7 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   if (!blank) return h;
   try {
     const url = windowUrl(record, servingOrigin());
-    if (!(await navigateWindowWhenReady(h, url)) || h.closed) {
+    if (!(await navigateWindowWhenReady(h, url, checkWindowPage)) || h.closed) {
       if (handles.get(record.window_id) === h) handles.delete(record.window_id);
       return null;
     }
