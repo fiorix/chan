@@ -645,9 +645,19 @@ async fn run_tool(
         let answer = tools::execute(
             name,
             &args,
-            &ToolContext::with_cancel(workspace, body_cancel),
+            &ToolContext::with_cancel(workspace, Arc::clone(&body_cancel)),
         )
-        .map_err(|e| ErrorData::internal_error(mcp_safe_message(&e), None));
+        .map_err(|error| {
+            // A set flag means the request was cancelled: a body that fails
+            // after it answers as the checks before the body do. A body that
+            // finished answers its result, so a landed write is reported.
+            let message = if body_cancel.load(Ordering::Relaxed) {
+                "request cancelled".to_string()
+            } else {
+                mcp_safe_message(&error)
+            };
+            ErrorData::internal_error(message, None)
+        });
         #[cfg(any(test, feature = "test-hooks"))]
         test_hooks::answered(held, &answer);
         answer
