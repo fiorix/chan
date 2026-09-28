@@ -64,12 +64,15 @@ const ROOT_HEALTH_MISSED_TICKS: u32 = 2;
 /// through [`ROOT_HEALTH_MISSED_TICKS`] budgets without answering.
 const ROOT_NOT_ANSWERING: &str = "not answering: its health check has not returned";
 const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// The reason a workspace's row shows while an earlier call of this process
-/// on its root has not let go: a mount or a revalidation whose caller left, a
-/// lookup or an unregister that has not returned, or a tenant still being
-/// built. An open or a removal that meets such a call answers
-/// [`ChanError::WorkspaceAlreadyOpen`] and leaves these words on the row, and
-/// a retry once the call lets go completes.
+/// The reason the host's lifecycle row for a root shows while an earlier
+/// call of this process on that root has not let go: a mount or a
+/// revalidation whose caller left, a lookup or an unregister that has not
+/// returned, a tenant still being built, or a handle of the root this
+/// process still holds. An open or a removal that meets one answers
+/// [`ChanError::WorkspaceAlreadyOpen`] and writes these words under the key
+/// it resolved the root to. A retry once it lets go runs anew: it completes,
+/// or, behind an unregister that removed the workspace, finds nothing to
+/// remove.
 pub const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
 
 #[cfg(test)]
@@ -3456,9 +3459,10 @@ impl WorkspaceHost {
     /// is `target` or `root` as given, lexically normalized, is found without
     /// asking any filesystem. Only when none is does the root's filesystem
     /// say which row it is, on the blocking pool: a path no row goes by, or a
-    /// root that resolves elsewhere since a registration of this process last
-    /// resolved it, asked by the path it resolves to now, which is what
-    /// `chan close` and the desktop's handoff send.
+    /// root that resolves elsewhere than the root its row stores, asked by
+    /// the path it resolves to now, which is what `chan close` and the
+    /// desktop's handoff send, unless a registration of this process has
+    /// resolved it since the registry was loaded.
     ///
     /// That lookup holds the root's lookup permit, taken without waiting.
     /// Every lookup runs under the root's lock, so a permit held beside that
