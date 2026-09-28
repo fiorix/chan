@@ -8589,6 +8589,17 @@ mod tests {
         home: &Path,
         holder: &Path,
     ) -> (Arc<DevserverState>, PathBuf, PathBuf) {
+        relinked_devserver_at(home, holder, "moved").await
+    }
+
+    /// [`relinked_devserver`] with the parent moved to `holder`'s child
+    /// `moved`.
+    #[cfg(unix)]
+    async fn relinked_devserver_at(
+        home: &Path,
+        holder: &Path,
+        moved: &str,
+    ) -> (Arc<DevserverState>, PathBuf, PathBuf) {
         use std::os::unix::fs::symlink;
         let parent = holder.join("parent");
         std::fs::create_dir_all(parent.join("ws")).expect("mkdir");
@@ -8599,7 +8610,7 @@ mod tests {
             .register_workspace(&parent.join("ws"))
             .expect("register")
             .root_path;
-        let moved = holder.join("moved");
+        let moved = holder.join(moved);
         std::fs::rename(&parent, &moved).expect("move the parent");
         symlink(&moved, &parent).expect("link the old parent");
         let relinked = moved.join("ws");
@@ -8860,6 +8871,153 @@ mod tests {
                 entries[0].path,
                 stored.to_string_lossy(),
                 "{case}: the row lists another path: {entries:?}"
+            );
+        }
+    }
+
+    /// A relinked root restored from an overlay row under its stored root
+    /// while its link's target is away fails and stays desired on; a later
+    /// handoff mounts it under the canonical path. The row shows the record
+    /// the host serves, with its prefix and token, and the on route answers
+    /// that same row whichever of the two records' prefixes it is asked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_shows_the_served_record_beside_a_failed_restore() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let target = holder.path().join("moved");
+        let away = holder.path().join("away");
+        std::fs::rename(&target, &away).expect("take the link's target away");
+        let rows = vec![PersistedWorkspace {
+            path: stored.to_string_lossy().into_owned(),
+            desired_on: true,
+            generation: 1,
+        }];
+        let rows = state.register_restore_rows(rows).await;
+        let attempts = state.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx).await;
+        let stored_prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let restored = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get(&stored_prefix)
+            .map(|record| (record.root.clone(), record.desired, record.phase.clone()));
+        assert!(
+            matches!(
+                &restored,
+                Some((root, DesiredMount::On, MountPhase::Failed(_))) if *root == stored
+            ),
+            "fixture: the restore did not fail desired on: {restored:?}"
+        );
+        std::fs::rename(&away, &target).expect("bring the link's target back");
+        let prefix = hand_off(&state, &relinked).await;
+        assert_ne!(
+            prefix, stored_prefix,
+            "fixture: the handoff took the failed record's prefix"
+        );
+
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the relinked root does not list once: {entries:?}"
+        );
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+        for asked in [&stored_prefix, &prefix] {
+            let answered = updated_row(
+                state
+                    .set_workspace_on(asked, true, false)
+                    .await
+                    .expect("turn the relinked root on"),
+            );
+            let entries = state.workspace_entries();
+            assert_eq!(
+                entries.len(),
+                1,
+                "the relinked root does not list once after an on of {asked}: {entries:?}"
+            );
+            assert_eq!(
+                answered, entries[0],
+                "the on route for {asked} answers a row other than the list's"
+            );
+            assert_on_row_of(&state, &answered, &stored, &prefix);
+        }
+    }
+
+    /// A relinked root turned on through the on route and then handed off
+    /// has two records keyed by its canonical path, at the stored root's
+    /// prefix, which the host serves, and at the canonical path's, which it
+    /// does not. After the saves that follow, the row lists the prefix the
+    /// host serves, whichever of the two sorts first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_turned_on_and_handed_off_lists_the_served_prefix() {
+        let _env = chan_home_env_read();
+        for served_sorts_first in [true, false] {
+            let home = tempfile::tempdir().expect("home");
+            let holder = tempfile::tempdir().expect("holder");
+            // The parent's new name decides the canonical path's prefix.
+            let base = canonical_root(holder.path());
+            let served = registered_workspace_prefix(&base.join("parent").join("ws"))
+                .expect("prefix");
+            let moved = (0..)
+                .map(|n| format!("moved-{n}"))
+                .find(|name| {
+                    let other = registered_workspace_prefix(&base.join(name).join("ws"))
+                        .expect("prefix");
+                    (served < other) == served_sorts_first
+                })
+                .expect("a name");
+            let (state, stored, relinked) =
+                relinked_devserver_at(home.path(), holder.path(), &moved).await;
+            assert_eq!(
+                registered_workspace_prefix(&stored).expect("prefix"),
+                served,
+                "fixture: the stored root's prefix"
+            );
+            updated_row(
+                state
+                    .set_workspace_on(&served, true, false)
+                    .await
+                    .expect("turn the relinked root on"),
+            );
+            let answered = hand_off(&state, &relinked).await;
+            assert_eq!(
+                answered, served,
+                "fixture: the handoff answered another mount"
+            );
+            let prefixes: Vec<String> = {
+                let map = state.workspaces.lock().unwrap();
+                let mut prefixes: Vec<String> = map.keys().cloned().collect();
+                prefixes.sort();
+                prefixes
+            };
+            assert!(
+                prefixes.len() == 2 && (prefixes[0] == served) == served_sorts_first,
+                "fixture: the handoff did not make a second record after the served one: {prefixes:?}"
+            );
+            state.persist_state();
+            state.persist_state();
+
+            let entries = state.workspace_entries();
+            assert_eq!(
+                entries.len(),
+                1,
+                "the relinked root does not list once: {entries:?}"
+            );
+            assert_eq!(
+                entries[0].prefix, served,
+                "the row lists a prefix the host does not serve (served sorts first: \
+                 {served_sorts_first}): {entries:?}"
+            );
+            assert_eq!(
+                entries[0].path,
+                stored.to_string_lossy(),
+                "the row lists another path: {entries:?}"
             );
         }
     }
