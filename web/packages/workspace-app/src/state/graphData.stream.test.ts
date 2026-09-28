@@ -83,3 +83,23 @@ test("publishes the accumulated view after every batch, upserting nodes and edge
   expect(graphData.loading).toBe(false);
   expect(graphData.error).toBeNull();
 });
+
+// A watcher event drops the cached graph while a load is in flight. The
+// dropped load must neither keep the loading flag up nor publish its view
+// over the drop.
+test("an invalidate during a load leaves nothing loading and publishes nothing stale", async () => {
+  let land: (view: GraphView) => void = () => {};
+  vi.spyOn(api, "graphStream").mockImplementation(
+    () => new Promise<GraphView>((resolve) => (land = resolve)),
+  );
+  const load = ensureGraphLoaded();
+  expect(graphData.loading).toBe(true);
+
+  invalidateGraph();
+  expect(graphData.loading, "the drop ends the dropped load's loading").toBe(false);
+  land({ nodes: [a] as GraphView["nodes"], edges: [] });
+  await load;
+
+  expect(graphData.view, "the dropped load publishes nothing").toBeNull();
+});
+
