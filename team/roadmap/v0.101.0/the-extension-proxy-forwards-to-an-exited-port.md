@@ -28,3 +28,15 @@ Read the entry's `running` flag in `proxy_extension_request` before the upstream
 
 1. With an entry's flag false, a request and a WebSocket upgrade to its path answer 502 `extension_unavailable`, and a listener on its port receives nothing.
 2. A running extension is proxied as it is now.
+
+## What shipped
+
+Landed on 2026-09-28; lines at `b39274a1a`, in `crates/chan-server/src/` where no other path is named. The builder's report is `dev/v0101-team/reports/report-Services-31.md` in the development tree, to the order `dev/v0101-team/tasks/task-Lead-Services-30.md`; the lead read the production diff whole and verified it at the blob, with no independent review (`dev/v0101-team/journals/journal-Lead.md`, the entry of 2026-09-28 12:03Z, "the three small fixes in and ready").
+
+- **One reader of the flag.** `ExtensionEntry::running` reads the flag the supervisor clears when it sees the process exit or stops it at shutdown, and the catalog's `running` field reads it through the same function (`extensions.rs:100-117`; `supervise_extension`, `:698-724`).
+- **The proxy sends nothing to an extension that is not running.** After the catalog's lookup and a preflight's answer, and before the upstream URL is built, a request whose entry is not running is answered the 502 `extension_unavailable` that a failed forward answers, with no connection made; a WebSocket upgrade takes the same path, since its branch comes after the check (`proxy_extension_request`, `routes/extensions.rs:111-147`; the failed forward's answer, `:165-174`). A running extension is proxied as before.
+- The design document says so (`design.md:29`, the "Local extension runtime" entry), and the changelog records it (`CHANGELOG.md:33`).
+
+Pinned, both red first at the base in the report: a plain request and a WebSocket upgrade to an entry whose flag is false, each answered 502 with its code, while a listener that stays bound on the entry's port for the whole test must accept nothing, raced against the answer and read once more after it (`an_exited_extension_is_sent_no_request`, `routes/extensions.rs:967`; `an_exited_extension_is_sent_no_websocket_upgrade`, `:997`; the entry made by a test-only builder, `extensions.rs:188-193`). The two pins that proxy a running entry pass with their bodies unchanged (`routes/extensions.rs:837`, `:885`). A mutation of each arm reds its own pin alone, both pins passed 200 runs as they are and 200 on one CPU, and the own gate was green.
+
+**What it does not cover, as ruled and written where the flag is read** (`routes/extensions.rs:126-129`): the supervisor clears the flag only once it sees the exit, so a port another process takes between the exit and that moment is still sent the request, its body, the tenant's scope and the extension's token. A CORS preflight for an exited entry, an `OPTIONS` from the frame's opaque origin, is still answered 204 by the proxy itself before the flag is read, and sends nothing upstream (`cors_preflight`, `:460-490`, called at `:122-124`); the request that follows it is answered the 502.

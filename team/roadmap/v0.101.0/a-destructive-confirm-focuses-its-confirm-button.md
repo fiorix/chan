@@ -8,6 +8,8 @@ The workspace app's confirm dialog parks focus on its confirm button whenever it
 
 The confirms the app marks destructive include "Reload from disk?", which replaces a tab's unsaved changes with the file on disk (`src/state/tabs.svelte.ts:8004-8013`); "Keep your version?", which replaces another writer's changes on disk (`:8040-8047`); a broken draft's discard (`src/state/store.svelte.ts:708-714`); and a file's delete (`:6025-6029`, `:6081-6087`). The review's steps are in the drawing's refused save, not landed: Cmd+W on a drawing whose save was refused opens a dialog whose focused button is "Close without saving", and Enter then discards the text (the review's F8, read at `b055b1137`).
 
+On 2026-09-28 the drawing's refused save landed, and the review's steps with it: a close of a drawing whose save was refused opens `Close without saving?`, marked destructive, and with a running terminal in the same close `Close tabs?`, marked destructive too (`src/state/tabs.svelte.ts:2946-2963`); the dialog still focuses its confirm as it opens and Enter still clicks the focused button (`src/components/ConfirmModal.svelte:9-17`, `:25-31`), so Enter answers `Close without saving` or `Close` (read at `b39274a1a`, not run).
+
 ## Desired contract
 
 A confirm that discards what the user typed or wrote does not take an Enter pressed without reading it as a yes: its cancel is the focused button. The rule is the shared dialog's, the same for every confirm marked destructive.

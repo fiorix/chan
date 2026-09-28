@@ -8,6 +8,8 @@ A draft's close saves a draft that has unsaved edits first, and when the save le
 
 The drawing's refused save, in hand and not landed, keeps that refusal and says why, once, by the lead's ruling, which chose it over the plan's recommendation: a first dialog that throws the edits away and then the draft's own, where a cancel of the second would leave a tab open whose edits the first had taken.
 
+On 2026-09-28 the drawing's refused save landed with that refusal: a draft drawing whose save is refused is not closed, its dialog does not open, and a notice says `<file> was not saved.`, while the tab's toolbar keeps the reason (`handleDraftTabClose`, `web/packages/workspace-app/src/state/tabs.svelte.ts:3708-3727`, the dialog at `:3735`; `src/components/FileEditorTab.svelte:1288-1291`). The notice's reason and its instruction were taken out by the lead's ruling on that order's review, since a notice shows for three seconds (`src/state/store.svelte.ts:528`, `:580-582`). What a discard from the draft's dialog would touch is in that order's report (`dev/v0101-team/reports/report-Frontend-26.md` in the development tree, "Residuals").
+
 ## Desired contract
 
 The owner's to decide: whether a draft drawing whose buffer does not parse can be discarded from the draft's own dialog, with no save first, and what such a discard throws away.
