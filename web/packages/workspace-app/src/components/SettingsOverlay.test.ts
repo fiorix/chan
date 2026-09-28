@@ -13,7 +13,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { json, recordRequests, type RecordedRequest } from "../__tests__/fetch";
 import { closeSettings, openSettings, settingsPreferences } from "../__tests__/settings";
-import { ui } from "../state/store.svelte";
+import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 
 afterEach(closeSettings);
 
@@ -112,5 +112,23 @@ describe("secret masking", () => {
     const suffixes = field.querySelector('[aria-label="Secret mask suffixes"]')!;
     expect(suffixes.querySelectorAll("li").length).toBeGreaterThan(0);
     expect(suffixes.querySelector("button")).toBeNull();
+  });
+});
+
+// A window with no workspace keeps its preferences apart from
+// `workspace.info`, and a sibling window's change refreshes them there, so an
+// open form follows that copy.
+describe("an open form in a window with no workspace", () => {
+  afterEach(() => __testSetStandalonePreferences(null));
+
+  test("shows a change another window made", async () => {
+    const { target } = await openSettings("Terminal");
+    const select = target.querySelector<HTMLSelectElement>('select[aria-label="Terminal font"]')!;
+    expect(select.value).toBe("os-default");
+
+    const changed = settingsPreferences();
+    __testSetStandalonePreferences({ ...changed, terminal: { ...changed.terminal, font: "source-code-pro" } });
+
+    await vi.waitFor(() => expect(select.value).toBe("source-code-pro"));
   });
 });

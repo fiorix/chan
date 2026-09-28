@@ -154,6 +154,29 @@ describe("catalog refresh across a devserver restart", () => {
     expect(extensionFor("gone")).toBeUndefined();
   });
 
+  test("refresh drops the launcher rows of a vanished extension and of an old name", async () => {
+    vi.spyOn(api, "extensions").mockResolvedValue([
+      { id: "keep", name: "Old name", entry_path: `/_chan/extensions/keep/${capA}/` },
+      {
+        id: "went",
+        name: "Went",
+        entry_path: `/_chan/extensions/went/${capA}/`,
+        commands: [{ id: "run", title: "Run it" }],
+      },
+    ]);
+    await refreshExtensions();
+
+    vi.spyOn(api, "extensions").mockResolvedValue([
+      { id: "keep", name: "New name", entry_path: `/_chan/extensions/keep/${capB}/` },
+    ]);
+    await refreshExtensions();
+
+    const rows = allCommands()
+      .filter((command) => command.id.startsWith("extension."))
+      .map((command) => [command.id, command.title]);
+    expect(rows).toEqual([["extension.keep", "New name"]]);
+  });
+
   test("singleton focus is unchanged across a refresh: run() focuses, never reopens", async () => {
     const pane: LeafNode = {
       kind: "leaf",

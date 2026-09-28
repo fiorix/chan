@@ -72,6 +72,19 @@ describe("Sixfold Vortex", () => {
     expect(after! - stalled!).toBeCloseTo(4, 9);
   });
 
+  test("keeps up with the speed control: at 4x a paint of 150 ms of clock takes 9 source steps", () => {
+    const { run, callbacks } = startAnimation(SixfoldVortex, recordingWebgl2().gl);
+    run.canvas.parentElement!.style.setProperty("--canvas-animation-speed", "4");
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const times = steppedTimes();
+    callbacks.frame(1150);
+    callbacks.frame(1200);
+
+    const [paint, next] = times();
+    expect(next! - paint!).toBeCloseTo(9, 9);
+  });
+
   test("a resize keeps the simulation where it was", () => {
     // A pane resize arrives as a burst of resizes; restarting the field or
     // its clock on each one would visibly reset the vortex while dragging.
