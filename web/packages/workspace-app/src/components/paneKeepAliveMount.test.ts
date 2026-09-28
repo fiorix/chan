@@ -72,6 +72,7 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 import {
   layout,
+  moveActiveTabToSide,
   reorderTab,
   selectTabInPane,
   type FileTab,
@@ -79,6 +80,7 @@ import {
   type Tab,
 } from "../state/tabs.svelte";
 import { ui } from "../state/store.svelte";
+import { drawableBoard, drawableBoards, standInForBoards } from "../__tests__/excalidraw";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
 
 globalThis.ResizeObserver = TestResizeObserver as unknown as typeof ResizeObserver;
@@ -234,4 +236,60 @@ describe("a pane keeps every tab body mounted across a switch", () => {
     );
   });
 
+});
+
+// A reorder and a send to the pane's other side copy the tab they move, and
+// the pane keeps its board and hands the board the copy. A board whose buffer
+// is not its own last serialization, as before its first change after the
+// drawing opened, seeds again from the copy's buffer, so a stroke still
+// waiting for its serialize is kept only if the copy took it first.
+describe("a pane keeps a board's first stroke across a copy of its tab", () => {
+  const EMPTY = '{"type":"excalidraw","version":2,"source":"chan","elements":[],"appState":{},"files":{}}';
+  const BOARD = "keepalive-board";
+
+  /// Open a drawing beside a text tab, draw its first stroke, copy the tab
+  /// with `copy` while the stroke's serialize waits, let the wait run out,
+  /// and return the drawing's tab as the pane holds it.
+  async function strokeThenCopy(copy: () => void): Promise<FileTab | undefined> {
+    await standInForBoards();
+    drawableBoards();
+    await mountWith([
+      harnessFileTab({
+        id: BOARD, path: "board.excalidraw", fileKind: "text", mode: "canvas", content: EMPTY, saved: EMPTY,
+      }),
+      fileTab("keepalive-file-a"),
+    ]);
+    const board = await drawableBoard();
+    await board.start();
+    await tick();
+    await tick();
+    vi.useFakeTimers();
+    try {
+      board.stroke({ id: "last-stroke", version: 1 });
+      copy();
+      await tick();
+      await tick();
+      await vi.advanceTimersByTimeAsync(200);
+      const pane = layout.nodes[PANE] as LeafNode;
+      return [...pane.tabs, ...(pane.bTabs ?? [])].find((tab) => tab.id === BOARD) as FileTab | undefined;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  test("a first stroke waiting at a reorder lands on the tab the pane holds", async () => {
+    const held = await strokeThenCopy(() => reorderTab(PANE, BOARD, 1));
+    const pane = layout.nodes[PANE] as LeafNode;
+
+    expect({ order: pane.tabs.map((tab) => tab.id), stroke: held?.content.includes("last-stroke") })
+      .toEqual({ order: ["keepalive-file-a", BOARD], stroke: true });
+  });
+
+  test("a first stroke waiting at a send to the other side lands on the tab the pane holds", async () => {
+    const held = await strokeThenCopy(() => moveActiveTabToSide("b"));
+    const pane = layout.nodes[PANE] as LeafNode;
+
+    expect({ side: pane.side, onB: pane.bTabs?.map((tab) => tab.id), stroke: held?.content.includes("last-stroke") })
+      .toEqual({ side: "b", onB: [BOARD], stroke: true });
+  });
 });
