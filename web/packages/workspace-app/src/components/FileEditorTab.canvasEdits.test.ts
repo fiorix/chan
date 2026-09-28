@@ -919,4 +919,75 @@ describe("a live drawing", () => {
 
     expect({ beforeAck, afterAck: isDirty(tab) }).toEqual({ beforeAck: true, afterAck: false });
   });
+
+  const BACKGROUND = "#abcdef";
+  /// What the authority holds beyond the file: the file's element one version
+  /// on, a peer's element and a peer's background.
+  const AUTHORITY = { elements: [{ ...ON_DISK, version: 2 }, PEER], appState: { viewBackgroundColor: BACKGROUND } };
+  const snapshotOf = (tab: FileTab, scene: { elements: unknown[]; appState: Record<string, unknown> }) => ({
+    type: "snapshot", path: tab.path, version: 1, ...scene, files: {}, dirty: false, mtime_ns: "1000000000", cursors: [],
+  });
+
+  /// A drawing on a board the library has not handed over yet, over a session
+  /// whose socket is open and has sent nothing.
+  async function openingDrawing() {
+    const { tab } = await loadedTab("notes/live.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+    const socket = sceneSockets[0]!;
+    socket.open();
+    return { tab, board, socket };
+  }
+
+  /// What the board shows once its first flush has run, and every push it
+  /// made. Runs on fake time and hands back real timers.
+  async function settled(tab: FileTab, board: ReturnType<typeof excalidrawBoard>, socket: SceneSocket) {
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+    return {
+      board: board.elements.map((e) => `${(e as { id: string }).id}@${(e as { version: number }).version}`).sort(),
+      background: board.appState.viewBackgroundColor,
+      pushes: socket.pushes().map(({ elements, appState }) => ({ elements, appState })),
+      dirty: isDirty(tab),
+    };
+  }
+  const SHOWS_THE_AUTHORITY = { board: ["on-disk@2", "peer@1"], background: BACKGROUND, pushes: [], dirty: false };
+
+  test("a snapshot the session holds when the library hands its API over is on the board after the init", async () => {
+    const { tab, board, socket } = await openingDrawing();
+    socket.frame(snapshotOf(tab, AUTHORITY));
+    vi.useFakeTimers();
+    await board.start();
+
+    expect(await settled(tab, board, socket)).toEqual(SHOWS_THE_AUTHORITY);
+  });
+
+  test("a snapshot between the library's handover and its init is on the board after the init", async () => {
+    const { tab, board, socket } = await openingDrawing();
+    vi.useFakeTimers();
+    await board.handOver();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.frame(snapshotOf(tab, AUTHORITY));
+    await board.init();
+
+    expect(await settled(tab, board, socket)).toEqual(SHOWS_THE_AUTHORITY);
+  });
+
+  test.each(["a snapshot", "an update"])(
+    "%s between the init's apply and its first change is on the board after the seed",
+    async (kind) => {
+      const { tab, board, socket } = await openingDrawing();
+      // An update follows the snapshot every attach begins with: here one of
+      // the file as it is.
+      if (kind === "an update") socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+      vi.useFakeTimers();
+      await board.handOver();
+      await vi.advanceTimersByTimeAsync(0);
+      await board.init(() =>
+        socket.frame(kind === "a snapshot" ? snapshotOf(tab, AUTHORITY) : { type: "update", version: 2, ...AUTHORITY }),
+      );
+
+      expect(await settled(tab, board, socket)).toEqual(SHOWS_THE_AUTHORITY);
+    },
+  );
 });
