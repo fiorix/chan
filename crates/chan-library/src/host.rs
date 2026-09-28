@@ -6807,9 +6807,13 @@ mod tests {
             "a removal beside an abandoned lookup: {removal:?}"
         );
         assert_eq!(
-            overlay.on_paths(),
-            vec![stored.to_string_lossy().into_owned()],
-            "a close or a removal beside an abandoned lookup changed the on-row"
+            overlay
+                .entries()
+                .into_iter()
+                .map(|row| (row.path, row.desired_on))
+                .collect::<Vec<_>>(),
+            vec![(stored.to_string_lossy().into_owned(), true)],
+            "a close or a removal beside an abandoned lookup wrote an overlay row"
         );
         assert_eq!(
             host.workspace_status(&canonical),
