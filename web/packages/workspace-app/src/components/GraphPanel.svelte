@@ -58,7 +58,7 @@
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
   import { type ScopeOption } from "../state/scope.svelte";
-  import { parentDir } from "../state/format";
+  import { basename, parentDir } from "../state/format";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
   import { tabMenu, openTabMenu, closeTabMenu } from "../state/tabMenu.svelte";
@@ -167,8 +167,7 @@
       // Label peels to the file basename so the scope header reads
       // as the contact name; the full path stays on `relPath` for
       // the BFS seed.
-      const slash = relPath.lastIndexOf("/");
-      const label = slash < 0 ? relPath : relPath.slice(slash + 1);
+      const label = basename(relPath);
       return { id: scopeId, kind: "contact", label, relPath };
     }
     if (scopeId.startsWith("language:")) {
@@ -539,8 +538,7 @@
     if (isDir) {
       scopeId = path ? `dir:${path}` : "workspace";
     } else {
-      const slash = path.lastIndexOf("/");
-      const parent = slash > 0 ? path.slice(0, slash) : "";
+      const parent = parentDir(path);
       scopeId = parent ? `dir:${parent}` : "workspace";
     }
     openGraphInActivePane({
@@ -1555,7 +1553,7 @@
     if (!needle) return null;
     for (const e of tree.entries) {
       if (e.is_dir || e.kind !== "contact") continue;
-      const base = e.path.split("/").pop() ?? e.path;
+      const base = basename(e.path);
       const stem = base.replace(/\.md$/i, "").toLowerCase();
       if (stem.includes(needle)) return e.path;
     }
