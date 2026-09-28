@@ -557,6 +557,10 @@
     // Team Work needs a workspace (the lead terminal arms the markdown
     // editor + drafts dir), so it is a workspace-window spawn only.
     if (!windowCaps.workspace) return;
+    // One team dialog at a time. The dialog edits the lead it opened over,
+    // so a second lead would take it over and leave the first with no
+    // Cancel that closes it. The launcher still answers over the dialog.
+    if (teamDialogState.request !== null) return;
     const ctx = resolveSpawnContext();
     const lead = createTeamWorkLeadTerminal({ cwd: ctx.dir });
     if (!lead) return;
