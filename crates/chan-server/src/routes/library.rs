@@ -3507,7 +3507,7 @@ mod devserver_route_tests {
             let id = workspace_id(root.path());
             let stall = Arc::new(root_stall::stall_matching(
                 root.path(),
-                &["Library::open_workspace"],
+                &[root_stall::OPEN_WORKSPACE],
             ));
             let open = Arc::clone(&stall);
             on_a_paused_clock(stall, "an on whose open hangs", async move {
@@ -3546,7 +3546,7 @@ mod devserver_route_tests {
             let id = workspace_id(root.path());
             let stall = Arc::new(root_stall::stall_matching(
                 root.path(),
-                &["register_workspace_with_name", "Library::open_workspace"],
+                &[root_stall::REGISTER_WORKSPACE, root_stall::OPEN_WORKSPACE],
             ));
             let steps = Arc::clone(&stall);
             on_a_paused_clock(stall, "an add whose steps hang", async move {
@@ -3602,7 +3602,7 @@ mod devserver_route_tests {
             let id = workspace_id(root.path());
             let stall = Arc::new(root_stall::stall_matching(
                 root.path(),
-                &["Workspace::revalidate_root"],
+                &[root_stall::REVALIDATE_ROOT],
             ));
             let revalidation = Arc::clone(&stall);
             on_a_paused_clock(
@@ -3666,7 +3666,7 @@ mod devserver_route_tests {
             (StatusCode, Option<String>, serde_json::Value),
             serde_json::Value,
         ) {
-            let stall = root_stall::stall_matching(root, &["Library::open_workspace"]);
+            let stall = root_stall::stall_matching(root, &[root_stall::OPEN_WORKSPACE]);
             let first = tokio::spawn(send(router.clone(), method, uri.clone(), body.clone()));
             assert!(
                 stall.wait_entered(Duration::from_secs(10)),
@@ -3771,7 +3771,8 @@ mod devserver_route_tests {
             // The first delete's unregister holds the root's registry-write
             // permit once its caller has gone; the second waits the release
             // budget for it.
-            let stall = root_stall::stall_matching(root.path(), &["unregister_workspace"]);
+            let stall =
+                root_stall::stall_matching(root.path(), &[root_stall::UNREGISTER_WORKSPACE]);
             let ((status, retry_after, body), row) = delete_beside_an_abandoned_call(
                 &router,
                 &stall,
@@ -3791,8 +3792,7 @@ mod devserver_route_tests {
             // The root check an open makes once it holds the workspace and its
             // writer lock: the on whose caller leaves there keeps both, and
             // the delete's unregister meets them.
-            const CHECK: &str =
-                "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+            const CHECK: root_stall::Step = chan_library::ROOT_CHECK_STEP;
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();

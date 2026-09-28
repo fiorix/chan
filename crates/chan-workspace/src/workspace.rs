@@ -1604,6 +1604,8 @@ impl Workspace {
     /// device; a different directory at the path stays
     /// [`ChanError::WorkspaceRootMissing`].
     pub fn revalidate_root(&self) -> Result<bool> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _step = crate::paths::root_stall::REVALIDATE_ROOT.open();
         self.fs.revalidate()
     }
 

@@ -237,6 +237,8 @@ impl Library {
         root: &Path,
         display_name: Option<String>,
     ) -> Result<KnownWorkspace> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _step = crate::paths::root_stall::REGISTER_WORKSPACE.open();
         if !root.exists() {
             return Err(ChanError::WorkspaceRootMissing(root.to_path_buf()));
         }
@@ -276,6 +278,8 @@ impl Library {
     /// Returns `Ok(false)` when no registry row matched `root` and
     /// no wipe was attempted.
     pub fn unregister_workspace(&self, root: &Path) -> Result<bool> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _step = crate::paths::root_stall::UNREGISTER_WORKSPACE.open();
         // Peek before delegating so the return value reflects whether the
         // workspace was registered. reset_workspace itself is idempotent on a
         // never-opened workspace (returns removed_entries = 0), but we
@@ -301,6 +305,8 @@ impl Library {
     /// callers do `register_workspace` first if needed (CLI does both
     /// in one shot for the "point at a directory and go" path).
     pub fn open_workspace(&self, root: &Path) -> Result<Arc<Workspace>> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _step = crate::paths::root_stall::OPEN_WORKSPACE.open();
         let found = self.match_root(root);
         let reg = self.inner.registry.lock().unwrap();
         let entry = reg
@@ -1457,7 +1463,10 @@ mod tests {
     fn a_named_step_is_held_in_any_profile() {
         let (lib, _cfg, root) = lib();
         let stored = lib.register_workspace(root.path()).unwrap().root_path;
-        let stall = crate::paths::root_stall::stall_matching(&stored, &["Library::open_workspace"]);
+        let stall = crate::paths::root_stall::stall_matching(
+            &stored,
+            &[crate::paths::root_stall::OPEN_WORKSPACE],
+        );
         let opening = lib.clone();
         let opened_root = stored.clone();
         let open = std::thread::spawn(move || opening.open_workspace(&opened_root).map(|_| ()));

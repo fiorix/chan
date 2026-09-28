@@ -20,8 +20,10 @@ name = "chan_library"
 # `TenantTaskOwner::task_count`. chan-server's tests (lib.rs,
 # routes/terminal.rs, routes/library_command_capability_tests.rs) use all but
 # `len`/`is_empty`, so they enable this in their dev-dependency; production
-# builds never see these items.
-test-util = []
+# builds never see these items. It also compiles `ROOT_CHECK_STEP`, the step
+# a mount's root check opens for chan-workspace's `root_stall` seam, so it
+# enables that seam.
+test-util = ["chan-workspace/test-hooks"]
 
 [dependencies]
 # The filesystem/registry core. default-features off (no embeddings: the host

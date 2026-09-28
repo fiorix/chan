@@ -1240,7 +1240,7 @@ mod tests {
             let (library, stored, key, _dirs) = registered_root();
             let stall = Arc::new(root_stall::stall_matching(
                 &stored,
-                &["Library::open_workspace"],
+                &[root_stall::OPEN_WORKSPACE],
             ));
             let open = Arc::clone(&stall);
             on_a_paused_clock(stall, "an open whose root hangs", async move {
@@ -1294,7 +1294,7 @@ mod tests {
         async fn an_open_beside_an_abandoned_open_answers_the_rows_words() {
             let (library, stored, key, _dirs) = registered_root();
             let embedded = Arc::new(EmbeddedServer::for_tests(library).await);
-            let stall = root_stall::stall_matching(&stored, &["Library::open_workspace"]);
+            let stall = root_stall::stall_matching(&stored, &[root_stall::OPEN_WORKSPACE]);
             let first = {
                 let embedded = Arc::clone(&embedded);
                 let key = key.clone();
