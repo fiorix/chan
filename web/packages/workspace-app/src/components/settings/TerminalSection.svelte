@@ -136,6 +136,9 @@
   }
 
   function toggleCustomTerminalColors(on: boolean): void {
+    // The page's standard colours are read once, outside the change: the
+    // write runs the change twice, so a read inside it would run twice too.
+    const standard = on && !prefs.terminal_colors?.custom ? snapshotStandardTerminalColors(prefs) : null;
     commit((p) => {
       const stored = p.terminal_colors?.custom;
       return {
@@ -143,7 +146,9 @@
         terminal_colors: on
           ? {
               mode: "custom",
-              custom: stored ? acceptedCustomColors(stored, p) : snapshotStandardTerminalColors(p),
+              custom: stored
+                ? acceptedCustomColors(stored, p)
+                : (standard ?? snapshotStandardTerminalColors(p)),
             }
           : {
               mode: "standard",
