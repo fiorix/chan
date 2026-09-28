@@ -268,7 +268,7 @@ pub fn promote(
 ) -> Result<DraftPromoteReport> {
     let scan = scan_draft(drafts_dir, name)?;
     let target_rel_path = fs_ops::validate_rel(target_rel)?;
-    let target_rel_str = posix_path(&target_rel_path);
+    let target_rel_str = fs_ops::rel_path_text(&target_rel_path);
     let target_abs =
         fs_ops::resolve_safe_strict_canon(workspace_root, workspace_root_canon, target_rel)?;
     refuse_target_inside(drafts_dir, &target_abs, &target_rel_str)?;
@@ -475,7 +475,7 @@ fn preflight_draft_merge(scan: &DraftScan, target_abs: &Path, target_rel: &str) 
     for entry in &scan.entries {
         let dest = target_abs.join(&entry.rel);
         if dest.exists() || fs::symlink_metadata(&dest).is_ok() {
-            let rel = format!("{target_rel}/{}", posix_path(&entry.rel));
+            let rel = format!("{target_rel}/{}", fs_ops::rel_path_text(&entry.rel));
             return Err(ChanError::PathAlreadyExists(rel));
         }
     }
@@ -738,10 +738,6 @@ fn broken(name: &str, message: impl Into<String>) -> ChanError {
         name: name.to_string(),
         message: message.into(),
     }
-}
-
-fn posix_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
 
 pub(crate) fn validate_name(name: &str) -> Result<()> {

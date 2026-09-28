@@ -48,14 +48,9 @@ fn files_under(root: &Path, directory: &Path, paths: &mut Vec<String>) {
         if entry.file_type().unwrap().is_dir() {
             files_under(root, &entry.path(), paths);
         } else {
-            paths.push(
-                entry
-                    .path()
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
+            paths.push(chan_workspace::fs_ops::rel_path_text(
+                entry.path().strip_prefix(root).unwrap(),
+            ));
         }
     }
 }

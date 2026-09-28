@@ -2095,7 +2095,7 @@ impl Workspace {
         // The graph and index keys, and the trash label, use the validated
         // spelling: a caller's `notes/` or `./a.md` names the same path but
         // matches none of the keys it was stored under.
-        let rel_key = rel_path.to_string_lossy().replace('\\', "/");
+        let rel_key = fs_ops::rel_path_text(&rel_path);
         let rel = rel_key.as_str();
         // cap-std lstat: TOCTOU-free type check. The subsequent
         // trash::move_into still operates path-based (it has to

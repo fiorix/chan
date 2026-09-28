@@ -310,7 +310,7 @@ impl RootedFs {
             return Some(String::new());
         }
         if let Ok(rel) = path.strip_prefix(&canon) {
-            return Some(posix_path(rel));
+            return Some(fs_ops::rel_path_text(rel));
         }
         None
     }
@@ -1147,7 +1147,7 @@ impl RootedFs {
             self.copy_file_exclusive(&from_rel, &to_rel, to, &to_canon)?;
             created.push(to_canon);
         } else {
-            self.preflight_tree(&posix_path(&from_rel), true)?;
+            self.preflight_tree(&fs_ops::rel_path_text(&from_rel), true)?;
             let stage = self.create_copy_stage(&to_rel, &to_canon)?;
             if let Err(error) = self
                 .copy_subtree(&from_rel, stage.rel(), &to_canon, &mut created)
@@ -1256,8 +1256,10 @@ impl RootedFs {
 
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
-        if descends_into(&posix_path(&from_rel), &posix_path(&to_rel)) {
-            return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+        let from_text = fs_ops::rel_path_text(&from_rel);
+        let to_text = fs_ops::rel_path_text(&to_rel);
+        if descends_into(&from_text, &to_text) {
+            return Err(ChanError::DestinationInsideSource(to_text));
         }
         let dir = self.dir();
         let source = dir.symlink_metadata(&from_rel).map_err(ChanError::from)?;
@@ -1295,7 +1297,7 @@ impl RootedFs {
                 }
                 .map_err(|error| map_cap_err(error, ancestor))?;
                 if source.dev() == metadata.dev() && source.ino() == metadata.ino() {
-                    return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+                    return Err(ChanError::DestinationInsideSource(to_text));
                 }
             }
         }
@@ -1306,7 +1308,7 @@ impl RootedFs {
             let source = self.root_path.join(&from_rel).canonicalize()?;
             let destination = self.root_path.join(canonical).canonicalize()?;
             if destination.starts_with(source) {
-                return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+                return Err(ChanError::DestinationInsideSource(to_text));
             }
         }
         Ok(())
@@ -1781,8 +1783,8 @@ pub(crate) fn canonical_posix(p: &str) -> String {
 /// more accurately.
 ///
 /// Both arguments must already be canonical, root-relative POSIX paths:
-/// `wire_rel` output on the tree lane, `posix_path(rel(..))` output on the
-/// workspace one.
+/// `wire_rel` output on the tree lane, `fs_ops::rel_path_text(rel(..))`
+/// output on the workspace one.
 pub(crate) fn descends_into(from: &str, to: &str) -> bool {
     to.strip_prefix(from)
         .is_some_and(|rest| rest.starts_with('/'))
@@ -1802,10 +1804,6 @@ pub(crate) fn split_name_ext(name: &str) -> (String, String) {
         }
         _ => (name.to_string(), String::new()),
     }
-}
-
-fn posix_path(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
 
 #[cfg(test)]

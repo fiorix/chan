@@ -1783,7 +1783,7 @@ fn is_filtered(rel: &str, is_dir: bool, policy: &IndexScopePolicy) -> bool {
 
 fn relativize(root: &Path, p: &Path) -> Option<String> {
     let rel = p.strip_prefix(root).ok()?;
-    Some(rel.to_string_lossy().replace('\\', "/"))
+    Some(crate::fs_ops::rel_path_text(rel))
 }
 
 #[cfg(test)]

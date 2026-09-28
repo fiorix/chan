@@ -68,12 +68,14 @@ impl MiniWorkspace {
                 )));
             }
         };
-        let Some(start_rel) = start_rel.to_str() else {
+        if start_rel.to_str().is_none() {
             return Err(ChanError::Io(
                 "start directory is not valid UTF-8".to_string(),
             ));
-        };
-        let start_rel = start_rel.trim_matches('/').replace('\\', "/");
+        }
+        let start_rel = fs_ops::rel_path_text(start_rel)
+            .trim_matches('/')
+            .to_string();
         Ok(Self {
             fs,
             start_rel,

@@ -36,6 +36,8 @@ use ignore::Match;
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
+pub use chan_report::rel_path_text;
+
 use crate::error::{ChanError, Result};
 use crate::vcs::is_vcs_control_path;
 use crate::workspace::WorkspaceGeneration;
@@ -838,10 +840,7 @@ pub fn walk_workspace_scoped<'a>(
             let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
                 return false;
             };
-            policy.includes(
-                &rel.to_string_lossy().replace('\\', "/"),
-                entry.file_type().is_dir(),
-            )
+            policy.includes(&rel_path_text(rel), entry.file_type().is_dir())
         })
         .filter_map(|result| match result {
             Ok(entry) => Some(entry),
@@ -858,9 +857,9 @@ pub fn walk_workspace_scoped<'a>(
 
 /// Every regular file under `walk_from` that the index ingests: inside
 /// `policy` and classified as indexable text. Yields the path relative
-/// to `root` with forward slashes on every platform, the key the index
-/// and the graph share, beside the walk entry so a caller that needs
-/// metadata does not stat again.
+/// to `root` as [`rel_path_text`] spells it, the key the index and the
+/// graph share, beside the walk entry so a caller that needs metadata
+/// does not stat again.
 pub(crate) fn indexable_rel_files<'a>(
     root: &'a Path,
     walk_from: &'a Path,
@@ -869,12 +868,7 @@ pub(crate) fn indexable_rel_files<'a>(
     walk_workspace_scoped(walk_from, policy)
         .filter(|entry| entry.file_type().is_file())
         .filter_map(move |entry| {
-            let rel = entry
-                .path()
-                .strip_prefix(root)
-                .ok()?
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = rel_path_text(entry.path().strip_prefix(root).ok()?);
             is_indexable_text(&rel).then_some((rel, entry))
         })
 }
@@ -1835,8 +1829,9 @@ pub fn resolve_safe(root: &Path, requested: &str) -> Result<PathBuf> {
     Ok(joined)
 }
 
-/// One entry in the file tree. Path is relative to the workspace root
-/// using `/` separators on all platforms (stable JSON shape).
+/// One entry in the file tree. Path is relative to the workspace root, as
+/// [`rel_path_text`] spells it: `/` between components on every platform,
+/// and on Unix a `\` in a name stays part of the name.
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeEntry {
     pub path: String,
@@ -1978,10 +1973,7 @@ fn list_tree_scoped_inner(
                 let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
                     return false;
                 };
-                policy.includes(
-                    &rel.to_string_lossy().replace('\\', "/"),
-                    entry.file_type().is_dir(),
-                )
+                policy.includes(&rel_path_text(rel), entry.file_type().is_dir())
             })
             .filter_map(|result| match result {
                 Ok(entry) => Some(entry),
@@ -2024,7 +2016,7 @@ fn tree_entries<'a>(
             .path()
             .strip_prefix(root)
             .map_err(|_| ChanError::PathEscape)?;
-        let path_str = rel.to_string_lossy().replace('\\', "/");
+        let path_str = rel_path_text(rel);
         let meta = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -2773,13 +2765,7 @@ mod tests {
         std::fs::write(tmp.path().join(".git/HEAD"), b"junk").unwrap();
         let filter = WalkFilter::new(["node_modules"]);
         let names: Vec<_> = walk_workspace_filtered(tmp.path(), &filter)
-            .map(|e| {
-                e.path()
-                    .strip_prefix(tmp.path())
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+            .map(|e| rel_path_text(e.path().strip_prefix(tmp.path()).unwrap()))
             .collect();
         assert!(names.iter().any(|n| n == "notes/a.md"));
         assert!(!names.iter().any(|n| n.contains("node_modules")));
@@ -2808,14 +2794,7 @@ mod tests {
         .unwrap();
 
         let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
-            .map(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(tmp.path())
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+            .map(|entry| rel_path_text(entry.path().strip_prefix(tmp.path()).unwrap()))
             .collect();
 
         assert!(paths.iter().any(|path| path == "vendor/keep.md"));
@@ -2846,14 +2825,7 @@ mod tests {
         .unwrap();
 
         let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
-            .map(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(tmp.path())
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+            .map(|entry| rel_path_text(entry.path().strip_prefix(tmp.path()).unwrap()))
             .collect();
 
         assert!(paths.iter().any(|path| path == "vendor libs/keep.md"));
@@ -2877,14 +2849,7 @@ mod tests {
         .unwrap();
 
         let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
-            .map(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(tmp.path())
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+            .map(|entry| rel_path_text(entry.path().strip_prefix(tmp.path()).unwrap()))
             .collect();
 
         assert!(paths.iter().any(|path| path == "vendor/keep.md"));
@@ -2904,14 +2869,7 @@ mod tests {
         .unwrap();
 
         let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
-            .map(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(tmp.path())
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+            .map(|entry| rel_path_text(entry.path().strip_prefix(tmp.path()).unwrap()))
             .collect();
 
         assert!(
