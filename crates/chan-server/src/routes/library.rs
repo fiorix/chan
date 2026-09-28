@@ -3785,6 +3785,34 @@ mod devserver_route_tests {
             assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
             assert_eq!(row, body["error"], "the answer is not the row's words");
         }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_launcher_delete_beside_an_abandoned_open_answers_still_releasing() {
+            // The root check an open makes once it holds the workspace and its
+            // writer lock: the on whose caller leaves there keeps both, and
+            // the delete's unregister meets them.
+            const CHECK: &str =
+                "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let stored = lib.register_workspace(root.path()).unwrap().root_path;
+            let id = workspace_id(root.path());
+            let (_host, router) = mutable_router(lib);
+            let stall = root_stall::stall_matching(root.path(), &[CHECK]);
+            let ((status, retry_after, body), row) = delete_beside_an_abandoned_call(
+                &router,
+                &stall,
+                &stored,
+                ("POST", format!("/api/library/workspaces/{id}/on")),
+                format!("/api/library/workspaces/{id}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "delete: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "delete: {body}");
+            assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
+            assert_eq!(row, body["error"], "the answer is not the row's words");
+        }
     }
 
     // Unix-only: Windows refuses to delete a tree while the tenant holds
