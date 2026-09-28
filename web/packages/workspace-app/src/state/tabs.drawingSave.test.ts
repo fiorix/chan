@@ -13,6 +13,7 @@ import {
   dismissConflict,
   draftCloseState,
   isDirty,
+  rekeyTabsForRename,
   resolveDraftClose,
   scheduleAutosave,
   setTabContent,
@@ -218,6 +219,24 @@ describe("a refused drawing that does not close says why", () => {
         `board.excalidraw stays in this window: it was not saved because the drawing does not parse (${parseReason(BROKEN)}).`,
       ]],
       written: [],
+    });
+  });
+});
+
+describe("the reason a drawing was not saved", () => {
+  test("goes when a rename takes the tab out of the check and its next save writes", async () => {
+    const pane = resetLayout([drawingTab("notes/board.excalidraw")]);
+    const write = stubWrites();
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, "board-1");
+    await vi.advanceTimersByTimeAsync(900);
+    rekeyTabsForRename("notes/board.excalidraw", "notes/board.json");
+    scheduleAutosave(pane.id, "board-1");
+    await vi.advanceTimersByTimeAsync(900);
+
+    const tab = readTab("board-1")!;
+    expect({ written: written(write), saveError: tab.saveError, dirty: isDirty(tab) }).toEqual({
+      written: [["notes/board.json", BROKEN]], saveError: null, dirty: false,
     });
   });
 });
