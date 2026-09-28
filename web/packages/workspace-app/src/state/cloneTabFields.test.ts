@@ -92,6 +92,7 @@ function loadedFileTab(): FileTab {
     mode: "wysiwyg",
     loading: false,
     error: null,
+    saveError: "the drawing does not parse (Unexpected token)",
     fileMissing: { path: "notes/loaded.md", fragment: null, suggestedPath: null },
     inspectorOpen: true,
     outlineOpen: true,

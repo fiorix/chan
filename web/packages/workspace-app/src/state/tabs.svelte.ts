@@ -255,6 +255,12 @@ export type FileTab = {
   loading: boolean;
   loadProgress?: { loadedBytes: number; totalBytes: number | null };
   error: string | null;
+  /// Why the last save of this buffer wrote nothing, while the buffer stays
+  /// the user's to fix: the tab keeps its editor and says the file was not
+  /// saved. Read only while the tab is dirty, since a buffer equal to the
+  /// file has nothing unsaved. Kept apart from `error`, which the tab shows
+  /// in place of its editor.
+  saveError?: string | null;
   /// Structured recovery state for an open file whose backing path
   /// disappeared. Kept separate from `error` so the UI can offer
   /// Re-open / Find / Close instead of showing a raw OS error.
@@ -3983,6 +3989,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   richPromptCaret: "carry",
   richPromptDraftPath: "carry",
   richPromptHeight: "carry",
+  saveError: "carry",
   saved: "carry",
   savedMtime: "carry",
   savedMtimeNs: "carry",
