@@ -270,9 +270,11 @@
 
   /// Hand pending local deltas to the session: elements whose canvas
   /// version moved past the broadcast map, file entries the authority
-  /// has not seen, and the cleaned appState when it changed.
+  /// has not seen, and the cleaned appState when it changed. A board that has
+  /// not taken its first seed holds what the library's handover or init put
+  /// there, none of it the user's, so it offers nothing, as it binds nothing.
   function pushDeltas(): void {
-    if (!api || !session) return;
+    if (!api || !session || !seededOnce) return;
     const deltas = sceneDeltas(allElements(), lastBroadcast);
     const newFiles: WireFiles = {};
     for (const [k, v] of Object.entries(api.getFiles())) {
