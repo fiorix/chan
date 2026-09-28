@@ -169,7 +169,13 @@ export async function readClipboardText(): Promise<string> {
       console.warn("readClipboardText: read_clipboard_text IPC failed", err);
     }
   }
-  return (await navigator.clipboard?.readText()) ?? "";
+  try {
+    return (await navigator.clipboard?.readText()) ?? "";
+  } catch (err) {
+    // A refused read (no permission, no user activation) is nothing to paste.
+    console.warn("readClipboardText: navigator.clipboard.readText failed", err);
+    return "";
+  }
 }
 
 /// Write clipboard text without needing a user gesture (the OSC 52 path).
