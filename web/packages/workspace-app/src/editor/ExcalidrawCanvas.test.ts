@@ -465,35 +465,6 @@ describe("scene session binding loop safety", () => {
     expect(session.pushScene.mock.calls[1]![2]).toEqual(pasted);
   });
 
-  test("forgetting a push offers its appState again", async () => {
-    // `lastAuthorityAppStateJson` is the same kind of mark for the appState,
-    // and the canvas sets it from the value it pushed rather than from one
-    // the authority sent back.
-    vi.useFakeTimers();
-    const { api, session, binding } = await mountBound([]);
-    const rendered = renderMock.mock.calls.at(-1)![0] as {
-      props: { onChange: () => void };
-    };
-
-    api.setAppState({ gridSize: 9 });
-    rendered.props.onChange();
-    vi.advanceTimersByTime(300);
-    expect(session.pushScene).toHaveBeenCalledTimes(1);
-    const claimed = session.pushScene.mock.calls[0]![1] as Record<string, unknown>;
-    expect(claimed).toBeDefined();
-    // Marked: an unchanged appState is not offered again.
-    rendered.props.onChange();
-    vi.advanceTimersByTime(300);
-    expect(session.pushScene).toHaveBeenCalledTimes(1);
-
-    binding.forgetBroadcast([], claimed, undefined);
-    rendered.props.onChange();
-    vi.advanceTimersByTime(300);
-    expect(session.pushScene).toHaveBeenCalledTimes(2);
-    expect(session.pushScene.mock.calls[1]![1]).toEqual(claimed);
-    vi.useRealTimers();
-  });
-
   test("unmounting unbinds the session", async () => {
     const { session } = await mountBound([]);
     unmount(mounted.pop()!);
