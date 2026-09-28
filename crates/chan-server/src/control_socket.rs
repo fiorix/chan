@@ -1905,6 +1905,18 @@ async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> Cont
                             message: live_terminals_body(active_terminals),
                         }
                     }
+                    // An earlier call of this process on the root has not
+                    // let go: say the words its row reads, which a retry
+                    // answers, as the launcher's routes do.
+                    Err(chan_library::Error::Core(
+                        chan_workspace::ChanError::WorkspaceAlreadyOpen,
+                    )) => ControlResponse::Error {
+                        message: format!(
+                            "{doing} {}: {}",
+                            path.display(),
+                            chan_library::WORKSPACE_STILL_RELEASING
+                        ),
+                    },
                     Err(e) => ControlResponse::Error {
                         message: format!("{doing} {}: {e}", path.display()),
                     },
