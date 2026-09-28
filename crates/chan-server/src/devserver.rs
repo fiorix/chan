@@ -7404,6 +7404,87 @@ mod tests {
         });
     }
 
+    /// A devserver forget over the management router: its status, its
+    /// `Retry-After` and its JSON body.
+    async fn forget_over_the_router(
+        app: Router,
+        prefix: String,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/devserver/workspaces{prefix}"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .map(|value| value.to_str().unwrap().to_string());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, retry_after, body)
+    }
+
+    /// A devserver forget beside an earlier forget whose caller left while
+    /// its unregister was held answers as the launcher's add and on do: the
+    /// words the root's row reads and a retry time, the host's release budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_forget_beside_an_abandoned_unregister_answers_still_releasing() {
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .unwrap()
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).unwrap();
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &["unregister_workspace"]);
+        let first = tokio::spawn(forget_over_the_router(app.clone(), prefix.clone()));
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the first forget never reached its unregister"
+        );
+        first.abort();
+        assert!(
+            first.await.unwrap_err().is_cancelled(),
+            "fixture: the first forget answered"
+        );
+        let again = app.clone();
+        let (status, retry_after, body) = completes_beside(
+            &stall,
+            "a forget beside an abandoned unregister",
+            async move { forget_over_the_router(again, prefix).await },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "forget: {body}");
+        assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
+        assert_eq!(
+            state.host.canonical_root_status(&stored).1.as_deref(),
+            Some(STILL_RELEASING),
+            "the answer is not the row's words"
+        );
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "a forget answered still releasing unregistered the workspace"
+        );
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
