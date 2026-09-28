@@ -7,11 +7,12 @@
 // ones. It keys each handle by window_id (the feed's reconciliation key), mints
 // via the widened createWindow with origin:"browser" (so the desktop watcher
 // never grows a native twin), and on the feed's absence-only discard closes the
-// matching handle. A reload wipes the in-memory handle map, so the reconciler
-// re-flags visible CONNECTED browser-origin records it holds no handle for (via
-// windowAttention) so their rows flash for a re-open click. Disconnected
-// browser-origin rows are stale browser tabs; the launcher discards them instead
-// of keeping a permanent "open elsewhere" affordance.
+// matching handle. A reload wipes the handle map, so visible browser records
+// without a local handle request a re-open click, connected or disconnected.
+// Missing handles cannot prove a window is gone; those rows stay for an explicit
+// Open or Close. A blocked popup leaves its record available by the same rule.
+// Open repairs a blank window or a disconnected record regardless of document
+// type, leaving a connected nonblank page untouched. Refusals close only blanks.
 //
 // Inert under demoState.enabled: a marketing embed never spawns windows.
 
@@ -29,6 +30,7 @@ const handles = new Map<string, Window>();
 // window_ids from the last feed push, so the reconciler detects removals (the
 // feed signals a discard by ABSENCE, never a tombstone).
 let prevIds = new Set<string>();
+
 function servingOrigin(): string {
   return typeof location === "undefined" ? "" : location.origin;
 }
@@ -88,8 +90,7 @@ export async function mintWindow(
         return null;
       }
     }
-    // A blocked popup leaves no handle; if the record never gets a /ws presence
-    // the reconciler treats it like any other stale browser row and discards it.
+    // A blocked popup leaves its record available for a later Open gesture.
     clearWindowAttention(rec.window_id);
     return rec;
   } catch (e) {
