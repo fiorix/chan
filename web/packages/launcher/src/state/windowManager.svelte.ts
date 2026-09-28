@@ -16,7 +16,7 @@
 // Inert under demoState.enabled: a marketing embed never spawns windows.
 
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
-import { isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
+import { isBlankWindow, isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
 import { backend } from "../api/backend";
 import { ApiError, type WindowKind, type WindowRecord, type WindowSet } from "../api/library";
 import { windowUrl } from "../lib/windowUrl";
@@ -109,16 +109,8 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   handles.set(record.window_id, h);
   clearWindowAttention(record.window_id);
   h.focus?.();
-  let blank: boolean;
-  try {
-    const page = h.document;
-    if (isWindowNavigating(h)) return h;
-    blank = h.location.href === "" || h.location.href === "about:blank" || page.contentType !== "text/html";
-  } catch {
-    // A window navigated to another origin still belongs to its user.
-    return h;
-  }
-  if (!blank) return h;
+  const blank = isBlankWindow(h);
+  if ((!blank && record.connected) || isWindowNavigating(h)) return h;
   try {
     const url = windowUrl(record, servingOrigin());
     if (!(await navigateWindowWhenReady(h, url, checkWindowPage)) || h.closed) {
@@ -127,7 +119,7 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
     }
     return h;
   } catch (e) {
-    h.close();
+    if (blank) h.close();
     if (handles.get(record.window_id) === h) handles.delete(record.window_id);
     throw e;
   }
