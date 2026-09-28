@@ -633,6 +633,48 @@ impl RootedFs {
         Ok((content, stat))
     }
 
+    /// Read at most `max_bytes` of UTF-8 text from the start of a file,
+    /// behind the editable-text gate, plus the open-handle stat.
+    pub(crate) fn read_text_with_stat_bounded(
+        &self,
+        rel: &str,
+        max_bytes: usize,
+    ) -> Result<(String, FileStat)> {
+        use std::io::Read;
+        if !self.editable_text_gate(rel) {
+            return Err(ChanError::NotEditableText(rel.to_string()));
+        }
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        ensure_regular_file_in(&dir, &rel_path)?;
+        let f = dir.open(&rel_path).map_err(ChanError::from)?;
+        let meta = f.metadata()?;
+        let stat = FileStat {
+            size: meta.len(),
+            mtime: mtime_secs_cap(&meta),
+            mtime_ns: mtime_ns_cap(&meta),
+            is_dir: false,
+        };
+        // The window ends at the size the open handle reported, so bytes
+        // the file gains after the open are not read.
+        let limit = stat.size.min(max_bytes as u64);
+        let mut bytes = Vec::with_capacity(limit as usize);
+        f.take(limit).read_to_end(&mut bytes)?;
+        let cut = limit < stat.size && bytes.len() as u64 == limit;
+        if cut {
+            if let Err(error) = std::str::from_utf8(&bytes) {
+                // Only a character the cut splits ends the bytes early; an
+                // invalid byte before it is left for the check below.
+                if error.error_len().is_none() {
+                    bytes.truncate(error.valid_up_to());
+                }
+            }
+        }
+        // Validated as `read_text_with_stat` validates, with its error.
+        let mut text = String::with_capacity(bytes.len());
+        bytes.as_slice().read_to_string(&mut text)?;
+        Ok((text, stat))
+    }
+
     /// Stream UTF-8 text chunks after the open-handle stat.
     pub(crate) fn read_text_with_stat_chunked<F>(
         &self,

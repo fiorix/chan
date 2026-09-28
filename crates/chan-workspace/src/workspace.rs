@@ -1781,6 +1781,26 @@ impl Workspace {
         self.fs.read_text_with_stat(rel)
     }
 
+    /// Read at most `max_bytes` of UTF-8 text from the start of a file,
+    /// behind the editable-text gate `read_text_with_stat` applies, and
+    /// return it with the file's stat, taken from the open handle. The read
+    /// stops at `max_bytes` or at the size that stat reports, whichever is
+    /// smaller, so bytes the file gains after the open are not read, and a
+    /// file shorter at the read than its stat gives the bytes it holds. A cut
+    /// that falls inside a multibyte character goes back to that
+    /// character's first byte. Only the bytes read are validated: an invalid
+    /// one among them is the error `read_text_with_stat` returns, and bytes
+    /// past the cut are neither read nor validated. The stat's `size` is the
+    /// whole file's, so a caller knows its text was cut when that size passes
+    /// `max_bytes`.
+    pub fn read_text_with_stat_bounded(
+        &self,
+        rel: &str,
+        max_bytes: usize,
+    ) -> Result<(String, FileStat)> {
+        self.fs.read_text_with_stat_bounded(rel, max_bytes)
+    }
+
     /// Stream UTF-8 text in chunks and include the open-handle stat.
     /// Returns early with `Ok(())` when the callback returns false,
     /// which lets HTTP callers stop disk reads after the client
@@ -8173,6 +8193,77 @@ mod tests {
         assert!(stat.mtime.is_some());
         assert!(stat.mtime_ns.is_some());
         assert!(!stat.is_dir);
+    }
+
+    #[test]
+    fn read_text_with_stat_bounded_returns_a_file_within_the_bound_whole() {
+        let (_cfg, _root, workspace) = fixture();
+        let text = "hello \u{e9}\u{20ac}";
+        workspace.write_text("a.md", text).unwrap();
+        let (_, whole) = workspace.read_text_with_stat("a.md").unwrap();
+        for bound in [text.len(), text.len() + 1, 1 << 20] {
+            let (content, stat) = workspace
+                .read_text_with_stat_bounded("a.md", bound)
+                .unwrap();
+            assert_eq!(content, text, "bound {bound}");
+            assert_eq!(stat, whole, "bound {bound}");
+        }
+    }
+
+    #[test]
+    fn read_text_with_stat_bounded_cuts_at_the_bound_or_the_character_before_it() {
+        let (_cfg, root, workspace) = fixture();
+        // A three-byte character at bytes 3..6.
+        let text = "abc\u{20ac}def";
+        std::fs::write(root.path().join("a.md"), text).unwrap();
+        for (bound, expected) in [
+            (3, "abc"),
+            (4, "abc"),
+            (5, "abc"),
+            (6, "abc\u{20ac}"),
+            (7, "abc\u{20ac}d"),
+        ] {
+            let (content, stat) = workspace
+                .read_text_with_stat_bounded("a.md", bound)
+                .unwrap();
+            assert_eq!(content, expected, "bound {bound}");
+            assert_eq!(stat.size, text.len() as u64, "bound {bound}");
+        }
+        // Bytes past the bound are neither read nor validated.
+        std::fs::write(root.path().join("b.md"), [b'a', b'b', b'c', 0xff, 0xfe]).unwrap();
+        let (content, stat) = workspace.read_text_with_stat_bounded("b.md", 3).unwrap();
+        assert_eq!(content, "abc");
+        assert_eq!(stat.size, 5);
+    }
+
+    #[test]
+    fn read_text_with_stat_bounded_refuses_invalid_utf8_it_reads_as_read_text_with_stat_does() {
+        let (_cfg, root, workspace) = fixture();
+        // An invalid byte inside the bound, and a file whose last character
+        // is cut short by its own end rather than by the bound.
+        for (name, bytes) in [
+            ("bad.md", &[b'a', 0xff, b'b'][..]),
+            ("short.md", &[b'a', 0xe2, 0x82][..]),
+        ] {
+            std::fs::write(root.path().join(name), bytes).unwrap();
+            let expected = workspace.read_text_with_stat(name).unwrap_err();
+            let err = workspace.read_text_with_stat_bounded(name, 16).unwrap_err();
+            assert_eq!(err.to_string(), expected.to_string(), "{name}");
+        }
+    }
+
+    #[test]
+    fn read_text_with_stat_bounded_refuses_a_path_that_is_not_editable_text() {
+        let (_cfg, root, workspace) = fixture();
+        std::fs::write(root.path().join("image.bin"), [0, 1, 2, 3]).unwrap();
+        assert!(matches!(
+            workspace.read_text_with_stat("image.bin").unwrap_err(),
+            ChanError::NotEditableText(_)
+        ));
+        let err = workspace
+            .read_text_with_stat_bounded("image.bin", 16)
+            .unwrap_err();
+        assert!(matches!(err, ChanError::NotEditableText(_)), "{err:?}");
     }
 
     #[test]
