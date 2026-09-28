@@ -439,18 +439,97 @@ pub fn canonicalize_normalized(workspace_root: &Path) -> PathBuf {
 ///
 /// Compiled for this crate's tests and for downstream test builds that enable
 /// `test-hooks`: chan-server's tests link chan-workspace as a normal
-/// dependency, so `cfg(test)` alone would not reach them. Each held call
-/// records the chain of chan functions that made it, so a test that finds an
-/// operation stuck can name the call that waited on the stalled root. Stalls
-/// are keyed by root, so tests that stall their own temporary roots do not
-/// interfere.
+/// dependency, so `cfg(test)` alone would not reach them. A test can hold one
+/// named [`Step`] of an operation and let the rest through. The code that runs
+/// a step opens it on the thread that makes the step's calls, so a step is
+/// known in every build profile and on every platform: a release build strips
+/// the symbol names a backtrace would offer, and inlining removes frames. Each
+/// held call records the steps open on it and the path it asked, so a test
+/// that finds an operation stuck can name the call that waited on the stalled
+/// root. Stalls are keyed by root, so tests that stall their own temporary
+/// roots do not interfere.
 #[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod root_stall {
+    use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::fmt;
+    use std::marker::PhantomData;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
     use std::time::{Duration, Instant};
+
+    /// One named step of an operation on a root, such as an open's lookup of
+    /// its root. The code that runs the step opens it with [`Step::open`], and
+    /// a test holds its calls with [`stall_matching`]. A step's constant is
+    /// defined beside the line that opens it and under the same `cfg`, so a
+    /// test cannot name a step that no code of its build opens.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Step(&'static str);
+
+    impl Step {
+        /// A step named `name`.
+        pub const fn new(name: &'static str) -> Self {
+            Self(name)
+        }
+
+        /// The name a held call's record gives this step.
+        pub fn name(self) -> &'static str {
+            self.0
+        }
+
+        /// Open this step on the calling thread until the returned guard
+        /// drops. A step is open only on the thread that opened it, so it is
+        /// opened in synchronous code where the step's filesystem calls run:
+        /// inside a closure that moves to another thread, not around it. The
+        /// guard is not `Send`, so a spawned future cannot hold it across an
+        /// await.
+        #[must_use = "a step is open only while its guard lives"]
+        pub fn open(self) -> OpenStep {
+            OPEN_STEPS.with(|open| open.borrow_mut().push(self));
+            OpenStep {
+                step: self,
+                _thread: PhantomData,
+            }
+        }
+    }
+
+    impl fmt::Display for Step {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    /// A step open on this thread. Dropping it closes the step, also when the
+    /// step's function unwinds.
+    pub struct OpenStep {
+        step: Step,
+        _thread: PhantomData<*const ()>,
+    }
+
+    impl Drop for OpenStep {
+        fn drop(&mut self) {
+            let closed = OPEN_STEPS.with(|open| open.borrow_mut().pop());
+            if closed != Some(self.step) && !std::thread::panicking() {
+                panic!("step {} closed while {closed:?} was open", self.step);
+            }
+        }
+    }
+
+    thread_local! {
+        /// The steps open on this thread, outermost first.
+        static OPEN_STEPS: RefCell<Vec<Step>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// [`Library::open_workspace`](crate::Library::open_workspace).
+    pub const OPEN_WORKSPACE: Step = Step::new("Library::open_workspace");
+    /// [`Library::register_workspace_with_name`](crate::Library::register_workspace_with_name),
+    /// which every registration runs.
+    pub const REGISTER_WORKSPACE: Step = Step::new("Library::register_workspace_with_name");
+    /// [`Library::unregister_workspace`](crate::Library::unregister_workspace).
+    pub const UNREGISTER_WORKSPACE: Step = Step::new("Library::unregister_workspace");
+    /// [`Workspace::revalidate_root`](crate::Workspace::revalidate_root).
+    pub const REVALIDATE_ROOT: Step = Step::new("Workspace::revalidate_root");
 
     #[derive(Default)]
     struct Gate {
@@ -463,9 +542,9 @@ pub mod root_stall {
         released: bool,
         /// Calls still to let through before the stall starts holding.
         passes: usize,
-        /// Only calls whose chain names one of these are held; empty holds
-        /// every call.
-        only: Vec<String>,
+        /// Only calls made while one of these steps is open are held; empty
+        /// holds every call.
+        only: Vec<Step>,
         /// Calls let through so far.
         passed: usize,
         /// Bumped by [`RootStall::release_held`], which lets go the calls
@@ -505,18 +584,19 @@ pub mod root_stall {
         install(root.into(), passes, Vec::new())
     }
 
-    /// [`stall`] that holds only the calls whose chain of chan functions
-    /// names one of `functions`, and lets every other call through, so a
-    /// test can hold one step of an operation on the root and not the rest.
-    pub fn stall_matching(root: impl Into<PathBuf>, functions: &[&str]) -> RootStall {
-        install(
-            root.into(),
-            0,
-            functions.iter().map(|name| name.to_string()).collect(),
-        )
+    /// [`stall`] that holds only the calls made while one of `steps` is open
+    /// on the calling thread, and lets every other call through, so a test
+    /// can hold one step of an operation on the root and not the rest.
+    /// Panics when `steps` is empty: [`stall`] holds every call.
+    pub fn stall_matching(root: impl Into<PathBuf>, steps: &[Step]) -> RootStall {
+        assert!(
+            !steps.is_empty(),
+            "stall_matching needs at least one step; stall holds every call"
+        );
+        install(root.into(), 0, steps.to_vec())
     }
 
-    fn install(root: PathBuf, passes: usize, only: Vec<String>) -> RootStall {
+    fn install(root: PathBuf, passes: usize, only: Vec<Step>) -> RootStall {
         let mut roots = vec![root.clone()];
         if let Ok(canonical) = dunce::canonicalize(&root) {
             if canonical != root {
@@ -611,8 +691,9 @@ pub mod root_stall {
                 .passed
         }
 
-        /// The chan call chain of every call that has reached the stall,
-        /// innermost function first.
+        /// The record of every call that has reached the stall: the steps
+        /// open on it, innermost first and joined by ` <- `, then ` @ ` and
+        /// the path it asked.
         pub fn entered(&self) -> Vec<String> {
             self.gate
                 .state
@@ -675,10 +756,9 @@ pub mod root_stall {
         let Some(gate) = gate else {
             return;
         };
-        let chain = call_chain();
+        let open = OPEN_STEPS.with(|open| open.borrow().clone());
         let mut state = gate.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let holds =
-            state.only.is_empty() || state.only.iter().any(|name| chain.contains(name.as_str()));
+        let holds = state.only.is_empty() || state.only.iter().any(|step| open.contains(step));
         if !holds || state.passes > 0 {
             if holds {
                 state.passes -= 1;
@@ -687,7 +767,7 @@ pub mod root_stall {
             gate.changed.notify_all();
             return;
         }
-        state.entered.push(chain);
+        state.entered.push(record(&open, path));
         let epoch = state.epoch;
         gate.changed.notify_all();
         while !state.released && state.epoch == epoch {
@@ -698,27 +778,14 @@ pub mod root_stall {
         }
     }
 
-    /// The chan functions on the current stack, innermost first, joined by
-    /// ` <- `, without this module's own frames.
-    fn call_chain() -> String {
-        let trace = std::backtrace::Backtrace::force_capture().to_string();
-        let mut frames: Vec<&str> = Vec::new();
-        for line in trace.lines() {
-            let Some((_, symbol)) = line.trim_start().split_once(": ") else {
-                continue;
-            };
-            if !symbol.starts_with("chan_") || symbol.contains("root_stall") {
-                continue;
-            }
-            let symbol = symbol.trim_end_matches("::{{closure}}");
-            if frames.last() != Some(&symbol) {
-                frames.push(symbol);
-            }
-            if frames.len() == 8 {
-                break;
-            }
+    /// A held call's record: the steps open on it, innermost first, and the
+    /// path it asked.
+    fn record(open: &[Step], path: &Path) -> String {
+        if open.is_empty() {
+            return format!("(no step) @ {}", path.display());
         }
-        frames.join(" <- ")
+        let steps: Vec<&str> = open.iter().rev().map(|step| step.name()).collect();
+        format!("{} @ {}", steps.join(" <- "), path.display())
     }
 }
 

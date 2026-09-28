@@ -1701,6 +1701,8 @@ impl WorkspaceHost {
                         .unwrap();
                 }
                 let result = workspace.ensure_root_available();
+                #[cfg(feature = "test-util")]
+                let _step = crate::ROOT_CHECK_STEP.open();
                 let key = canonical_key(&checking_root);
                 drop(workspace);
                 (result, key, held_permit)

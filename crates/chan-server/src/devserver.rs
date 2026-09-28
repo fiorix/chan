@@ -3747,7 +3747,9 @@ mod tests {
                 let files = state.standalone_files.as_ref().expect("Files supported");
                 let manager = Arc::downgrade(&files.watcher);
                 let worker = Arc::downgrade(&files.mutations);
-                let stall = held.then(|| root_stall::stall_matching(&directory, &["try_attach"]));
+                let stall = held.then(|| {
+                    root_stall::stall_matching(&directory, &[crate::standalone_watch::ATTACH_STEP])
+                });
                 let (id, mut frames) = state.scope_registry.register();
                 files
                     .watcher
@@ -7043,10 +7045,7 @@ mod tests {
 
         let stall = root_stall::stall_matching(
             root.path(),
-            &[
-                "WorkspaceHost::open_workspace",
-                "Workspace::revalidate_root",
-            ],
+            &[chan_library::ROOT_CHECK_STEP, root_stall::REVALIDATE_ROOT],
         );
         let host = Arc::clone(&state.host);
         let launching = key.clone();
@@ -7234,9 +7233,9 @@ mod tests {
                     .unwrap();
             }
             let hop = if mounted {
-                "Workspace::revalidate_root"
+                root_stall::REVALIDATE_ROOT
             } else {
-                "Library::open_workspace"
+                root_stall::OPEN_WORKSPACE
             };
             let stall = root_stall::stall_matching(root.path(), &[hop]);
             let opening = Arc::clone(&state.host);
@@ -7343,8 +7342,7 @@ mod tests {
     }
 
     fn abandoned_root_check_holds_mount_admission(already_open: bool) {
-        const CHECK: &str =
-            "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+        const CHECK: root_stall::Step = chan_library::ROOT_CHECK_STEP;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(5)
             .enable_all()
@@ -7362,7 +7360,7 @@ mod tests {
             let workspace =
                 already_open.then(|| state.host.library().open_workspace(root.path()).unwrap());
             let stall =
-                root_stall::stall_matching(root.path(), &[CHECK, "Library::open_workspace"]);
+                root_stall::stall_matching(root.path(), &[CHECK, root_stall::OPEN_WORKSPACE]);
             let opening = Arc::clone(&state.host);
             let opening_root = root.path().to_path_buf();
             let supplied = workspace.clone();
@@ -7383,7 +7381,10 @@ mod tests {
                 let mut released = 0;
                 loop {
                     let entered = stall.entered();
-                    if entered.last().is_some_and(|call| call.contains(CHECK)) {
+                    if entered
+                        .last()
+                        .is_some_and(|call| call.contains(CHECK.name()))
+                    {
                         break;
                     }
                     if entered.len() > released {
@@ -7509,7 +7510,7 @@ mod tests {
             .root_path;
         let prefix = registered_workspace_prefix(&stored).unwrap();
         let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-        let stall = root_stall::stall_matching(root.path(), &["unregister_workspace"]);
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::UNREGISTER_WORKSPACE]);
         let first = tokio::spawn(forget_over_the_router(app.clone(), prefix.clone()));
         assert!(
             stall.wait_entered(Duration::from_secs(10)),
@@ -7564,7 +7565,7 @@ mod tests {
             .unwrap()
             .expect("fixture: a fresh attempt");
         let stored = attempt.root.clone();
-        let stall = root_stall::stall_matching(root, &["unregister_workspace"]);
+        let stall = root_stall::stall_matching(root, &[root_stall::UNREGISTER_WORKSPACE]);
         let removing = Arc::clone(&state.host);
         let removed = stored.clone();
         let first =
@@ -7802,8 +7803,7 @@ mod tests {
     /// bound, and a close and a forget of that root finish after it.
     #[test]
     fn a_serve_beside_an_abandoned_root_check_answers_already_open_inside_its_bound() {
-        const CHECK: &str =
-            "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
+        const CHECK: root_stall::Step = chan_library::ROOT_CHECK_STEP;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(4)
             .enable_all()
@@ -7934,9 +7934,9 @@ mod tests {
                     .expect("mount before revalidation");
             }
             let hop = if mounted {
-                "Workspace::revalidate_root"
+                root_stall::REVALIDATE_ROOT
             } else {
-                "Library::open_workspace"
+                root_stall::OPEN_WORKSPACE
             };
             // Every key lookup must pass so later callers reach the same
             // lifecycle lock, even after an earlier caller stops waiting.
@@ -8450,9 +8450,7 @@ mod tests {
 
         // The root check after the build resolves the runtime's key on the
         // blocking pool; hold that call and no other.
-        let post_build_check =
-            "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
-        let stall = root_stall::stall_matching(late.path(), &[post_build_check]);
+        let stall = root_stall::stall_matching(late.path(), &[chan_library::ROOT_CHECK_STEP]);
         let mounting = Arc::clone(&state);
         let mount = tokio::spawn(async move {
             mounting

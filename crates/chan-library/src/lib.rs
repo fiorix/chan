@@ -46,6 +46,14 @@ pub use host::{
     LocalColorStore, LocalThemeStore, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus,
     WORKSPACE_STILL_RELEASING,
 };
+
+/// The root check a mount runs after its tenant build, under the root's
+/// permit, as a step of chan-workspace's `root_stall` seam: a downstream test
+/// holds it with `stall_matching`. Behind `test-util` alone, which enables that
+/// seam; this crate's own tests do not.
+#[cfg(feature = "test-util")]
+pub const ROOT_CHECK_STEP: chan_workspace::paths::root_stall::Step =
+    chan_workspace::paths::root_stall::Step::new("WorkspaceHost::open_workspace root check");
 pub use prefix::{
     allocate_workspace_prefix, registered_workspace_prefix, workspace_prefix_for, workspace_slug,
 };

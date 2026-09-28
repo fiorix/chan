@@ -36,6 +36,12 @@ use notify::Watcher as _;
 use crate::bus::{FsResetReason, ScopeDelta, ScopeRegistry};
 use crate::standalone_mutations::StandaloneMutationBus;
 
+/// One attach of a Files watch scope ([`ActorState::try_attach`]), as a step
+/// of chan-workspace's `root_stall` seam that a test holds.
+#[cfg(test)]
+pub(crate) const ATTACH_STEP: chan_workspace::paths::root_stall::Step =
+    chan_workspace::paths::root_stall::Step::new("standalone_watch::ActorState::try_attach");
+
 /// How often pending (desired but unattached) scopes retry their OS watch.
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// Maximum wait for a watch worker that may be inside a stalled filesystem call.
@@ -218,6 +224,8 @@ impl ActorState {
     /// race: once the watch is live, the subscriber relists once and no
     /// creation between its first list and this point can be missed.
     fn try_attach(&mut self, dir: &str) {
+        #[cfg(test)]
+        let _step = ATTACH_STEP.open();
         let abs = match self.resolver.resolve_dir(dir) {
             Ok(abs) => abs,
             Err(reason) => {

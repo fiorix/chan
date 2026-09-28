@@ -5889,7 +5889,7 @@ mod tests {
         ));
         let control: Arc<dyn chan_library::HostControl> = host.clone();
         let scope = UnserveScope::Host(Arc::downgrade(&control));
-        let stall = root_stall::stall_matching(root.path(), &["unregister_workspace"]);
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::UNREGISTER_WORKSPACE]);
         let removing = Arc::clone(&host);
         let removed = stored.clone();
         let first =
