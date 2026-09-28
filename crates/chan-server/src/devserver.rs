@@ -45,7 +45,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
-use chan_workspace::Library;
+use chan_workspace::{KnownWorkspace, Library};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::random_token;
@@ -594,6 +594,59 @@ impl WorkspaceRecord {
             desired_on: self.desired == DesiredMount::On,
             generation: self.generation,
         })
+    }
+
+    /// Whether this record joins the registry row `row`: its root is one of
+    /// the keys the row goes by ([`registry_row_keys`]), the row's stored
+    /// root or the canonical path the row last resolved to.
+    fn joins(&self, row: &KnownWorkspace) -> bool {
+        registry_row_keys(row).contains(&self.root.as_path())
+    }
+}
+
+/// The records the devserver's list reads, every one but a tombstone, with
+/// the prefixes the host serves.
+struct Listing {
+    records: Vec<WorkspaceRecord>,
+    served: HashSet<String>,
+}
+
+impl Listing {
+    /// Read from the record map its caller holds, with the host's prefixes
+    /// read while it holds it, as the save reads them: a mount publishes its
+    /// prefix on the host before its record turns Mounted under that lock,
+    /// so a record read as Mounted has its prefix read as served.
+    fn read(workspaces: &HashMap<String, WorkspaceRecord>, host: &WorkspaceHost) -> Self {
+        Self {
+            records: workspaces
+                .values()
+                .filter(|record| record.desired != DesiredMount::Forgotten)
+                .cloned()
+                .collect(),
+            served: host
+                .mounted_prefixes()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// The record the registry row `row` shows among those that join it:
+    /// the one whose prefix the host serves; then the one desired on; then
+    /// the one keyed by the row's stored root; then the one whose prefix
+    /// sorts first. `None` when no record joins the row.
+    fn shown(&self, row: &KnownWorkspace) -> Option<&WorkspaceRecord> {
+        self.records
+            .iter()
+            .filter(|record| record.joins(row))
+            .min_by_key(|record| {
+                (
+                    !self.served.contains(&record.prefix),
+                    record.desired != DesiredMount::On,
+                    record.root != row.root_path,
+                    record.prefix.as_str(),
+                )
+            })
     }
 }
 
@@ -1378,24 +1431,31 @@ impl DevserverState {
     }
 
     /// The current [`WorkspaceEntry`] for `prefix`, or `None` when no
-    /// workspace is registered there. The row lists the stored root of the
-    /// registry row the record joins, as the list does. The record is copied
-    /// out of the map before its row is built, as the list's rows are.
+    /// workspace is registered there. For a record that joins a registry
+    /// row it is the row the list shows for that registry row
+    /// ([`registry_row_entry`](Self::registry_row_entry)), which may be
+    /// another record's, so a client that takes the answer as the row holds
+    /// what its next list holds; a record that joins none is listed at its
+    /// own root. The records are copied out of the map before the row is
+    /// built, as the list's are.
     fn entry_for(&self, prefix: &str) -> Option<WorkspaceEntry> {
-        let record = self
-            .workspaces
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(prefix)
-            .cloned()?;
-        let root = self
+        let (record, listing) = {
+            let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                workspaces.get(prefix).cloned()?,
+                Listing::read(&workspaces, &self.host),
+            )
+        };
+        match self
             .host
             .library()
             .list_workspaces()
             .into_iter()
-            .find(|row| registry_row_keys(row).contains(&record.root.as_path()))
-            .map_or_else(|| record.root.clone(), |row| row.root_path);
-        Some(self.entry_from_record(&record, &root))
+            .find(|row| record.joins(row))
+        {
+            Some(row) => self.registry_row_entry(&row, &listing),
+            None => Some(self.entry_from_record(&record, &record.root)),
+        }
     }
 
     /// Forget the workspace at `prefix`: unmount it if on, then drop the
@@ -1632,49 +1692,29 @@ impl DevserverState {
     /// derived prefix with no token; toggling it on mounts it (see
     /// [`set_workspace_on`](Self::set_workspace_on)). Sorted by prefix.
     ///
-    /// A record joins the registry row that goes by its root
-    /// ([`registry_row_keys`]): the row's stored root, or the canonical path
-    /// the row last resolved to, which is how a record made for a root whose
-    /// path resolves elsewhere since it was registered is keyed. The joined
-    /// row lists the row's stored root, with the record's prefix, token, `on`
-    /// and status. When two records join one row, the row shows the one
-    /// desired on; when neither or both are, the one keyed by the stored
-    /// root, and then the one whose prefix sorts first. The other is not
-    /// listed.
+    /// Each registry row is listed by
+    /// [`registry_row_entry`](Self::registry_row_entry), which answers the
+    /// on route too.
     ///
     /// The records are copied out of the record map before any row is built,
     /// so a row's status probe never runs while this holds the map that
     /// mounts, the on and off toggle, forget and persistence all take.
     fn workspace_entries(&self) -> Vec<WorkspaceEntry> {
-        let records: Vec<WorkspaceRecord> = {
+        let listing = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces
-                .values()
-                .filter(|record| record.desired != DesiredMount::Forgotten)
-                .cloned()
-                .collect()
+            Listing::read(&workspaces, &self.host)
         };
         let mut entries: Vec<WorkspaceEntry> = Vec::new();
         let mut joined: HashSet<&str> = HashSet::new();
         for ws in self.host.library().list_workspaces() {
-            let keys = registry_row_keys(&ws);
-            let joining: Vec<&WorkspaceRecord> = records
-                .iter()
-                .filter(|record| keys.contains(&record.root.as_path()))
-                .collect();
-            joined.extend(joining.iter().map(|record| record.prefix.as_str()));
-            let shown = joining.into_iter().min_by_key(|record| {
-                (
-                    record.desired != DesiredMount::On,
-                    record.root != ws.root_path,
-                    record.prefix.as_str(),
-                )
-            });
-            if let Some(record) = shown {
-                entries.push(self.entry_from_record(record, &ws.root_path));
-            } else if let Ok(prefix) = registered_workspace_prefix(&ws.root_path) {
-                entries.push(self.off_row(prefix, &ws.root_path));
-            }
+            joined.extend(
+                listing
+                    .records
+                    .iter()
+                    .filter(|record| record.joins(&ws))
+                    .map(|record| record.prefix.as_str()),
+            );
+            entries.extend(self.registry_row_entry(&ws, &listing));
         }
         // Defensive: a served workspace whose root left the library (forgotten
         // while still mounted) must still surface so a live mount never
@@ -1682,7 +1722,7 @@ impl DevserverState {
         // the stale devserver map row is not a real workspace anymore; this is
         // the control-socket `chan workspace forget` path. A record that joined
         // a row is that row's, listed or not, and is not listed again here.
-        for record in &records {
+        for record in &listing.records {
             if joined.contains(record.prefix.as_str()) {
                 continue;
             }
@@ -1693,6 +1733,28 @@ impl DevserverState {
         }
         entries.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         entries
+    }
+
+    /// The row the list shows for the registry row `ws`, or `None` when no
+    /// record joins it and its stored root derives no prefix.
+    ///
+    /// A record joins the registry row that goes by its root
+    /// ([`registry_row_keys`]): the row's stored root, or the canonical path
+    /// the row last resolved to, which differ for a root whose path resolves
+    /// elsewhere since it was registered. The joined row lists the row's
+    /// stored root, with the prefix, token, `on` and status of the record
+    /// [`Listing::shown`] chooses: the one whose prefix the host serves, so
+    /// the row's prefix and token are the mount a client reaches, before the
+    /// one desired on, the one keyed by the stored root and the one whose
+    /// prefix sorts first. The other records are not listed. A row no record
+    /// joins is listed off at the prefix derived from its stored root.
+    fn registry_row_entry(&self, ws: &KnownWorkspace, listing: &Listing) -> Option<WorkspaceEntry> {
+        match listing.shown(ws) {
+            Some(record) => Some(self.entry_from_record(record, &ws.root_path)),
+            None => registered_workspace_prefix(&ws.root_path)
+                .ok()
+                .map(|prefix| self.off_row(prefix, &ws.root_path)),
+        }
     }
 
     /// Resolve a route prefix back to a host-library workspace root for a
