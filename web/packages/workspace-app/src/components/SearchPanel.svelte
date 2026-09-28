@@ -866,7 +866,7 @@
                      file (opens). The trailing "/" + "directory" label mark a
                      dir; a file shows its basename like a filename match. -->
                 <div class="row1">
-                  <KindChip kind="document" compact dim />
+                  <KindChip kind={r.isDir ? "folder" : "document"} compact dim />
                   <span class="path">{r.path}{r.isDir ? "/" : ""}</span>
                 </div>
                 <div class="preview muted">{r.isDir ? "directory" : basename(r.path)}</div>
