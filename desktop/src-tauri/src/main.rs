@@ -9422,6 +9422,351 @@ mod tests {
         }
     }
 
+    /// The window a handoff opens, stored under the registry row of the
+    /// workspace it serves, the path the launcher nests the window under.
+    /// Every test runs in its own chan home, where the local window registry
+    /// the desktop mints into is installed.
+    pub(crate) mod handoff_row {
+        use super::*;
+        use chan_workspace::paths::root_stall;
+
+        /// How long a test waits for the handoff's arm that registers a root
+        /// to mount it and mint its window.
+        const MOUNT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+        fn own_home(test: &str) -> bool {
+            embedded::in_own_chan_home(&format!("tests::handoff_row::{test}"))
+        }
+
+        /// How long the CLI waits for the handoff's `Opened` reply: past it,
+        /// `chan serve` takes the desktop for gone.
+        fn cli_reply_bound() -> std::time::Duration {
+            chan_server::handoff::Request::OpenWorkspace {
+                protocol: 0,
+                cli_version: String::new(),
+                workspace_path: String::new(),
+            }
+            .reply_budget()
+        }
+
+        /// A desktop over a library in the chan home, with the local window
+        /// registry installed, and the runtime its host was built on.
+        pub(crate) struct Desktop {
+            pub(crate) state: Arc<AppState>,
+            pub(crate) runtime: tokio::runtime::Runtime,
+            library: chan_workspace::Library,
+            app: tauri::App<tauri::test::MockRuntime>,
+        }
+
+        impl Desktop {
+            pub(crate) fn new() -> Self {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("test runtime");
+                let home = chan_workspace::paths::config_dir();
+                let library =
+                    chan_workspace::Library::open_at(home.join("config.toml")).expect("library");
+                let embedded = runtime.block_on(async {
+                    let embedded = embedded::EmbeddedServer::for_tests(library.clone()).await;
+                    embedded.install_local_window_registry_for_tests();
+                    embedded
+                });
+                let state = empty_state();
+                assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+                Self {
+                    state,
+                    runtime,
+                    library,
+                    app: tauri::test::mock_app(),
+                }
+            }
+
+            pub(crate) fn embedded(&self) -> &embedded::EmbeddedServer {
+                self.state.embedded().expect("embedded")
+            }
+
+            /// Register `root` and answer the root its registry row stores.
+            pub(crate) fn register(&self, root: &Path) -> PathBuf {
+                self.library
+                    .register_workspace(root)
+                    .expect("register")
+                    .root_path
+            }
+
+            /// Hand `path` off as `chan serve` does while the desktop runs.
+            #[cfg(unix)]
+            fn hand_off(&self, path: &Path) -> Result<(), String> {
+                open_workspace_from_handoff(
+                    self.app.handle().clone(),
+                    Arc::clone(&self.state),
+                    path.to_path_buf(),
+                )
+            }
+
+            /// Mount the workspace whose registry row stores `stored` as the
+            /// boot's restore does, keyed by that root.
+            #[cfg(unix)]
+            pub(crate) fn restore(&self, stored: &Path) {
+                self.runtime
+                    .block_on(serve::start(
+                        self.app.handle().clone(),
+                        Arc::clone(&self.state),
+                        stored.to_string_lossy().into_owned(),
+                        serve::WorkspaceOpenMode::RestoreOnly,
+                    ))
+                    .expect("restore the workspace");
+            }
+
+            /// Every workspace window's path in the registry, the ones the
+            /// live feed hides included.
+            pub(crate) fn window_paths(&self) -> Vec<PathBuf> {
+                self.embedded()
+                    .workspace_window_paths_for_tests()
+                    .into_iter()
+                    .map(|(_, path)| PathBuf::from(path))
+                    .collect()
+            }
+
+            /// The registry's workspace windows as `(window_id, path)` once
+            /// there are `count`, waiting up to [`MOUNT_BOUND`] for the arm
+            /// that registers a handed-off root.
+            fn wait_for_windows(&self, count: usize) -> Vec<(String, String)> {
+                let deadline = std::time::Instant::now() + MOUNT_BOUND;
+                loop {
+                    let windows = self.embedded().workspace_window_paths_for_tests();
+                    if windows.len() >= count {
+                        return windows;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{} of {count} handed-off windows were minted within {MOUNT_BOUND:?}",
+                        windows.len()
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+
+            /// The window `window_id` as the live feed serves it, if it does.
+            fn in_feed(&self, window_id: &str) -> Option<chan_server::WindowRecord> {
+                self.embedded()
+                    .local_window_records()
+                    .into_iter()
+                    .find(|record| record.window_id == window_id)
+            }
+
+            #[cfg(unix)]
+            fn served_keys(&self) -> Vec<String> {
+                self.state.serves.lock().unwrap().keys().cloned().collect()
+            }
+        }
+
+        /// A root registered at `holder/parent/ws` whose parent then moved
+        /// to `holder/moved` and was linked back under its old name, so its
+        /// registry row stores a path that resolves elsewhere now.
+        #[cfg(unix)]
+        pub(crate) struct Relinked {
+            /// The root the registry row stores.
+            pub(crate) stored: PathBuf,
+            /// The path it resolves to now, which `chan serve` sends.
+            pub(crate) now: PathBuf,
+            _holder: tempfile::TempDir,
+        }
+
+        #[cfg(unix)]
+        impl Relinked {
+            pub(crate) fn register(desktop: &Desktop) -> Self {
+                let holder = tempfile::tempdir().expect("holder");
+                let parent = holder.path().join("parent");
+                std::fs::create_dir_all(parent.join("ws")).expect("root");
+                let stored = desktop.register(&parent.join("ws"));
+                let moved = holder.path().join("moved");
+                std::fs::rename(&parent, &moved).expect("move the parent");
+                std::os::unix::fs::symlink(&moved, &parent).expect("link the old parent");
+                let now = std::fs::canonicalize(&stored).expect("the stored root resolves");
+                assert_ne!(now, stored, "fixture: the stored root resolves to itself");
+                Self {
+                    stored,
+                    now,
+                    _holder: holder,
+                }
+            }
+        }
+
+        /// A relinked root handed off by the path it resolves to, as `chan
+        /// serve` sends it, is served and stored under its registry row's
+        /// root, at the prefix derived from that root.
+        #[cfg(unix)]
+        #[test]
+        fn a_relinked_roots_handed_off_window_is_stored_under_its_row() {
+            if !own_home("a_relinked_roots_handed_off_window_is_stored_under_its_row") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop
+                .hand_off(&root.now)
+                .expect("the handoff is accepted");
+            let windows = desktop.wait_for_windows(1);
+            let (window_id, path) = &windows[0];
+            assert_eq!(
+                Path::new(path),
+                root.stored,
+                "the handed-off window is not stored under its registry row"
+            );
+            let stored = root.stored.to_string_lossy().into_owned();
+            assert_eq!(
+                desktop.served_keys(),
+                std::slice::from_ref(&stored),
+                "the desktop does not key the workspace by its registry row"
+            );
+            let record = desktop
+                .in_feed(window_id)
+                .expect("the window is in the feed");
+            assert_eq!(
+                record.prefix,
+                format!("/{}", serve::workspace_window_prefix(&stored)),
+                "the workspace is not served at the prefix of its registry row"
+            );
+        }
+
+        /// A handoff of a relinked root the boot restored mints its window
+        /// under the row's root before it answers, while the root stops
+        /// answering: the host knows the workspace by the path the handoff
+        /// names, and nothing asks the root.
+        #[cfg(unix)]
+        #[test]
+        fn a_restored_relinked_roots_handoff_mints_under_its_row_while_it_hangs() {
+            if !own_home("a_restored_relinked_roots_handoff_mints_under_its_row_while_it_hangs") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            let stall = root_stall::stall(&root.stored);
+            let app = desktop.app.handle().clone();
+            let state = Arc::clone(&desktop.state);
+            let path = root.now.clone();
+            let answer = stall.finishes_beside(
+                "handing off a mounted root that hangs",
+                cli_reply_bound(),
+                move || open_workspace_from_handoff(app, state, path),
+            );
+            assert_eq!(answer, Ok(()));
+            assert_eq!(
+                desktop.window_paths(),
+                std::slice::from_ref(&root.stored),
+                "the handoff did not mint its window under the registry row before it answered"
+            );
+        }
+
+        /// A root handed off before it exists, under a symlinked parent, is
+        /// created and its window stored under the root its new registry row
+        /// stores, which is what the window feed finds it by.
+        #[cfg(unix)]
+        #[test]
+        fn a_root_handed_off_under_a_symlinked_parent_before_it_exists_is_in_the_feed() {
+            if !own_home(
+                "a_root_handed_off_under_a_symlinked_parent_before_it_exists_is_in_the_feed",
+            ) {
+                return;
+            }
+            let desktop = Desktop::new();
+            let holder = tempfile::tempdir().expect("holder");
+            std::fs::create_dir(holder.path().join("real")).expect("real parent");
+            std::os::unix::fs::symlink(holder.path().join("real"), holder.path().join("link"))
+                .expect("link the parent");
+            let typed = holder.path().join("link").join("new");
+            desktop.hand_off(&typed).expect("the handoff is accepted");
+            let windows = desktop.wait_for_windows(1);
+            let (window_id, path) = &windows[0];
+            assert!(
+                desktop.in_feed(window_id).is_some(),
+                "the window of a root the handoff created is not in the feed; it stores {path}"
+            );
+            let rows: Vec<PathBuf> = desktop
+                .library
+                .list_workspaces()
+                .into_iter()
+                .map(|row| row.root_path)
+                .collect();
+            assert_eq!(
+                rows,
+                [PathBuf::from(path)],
+                "the window is not stored under its new registry row"
+            );
+        }
+
+        /// A handoff by another spelling of a mounted root, through a symlink
+        /// to its parent, opens one more window under its registry row.
+        #[cfg(unix)]
+        #[test]
+        fn a_handoff_by_another_spelling_of_a_mounted_root_opens_a_window() {
+            if !own_home("a_handoff_by_another_spelling_of_a_mounted_root_opens_a_window") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let holder = tempfile::tempdir().expect("holder");
+            std::fs::create_dir_all(holder.path().join("real").join("ws")).expect("root");
+            std::os::unix::fs::symlink(holder.path().join("real"), holder.path().join("alias"))
+                .expect("link the parent");
+            let stored = desktop.register(&holder.path().join("real").join("ws"));
+            desktop
+                .hand_off(&stored)
+                .expect("the first handoff is accepted");
+            desktop.wait_for_windows(1);
+            desktop
+                .hand_off(&holder.path().join("alias").join("ws"))
+                .expect("the second handoff is accepted");
+            let paths: Vec<PathBuf> = desktop
+                .wait_for_windows(2)
+                .into_iter()
+                .map(|(_, path)| PathBuf::from(path))
+                .collect();
+            assert_eq!(
+                paths,
+                [stored.clone(), stored],
+                "a handoff by another spelling did not open a window under the row"
+            );
+        }
+
+        /// A handoff of a root that is not mounted answers while that root
+        /// stops answering: the arm that registers it runs on a task of its
+        /// own, and the handler asks the root nothing. Once the root answers,
+        /// that arm opens the window under the registry row.
+        #[test]
+        fn a_handoff_of_a_root_that_is_not_mounted_answers_while_it_hangs() {
+            if !own_home("a_handoff_of_a_root_that_is_not_mounted_answers_while_it_hangs") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = tempfile::tempdir().expect("root");
+            let stored = desktop.register(root.path());
+            let stall = root_stall::stall(&stored);
+            let app = desktop.app.handle().clone();
+            let state = Arc::clone(&desktop.state);
+            let path = stored.clone();
+            let answer = stall.finishes_beside(
+                "handing off a root that hangs",
+                cli_reply_bound(),
+                move || open_workspace_from_handoff(app, state, path),
+            );
+            assert_eq!(answer, Ok(()));
+            drop(stall);
+            let windows = desktop.wait_for_windows(1);
+            assert!(
+                desktop.in_feed(&windows[0].0).is_some(),
+                "the handed-off window is not in the feed once its root answers"
+            );
+            assert_eq!(
+                desktop.window_paths(),
+                [stored],
+                "the handed-off window is not stored under its registry row"
+            );
+        }
+    }
+
     /// What the on-set snapshot records beside the shared terminal tenant and
     /// after a normal shutdown has drained the tenants.
     mod on_set {
