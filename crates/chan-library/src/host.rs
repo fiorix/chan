@@ -2524,14 +2524,26 @@ impl WorkspaceHost {
     /// launcher lists the workspace by and nests its windows under, whichever
     /// of the two keys the caller holds: they differ for a root whose path
     /// resolves elsewhere since it was registered. When no workspace runtime
-    /// goes by `key`, the record stores `key` itself, and the window feed
-    /// shows it once a workspace runtime that goes by that path is mounted.
+    /// goes by `key`, as when a mount is still pending, the record stores
+    /// the stored root of the registry row that goes by `key`
+    /// ([`registry_row_keys`]), found without asking any filesystem, and
+    /// `key` itself when no row does; the window feed shows it once a
+    /// workspace runtime that goes by that path is mounted.
     pub fn mint_workspace_window(
         &self,
         key: &Path,
         origin: WindowOrigin,
     ) -> Result<WindowRecord, Error> {
-        let root = self.mounted_root(key).unwrap_or_else(|| key.to_path_buf());
+        let root = self
+            .mounted_root(key)
+            .or_else(|| {
+                self.library()
+                    .list_workspaces()
+                    .into_iter()
+                    .find(|row| registry_row_keys(row).contains(&key))
+                    .map(|row| row.root_path)
+            })
+            .unwrap_or_else(|| key.to_path_buf());
         self.mint_window_with_origin(
             WindowKind::Workspace,
             Some(root.to_string_lossy().into_owned()),
