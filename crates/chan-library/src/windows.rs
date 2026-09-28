@@ -962,7 +962,20 @@ mod tests {
             fn exit(&self, _: &tracing::span::Id) {}
         }
         let lines = Arc::new(Mutex::new(Vec::new()));
-        let out = tracing::subscriber::with_default(Capture(Arc::clone(&lines)), f);
+        let out = {
+            let _default = tracing::subscriber::set_default(Capture(Arc::clone(&lines)));
+            // While at most one dispatcher is registered, tracing-core takes a
+            // callsite's interest from the default of whichever thread
+            // registers it first, so a test that reaches a callsite first on a
+            // thread with no capture caches it as never enabled for every
+            // thread. A second registered dispatcher, held as long as the
+            // capture, makes registration consult every registered dispatcher
+            // instead, and the rebuild after it corrects a callsite another
+            // thread registered in the meantime.
+            let _registered = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            tracing::callsite::rebuild_interest_cache();
+            f()
+        };
         let lines = lines.lock().unwrap().clone();
         (out, lines)
     }
