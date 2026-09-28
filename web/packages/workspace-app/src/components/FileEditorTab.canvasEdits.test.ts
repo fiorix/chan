@@ -18,7 +18,7 @@ import { EXCALIDRAW_VERSION, excalidrawBoard, type BoardProps } from "../__tests
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { applyLocalTheme, effectiveHybridSurfaceTheme, onWatchEvent, refreshWorkspace } from "../state/store.svelte";
 import {
-  closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane,
+  closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane, detachTabToPaneEdge,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
   layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
@@ -323,6 +323,21 @@ describe("pending drawing edits", () => {
 
     expect({
       carried: moved?.kind === "file" ? moved.content.includes("last-stroke") : "not moved",
+      inDebounce: Date.now() - strokeAt < 200,
+    }).toEqual({ carried: true, inDebounce: true });
+  });
+
+  test("a drop on another pane's edge carries the pending stroke", async () => {
+    const { pane, tab, strokeAt } = await draw();
+    const other = splitPane(pane.id, "row")!;
+    detachTabToPaneEdge(pane.id, tab.id, other, "right");
+    const node = layout.nodes[layout.activePaneId];
+    const dropped = node?.kind === "leaf" && node.id !== pane.id && node.id !== other
+      ? node.tabs.find((t) => t.id === tab.id)
+      : undefined;
+
+    expect({
+      carried: dropped?.kind === "file" ? dropped.content.includes("last-stroke") : "not dropped",
       inDebounce: Date.now() - strokeAt < 200,
     }).toEqual({ carried: true, inDebounce: true });
   });
