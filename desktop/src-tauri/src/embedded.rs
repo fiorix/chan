@@ -296,7 +296,24 @@ impl EmbeddedServer {
         }
     }
 
+    /// Mount the registered workspace at `key` and answer its launch URL.
+    ///
+    /// Every attempt and the waits between them share the devserver mount's
+    /// bound, counted from the call: a root that stops answering is refused at
+    /// the bound in [`chan_server::mount_timed_out`]'s words, and an open
+    /// waiting on it gives the root's lock back to a close or a removal when
+    /// it is dropped there.
     pub async fn open_workspace(&self, key: &str) -> Result<String, String> {
+        tokio::time::timeout(
+            chan_server::WORKSPACE_MOUNT_TIMEOUT,
+            self.open_workspace_attempts(key),
+        )
+        .await
+        .unwrap_or_else(|_| Err(chan_server::mount_timed_out(Path::new(key))))
+    }
+
+    /// [`open_workspace`](Self::open_workspace)'s attempts, unbounded.
+    async fn open_workspace_attempts(&self, key: &str) -> Result<String, String> {
         use chan_workspace::ChanError;
         // The host waits for in-process owners while publishing Starting.
         // Retry WorkspaceLocked here, which can also be the tail of a local
