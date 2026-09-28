@@ -121,9 +121,11 @@
     terminalMessageBytes,
   } from "../terminal/connection";
   import {
+    copyTerminalKeyboardProtocolState,
     handleGhosttyShiftEnter,
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
+    type TerminalKeyboardProtocolState,
   } from "../terminal/keymap";
   import {
     handleTerminalClipboardChord,
@@ -338,6 +340,15 @@
   // its own session frame leaves the screen as it was and keeps it; only a
   // disposed xterm clears it.
   let sawSessionControl = false;
+  // Set when a socket closes between a session frame and its `ready`: the
+  // screen holds part of a replay and `receivedSeq` names the end of it, so
+  // neither the live cursor nor a snapshot is a place to resume from. The
+  // redial asks for the whole ring and paints it over a reset screen; the
+  // next `ready` clears it.
+  let replayCut = false;
+  // The keyboard protocol as it stood when the current replay began, which
+  // a whole-ring replay over a cut one starts from again.
+  let keyboardProtocolBeforeReplay: TerminalKeyboardProtocolState | null = null;
   let pendingPromptSeed = "";
   let promptSeedSent = false;
   let terminalCwdAbs: string | null = $state(null);
@@ -1351,7 +1362,7 @@
     missedBytes = 0;
     const reattaching = Boolean(tab.terminalSessionId);
     const liveResumeSince =
-      reattaching && sawSessionControl && serverGeneration !== null
+      reattaching && sawSessionControl && !replayCut && serverGeneration !== null
         ? receivedSeq
         : undefined;
     const liveResumeGeneration =
@@ -1384,7 +1395,7 @@
     // dump and the ghostty backend never captures one (serialize stays
     // null there), so a reattach under ghostty lets the server ring
     // replay restore the screen instead.
-    if (resumeSince === undefined && reattaching && tab.terminalSessionId && backend === "xterm") {
+    if (resumeSince === undefined && !replayCut && reattaching && tab.terminalSessionId && backend === "xterm") {
       const cached = readTerminalSnapshot(tab.terminalSessionId);
       if (cached && cached.cols === term.cols && cached.rows === term.rows) {
         pendingSnapshot = cached;
@@ -1457,6 +1468,7 @@
       }
       if (frame.type === "ready") {
         attachReplayActive = false;
+        replayCut = false;
         replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
@@ -1472,6 +1484,20 @@
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
+        if (replayCut) {
+          // The cut may have left xterm's parser, the mouse filter's held tail
+          // and the OSC 52 observer inside a sequence, and the keyboard
+          // protocol holding what the cut replay pushed, which this replay
+          // pushes again.
+          mouseFilter?.reset();
+          osc52Bridge?.reset();
+          if (tab.keyboardProtocol && keyboardProtocolBeforeReplay) {
+            copyTerminalKeyboardProtocolState(keyboardProtocolBeforeReplay, tab.keyboardProtocol);
+          }
+          writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay");
+        } else if (tab.keyboardProtocol) {
+          keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol);
+        }
         dialSawSession = true;
         sawSessionControl = true;
         // A successful attach proves the session + path healthy: reset the
@@ -1658,6 +1684,7 @@
       }
     };
     ws.onclose = () => {
+      if (attachReplayActive) replayCut = true;
       clearLiveness();
       clearTerminalMetadataSink();
       // Socket gone: any in-flight prompt can no longer observe its
@@ -1804,6 +1831,9 @@
     // An ended session's screen closes with the line this tab wrote below the
     // PTY's output, so it is no snapshot of the session.
     if (status === "exited") return;
+    // A replay that has not reached its `ready` has painted part of the
+    // session under a cursor that names the end of it.
+    if (attachReplayActive || replayCut) return;
     const sessionId = tab.terminalSessionId;
     if (!term || !serialize || !sessionId || serverGeneration === null) return;
     // Never throw out of a pagehide/beforeunload handler: this fires globally
@@ -2045,6 +2075,7 @@
   }
 
   function closeSocket(): void {
+    if (attachReplayActive) replayCut = true;
     attachReplayActive = false;
     suppressAttachReplayGeneratedReplies = false;
     clearTerminalMetadataSink();
