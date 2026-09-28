@@ -58,6 +58,7 @@
     dismissExternalChange,
     forceReloadFromDisk,
     isDocAttached,
+    isDirty,
     openFind,
     overwriteDiskConflict,
     reloadTabFromDisk,
@@ -357,6 +358,8 @@
       ? `loading ${formatBytes(tab.loadProgress.loadedBytes)} / ${formatBytes(tab.loadProgress.totalBytes)}`
       : "loading...",
   );
+  /// Why the buffer was not saved, while it differs from the file.
+  const notSaved = $derived(tab.saveError && isDirty(tab) ? tab.saveError : null);
 
   /// 0-indexed source line under the caret. Workspaces the outline's
   /// active-heading marker (Google-Docs-style "you are here" bar
@@ -1281,6 +1284,10 @@
     <div class="editor-toolbar">
       <span class="error">{tab.error}</span>
     </div>
+  {:else if notSaved}
+    <div class="editor-toolbar">
+      <span class="error">Not saved: {notSaved}</span>
+    </div>
   {/if}
   {#if tab.fileMissing}
     <div class="missing-file-state">
@@ -1319,6 +1326,12 @@
     </div>
   {:else if tab.error}
     <div class="placeholder error-placeholder">{tab.error}</div>
+  {:else if notSaved && tab.mode === "canvas"}
+    <!-- The board opens a text that does not parse as an empty scene, and
+         its first change would replace the text the user is fixing. -->
+    <div class="placeholder refused-placeholder">
+      This drawing does not parse, so the board cannot show it. Switch to Source to fix it.
+    </div>
   {:else}
     <div class="editor-inspector-row">
     {#if tab.outlineOpen}

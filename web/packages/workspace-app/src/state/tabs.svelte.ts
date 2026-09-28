@@ -2967,6 +2967,7 @@ async function loadTabContent(
       start.loading = true;
       start.loadProgress = { loadedBytes: 0, totalBytes: null };
       start.error = null;
+      start.saveError = null;
       start.fileMissing = null;
     }
     const r = await api.readStream(path, {
@@ -3009,6 +3010,7 @@ async function loadTabContent(
       t.diskConflicted = r.disk_conflicted ?? false;
       t.repoRoot = r.repo_root ?? null;
       t.error = null;
+      t.saveError = null;
       t.fileMissing = null;
       // Older servers omit `writable`; treat absent as writable so
       // the lamp behaves the way it did before this field existed.
@@ -5555,6 +5557,7 @@ function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
   tab.repoRoot = response.repo_root ?? null;
   tab.fsWritable = response.writable ?? true;
   tab.error = null;
+  tab.saveError = null;
   tab.fileMissing = null;
   tab.externalChange = false;
   mirrorToSiblings(tab.path, response.content, tab.id);
@@ -5798,7 +5801,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   if (isExcalidraw(live.path)) {
     const reason = validateJsonBuffer(live.content);
     if (reason !== null) {
-      live.error = `JSON parse error: ${reason}`;
+      live.saveError = `the drawing does not parse (${reason})`;
       return;
     }
   }
@@ -5830,6 +5833,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     done.authorityVersion = r.authority_version ?? null;
     done.diskConflicted = r.disk_conflicted ?? false;
     done.error = null;
+    done.saveError = null;
     done.fileMissing = null;
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
