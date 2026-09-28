@@ -1483,9 +1483,11 @@ impl DevserverState {
     /// registration entirely. Refusal leaves both the live mount and the
     /// registration intact. Distinct from on/off.
     ///
-    /// A removal the host answers still releasing has run its close, so the
-    /// workspace is off and still registered; a starting record this forget
-    /// tombstoned is put back turned off
+    /// A removal the host answers still releasing has run its close first,
+    /// so a workspace still registered is off in the host, and its off row
+    /// is a fresh row behind an earlier removal's forget, or no row after
+    /// the unregister's own conflict: nothing in the overlay outranks a
+    /// record left desired on. The record is turned off
     /// ([`stand_down_refused_forget`](Self::stand_down_refused_forget)).
     async fn forget_workspace(
         &self,
@@ -1502,15 +1504,19 @@ impl DevserverState {
         // library itself -- every library workspace is forgettable.
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces
-                .get(prefix)
-                .map(|record| (record.root.clone(), record.phase.clone()))
+            workspaces.get(prefix).map(|record| {
+                (
+                    record.root.clone(),
+                    record.phase.clone(),
+                    Some(record.generation),
+                )
+            })
         }
         .or_else(|| {
             self.library_root_for_prefix(prefix)
-                .map(|root| (root, MountPhase::Stopped))
+                .map(|root| (root, MountPhase::Stopped, None))
         });
-        let Some((root, phase)) = current else {
+        let Some((root, phase, read)) = current else {
             return Ok(WorkspaceLifecycleOutcome::NotFound);
         };
         let pending = if phase == MountPhase::Starting {
@@ -1531,8 +1537,12 @@ impl DevserverState {
         let removed = match self.host.remove_workspace_for_root(&root, force).await {
             Ok(removed) => removed,
             Err(error @ Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
-                if let Some((_, tombstone)) = pending {
-                    self.stand_down_refused_forget(prefix, tombstone);
+                let left = match &pending {
+                    Some((_, tombstone)) => Some((*tombstone, true)),
+                    None => read.map(|generation| (generation, false)),
+                };
+                if let Some((generation, tombstoned)) = left {
+                    self.stand_down_refused_forget(prefix, generation, tombstoned);
                 }
                 return Err(error);
             }
@@ -1573,35 +1583,47 @@ impl DevserverState {
         Ok(WorkspaceLifecycleOutcome::Completed)
     }
 
-    /// Put back the tombstone that a forget of a starting record left at
-    /// `prefix`, at generation `tombstone`, once the host has answered that
-    /// forget still releasing: turned off, not as it was.
+    /// Turn off the record at `prefix` once the host has answered its
+    /// forget still releasing: the tombstone this forget left of a starting
+    /// record at `generation` (`tombstoned`), or a record it did not
+    /// tombstone, still at the `generation` it read.
     ///
     /// The host's removal ran its close before it answered, so the host holds
-    /// the workspace off and registered. The record as it was is desired on at
-    /// its attempt's generation: its next save would write the overlay row on
-    /// over the close's off, and its attempt would mount the workspace; and an
-    /// attempt that has already read the tombstone keeps a record that is not
-    /// one when it drops it, which would leave this one starting with nothing
-    /// behind it. Off at the tombstone's generation, which is past the
-    /// attempt's, is what the host holds, and has the attempt stand down
-    /// whenever it lands. A record that is no longer this tombstone belongs to
-    /// a later change and is left alone.
-    fn stand_down_refused_forget(&self, prefix: &str, tombstone: u64) {
-        let put_back = {
+    /// the workspace off. The tombstone goes back off at its own generation,
+    /// which is past its attempt's: the attempt stands down at either of its
+    /// reconciles if it has not read the tombstone, and one that has runs a
+    /// removal of its own when it lands. The starting record as it was is
+    /// desired on at its attempt's generation: its next save would write the
+    /// overlay row on over the close's off, and its attempt would mount the
+    /// workspace, or leave it starting with nothing behind it once that
+    /// attempt drops what it read as a tombstone. Any other record turns off
+    /// at a newer generation whatever its phase, since a failed record stays
+    /// desired on and a mounted one keeps its desire at a save during a
+    /// stop. A record changed since, or another forget's tombstone, belongs
+    /// to a later change and is left alone.
+    fn stand_down_refused_forget(&self, prefix: &str, generation: u64, tombstoned: bool) {
+        let changed = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             match workspaces.get_mut(prefix) {
                 Some(record)
-                    if record.desired == DesiredMount::Forgotten
-                        && record.generation == tombstone =>
+                    if tombstoned
+                        && record.desired == DesiredMount::Forgotten
+                        && record.generation == generation =>
                 {
                     record.desired = DesiredMount::Off;
                     true
                 }
+                Some(record)
+                    if !tombstoned
+                        && record.desired != DesiredMount::Forgotten
+                        && record.generation == generation =>
+                {
+                    record.turn_off()
+                }
                 _ => false,
             }
         };
-        if put_back {
+        if changed {
             self.persist_state();
         }
     }
