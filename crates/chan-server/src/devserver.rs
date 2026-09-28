@@ -7754,6 +7754,49 @@ mod tests {
         assert_eq!(overlay_on(&state, &stored), Some(false));
     }
 
+    /// A record that changed after a forget tombstoned it, as a turn-on that
+    /// lands while the forget waits on the host changes it, stays as that
+    /// change left it when the host answers the forget still releasing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_forget_leaves_a_later_turn_on_alone() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, _attempt, prefix, _stored, stall) =
+            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while record_intent(&state, &prefix)
+                != Some((DesiredMount::Forgotten, MountPhase::Stopped))
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("fixture: the forget never tombstoned the record");
+        let turned_on = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get_mut(&prefix)
+            .unwrap()
+            .begin_on()
+            .expect("fixture: the turn-on began no attempt");
+        let (status, _, body) = completes_beside(&stall, "a refused forget", async move {
+            forgetting.await.unwrap()
+        })
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        let workspaces = state.workspaces.lock().unwrap();
+        let record = workspaces.get(&prefix).expect("the turned-on record");
+        assert_eq!(
+            (record.desired, record.phase.clone(), record.generation),
+            (DesiredMount::On, MountPhase::Starting, turned_on),
+            "the refused forget undid a later turn-on"
+        );
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
