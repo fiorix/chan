@@ -58,7 +58,7 @@ import {
   closeTab,
   conflictDialog,
   draftCloseState,
-  flushPendingEdits,
+  flushTabEdits,
   hasAnyTab,
   hasBrowserTab,
   cancelMissingFileCheck,
@@ -1526,7 +1526,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
       const tabId = op.tab_id ?? paneActiveTabId(p);
       const tab = tabId ? allPaneTabs(p).find((t) => t.id === tabId) : undefined;
       if (!tab) return { ok: false, summary: "no tab to close", blocked };
-      if (!op.force) flushPendingEdits([tab]);
+      if (!op.force) flushTabEdits([tab]);
       const reason = paneCloseBlock(tab);
       if (reason && !op.force) {
         blocked.push({ tab: paneTabTitle(tab), reason });
@@ -1539,7 +1539,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
       const p = paneByIdOrActive(op.pane_id);
       if (!p)
         return { ok: false, summary: `no such pane ${op.pane_id ?? layout.activePaneId}`, blocked };
-      if (!op.force) flushPendingEdits(allPaneTabs(p));
+      if (!op.force) flushTabEdits(allPaneTabs(p));
       collectBlocks(allPaneTabs(p), op.force, blocked);
       if (blocked.length)
         return { ok: false, summary: `blocked ${blocked.length} tab(s)`, blocked };
@@ -1548,7 +1548,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
     }
     case "close_all": {
       const panes = paneLeaves();
-      if (!op.force) flushPendingEdits(panes.flatMap((p) => allPaneTabs(p)));
+      if (!op.force) flushTabEdits(panes.flatMap((p) => allPaneTabs(p)));
       for (const p of panes) collectBlocks(allPaneTabs(p), op.force, blocked);
       if (blocked.length)
         return { ok: false, summary: `blocked ${blocked.length} tab(s)`, blocked };

@@ -2676,7 +2676,7 @@ export function registerPendingEditFlush(tabId: string, flush: () => void): () =
 
 /// Commit the buffered input of each of `tabs` that has a mounted editor,
 /// for a caller about to read their buffers.
-export function flushPendingEdits(tabs: readonly Tab[]): void {
+export function flushTabEdits(tabs: readonly Tab[]): void {
   for (const tab of tabs) if (tab.kind === "file") pendingEditFlushes.get(tab.id)?.();
 }
 
@@ -5161,7 +5161,7 @@ export function moveTab(
   const targetTabs = mutablePaneTabs(to, targetSide);
   // The editor in the old place is torn down with the original, and what it
   // commits then lands on the original, so the copy takes its input first.
-  flushPendingEdits([found.tab]);
+  flushTabEdits([found.tab]);
   // Pull a plain snapshot of the tab. The proxied element won't survive
   // splice + push cleanly across pane boundaries; copying its fields
   // sidesteps the question.
