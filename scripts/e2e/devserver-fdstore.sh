@@ -8,7 +8,8 @@
 # session spawned after the previous boot. (5) A restart whose manifest
 # names a prefix no tenant is mounted at, as after a build that derives a
 # workspace's prefix differently, restores the workspace PTY in the tenant
-# its window is shown under and ends a terminal window's. Session close, `stop`,
+# its window is shown under, where `cs` run in it reaches that tenant, and
+# ends a terminal window's. Session close, `stop`,
 # `restart --force`, and a bare `systemctl --user stop` all end the shells
 # and empty the store. The fd store count is asserted after every phase so
 # restart/adoption cycles can never grow it.
@@ -363,6 +364,48 @@ print(json.dumps({"kind": "workspace", "workspace_path": sys.argv[1]}))
     printf '%s %s %s\n' "$sid" "$pid" "$wid"
 }
 
+# Spawn a shell in a window that records its pid and the control socket its
+# environment names, and, once the trigger file appears, runs `cs terminal
+# list` with the socket the trigger names and keeps what it answered and its
+# exit code. Prints "sid pid".
+spawn_cs_probe() { # window-id trigger result
+    local wid="$1" trigger="$2" result="$3" prefix ttoken payload sid
+    read -r prefix ttoken <<<"$(window_route "$wid")"
+    payload="$(python3 -c '
+import json, shlex, sys
+
+wid, trigger, cs, result = sys.argv[1:]
+script = (
+    "echo $$ > \"$4.pid\"; printf \"%s\\\\n\" \"$CHAN_CONTROL_SOCKET\" > \"$4.socket\"; i=0; "
+    "while [ ! -e \"$1\" ] && [ \"$i\" -lt 1500 ]; do sleep 0.2; i=$((i+1)); done; "
+    "CHAN_CONTROL_SOCKET=\"$(cat \"$1\")\" \"$2\" terminal list > \"$3.tmp\" 2>&1; "
+    "echo \"rc=$?\" >> \"$3.tmp\"; "
+    "mv \"$3.tmp\" \"$3\"; exec sleep 86317"
+)
+command = "exec sh -c " + " ".join(
+    shlex.quote(arg) for arg in (script, "cs-probe", trigger, cs, result, result)
+)
+print(json.dumps({"name": "e2e-cs-86317", "command": command, "window_id": wid}))
+' "$wid" "$trigger" "$CS" "$result")"
+    sid="$(curl -fsS -m 10 -X POST -H "Authorization: Bearer $ttoken" \
+        -H 'Content-Type: application/json' -d "$payload" \
+        "$BASE$prefix/api/terminals" | json_field session)"
+    wait_until 15 "the cs probe's pid" test -s "$result.pid"
+    printf '%s %s\n' "$sid" "$(cat "$result.pid")"
+}
+
+# The devserver's stable control socket name for a prefix: FNV-1a 64 over
+# the library id and the prefix, NUL-separated, as the server derives it.
+stable_socket_name() { # library-id prefix
+    python3 -c '
+import sys
+
+h = 0xCBF29CE484222325
+for byte in (sys.argv[1] + "\0" + sys.argv[2]).encode():
+    h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+print(f"chan-control-s{h:016x}.sock")' "$1" "$2"
+}
+
 child_alive() { kill -0 "$1" 2>/dev/null; }
 
 window_listed() { # window-id
@@ -436,6 +479,10 @@ case "$TARGET_DIR" in
     *) TARGET_DIR="$REPO/$TARGET_DIR" ;;
 esac
 CHAN="$TARGET_DIR/debug/chan"
+# `cs` is the same binary under the name it dispatches on.
+mkdir -p "$WORK/bin"
+ln -s "$CHAN" "$WORK/bin/cs"
+CS="$WORK/bin/cs"
 
 # ---- first start, with a fast-watchdog drop-in in place from boot ----
 mkdir -p "$DROPIN_DIR"
@@ -546,11 +593,22 @@ assert_store 3 "crash adoption must not grow the store"
 # the stop's final write and before the next start reads it. The workspace
 # session must come back in the tenant its window is shown under; a terminal
 # window's session, which no workspace window places, must end with its
-# window, as any session the import skips.
+# window, as any session the import skips. A shell spawned under a prefix
+# that no tenant mounts after the restart keeps that prefix's control
+# socket, which nothing binds; `cs` run with it must reach the tenant
+# serving its workspace. The workspace tenant here mounts again at its own
+# prefix, so the probe shell runs `cs` with the socket of the prefix its
+# manifest was rewritten to, the one a shell spawned there carries, after
+# checking the name the case derives against its own socket.
 log "case 5: a restart whose manifest names a prefix no tenant is mounted at"
 read -r SID5 PID5 WID5 <<<"$(spawn_windowed_sleep 86316)"
 log "session5 $SID5 child $PID5 window $WID5"
 assert_store 4 "a third shared session parked beside the others"
+CS_TRIGGER="$WORK/cs-probe.go"
+CS_RESULT="$WORK/cs-probe.result"
+read -r CS_SID CS_PID <<<"$(spawn_cs_probe "$WS_WID1" "$CS_TRIGGER" "$CS_RESULT")"
+log "cs probe $CS_SID shell $CS_PID in workspace window $WS_WID1"
+assert_store 5 "the cs probe parked in the workspace window"
 MOVED_PREFIX="/e2e-moved-00000000"
 MOVE_RECORD="$WORK/moved-prefix.record"
 cat > "$WORK/move-prefix.py" <<'EOF'
@@ -577,7 +635,7 @@ with open(record, "w") as handle:
 EOF
 cat > "$DROPIN_DIR/60-e2e-moved-prefix.conf" <<EOF
 [Service]
-ExecStartPre=$(command -v python3) $WORK/move-prefix.py $CHAN_HOME/devserver/fdstore-restart.json $MOVE_RECORD $MOVED_PREFIX $WS_SID1 $SID5
+ExecStartPre=$(command -v python3) $WORK/move-prefix.py $CHAN_HOME/devserver/fdstore-restart.json $MOVE_RECORD $MOVED_PREFIX $WS_SID1 $CS_SID $SID5
 EOF
 systemctl --user daemon-reload
 systemctl --user restart "$UNIT_NAME" \
@@ -585,8 +643,8 @@ systemctl --user restart "$UNIT_NAME" \
 wait_until 60 "readiness after the moved-prefix restart" ready
 rm -f "$DROPIN_DIR/60-e2e-moved-prefix.conf"
 systemctl --user daemon-reload
-[ -f "$MOVE_RECORD" ] && [ "$(wc -l < "$MOVE_RECORD")" = 2 ] \
-    || fail "the drop-in did not rewrite both sessions' prefixes"
+[ -f "$MOVE_RECORD" ] && [ "$(wc -l < "$MOVE_RECORD")" = 3 ] \
+    || fail "the drop-in did not rewrite the three sessions' prefixes"
 log "manifest rewritten before the start: $(tr '\n' ';' < "$MOVE_RECORD")"
 wait_until 15 "session5 child death" sh -c "! kill -0 $PID5 2>/dev/null"
 child_alive "$WS_PID1" || fail "workspace child died across the moved-prefix restart"
@@ -603,7 +661,31 @@ if window_listed "$WID5"; then
 fi
 child_alive "$PID1" || fail "session1 child died across the moved-prefix restart"
 child_alive "$PID2" || fail "session2 child died across the moved-prefix restart"
-assert_store 3 "the refused session left the store; the moved one stayed"
+assert_store 4 "the refused session left the store; the moved ones stayed"
+child_alive "$CS_PID" || fail "the cs probe's shell died across the moved-prefix restart"
+wait_until 30 "the cs probe in its window's tenant roster" \
+    session_in_roster "$CS_SID" "$WS_WID1"
+LIBRARY_ID="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["library_id"])' \
+    "$CHAN_HOME/devserver/fdstore-restart.json")"
+CS_OWN_SOCKET="$(cat "$CS_RESULT.socket")"
+[ "$(dirname "$CS_OWN_SOCKET")/$(stable_socket_name "$LIBRARY_ID" "$WS_PREFIX")" = "$CS_OWN_SOCKET" ] \
+    || fail "the probe's socket $CS_OWN_SOCKET is not its tenant's stable socket"
+CS_MOVED_SOCKET="$(dirname "$CS_OWN_SOCKET")/$(stable_socket_name "$LIBRARY_ID" "$MOVED_PREFIX")"
+[ ! -e "$CS_MOVED_SOCKET" ] || fail "something binds the moved prefix's socket $CS_MOVED_SOCKET"
+log "cs runs in the moved terminal with $CS_MOVED_SOCKET, which nothing binds"
+printf '%s\n' "$CS_MOVED_SOCKET" > "$CS_TRIGGER.tmp"
+mv "$CS_TRIGGER.tmp" "$CS_TRIGGER"
+wait_until 30 "cs in the moved terminal to answer" test -s "$CS_RESULT"
+log "cs in the moved terminal answered: $(tr '\n' ' ' < "$CS_RESULT" | cut -c1-400)"
+grep -qx 'rc=0' "$CS_RESULT" \
+    || fail "cs in the moved terminal did not reach its server"
+grep -q 'e2e-cs-86317' "$CS_RESULT" \
+    || fail "cs in the moved terminal reached a tenant that does not hold it"
+log "cs in the moved terminal reached the tenant serving its workspace"
+read -r WS_PREFIX5 WS_TOKEN5 <<<"$(window_route "$WS_WID1")"
+api DELETE "$WS_PREFIX5/api/terminals/$CS_SID" "$WS_TOKEN5" >/dev/null
+wait_until 15 "the cs probe's death" sh -c "! kill -0 $CS_PID 2>/dev/null"
+assert_store 3 "the cs probe closed; the moved workspace session stayed"
 JOURNAL="$(journalctl --user -u "$UNIT_NAME" -n 400 --no-pager 2>/dev/null || true)"
 if grep -q "systemd fdstore restore: restored" <<<"$JOURNAL"; then
     grep -q "restoring a parked terminal session in the tenant its window is shown under" \
