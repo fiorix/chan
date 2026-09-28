@@ -64,6 +64,10 @@ const ROOT_HEALTH_MISSED_TICKS: u32 = 2;
 /// through [`ROOT_HEALTH_MISSED_TICKS`] budgets without answering.
 const ROOT_NOT_ANSWERING: &str = "not answering: its health check has not returned";
 const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// The reason a row shows while an earlier call of this process on its root
+/// has not let go: a mount whose caller left, or a lookup that has not
+/// returned.
+const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
 
 #[cfg(test)]
 type WorkspaceOpenProbe = Box<dyn FnMut(&mut chan_workspace::Result<Arc<Workspace>>) + Send>;
@@ -817,6 +821,26 @@ impl Drop for WorkspaceMountGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.host.settle_interrupted_mount(&self.root);
+        }
+    }
+}
+
+/// What a close by root learned of the workspace's registry row.
+enum ClosingRow {
+    /// The root the row stores, or the root a mounted runtime was opened at.
+    Found(PathBuf),
+    /// No row goes by the root.
+    Absent,
+    /// The root was not asked: a lookup of it whose caller gave up has not
+    /// returned.
+    Unasked,
+}
+
+impl ClosingRow {
+    fn stored(&self) -> Option<&Path> {
+        match self {
+            ClosingRow::Found(stored) => Some(stored),
+            ClosingRow::Absent | ClosingRow::Unasked => None,
         }
     }
 }
@@ -3268,7 +3292,8 @@ impl WorkspaceHost {
     /// root that hangs while its key is resolved holds one blocking thread
     /// for it however many callers ask, and every caller of it waits without
     /// holding a runtime worker. This bound covers key resolution; separate
-    /// call permits admit the open, its root check and mounted revalidation.
+    /// call permits admit the open, its root check, mounted revalidation and
+    /// a close's or removal's registry lookup.
     pub async fn root_key(&self, root: &Path) -> Result<PathBuf, Error> {
         #[cfg(test)]
         let probe = self.blocking_thread_probe.lock().unwrap().clone();
@@ -3320,15 +3345,19 @@ impl WorkspaceHost {
     /// root. `target` is `root`'s canonical key, which the caller computed off
     /// the runtime thread before taking the lock.
     ///
-    /// Also returns the root the workspace's registry row stores, when the
-    /// close found the row, for a removal to forget its overlay rows by.
+    /// Also returns what the close learned of the workspace's registry row,
+    /// for a removal to forget its overlay rows by. A root no runtime holds
+    /// whose lookup was not asked (see [`closing_row`](Self::closing_row))
+    /// closes as a root no row goes by: it answers `NotFound` and records
+    /// no off, since it cannot tell under which spelling the row's on-row
+    /// is kept.
     async fn close_workspace_for_root_locked(
         &self,
         root: &Path,
         target: &Path,
         force: bool,
         record_off: bool,
-    ) -> Result<(WorkspaceLifecycleOutcome, Option<PathBuf>), Error> {
+    ) -> Result<(WorkspaceLifecycleOutcome, ClosingRow), Error> {
         let mounted = {
             let workspaces = self
                 .workspaces
@@ -3349,23 +3378,11 @@ impl WorkspaceHost {
                         overlay.set_each(&overlay_spellings(target, Some(&stored)), false);
                     }
                 }
-                Ok((outcome, Some(stored)))
+                Ok((outcome, ClosingRow::Found(stored)))
             }
             None => {
-                let stored = {
-                    let library = self.library.clone();
-                    let root = root.to_path_buf();
-                    #[cfg(test)]
-                    let probe = self.removal_hop_probe.lock().unwrap().clone();
-                    self.off_runtime(move || {
-                        #[cfg(test)]
-                        if let Some(probe) = probe {
-                            probe(RemovalHop::Lookup);
-                        }
-                        registered_stored_root(&library, &root)
-                    })
-                    .await?
-                };
+                let row = self.closing_row(root, target).await?;
+                let stored = row.stored();
                 let registered = stored.is_some();
                 let starting = self
                     .mount_state
@@ -3375,7 +3392,7 @@ impl WorkspaceHost {
                     .is_some_and(|state| matches!(state, MountState::Starting));
                 if record_off && registered {
                     if let Some(overlay) = self.workspace_overlay() {
-                        overlay.set_each(&overlay_spellings(target, stored.as_deref()), false);
+                        overlay.set_each(&overlay_spellings(target, stored), false);
                     }
                 }
                 self.clear_workspace_lifecycle_by_key(target);
@@ -3384,9 +3401,60 @@ impl WorkspaceHost {
                 } else {
                     WorkspaceLifecycleOutcome::NotFound
                 };
-                Ok((outcome, stored))
+                Ok((outcome, row))
             }
         }
+    }
+
+    /// The registry row of `root`, whose canonical key is `target`, for a
+    /// close or a removal of a root no runtime holds.
+    ///
+    /// A row goes by the root it stores and the canonical path it last
+    /// resolved to ([`registry_row_keys`]); the first row one of whose keys
+    /// is `target` or `root` as given, lexically normalized, is found without
+    /// asking any filesystem. Only when none is does the root's filesystem
+    /// say which row it is, on the blocking pool: a path no row goes by, or a
+    /// root that resolves elsewhere since a registration of this process last
+    /// resolved it, asked by the path it resolves to now, which is what
+    /// `chan close` and the desktop's handoff send.
+    ///
+    /// That lookup holds the root's lookup permit, taken without waiting.
+    /// Every lookup runs under the root's lock, so a permit held beside that
+    /// lock belongs to a lookup whose caller gave up, on a root that has not
+    /// answered it; the root is then not asked again, and a root that stops
+    /// answering holds one lookup thread however many of its callers give up.
+    async fn closing_row(&self, root: &Path, target: &Path) -> Result<ClosingRow, Error> {
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        if let Some(row) = self.library.list_workspaces().into_iter().find(|row| {
+            let keys = registry_row_keys(row);
+            keys.contains(&target) || keys.contains(&given.as_path())
+        }) {
+            return Ok(ClosingRow::Found(row.root_path));
+        }
+        let Some(permit) = self
+            .root_calls
+            .try_lock(&(target.to_path_buf(), RootCall::Lookup))
+        else {
+            return Ok(ClosingRow::Unasked);
+        };
+        let permit = permit.into_owned();
+        let library = self.library.clone();
+        let root = root.to_path_buf();
+        #[cfg(test)]
+        let probe = self.removal_hop_probe.lock().unwrap().clone();
+        let stored = self
+            .off_runtime(move || {
+                let _permit = permit;
+                #[cfg(test)]
+                if let Some(probe) = probe {
+                    probe(RemovalHop::Lookup);
+                }
+                registered_stored_root(&library, &root)
+            })
+            .await?;
+        Ok(stored.map_or(ClosingRow::Absent, ClosingRow::Found))
     }
 
     /// Remove the workspace at `root`: unmount it if mounted, forget it from the
@@ -3407,6 +3475,12 @@ impl WorkspaceHost {
     /// shared stores it writes (the overlay, the window registry, the library
     /// registry) serialize their writes under locks of their own, which is
     /// what keeps removals of different roots safe beside each other.
+    ///
+    /// A removal whose close could not ask the root which registry row it is,
+    /// because an earlier lookup of that root has not returned, changes
+    /// nothing, leaves its row reading `workspace is still releasing; retry`
+    /// and answers [`ChanError::WorkspaceAlreadyOpen`], as an open beside a
+    /// holder that has not let go does.
     pub async fn remove_workspace_for_root(
         &self,
         root: &Path,
@@ -3417,18 +3491,26 @@ impl WorkspaceHost {
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
         // here. Refusal leaves the runtime, registry, overlay, and windows intact.
-        let stored = match self
+        let row = match self
             .close_workspace_for_root_locked(root, &target, force, true)
             .await?
         {
             (WorkspaceLifecycleOutcome::Refused { active_terminals }, _) => {
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
             }
-            (
-                WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound,
-                stored,
-            ) => stored,
+            // A removal that cannot learn the row's stored root would forget
+            // one spelling of its overlay rows and leave the other to bring the
+            // workspace back at the next start, so it does nothing and answers
+            // as an open beside a holder that has not let go does.
+            (_, ClosingRow::Unasked) => {
+                self.mark_mount_error_by_key(&target, WORKSPACE_STILL_RELEASING.into());
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            (WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound, row) => {
+                row
+            }
         };
+        let stored = row.stored();
 
         let mut removing = WorkspaceRemoveGuard::new(self, target.clone());
         self.mark_mount_removing_by_key(&target);
@@ -3439,7 +3521,7 @@ impl WorkspaceHost {
         //
         // Forget the on/off state so a devserver restart doesn't re-mount it.
         if let Some(overlay) = self.workspace_overlay() {
-            overlay.forget_each(&overlay_spellings(&target, stored.as_deref()));
+            overlay.forget_each(&overlay_spellings(&target, stored));
         }
         // FORGET is the ONLY path that purges the window records: the workspace is
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
@@ -4304,7 +4386,7 @@ impl WorkspaceHost {
         } else {
             // A cancelled blocking open can keep its writer handle until the
             // operation returns, so cancellation leaves an explicit retry state.
-            self.mark_mount_error_by_key(key, "workspace is still releasing; retry".into());
+            self.mark_mount_error_by_key(key, WORKSPACE_STILL_RELEASING.into());
         }
     }
 
