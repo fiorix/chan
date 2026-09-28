@@ -2124,13 +2124,18 @@ impl WorkspaceHost {
         }
     }
 
-    /// Restores inherited fdstore PTYs into their original mounted tenants.
+    /// Restores inherited fdstore PTYs into their mounted tenants.
     ///
     /// Guardrails are deliberately conservative: a PTY is restored only when its
-    /// tenant prefix is mounted and its owning `window_id` is still present in
-    /// the persisted window registry. If `.chan` metadata or a workspace mount
-    /// disappeared during the restart, the fd is dropped instead of reviving a
-    /// session into a layout the client can no longer reconcile.
+    /// owning `window_id` is still present in the persisted window registry and
+    /// a mounted tenant takes it. That is the tenant at the session's own
+    /// prefix. Where no tenant is mounted there, as after a build that derives a
+    /// workspace's prefix differently from the one that parked the session, it
+    /// is the one workspace runtime the window feed shows the session's window
+    /// under, the tenant that window's panes dial.
+    /// If `.chan` metadata or a workspace mount disappeared during the restart,
+    /// the fd is dropped instead of reviving a session into a layout the client
+    /// can no longer reconcile.
     #[cfg(target_os = "linux")]
     pub fn restore_fdstore_terminal_sessions(
         &self,
@@ -2143,58 +2148,90 @@ impl WorkspaceHost {
             }
             return report;
         };
-        let valid_windows: HashSet<String> = registry
+        let rows: HashMap<String, PersistedWindow> = registry
             .snapshot()
             .into_iter()
-            .map(|row| row.window_id)
+            .map(|row| (row.window_id.clone(), row))
             .collect();
-        let mut by_prefix: HashMap<String, Vec<FdStoreSessionImport>> = HashMap::new();
+        let mut by_prefix: HashMap<String, Vec<(&PersistedWindow, FdStoreSessionImport)>> =
+            HashMap::new();
         for import in imports {
             let Some(window_id) = import.meta.window_id.as_deref() else {
                 report.skip_session(&import.meta, "missing window id");
                 continue;
             };
-            if !valid_windows.contains(window_id) {
+            let Some(row) = rows.get(window_id) else {
                 report.skip_session(
                     &import.meta,
                     format!("window {window_id} is no longer persisted"),
                 );
                 continue;
-            }
+            };
             by_prefix
                 .entry(import.meta.tenant_prefix.clone())
                 .or_default()
-                .push(import);
+                .push((row, import));
         }
 
         let Ok(workspaces) = self.workspaces.read() else {
-            for import in by_prefix.into_values().flatten() {
+            for (_, import) in by_prefix.into_values().flatten() {
                 report.skip_session(&import.meta, "workspace host lock poisoned");
             }
             return report;
         };
-        for (prefix, imports) in by_prefix {
+        let mut unmounted = Vec::new();
+        for (prefix, sessions) in by_prefix {
             let Some(runtime) = workspaces.get(&prefix) else {
-                for import in imports {
-                    report.skip_session(
-                        &import.meta,
-                        format!("tenant prefix {prefix} is not mounted"),
-                    );
-                }
+                unmounted.extend(sessions);
                 continue;
             };
-            let tenant_report = runtime
-                .artifacts
-                .terminal_sessions
-                .restore_fdstore_sessions(imports);
-            report.restored += tenant_report.restored;
-            report.skipped.extend(tenant_report.skipped);
-            report
-                .skipped_sessions
-                .extend(tenant_report.skipped_sessions);
-            report
-                .abandoned_ring_fds
-                .extend(tenant_report.abandoned_ring_fds);
+            let imports = sessions.into_iter().map(|(_, import)| import).collect();
+            absorb_restore_report(
+                &mut report,
+                runtime
+                    .artifacts
+                    .terminal_sessions
+                    .restore_fdstore_sessions(imports),
+            );
+        }
+        // Second, so the sessions a tenant parked under its own prefix keep
+        // their live names and their places under its session cap.
+        let mut by_window_tenant: HashMap<&str, (&HostedWorkspaceRuntime, Vec<_>)> = HashMap::new();
+        for (row, import) in unmounted {
+            match parked_window_runtime(&workspaces, row) {
+                Ok((prefix, runtime)) => {
+                    tracing::warn!(
+                        session = %import.meta.session_id,
+                        manifest_prefix = %import.meta.tenant_prefix,
+                        restored_prefix = %prefix,
+                        window = %row.window_id,
+                        "restoring a parked terminal session in the tenant its window is \
+                         shown under: no tenant is mounted at the prefix the restart \
+                         manifest names",
+                    );
+                    by_window_tenant
+                        .entry(prefix)
+                        .or_insert_with(|| (runtime, Vec::new()))
+                        .1
+                        .push(import);
+                }
+                Err(why) => {
+                    let reason = format!(
+                        "tenant prefix {} is not mounted and its window {} {why}",
+                        import.meta.tenant_prefix, row.window_id
+                    );
+                    report.skip_session(&import.meta, reason);
+                }
+            }
+        }
+        for (runtime, imports) in by_window_tenant.into_values() {
+            absorb_restore_report(
+                &mut report,
+                runtime
+                    .artifacts
+                    .terminal_sessions
+                    .restore_fdstore_sessions(imports),
+            );
         }
         if report.restored > 0 {
             self.notify_window_change();
@@ -4572,6 +4609,45 @@ fn window_path_runtimes<'a>(
     workspaces
         .iter()
         .filter(move |(_, runtime)| runtime.found_by(&key))
+}
+
+/// Where the fd-store import restores a session parked under a prefix no
+/// tenant is mounted at: the one workspace runtime its window's stored path
+/// goes by ([`window_path_runtimes`]), where the window feed shows that
+/// window, with the prefix it is mounted at. Otherwise why not, worded to
+/// follow "its window <id>". A terminal window is refused rather than sent to
+/// the shared terminal tenant, as the feed would: that tenant's prefix does
+/// not move, so a session parked under another prefix did not run there. A
+/// path more than one runtime goes by is refused because the feed's pick
+/// among them follows the routing map's order, which no other lookup repeats.
+#[cfg(target_os = "linux")]
+fn parked_window_runtime<'a>(
+    workspaces: &'a HashMap<String, HostedWorkspaceRuntime>,
+    row: &PersistedWindow,
+) -> Result<(&'a str, &'a HostedWorkspaceRuntime), String> {
+    if !matches!(row.kind, WindowKind::Workspace) {
+        return Err("is a terminal window".to_string());
+    }
+    let Some(path) = row.workspace_path.as_deref() else {
+        return Err("stores no workspace path".to_string());
+    };
+    let mut runtimes = window_path_runtimes(workspaces, Path::new(path));
+    match (runtimes.next(), runtimes.next()) {
+        (Some((prefix, runtime)), None) => Ok((prefix.as_str(), runtime)),
+        (None, _) => Err(format!("names {path}, which no mounted workspace goes by")),
+        (Some(_), Some(_)) => Err(format!(
+            "names {path}, which more than one mounted workspace goes by"
+        )),
+    }
+}
+
+/// Fold one tenant's restore report into the host's.
+#[cfg(target_os = "linux")]
+fn absorb_restore_report(report: &mut FdStoreRestoreReport, tenant: FdStoreRestoreReport) {
+    report.restored += tenant.restored;
+    report.skipped.extend(tenant.skipped);
+    report.skipped_sessions.extend(tenant.skipped_sessions);
+    report.abandoned_ring_fds.extend(tenant.abandoned_ring_fds);
 }
 
 /// The overlay rows one workspace is kept under: the key a user's action
