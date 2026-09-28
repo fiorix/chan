@@ -721,6 +721,32 @@ mod tests {
         assert!(!paths.iter().any(|p| p.starts_with("recipes/")));
     }
 
+    /// On Unix `\` is an ordinary character of a name; the listing names the
+    /// file as it is, never as the `a/b.md` that names a different path.
+    #[cfg(unix)]
+    #[test]
+    fn list_files_names_a_backslash_name_as_itself() {
+        let (_cfg, root, ctx) = fixture();
+        std::fs::create_dir(root.path().join("dir")).unwrap();
+        std::fs::write(root.path().join("a\\b.md"), "x").unwrap();
+        std::fs::write(root.path().join("dir/a\\b.md"), "x").unwrap();
+        for (args, expected) in [
+            (serde_json::json!({}), &["a\\b.md", "dir/a\\b.md"][..]),
+            (serde_json::json!({ "prefix": "dir" }), &["dir/a\\b.md"][..]),
+        ] {
+            let v = execute("list_files", &args, &ctx).unwrap();
+            let mut files: Vec<&str> = v["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["is_dir"] != true)
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect();
+            files.sort();
+            assert_eq!(files, expected, "{args}");
+        }
+    }
+
     #[test]
     fn list_files_includes_in_root_drafts_dir() {
         // Drafts are real in-root files under the configured drafts dir,
