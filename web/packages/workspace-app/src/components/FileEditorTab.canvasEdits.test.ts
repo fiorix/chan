@@ -997,6 +997,34 @@ describe("a live drawing", () => {
     },
   );
 
+  test("a board that binds before its socket's snapshot pushes nothing before it and shows the authority after it", async () => {
+    const { tab, board, socket } = await openingDrawing();
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(250);
+    const beforeSnapshot = socket.pushes().length;
+    socket.frame(snapshotOf(tab, AUTHORITY));
+
+    expect({ beforeSnapshot, ...(await settled(tab, board, socket)) }).toEqual({ beforeSnapshot: 0, ...SHOWS_THE_AUTHORITY });
+  });
+
+  test("a live tab whose load ends after the library's init binds at its seed and shows the authority", async () => {
+    const { tab, reads } = await loadedTab("notes/live.excalidraw", DRAWING);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await reads.finish(DRAWING);
+    await loading;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sceneSockets).toHaveLength(1);
+    const socket = sceneSockets[0]!;
+    socket.open();
+    socket.frame(snapshotOf(tab, AUTHORITY));
+
+    expect(await settled(tab, board, socket)).toEqual(SHOWS_THE_AUTHORITY);
+  });
+
   test("a background this window picked stays on its board through a remount within the session's linger", async () => {
     const PICKED = "#123456";
     const { tab, board, socket } = await attachedDrawing();
