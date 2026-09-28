@@ -191,12 +191,12 @@ function showGaveUp() {
   els.body.classList.add('is-gaveup');
   els.title.textContent = label ? `Can't reach ${label}` : "Still can't connect";
   els.foot.textContent =
-    `${displayUrl} hasn't responded after ${attempt} attempts. Retry, or disconnect to close this window.`;
+    `${displayUrl} hasn't responded after ${attempt} attempts. Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu.`;
   els.actions.hidden = false;
   // The title and the foot sit outside the live region, so this row is
   // what tells a screen reader the retrying stopped and there is
   // something to do about it.
-  addRow('info', new Date(), `Gave up after ${attempt} attempts. Retry, or disconnect to close this window.`);
+  addRow('info', new Date(), `Gave up after ${attempt} attempts. Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu.`);
 }
 
 // Clear the gave-up state so the loop can resume from a clean header.
@@ -207,10 +207,12 @@ function hideGaveUp() {
   els.foot.textContent = 'This window keeps retrying until it connects or you close it.';
 }
 
-// Retry restarts the loop with a fresh attempt budget; Disconnect destroys the
-// window (same as Cmd+W) so the launcher leaves the connecting state. Both are
-// no-ops until the loop has actually given up (the actions are hidden before
-// then). request_close_window is a no-op in standalone-browser dev (no Tauri).
+// Retry restarts the loop with a fresh attempt budget; Disconnect closes the
+// window as Cmd+W and the close button do, through request_close_window, which
+// hides a window on this page: the loop ends with the page, and the window's
+// record keeps its terminal sessions on the devserver. Both are no-ops until
+// the loop has actually given up (the actions are hidden before then).
+// request_close_window is a no-op in standalone-browser dev (no Tauri).
 function wireActions() {
   els.retry.addEventListener('click', () => {
     if (!stopped) return;
@@ -343,12 +345,12 @@ function pad2(n) {
 
 // Close/cancel chords. The connecting window must be closable from the
 // keyboard: Cmd+W on macOS normally arrives via the File > Close Window
-// menu item (which destroys a connecting window for real), and this
-// listener covers Ctrl+D everywhere plus Cmd/Ctrl+W where no menu item
-// claims the chord (Linux has no Close Window accelerator). The invoked
-// request_close_window destroys the window outright, bypassing the
-// bury-on-close handler - on this screen there is no session or shell
-// worth keeping, only the retry loop being cancelled. Capture phase so
+// menu item, and this listener covers Ctrl+D everywhere plus Cmd/Ctrl+W
+// where no menu item claims the chord (Linux has no Close Window
+// accelerator). Every one of them reaches request_close_window, which
+// hides a window on this page rather than discarding it: the retry loop
+// ends with the page, and the window's record keeps the terminal
+// sessions it held before this page loaded. Capture phase so
 // a focused element cannot swallow the chord first; no-op in the
 // standalone-browser dev mode (no Tauri, nothing to close).
 window.addEventListener(

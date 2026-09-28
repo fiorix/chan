@@ -44,6 +44,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The extension proxy sends nothing to an extension that has exited.** Once its supervisor has seen an extension's process exit, or has stopped it, a request or WebSocket upgrade to its path answers 502 `extension_unavailable` without connecting to its port, so its token and the request no longer reach whatever process holds that port by then.
 
+- **A close on a devserver window's connecting page keeps its terminals.** A devserver window still waiting on its connecting page, closed by its close button, by Cmd/Ctrl+W, Ctrl+D, Ctrl+Shift+W or Ctrl+Alt+W, or by the page's Disconnect, is hidden as the live page's Hide hides a window: its record and its terminal sessions stay on the devserver, and it reopens from the Window menu or the launcher. In v0.100.0 each of those closes discarded the window on the devserver and ended its terminal sessions, and on macOS File > Close Window closed it only until the desktop opened it again. A window hidden while its devserver does not answer opens again after the desktop disconnects from that devserver and connects again.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
