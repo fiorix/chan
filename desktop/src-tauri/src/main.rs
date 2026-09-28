@@ -2950,10 +2950,11 @@ fn register_devserver_from_handoff(
 /// the handshake. The synchronous return therefore reports only that
 /// the request was accepted, not that the window is fully up; on a
 /// genuine mount failure the desktop emits a system notice rather than
-/// blocking the CLI.
+/// blocking the CLI. Generic over the Tauri runtime so a test can drive it
+/// with the mock app.
 #[cfg(any(unix, windows))]
-fn open_workspace_from_handoff(
-    app: tauri::AppHandle,
+fn open_workspace_from_handoff<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: Arc<AppState>,
     path: PathBuf,
 ) -> Result<(), String> {
