@@ -102,8 +102,9 @@ pub use devserver::{
     persisted_devserver_port, persisted_devserver_token, rotate_persisted_devserver_token,
     run_devserver, spawn_root_health_probe, DevserverConfig, DevserverTunnel,
     DEVSERVER_TOKEN_MARKER, DEVSERVER_TOKEN_MAX_AGE_SECS, ROOT_HEALTH_PROBE_INTERVAL,
+    WORKSPACE_MOUNT_TIMEOUT,
 };
-pub use error::Error;
+pub use error::{mount_timed_out, Error};
 pub use extensions::{ExtensionRuntime, EXTENSION_HANDSHAKE_MARKER};
 pub use mcp_bridge::run_stdio_proxy as run_mcp_stdio_proxy;
 pub use preferences::{

@@ -92,6 +92,18 @@ pub fn err_settings_locked() -> Response {
     )
 }
 
+/// The refusal of a request to mount a workspace whose root did not answer
+/// within [`WORKSPACE_MOUNT_TIMEOUT`](crate::WORKSPACE_MOUNT_TIMEOUT) of the
+/// request's start, naming `root`. The launcher's add and on and the desktop's
+/// open answer it in these words.
+pub fn mount_timed_out(root: &std::path::Path) -> String {
+    format!(
+        "mount timed out after {} seconds: {} did not answer",
+        crate::WORKSPACE_MOUNT_TIMEOUT.as_secs(),
+        root.display()
+    )
+}
+
 pub fn err_state(e: &StateAccessError) -> Response {
     match e {
         StateAccessError::Busy => {
