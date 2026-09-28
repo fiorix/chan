@@ -873,6 +873,28 @@ describe("Waiting command refusals", () => {
 });
 
 describe("browser Show readiness", () => {
+  it.each(["Show", "Focus"])("%s from the deck reports a blocked window and shows no success", async (verb) => {
+    const realActions = await vi.importActual<typeof import("../state/computerActions")>("../state/computerActions");
+    actions.setShown.mockImplementation(realActions.setWindowShown);
+    actions.focus.mockImplementation(realActions.focusComputerWindow);
+    vi.spyOn(window, "open").mockReturnValue(null);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    library.windows = [{
+      ...windowRecord, window_id: `deck blocked ${verb}`, hidden: true, connected: false, origin: "browser",
+    }];
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result(verb).click();
+    await flushPromises();
+    expect(activeCommandLauncherDraft().operation).toMatchObject({ kind: "error", message: "The browser blocked the Chan window" });
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("The browser blocked the Chan window");
+    expect(visibility).not.toHaveBeenCalled();
+  });
+
   it.each(["ready", "closed", "refused", "connected", "native"])("Show from the deck handles %s before visibility", async (outcome) => {
     const visibilityOnly = outcome === "connected" || outcome === "native";
     vi.useFakeTimers();
