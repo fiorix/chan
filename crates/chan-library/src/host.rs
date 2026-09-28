@@ -7103,6 +7103,35 @@ mod tests {
         );
     }
 
+    /// An unregister that fails with anything but a handle of the root this
+    /// process holds settles the removal's row with that failure's own
+    /// sentence, not with the words a retry answers.
+    #[tokio::test]
+    async fn a_removal_whose_unregister_fails_otherwise_keeps_its_errors_sentence() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let foreign = hold_foreign_lock(&library, root.path());
+        let host = WorkspaceHost::new(library, fake_builder());
+        let error = host
+            .remove_workspace_for_root(root.path(), false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Core(ChanError::WorkspaceLocked)),
+            "a removal of a workspace another process holds: {error}"
+        );
+        assert!(
+            matches!(
+                host.mount_state.lock().unwrap().get(&canonical_key(root.path())),
+                Some(MountState::Error(reason)) if *reason == error.to_string()
+            ),
+            "the removal's row does not read its error's sentence"
+        );
+        drop(foreign);
+    }
+
     /// A close of a relinked root that is not mounted reads a mount in
     /// flight, and clears the root's lifecycle, under every key its
     /// registry row goes by, the stored root among them, where a devserver
