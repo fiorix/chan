@@ -765,6 +765,7 @@ const repairDocuments = [
   { label: "user XML", mime: "application/xml", xml: true },
   { label: "user HTML", mime: "text/html" },
   { label: "user foreign page", mime: "text/html", opaque: true },
+  { label: "invoking workspace", mime: "text/html", self: true },
 ];
 
 function repairPopup(spec: (typeof repairDocuments)[number]) {
@@ -806,12 +807,16 @@ describe("record-based window repair", () => {
         const { child, page, navigate, contentType, readDocument } = fixture;
         vi.spyOn(window, "open").mockReturnValue(fixture.handle);
         const blank = spec.href === "about:blank" || spec.href === "";
-        const needsRepair = !spec.mark && (blank || !connected);
+        const needsRepair = !spec.self && !spec.mark && (blank || !connected);
         const host = bridge({ checkPage: vi.fn(async () => {
           await new Promise((resolve) => setTimeout(resolve, 100));
           return pageAnswer();
         }) });
         const rec = scopedWindow({ window_id: `rule ${spec.label} ${connected}`, connected });
+        if (spec.self) {
+          host.currentWindowId = () => rec.window_id;
+          vi.stubGlobal("window", fixture.child);
+        }
         const failed = vi.fn();
         const pending = focusLibraryWindow(host, rec).catch(failed);
         const check = host.checkPage;
