@@ -173,6 +173,7 @@ impl TabDestinationArgs {
                 .clone()
                 .or_else(|| std::env::var("CHAN_WINDOW_ID").ok()),
             std::env::var("CHAN_CONTROL_SOCKET").ok(),
+            std::env::var("CHAN_WORKSPACE_PATH").ok(),
         )
     }
 
@@ -1966,7 +1967,7 @@ const CLIPBOARD_WAIT_NOTICE_DELAY: std::time::Duration = std::time::Duration::fr
 /// a browser permission prompt, or the native clipboard backend), so a
 /// blocking `cs paste` / `cs copy` is self-explaining instead of silent.
 async fn send_clipboard_request(
-    socket: &std::path::Path,
+    socket: &crate::control::EnvControlSocket,
     request: ControlRequest,
 ) -> Result<String> {
     let round_trip = send_control_request(socket, request);
