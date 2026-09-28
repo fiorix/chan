@@ -21,7 +21,7 @@ import {
   closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
-  layout, setTabContent, type FileTab, type SerNode,
+  layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
 const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
@@ -313,6 +313,19 @@ describe("pending drawing edits", () => {
       expect(readTab(tab.id)).toBeUndefined();
     },
   );
+
+  test("a move to another pane carries the pending stroke", async () => {
+    const { pane, tab, strokeAt } = await draw();
+    const other = splitPane(pane.id, "row")!;
+    moveTab(pane.id, tab.id, other);
+    const node = layout.nodes[other];
+    const moved = node?.kind === "leaf" ? node.tabs.find((t) => t.id === tab.id) : undefined;
+
+    expect({
+      carried: moved?.kind === "file" ? moved.content.includes("last-stroke") : "not moved",
+      inDebounce: Date.now() - strokeAt < 200,
+    }).toEqual({ carried: true, inDebounce: true });
+  });
 
   const PANE_CLOSES: [kind: string, blockedSummary: string][] = [
     ["close_tab", "blocked 1 tab"],
