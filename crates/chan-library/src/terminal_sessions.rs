@@ -11599,6 +11599,17 @@ mod tests {
             let hook = RecordingPark::default();
             let registry = parked_registry(&hook);
 
+            // Closing an imported session signals its pid, so the pid is a
+            // child of this test, reaped only once the controller that
+            // signals it has stopped: until then its pid cannot be reused.
+            let mut child = Command::new("sleep")
+                .arg("60")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
             let pty = native_pty_system().openpty(test_size()).unwrap();
             let raw_fd = pty.master.as_raw_fd().unwrap();
             let master_fd = clone_master_fd(raw_fd).unwrap();
@@ -11618,7 +11629,7 @@ mod tests {
                 env: Default::default(),
                 profile: None,
                 mcp_env: false,
-                child_pid: Some(4242),
+                child_pid: Some(pid),
                 size: test_size().into(),
                 seq: 7,
                 generation: 3,
@@ -11647,14 +11658,20 @@ mod tests {
 
             let adopt = hook.wait_for_call("adopt:");
             let name = adopt.strip_prefix("adopt:").unwrap().to_string();
-            assert_eq!(name, fdstore_fd_name("imported-session", Some(4242)));
+            assert_eq!(name, fdstore_fd_name("imported-session", Some(pid)));
             assert!(
                 !hook.calls().iter().any(|c| c.starts_with("park:")),
                 "adoption must not re-store an inherited fd"
             );
 
+            let session = registry.sessions.lock().unwrap()["imported-session"].clone();
             assert!(registry.close("imported-session", CloseReason::Explicit));
             assert_eq!(hook.unpark_calls(), vec![format!("unpark:{name}")]);
+            assert!(
+                session.ended.wait(Duration::from_secs(30)).is_some(),
+                "the controller of the closed session never stopped"
+            );
+            child.wait().unwrap();
         }
 
         /// A stand-in for the systemd fd store and the restart manifest file:
