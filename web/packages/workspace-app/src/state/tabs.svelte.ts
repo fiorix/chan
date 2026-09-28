@@ -2650,6 +2650,12 @@ export function registerPendingEditFlush(tabId: string, flush: () => void): () =
   };
 }
 
+/// Commit the buffered input of each of `tabs` that has a mounted editor,
+/// for a caller about to read their buffers.
+export function flushPendingEdits(tabs: readonly Tab[]): void {
+  for (const tab of tabs) if (tab.kind === "file") pendingEditFlushes.get(tab.id)?.();
+}
+
 export function registerTerminalCloseSink(tabId: string, sink: TerminalCloseSink): () => void {
   terminalCloseSinks.set(tabId, sink);
   return () => {
