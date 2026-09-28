@@ -8539,6 +8539,73 @@ mod tests {
         );
     }
 
+    /// A devserver with a window registry over one registered root whose
+    /// parent then moved under a symlink, so the registry row keeps the
+    /// root it stored and the root now resolves under the moved parent.
+    /// Returns the state, the stored root, and the moved spelling a serve
+    /// request names.
+    #[cfg(unix)]
+    async fn relinked_devserver(
+        home: &Path,
+        holder: &Path,
+    ) -> (Arc<DevserverState>, PathBuf, PathBuf) {
+        use std::os::unix::fs::symlink;
+        let parent = holder.join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("mkdir");
+        let state = devserver_with_windows(home).await;
+        let stored = state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register")
+            .root_path;
+        let moved = holder.join("moved");
+        std::fs::rename(&parent, &moved).expect("move the parent");
+        symlink(&moved, &parent).expect("link the old parent");
+        let relinked = moved.join("ws");
+        assert_ne!(
+            canonical_root(&relinked),
+            stored,
+            "fixture: the root did not relink"
+        );
+        (state, stored, relinked)
+    }
+
+    /// A relinked root's handed-off window stores the root its registry row
+    /// stores, the path the launcher lists the workspace by and nests the
+    /// workspace's windows under, whichever spelling the serve request named.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_roots_handed_off_window_stores_its_registry_rows_root() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, _stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+
+        let response = handle_discovery_request(&state, 8787, register_request(&relinked)).await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "fixture: the relinked root's serve request failed: {response:?}"
+        );
+        let rows = state.host.library().list_workspaces();
+        assert_eq!(rows.len(), 1, "fixture: the registry holds {rows:?}");
+        let windows: Vec<_> = state
+            .host
+            .assemble_window_records()
+            .into_iter()
+            .filter(|record| record.kind == WindowKind::Workspace)
+            .collect();
+        assert_eq!(windows.len(), 1, "fixture: the handoff minted {windows:?}");
+        assert_eq!(
+            windows[0].workspace_path.as_deref(),
+            Some(&*rows[0].root_path.to_string_lossy()),
+            "the handed-off window stores a path other than its registry row's root"
+        );
+    }
+
     #[tokio::test]
     async fn discovery_registration_mounts_and_mints_one_window_per_request() {
         let _env = chan_home_env_read();
