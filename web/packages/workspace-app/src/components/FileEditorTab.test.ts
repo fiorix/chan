@@ -13,7 +13,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import FileEditorTab from "./FileEditorTab.svelte";
 import Pane from "./Pane.svelte";
 import { api } from "../api/client";
+import { setSocketFactory } from "../api/transport";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { demoSocketFactory } from "../demo/socket";
+import { resetDocSyncForTests } from "../state/docSync.svelte";
+import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { bufferKey, flushPendingBufferWrites, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
@@ -37,9 +41,12 @@ import {
   closeFind,
   ensureTabSlidePreview,
   layout,
+  markTabFileMissing,
   openFind,
+  rekeyTabsForRename,
   reloadTabFromDisk,
   saveTab,
+  scheduleAutosave,
   setMode,
   setTabContent,
   type FileTab,
@@ -83,6 +90,7 @@ const island = vi.hoisted(() => {
   const island = {
     props: null as Record<string, unknown> | null,
     session: null as object | null,
+    releases: 0,
     module: {
       default: (_anchor: unknown, props: Record<string, unknown>) => {
         island.props = props;
@@ -105,6 +113,7 @@ vi.mock("../state/sceneSync.svelte", async (importOriginal) => {
     acquireSceneSession: (tab: { mode: string }) =>
       island.session ?? actual.acquireSceneSession(tab as never),
     releaseSceneSession: (id: string) => {
+      island.releases += 1;
       if (!island.session) actual.releaseSceneSession(id);
     },
   };
@@ -1480,6 +1489,17 @@ describe("a drawing whose save is refused", () => {
     });
   });
 
+  test("a missing file's state comes before the line", async () => {
+    const { tab, target } = await refused();
+    markTabFileMissing(tab.id);
+    await settle();
+
+    expect({
+      toolbar: target.querySelector(".editor-toolbar")?.textContent?.trim(),
+      line: toolbarLine(target),
+    }).toEqual({ toolbar: "File moved or deleted", line: undefined });
+  });
+
   test("a tab whose load failed still shows the error in place of the editor", async () => {
     const tab = seat(fileTab({ mode: "source" }));
     const { target } = await render(tab);
@@ -1492,5 +1512,155 @@ describe("a drawing whose save is refused", () => {
       placeholder: target.querySelector(".error-placeholder")?.textContent?.trim(),
       editor: target.querySelector(".cm-content") !== null,
     }).toEqual({ line: "read failed", placeholder: "read failed", editor: false });
+  });
+
+  describe("and the live sessions", () => {
+    /// A session socket that answers only what a test feeds it.
+    class SessionSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(readonly url: string) {
+        sessionSockets.push(this);
+      }
+      send(): void {}
+      close(): void {
+        this.readyState = 3;
+      }
+      open(): void {
+        this.readyState = 1;
+        this.onopen?.();
+      }
+      frame(f: unknown): void {
+        this.onmessage?.({ data: JSON.stringify(f) });
+      }
+    }
+    const sessionSockets: SessionSocket[] = [];
+    const dialled = (kind: "scene" | "doc") => sessionSockets.filter((s) => s.url.includes(`/api/${kind}/ws`)).length;
+    const FIXED = '{"type":"excalidraw","elements":[] }';
+
+    /// Holds every write until the test lets it land.
+    function heldWrites(write: { mockImplementation(fn: typeof api.write): unknown }, realWrite: typeof api.write) {
+      const gate: { land?: () => void } = {};
+      write.mockImplementation(
+        (...args) =>
+          new Promise((resolve) => {
+            gate.land = () => resolve(realWrite(...args));
+          }),
+      );
+      return gate;
+    }
+
+    async function autosaveFires(tabId: string): Promise<void> {
+      scheduleAutosave(PANE, tabId);
+      await new Promise((r) => setTimeout(r, 900));
+      await settle();
+    }
+
+    beforeEach(() => {
+      sessionSockets.length = 0;
+      resetSceneSyncForTests();
+      resetDocSyncForTests();
+      setSocketFactory((url) =>
+        url.includes("/api/scene/ws") || url.includes("/api/doc/ws")
+          ? (new SessionSocket(url) as unknown as WebSocket)
+          : demoSocketFactory(url),
+      );
+    });
+
+    afterEach(() => {
+      resetSceneSyncForTests();
+      resetDocSyncForTests();
+      setSocketFactory(demoSocketFactory);
+    });
+
+    test("a refused drawing switched to the board dials no scene session", async () => {
+      const { tab } = await refused();
+      setMode(tab, "canvas");
+      await settle();
+
+      expect({ scene: dialled("scene"), held: tab.refusedUnwritten }).toEqual({ scene: 0, held: true });
+    });
+
+    test("on the board a fixed text is written by the classic save, and the session comes after it lands", async () => {
+      const realWrite = api.write.bind(api);
+      const { tab, write } = await refused();
+      const gate = heldWrites(write, realWrite);
+      setTabContent(tab, FIXED);
+      setMode(tab, "canvas");
+      await settle();
+      await autosaveFires(tab.id);
+      const inFlight = dialled("scene");
+      gate.land?.();
+      await settle();
+
+      expect({ inFlight, scene: dialled("scene"), disk: disk.get(PATH)?.content }).toEqual({
+        inFlight: 0, scene: 1, disk: FIXED,
+      });
+    });
+
+    test("a refused text's write carries the tokens of its load, not a snapshot's", async () => {
+      const { tab, write } = await refused();
+      setMode(tab, "canvas");
+      await settle();
+      for (const socket of sessionSockets) {
+        socket.open();
+        socket.frame({ type: "snapshot", version: 9, elements: [], appState: {}, files: {}, dirty: false, mtime_ns: "99000000000", cursors: [] });
+      }
+      await settle();
+      setMode(tab, "source");
+      // Back in source mode a session lingers before it lets the tab go.
+      await vi.waitFor(() => expect(tab.doc).toBeUndefined());
+      setTabContent(tab, FIXED);
+      await saveTab(tab);
+
+      expect(write.mock.calls.map((call) => call.slice(2))).toEqual([[null, 1, null]]);
+    });
+
+    test("a rename out of the check takes the line away and no document session until the write lands", async () => {
+      const realWrite = api.write.bind(api);
+      const { tab, target, write } = await refused();
+      const gate = heldWrites(write, realWrite);
+      rekeyTabsForRename(PATH, "notes/board.json");
+      await settle();
+      const renamed = { line: toolbarLine(target), doc: dialled("doc") };
+      await autosaveFires(tab.id);
+      const inFlight = dialled("doc");
+      gate.land?.();
+      await settle();
+
+      expect({ renamed, inFlight, doc: dialled("doc"), disk: disk.get("notes/board.json")?.content }).toEqual({
+        renamed: { line: undefined, doc: 0 }, inFlight: 0, doc: 1, disk: BROKEN,
+      });
+    });
+
+    test("a text undone back to the file's clears both and takes its session again", async () => {
+      const { tab } = await refused();
+      setTabContent(tab, SAVED);
+      setMode(tab, "canvas");
+      await settle();
+
+      expect({ reason: tab.saveError, held: tab.refusedUnwritten, scene: dialled("scene") }).toEqual({
+        reason: null, held: false, scene: 1,
+      });
+    });
+
+    test("a new reason while held dials nothing and releases nothing", async () => {
+      const { tab } = await refused();
+      const first = tab.saveError;
+      const releases = island.releases;
+      setTabContent(tab, '{"type":"excalidraw",,"elements":[]}');
+      await saveTab(tab);
+      await settle();
+
+      expect({
+        moved: tab.saveError !== first && typeof tab.saveError === "string",
+        releases: island.releases - releases,
+        scene: dialled("scene"),
+        doc: dialled("doc"),
+      }).toEqual({ moved: true, releases: 0, scene: 0, doc: 0 });
+    });
   });
 });
