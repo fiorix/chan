@@ -2306,7 +2306,10 @@ export function crossWindowBroadcastMembers(tab: TerminalTab): TerminalRosterEnt
 /// delivers to members with their own broadcast toggle on. Drives the
 /// broadcast indicator's count.
 export function terminalBroadcastReachCount(tab: TerminalTab): number {
-  const local = tab.broadcastTargetIds.length;
+  // Input fans out to the source's group only (terminalBroadcastMemberIds),
+  // while the targets are the window-wide union.
+  const inGroup = new Set(terminalBroadcastMemberIds(tab));
+  const local = tab.broadcastTargetIds.filter((id) => inGroup.has(id)).length;
   const cross = crossWindowBroadcastMembers(tab).filter((e) => e.broadcast).length;
   return local + cross;
 }
