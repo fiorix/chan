@@ -112,11 +112,18 @@ interface PersistedTransfer {
   source: TransferSource | null;
 }
 
-function persist(): void {
+function persist(payload = persistedTransfers()): void {
   if (typeof window === "undefined") return;
   try {
-    const payload = {
-      items: transfers.items.map(
+    window.sessionStorage.setItem(storeKey(), JSON.stringify(payload));
+  } catch {
+    // sessionStorage unavailable / quota: the bubble degrades to in-memory.
+  }
+}
+
+function persistedTransfers(): { items: PersistedTransfer[]; shown: boolean } {
+  return {
+    items: transfers.items.map(
         (t): PersistedTransfer => ({
           id: t.id,
           kind: t.kind,
@@ -128,12 +135,8 @@ function persist(): void {
           source: t.source,
         }),
       ),
-      shown: transfers.shown,
-    };
-    window.sessionStorage.setItem(storeKey(), JSON.stringify(payload));
-  } catch {
-    // sessionStorage unavailable / quota: the bubble degrades to in-memory.
-  }
+    shown: transfers.shown,
+  };
 }
 
 let nextId = 1;
@@ -481,10 +484,15 @@ export function restoreTransfers(
   emitSignal();
 }
 
+/// The page's own teardown: cancel every transfer's transport, but record the
+/// transfers as they stood, so the load that follows restores one cut short
+/// as interrupted, with a Retry for a download, not as cancelled by the user.
 export function cancelAllTransfers(): void {
+  const standing = persistedTransfers();
   for (const transfer of [...transfers.items]) {
     if (occupiesWindow(transfer)) transfer.cancel?.();
   }
+  persist(standing);
 }
 
 if (typeof window !== "undefined") {
