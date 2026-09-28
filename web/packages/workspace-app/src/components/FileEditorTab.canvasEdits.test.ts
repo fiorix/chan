@@ -5,7 +5,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 import FileEditorTab from "./FileEditorTab.svelte";
-import { api } from "../api/client";
+import { api, sessionWindowId } from "../api/client";
 import { setSocketFactory } from "../api/transport";
 import { demoSocketFactory } from "../demo/socket";
 import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
@@ -16,7 +16,7 @@ import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { EXCALIDRAW_VERSION, excalidrawBoard, type BoardProps } from "../__tests__/excalidrawLibrary";
 import { trackTimers, type TimerTrack } from "../demo/timers";
-import { applyLocalTheme, effectiveHybridSurfaceTheme, refreshWorkspace } from "../state/store.svelte";
+import { applyLocalTheme, effectiveHybridSurfaceTheme, onWatchEvent, refreshWorkspace } from "../state/store.svelte";
 import {
   closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
@@ -271,6 +271,23 @@ async function draw(over: Partial<FileTab> = {}) {
   return { pane, tab, target, strokeAt: Date.now() - 50 };
 }
 
+/// What the control client prints for a `cs pane` operation: the window
+/// command the server relays, answered through the window's reply. It waits
+/// only on tasks due now, so a stroke's pending serialize stays pending.
+async function paneExec(op: Record<string, unknown>) {
+  const reply = vi.spyOn(api, "windowReply").mockResolvedValue(undefined);
+  reply.mockClear();
+  onWatchEvent({
+    type: "window_command", window_id: sessionWindowId(), command: "pane_exec", request_id: "pane-exec", op,
+  });
+  for (let i = 0; i < 20 && reply.mock.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(0);
+  expect(reply).toHaveBeenCalledTimes(1);
+  const { ok, summary, blocked } = reply.mock.calls[0]![0].payload as {
+    ok: boolean; summary: string; blocked: { tab: string; reason: string }[];
+  };
+  return { ok, summary, blocked };
+}
+
 describe("pending drawing edits", () => {
   test("a mode switch carries the pending stroke into Source", async () => {
     const { tab, target } = await draw();
@@ -296,6 +313,44 @@ describe("pending drawing edits", () => {
       expect(readTab(tab.id)).toBeUndefined();
     },
   );
+
+  const PANE_CLOSES: [kind: string, blockedSummary: string][] = [
+    ["close_tab", "blocked 1 tab"],
+    ["close_pane", "blocked 1 tab(s)"],
+    ["close_all", "blocked 1 tab(s)"],
+  ];
+
+  test.each(PANE_CLOSES)(
+    "an unforced %s reports a pending stroke unsaved, and closes once it is saved", async (kind, blockedSummary) => {
+      const { pane, tab, strokeAt } = await draw();
+      const op = { kind, pane_id: pane.id, tab_id: tab.id };
+      const asked = await paneExec(op);
+      const askedInDebounce = Date.now() - strokeAt < 200;
+      const open = readTab(tab.id) !== undefined;
+
+      expect({ asked, askedInDebounce, open }).toEqual({
+        asked: { ok: false, summary: blockedSummary, blocked: [{ tab: "board.excalidraw", reason: "unsaved changes" }] },
+        askedInDebounce: true,
+        open: true,
+      });
+      scheduleAutosave(pane.id, tab.id);
+      await vi.advanceTimersByTimeAsync(800);
+      const again = await paneExec(op);
+      expect({ ok: again.ok, closed: readTab(tab.id) === undefined }).toEqual({ ok: true, closed: true });
+      expect(disk.get(tab.path)?.content).toContain("last-stroke");
+    },
+  );
+
+  test.each(PANE_CLOSES.map(([kind]) => kind))("a forced %s closes a drawing with a pending stroke and writes nothing", async (kind) => {
+    const { pane, tab } = await draw();
+    const write = vi.spyOn(api, "write");
+    const closed = await paneExec({ kind, pane_id: pane.id, tab_id: tab.id, force: true });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect({ ok: closed.ok, blocked: closed.blocked, gone: readTab(tab.id) === undefined, writes: write.mock.calls.length })
+      .toEqual({ ok: true, blocked: [], gone: true, writes: 0 });
+    expect(disk.get(tab.path)?.content).not.toContain("last-stroke");
+  });
 
   test("a pending stroke keeps an initially empty drawing from being deleted", async () => {
     const { pane, tab } = await draw({ content: "", saved: "", openedEmpty: true });
@@ -924,6 +979,34 @@ describe("a live drawing", () => {
     socket.frame({ type: "push-ok", version: 3 });
 
     expect({ beforeAck, afterAck: isDirty(tab) }).toEqual({ beforeAck: true, afterAck: false });
+  });
+
+  test("an unforced close_tab reports a pending stroke unsaved and pushes it, and closes after its ack", async () => {
+    const { pane, tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    board.stroke(STROKE);
+    const op = { kind: "close_tab", pane_id: pane.id, tab_id: tab.id };
+    const asked = await paneExec(op);
+    const pushed = socket.pushes().map((f) => (f.elements as { id: string }[]).map((e) => e.id));
+    socket.frame({ type: "push-ok", version: 2 });
+    const again = await paneExec(op);
+
+    expect({ asked, pushed, closed: again.ok && readTab(tab.id) === undefined }).toEqual({
+      asked: { ok: false, summary: "blocked 1 tab", blocked: [{ tab: "live.excalidraw", reason: "unsaved changes" }] },
+      pushed: [["stroke"]],
+      closed: true,
+    });
+  });
+
+  test("a forced close_tab pushes nothing of a pending stroke", async () => {
+    const { pane, tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    board.stroke(STROKE);
+    const closed = await paneExec({ kind: "close_tab", pane_id: pane.id, tab_id: tab.id, force: true });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect({ ok: closed.ok, gone: readTab(tab.id) === undefined, pushes: socket.pushes() })
+      .toEqual({ ok: true, gone: true, pushes: [] });
   });
 
   const BACKGROUND = "#abcdef";
