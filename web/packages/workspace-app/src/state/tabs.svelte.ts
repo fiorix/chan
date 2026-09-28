@@ -5253,6 +5253,9 @@ export function detachTabToPaneEdge(
   if (!found) return;
   if (fromPaneId === targetPaneId && allPaneTabs(fromNode).length <= 1) return;
 
+  // The editor in the old place is torn down with the original, and what it
+  // commits then lands on the original, so the copy takes its input first.
+  flushTabEdits([found.tab]);
   const moved = cloneTab(found.tab);
   found.tabs.splice(found.index, 1);
   if (paneActiveTabId(fromNode, found.side) === tabId) {
