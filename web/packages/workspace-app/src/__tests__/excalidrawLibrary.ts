@@ -1,7 +1,7 @@
 // A stand-in for the Excalidraw board, for tests that mount ExcalidrawCanvas
 // with React and the drawing library mocked out. It keeps the library's order
 // of events, which the canvas's seeding depends on, and the parts of its
-// restore and its serializer that a test can see.
+// restore, its serializer and its reconcile that a test can see.
 //
 // The order is read from @excalidraw/excalidraw 0.18.1's source
 // (dist/dev/index.js) and was not run in a browser:
@@ -28,7 +28,8 @@
 //      which keeps the `viewModeEnabled` prop over the restored value
 //      (:25139-25146); `updateScene` applies whatever it is handed.
 //
-// The restore and the serializer are read from dist/dev/chunk-4FTI6OG3.js.
+// The restore and the serializer are read from dist/dev/chunk-4FTI6OG3.js,
+// the reconcile from dist/dev/index.js.
 //
 // EXCALIDRAW_VERSION is the version all of this was read from. A test fails
 // when the installed package is another, so an upgrade reads it all again.
@@ -96,11 +97,33 @@ function serializeAsJSON(elements: Element[], appState: AppState, files: Files):
   return JSON.stringify({ elements: kept, appState: exported, files: referenced });
 }
 
+/// The library's `reconcileElements` (index.js:32859-32888), reduced to its
+/// version rule (:32828-32837): a remote element replaces the local one unless
+/// the local one is newer, or as new with the lower `versionNonce`, and the
+/// local elements the remote does not name follow. It leaves out the editing
+/// state that also keeps a local element, and the order by fractional index.
+function reconcileElements(local: readonly Element[], remote: readonly Element[]): Element[] {
+  const mine = new Map(local.map((element) => [element.id, element]));
+  const kept = new Map<unknown, Element>();
+  for (const element of remote) {
+    if (kept.has(element.id)) continue;
+    const own = mine.get(element.id);
+    const ownWins =
+      own !== undefined &&
+      (Number(own.version) > Number(element.version) ||
+        (own.version === element.version && Number(own.versionNonce) < Number(element.versionNonce)));
+    kept.set(element.id, ownWins ? own : element);
+  }
+  for (const element of local) if (!kept.has(element.id)) kept.set(element.id, element);
+  return [...kept.values()];
+}
+
 /// The module the canvas imports, for `vi.mock("@excalidraw/excalidraw")`.
 export const excalidrawModule = {
   Excalidraw: () => null,
   restore,
   serializeAsJSON,
+  reconcileElements,
   CaptureUpdateAction: { IMMEDIATELY: "IMMEDIATELY", EVENTUALLY: "EVENTUALLY", NEVER: "NEVER" },
 };
 
