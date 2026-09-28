@@ -105,9 +105,15 @@ impl ExtensionEntry {
                 .expect("an extension entry always shares its own upstream origin"),
             capabilities: self.capabilities.clone(),
             singleton: self.singleton,
-            running: self.running.load(Ordering::Relaxed),
+            running: self.running(),
             commands: self.commands.clone(),
         }
+    }
+
+    /// Whether the extension's process is running: false once its
+    /// supervisor has seen the process exit, or has stopped it.
+    pub(crate) fn running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
     }
 
     pub(crate) fn public_path_for(&self, upstream: &Url) -> Option<String> {

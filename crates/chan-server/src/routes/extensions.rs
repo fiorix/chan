@@ -123,6 +123,19 @@ async fn proxy_extension_request(
         return response;
     }
 
+    // An extension whose process has exited, or that its supervisor stopped,
+    // is sent nothing, its token included, whatever holds its port since.
+    // The supervisor clears the flag only once it sees the exit, so a port
+    // taken between the exit and that observation is still forwarded to.
+    if !entry.running() {
+        return crate::error::err_code(
+            StatusCode::BAD_GATEWAY,
+            "extension unavailable".into(),
+            "extension_unavailable",
+            serde_json::json!({}),
+        );
+    }
+
     let upstream = entry.upstream_url(&path, request.uri().query());
     let (mut parts, body) = request.into_parts();
     if parts.headers.contains_key(header::UPGRADE) {
