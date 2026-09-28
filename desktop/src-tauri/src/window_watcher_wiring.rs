@@ -2833,6 +2833,33 @@ mod tests {
         harness.stop(WatchLoopStop::KeepWindows).await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_on_a_changed_key_navigates_a_connected_record() {
+        let mut record = retry_record("changed-key-connected", 0);
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        harness.navigate_first(&record).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        record.token = "restarted-token".into();
+        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed_wake().await;
+        let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
+        // Another client reaches the new target before this window's try.
+        harness.set_connected(&record, true).await;
+        tokio::time::advance(RETRY_NUDGE).await;
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 5, 20],
+            "a connected record cannot end a try for a key this webview never loaded"
+        );
+        assert_eq!(harness.raised(&record), vec![true, true, false]);
+        let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::Navigated));
+        assert!(harness.applied(&record));
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
     // A Reload that found its target not ready is carried out by a later try
     // once the target answers ready, on a page whose socket is gone, whatever
     // the page's URL reads: a page stuck after a failed self-reload of its
