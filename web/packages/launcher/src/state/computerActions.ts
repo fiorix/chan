@@ -129,18 +129,20 @@ export async function focusComputerWindow(window: WindowRecord): Promise<void> {
     await focusWindow(window);
     return;
   }
-  await openWindowRecord(window);
+  if (!(await openWindowRecord(window))) return;
   if (window.hidden) {
     await toggleWindowVisibility(window, actingFor(window.prefix));
   }
 }
 
 export async function setWindowShown(window: WindowRecord, shown: boolean): Promise<void> {
-  if (!!window.hidden === !shown) return;
   if (hasDesktopBridge) {
+    if (!!window.hidden === !shown) return;
     await toggleWindow(window);
     return;
   }
+  if (shown && !window.connected && !(await openWindowRecord(window, { focus: false }))) return;
+  if (!!window.hidden === !shown) return;
   await toggleWindowVisibility(window, actingFor(window.prefix));
 }
 

@@ -29,7 +29,8 @@
   import { hasControlAttention, clearControlAttention } from "../state/controlAttention.svelte";
   import { hasWindowAttention } from "../state/windowAttention.svelte";
   import { hasDesktopBridge, readOnly, selfManagedWindows } from "../state/capabilities";
-  import { openWindowRecord, toggleWindowVisibility } from "../state/windowManager.svelte";
+  import { openWindowRecord } from "../state/windowManager.svelte";
+  import { setWindowShown } from "../state/computerActions";
   import { actingFor, canActOnTenant } from "../state/leadership.svelte";
   import { MAX_WINDOW_LABEL_CHARS, type WindowRecord } from "../api/library";
 
@@ -209,7 +210,7 @@
             : "Hide window"}
         aria-label={w.hidden ? "Show window" : "Hide window"}
         onclick={() => {
-          run(w, toggleWindowVisibility(w, actingFor(w.prefix)));
+          run(w, setWindowShown(w, !!w.hidden));
         }}>
         {#if w.hidden}<EyeOff size={16} />{:else}<Eye size={16} />{/if}
       </button>
