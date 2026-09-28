@@ -41,6 +41,7 @@
     width,
     align = "stretch",
     lifted = false,
+    label,
     children,
   }: {
     id: OverlayId;
@@ -55,6 +56,8 @@
     // Centered auto-height overlays can opt into a lifted resting
     // position when their content expands below the main input.
     lifted?: boolean;
+    // The overlay's accessible name.
+    label: string;
     children: Snippet;
   } = $props();
 
@@ -103,6 +106,8 @@
       style="width: {resolvedWidth};"
       onclick={(e) => e.stopPropagation()}
       role="dialog"
+      aria-modal="true"
+      aria-label={label}
       tabindex="-1"
     >
       {@render children()}

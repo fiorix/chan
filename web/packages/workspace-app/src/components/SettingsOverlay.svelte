@@ -330,7 +330,7 @@ function mutationPatch(
   }
 </script>
 
-<OverlayShell id="settings" open={settingsPanel.open} onClose={closeSettings}>
+<OverlayShell id="settings" label="Settings" open={settingsPanel.open} onClose={closeSettings}>
   <div class="settings" bind:this={settingsEl} tabindex="-1">
     <header>
       <button
