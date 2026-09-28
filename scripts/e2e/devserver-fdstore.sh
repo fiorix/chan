@@ -5,7 +5,10 @@
 # and workspace PTYs survive (1) a bare `systemctl --user restart`, including distinct live
 # and spawn metadata, (2) `chan devserver restart`, (3) a watchdog kill
 # (SIGSTOP the main process), and (4) a kill -9 crash restart including a
-# session spawned after the previous boot; session close, `stop`,
+# session spawned after the previous boot. (5) A restart whose manifest
+# names a prefix no tenant is mounted at, as after a build that derives a
+# workspace's prefix differently, restores the workspace PTY in the tenant
+# its window is shown under and ends a terminal window's. Session close, `stop`,
 # `restart --force`, and a bare `systemctl --user stop` all end the shells
 # and empty the store. The fd store count is asserted after every phase so
 # restart/adoption cycles can never grow it.
@@ -362,6 +365,35 @@ print(json.dumps({"kind": "workspace", "workspace_path": sys.argv[1]}))
 
 child_alive() { kill -0 "$1" 2>/dev/null; }
 
+window_listed() { # window-id
+    local token
+    token="$(devserver_token)"
+    api GET /api/library/windows "$token" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+raise SystemExit(0 if any(r["window_id"] == sys.argv[1] for r in rows) else 1)' "$1"
+}
+
+# Whether the session is in the roster of the tenant its window's record
+# names; false, not fatal, while that tenant still refuses during startup.
+session_in_roster() { # sid window-id
+    local prefix ttoken
+    read -r prefix ttoken <<<"$(window_route "$2")" || return 1
+    api GET "$prefix/api/terminals/roster" "$ttoken" 2>/dev/null | grep -q "$1"
+}
+
+manifest_prefix_is() { # sid prefix
+    python3 -c '
+import json, sys
+
+path, sid, prefix = sys.argv[1:]
+with open(path) as handle:
+    manifest = json.load(handle)
+entry = next((row for row in manifest["sessions"] if row["meta"]["session_id"] == sid), None)
+raise SystemExit(0 if entry is not None and entry["meta"]["tenant_prefix"] == prefix else 1)
+' "$CHAN_HOME/devserver/fdstore-restart.json" "$@"
+}
+
 # The session id must be reachable through its exact window's tenant roster
 # after a boot (tenant tokens re-mint across restarts).
 assert_session_listed() { # sid window-id
@@ -507,23 +539,101 @@ assert_session_listed "$WS_SID1" "$WS_WID1"
 assert_session_listed "$SID2" "$WID2"
 assert_store 3 "crash adoption must not grow the store"
 
-# ---- case 5: closing a session removes its store entry ----
-log "case 5: session close removes the store entry"
+# ---- case 5: the manifest names a prefix no tenant is mounted at ----
+# A build that derives a workspace's prefix differently from the one that
+# parked its terminals imports them under a prefix nothing is mounted at.
+# An ExecStartPre drop-in models it by rewriting the parked manifest after
+# the stop's final write and before the next start reads it. The workspace
+# session must come back in the tenant its window is shown under; a terminal
+# window's session, which no workspace window places, must end with its
+# window, as any session the import skips.
+log "case 5: a restart whose manifest names a prefix no tenant is mounted at"
+read -r SID5 PID5 WID5 <<<"$(spawn_windowed_sleep 86316)"
+log "session5 $SID5 child $PID5 window $WID5"
+assert_store 4 "a third shared session parked beside the others"
+MOVED_PREFIX="/e2e-moved-00000000"
+MOVE_RECORD="$WORK/moved-prefix.record"
+cat > "$WORK/move-prefix.py" <<'EOF'
+import json, os, sys
+
+path, record, prefix, *sessions = sys.argv[1:]
+with open(path) as handle:
+    manifest = json.load(handle)
+moved = []
+for entry in manifest["sessions"]:
+    meta = entry["meta"]
+    if meta["session_id"] in sessions:
+        moved.append(f'{meta["session_id"]} {meta["tenant_prefix"]} {prefix}')
+        meta["tenant_prefix"] = prefix
+if len(moved) != len(sessions):
+    sys.exit(f"move-prefix: found {len(moved)} of {len(sessions)} sessions in {path}")
+tmp = path + ".e2e-tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as handle:
+    json.dump(manifest, handle, indent=2)
+os.replace(tmp, path)
+with open(record, "w") as handle:
+    handle.write("\n".join(moved) + "\n")
+EOF
+cat > "$DROPIN_DIR/60-e2e-moved-prefix.conf" <<EOF
+[Service]
+ExecStartPre=$(command -v python3) $WORK/move-prefix.py $CHAN_HOME/devserver/fdstore-restart.json $MOVE_RECORD $MOVED_PREFIX $WS_SID1 $SID5
+EOF
+systemctl --user daemon-reload
+systemctl --user restart "$UNIT_NAME" \
+    || fail "restart with the moved-prefix drop-in failed (its ExecStartPre refused?)"
+wait_until 60 "readiness after the moved-prefix restart" ready
+rm -f "$DROPIN_DIR/60-e2e-moved-prefix.conf"
+systemctl --user daemon-reload
+[ -f "$MOVE_RECORD" ] && [ "$(wc -l < "$MOVE_RECORD")" = 2 ] \
+    || fail "the drop-in did not rewrite both sessions' prefixes"
+log "manifest rewritten before the start: $(tr '\n' ';' < "$MOVE_RECORD")"
+wait_until 15 "session5 child death" sh -c "! kill -0 $PID5 2>/dev/null"
+child_alive "$WS_PID1" || fail "workspace child died across the moved-prefix restart"
+wait_until 30 "the workspace session in its window's tenant roster" \
+    session_in_roster "$WS_SID1" "$WS_WID1"
+assert_session_listed "$WS_SID1" "$WS_WID1"
+read -r WS_PREFIX _ <<<"$(window_route "$WS_WID1")"
+[ "$WS_PREFIX" != "$MOVED_PREFIX" ] || fail "the workspace window is shown at the moved prefix"
+wait_until 15 "the manifest naming the workspace session under its window's prefix" \
+    manifest_prefix_is "$WS_SID1" "$WS_PREFIX"
+log "workspace session $WS_SID1 restored under $WS_PREFIX, where its window is shown"
+if window_listed "$WID5"; then
+    fail "session5's terminal window survived its refused restore"
+fi
+child_alive "$PID1" || fail "session1 child died across the moved-prefix restart"
+child_alive "$PID2" || fail "session2 child died across the moved-prefix restart"
+assert_store 3 "the refused session left the store; the moved one stayed"
+JOURNAL="$(journalctl --user -u "$UNIT_NAME" -n 400 --no-pager 2>/dev/null || true)"
+if grep -q "systemd fdstore restore: restored" <<<"$JOURNAL"; then
+    grep -q "restoring a parked terminal session in the tenant its window is shown under" \
+        <<<"$JOURNAL" \
+        || fail "the journal has no line for the session restored in its window's tenant"
+    grep -qF "session $SID5: tenant prefix $MOVED_PREFIX is not mounted and its window $WID5 is a terminal window" \
+        <<<"$JOURNAL" \
+        || fail "the journal does not say why session5 was not restored"
+    log "journal names the moved session and why session5 ended"
+else
+    log "note: journal shows no fdstore restore line (may be unreadable here)"
+fi
+
+# ---- case 6: closing a session removes its store entry ----
+log "case 6: session close removes the store entry"
 read -r TPREFIX TTOKEN <<<"$(window_route "$WID2")"
 api DELETE "$TPREFIX/api/terminals/$SID2" "$TTOKEN" >/dev/null
 wait_until 15 "session2 child death" sh -c "! kill -0 $PID2 2>/dev/null"
 assert_store 2 "closed session left the shared and workspace entries"
 
-# ---- case 6: chan devserver stop kills the child before the unit exits ----
-log "case 6: chan devserver stop"
+# ---- case 7: chan devserver stop kills the child before the unit exits ----
+log "case 7: chan devserver stop"
 "$CHAN" devserver stop --service=systemd
 child_alive "$PID1" && fail "child survived stop's explicit drain"
 child_alive "$WS_PID1" && fail "workspace child survived stop's explicit drain"
 systemctl --user is-active --quiet "$UNIT_NAME" && fail "unit still active after stop"
 assert_store 0 "stop released the store"
 
-# ---- case 7: restart --force kills sessions and restarts ----
-log "case 7: restart --force"
+# ---- case 8: restart --force kills sessions and restarts ----
+log "case 8: restart --force"
 "$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
 wait_until 60 "readiness before force" ready
 read -r SID3 PID3 WID3 <<<"$(spawn_windowed_sleep 86313)"
@@ -534,8 +644,8 @@ wait_until 60 "readiness after force" ready
 child_alive "$PID3" && fail "child survived restart --force"
 assert_store 0 "force restart cleared the store"
 
-# ---- case 8: bare systemctl stop HUPs the shells and empties the store ----
-log "case 8: bare systemctl --user stop"
+# ---- case 9: bare systemctl stop HUPs the shells and empties the store ----
+log "case 9: bare systemctl --user stop"
 read -r SID4 PID4 WID4 <<<"$(spawn_windowed_sleep 86314)"
 log "session4 $SID4 child $PID4 window $WID4"
 assert_store 1 "session parked before bare stop"
@@ -544,7 +654,7 @@ wait_until 30 "session4 child death via store release HUP" \
     sh -c "! kill -0 $PID4 2>/dev/null"
 assert_store 0 "bare stop released the store"
 
-log "PASS: all 8 cases at $SHA"
+log "PASS: all 9 cases at $SHA"
 # Restore the pre-existing unit state (the snapshot lives inside $WORK)
 # BEFORE the throwaway work dir goes away.
 finish_success
