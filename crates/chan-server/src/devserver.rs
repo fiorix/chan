@@ -1921,7 +1921,10 @@ impl DevserverState {
     /// grouped by the registry row that path names ([`registered_row_for`]),
     /// and each group makes one record under that row's stored root, at the
     /// prefix derived from it, desired on when any row of the group is, at
-    /// the highest generation among them. A group holds more than one row
+    /// the highest generation among them and at least 1. A save gives a row
+    /// of generation 0 a generation of its own ([`WorkspaceOverlay::replace`]),
+    /// and the attempt started here must be at the generation the first save
+    /// keeps, or it stands down. A group holds more than one row
     /// when an earlier build's records went by either of a workspace's keys,
     /// or when the host's close or removal by root wrote an off row under
     /// each. Generations are counted per path and order nothing between two
@@ -1950,6 +1953,7 @@ impl DevserverState {
         }
         let mut attempts = Vec::new();
         for (root, row) in grouped {
+            let generation = row.generation.max(1);
             let prefix = match registered_workspace_prefix(&root) {
                 Ok(prefix) => prefix,
                 Err(error) => {
@@ -1960,16 +1964,12 @@ impl DevserverState {
                     continue;
                 }
             };
-            let record = WorkspaceRecord::prepared(
-                root.clone(),
-                prefix.clone(),
-                row.desired_on,
-                row.generation,
-            );
+            let record =
+                WorkspaceRecord::prepared(root.clone(), prefix.clone(), row.desired_on, generation);
             let attempt = row.desired_on.then(|| MountAttempt {
                 root: root.clone(),
                 prefix: prefix.clone(),
-                generation: row.generation,
+                generation,
             });
             {
                 let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
