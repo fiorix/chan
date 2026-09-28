@@ -127,6 +127,8 @@ Toggle Off closes the mounted workspace in WorkspaceHost and destroys its worksp
 
 Stops the serve (if running), then unregisters the workspace through `chan-workspace` in-process. The filesystem is untouched. The watcher fires and the row disappears. For a devserver's served workspace, Forget unmounts it on the devserver and drops the row. There is no "delete workspace" action in the desktop UI.
 
+A `chan workspace forget` handed to the desktop names a mounted workspace to the host's removal by the root its registry row stores while that root still resolves to the canonical root its runtime was mounted at, so that the removal purges the windows stored under either path, and by that canonical root otherwise, since the host resolves the name again and a stored root pointed at another workspace's folder would forget that workspace. In that second case the forget closes the workspace, forgets its on state and purges the windows stored under its canonical root; unless a registration since the registry was loaded resolved the row to that folder, the removal matches no row, so the row stays registered and off with the windows stored under its stored root, and the desktop answers that it closed.
+
 ### 3.6 External changes
 
 Anything that mutates `~/.chan/config.toml` shows up in the UI: `chan workspace add` / `chan workspace forget` from a terminal, a second chan-desktop process, or hand-editing the TOML.
