@@ -1770,6 +1770,8 @@ const KEY_BRIDGE_JS: &str = include_str!("key_bridge.js");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::handoff_row::Desktop;
+    use chan_workspace::paths::root_stall;
 
     #[test]
     fn workspace_open_mode_mints_only_for_explicit_opens() {
@@ -1900,6 +1902,97 @@ mod tests {
         let outcome = stop_handle(None, &state, &key, false).await.expect("stop");
         assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
         assert!(!embedded.is_root_mounted(root.path()));
+    }
+
+    fn own_home(test: &str) -> bool {
+        crate::embedded::in_own_chan_home(&format!("serve::tests::{test}"))
+    }
+
+    /// Two opens a user asked for and a restore, all past the host's check
+    /// while the first open's mount of the workspace is held, open two
+    /// windows: an open that finds the mount another start published first
+    /// still mints its window, and the restore mints none.
+    #[test]
+    fn an_open_that_loses_the_race_to_publish_still_opens_its_window() {
+        if !own_home("an_open_that_loses_the_race_to_publish_still_opens_its_window") {
+            return;
+        }
+        let desktop = Desktop::new();
+        let root = tempfile::tempdir().expect("root");
+        let stored = desktop.register(root.path());
+        let key = stored.to_string_lossy().into_owned();
+        let open = |mode| {
+            start(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                key.clone(),
+                mode,
+            )
+        };
+        let stall = root_stall::stall(&stored);
+        let first = desktop.runtime.spawn(open(WorkspaceOpenMode::OpenWindow));
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(10)),
+            "the first open never reached its mount"
+        );
+        let mut later = [
+            Box::pin(open(WorkspaceOpenMode::OpenWindow)),
+            Box::pin(open(WorkspaceOpenMode::RestoreOnly)),
+        ];
+        desktop.runtime.block_on(async {
+            for waiting in &mut later {
+                assert!(
+                    futures::poll!(waiting.as_mut()).is_pending(),
+                    "a start finished while the first mount was held"
+                );
+            }
+        });
+        drop(stall);
+        desktop.runtime.block_on(async {
+            first
+                .await
+                .expect("join the first open")
+                .expect("the first open");
+            for waiting in later {
+                waiting.await.expect("a later start");
+            }
+        });
+        assert_eq!(
+            desktop.window_paths(),
+            [stored.clone(), stored],
+            "two opens and a restore of one workspace did not open two windows"
+        );
+    }
+
+    /// A restore of a workspace the host already serves mints no window: the
+    /// boot restores only the persisted set, whoever mounted the workspace.
+    #[test]
+    fn a_restore_of_a_workspace_the_host_serves_mints_no_window() {
+        if !own_home("a_restore_of_a_workspace_the_host_serves_mints_no_window") {
+            return;
+        }
+        let desktop = Desktop::new();
+        let root = tempfile::tempdir().expect("root");
+        let stored = desktop.register(root.path());
+        let key = stored.to_string_lossy().into_owned();
+        desktop
+            .runtime
+            .block_on(desktop.embedded().open_workspace(&key))
+            .expect("the host mounts the workspace");
+        desktop
+            .runtime
+            .block_on(start(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                key,
+                WorkspaceOpenMode::RestoreOnly,
+            ))
+            .expect("restore a workspace the host serves");
+        assert_eq!(
+            desktop.window_paths(),
+            Vec::<std::path::PathBuf>::new(),
+            "a restore of a workspace the host serves minted a window"
+        );
     }
 
     #[test]

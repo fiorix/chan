@@ -9457,7 +9457,7 @@ mod tests {
             pub(crate) state: Arc<AppState>,
             pub(crate) runtime: tokio::runtime::Runtime,
             library: chan_workspace::Library,
-            app: tauri::App<tauri::test::MockRuntime>,
+            pub(crate) app: tauri::App<tauri::test::MockRuntime>,
         }
 
         impl Desktop {
