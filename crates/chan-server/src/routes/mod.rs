@@ -8,6 +8,8 @@
 //! `library::launcher_router`, and `devserver::build_devserver_app`.
 
 mod attachments;
+#[cfg(all(test, unix))]
+mod backslash_name_tests;
 mod build_info;
 mod contacts;
 // pub(crate) so the server-side doc-session authority (registry, flusher,
