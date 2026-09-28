@@ -2823,12 +2823,21 @@ fn build_devserver_app(
     // The cell is filled with the bound address after the listener binds
     // (unfilled on a tunnel-only devserver, where `require_mutable` answers
     // 503).
+    //
+    // The launcher's add and on ask the startup coordinator first, as the
+    // devserver's own open and on do, so from the stop signal on they are
+    // refused before they register or mount a root.
     let serve_addr: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
-    crate::install_launcher_root_fallback(
-        &host,
+    let admission: crate::routes::MountAdmission = {
+        let startup = state.startup.clone();
+        Arc::new(move |root: &Path| startup.refuse_mount_at_stop(root))
+    };
+    host.install_root_fallback(crate::routes::admitting_launcher_router(
+        host.clone(),
         Some(state.token.clone()),
         Some(serve_addr.clone()),
-    );
+        Some(admission),
+    ));
     let app = public
         .merge(authed)
         .merge(host.router())
