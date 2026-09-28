@@ -724,19 +724,27 @@ fn read_media_content_sync(
             None,
         )
     })?;
-    let bytes = ctx
+    let read_error = |e: chan_workspace::ChanError| {
+        ErrorData::internal_error(mcp_safe_message(&LlmError::from(e)), None)
+    };
+    // The size comes from the open handle's stat, so a file over the cap is
+    // refused before a byte of it is read. The reader's window is frozen at
+    // that size: bytes the file gains after the open are not read, and a
+    // file that shrinks under the read is an error.
+    let reader = ctx
         .workspace
-        .read(&path)
-        .map_err(|e| ErrorData::internal_error(mcp_safe_message(&LlmError::from(e)), None))?;
-    if (bytes.len() as u64) > max_media_bytes {
+        .read_bytes_bounded(&path)
+        .map_err(read_error)?;
+    let size = reader.stat().size;
+    if size > max_media_bytes {
         return Err(ErrorData::invalid_params(
-            format!(
-                "media too large: {} bytes exceeds {} byte cap",
-                bytes.len(),
-                max_media_bytes
-            ),
+            format!("media too large: {size} bytes exceeds {max_media_bytes} byte cap"),
             None,
         ));
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    for chunk in reader {
+        bytes.extend_from_slice(&chunk.map_err(read_error)?);
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     match kind {
