@@ -139,7 +139,7 @@ import {
   proposeDefaultFilename,
 } from "./pathValidate";
 import { basename, parentDir } from "./format";
-import { setNotifyHandler } from "./notify.svelte";
+import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
 import { defaultScopeId } from "./scope.svelte";
 import {
@@ -580,6 +580,7 @@ export function dismissStatus(): void {
 setNotifyHandler((msg) => {
   setTransientStatus(msg);
 });
+setStatusReader(() => ui.status);
 
 const dismissedWorkspaceWarningKeys = new Set<string>();
 

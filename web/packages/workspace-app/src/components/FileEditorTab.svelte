@@ -53,7 +53,7 @@
     layout,
     allPaneTabs,
     attemptInPlaceReopen,
-    beginMissingFileReopen,
+    beginMissingFileReopen, endMissingFileReopen, MISSING_FILE_REOPEN_STATUS, missingFileReopenInstructionShows,
     closeTab,
     dismissExternalChange,
     forceReloadFromDisk,
@@ -903,7 +903,8 @@
   // must match the one set below.
   onDestroy(() => {
     slidePreviewHandle?.close({ notify: false });
-    if (ui.status === "Choose the moved file in Files to re-open this tab") {
+    endMissingFileReopen(tab.id);
+    if (missingFileReopenInstructionShows()) {
       ui.status = null;
     }
   });
@@ -916,16 +917,16 @@
     // manually.
     if (await attemptInPlaceReopen(tab.id)) return;
     const parent = parentDir(tab.path);
-    beginMissingFileReopen(tab.id);
+    beginMissingFileReopen(tab.id, "pick");
     revealPathInBrowser(parent || tab.path, { inspectorOpen: true });
-    ui.status = "Choose the moved file in Files to re-open this tab";
+    ui.status = MISSING_FILE_REOPEN_STATUS;
   }
 
   function doReopenAtSuggested(): void {
     const suggested = tab.fileMissing?.suggestedPath;
     if (!suggested) return;
-    beginMissingFileReopen(tab.id);
-    void openInActivePane(suggested);
+    beginMissingFileReopen(tab.id, "open");
+    void openInActivePane(suggested).finally(() => endMissingFileReopen(tab.id));
   }
 
   function doFindMissing(): void {

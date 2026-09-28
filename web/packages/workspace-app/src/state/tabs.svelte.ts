@@ -42,7 +42,7 @@ import {
   type TerminalKeyboardProtocolState,
 } from "../terminal/keymap";
 import type { SubmitAgent } from "../terminal/submitMode";
-import { notify } from "./notify.svelte";
+import { notify, statusShows } from "./notify.svelte";
 import { isRichPromptVisible, showRichPromptForTab } from "./richPrompt.svelte";
 import {
   defaultTeamConfig,
@@ -3106,17 +3106,23 @@ export async function openInPane(
   const p = pane(destination.paneId);
   const side = destination.side;
   const tabs = mutablePaneTabs(p, side);
+  // A pick the user left, its instruction dismissed or replaced by another
+  // status, is over: the file opens beside the missing tab.
+  if (pendingMissingFileReopen?.by === "pick" && !missingFileReopenInstructionShows()) {
+    pendingMissingFileReopen = null;
+  }
+  const pendingTabId = pendingMissingFileReopen?.tabId ?? null;
   const pendingReopen =
-    pendingMissingFileReopenTabId === null
+    pendingTabId === null
       ? undefined
       : tabs.find(
           (t): t is FileTab =>
             t.kind === "file" &&
-            t.id === pendingMissingFileReopenTabId &&
+            t.id === pendingTabId &&
             t.fileMissing !== null,
         );
   if (pendingReopen) {
-    pendingMissingFileReopenTabId = null;
+    pendingMissingFileReopen = null;
     const pathKind = classifyPath(path);
     // A non-extension-editable file that passed the content peek is source-like
     // (an odd suffix, not markdown), so it opens in source mode, not wysiwyg.
@@ -5499,7 +5505,9 @@ const AUTOSAVE_DEBOUNCE_MS = 800;
 const autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const savingTabs = new Set<string>();
 const saveAgainAfterCurrent = new Set<string>();
-let pendingMissingFileReopenTabId: string | null = null;
+/// The missing-file tab the next file opened into its pane replaces, and how
+/// that re-open ends (see `beginMissingFileReopen`).
+let pendingMissingFileReopen: { tabId: string; by: "pick" | "open" } | null = null;
 
 /// Conflict dialog state. Populated when a save returns 409 or 428
 /// (an external edit landed, or a live authority requires explicit
@@ -7940,10 +7948,24 @@ export async function attemptInPlaceReopen(
   return after !== null && after.tab.fileMissing === null;
 }
 
-export function beginMissingFileReopen(tabId: string): void {
+/// The instruction a re-open by a pick shows while it waits for the user.
+export const MISSING_FILE_REOPEN_STATUS = "Choose the moved file in Files to re-open this tab";
+
+/// Whether the pick's instruction still shows. The status lives in the
+/// store, which this module cannot import, so it is read through the status
+/// bus.
+export function missingFileReopenInstructionShows(): boolean {
+  return statusShows(MISSING_FILE_REOPEN_STATUS);
+}
+
+/// Arm the re-open of a missing-file tab: the next file opened into its pane
+/// replaces it. A "pick" waits for the user to choose the moved file in Files
+/// and is live only while its instruction shows; an "open" ends when the
+/// caller's own open settles, through `endMissingFileReopen`.
+export function beginMissingFileReopen(tabId: string, by: "pick" | "open"): void {
   const found = findFileTabById(tabId);
   if (!found || found.tab.fileMissing === null) return;
-  pendingMissingFileReopenTabId = tabId;
+  pendingMissingFileReopen = { tabId, by };
   const node = layout.nodes[found.paneId];
   if (node?.kind === "leaf") {
     const match = findTabInPane(node, tabId);
@@ -7953,6 +7975,11 @@ export function beginMissingFileReopen(tabId: string): void {
     }
   }
   layout.activePaneId = found.paneId;
+}
+
+/// End the re-open of `tabId`, when it is the one armed.
+export function endMissingFileReopen(tabId: string): void {
+  if (pendingMissingFileReopen?.tabId === tabId) pendingMissingFileReopen = null;
 }
 
 /// Refresh a non-dirty tab's content from disk. Used by user-initiated
