@@ -178,6 +178,13 @@ impl ExtensionEntry {
             commands: Vec::new(),
         }
     }
+
+    /// This entry as its supervisor leaves it once the process has exited.
+    #[cfg(test)]
+    pub(crate) fn exited_for_test(self) -> Self {
+        self.running.store(false, Ordering::Relaxed);
+        self
+    }
 }
 
 #[derive(Debug, Default)]

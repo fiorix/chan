@@ -928,6 +928,106 @@ mod tests {
         let _ = upstream_task.await;
     }
 
+    /// A catalog of one entry whose process its supervisor saw exit, with
+    /// its upstream on `address`.
+    fn exited_catalog(address: std::net::SocketAddr) -> Arc<ExtensionCatalog> {
+        ExtensionCatalog::for_test(vec![ExtensionEntry::for_test(
+            "echo",
+            "Echo",
+            &format!("http://{address}/"),
+            "upstream-secret",
+            CAPABILITY,
+        )
+        .exited_for_test()])
+    }
+
+    fn assert_extension_unavailable(status: StatusCode, body: &[u8]) {
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let body: serde_json::Value = serde_json::from_slice(body).expect("JSON refusal");
+        assert_eq!(body["code"], "extension_unavailable", "{body}");
+    }
+
+    // The exited extension's port stays bound for the whole test, so no other
+    // process can take it, and a connection the proxy made to it would wait
+    // in its accept queue.
+    #[tokio::test]
+    async fn an_exited_extension_is_sent_no_request() {
+        let port = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the extension's port");
+        let (tenant, _shutdown_tx) = tenant();
+        let app = extension_router(
+            exited_catalog(port.local_addr().expect("port address")),
+            tenant,
+        );
+        let request = Request::builder()
+            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+            .body(Body::empty())
+            .unwrap();
+        let response = tokio::select! {
+            biased;
+            accepted = port.accept() => {
+                panic!("the proxy connected to an exited extension's port: {accepted:?}")
+            }
+            response = app.oneshot(request) => response.expect("proxy response"),
+        };
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 4096).await.expect("body");
+        assert_extension_unavailable(status, &body);
+        assert!(
+            port.accept().now_or_never().is_none(),
+            "the proxy connected to an exited extension's port"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exited_extension_is_sent_no_websocket_upgrade() {
+        let port = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the extension's port");
+        let (tenant, _shutdown_tx) = tenant();
+        let proxy = extension_router(
+            exited_catalog(port.local_addr().expect("port address")),
+            tenant,
+        );
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let proxy_address = proxy_listener.local_addr().expect("proxy address");
+        let proxy_task = tokio::spawn(async move {
+            axum::serve(proxy_listener, proxy)
+                .await
+                .expect("serve proxy")
+        });
+
+        let upgrade = reqwest::Client::new()
+            .get(format!(
+                "http://{proxy_address}/_chan/extensions/echo/{CAPABILITY}/socket"
+            ))
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+            .send();
+        let response = tokio::select! {
+            biased;
+            accepted = port.accept() => {
+                panic!("the proxy connected to an exited extension's port: {accepted:?}")
+            }
+            response = upgrade => response.expect("the proxy answers the upgrade"),
+        };
+        let status = response.status();
+        let body = response.bytes().await.expect("body");
+        assert_extension_unavailable(status, &body);
+        assert!(
+            port.accept().now_or_never().is_none(),
+            "the proxy connected to an exited extension's port"
+        );
+
+        proxy_task.abort();
+        let _ = proxy_task.await;
+    }
+
     #[test]
     fn gateway_frame_policy_marker_is_narrow() {
         let mut headers = HeaderMap::new();
