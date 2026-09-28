@@ -446,6 +446,19 @@ describe("raw file writes", () => {
       },
     });
   });
+
+  test("keeps conflict metadata beside a blank refusal sentence", async () => {
+    const body = { error: " \t", current_mtime_ns: "300", current_authority_version: 9 };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 409 }),
+    );
+
+    await expect(api.write("a.md", "changed", "100", null, 7)).rejects.toMatchObject({
+      status: 409,
+      message: " \t",
+      data: body,
+    });
+  });
 });
 
 describe("relationship streaming", () => {

@@ -217,4 +217,25 @@ describe.each([
     setFetchImpl(async () => new Response("", { status: 500, statusText: "" }));
     await expect(send()).rejects.toEqual(new ApiError(500, "HTTP 500"));
   });
+
+  test.each(["", " \t"])("keeps a blank error %j as the sentence beside its envelope", async (blank) => {
+    const body = { error: blank, code: "blank_refusal" };
+    setFetchImpl(async () => new Response(JSON.stringify(body), { status: 409 }));
+    const error = await send().then(() => null, (reason: unknown) => reason);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 409, message: blank, data: body });
+  });
+
+  test("uses the status text when the refusal body cannot be read", async () => {
+    setFetchImpl(async () => {
+      const response = new Response('{"error":"lost"}', { status: 502, statusText: "Bad Gateway" });
+      Object.defineProperty(response, "text", {
+        value: () => Promise.reject(new TypeError("network error")),
+      });
+      return response;
+    });
+    const error = await send().then(() => null, (reason: unknown) => reason);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 502, message: "Bad Gateway", data: null });
+  });
 });
