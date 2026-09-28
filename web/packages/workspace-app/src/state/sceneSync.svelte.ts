@@ -202,9 +202,9 @@ const PERMANENT_ERROR_REASONS = new Set(["attach-failed", "doc-too-large"]);
 /// The session calls it from its socket's frames and closes, from the replay
 /// `bindCanvas` makes when the canvas binds, from the save funnel
 /// (`flushPendingLocal`, through `flush` and the waiters' check), from the
-/// force-reload prompt's query and the saved mark's check (`hasPendingLocal`,
-/// the second reached from the canvas's own flush through `bufferMirrored`),
-/// and from the roster hook (`collaboratorsChanged`).
+/// waiters' check, the force-reload prompt's query and the saved mark's check
+/// (`hasPendingLocal`, the last reached from the canvas's own flush through
+/// `bufferMirrored`), and from the roster hook (`collaboratorsChanged`).
 export type SceneCanvasBinding = {
   /// Full authority state: reconcile every element (tombstones
   /// included) into the canvas, adopt appState, register files. The
@@ -339,8 +339,9 @@ export class SceneSession {
 
   private pushInFlight = false;
   /// The push currently on the wire, in the same three parts the queued one
-  /// has, so a drop or a resync can tell the canvas that none of it landed.
-  /// Cleared by the ack.
+  /// has, so a drop, or the next socket's first snapshot, can hand all of it
+  /// back to the canvas: whether the authority read it is not known. Cleared
+  /// by the ack.
   private unacked: QueuedPush | null = null;
   private queued: QueuedPush | null = null;
 
@@ -608,10 +609,11 @@ export class SceneSession {
     return this.tab.readMode || !this.tab.fsWritable;
   }
 
-  /// Tell the canvas that everything `pushScene` claimed but the authority
-  /// never accepted is local again: the payload on the wire and the one
-  /// coalesced behind it, in all three of their parts. Called wherever
-  /// those are discarded.
+  /// Tell the canvas that everything `pushScene` claimed and the authority
+  /// has not acknowledged is local again: the payload on the wire, which the
+  /// authority may or may not have read, and the one coalesced behind it, in
+  /// all three of their parts. Called wherever those are discarded: at the
+  /// socket's close and at the next socket's first snapshot.
   private releaseUnaccepted(): void {
     const wire = this.unacked;
     const queued = this.queued;
