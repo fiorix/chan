@@ -9562,6 +9562,25 @@ mod tests {
             fn served_keys(&self) -> Vec<String> {
                 self.state.serves.lock().unwrap().iter().cloned().collect()
             }
+
+            /// The registry row that stores `root`, if one does.
+            #[cfg(unix)]
+            fn row(&self, root: &Path) -> Option<chan_workspace::KnownWorkspace> {
+                self.library
+                    .list_workspaces()
+                    .into_iter()
+                    .find(|row| row.root_path == root)
+            }
+
+            /// The paths the workspace overlay has on, once
+            /// [`RelinkedOnto`] installed it.
+            #[cfg(unix)]
+            fn on_paths(&self) -> Vec<String> {
+                self.embedded()
+                    .workspace_overlay()
+                    .expect("the overlay is installed")
+                    .on_paths()
+            }
         }
 
         /// A root registered at `holder/parent/ws` whose parent then moved
@@ -9593,6 +9612,73 @@ mod tests {
                     now,
                     _holder: holder,
                 }
+            }
+        }
+
+        /// A second workspace, registered, restored, on and with one window,
+        /// whose folder the old parent of a mounted [`Relinked`] root is then
+        /// pointed at, so the root that root's registry row stores resolves
+        /// to the second workspace's folder.
+        #[cfg(unix)]
+        struct RelinkedOnto {
+            other: PathBuf,
+            _holder: tempfile::TempDir,
+        }
+
+        #[cfg(unix)]
+        impl RelinkedOnto {
+            fn relink(desktop: &Desktop, root: &Relinked) -> Self {
+                desktop.embedded().install_workspace_overlay_for_tests(
+                    chan_workspace::paths::config_dir().join("workspaces.json"),
+                );
+                let holder = tempfile::tempdir().expect("holder of the other workspace");
+                std::fs::create_dir_all(holder.path().join("ws")).expect("the other root");
+                let other = desktop.register(&holder.path().join("ws"));
+                desktop.restore(&other);
+                desktop
+                    .embedded()
+                    .mint_workspace_window(&other)
+                    .expect("a window of the other workspace");
+                let overlay = desktop.embedded().workspace_overlay().expect("overlay");
+                for on in [&root.stored, &other] {
+                    overlay.set(&on.to_string_lossy(), true);
+                }
+                let link = root.stored.parent().expect("the linked parent");
+                std::fs::remove_file(link).expect("unlink the old parent");
+                std::os::unix::fs::symlink(holder.path(), link)
+                    .expect("point the old parent at the other workspace");
+                assert_eq!(
+                    std::fs::canonicalize(&root.stored).expect("the stored root resolves"),
+                    other,
+                    "fixture: the stored root resolves to the other workspace"
+                );
+                Self {
+                    other,
+                    _holder: holder,
+                }
+            }
+
+            /// The other workspace is registered, mounted, on and has its
+            /// window after the forget that answered `outcome`.
+            fn assert_untouched<T: std::fmt::Debug>(&self, desktop: &Desktop, outcome: &T) {
+                assert!(
+                    desktop.row(&self.other).is_some(),
+                    "the forget unregistered another workspace: {outcome:?}"
+                );
+                assert!(
+                    desktop.embedded().is_workspace_mounted_by_key(&self.other),
+                    "the forget closed another workspace: {outcome:?}"
+                );
+                assert!(
+                    desktop.window_paths().contains(&self.other),
+                    "the forget removed another workspace's window: {outcome:?}"
+                );
+                assert!(
+                    desktop
+                        .on_paths()
+                        .contains(&self.other.to_string_lossy().into_owned()),
+                    "the forget turned another workspace off: {outcome:?}"
+                );
             }
         }
 
@@ -9812,6 +9898,102 @@ mod tests {
                 desktop.window_paths(),
                 Vec::<PathBuf>::new(),
                 "the forget left windows of the workspace behind"
+            );
+        }
+
+        /// A forget handed to the desktop by the folder a restored workspace
+        /// is mounted from, after the path its registry row stores was pointed
+        /// at another registered workspace, leaves that other workspace as it
+        /// was and closes the one whose folder it names.
+        #[cfg(unix)]
+        #[test]
+        fn a_forget_of_a_restored_root_relinked_to_another_workspace_leaves_that_workspace() {
+            if !own_home(
+                "a_forget_of_a_restored_root_relinked_to_another_workspace_leaves_that_workspace",
+            ) {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            let onto = RelinkedOnto::relink(&desktop, &root);
+            assert_eq!(
+                desktop
+                    .row(&root.stored)
+                    .expect("fixture: the root is registered")
+                    .cached_canonical_path(),
+                root.stored,
+                "fixture: a registration resolved the row again after the restore"
+            );
+
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                root.now.clone(),
+                true,
+            ));
+
+            onto.assert_untouched(&desktop, &outcome);
+            assert!(
+                !desktop.embedded().is_workspace_mounted_by_key(&root.now),
+                "the forget left the workspace it names mounted: {outcome:?}"
+            );
+            // The host's removal unregisters by the name it is given, and a
+            // name matches a row by the canonical path the row last resolved
+            // to or by resolving the root the row stores again. This row last
+            // resolved to the root it stores, when the registry was loaded or
+            // the root registered, and that root now resolves to the other
+            // workspace's folder, so no name matches the row: it stays
+            // registered, and off, and the removal finds nothing to remove.
+            assert!(
+                desktop.row(&root.stored).is_some()
+                    && !desktop
+                        .on_paths()
+                        .contains(&root.stored.to_string_lossy().into_owned()),
+                "the forget did not leave the workspace it names registered and off: {outcome:?}"
+            );
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound)
+            );
+        }
+
+        /// The same forget of a root that a handoff mounted, whose registration
+        /// resolved the path the handoff sent, forgets it and leaves the other
+        /// workspace as it was.
+        #[cfg(unix)]
+        #[test]
+        fn a_forget_of_a_handed_off_root_relinked_to_another_workspace_forgets_it() {
+            if !own_home("a_forget_of_a_handed_off_root_relinked_to_another_workspace_forgets_it") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop
+                .hand_off(&root.now)
+                .expect("the handoff is accepted");
+            desktop.wait_for_windows(1);
+            let onto = RelinkedOnto::relink(&desktop, &root);
+
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                root.now.clone(),
+                true,
+            ));
+
+            onto.assert_untouched(&desktop, &outcome);
+            assert!(
+                !desktop.embedded().is_workspace_mounted_by_key(&root.now),
+                "the forget left the workspace it names mounted: {outcome:?}"
+            );
+            assert!(
+                desktop.row(&root.stored).is_none(),
+                "the forget left the workspace it names registered: {outcome:?}"
+            );
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
         }
 
