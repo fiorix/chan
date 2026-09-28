@@ -8,7 +8,10 @@
 // the host is already waiting on the answer. A terminal-only window accepts
 // it too. On the web, closing the browser tab is a hide: it flushes buffers
 // and the layout and discards nothing, while the explicit close-window
-// command clears the window and asks the desktop to close it.
+// command clears the window and asks the desktop to close it. However a
+// window goes, what its tabs hold and have not saved, a drawing's stroke
+// still waiting for its serialize included, is where the next open of the
+// file finds it.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -35,7 +38,10 @@ vi.mock("./state/store.svelte", async (importOriginal) => ({
 
 import { reloadWindow, requestCloseWindow } from "./api/desktop";
 import { hostCommand, mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
-import { fileTab, resetLayout } from "./__tests__/tabs";
+import { drawableBoard, drawableBoards } from "./__tests__/excalidraw";
+import { fileTab, readTab, resetLayout } from "./__tests__/tabs";
+import { bufferKey, divergentBufferOrNull } from "./state/editorBuffer";
+import { setTabContent } from "./state/tabs.svelte";
 import { resolveCloseConfirm } from "./state/closeConfirm.svelte";
 import { lockNow, screensaver } from "./state/screensaver.svelte";
 import { discardWindowSession, persistLayoutToHash, ui } from "./state/store.svelte";
@@ -135,5 +141,77 @@ describe("closing a web window", () => {
     await settle();
     expect(discardWindowSession).toHaveBeenCalledTimes(1);
     expect(requestCloseWindow).not.toHaveBeenCalled();
+  });
+});
+
+describe("what a window that goes leaves for the next open", () => {
+  const BOARD = "notes/board.excalidraw";
+  const EMPTY = '{"type":"excalidraw","version":2,"source":"chan","elements":[],"appState":{},"files":{}}';
+  // The files' mtime on disk, well before any recovery write's stamp.
+  const DISK_MTIME_NS = "1000000000";
+
+  afterEach(() => {
+    vi.useRealTimers();
+    localStorage.clear();
+  });
+
+  /// A drawing open on a board a test can draw on, with a stroke drawn and
+  /// its serialize still waiting on a clock that does not move.
+  async function strokeInDebounce(): Promise<void> {
+    drawableBoards();
+    resetLayout([
+      fileTab({
+        id: "board", path: BOARD, fileKind: "text", mode: "canvas",
+        content: EMPTY, saved: EMPTY, savedMtimeNs: DISK_MTIME_NS,
+      }),
+    ]);
+    const board = await drawableBoard();
+    await board.start();
+    await settle();
+    vi.useFakeTimers();
+    board.stroke({ id: "last-stroke", version: 1 });
+    expect(readTab("board")?.content).toBe(EMPTY);
+  }
+
+  /// What the next page load's open of `path` offers from the recovery
+  /// buffer, over the file as it is on disk. A load's id is fixed when the
+  /// load starts, so the entry this one wrote is relabelled as an earlier
+  /// load's, which is how the next load reads it.
+  function nextOpenOffers(path: string, disk: string): string {
+    const raw = localStorage.getItem(bufferKey(path));
+    if (raw === null) return "nothing stored";
+    localStorage.setItem(bufferKey(path), JSON.stringify({ ...JSON.parse(raw), sessionId: "an-earlier-load" }));
+    return divergentBufferOrNull(path, path, disk, DISK_MTIME_NS)?.content ?? "nothing offered";
+  }
+
+  const WAYS: [string, () => Promise<void>][] = [
+    ["the close-window command", async () => hostCommand("app.window.close")],
+    ["the red dot while reconnecting", async () => {
+      ui.disconnectBlocking = true;
+      hostCommand("app.window.confirmClose");
+    }],
+    ["the red dot's Close", async () => {
+      hostCommand("app.window.confirmClose");
+      await settle();
+      document.querySelector<HTMLButtonElement>(".actions button.close")!.click();
+    }],
+    ["a pagehide", async () => void window.dispatchEvent(new Event("pagehide"))],
+    ["a beforeunload", async () => void window.dispatchEvent(new Event("beforeunload"))],
+  ];
+
+  test.each(WAYS)("%s leaves a drawing's pending stroke for the next open", async (_way, go) => {
+    await strokeInDebounce();
+    await go();
+
+    expect(nextOpenOffers(BOARD, EMPTY)).toContain("last-stroke");
+  });
+
+  test("the close-window command leaves a text tab's edit whose recovery write is queued", async () => {
+    vi.useFakeTimers();
+    setTabContent(readTab("a-file")!, "hello, edited");
+    await settle();
+    hostCommand("app.window.close");
+
+    expect(nextOpenOffers("README.md", "hello")).toBe("hello, edited");
   });
 });
