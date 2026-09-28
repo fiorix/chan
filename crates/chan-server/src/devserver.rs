@@ -1271,8 +1271,10 @@ impl DevserverState {
     /// a newer off row supersedes this attempt, while an absent registry row
     /// means a concurrent remove won.
     ///
-    /// The attempt's root is the key its mount resolved, or the root a
-    /// restored overlay row stores, and it is matched by equality against
+    /// The attempt's root is the root its record goes by: the stored root of
+    /// the registry row its mount's registration answered, or of the row a
+    /// restored overlay row's path names, or that path when no row goes by
+    /// it. It is matched by equality against
     /// the keys the registry rows go by ([`registry_row_keys`]) and the root
     /// each overlay row stores: this check runs before the attempt's bound
     /// starts and never waits on a filesystem, the attempt's own root's or
