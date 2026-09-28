@@ -5,11 +5,17 @@
 // `#rgb` or `#rrggbb`, while the file on disk can hold anything a hand edit
 // put there. A write copies the stored palette, so it must send each stored
 // hex in the form the route accepts, and the standard colour in place of one
-// that does not parse, which is what the terminal paints for such a palette.
+// that does not parse.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { closeSettings, openSettings, settingsPreferences } from "../../__tests__/settings";
+import { readStandardTerminalColors } from "../../state/paneColor";
+
+vi.mock("../../state/paneColor", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/paneColor")>();
+  return { ...actual, readStandardTerminalColors: vi.fn(actual.readStandardTerminalColors) };
+});
 
 // jsdom defines no theme tokens, so the standard colours are the reader's
 // fallbacks.
@@ -57,5 +63,23 @@ describe("Settings > Terminal > custom colours over a hand-edited palette", () =
         custom: { background: STANDARD.background, foreground: "#ffffff", cursor: "#00ff00", contrast: "auto" },
       },
     });
+  });
+});
+
+describe("Settings > Terminal > custom colours turned on", () => {
+  afterEach(closeSettings);
+
+  // The write runs its change twice, once on the form and once on the config
+  // it sends against, so work inside the change runs twice too.
+  test("reads the standard colours once for one toggle", async () => {
+    const { target, writes } = await openSettings("Terminal");
+    vi.mocked(readStandardTerminalColors).mockClear();
+    const toggle = [...target.querySelectorAll<HTMLLabelElement>("label.pill")]
+      .find((label) => label.textContent?.trim() === "Custom terminal colours")!
+      .querySelector("input")!;
+    toggle.click();
+
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(readStandardTerminalColors).toHaveBeenCalledTimes(1);
   });
 });

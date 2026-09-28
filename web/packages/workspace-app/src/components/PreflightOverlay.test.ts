@@ -46,3 +46,51 @@ test("shows an ApiError message that is itself JSON without unwrapping it", asyn
   expect(target.querySelector(".onboard-err")?.textContent).toBe(message);
   expect(fetch).toHaveBeenCalledTimes(2);
 });
+
+test("a poll that lands after an answer does not bring the answered step back", async () => {
+  const deciding: PreflightSnapshot = {
+    phase: "needs_decision",
+    locked: true,
+    readiness: { state: "recovering" },
+    steps: [
+      {
+        id: "index",
+        label: "Build search index",
+        state: "needs_decision",
+        decision: { prompt: "Recovery is stalled.", choices: [{ id: "rebuild", label: "Rebuild the search index" }] },
+      },
+    ],
+  } as PreflightSnapshot;
+  const answered: PreflightSnapshot = {
+    phase: "needs_decision",
+    locked: true,
+    readiness: { state: "recovering" },
+    steps: [{ id: "index", label: "Build search index", state: "pending" }],
+  } as PreflightSnapshot;
+  let landStalePoll: (snap: PreflightSnapshot) => void = () => {};
+  const preflight = vi
+    .spyOn(api, "preflight")
+    .mockResolvedValueOnce(deciding)
+    .mockImplementationOnce(() => new Promise((resolve) => (landStalePoll = resolve)))
+    .mockResolvedValue(answered);
+  vi.spyOn(api, "preflightDecision").mockResolvedValue(answered);
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(PreflightOverlay, { target }));
+  const choice = (): HTMLButtonElement | undefined =>
+    [...target.querySelectorAll<HTMLButtonElement>(".choices button")].find(
+      (b) => b.textContent?.trim() === "Rebuild the search index",
+    );
+  await vi.waitFor(() => expect(choice()).toBeDefined());
+  // The next poll is in flight, held, when the user answers.
+  await vi.waitFor(() => expect(preflight).toHaveBeenCalledTimes(2), { timeout: 2000 });
+
+  choice()!.click();
+  await vi.waitFor(() => expect(choice(), "the answer takes the step").toBeUndefined());
+  landStalePoll(deciding);
+  await new Promise((r) => setTimeout(r, 0));
+  await Promise.resolve();
+
+  expect(choice(), "the stale poll does not bring the step back").toBeUndefined();
+});
+
