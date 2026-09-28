@@ -1026,6 +1026,83 @@ describe("the scene a later bind replays", () => {
   );
 });
 
+describe("a socket's snapshot comes before anything else on it", () => {
+  // Every dial answers with a snapshot taken when the socket attached, so a
+  // push sent before it lands is applied by the authority after it, and the
+  // snapshot then hands the canvas back a push the authority is applying.
+  const idsOf = (sock: FakeSocket) =>
+    sock.frames("push").map((p) => (p.elements as WireElement[]).map((e) => e.id));
+
+  /// Drop the socket and step the redial's backoff until a new one opens.
+  function redial(): FakeSocket {
+    lastSocket().drop();
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    expect(sockets.length).toBeGreaterThan(before);
+    const back = lastSocket();
+    back.open();
+    return back;
+  }
+
+  test("a push after a drop waits for the new socket's snapshot and then goes once", () => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding } = attached(tab!);
+    const back = redial();
+    binding.pending.push(elem("drawn", 2));
+    binding.flushPendingLocal();
+    const beforeSnapshot = idsOf(back);
+    back.frame(snap([]));
+    vi.useRealTimers();
+
+    expect({ beforeSnapshot, after: idsOf(back) }).toEqual({ beforeSnapshot: [], after: [["drawn"]] });
+  });
+
+  test("a push after a heal's redial waits for the new socket's snapshot", async () => {
+    vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding } = attached(tab!);
+    session.degrade();
+    const before = sockets.length;
+    tab!.content = tab!.content + "\n";
+    await saveTab(tab!);
+    await flushMicro();
+    const back = lastSocket();
+    back.open();
+    binding.pending.push(elem("drawn", 2));
+    binding.flushPendingLocal();
+    const beforeSnapshot = idsOf(back);
+    back.frame(snap([]));
+
+    expect({ redialed: sockets.length > before, beforeSnapshot, after: idsOf(back) }).toEqual({
+      redialed: true,
+      beforeSnapshot: [],
+      after: [["drawn"]],
+    });
+  });
+
+  test("a bind after a drop replays nothing until the new socket's snapshot, which reaches it", () => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pending.push(elem("never-accepted", 2));
+    binding.flushPendingLocal();
+    sock.drop();
+    const next = rebind(session, binding);
+    const beforeSnapshot = next.snapshots.length;
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    lastSocket().open();
+    lastSocket().frame(snap([elem("authority", 3)]));
+    vi.useRealTimers();
+
+    expect({ beforeSnapshot, replays: next.snapshots.map((s) => s.elements.map((e) => e.id)) }).toEqual({
+      beforeSnapshot: 0,
+      replays: [["authority"]],
+    });
+  });
+});
+
 describe("the classic PUT during an outage", () => {
   test("a still-retrying socket outage sends nothing at all", async () => {
     vi.useFakeTimers();
