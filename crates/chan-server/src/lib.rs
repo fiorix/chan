@@ -1367,10 +1367,12 @@ pub fn install_local_workspace_overlay(host: &WorkspaceHost) {
 
 /// Install the launcher SPA as the host's root fallback: the devserver/library
 /// root `/` then serves `web-launcher` (and its `/api/library/*` data surface)
-/// instead of 404ing. Both embedders call this once after wrapping the host in
-/// an `Arc` -- chan-desktop's loopback (`embedded.rs`) and the headless devserver
-/// (`build_devserver_app`) -- so the one launcher is reached on every surface
-/// through the existing transparent proxy.
+/// instead of 404ing. chan-desktop's loopback (`embedded.rs`) calls this once
+/// after wrapping the host in an `Arc`. The headless devserver
+/// (`build_devserver_app`) installs the same bundle through
+/// `routes::admitting_launcher_router`, with the mount admission its stop
+/// refuses by, which this install leaves empty. The one launcher is reached on
+/// every surface through the existing transparent proxy.
 ///
 /// `bearer` gates `/api/library/*`: the desktop loopback passes its per-window
 /// token and the devserver passes its rotatable devserver token. Tunnel-origin

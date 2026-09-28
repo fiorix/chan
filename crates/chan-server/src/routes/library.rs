@@ -51,9 +51,31 @@ use crate::{
 ///     request time).
 ///   - `None` -- a surface with nowhere to mount a workspace. The mutation
 ///     handlers answer 403 there.
+///
+/// `admission` is the surface's [`MountAdmission`], if it has one.
 struct LauncherState {
     host: Arc<WorkspaceHost>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+    admission: Option<MountAdmission>,
+}
+
+/// A check the launcher's add asks before it registers a root and its on
+/// before it mounts one, naming the root. An `Err` is the refusal the route
+/// answers instead: 503 in the envelope, with the error's sentence. The
+/// devserver's refuses every root from its stop signal on; a surface with no
+/// stop of its own has none.
+pub(crate) type MountAdmission = Arc<dyn Fn(&Path) -> Result<(), crate::Error> + Send + Sync>;
+
+impl LauncherState {
+    /// The refusal to answer instead of registering or mounting `root`, when
+    /// the surface's admission refuses it.
+    fn refuse_mount(&self, root: &Path) -> Option<Response> {
+        let refusal = (self.admission.as_ref()?)(root).err()?;
+        Some(crate::error::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            refusal.to_string(),
+        ))
+    }
 }
 
 const COMMAND_CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
@@ -110,6 +132,17 @@ pub fn launcher_router(
     host: Arc<WorkspaceHost>,
     bearer: Option<LauncherBearer>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+) -> Router {
+    admitting_launcher_router(host, bearer, serve_addr, None)
+}
+
+/// [`launcher_router`] whose add and on ask `admission` first. The devserver
+/// installs its launcher through here, with an admission its stop refuses by.
+pub(crate) fn admitting_launcher_router(
+    host: Arc<WorkspaceHost>,
+    bearer: Option<LauncherBearer>,
+    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+    admission: Option<MountAdmission>,
 ) -> Router {
     // The launcher surface descriptor the injected meta advertises: no serve
     // address is the read-only surface; a serve address plus a desktop bridge is
@@ -232,6 +265,7 @@ pub fn launcher_router(
     let launcher_state = Arc::new(LauncherState {
         host: host.clone(),
         serve_addr,
+        admission,
     });
     // Workspaces: list always; the mutation routes are always present but
     // refuse with 403 on the read-only surface (gated by `serve_addr` inside the
@@ -1839,6 +1873,10 @@ fn mount_timed_out_refusal(root: &Path) -> Response {
 /// start. A root that stops answering in any of them is refused at the bound,
 /// and an open waiting on it gives the root's lock back to a close or a
 /// removal when it is dropped there.
+///
+/// A root the surface's [`MountAdmission`] refuses, as a stopping devserver's
+/// refuses every root, is answered with that refusal before anything is
+/// registered.
 async fn handle_add_workspace(
     State(state): State<Arc<LauncherState>>,
     Json(req): Json<AddWorkspace>,
@@ -1849,6 +1887,9 @@ async fn handle_add_workspace(
         Err(resp) => return *resp,
     };
     let root = Path::new(&req.path);
+    if let Some(refusal) = state.refuse_mount(root) {
+        return refusal;
+    }
     match tokio::time::timeout_at(
         started + crate::WORKSPACE_MOUNT_TIMEOUT,
         add_workspace(&state, addr, root, req.label.clone()),
@@ -1926,6 +1967,8 @@ async fn add_workspace(
 /// until the health probe marks it.
 /// The open and a mounted root's recheck share the devserver mount's bound,
 /// counted from the request's start, as the add's steps do.
+/// A root the surface's [`MountAdmission`] refuses is answered with that
+/// refusal before the host is asked, mounted or not.
 /// Loopback-only.
 async fn handle_workspace_on(
     State(state): State<Arc<LauncherState>>,
@@ -1940,6 +1983,9 @@ async fn handle_workspace_on(
         return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     let root = registered.root_path.clone();
+    if let Some(refusal) = state.refuse_mount(&root) {
+        return refusal;
+    }
     let opening = state
         .host
         .open_or_get_registered_workspace(&root, tenant_config(addr, &prefix));
