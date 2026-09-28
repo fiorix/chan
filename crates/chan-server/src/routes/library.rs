@@ -3633,9 +3633,9 @@ mod devserver_route_tests {
         }
     }
 
-    /// The launcher's add and on of a root that an earlier open, whose caller
-    /// left, still holds: they answer with the words the root's row reads and
-    /// a retry time, the host's release budget.
+    /// The launcher's add, on and delete of a root that an earlier call, whose
+    /// caller left, still holds: they answer with the words the root's row
+    /// reads and a retry time, the host's release budget.
     #[cfg(unix)]
     mod still_releasing {
         use std::path::Path;
@@ -3719,6 +3719,65 @@ mod devserver_route_tests {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "add: {body}");
             assert_eq!(retry_after.as_deref(), Some("1"), "add: {body}");
             assert_eq!(body["error"], STILL_RELEASING);
+            assert_eq!(row, body["error"], "the answer is not the row's words");
+        }
+
+        /// Send `first` and leave it held at the call `stall` holds on the
+        /// root, as a client that goes away does, then send `delete` beside
+        /// that call. Answers the delete and what the row of `stored` then
+        /// reads.
+        async fn delete_beside_an_abandoned_call(
+            router: &axum::Router,
+            stall: &root_stall::RootStall,
+            stored: &Path,
+            (method, uri): (&'static str, String),
+            delete: String,
+        ) -> (
+            (StatusCode, Option<String>, serde_json::Value),
+            serde_json::Value,
+        ) {
+            let first = tokio::spawn(send(router.clone(), method, uri, None));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the first request never reached the call held on its root"
+            );
+            first.abort();
+            assert!(
+                first.await.unwrap_err().is_cancelled(),
+                "fixture: the first request answered"
+            );
+            let again = router.clone();
+            let answer = completes_beside(stall, "a delete beside an abandoned call", async move {
+                send(again, "DELETE", delete, None).await
+            })
+            .await;
+            let row = row_error(router, stored).await;
+            (answer, row)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_launcher_delete_beside_an_abandoned_unregister_answers_still_releasing() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let stored = lib.register_workspace(root.path()).unwrap().root_path;
+            let delete = format!("/api/library/workspaces/{}", workspace_id(root.path()));
+            let (_host, router) = mutable_router(lib);
+            // The first delete's unregister holds the root's registry-write
+            // permit once its caller has gone; the second waits the release
+            // budget for it.
+            let stall = root_stall::stall_matching(root.path(), &["unregister_workspace"]);
+            let ((status, retry_after, body), row) = delete_beside_an_abandoned_call(
+                &router,
+                &stall,
+                &stored,
+                ("DELETE", delete.clone()),
+                delete,
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "delete: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "delete: {body}");
+            assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
             assert_eq!(row, body["error"], "the answer is not the row's words");
         }
     }
