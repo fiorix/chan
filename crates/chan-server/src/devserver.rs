@@ -13059,26 +13059,6 @@ mod tests {
             assert_recorded_child_identity(true, true, true).await;
         }
 
-        fn kill_by_cmdline_fragment(fragment: &str) {
-            let Ok(entries) = std::fs::read_dir("/proc") else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
-                    continue;
-                };
-                let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
-                    continue;
-                };
-                if String::from_utf8_lossy(&cmdline).contains(fragment) {
-                    if let Some(pid) = rustix::process::Pid::from_raw(pid) {
-                        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-                    }
-                }
-            }
-        }
-
         /// The guard must leave the process env EXACTLY as it found it:
         /// present sentinels restored to their values, an absent variable
         /// restored to absence, with the in-scope state overridden/cleared.
@@ -13350,6 +13330,13 @@ mod tests {
                 )
             );
             let pid = sessions[0]["meta"]["child_pid"].as_u64().unwrap() as u32;
+            // Pinned before its start time is compared, so the kill at the
+            // end reaches this child and never a process that took its pid.
+            let child = rustix::process::pidfd_open(
+                rustix::process::Pid::from_raw(pid as i32).expect("a child pid"),
+                rustix::process::PidfdFlags::empty(),
+            )
+            .expect("pin the parked child");
             assert_eq!(
                 sessions[0]["child_start_time"].as_u64(),
                 Some(proc_start_time(pid))
@@ -13390,7 +13377,7 @@ mod tests {
             parker.stop().await;
             // The detached child deliberately outlives the registries; the
             // test owns it now.
-            kill_by_cmdline_fragment("sleep 86397");
+            let _ = rustix::process::pidfd_send_signal(&child, rustix::process::Signal::KILL);
         }
     }
 }
