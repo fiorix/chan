@@ -58,6 +58,7 @@ import {
   closeTab,
   conflictDialog,
   draftCloseState,
+  flushPendingEdits,
   hasAnyTab,
   hasBrowserTab,
   cancelMissingFileCheck,
@@ -1435,7 +1436,9 @@ type PaneExecResult = {
 /// CLI prints. Focus / split / resize mutate the layout directly; close ops
 /// pre-check the dirty/live blocker on PUBLIC fields and, without `force`,
 /// report the blocked tabs instead of closing (no UI dialog, since this is
-/// a scripted command). With `force`, `closeTab`/`closePane` run with
+/// a scripted command). Without `force` they first commit each tab's
+/// buffered input, so a drawing's stroke still waiting for its serialize is
+/// counted as unsaved. With `force`, `closeTab`/`closePane` run with
 /// `{ force: true }` so the SPA's own confirm is bypassed.
 async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
   const blocked: { tab: string; reason: string }[] = [];
@@ -1523,6 +1526,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
       const tabId = op.tab_id ?? paneActiveTabId(p);
       const tab = tabId ? allPaneTabs(p).find((t) => t.id === tabId) : undefined;
       if (!tab) return { ok: false, summary: "no tab to close", blocked };
+      if (!op.force) flushPendingEdits([tab]);
       const reason = paneCloseBlock(tab);
       if (reason && !op.force) {
         blocked.push({ tab: paneTabTitle(tab), reason });
@@ -1535,6 +1539,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
       const p = paneByIdOrActive(op.pane_id);
       if (!p)
         return { ok: false, summary: `no such pane ${op.pane_id ?? layout.activePaneId}`, blocked };
+      if (!op.force) flushPendingEdits(allPaneTabs(p));
       collectBlocks(allPaneTabs(p), op.force, blocked);
       if (blocked.length)
         return { ok: false, summary: `blocked ${blocked.length} tab(s)`, blocked };
@@ -1543,6 +1548,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
     }
     case "close_all": {
       const panes = paneLeaves();
+      if (!op.force) flushPendingEdits(panes.flatMap((p) => allPaneTabs(p)));
       for (const p of panes) collectBlocks(allPaneTabs(p), op.force, blocked);
       if (blocked.length)
         return { ok: false, summary: `blocked ${blocked.length} tab(s)`, blocked };
