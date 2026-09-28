@@ -263,6 +263,13 @@ export type FileTab = {
   /// file has nothing unsaved. Kept apart from `error`, which the tab shows
   /// in place of its editor.
   saveError?: string | null;
+  /// A text the save refused has not been written since. While set, the tab
+  /// takes no live session, so its saves stay with the classic path and the
+  /// tokens of its load, and the write of the text meets the conflict check
+  /// rather than a session's newer base. Cleared by a write that lands, a
+  /// load, or the buffer returning to the file's text; not by the check
+  /// passing or by a rename, since neither writes the text.
+  refusedUnwritten?: boolean;
   /// Structured recovery state for an open file whose backing path
   /// disappeared. Kept separate from `error` so the UI can offer
   /// Re-open / Find / Close instead of showing a raw OS error.
@@ -4013,6 +4020,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   profile: "carry",
   queueDepth: "carry",
   readMode: "carry",
+  refusedUnwritten: "carry",
   repoRoot: "carry",
   richPromptCaret: "carry",
   richPromptDraftPath: "carry",
