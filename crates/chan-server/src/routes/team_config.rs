@@ -1813,6 +1813,125 @@ sleep 3"
         );
     }
 
+    /// `sample_config` with the worker's agent named by `CHAN_AGENT` and a
+    /// second entry whose value holds a space, a single quote and a `$`.
+    fn config_with_member_env() -> TeamConfig {
+        let mut config = sample_config();
+        config.members[1].env = std::collections::BTreeMap::from([
+            ("CHAN_AGENT".to_string(), "codex".to_string()),
+            ("NOTE".to_string(), "it's a $HOME dir".to_string()),
+        ]);
+        config
+    }
+
+    #[test]
+    fn script_passes_each_member_env_on_its_spawn_line() {
+        let config = config_with_member_env();
+        validate_team_config(&config).expect("the script is generated from an accepted config");
+        let script = generate_bootstrap_script("new-team-1", &config, None);
+        let spawn = script
+            .lines()
+            .find(|line| line.starts_with("cs terminal new --tab-name='@@Alice'"))
+            .expect("the worker's spawn line");
+        assert_eq!(
+            spawn,
+            r#"cs terminal new --tab-name='@@Alice' --tab-group='alpha' --env 'CHAN_AGENT=codex' --env 'NOTE=it'\''s a $HOME dir'"#,
+            "one single-quoted --env word per member env entry, in the map's order: {script}"
+        );
+    }
+
+    /// Run `script` under bash from a scratch directory, with a `cs` on PATH
+    /// that records the arguments of each call as the shell passed them, and
+    /// return the calls in order.
+    #[cfg(unix)]
+    fn cs_calls_of(script: &str) -> Vec<Vec<String>> {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let bin = scratch.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let calls_log = scratch.path().join("cs-calls");
+        // A call is its argument count and then its arguments, every field
+        // NUL-terminated: no argument can hold a NUL, so the log reads back
+        // as exactly the words each call received.
+        write_executable(
+            &bin.join("cs"),
+            &format!(
+                "#!/bin/sh\n{{ printf '%s\\0' \"$#\"; printf '%s\\0' \"$@\"; }} >> {}\n",
+                sh_squote(&calls_log.to_string_lossy())
+            ),
+        );
+        write_executable(&bin.join("sleep"), "#!/bin/sh\nexit 0\n");
+        let script_path = scratch.path().join("team.sh");
+        std::fs::write(&script_path, script).unwrap();
+        let path = match std::env::var_os("PATH") {
+            Some(inherited) => format!("{}:{}", bin.display(), inherited.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        let output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(scratch.path())
+            .env("PATH", path)
+            .output()
+            .expect("run the script under bash");
+        assert!(
+            output.status.success(),
+            "script failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let log = std::fs::read(&calls_log).unwrap();
+        let mut fields = log
+            .split(|&byte| byte == 0)
+            .map(|field| String::from_utf8(field.to_vec()).unwrap());
+        let mut calls = Vec::new();
+        // The last terminator leaves one empty field behind it.
+        while let Some(count) = fields.next().filter(|count| !count.is_empty()) {
+            let count: usize = count.parse().unwrap();
+            calls.push(fields.by_ref().take(count).collect());
+        }
+        calls
+    }
+
+    // Runs the script under bash with a POSIX PATH, so unix only. The words
+    // are what `cs terminal new` parses; its `--env` parser splits each at
+    // the first `=`, which a validated key cannot hold.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_hands_each_member_env_entry_to_cs_as_one_word() {
+        let calls = cs_calls_of(&generate_bootstrap_script(
+            "new-team-1",
+            &config_with_member_env(),
+            None,
+        ));
+        let spawns: Vec<&Vec<String>> = calls
+            .iter()
+            .filter(|argv| argv.starts_with(&["terminal".to_string(), "new".to_string()]))
+            .collect();
+        assert_eq!(
+            spawns,
+            [
+                &vec![
+                    "terminal",
+                    "new",
+                    "--tab-name=@@Lead",
+                    "--tab-group=alpha",
+                    "--env",
+                    "CHAN_TAB_NAME=@@Lead",
+                ],
+                &vec![
+                    "terminal",
+                    "new",
+                    "--tab-name=@@Alice",
+                    "--tab-group=alpha",
+                    "--env",
+                    "CHAN_AGENT=codex",
+                    "--env",
+                    "NOTE=it's a $HOME dir",
+                ],
+            ],
+            "each member's spawn receives its env as --env KEY=VALUE words: {calls:?}"
+        );
+    }
+
     #[test]
     fn identity_prompt_addresses_the_member_and_points_at_bootstrap() {
         let config = sample_config();
