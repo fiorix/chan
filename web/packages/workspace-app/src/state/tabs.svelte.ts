@@ -2923,10 +2923,20 @@ async function confirmCloseTabs(
         : `${terminals.length} live terminals`;
     parts.push(`${label} is still running`);
   }
+  if (refused.length > 0 && parts.length > 0) {
+    // Two kinds of thing end here, so the title and the buttons name
+    // neither; the message says both.
+    return uiConfirm({
+      title: "Close tabs?",
+      message: [notSavedSentence(refused), ...parts.map((part) => `${part}.`)].join(" "),
+      confirmLabel: "Close",
+      destructive: true,
+    });
+  }
   if (refused.length > 0) {
     return uiConfirm({
       title: "Close without saving?",
-      message: [notSavedSentence(refused), ...parts.map((part) => `${part}.`)].join(" "),
+      message: notSavedSentence(refused),
       confirmLabel: "Close without saving",
       cancelLabel: "Keep editing",
       destructive: true,
@@ -3692,11 +3702,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
         // A draft has its own close flow, so a refused buffer is not asked
         // about here: the close is refused, and says why.
         const live = liveFileTabById(tab.id) ?? tab;
-        if (live.saveError) {
-          notify(
-            `${tabLabel(live)} was not saved because ${live.saveError}. The draft closes once the drawing parses or its edits are undone.`,
-          );
-        }
+        if (live.saveError) notify(`${tabLabel(live)} was not saved.`);
         return false;
       }
     }
@@ -6966,9 +6972,7 @@ export async function closeFileTabAfterMove(
     }
     if (isDirty(tab)) {
       const live = liveFileTabById(tab.id) ?? tab;
-      if (live.saveError) {
-        notify(`${tabLabel(live)} stays in this window: it was not saved because ${live.saveError}.`);
-      }
+      if (live.saveError) notify(`${tabLabel(live)} was not saved and stays in this window.`);
       return;
     }
   }

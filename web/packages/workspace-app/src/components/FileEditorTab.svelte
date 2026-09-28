@@ -963,6 +963,7 @@
   // the label re-resolves when the override store changes.
   const slidePreviewChord = $derived(chordLabel("app.slides.preview"));
   const slidePresentChord = $derived(chordLabel("app.slides.present"));
+  const sourceChord = $derived(chordLabel("app.editor.toggleMode"));
 
   const showPageWidthMenuRow = $derived(tab.mode !== "canvas");
 
@@ -1330,7 +1331,7 @@
     <!-- The board opens a text that does not parse as an empty scene, and
          its first change would replace the text the user is fixing. -->
     <div class="placeholder refused-placeholder">
-      This drawing does not parse, so the board cannot show it. Switch to Source to fix it.
+      This drawing does not parse, so the board cannot show it. Use Show source code ({sourceChord}) to fix it.
     </div>
   {:else}
     <div class="editor-inspector-row">
