@@ -5337,6 +5337,153 @@ mod tests {
         }
     }
 
+    /// Run `scenario` on a current-thread runtime whose clock starts
+    /// paused, on a thread of its own, and panic naming `what` when it has
+    /// not ended within thirty seconds of the real clock.
+    fn on_a_paused_clock(
+        what: &str,
+        scenario: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .expect("paused runtime");
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(scenario)
+            }));
+            let _ = done.send(outcome);
+        });
+        match finished.recv_timeout(Duration::from_secs(30)) {
+            Ok(outcome) => {
+                worker.join().expect("scenario thread");
+                if let Err(panic) = outcome {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{what} ended without an outcome")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{what} did not end within thirty seconds")
+            }
+        }
+    }
+
+    /// Removals of a root whose unregister has stopped answering, each
+    /// after an earlier one's caller gave up, wait for that unregister at
+    /// most the release budget, then answer as an open beside a holder
+    /// that has not let go does, having changed nothing: the root holds
+    /// one unregister thread however many of its removals give up.
+    #[test]
+    fn removals_of_a_registered_root_hold_one_unregister_thread() {
+        on_a_paused_clock("removals beside an abandoned unregister", async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let overlay_key = canonical_key(root.path()).to_string_lossy().into_owned();
+            let host = WorkspaceHost::new(library, fake_builder());
+            let budget = host.open_release_budget;
+            let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+            host.install_workspace_overlay(Arc::clone(&overlay));
+            let store = tempfile::tempdir().unwrap();
+            let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+            host.install_window_registry(registry.clone(), "local".into());
+            let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+            let first = held
+                .answer_or_give_up(host.remove_workspace_for_root(root.path(), false))
+                .await;
+            assert!(
+                first.is_none(),
+                "fixture: the first removal did not reach its unregister"
+            );
+            // What the first removal forgot before its unregister, written
+            // again, so that a later removal that forgets anything shows it.
+            overlay.set(&overlay_key, true);
+            registry.create(
+                WindowKind::Workspace,
+                Some(root.path().to_string_lossy().into_owned()),
+            );
+
+            let mut answers = Vec::new();
+            let mut early = Vec::new();
+            for _ in 0..2 {
+                let removal = host.remove_workspace_for_root(root.path(), false);
+                tokio::pin!(removal);
+                // Until the removal marks its row, which it does before it
+                // waits for the unregister's permit, or answers.
+                let answered = loop {
+                    tokio::select! {
+                        biased;
+                        answer = &mut removal => break Some(answer),
+                        _ = tokio::task::yield_now() => {}
+                    }
+                    if host.workspace_status(root.path()).0 == WorkspaceStatus::Removing {
+                        break None;
+                    }
+                };
+                if let Some(answer) = answered {
+                    early.push(answer);
+                    continue;
+                }
+                tokio::time::advance(budget - Duration::from_millis(1)).await;
+                tokio::select! {
+                    biased;
+                    answer = &mut removal => {
+                        early.push(answer);
+                        continue;
+                    }
+                    _ = tokio::task::yield_now() => {}
+                }
+                tokio::time::advance(Duration::from_millis(1)).await;
+                answers.push(held.answer_or_give_up(&mut removal).await);
+            }
+
+            assert_eq!(
+                held.count, 1,
+                "each removal whose caller gave up left an unregister behind"
+            );
+            assert!(
+                early.is_empty(),
+                "a removal answered before its release budget: {early:?}"
+            );
+            for answer in &answers {
+                assert!(
+                    matches!(
+                        answer,
+                        Some(Err(Error::Core(ChanError::WorkspaceAlreadyOpen)))
+                    ),
+                    "a removal beside an abandoned unregister: {answer:?}"
+                );
+            }
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (
+                    WorkspaceStatus::Error,
+                    Some("workspace is still releasing; retry".into())
+                ),
+                "the removal's answer is not the row's words"
+            );
+            assert_eq!(
+                overlay.on_paths(),
+                vec![overlay_key],
+                "a removal beside an abandoned unregister forgot the overlay row"
+            );
+            assert_eq!(
+                registry.snapshot().len(),
+                1,
+                "a removal beside an abandoned unregister purged the window records"
+            );
+            assert!(
+                host.library().workspace_paths_for(root.path()).is_some(),
+                "a removal beside an abandoned unregister unregistered the workspace"
+            );
+        });
+    }
+
     #[test]
     fn canonical_key_strips_verbatim_prefix() {
         // A caller path resolved WITH the Windows `\\?\` verbatim prefix and a
