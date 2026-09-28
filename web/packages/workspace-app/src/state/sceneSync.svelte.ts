@@ -22,7 +22,8 @@
 /// [`SceneSession.pushScene`]. Saved-state semantics are ack-based:
 /// `tab.saved` advances to `tab.content` whenever a `push-ok` lands with
 /// nothing left unpushed, and whenever the canvas mirrors its board into
-/// the buffer with nothing of its own unconfirmed, as after a peer's edit,
+/// the buffer while attached with nothing of its own unconfirmed, as after a
+/// peer's edit,
 /// so dirty keeps meaning "unconfirmed local changes" for every existing
 /// consumer.
 ///
@@ -198,8 +199,12 @@ export type ScenePeerCursor = {
 const PERMANENT_ERROR_REASONS = new Set(["attach-failed", "doc-too-large"]);
 
 /// The canvas half of a session (ExcalidrawCanvas.svelte implements it).
-/// Every call arrives from a socket callback, except the replay `bindCanvas`
-/// makes when the canvas binds.
+/// The session calls it from its socket's frames and closes, from the replay
+/// `bindCanvas` makes when the canvas binds, from the save funnel
+/// (`flushPendingLocal`, through `flush` and the waiters' check), from the
+/// force-reload prompt's query and the saved mark's check (`hasPendingLocal`,
+/// the second reached from the canvas's own flush through `bufferMirrored`),
+/// and from the roster hook (`collaboratorsChanged`).
 export type SceneCanvasBinding = {
   /// Full authority state: reconcile every element (tombstones
   /// included) into the canvas, adopt appState, register files. The
@@ -222,13 +227,15 @@ export type SceneCanvasBinding = {
   /// quiescence).
   flushPendingLocal(): void;
   /// Forget that this payload was handed over. `pushScene` answers true for
-  /// a coalesced push and for one on the wire, and neither has been accepted
-  /// yet: a drop or a resync throws both away. It takes the same three parts
-  /// `pushScene` does, because the canvas marks all three on a true and each
-  /// mark keeps its part out of every later push: an element stays on the
-  /// canvas having reached nobody, a file leaves the authority holding an
-  /// element that references bytes it does not have, and an appState change
-  /// never arrives at all.
+  /// a coalesced push and for one on the wire, and neither has been
+  /// acknowledged yet: a drop, or the next socket's first snapshot, throws
+  /// both away. It takes the same three parts `pushScene` does, because the
+  /// canvas marks all three on a true and a mark left in place keeps its part
+  /// out of every later push: an element stays on the canvas having reached
+  /// nobody, and a file leaves the authority holding an element that
+  /// references bytes it does not have. The appState is handed back too, but
+  /// the snapshot the session hands the canvas next replaces it, so a
+  /// released appState is not offered again.
   forgetBroadcast(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void;
 };
 
@@ -444,8 +451,9 @@ export class SceneSession {
   /// nothing was taken and the caller still owns the change, so a canvas
   /// that marks its elements as broadcast must do so only on true. A
   /// coalesced push IS taken, which is why the in-flight branch answers
-  /// true. The binding re-pushes whatever stayed local after the next
-  /// snapshot.
+  /// true. After the next snapshot the binding pushes the elements and files
+  /// that stayed local; an appState that stayed local is replaced by that
+  /// snapshot's.
   pushScene(elements: WireElement[], appState?: WireAppState, files?: WireFiles): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.haveSnapshot) {
       return false;
@@ -488,8 +496,8 @@ export class SceneSession {
 
   /// The canvas has mirrored its board into the tab's buffer, with none of
   /// its appState left unpushed. A mirror that follows a peer's edit or an
-  /// ack carries only what the authority holds, and no push-ok comes for
-  /// it; one that carries a local change finds that change pending or on
+  /// ack carries nothing of this window's that the authority has not
+  /// acknowledged, and no push-ok comes for it; one that carries a local change finds that change pending or on
   /// the wire and leaves the mark to its push-ok. Only an attached session
   /// owns the mark: a degraded one's buffer is the classic save's, and a
   /// connecting or reconnecting one has no snapshot of this socket yet.
@@ -937,7 +945,9 @@ export class SceneSession {
   }
 
   /// Ack-based saved semantics: with nothing local on the wire, queued or
-  /// not yet handed over, the buffer holds what the authority holds.
+  /// not yet handed over, the buffer holds no change of this window's that
+  /// the authority has not acknowledged. It can still lag the authority, by
+  /// a peer's edit the canvas's flush has not mirrored yet.
   private confirmSaved(): void {
     if (this.pushInFlight || this.queued !== null) return;
     if (this.binding?.hasPendingLocal() ?? false) return;

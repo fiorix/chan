@@ -125,9 +125,11 @@
   // The appState the canvas has handed to the board and the library does
   // not show yet. `updateScene` shows an appState only at the library's next
   // render, so every serialization, the baseline's and the flush's alike,
-  // lays this over what the library reports; the library's next reported
-  // change follows that render and drops it. It holds what came out of the
-  // serializer, so it names no key.
+  // lays this over what the library reports, until the library's next
+  // reported change drops it. That change is normally the one the render
+  // reports, but a discrete event's render can report one first, which
+  // design.md names as open. It holds what came out of the serializer, so it
+  // names no key.
   let handedAppState: Partial<AppState> | null = null;
 
   // Seeded: the library, past its own init (whose apply replaces every
@@ -205,8 +207,9 @@
 
   /// What the library keeps of `appState` when it restores a scene holding
   /// it and serializes that scene: the grid and the background, each at the
-  /// library's default where `appState` lacks it. The seed takes the same of
-  /// a buffer's.
+  /// library's default where `appState` lacks it, and the grid's size and step
+  /// also at the default where they are not finite numbers, then rounded and
+  /// clamped to 1..100. The seed takes the same of a buffer's.
   function keptAppState(
     e: typeof import("@excalidraw/excalidraw"),
     appState: WireAppState,
@@ -258,10 +261,11 @@
     if (kept !== undefined) {
       // Any adopted appState is the new authority baseline; only later
       // local divergence should ride a push. The board shows it only at the
-      // library's next render, so until then every serialization lays it
-      // over the board's earlier one, as for a seed, and it is what the next
-      // push offers: a push made first, from a timer, a close or the session
-      // right after this frame, then sends nothing older over it.
+      // library's next render, so until the library's next reported change
+      // every serialization lays it over the board's earlier one, as for a
+      // seed, and it is what the next push offers: a push made before that,
+      // from a timer, a close or the session right after this frame, sends
+      // nothing older over it.
       handedAppState = { ...(handedAppState ?? {}), ...kept };
       cleanedAppState = kept;
       cleanedAppStateJson = lastAuthorityAppStateJson = canonicalJson(kept);
@@ -292,10 +296,13 @@
       hasFiles ? newFiles : undefined,
     );
     // Everything below records "the authority has this", so it runs only
-    // when the session took the push. A dropped one leaves the deltas,
-    // the new files and the appState pending, and the next flush sends
-    // them; marking them first is how a shape drawn while the channel was
-    // down was never pushed again.
+    // when the session took the push. A refused one leaves all three
+    // unmarked for the next flush; marking them first is how a shape drawn
+    // while the channel was down was never pushed again. A snapshot adopted
+    // before that flush marks what it holds and replaces the appState, on
+    // the board and here, so after a reattach the elements and files the
+    // snapshot lacks are offered and an appState refused while the socket
+    // was down is not (design.md names it as open).
     if (!taken) return;
     noteVersions(lastBroadcast, deltas);
     for (const k of Object.keys(newFiles)) knownFiles.add(k);
@@ -338,10 +345,11 @@
       pushDeltas();
     },
     forgetBroadcast(elements, appState, files) {
-      // The push was claimed and then discarded, so the authority never took
-      // any of it. Dropping each mark is what puts its part back in the next
-      // flush: the elements in `sceneDeltas`, the files in the `newFiles`
-      // scan, the appState in the baseline comparison.
+      // The push was claimed and then discarded, with its socket or at the
+      // next socket's first snapshot, and whether the authority read it is not
+      // known. Dropping each mark offers its part again unless the snapshot
+      // adopted next marks it: the elements in `sceneDeltas`, the files in the
+      // `newFiles` scan.
       for (const el of elements) {
         const id = (el as { id?: unknown }).id;
         if (typeof id === "string") lastBroadcast.delete(id);
@@ -350,10 +358,12 @@
         for (const k of Object.keys(files)) knownFiles.delete(k);
       }
       if (appState !== undefined) {
-        // The appState rides a push as a whole value rather than a delta, so
-        // clearing the baseline offers the latest flush's or adopt's
-        // appState again. At worst that is one redundant push of a value the
-        // authority has; a snapshot adopted before that push replaces it.
+        // Clearing the baseline would offer the latest flush's or adopt's
+        // appState again, but nothing reads it before an adopt replaces it:
+        // the session adopts the next socket's first snapshot before it takes
+        // a push, and the adopt sets the baseline and what the next push
+        // offers to that snapshot's appState. A released appState is not
+        // offered again.
         lastAuthorityAppStateJson = "";
       }
     },
@@ -442,9 +452,11 @@
 
   /// Every change the library reports. The first comes from its init, and
   /// none comes before it, so it is where a board whose buffer was loaded
-  /// before the init finished is seeded. A change follows the render that
-  /// shows what was handed before it, so that is dropped first; a seed here
-  /// hands its own after the drop, and it lasts until the next change.
+  /// before the init finished is seeded. A change normally follows the render
+  /// that shows what was handed before it, so that is dropped first (a
+  /// discrete event's render can report before it, which design.md names as
+  /// open); a seed here hands its own after the drop, and it lasts until the
+  /// next change.
   function onLibraryChange(): void {
     handedAppState = null;
     seed();
