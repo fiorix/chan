@@ -44,6 +44,7 @@ pub use gateway_registry::{GatewayEntry, GatewayInput, GatewayRegistry, GatewayS
 pub use host::{
     CollapsedMachinesStore, DevserverFeedSource, HostedWorkspace, LauncherWorkspace,
     LocalColorStore, LocalThemeStore, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus,
+    WORKSPACE_STILL_RELEASING,
 };
 pub use prefix::{
     allocate_workspace_prefix, registered_workspace_prefix, workspace_prefix_for, workspace_slug,
