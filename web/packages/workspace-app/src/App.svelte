@@ -11,7 +11,11 @@
   import SessionEndedOverlay from "./components/SessionEndedOverlay.svelte";
   import CloseConfirmOverlay from "./components/CloseConfirmOverlay.svelte";
   import { installWakeGapDetector } from "./wakeGap";
-  import { uiCloseConfirm } from "./state/closeConfirm.svelte";
+  import {
+    flushAndCloseWindow,
+    flushAndHideWindow,
+    uiCloseConfirm,
+  } from "./state/closeConfirm.svelte";
   import DraftCloseModal from "./components/DraftCloseModal.svelte";
   import WorkspaceWarningsModal from "./components/WorkspaceWarningsModal.svelte";
   import TeamDialog from "./components/TeamDialog.svelte";
@@ -132,12 +136,7 @@
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
-  import {
-    hideWindowFromCloseConfirm,
-    isTauriDesktop,
-    reloadWindow,
-    requestCloseWindow,
-  } from "./api/desktop";
+  import { isTauriDesktop, reloadWindow } from "./api/desktop";
   import { activeTransferCount } from "./state/transfers.svelte";
   import {
     currentOS,
@@ -1042,7 +1041,7 @@
         !builtInChordSuperseded("app.window.hide");
       if (hideChord) {
         e.preventDefault();
-        void hideWindowFromCloseConfirm();
+        flushAndHideWindow();
         return;
       }
     }
@@ -1419,9 +1418,8 @@
       // window can be re-surfaced.
       case "app.window.close":
         if (closeActiveEmptyPane()) return;
-        flushEditsToRecovery();
         discardWindowSession();
-        if (isTauriDesktop()) void requestCloseWindow();
+        flushAndCloseWindow();
         return;
       // The desktop OS red-dot on a LIVE window. The host prevented the close
       // and asked us. Two fast paths close straight away (no prompt): while the
@@ -1431,9 +1429,8 @@
       // other window prompts Hide / Close / Cancel; the overlay owns the outcome.
       case "app.window.confirmClose":
         if (ui.disconnectBlocking || !hasAnyTab()) {
-          flushEditsToRecovery();
           discardWindowSession({ reap: true });
-          if (isTauriDesktop()) void requestCloseWindow();
+          flushAndCloseWindow();
           return;
         }
         void uiCloseConfirm();
@@ -1444,7 +1441,7 @@
       // bury IPC is an explicit no-op off desktop, where the launcher entry is
       // not offered.
       case "app.window.hide":
-        void hideWindowFromCloseConfirm();
+        flushAndHideWindow();
         return;
       // `app.save` is intentionally absent: autosave covers the write path.
       case "app.file.new":

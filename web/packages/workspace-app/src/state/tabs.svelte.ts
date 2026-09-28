@@ -2664,13 +2664,13 @@ export function flushTabEdits(tabs: readonly Tab[]): void {
 }
 
 /// Put every tab's unsaved input in its recovery buffer now, for a window
-/// that goes without closing its tabs: a close of the window runs none of a
-/// tab's closes, and an unload runs no component teardown and may not come
-/// at all when a desktop webview is destroyed. Each mounted editor commits
-/// its buffered input, the effects that queue a recovery write for a buffer
-/// run, and the queued writes are written. It never throws, since its
-/// callers are an unload handler and a window's close, both of which must
-/// finish: a failure is logged and what did commit is still written. Not
+/// that goes without closing its tabs: a hide or a close of the window runs
+/// none of a tab's closes, and an unload runs no component teardown and may
+/// not come at all when a desktop webview is destroyed. Each mounted editor
+/// commits its buffered input, the effects that queue a recovery write for a
+/// buffer run, and the queued writes are written. It never throws, since its
+/// callers are an unload handler and a window's hide or close, all of which
+/// must finish: a failure is logged and what did commit is still written. Not
 /// called from an effect or a derived: it runs svelte's flush, which an
 /// effect already runs inside, and each commit writes a tab's buffer.
 export function flushEditsToRecovery(): void {

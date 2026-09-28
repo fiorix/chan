@@ -17,15 +17,11 @@
   import {
     cancelCloseConfirmForConnectionChange,
     closeConfirmState,
+    flushAndCloseWindow,
+    flushAndHideWindow,
     resolveCloseConfirm,
   } from "../state/closeConfirm.svelte";
   import { discardWindowSession, ui } from "../state/store.svelte";
-  import { flushEditsToRecovery } from "../state/tabs.svelte";
-  import {
-    isTauriDesktop,
-    requestCloseWindow,
-    hideWindowFromCloseConfirm,
-  } from "../api/desktop";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -50,16 +46,15 @@
 
   // Hide: bury the window (sessions stay warm, reopenable from the Window menu).
   function hide(): void {
-    void hideWindowFromCloseConfirm();
+    flushAndHideWindow();
     resolveCloseConfirm("hide");
   }
 
   // Close: discard this window's session blob (the server reaps its terminals)
   // and ask the host to destroy the window, so it leaves no hidden/empty row.
   function close(): void {
-    flushEditsToRecovery();
     discardWindowSession({ reap: true });
-    if (isTauriDesktop()) void requestCloseWindow();
+    flushAndCloseWindow();
     resolveCloseConfirm("close");
   }
 
