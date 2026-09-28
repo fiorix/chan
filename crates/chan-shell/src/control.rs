@@ -31,9 +31,6 @@ pub struct EnvControlSocket {
     // Read by the search, which runs on unix only.
     #[cfg_attr(not(unix), allow(dead_code))]
     workspace_path: Option<PathBuf>,
-    /// The socket that answered in this one's place, so a `cs` run searches
-    /// once.
-    found: std::sync::OnceLock<PathBuf>,
     /// The lines this socket announced, for the tests to read.
     #[cfg(all(test, unix))]
     announced: std::sync::Mutex<Vec<String>>,
@@ -47,7 +44,6 @@ impl EnvControlSocket {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
-            found: std::sync::OnceLock::new(),
             #[cfg(all(test, unix))]
             announced: std::sync::Mutex::new(Vec::new()),
         }
@@ -60,9 +56,6 @@ impl EnvControlSocket {
     /// the terminal's workspace (see [`Self::find_moved_server`]). Otherwise
     /// the connect fails as it would for any path.
     async fn connect(&self) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
-        if let Some(found) = self.found.get() {
-            return connect_path(found).await;
-        }
         let err = match transport::connect(&self.path).await {
             Ok(halves) => return Ok(halves),
             Err(err) => err,
@@ -71,9 +64,7 @@ impl EnvControlSocket {
         if is_gone(&err) {
             if let Some((found, root)) = self.find_moved_server().await {
                 if let Ok(halves) = transport::connect(&found).await {
-                    if self.found.set(found.clone()).is_ok() {
-                        self.announce(&found, &root);
-                    }
+                    self.announce(&found, &root);
                     return Ok(halves);
                 }
             }
@@ -135,8 +126,8 @@ impl EnvControlSocket {
         matching.next().is_none().then_some(found)
     }
 
-    /// Say once, and only to a person at a terminal, that this terminal's
-    /// server answered at another socket than the one its environment
+    /// Say, only to a person at a terminal, that this terminal's server
+    /// answered at another socket than the one its environment
     /// names. A script or an agent reads `cs`'s stderr through a pipe and
     /// sees nothing new.
     #[cfg(unix)]
@@ -1239,10 +1230,10 @@ mod tests {
     }
 
     // A terminal whose tenant moved to another prefix keeps the socket of
-    // the old one, which nothing binds. Its requests reach the one devserver
-    // tenant beside that socket that serves its workspace, found once for
-    // the run and announced once, whether the old socket's node is gone or
-    // left behind refusing.
+    // the old one, which nothing binds. Its request reaches the one devserver
+    // tenant beside that socket that serves its workspace, which is asked who
+    // it is once, and the move is announced once, whether the old socket's
+    // node is gone or left behind refusing.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_moved_terminal_reaches_the_tenant_serving_its_workspace() {
@@ -1267,19 +1258,15 @@ mod tests {
                 "moved",
             );
             let socket = env_socket(&dead, Some(&link));
-            for request in 0..2 {
-                let reply = send_control_request(&socket, ControlRequest::WindowList)
-                    .await
-                    .unwrap_or_else(|e| {
-                        panic!("stale node {stale_node}, request {request}: {e:#}")
-                    });
-                assert_eq!(reply, "moved", "stale node {stale_node}, request {request}");
-            }
-            assert_eq!(moved.requests(), 2, "stale node {stale_node}");
+            let reply = send_control_request(&socket, ControlRequest::WindowList)
+                .await
+                .unwrap_or_else(|e| panic!("stale node {stale_node}: {e:#}"));
+            assert_eq!(reply, "moved", "stale node {stale_node}");
+            assert_eq!(moved.requests(), 1, "stale node {stale_node}");
             assert_eq!(
                 moved.identifies(),
                 1,
-                "stale node {stale_node}: the search ran more than once for one socket"
+                "stale node {stale_node}: the tenant was asked who it is more than once"
             );
             assert_eq!(other.requests(), 0, "stale node {stale_node}");
             let announced = socket.announced.lock().unwrap().clone();
