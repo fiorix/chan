@@ -47,7 +47,7 @@ function statusAction(): HTMLButtonElement | null {
 }
 
 function dialog(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('.workspace-warnings-backdrop [role="dialog"]');
+  return document.querySelector<HTMLElement>('[role="dialog"][aria-labelledby="workspace-warnings-title"]');
 }
 
 function button(scope: ParentNode, label: string): HTMLButtonElement | undefined {
