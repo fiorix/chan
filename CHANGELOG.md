@@ -20,6 +20,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **AUR packages preserve their release binaries through testing.** Both recipes install a copy saved by `build()` before `check()` runs, so cargo's integration-test build cannot replace the shipped executable with one carrying dev-dependency features.
 
+- **Lock probes release their temporary locks before returning.** A concurrent process spawn can no longer keep a completed workspace or daemon lock probe held until the child executes, avoiding spurious locked-workspace refusals.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
