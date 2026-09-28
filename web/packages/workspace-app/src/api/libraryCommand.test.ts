@@ -86,6 +86,23 @@ describe("scoped library command client", () => {
     );
   });
 
+  test("hands a snapshot read's signal to its request", async () => {
+    transport.requestRoot
+      .mockResolvedValueOnce({ token: "cap-read", expires_in_seconds: 300 })
+      .mockResolvedValueOnce(snapshot);
+    const controller = new AbortController();
+    const load: (signal: AbortSignal) => Promise<unknown> = loadScopedLibrarySnapshot;
+
+    await expect(load(controller.signal)).resolves.toEqual(snapshot);
+    expect(transport.requestRoot).toHaveBeenNthCalledWith(
+      2,
+      "GET",
+      "/api/library/command-capabilities/cap-read",
+      undefined,
+      controller.signal,
+    );
+  });
+
   test("executes only through the capability action route", async () => {
     transport.requestRoot
       .mockResolvedValueOnce({ token: "cap-action", expires_in_seconds: 300 })

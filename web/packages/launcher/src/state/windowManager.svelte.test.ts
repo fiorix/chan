@@ -761,3 +761,79 @@ describe("record-based window repair", () => {
     });
   }
 });
+
+describe("the feed read before a repair", () => {
+  const PAGE = "http://localhost:3000/proj-1/?w=w-back";
+
+  function pageWindow(): FakeWin {
+    const child = fakeWin();
+    child.location.href = PAGE;
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    checkWindowPage.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return new Response("<html></html>");
+    });
+    return child;
+  }
+
+  it("leaves a page whose record reconnects while its page is checked", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", origin: "browser", connected: false });
+    reconcileWindows(set([rec]));
+    const child = pageWindow();
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(50);
+    reconcileWindows(set([{ ...rec, connected: true }]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(await pending).toBe(child);
+    expect(navigation).not.toHaveBeenCalled();
+    expect(child.document.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(false);
+    expect(hasWindowHandle("w-back")).toBe(true);
+  });
+
+  it("repairs a page whose latest record still reads disconnected", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", origin: "browser", connected: false });
+    reconcileWindows(set([rec]));
+    const child = pageWindow();
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(50);
+    reconcileWindows(set([{ ...rec }]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(await pending).toBe(child);
+    expect(navigation).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("/proj-1/?w=w-back"));
+  });
+
+  it("leaves a window it cannot close when its record leaves the feed during the check", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", origin: "browser", connected: false });
+    reconcileWindows(set([rec]));
+    const child = pageWindow();
+    child.close = vi.fn();
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(50);
+    reconcileWindows(set([]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(await pending).toBeNull();
+    expect(navigation).not.toHaveBeenCalled();
+    expect(child.document.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(false);
+    expect(hasWindowHandle("w-back")).toBe(false);
+  });
+
+  it("repairs a page before any feed has arrived", async () => {
+    vi.useFakeTimers();
+    const child = pageWindow();
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(record({ window_id: "w-back", origin: "browser", connected: false }));
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(child);
+    expect(navigation).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("/proj-1/?w=w-back"));
+  });
+});

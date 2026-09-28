@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { WindowPageCheck } from "./window-page";
+import { isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "./window-page";
 
 async function separateCallers() {
   vi.resetModules();
@@ -10,13 +10,15 @@ async function separateCallers() {
   return { owner, peer };
 }
 
-function popup() {
+function popup(initialHref = "about:blank") {
   const navigate = vi.fn();
+  let href = initialHref;
   const window = {
     closed: false,
     document: document.implementation.createHTMLDocument(),
     focus: vi.fn(),
-    location: { get href() { return "about:blank"; }, set href(url: string) { navigate(url); } },
+    location: { get href() { return href; }, set href(url: string) { navigate(url); } },
+    showBlank() { href = "about:blank"; },
   };
   return { window, handle: window as unknown as Window, navigate };
 }
@@ -78,5 +80,150 @@ describe("window page ownership between callers", () => {
     expect(await peer.navigateWindowWhenReady(child.handle, "/peer", peerCheck)).toBe(true);
     expect(peerCheck).toHaveBeenCalledTimes(1);
     expect(child.navigate).toHaveBeenCalledExactlyOnceWith("/peer");
+  });
+});
+
+type Connection = "connected" | "disconnected" | "gone";
+
+const PAGE = "https://chan.test/project/?w=w-1";
+const OWNER = "data-chan-window-page-owner";
+
+function slowCheck() {
+  return vi.fn<WindowPageCheck>(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return answer();
+  });
+}
+
+function withReader(readConnection: (signal: AbortSignal) => Promise<Connection>) {
+  return { focus: true, readConnection };
+}
+
+function heldReading() {
+  let answerWith!: (connection: Connection) => void;
+  const readConnection = vi.fn((_signal: AbortSignal) => new Promise<Connection>((resolve) => {
+    answerWith = resolve;
+  }));
+  return { readConnection, answer: (connection: Connection) => answerWith?.(connection) };
+}
+
+describe("the connection read before navigation", () => {
+  test("leaves a window that reads connected once its page answers", async () => {
+    vi.useFakeTimers();
+    const child = popup(PAGE);
+    const readConnection = vi.fn(async (_signal: AbortSignal): Promise<Connection> => "connected");
+    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(readConnection));
+    await vi.advanceTimersByTimeAsync(99);
+    expect(readConnection).not.toHaveBeenCalled();
+    expect(child.window.document.documentElement.getAttribute(OWNER)).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await pending).toBe(true);
+    expect(child.navigate).not.toHaveBeenCalled();
+    expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(false);
+    expect(isWindowNavigating(child.handle)).toBe(false);
+  });
+
+  test("navigates a window that still reads disconnected, asking once with the wait's signal", async () => {
+    vi.useFakeTimers();
+    const child = popup(PAGE);
+    const readConnection = vi.fn(async (_signal: AbortSignal): Promise<Connection> => "disconnected");
+    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(readConnection));
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(true);
+    expect(readConnection).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal));
+    expect(child.navigate).toHaveBeenCalledExactlyOnceWith(PAGE);
+    expect(child.window.document.documentElement.getAttribute(OWNER)).toBe("navigating");
+  });
+
+  test("ends the wait as for a closed window when the record is gone", async () => {
+    vi.useFakeTimers();
+    const child = popup(PAGE);
+    const readConnection = vi.fn(async (_signal: AbortSignal): Promise<Connection> => "gone");
+    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(readConnection));
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(false);
+    expect(child.navigate).not.toHaveBeenCalled();
+    expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(false);
+    expect(isWindowNavigating(child.handle)).toBe(false);
+  });
+
+  test("navigates a blank window without reading its connection", async () => {
+    vi.useFakeTimers();
+    const child = popup();
+    const readConnection = vi.fn(async (_signal: AbortSignal): Promise<Connection> => "connected");
+    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(readConnection));
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(true);
+    expect(readConnection).not.toHaveBeenCalled();
+    expect(child.navigate).toHaveBeenCalledExactlyOnceWith(PAGE);
+  });
+
+  test("navigates a window that turned blank while its connection was read", async () => {
+    vi.useFakeTimers();
+    const child = popup(PAGE);
+    const reading = heldReading();
+    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(reading.readConnection));
+    await vi.advanceTimersByTimeAsync(100);
+    child.window.showBlank();
+    reading.answer("connected");
+
+    expect(await pending).toBe(true);
+    expect(child.navigate).toHaveBeenCalledExactlyOnceWith(PAGE);
+  });
+
+  test("rejects once and keeps the page when the reading fails", async () => {
+    vi.useFakeTimers();
+    const child = popup(PAGE);
+    const readConnection = vi.fn(async (_signal: AbortSignal): Promise<Connection> => {
+      throw new Error("The window's record could not be read.");
+    });
+    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(readConnection));
+    const outcome = pending.then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await outcome).toMatchObject({ message: "The window's record could not be read." });
+    expect(child.navigate).not.toHaveBeenCalled();
+    expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(false);
+  });
+
+  test("navigates nothing when the window closes during the reading", async () => {
+    vi.useFakeTimers();
+    const child = popup(PAGE);
+    const reading = heldReading();
+    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(reading.readConnection));
+    await vi.advanceTimersByTimeAsync(100);
+    child.window.closed = true;
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(false);
+    reading.answer("disconnected");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.navigate).not.toHaveBeenCalled();
+    expect(reading.readConnection.mock.calls[0][0].aborted).toBe(true);
+  });
+
+  test("bounds the reading by the wait's sixty seconds", async () => {
+    vi.useFakeTimers();
+    const child = popup(PAGE);
+    const reading = heldReading();
+    const check = vi.fn<WindowPageCheck>(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 59_000));
+      return answer();
+    });
+    let settled: unknown = "pending";
+    void navigateWindowWhenReady(child.handle, PAGE, check, withReader(reading.readConnection))
+      .then((ready) => { settled = ready; }, (error: unknown) => { settled = error; });
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(settled).toMatchObject({ message: "Timed out waiting for the window page" });
+    reading.answer("disconnected");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.navigate).not.toHaveBeenCalled();
+    expect(reading.readConnection.mock.calls[0][0].aborted).toBe(true);
+    expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(false);
   });
 });
