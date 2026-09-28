@@ -39,8 +39,6 @@
 // and returns `binary` for the unknown case; the authoritative
 // text/binary answer always rides the server `kind`.
 
-import { basename } from "./format";
-
 const MARKDOWN_EXTENSIONS = new Set(["md", "txt"]);
 
 // Browser-native video containers the server streams with HTTP range
@@ -287,6 +285,14 @@ function extOf(path: string): string | null {
   return path.slice(dot + 1).toLowerCase();
 }
 
+// A workspace path's last component, cut at `/` alone as `basename` in
+// `./format.ts` cuts it. The file-classes check compiles this module on its
+// own, so it imports nothing, and the cut is written here.
+function basenameOf(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? path : path.slice(slash + 1);
+}
+
 /// Path-only kind classifier. Returns the editor-facing kind a path
 /// would receive in the absence of a server-side `TreeEntry.kind`.
 /// Used by `classifyFile` in `./kinds.ts` as the fallback branch.
@@ -308,7 +314,7 @@ export function classifyPath(
     if (ext === "md") return "document";
     if (MARKDOWN_EXTENSIONS.has(ext) || TEXT_EXTENSIONS.has(ext)) return "text";
   }
-  if (TEXT_BASENAMES.has(basename(path))) return "text";
+  if (TEXT_BASENAMES.has(basenameOf(path))) return "text";
   return "binary";
 }
 
