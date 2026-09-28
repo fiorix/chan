@@ -4,8 +4,11 @@
 //! call. Each file under `tests/` is its own process and this one holds a
 //! single test, so nothing else reads while it counts: the workspace's
 //! startup recovery is stopped first, and the MCP session runs over an
-//! in-memory pipe. The only other reads in a count are the counter's own
-//! reads of `/proc/self/io`, a few hundred bytes.
+//! in-memory pipe. The counter's own read of `/proc/self/io` is counted
+//! too, and a count leaves it out. One more read can land in a count:
+//! glibc's malloc reads the list of online CPUs once, the first time a
+//! thread finds its arena held, which pinned to one CPU happens inside a
+//! call. A count gives it [`OTHER_READS`] bytes of room.
 #![cfg(all(feature = "mcp", target_os = "linux"))]
 
 use base64::Engine as _;
@@ -16,14 +19,22 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufRea
 /// The `read_media` cap the server is built with.
 const CAP: u64 = 1 << 20;
 
-/// Bytes this process has read through read-like system calls so far.
-fn bytes_read() -> u64 {
-    std::fs::read_to_string("/proc/self/io")
-        .expect("read /proc/self/io")
+/// Room a count leaves for reads the tool does not make: the online-CPU
+/// list glibc's malloc reads, `0-7\n` on an eight-CPU box. It is far below
+/// the 64 KiB a bounded read of the file takes at a time.
+const OTHER_READS: u64 = 256;
+
+/// Bytes this process has read through read-like system calls before this
+/// call, and the length of the text this call read to learn it, which the
+/// next count includes.
+fn bytes_read() -> (u64, u64) {
+    let io = std::fs::read_to_string("/proc/self/io").expect("read /proc/self/io");
+    let rchar = io
         .lines()
         .find_map(|line| line.strip_prefix("rchar:"))
         .and_then(|value| value.trim().parse().ok())
-        .expect("rchar in /proc/self/io")
+        .expect("rchar in /proc/self/io");
+    (rchar, io.len() as u64)
 }
 
 async fn write_rpc<W: AsyncWrite + Unpin>(writer: &mut W, value: serde_json::Value) {
@@ -40,7 +51,8 @@ async fn read_rpc<R: AsyncBufRead + Unpin>(reader: &mut R) -> serde_json::Value 
 }
 
 /// Call `read_media` on `path` and return the JSON-RPC answer, with the
-/// number of bytes the process read while the call ran.
+/// number of bytes the process read while the call ran, the counter's own
+/// read left out.
 async fn read_media<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -51,7 +63,7 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let before = bytes_read();
+    let (before, own) = bytes_read();
     write_rpc(
         writer,
         serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
@@ -59,7 +71,7 @@ where
     )
     .await;
     let answer = read_rpc(reader).await;
-    (answer, bytes_read() - before)
+    (answer, bytes_read().0 - before - own)
 }
 
 /// `read_media` refuses a file over its cap having read none of it, and
@@ -112,10 +124,10 @@ async fn read_media_reads_none_of_a_file_over_its_cap() {
         within,
         "fixture: the file within the cap was answered with other bytes"
     );
+    let within_len = within.len() as u64;
     assert!(
-        counted >= within.len() as u64,
-        "fixture: the counter saw {counted} bytes read for a file of {}",
-        within.len()
+        (within_len..within_len + OTHER_READS).contains(&counted),
+        "fixture: the counter saw {counted} bytes read for a file of {within_len}"
     );
 
     let (answer, counted) = read_media(&mut read, &mut write, 3, "over.png").await;
@@ -125,7 +137,7 @@ async fn read_media_reads_none_of_a_file_over_its_cap() {
         "fixture: {answer}"
     );
     assert!(
-        counted < 8 * 1024,
+        counted < OTHER_READS,
         "the tool read {counted} bytes to refuse a file of {over_size} over its cap of {CAP}"
     );
 }
