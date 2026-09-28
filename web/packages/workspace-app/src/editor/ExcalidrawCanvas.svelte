@@ -26,6 +26,18 @@
       lastBroadcast.set(id, typeof el.version === "number" ? el.version : 0);
     }
   }
+
+  /// JSON text of `value` with every object's keys sorted, so two appStates
+  /// holding the same keys and values give one text whatever order each was
+  /// built in: the authority's frames sort an object's keys, and the board
+  /// keeps the library's order.
+  export function canonicalJson(value: unknown): string {
+    return JSON.stringify(value, (_key, v: unknown) =>
+      v !== null && typeof v === "object" && !Array.isArray(v)
+        ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+        : v,
+    );
+  }
 </script>
 
 <script lang="ts">
@@ -144,11 +156,12 @@
   const lastBroadcast = new Map<string, number>();
   /// File ids the authority already knows (pushed by us or fanned in).
   const knownFiles = new Set<string>();
-  /// Cleaned appState from the latest serialize, plus the JSON of the
-  /// appState the authority is known to hold (from our last push OR any
-  /// adopted snapshot/update). Only a divergence from that baseline
-  /// rides a push: adopting an incoming appState must move the baseline
-  /// too, or the echo would re-push forever between two live canvases.
+  /// Cleaned appState from the latest serialize with its canonical JSON,
+  /// plus the canonical JSON of the appState the authority is known to hold
+  /// (from our last push OR any adopted snapshot/update, taken as the
+  /// serializer keeps it). Only a divergence from that baseline rides a
+  /// push: adopting an incoming appState must move the baseline too, or the
+  /// echo would re-push forever between two live canvases.
   let cleanedAppState: WireAppState = {};
   let cleanedAppStateJson = "";
   let lastAuthorityAppStateJson = "";
@@ -186,11 +199,30 @@
     return api.getSceneElementsIncludingDeleted() as unknown as Record<string, unknown>[];
   }
 
+  /// What the library keeps of `appState` when it restores a scene holding
+  /// it and serializes that scene: the grid and the background, each at the
+  /// library's default where `appState` lacks it. The seed takes the same of
+  /// a buffer's.
+  function keptAppState(
+    e: typeof import("@excalidraw/excalidraw"),
+    appState: WireAppState,
+  ): WireAppState {
+    const restored = e.restore({ appState } as Parameters<typeof e.restore>[0], null, null).appState;
+    return (JSON.parse(e.serializeAsJSON([], restored, {}, "local")) as { appState: WireAppState })
+      .appState;
+  }
+
   /// Fold authority content into the canvas. The local side of the
   /// reconcile includes deleted elements: a local tombstone must beat a
   /// slower remote update of the same element or a delete could
   /// resurrect during the push round-trip. The transaction never enters
   /// local undo (CaptureUpdateAction.NEVER).
+  ///
+  /// Of an adopted appState only what the serializer keeps is handed to the
+  /// board and recorded, as the seed hands a buffer's: a file's key the
+  /// serializer drops, a view key among them, never reaches the board, and a
+  /// key the file leaves out is the library's default on both sides of the
+  /// comparison, so an appState nobody changed on the board is not pushed.
   function applyRemote(
     elements: WireElement[],
     appState: WireAppState | undefined,
@@ -202,9 +234,10 @@
       elements as unknown as Parameters<typeof ex.reconcileElements>[1],
       api.getAppState(),
     );
+    const kept = appState !== undefined ? keptAppState(ex, appState) : undefined;
     api.updateScene({
       elements: reconciled,
-      ...(appState !== undefined ? { appState } : {}),
+      ...(kept !== undefined ? { appState: kept } : {}),
       captureUpdate: ex.CaptureUpdateAction.NEVER,
     } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
     // Equal canvas/broadcast versions afterwards mean the remote value
@@ -218,10 +251,10 @@
       }
       for (const k of Object.keys(files)) knownFiles.add(k);
     }
-    if (appState !== undefined) {
+    if (kept !== undefined) {
       // Any adopted appState is the new authority baseline; only later
       // local divergence should ride a push.
-      lastAuthorityAppStateJson = JSON.stringify(appState);
+      lastAuthorityAppStateJson = canonicalJson(kept);
     }
   }
 
@@ -407,7 +440,7 @@
       try {
         const parsed = JSON.parse(json) as { appState?: WireAppState };
         cleanedAppState = parsed.appState ?? {};
-        cleanedAppStateJson = JSON.stringify(cleanedAppState);
+        cleanedAppStateJson = canonicalJson(cleanedAppState);
       } catch {
         // The buffer mirror below still runs; deltas push without
         // appState.
