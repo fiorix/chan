@@ -704,6 +704,49 @@ describe("reconcileWindows", () => {
     expect(hasWindowAttention("w-c")).toBe(false);
   });
 
+  it("discards nothing for a window that closes while its Open is pending", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-pending", origin: "browser", connected: false });
+    reconcileWindows(set([rec]));
+    checkWindowPage.mockImplementationOnce(async () => gateResponse("30"));
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(0);
+    opened[0].win.closed = true;
+
+    reconcileWindows(set([rec]));
+    expect(discardWindow).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toBeNull();
+    reconcileWindows(set([rec]));
+
+    expect(discardWindow).not.toHaveBeenCalled();
+    expect(hasWindowAttention("w-pending")).toBe(true);
+  });
+
+  it("discards nothing when another page's refusal closes a window an Open follows", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-peer", origin: "browser", connected: false });
+    reconcileWindows(set([rec]));
+    const child = fakeWin();
+    child.document.documentElement.setAttribute("data-chan-window-page-owner", `waiting:${Date.now() + 30_000}`);
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.document.documentElement.removeAttribute("data-chan-window-page-owner");
+    child.closed = true;
+
+    reconcileWindows(set([rec]));
+    expect(discardWindow).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toBeNull();
+    expect(checkWindowPage).not.toHaveBeenCalled();
+    reconcileWindows(set([rec]));
+
+    expect(discardWindow).not.toHaveBeenCalled();
+    expect(hasWindowAttention("w-peer")).toBe(true);
+  });
+
+
   it("is inert under demoState.enabled", () => {
     setDemoReset(() => {});
     reconcileWindows(set([record({ window_id: "w-d", origin: "browser" })]));
