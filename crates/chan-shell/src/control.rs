@@ -185,7 +185,7 @@ impl<'a> From<&'a EnvControlSocket> for ControlTarget<'a> {
 /// Build an [`OpenEnv`] from explicit values (the env-var lookups live in
 /// [`open_env`]; this split keeps the validation unit-testable without
 /// touching the process environment).
-pub fn open_env_from(
+pub(crate) fn open_env_from(
     window_id: Option<String>,
     control_socket: Option<String>,
     workspace_path: Option<String>,
@@ -210,7 +210,7 @@ pub fn open_env_from(
 
 /// Resolve the full chan-terminal environment from the process env, for
 /// category-1 actions that target a specific window.
-pub fn open_env() -> Result<OpenEnv> {
+pub(crate) fn open_env() -> Result<OpenEnv> {
     open_env_from(
         std::env::var("CHAN_WINDOW_ID").ok(),
         std::env::var("CHAN_CONTROL_SOCKET").ok(),
@@ -221,7 +221,7 @@ pub fn open_env() -> Result<OpenEnv> {
 /// Resolve just the control socket, for category-2 actions (`cs terminal
 /// write` / `terminal list` / `search`) that act on the server's live
 /// sessions and so do not need a window to target.
-pub fn control_socket_env() -> Result<EnvControlSocket> {
+pub(crate) fn control_socket_env() -> Result<EnvControlSocket> {
     let socket = std::env::var("CHAN_CONTROL_SOCKET")
         .ok()
         .map(|s| s.trim().to_string())
