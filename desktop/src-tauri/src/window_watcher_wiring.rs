@@ -187,6 +187,9 @@ impl Retarget {
 
 struct RemoteLaunch {
     key: RemoteLaunchKey,
+    /// The key handed to this webview's open or last settled navigation.
+    /// Unknown for a kept window until this watcher navigates it.
+    loaded: Option<RemoteLaunchKey>,
     attempted_at: tokio::time::Instant,
     phase: LaunchPhase,
 }
@@ -273,6 +276,7 @@ impl WindowBuilds {
             label,
             RemoteLaunch {
                 key,
+                loaded: None,
                 attempted_at: tokio::time::Instant::now(),
                 phase: LaunchPhase::InFlight,
             },
@@ -402,11 +406,10 @@ impl RemoteLaunches {
     /// it if the key moved, so no attempt is ever dispatched at an absent
     /// webview.
     ///
-    /// A try of the timer on a window whose record reads connected leaves
-    /// it alone: a `/ws` socket tagged with the window is live, as its
-    /// page's is once the page is on its target. The attempt is applied and
-    /// nothing navigates. Every other try navigates when the target answers
-    /// ready.
+    /// A try of the timer leaves a connected record alone only when this
+    /// webview was loaded with the attempt's key. Another client's socket
+    /// can make the record read connected before this webview reaches that
+    /// target. Every other try navigates when the target answers ready.
     fn admit(
         &self,
         record: &WindowRecord,
@@ -418,22 +421,27 @@ impl RemoteLaunches {
             return None;
         }
         let retarget = self.retarget(record, gateway, reload)?;
-        if retarget == Retarget::Retry && record.connected {
-            self.apply(record, gateway);
+        if retarget == Retarget::Retry && record.connected && self.apply_if_loaded(record, gateway)
+        {
             return None;
         }
         Some(retarget)
     }
 
-    /// Mark the waiting attempt for `record`'s key applied.
-    fn apply(&self, record: &WindowRecord, gateway: bool) {
+    /// End a waiting attempt only if this webview was loaded with its key.
+    fn apply_if_loaded(&self, record: &WindowRecord, gateway: bool) -> bool {
         let next = RemoteLaunchKey::from_record(record, gateway);
         let mut state = self.0.lock().unwrap();
         if let Some(attempt) = state.entries.get_mut(&native_label(record)) {
-            if attempt.key == next && attempt.phase == LaunchPhase::Waiting {
+            if attempt.key == next
+                && attempt.phase == LaunchPhase::Waiting
+                && attempt.loaded.as_ref() == Some(&next)
+            {
                 attempt.phase = LaunchPhase::Applied;
+                return true;
             }
         }
+        false
     }
 
     fn begin_remote(
@@ -452,10 +460,16 @@ impl RemoteLaunches {
             if state.retired.is_some() {
                 return;
             }
+            let key = RemoteLaunchKey::from_record(record, gateway);
+            let loaded = state
+                .entries
+                .get(&label)
+                .and_then(|entry| entry.loaded.clone());
             state.entries.insert(
                 label.clone(),
                 RemoteLaunch {
-                    key: RemoteLaunchKey::from_record(record, gateway),
+                    loaded: if retarget { loaded } else { Some(key.clone()) },
+                    key,
                     attempted_at: tokio::time::Instant::now(),
                     phase: if retarget {
                         LaunchPhase::InFlight
@@ -536,6 +550,7 @@ impl RemoteLaunches {
                     let Some(attempt) = state.entries.get_mut(label) else {
                         return;
                     };
+                    attempt.loaded = Some(attempt.key.clone());
                     attempt.phase = LaunchPhase::Applied;
                     drop(state);
                     builds.retry();
