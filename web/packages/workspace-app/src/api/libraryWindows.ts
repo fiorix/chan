@@ -165,17 +165,33 @@ export async function createLibraryWindow(
   const popup = globalThis.window.open("", "_blank");
   if (!popup) throw new Error(blockedWindowMessage("The browser blocked the new Chan window"));
   clearClonedSessionDeckDrafts(popup);
+  // The record minted for this popup, until its page opens. A create that ends
+  // before then discards it, since no window will ever show it.
+  let unshown: string | undefined;
   try {
     const result = await bridge.runAction(action);
     if (!result?.window) throw new Error("Chan did not return the new window");
+    unshown = result.window.window_id;
     popup.name = result.window.window_id;
-    if (!(await navigateWindowWhenReady(popup, result.window.launch_path, bridge.checkPage))) return;
+    if (!(await navigateWindowWhenReady(popup, result.window.launch_path, bridge.checkPage))) {
+      discardCreated(bridge, unshown);
+      return;
+    }
+    unshown = undefined;
     popup.focus();
     await bridge.refresh();
   } catch (error) {
     popup.close();
+    if (unshown) discardCreated(bridge, unshown);
     throw error;
   }
+}
+
+// The deck reports why the create ended, not whether its cleanup reached the
+// server, so the discard runs in the background and a refused one leaves the
+// record listed for a Close.
+function discardCreated(bridge: LibraryWindowBridge, windowId: string): void {
+  void bridge.runAction({ action: "close_window", window_id: windowId }).catch(() => {});
 }
 
 /// Bring an existing library window to the front, un-hiding it if needed.
