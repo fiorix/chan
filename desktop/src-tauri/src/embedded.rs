@@ -267,6 +267,24 @@ impl EmbeddedServer {
         chan_server::install_local_window_registry(&self.host);
     }
 
+    /// Every workspace window record in the local registry, as its window id
+    /// and the path it stores, the ones the live feed hides included, so a
+    /// test sees what a mint stored whether or not the feed shows it.
+    #[cfg(test)]
+    pub fn workspace_window_paths_for_tests(&self) -> Vec<(String, String)> {
+        self.host
+            .window_registry()
+            .map(|registry| {
+                registry
+                    .snapshot()
+                    .into_iter()
+                    .filter(|row| row.kind == chan_server::WindowKind::Workspace)
+                    .filter_map(|row| Some((row.window_id, row.workspace_path?)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The shared window-title map the desktop writes (on window build /
     /// rename / destroy) and the server reads for `cs window list`.
     pub fn window_titles(&self) -> SharedWindowTitles {
