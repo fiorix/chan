@@ -202,8 +202,10 @@ const PERMANENT_ERROR_REASONS = new Set(["attach-failed", "doc-too-large"]);
 /// makes when the canvas binds.
 export type SceneCanvasBinding = {
   /// Full authority state: reconcile every element (tombstones
-  /// included) into the canvas, adopt appState, register files.
-  applySnapshot(elements: WireElement[], appState: WireAppState, files: WireFiles): void;
+  /// included) into the canvas, adopt appState, register files. The
+  /// appState is left out of a later snapshot on the same socket while this
+  /// window's appState claim stands.
+  applySnapshot(elements: WireElement[], appState: WireAppState | undefined, files: WireFiles): void;
   /// Accepted values fanned from the authority.
   applyUpdate(f: {
     elements: WireElement[];
@@ -803,20 +805,44 @@ export class SceneSession {
   }
 
   private onSnapshot(f: Extract<ServerFrame, { type: "snapshot" }>): void {
+    // The server fans a later snapshot on a socket that had its own when a
+    // conflict's resolution leaves the scene unchanged or overwrites the
+    // disk. A push this window sent on that socket and the server has not
+    // acked is read after it, applied after it and acked on the same socket,
+    // so a later snapshot ends none of them: they stay claimed, their parts
+    // stay in the scene over the snapshot's, and while this window's
+    // appState claim stands the snapshot's appState stays off the board, as
+    // an update's does.
+    const later = this.ws !== null && this.snapshotSocket === this.ws;
     this.shadowElements = new Map();
     for (const el of f.elements) this.foldIntoShadow(el);
     this.shadowAppState = f.appState;
     this.shadowFiles = f.files;
     this.snapshotSocket = this.ws;
     this.tab.authorityVersion = f.version;
-    // A snapshot opens a fresh sync epoch: an in-flight push belongs to
-    // the pre-resync world and will never be acked on this epoch. Hand its
-    // elements back before dropping them; `applySnapshot` below re-marks
-    // whatever the authority actually holds, so only what never arrived
-    // stays offered.
-    this.releaseUnaccepted();
-    this.pushInFlight = false;
-    this.queued = null;
+    let claim: WireAppState | null = null;
+    if (later) {
+      for (const push of [this.unacked, this.queued]) {
+        if (push === null) continue;
+        // The authority keeps its own element where it is newer.
+        for (const el of push.elements.values()) {
+          const held = this.shadowElements.get(el.id as string);
+          if (held === undefined || Number(held.version) <= Number(el.version)) this.foldIntoShadow(el);
+        }
+        if (push.files !== null) this.shadowFiles = { ...this.shadowFiles, ...push.files };
+      }
+      claim = this.queued?.appState ?? this.unacked?.appState ?? null;
+      if (claim !== null) this.shadowAppState = claim;
+    } else {
+      // A socket's first snapshot opens a fresh sync epoch: a push still
+      // claimed was sent on an earlier socket and is never acked on this
+      // one. Hand its parts back before dropping them; `applySnapshot` below
+      // marks the elements and files the authority holds, so only those it
+      // lacks are offered again.
+      this.releaseUnaccepted();
+      this.pushInFlight = false;
+      this.queued = null;
+    }
     this.serverDirty = f.dirty;
     this.stampMtime(f.mtime_ns ?? null);
     this.cursors.clear();
@@ -825,7 +851,7 @@ export class SceneSession {
     }
     this.mirror();
     if (this.binding) {
-      this.binding.applySnapshot(f.elements, f.appState, f.files);
+      this.binding.applySnapshot(f.elements, claim !== null ? undefined : f.appState, f.files);
       this.binding.collaboratorsChanged();
     }
     this.promoteIfChannelUp();
