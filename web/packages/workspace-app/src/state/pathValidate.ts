@@ -10,6 +10,8 @@
 // dot/space in segments) so a path that opens fine on macOS
 // doesn't blow up when the same workspace is opened on Windows later.
 
+import { basename, parentDir } from "./format";
+
 export type PathCheck = { ok: true } | { ok: false; reason: string };
 
 const MAX_SEGMENT = 255;
@@ -117,9 +119,7 @@ function validateSegment(seg: string): PathCheck {
 /// paths. Mirrors the conventions used by tree.entries (no leading
 /// slash, "/" as separator).
 export function splitPath(path: string): { parent: string; base: string } {
-  const slash = path.lastIndexOf("/");
-  if (slash < 0) return { parent: "", base: path };
-  return { parent: path.slice(0, slash), base: path.slice(slash + 1) };
+  return { parent: parentDir(path), base: basename(path) };
 }
 
 /// Append `.md` to a relative path when the basename has no real
@@ -135,9 +135,7 @@ export function splitPath(path: string): { parent: string; base: string } {
 /// re-apply it as a defensive layer (idempotent).
 export function appendDefaultMd(path: string): string {
   const stripped = path.endsWith(".") ? path.slice(0, -1) : path;
-  const slash = stripped.lastIndexOf("/");
-  const basename = slash >= 0 ? stripped.slice(slash + 1) : stripped;
-  const dot = basename.lastIndexOf(".");
+  const dot = basename(stripped).lastIndexOf(".");
   if (dot <= 0) return `${stripped}.md`;
   return stripped;
 }
@@ -152,19 +150,14 @@ export function appendDefaultMd(path: string): string {
 /// the rest of its name as the "extension". Mirrors
 /// `appendDefaultMd`'s "real extension" predicate.
 export function preserveExtension(oldPath: string, newPath: string): string {
-  const oldBase = basenameOf(oldPath);
+  const oldBase = basename(oldPath);
   const oldDot = oldBase.lastIndexOf(".");
   if (oldDot <= 0) return newPath;
   const oldExt = oldBase.slice(oldDot);
-  const newBase = basenameOf(newPath);
+  const newBase = basename(newPath);
   const newDot = newBase.lastIndexOf(".");
   if (newDot > 0) return newPath;
   return newPath + oldExt;
-}
-
-function basenameOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash >= 0 ? path.slice(slash + 1) : path;
 }
 
 /// Default stem used by the new-file path prompt when it proposes

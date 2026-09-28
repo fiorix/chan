@@ -17,6 +17,7 @@ import { openBubbleShell } from "../bubble";
 import { createCaretAnchor } from "./anchor";
 import type { BubbleHandle } from "./types";
 import { api } from "../../api/client";
+import { basename } from "../../state/format";
 
 export type ContactBubbleMode = "wiki" | "mention";
 
@@ -262,8 +263,7 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   }
 
   function basenameStem(path: string): string {
-    const slash = path.lastIndexOf("/");
-    const base = slash < 0 ? path : path.slice(slash + 1);
+    const base = basename(path);
     const dot = base.lastIndexOf(".");
     return (dot <= 0 ? base : base.slice(0, dot)).toLowerCase();
   }

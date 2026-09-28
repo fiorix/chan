@@ -30,6 +30,7 @@ import { windowCaps } from "./windowCaps";
 import { filesContext } from "./fileContext.svelte";
 import { editorToolsPrefs } from "./editorTools.svelte";
 import { classifyPath, isCsv, isEditableText, isExcalidraw, isJson } from "./fileTypes";
+import { basename } from "./format";
 import { edgeSplitSpec, type PaneMouseSplitEdge } from "./paneMouseSplit";
 import type { FileKind } from "./kinds";
 import {
@@ -1981,11 +1982,11 @@ export function graphTitle(mode: GraphTab["mode"], scopeId: string): string {
   if (mode === "language") return "Languages";
   if (scopeId === "workspace" || scopeId === "global") return "path=workspace";
   if (scopeId.startsWith("file:")) {
-    const name = graphScopeBasename(scopeId.slice("file:".length));
+    const name = basename(scopeId.slice("file:".length));
     return name ? `path=${name}` : "path=workspace";
   }
   if (scopeId.startsWith("dir:")) {
-    const name = graphScopeBasename(scopeId.slice("dir:".length));
+    const name = basename(scopeId.slice("dir:".length));
     return name ? `path=${name}/` : "path=workspace";
   }
   if (scopeId.startsWith("tag:")) {
@@ -1997,25 +1998,20 @@ export function graphTitle(mode: GraphTab["mode"], scopeId: string): string {
     return `mention=${mention.startsWith("@@") ? mention : `@@${mention}`}`;
   }
   if (scopeId.startsWith("contact:")) {
-    const name = graphScopeBasename(scopeId.slice("contact:".length));
+    const name = basename(scopeId.slice("contact:".length));
     return `contact=${name || scopeId.slice("contact:".length)}`;
   }
   if (scopeId.startsWith("language:")) {
     return `lang=${scopeId.slice("language:".length)}`;
   }
   if (scopeId.startsWith("git_repo:")) {
-    return graphScopeBasename(scopeId.slice("git_repo:".length));
+    return basename(scopeId.slice("git_repo:".length));
   }
   // Unknown prefix shape: peel anything before the first colon
   // so the user at least sees the payload.
   const colon = scopeId.indexOf(":");
   if (colon > 0) return scopeId.slice(colon + 1);
   return scopeId;
-}
-
-function graphScopeBasename(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i < 0 ? path : path.slice(i + 1);
 }
 
 type TerminalMetadataSink = (metadata: TerminalMetadata) => boolean;
@@ -7978,11 +7974,11 @@ async function runSuggestReopenLookup(
   tabId: string,
   path: string,
 ): Promise<void> {
-  const basename = path.split("/").pop();
-  if (!basename) return;
+  const name = basename(path);
+  if (!name) return;
   let candidates: string[] = [];
   try {
-    const hits = await api.search(basename, 5);
+    const hits = await api.search(name, 5);
     candidates = hits
       .map((h) => h.path)
       .filter((candidate) => candidate !== path);

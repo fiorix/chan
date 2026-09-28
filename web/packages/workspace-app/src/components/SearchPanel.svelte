@@ -31,6 +31,7 @@
   import type { ContentHit, ReportFileStats } from "../api/types";
   import { collapseContentHitsByFile } from "../search/results";
   import { isEditableText, isImage } from "../state/fileTypes";
+  import { basename } from "../state/format";
   import {
     ensureGraphLoaded,
     graphData,
@@ -717,11 +718,6 @@
     return escaped
       .replace(/&lt;b&gt;/g, "<mark>")
       .replace(/&lt;\/b&gt;/g, "</mark>");
-  }
-
-  function basename(path: string): string {
-    const slash = path.lastIndexOf("/");
-    return slash >= 0 ? path.slice(slash + 1) : path;
   }
 
   /// Hamburger menu state. Mirrors the file browser / graph
