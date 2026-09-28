@@ -288,27 +288,19 @@ fn arg_string<'a>(args: &'a Json, key: &str) -> Result<&'a str> {
 
 fn exec_read_file(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let path = arg_string(args, "path")?;
-    // read_text_with_stat returns content + ns mtime in one stat
-    // (no second-syscall race), so we can echo `mtime_ns` to the
-    // model and accept it back on `write_file` for an OCC check.
-    let (content, stat) = ctx.workspace.read_text_with_stat(path)?;
-    let original_len = content.len();
-    let (content, truncated) = if original_len > READ_FILE_CAP_BYTES {
-        // Truncate at a UTF-8 char boundary so we hand the model a
-        // valid Rust String. find_char_boundary walks back at most
-        // 4 bytes which is cheap.
-        let mut cut = READ_FILE_CAP_BYTES;
-        while cut > 0 && !content.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        (content[..cut].to_owned(), true)
-    } else {
-        (content, false)
-    };
+    // The read stops at the cap, cut back to a character boundary, and
+    // takes its stat from the open handle (no second-syscall race), so the
+    // file's size comes from the stat and `mtime_ns` can be echoed to the
+    // model and accepted back on `write_file` for an OCC check.
+    let (content, stat) = ctx
+        .workspace
+        .read_text_with_stat_bounded(path, READ_FILE_CAP_BYTES)?;
+    let size = stat.size;
+    let truncated = size > READ_FILE_CAP_BYTES as u64;
     let mut out = serde_json::json!({
         "path": path,
         "content": content,
-        "size": original_len,
+        "size": size,
     });
     if let Some(mtime_ns) = stat.mtime_ns {
         out["mtime_ns"] = serde_json::json!(mtime_ns);
@@ -316,7 +308,7 @@ fn exec_read_file(args: &Json, ctx: &ToolContext) -> Result<Json> {
     if truncated {
         out["truncated"] = serde_json::Value::Bool(true);
         out["note"] = serde_json::json!(format!(
-            "file truncated to {READ_FILE_CAP_BYTES} bytes; full size {original_len}"
+            "file truncated to {READ_FILE_CAP_BYTES} bytes; full size {size}"
         ));
     }
     Ok(out)
