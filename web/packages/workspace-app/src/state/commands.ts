@@ -158,6 +158,15 @@ export function registerCommands(cmds: readonly Command[]): void {
   registry.push(...cmds);
 }
 
+/// Remove every registered command `match` selects. The extension catalog
+/// replaces its rows through this on each refresh, so a row whose
+/// extension went away does not stay behind.
+export function unregisterCommands(match: (command: Command) => boolean): void {
+  for (let index = registry.length - 1; index >= 0; index -= 1) {
+    if (match(registry[index]!)) registry.splice(index, 1);
+  }
+}
+
 /// All registered commands, de-duplicated by (id, category, title) so a
 /// module re-evaluated under dev hot-reload can't stack duplicates.
 /// Later registrations win, keeping the freshest run() closure.
