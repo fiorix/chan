@@ -3256,6 +3256,340 @@ mod devserver_route_tests {
         );
     }
 
+    /// The launcher's add and on share the devserver mount's bound, counted
+    /// from the request's start, over everything they ask of the root.
+    ///
+    /// These run on a paused clock, which moves only when a test advances it:
+    /// a blocking task holds tokio's auto-advance off while it is outstanding,
+    /// and a call held on the root keeps one outstanding. So the bound expires
+    /// when the test says and at no other time, and the one real-clock bound,
+    /// the hang guard, only decides how soon a request that never answers is
+    /// reported.
+    #[cfg(unix)]
+    mod mount_bound {
+        use std::future::Future;
+        use std::path::{Path, PathBuf};
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+
+        use chan_workspace::paths::root_stall::{self, RootStall};
+
+        use super::*;
+        use crate::devserver::hung_root_support::HEALTHY_ROOT_BOUND;
+
+        /// The bound, written out so that moving it is a deliberate edit here.
+        const MOUNT_BOUND: Duration = Duration::from_secs(60);
+        const JUST_SHORT: Duration = Duration::from_millis(1);
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+
+        /// Run `scenario` on a current-thread runtime whose clock starts
+        /// paused, on a thread of its own, and panic naming `what` and the
+        /// calls `stall` holds when it has not ended within
+        /// [`HEALTHY_ROOT_BOUND`] of real time. The stall goes before the
+        /// thread is joined: dropping the scenario's runtime waits for its
+        /// blocking tasks, and a held call is one.
+        fn on_a_paused_clock(
+            stall: Arc<RootStall>,
+            what: &str,
+            scenario: impl Future<Output = ()> + Send + 'static,
+        ) {
+            let (done, finished) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .start_paused(true)
+                    .build()
+                    .expect("paused runtime");
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(scenario)
+                }));
+                let _ = done.send(outcome);
+            });
+            match finished.recv_timeout(HEALTHY_ROOT_BOUND) {
+                Ok(outcome) => {
+                    drop(stall);
+                    worker.join().expect("scenario thread");
+                    if let Err(panic) = outcome {
+                        std::panic::resume_unwind(panic);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => panic!("{what} ended without an outcome"),
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "{what} did not finish; calls held on the root: {:#?}",
+                    stall.entered()
+                ),
+            }
+        }
+
+        /// Wait until a call on the root is held, from a blocking thread, so
+        /// the runtime's one thread keeps serving the request that makes it.
+        async fn held(stall: &Arc<RootStall>, what: &str) {
+            let waiting = Arc::clone(stall);
+            let entered =
+                tokio::task::spawn_blocking(move || waiting.wait_entered(Duration::from_secs(10)))
+                    .await
+                    .expect("wait task");
+            assert!(entered, "fixture: {what} never reached its root");
+        }
+
+        /// Let the calls `stall` holds go, one round at a time, until the call
+        /// it holds is the open's; false when none has come within ten seconds.
+        fn release_until_the_open_is_held(stall: &RootStall) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let entered = stall.entered();
+                if entered
+                    .last()
+                    .is_some_and(|chain| chain.contains("Library::open_workspace"))
+                {
+                    return true;
+                }
+                stall.release_held();
+                while stall.entered().len() == entered.len() {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+
+        /// Give the runtime room to fire a timer that is due and to run
+        /// whatever it wakes.
+        async fn settle() {
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        /// One request through `router`: its status, its `Retry-After` and its
+        /// JSON body. It owns its arguments, so a test can run it as a task of
+        /// its own and watch whether it has answered.
+        async fn send(
+            router: axum::Router,
+            method: &'static str,
+            uri: String,
+            body: Option<String>,
+        ) -> (StatusCode, Option<String>, serde_json::Value) {
+            let mut req = Caller::Local.stamp(Request::builder().method(method).uri(uri), None);
+            let body = match body {
+                Some(body) => {
+                    req = req.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(body)
+                }
+                None => Body::empty(),
+            };
+            let response = router.oneshot(req.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            let retry_after = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .map(|value| value.to_str().unwrap().to_string());
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, retry_after, json)
+        }
+
+        fn workspace_id(root: &Path) -> String {
+            allocate_workspace_prefix(root)
+                .unwrap()
+                .trim_start_matches('/')
+                .to_string()
+        }
+
+        /// The `error` of the launcher's row for the registered root `stored`.
+        async fn row_error(router: &axum::Router, stored: &Path) -> serde_json::Value {
+            let (status, _, rows) = send(
+                router.clone(),
+                "GET",
+                "/api/library/workspaces".into(),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "list: {rows}");
+            let path = stored.to_string_lossy().into_owned();
+            rows.as_array()
+                .and_then(|rows| rows.iter().find(|row| row["path"] == path.as_str()))
+                .map(|row| row["error"].clone())
+                .unwrap_or_else(|| panic!("no row for {path}: {rows}"))
+        }
+
+        /// The off and the removal of the root at `id` answer, and the
+        /// removal takes `stored` out of the registry.
+        async fn off_and_removal_answer(
+            host: &WorkspaceHost,
+            router: &axum::Router,
+            id: &str,
+            stored: &Path,
+        ) {
+            let off = format!("/api/library/workspaces/{id}/off");
+            let (status, _, body) = send(router.clone(), "POST", off, None).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "off: {body}");
+            let removal = format!("/api/library/workspaces/{id}");
+            let (status, _, body) = send(router.clone(), "DELETE", removal, None).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "removal: {body}");
+            assert!(
+                !host
+                    .library()
+                    .list_workspaces()
+                    .iter()
+                    .any(|row| row.root_path == stored),
+                "the removed root is still registered"
+            );
+        }
+
+        fn refusal_naming(root: &Path) -> String {
+            format!(
+                "mount timed out after 60 seconds: {} did not answer",
+                root.display()
+            )
+        }
+
+        /// An on whose root answers its key and then hangs in its open is
+        /// refused at the bound with the root's name, and gives the root's
+        /// lock back: the off and the removal of that root answer after it.
+        #[test]
+        fn a_launcher_on_whose_open_hangs_answers_at_the_mount_bound() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let stored = lib.register_workspace(root.path()).unwrap().root_path;
+            let id = workspace_id(root.path());
+            let stall = Arc::new(root_stall::stall_matching(
+                root.path(),
+                &["Library::open_workspace"],
+            ));
+            let open = Arc::clone(&stall);
+            on_a_paused_clock(stall, "an on whose open hangs", async move {
+                let (host, router) = mutable_router(lib);
+                let on = tokio::spawn(send(
+                    router.clone(),
+                    "POST",
+                    format!("/api/library/workspaces/{id}/on"),
+                    None,
+                ));
+                held(&open, "the on").await;
+                tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
+                settle().await;
+                assert!(!on.is_finished(), "the on answered before the mount bound");
+                tokio::time::advance(JUST_SHORT).await;
+                let (status, retry_after, body) = on.await.expect("on task");
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "on: {body}");
+                assert_eq!(body["error"], refusal_naming(&stored));
+                assert_eq!(retry_after, None, "nothing says when the root will answer");
+                assert_eq!(row_error(&router, &stored).await, STILL_RELEASING);
+                off_and_removal_answer(&host, &router, &id, &stored).await;
+            });
+        }
+
+        /// An add is refused at one bound counted from its start, whichever
+        /// of its steps the time goes to: here half goes to its registration
+        /// and the rest to its open, which hangs. The off and the removal of
+        /// the root answer after it.
+        #[test]
+        fn a_launcher_add_answers_at_one_bound_from_its_start() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let requested: PathBuf = root.path().to_path_buf();
+            let stored = chan_workspace::paths::canonicalize_normalized(root.path());
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let id = workspace_id(root.path());
+            let stall = Arc::new(root_stall::stall_matching(
+                root.path(),
+                &["register_workspace_with_name", "Library::open_workspace"],
+            ));
+            let steps = Arc::clone(&stall);
+            on_a_paused_clock(stall, "an add whose steps hang", async move {
+                let (host, router) = mutable_router(lib);
+                let body = serde_json::json!({ "path": requested.to_string_lossy() }).to_string();
+                let add = tokio::spawn(send(
+                    router.clone(),
+                    "POST",
+                    "/api/library/workspaces".into(),
+                    Some(body),
+                ));
+                held(&steps, "the add's registration").await;
+                assert!(
+                    steps.entered()[0].contains("register_workspace_with_name"),
+                    "fixture: the first held call is not the registration: {:#?}",
+                    steps.entered()
+                );
+                tokio::time::advance(MOUNT_BOUND / 2).await;
+                let releasing = Arc::clone(&steps);
+                assert!(
+                    tokio::task::spawn_blocking(move || release_until_the_open_is_held(&releasing))
+                        .await
+                        .expect("release task"),
+                    "fixture: the add never reached its open: {:#?}",
+                    steps.entered()
+                );
+                tokio::time::advance(MOUNT_BOUND / 2 - JUST_SHORT).await;
+                settle().await;
+                assert!(
+                    !add.is_finished(),
+                    "the add answered before the mount bound"
+                );
+                tokio::time::advance(JUST_SHORT).await;
+                let (status, retry_after, body) = add.await.expect("add task");
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "add: {body}");
+                assert_eq!(body["error"], refusal_naming(&requested));
+                assert_eq!(retry_after, None, "nothing says when the root will answer");
+                assert_eq!(row_error(&router, &stored).await, STILL_RELEASING);
+                off_and_removal_answer(&host, &router, &id, &stored).await;
+            });
+        }
+
+        /// An on of a mounted root whose revalidation hangs is refused at the
+        /// bound with the root's name, and gives the root's lock back: the off
+        /// of that root answers after it, and so does its removal, whatever it
+        /// answers while the revalidation still holds the workspace.
+        #[test]
+        fn a_launcher_on_whose_mounted_revalidation_hangs_answers_at_the_mount_bound() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let stored = lib.register_workspace(root.path()).unwrap().root_path;
+            let id = workspace_id(root.path());
+            let stall = Arc::new(root_stall::stall_matching(
+                root.path(),
+                &["Workspace::revalidate_root"],
+            ));
+            let revalidation = Arc::clone(&stall);
+            on_a_paused_clock(
+                stall,
+                "an on whose mounted revalidation hangs",
+                async move {
+                    let (_host, router) = mutable_router(lib);
+                    let on_uri = format!("/api/library/workspaces/{id}/on");
+                    let (status, _, body) =
+                        send(router.clone(), "POST", on_uri.clone(), None).await;
+                    assert_eq!(status, StatusCode::OK, "fixture: the mount: {body}");
+                    assert!(
+                        revalidation.entered().is_empty(),
+                        "fixture: the mount met the held revalidation"
+                    );
+                    let on = tokio::spawn(send(router.clone(), "POST", on_uri, None));
+                    held(&revalidation, "the on's revalidation").await;
+                    tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
+                    settle().await;
+                    assert!(!on.is_finished(), "the on answered before the mount bound");
+                    tokio::time::advance(JUST_SHORT).await;
+                    let (status, retry_after, body) = on.await.expect("on task");
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "on: {body}");
+                    assert_eq!(body["error"], refusal_naming(&stored));
+                    assert_eq!(retry_after, None, "nothing says when the root will answer");
+                    let off = format!("/api/library/workspaces/{id}/off");
+                    let (status, _, body) = send(router.clone(), "POST", off, None).await;
+                    assert_eq!(status, StatusCode::NO_CONTENT, "off: {body}");
+                    let removal = format!("/api/library/workspaces/{id}");
+                    send(router.clone(), "DELETE", removal, None).await;
+                },
+            );
+        }
+    }
+
     // Unix-only: Windows refuses to delete a tree while the tenant holds
     // handles inside it, so the replacement cannot be staged there, and
     // `RootedFs::revalidate`'s non-unix arm has no inode check to observe.
