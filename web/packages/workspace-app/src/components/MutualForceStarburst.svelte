@@ -28,7 +28,7 @@
       let height = 0;
       let lastSimulationMs = 0;
       let pendingSourceFrames = 0;
-      let particles = createMutualForceParticles();
+      const particles = createMutualForceParticles();
       let paintedBackground = "";
 
       function backgroundColor(): string {
@@ -140,7 +140,6 @@
         resize(nextWidth, nextHeight, reducedMotion, timeMs) {
           width = nextWidth;
           height = nextHeight;
-          particles = createMutualForceParticles();
           lastSimulationMs = 0;
           pendingSourceFrames = 0;
           resetSurface();

@@ -36,7 +36,7 @@
       let width = 0;
       let height = 0;
       let lastSimulationMs = 0;
-      let particles = createPolarDriftParticles();
+      const particles = createPolarDriftParticles();
       let paintedBackground = "";
 
       function backgroundColor(): [number, number, number] {
@@ -123,7 +123,6 @@
         resize(nextWidth, nextHeight, reducedMotion, timeMs) {
           width = nextWidth;
           height = nextHeight;
-          particles = createPolarDriftParticles();
           lastSimulationMs = 0;
           resetSurface();
           if (reducedMotion) drawStatic();
