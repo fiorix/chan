@@ -282,3 +282,143 @@ describe("a window page mark that expires", () => {
     expect(child.navigate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("a caller that finds another page's wait", () => {
+  function outcomeOf(pending: Promise<boolean>) {
+    const seen: { value: unknown } = { value: "pending" };
+    void pending.then((ready) => { seen.value = ready; }, (error: unknown) => { seen.value = error; });
+    return seen;
+  }
+
+  test("answers once that wait navigates, with no check of its own", async () => {
+    vi.useFakeTimers();
+    const { owner, peer } = await separateCallers();
+    const child = popup();
+    const ownerCheck = vi.fn<WindowPageCheck>()
+      .mockResolvedValueOnce(answer(503)).mockResolvedValueOnce(answer());
+    const peerCheck = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+    const ownerAnswer = owner.navigateWindowWhenReady(child.handle, "/owner", ownerCheck);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const peerAnswer = outcomeOf(peer.navigateWindowWhenReady(child.handle, "/peer", peerCheck));
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(peerAnswer.value).toBe("pending");
+    expect(peerCheck).not.toHaveBeenCalled();
+    expect(child.window.focus).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await ownerAnswer).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(peerAnswer.value).toBe(true);
+    expect(peerCheck).not.toHaveBeenCalled();
+    expect(child.navigate).toHaveBeenCalledExactlyOnceWith("/owner");
+  });
+
+  test.each(["blank", "page"] as const)("answers from what a refused wait leaves in a %s window", async (state) => {
+    vi.useFakeTimers();
+    const { owner, peer } = await separateCallers();
+    const child = popup(state === "blank" ? "about:blank" : PAGE);
+    const ownerCheck = vi.fn<WindowPageCheck>()
+      .mockResolvedValueOnce(answer(503)).mockResolvedValueOnce(answer(409));
+    const peerCheck = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+    // The owner's caller closes a window only when it was blank.
+    const ownerAnswer = owner.navigateWindowWhenReady(child.handle, "/owner", ownerCheck).catch((error: unknown) => {
+      if (state === "blank") child.window.closed = true;
+      return error;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const peerAnswer = outcomeOf(peer.navigateWindowWhenReady(child.handle, "/peer", peerCheck));
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(peerAnswer.value).toBe("pending");
+    expect(peerCheck).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await ownerAnswer).toMatchObject({ message: "Please wait." });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(peerAnswer.value).toBe(state === "page");
+    expect(peerCheck).toHaveBeenCalledTimes(state === "page" ? 1 : 0);
+    expect(child.navigate.mock.calls).toEqual(state === "page" ? [["/peer"]] : []);
+  });
+
+  test("takes a window whose owner left its waiting mark once the mark runs out", async () => {
+    vi.useFakeTimers();
+    const child = popup();
+    child.window.document.documentElement.setAttribute(OWNER, `waiting:${Date.now() + 60_000}`);
+    const check = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+
+    const caller = outcomeOf(navigateWindowWhenReady(child.handle, "/caller", check));
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(caller.value).toBe("pending");
+    expect(check).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(caller.value).toBe(true);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(child.navigate).toHaveBeenCalledExactlyOnceWith("/caller");
+    expect(child.window.document.documentElement.getAttribute(OWNER)).toMatch(/^navigating:\d+$/);
+  });
+
+  test("answers once that wait's navigation has replaced the document", async () => {
+    vi.useFakeTimers();
+    const { owner, peer } = await separateCallers();
+    const child = popup();
+    child.navigate.mockImplementation(() => {
+      child.window.document = document.implementation.createHTMLDocument();
+    });
+    const ownerCheck = vi.fn<WindowPageCheck>()
+      .mockResolvedValueOnce(answer(503)).mockResolvedValueOnce(answer());
+    const peerCheck = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+    void owner.navigateWindowWhenReady(child.handle, "/owner", ownerCheck);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const peerAnswer = outcomeOf(peer.navigateWindowWhenReady(child.handle, "/peer", peerCheck));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(peerAnswer.value).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1_100);
+
+    expect(peerAnswer.value).toBe(true);
+    expect(peerCheck).not.toHaveBeenCalled();
+    expect(child.navigate).toHaveBeenCalledExactlyOnceWith("/owner");
+  });
+
+  test("answers closed once the user closes a window another page waits on", async () => {
+    vi.useFakeTimers();
+    const child = popup();
+    child.window.document.documentElement.setAttribute(OWNER, `waiting:${Date.now() + 60_000}`);
+    const check = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+
+    const caller = outcomeOf(navigateWindowWhenReady(child.handle, "/caller", check));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(caller.value).toBe("pending");
+    child.window.closed = true;
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(caller.value).toBe(false);
+    expect(check).not.toHaveBeenCalled();
+    expect(child.navigate).not.toHaveBeenCalled();
+  });
+
+  test.each(["answers", "refuses"] as const)("an owner whose window another page took when its page %s defers to that page", async (reply) => {
+    vi.useFakeTimers();
+    const child = popup();
+    let release!: () => void;
+    const check = vi.fn<WindowPageCheck>(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return answer(reply === "answers" ? 200 : 409);
+    });
+    const owner = outcomeOf(navigateWindowWhenReady(child.handle, "/owner", check));
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The page that took the window after this wait's mark ran out.
+    child.window.document.documentElement.setAttribute(OWNER, `waiting:${Date.now() + 60_000}`);
+    release();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(owner.value).toBe("pending");
+    expect(child.navigate).not.toHaveBeenCalled();
+    child.window.closed = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(owner.value).toBe(false);
+    expect(child.navigate).not.toHaveBeenCalled();
+  });
+});

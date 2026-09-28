@@ -104,4 +104,24 @@ describe("browser action visibility", () => {
     expect(check).not.toHaveBeenCalled();
     expect(visibility).toHaveBeenCalledExactlyOnceWith(`show peer ${phase}`, false, undefined);
   });
+
+  it("Show changes no visibility before a peer's wait decides", async () => {
+    vi.useFakeTimers();
+    const child = popup();
+    child.document.documentElement.setAttribute("data-chan-window-page-owner", `waiting:${Date.now() + 30_000}`);
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const check = vi.spyOn(backend, "checkWindowPage");
+    let settled = false;
+    const pending = setWindowShown({ ...record, window_id: "show follows" }, true).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
+    expect(visibility).not.toHaveBeenCalled();
+    expect(child.focus).not.toHaveBeenCalled();
+    child.document.documentElement.setAttribute("data-chan-window-page-owner", `navigating:${Date.now() + 10_000}`);
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
+    expect(check).not.toHaveBeenCalled();
+    expect(visibility).toHaveBeenCalledExactlyOnceWith("show follows", false, undefined);
+  });
 });

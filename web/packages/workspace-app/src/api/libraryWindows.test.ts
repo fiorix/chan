@@ -761,6 +761,29 @@ describe("focusing a capability popup", () => {
     expect(navigate).toHaveBeenCalledTimes(2);
   });
 
+  test.each(["navigates", "closes"] as const)("unhides nothing before a peer's wait decides, then %s", async (outcome) => {
+    vi.useFakeTimers();
+    const popup = fakePopup();
+    popup.document.documentElement.setAttribute("data-chan-window-page-owner", `waiting:${Date.now() + 30_000}`);
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge();
+    let settled = false;
+    const pending = focusLibraryWindow(host, scopedWindow({ hidden: true })).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
+    expect(host.runAction).not.toHaveBeenCalled();
+    if (outcome === "navigates") {
+      popup.document.documentElement.setAttribute("data-chan-window-page-owner", `navigating:${Date.now() + 10_000}`);
+    } else {
+      popup.document.documentElement.removeAttribute("data-chan-window-page-owner");
+      popup.closed = true;
+    }
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(host.runAction).toHaveBeenCalledTimes(outcome === "navigates" ? 1 : 0);
+  });
+
   test.each(["new_terminal", "new_workspace_window", "focus"] as const)("does not check a page on the native %s branch", async (action) => {
     asDesktop(vi.fn().mockResolvedValue(null));
     const open = vi.spyOn(window, "open");
