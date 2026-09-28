@@ -5133,6 +5133,9 @@ export function moveTab(
     return;
   }
   const targetTabs = mutablePaneTabs(to, targetSide);
+  // The editor in the old place is torn down with the original, and what it
+  // commits then lands on the original, so the copy takes its input first.
+  flushPendingEdits([found.tab]);
   // Pull a plain snapshot of the tab. The proxied element won't survive
   // splice + push cleanly across pane boundaries; copying its fields
   // sidesteps the question.
