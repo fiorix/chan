@@ -1451,6 +1451,35 @@ mod tests {
         );
     }
 
+    /// A test that holds one named step of an open holds that step's call in
+    /// every build profile, a release build's stripped symbols included.
+    #[test]
+    fn a_named_step_is_held_in_any_profile() {
+        let (lib, _cfg, root) = lib();
+        let stored = lib.register_workspace(root.path()).unwrap().root_path;
+        let stall = crate::paths::root_stall::stall_matching(&stored, &["Library::open_workspace"]);
+        let opening = lib.clone();
+        let opened_root = stored.clone();
+        let open = std::thread::spawn(move || opening.open_workspace(&opened_root).map(|_| ()));
+        let held = stall.wait_entered(std::time::Duration::from_secs(10));
+        let entered = stall.entered();
+        let passed = stall.passed();
+        drop(stall);
+        open.join()
+            .expect("open thread")
+            .expect("the open once released");
+        assert!(
+            held,
+            "the seam held nothing: {passed} calls under the root went through"
+        );
+        assert!(
+            entered
+                .iter()
+                .all(|call| call.contains("Library::open_workspace")),
+            "a held call is not the open's: {entered:#?}"
+        );
+    }
+
     /// While one registered root hangs, registering a new root does not hold
     /// the registry. The registration's wait on the hung root is stretched past
     /// this test's bound, so a lookup of another registered root and the reload
