@@ -1,8 +1,8 @@
 //! Local-workspace runtime and workspace-window helpers.
 //!
 //! chan-desktop opens local workspaces through the embedded chan-server
-//! `WorkspaceHost`. Each running workspace is tracked in `AppState.serves`
-//! with its route prefix and token-bearing URL. chan-desktop links
+//! `WorkspaceHost`. Each workspace this desktop mounts is tracked in
+//! `AppState.serves` by the root its registry row stores. chan-desktop links
 //! `chan-workspace` and `chan-server` directly; there is no `chan`
 //! binary at runtime. Registry mutations and feature toggles run
 //! in-process against the embedded host's shared `Library`, and
@@ -37,18 +37,6 @@ pub const SERVES_CHANGED: &str = "serves-changed";
 const ICON_LOCAL_HOME: &str = "\u{2302}"; // ⌂ house: any local-disk workspace
 const ICON_REMOTE: &str = "\u{2197}\u{FE0E}"; // ↗ up-right arrow: a remote devserver
 
-/// Live state for one running serve. Held in `AppState.serves`
-/// keyed by canonical workspace path.
-pub struct ServeHandle {
-    pub url: Option<String>,
-}
-
-impl ServeHandle {
-    fn embedded(url: String) -> Self {
-        Self { url: Some(url) }
-    }
-}
-
 /// Whether mounting a workspace should also mint a native window.
 ///
 /// User-requested opens always mint one window, including when persisted
@@ -79,16 +67,22 @@ pub async fn start<R: tauri::Runtime>(
     key: String,
     open_mode: WorkspaceOpenMode,
 ) -> Result<(), String> {
-    if state.serves.lock().unwrap().contains_key(&key) {
-        return Ok(());
-    }
     let Some(embedded) = state.embedded.get() else {
         return Err("embedded local server is unavailable".to_string());
     };
-    let url = embedded.open_workspace(&key).await?;
+    if state.serves.lock().unwrap().contains(&key) {
+        // Served already. A user-requested open still mints its one window:
+        // a handoff reaches this key through the registry row whatever
+        // spelling of the root it was sent. A restore mints nothing.
+        if open_mode.should_mint() {
+            embedded.mint_workspace_window(Path::new(&key))?;
+        }
+        return Ok(());
+    }
+    embedded.open_workspace(&key).await?;
     {
         let mut serves = state.serves.lock().unwrap();
-        if serves.contains_key(&key) {
+        if serves.contains(&key) {
             // A concurrent `start` for this key won the race across the mount
             // await (the pre-check above guards only the pre-await instant).
             // Both callers are holding the SAME tenant: the prefix is derived
@@ -101,7 +95,7 @@ pub async fn start<R: tauri::Runtime>(
             // terminals too. Report the workspace as running, which it is.
             return Ok(());
         }
-        serves.insert(key.clone(), ServeHandle::embedded(url.clone()));
+        serves.insert(key.clone());
     }
     let _ = app.emit(SERVES_CHANGED, ());
     // A user-requested open always mints after the mount. Persisted rows became
@@ -110,10 +104,9 @@ pub async fn start<R: tauri::Runtime>(
     // block so an empty persisted set stays empty. The registry remains the
     // sole window-creation authority; there is no imperative window build.
     if open_mode.should_mint() {
-        if let Err(e) = embedded.mint_window(WindowKind::Workspace, Some(key.clone())) {
-            let removed = { state.serves.lock().unwrap().remove(&key) };
-            if let Some(handle) = removed {
-                drop(handle);
+        if let Err(e) = embedded.mint_workspace_window(Path::new(&key)) {
+            let removed = state.serves.lock().unwrap().remove(&key);
+            if removed {
                 let _ = stop_handle(None, &state, &key, true).await;
             }
             let _ = app.emit(SERVES_CHANGED, ());
@@ -1889,7 +1882,7 @@ mod tests {
             "the loser must not close the tenant both callers share",
         );
         assert!(
-            state.serves.lock().unwrap().contains_key(&key),
+            state.serves.lock().unwrap().contains(&key),
             "serves must agree with the live mount",
         );
 
@@ -1897,27 +1890,6 @@ mod tests {
         let outcome = stop_handle(None, &state, &key, false).await.expect("stop");
         assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
         assert!(!embedded.is_root_mounted(root.path()));
-    }
-
-    #[test]
-    fn cli_handoff_mints_for_running_and_stopped_workspaces() {
-        const MAIN_RS: &str = include_str!("main.rs");
-        let handoff = MAIN_RS
-            .split("fn open_workspace_from_handoff<")
-            .nth(1)
-            .expect("handoff function exists")
-            .split("async fn close_workspace_from_handoff(")
-            .next()
-            .expect("handoff section ends before close");
-
-        assert!(
-            handoff.contains(".mint_window(chan_server::WindowKind::Workspace"),
-            "an already-running workspace must mint immediately",
-        );
-        assert!(
-            handoff.contains("serve::WorkspaceOpenMode::OpenWindow"),
-            "a stopped workspace must mint after mounting",
-        );
     }
 
     #[test]

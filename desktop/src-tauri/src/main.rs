@@ -41,7 +41,6 @@ use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder,
 use tauri_plugin_opener::OpenerExt;
 
 use config::{ConfigStore, WindowGeometry};
-use serve::ServeHandle;
 use window_watcher_wiring::DevserverWatcherStop;
 
 const SYSTEM_NOTICE: &str = "system-notice";
@@ -95,8 +94,9 @@ pub struct AppState {
     /// serializes through one lock, so a devserver CRUD can't lose an update to
     /// a concurrent window-config save.
     store: Arc<Mutex<ConfigStore>>,
-    /// Live embedded local workspaces keyed by canonical workspace path.
-    serves: Mutex<HashMap<String, ServeHandle>>,
+    /// The embedded local workspaces this desktop mounted, each by the root
+    /// its registry row stores.
+    serves: Mutex<std::collections::HashSet<String>>,
     retarget_tickets: serve::RetargetTickets,
     /// In-process chan-server host for normal local workspaces.
     /// Initialized during Tauri setup, after the async runtime is
@@ -270,7 +270,7 @@ impl AppState {
     pub(crate) fn with_store(store: Arc<Mutex<ConfigStore>>) -> Self {
         Self {
             store,
-            serves: Mutex::new(HashMap::new()),
+            serves: Mutex::new(std::collections::HashSet::new()),
             retarget_tickets: serve::RetargetTickets::default(),
             embedded: OnceLock::new(),
             local_watcher_view: OnceLock::new(),
@@ -1125,21 +1125,27 @@ fn spawn_devserver_workspace_poll(
 }
 
 /// Register `path` with the shared embedded Library, creating the
-/// directory for a fresh path. No workspace handle is held when this
-/// returns, so the immediately-following `serve::start` can mount the
-/// workspace without tripping `WorkspaceAlreadyOpen` against the
-/// lifetime flock. Blocking: `register_workspace` writes the registry,
-/// so callers invoke it via `spawn_blocking`.
-fn register_workspace_path(library: &chan_workspace::Library, path: &str) -> Result<(), String> {
-    let root = Path::new(path);
-    if !root.exists() {
-        std::fs::create_dir_all(root)
-            .map_err(|e| format!("creating workspace root {path}: {e}"))?;
+/// directory for a fresh path, and answer the root its registry row stores,
+/// the key the desktop serves the workspace and stores its windows by. It
+/// is not `path` for a root whose path resolves elsewhere since the row was
+/// stored, whose row keeps its root, nor for a fresh path whose parent is a
+/// symlink, whose new row stores the canonical form. No workspace handle is
+/// held when this returns, so the immediately-following `serve::start` can
+/// mount the workspace without tripping `WorkspaceAlreadyOpen` against the
+/// lifetime flock. Blocking: `register_workspace` writes the registry, so
+/// callers invoke it via `spawn_blocking`.
+fn register_workspace_path(
+    library: &chan_workspace::Library,
+    path: &Path,
+) -> Result<PathBuf, String> {
+    if !path.exists() {
+        std::fs::create_dir_all(path)
+            .map_err(|e| format!("creating workspace root {}: {e}", path.display()))?;
     }
     library
-        .register_workspace(root)
-        .map_err(|e| format!("registering workspace {path}: {e}"))?;
-    Ok(())
+        .register_workspace(path)
+        .map(|row| row.root_path)
+        .map_err(|e| format!("registering workspace {}: {e}", path.display()))
 }
 
 /// Snapshot every currently-mounted local workspace into the library-owned
@@ -2939,66 +2945,51 @@ fn register_devserver_from_handoff(
 /// Open a workspace in a native window in response to a CLI handoff
 /// request (`chan serve <workspace>` while this desktop is running).
 ///
-/// Registers and boots the workspace through the shared embedded Library, then
-/// `serve::start` mounts it, restores persisted windows, and mints one new
-/// window. If the workspace is already running,
-/// `serve::start` returns early, so this function mints the requested window
-/// directly. The watcher opens the newly minted row in both cases.
+/// A workspace the embedded host already serves by the path as sent, its
+/// canonical root or its registry row's root, gets another window at once:
+/// the host answers from the keys it stores and mints the window under the
+/// row's root, the path the launcher nests it under, so the answer waits on
+/// no filesystem.
 ///
-/// The slow work (registry write, boot scan, mount) runs on a spawned
-/// task so the callback returns promptly and the CLI doesn't block on
-/// the handshake. The synchronous return therefore reports only that
-/// the request was accepted, not that the window is fully up; on a
-/// genuine mount failure the desktop emits a system notice rather than
-/// blocking the CLI. Generic over the Tauri runtime so a test can drive it
-/// with the mock app.
+/// Otherwise the workspace is registered through the shared embedded
+/// Library, which creates the directory for a fresh path, and
+/// `serve::start` mounts it, restores its persisted windows and mints one
+/// new window, keyed by the root its registry row stores: the path as sent
+/// may resolve elsewhere since the row was stored, or not exist until the
+/// registration creates it. The watcher opens the minted window in both
+/// cases.
+///
+/// The registration and the mount run on a spawned task so the callback
+/// returns promptly and the CLI doesn't block on the handshake. The
+/// synchronous return therefore reports only that the request was accepted,
+/// not that the window is fully up; on a genuine mount failure the desktop
+/// emits a system notice rather than blocking the CLI. Generic over the
+/// Tauri runtime so a test can drive it with the mock app.
 #[cfg(any(unix, windows))]
 fn open_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: Arc<AppState>,
     path: PathBuf,
 ) -> Result<(), String> {
-    let key = canonical_key(&path);
-
-    // Already running: raise an additional window immediately. This is
-    // synchronous and gives the user the window without a mount cycle.
-    let running_url = state
-        .serves
-        .lock()
-        .unwrap()
-        .get(&key)
-        .and_then(|h| h.url.clone());
-    if running_url.is_some() {
-        // Already running: mint another window; the watcher opens it.
-        return state
-            .embedded()
-            .ok_or_else(|| "embedded local server is unavailable".to_string())?
-            .mint_window(chan_server::WindowKind::Workspace, Some(key.clone()))
-            .map(|_| ());
-    }
-
-    // Not running: register (creating the dir for a fresh path)
-    // through the shared Library, then mount + spawn the window. Off
-    // the listener task so the CLI gets a prompt response.
     let Some(embedded) = state.embedded() else {
         return Err("embedded local server is unavailable".to_string());
     };
+    if embedded.is_workspace_mounted_by_key(&path) {
+        return embedded.mint_workspace_window(&path).map(|_| ());
+    }
+
     let library = embedded.library().clone();
-    let key_for_block = key.clone();
     tauri::async_runtime::spawn(async move {
-        let library_for_register = library.clone();
-        let key_for_register = key_for_block.clone();
-        let registered = tokio::task::spawn_blocking(move || {
-            register_workspace_path(&library_for_register, &key_for_register)
-        })
-        .await;
-        match registered {
-            Ok(Ok(())) => {}
+        let requested = path.display().to_string();
+        let registered =
+            tokio::task::spawn_blocking(move || register_workspace_path(&library, &path)).await;
+        let key = match registered {
+            Ok(Ok(root)) => root.to_string_lossy().into_owned(),
             Ok(Err(e)) => {
                 emit_system_notice(
                     &app,
                     "warning",
-                    format!("Could not open {key_for_block} from chan serve: {e}"),
+                    format!("Could not open {requested} from chan serve: {e}"),
                 );
                 return;
             }
@@ -3006,16 +2997,16 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
                 emit_system_notice(
                     &app,
                     "warning",
-                    format!("Opening {key_for_block} from chan serve panicked: {e}"),
+                    format!("Opening {requested} from chan serve panicked: {e}"),
                 );
                 return;
             }
-        }
+        };
         // The handoff is an explicit open, so mint after mounting and restoring.
         if let Err(e) = serve::start(
             app.clone(),
             Arc::clone(&state),
-            key_for_block.clone(),
+            key.clone(),
             serve::WorkspaceOpenMode::OpenWindow,
         )
         .await
@@ -3023,7 +3014,7 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
             emit_system_notice(
                 &app,
                 "warning",
-                format!("Could not open {key_for_block} from chan serve: {e}"),
+                format!("Could not open {key} from chan serve: {e}"),
             );
         }
     });
@@ -9558,7 +9549,7 @@ mod tests {
 
             #[cfg(unix)]
             fn served_keys(&self) -> Vec<String> {
-                self.state.serves.lock().unwrap().keys().cloned().collect()
+                self.state.serves.lock().unwrap().iter().cloned().collect()
             }
         }
 
