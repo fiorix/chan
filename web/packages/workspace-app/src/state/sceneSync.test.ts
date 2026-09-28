@@ -1024,6 +1024,24 @@ describe("the scene a later bind replays", () => {
   const MINE = { viewBackgroundColor: "#111111" };
   const PEERS = { viewBackgroundColor: "#222222" };
 
+  test("leaves out a push the session refused", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding } = attached(tab!);
+    session.degrade();
+    binding.pending.push(elem("refused", 2));
+    binding.pendingAppState = MINE;
+    binding.pendingFiles = { "file-r": { dataURL: "data:image/png;base64,AAA" } };
+    binding.flushPendingLocal();
+    const replay = rebind(session, binding).snapshots[0];
+
+    expect({
+      refused: binding.pending.map((e) => e.id),
+      elements: replay?.elements.map((e) => e.id),
+      appState: replay?.appState,
+      files: Object.keys(replay?.files ?? {}),
+    }).toEqual({ refused: ["refused"], elements: [], appState: {}, files: [] });
+  });
+
   test("holds the appState and files this window pushed", () => {
     const [tab] = installTabs([sceneTab()]);
     const { session, binding, sock } = attached(tab!);
