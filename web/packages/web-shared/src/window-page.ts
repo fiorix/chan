@@ -81,27 +81,79 @@ function retryAfterMs(header: string | null): number {
   return Number.isFinite(date) ? Math.min(WINDOW_PAGE_WAIT_MS, Math.max(WINDOW_PAGE_RETRY_MIN_MS, date - Date.now())) : WINDOW_PAGE_RETRY_MIN_MS;
 }
 
+type WaitOptions = {
+  focus?: boolean;
+  /** Asked after the page answers, for a window that is not blank, so a
+   * record that changed during the wait decides instead of the one the
+   * caller started from. */
+  readConnection?: (signal: AbortSignal) => WindowConnection | Promise<WindowConnection>;
+};
+
+/** Decide again from what the window holds. `expired` is the mark whose time
+ * ran out while it was followed, so that mark no longer counts. */
+type Again = { again: true; expired?: string };
+
 export function navigateWindowWhenReady(
   h: Window,
   url: string,
   checkPage: WindowPageCheck,
-  opts: {
-    focus?: boolean;
-    /** Asked after the page answers, for a window that is not blank, so a
-     * record that changed during the wait decides instead of the one the
-     * caller started from. */
-    readConnection?: (signal: AbortSignal) => WindowConnection | Promise<WindowConnection>;
-  } = {},
+  opts: WaitOptions = {},
 ): Promise<boolean> {
   const waiting = waitingPages.get(h);
   if (waiting) return waiting;
-  if (h.closed) return Promise.resolve(false);
-  const page = readableDocument(h);
-  // Other opener pages have their own module state but share this document.
-  if (readMark(page).phase !== "absent") {
-    if (opts.focus !== false) h.focus?.();
-    return Promise.resolve(true);
+  // One pending answer owns a named window even when the user clicks twice.
+  const pending = settle(h, url, checkPage, opts).finally(() => waitingPages.delete(h));
+  waitingPages.set(h, pending);
+  return pending;
+}
+
+// Other opener pages have their own module state but share the window's
+// document, so what another page is doing with the window is read from the
+// mark on it. A navigating mark is a wait already decided. A waiting one is
+// followed until it is decided, so no caller answers for the window before its
+// owner does.
+async function settle(h: Window, url: string, checkPage: WindowPageCheck, opts: WaitOptions): Promise<boolean> {
+  let expired: string | undefined;
+  let first = true;
+  for (;;) {
+    if (h.closed) return false;
+    const page = readableDocument(h);
+    const mark = readMark(page);
+    const live = mark.phase !== "absent" && mark.value !== expired ? mark : undefined;
+    if (live && first && opts.focus !== false) h.focus?.();
+    first = false;
+    if (live?.phase === "navigating") return true;
+    const outcome = page && live ? await follow(h, page, live) : await own(h, page, url, checkPage, opts);
+    if (typeof outcome === "boolean") return outcome;
+    expired = outcome.expired;
   }
+}
+
+// A follower sends nothing: it watches what the window shares until the owner
+// has decided, the window has closed, or the mark's time has run out.
+function follow(h: Window, page: Document, mark: { value: string; remainingMs: number }): Promise<boolean | Again> {
+  return new Promise((resolve) => {
+    const finish = (outcome: boolean | Again) => {
+      clearTimeout(expiry);
+      clearInterval(poll);
+      resolve(outcome);
+    };
+    const expiry = setTimeout(() => finish({ again: true, expired: mark.value }), mark.remainingMs);
+    const poll = setInterval(() => {
+      if (h.closed) finish(false);
+      else if (readableDocument(h) !== page) finish(true);
+      else if (readMark(page).value !== mark.value) finish({ again: true });
+    }, WINDOW_CLOSED_POLL_MS);
+  });
+}
+
+function own(
+  h: Window,
+  page: Document | undefined,
+  url: string,
+  checkPage: WindowPageCheck,
+  opts: WaitOptions,
+): Promise<boolean | Again> {
   if (page?.body && isBlankWindow(h)) page.body.textContent = "Waiting for the window to be ready...";
   const mark = writeMark(page, "waiting");
   const controller = new AbortController();
@@ -143,30 +195,41 @@ export function navigateWindowWhenReady(
     if (connection === "gone") return "closed";
     return connection === "connected" && !isBlankWindow(h) ? "stay" : "navigate";
   };
+  // Another page can take this window once this wait's mark has run out, as
+  // it does when this page's timers fire late. This wait then answers what
+  // that page makes of the window, and its caller closes nothing under it.
+  const taken = (): boolean => {
+    if (!page || readableDocument(h) !== page) return false;
+    const current = readMark(page);
+    return current.phase !== "absent" && current.value !== mark;
+  };
   // The deadline and close check also cover a fetch, a response body or a
   // reading that stalls.
-  // One pending navigation owns a named window even when the user clicks twice.
-  const pending = Promise.race([arrive(), stopped]).then((arrival) => {
-    if (arrival === "closed" || h.closed) return false;
-    if (arrival === "stay") return true;
-    // The navigation replaces the document the window holds now, which need
-    // not be the one the wait began on.
-    const current = readableDocument(h);
-    h.location.href = url;
-    writeMark(current, "navigating");
-    return true;
-  }).finally(() => {
+  return Promise.race([arrive(), stopped]).then(
+    (arrival): boolean | Again => {
+      if (taken()) return { again: true };
+      if (arrival === "closed" || h.closed) return false;
+      if (arrival === "stay") return true;
+      // The navigation replaces the document the window holds now, which need
+      // not be the one the wait began on.
+      const current = readableDocument(h);
+      h.location.href = url;
+      writeMark(current, "navigating");
+      return true;
+    },
+    (error: unknown): Again => {
+      if (taken()) return { again: true };
+      throw error;
+    },
+  ).finally(() => {
     clearTimeout(retryTimer);
     clearTimeout(deadline);
     clearInterval(closedPoll);
     controller.abort();
-    waitingPages.delete(h);
     // Only this wait's own waiting mark goes; a navigating mark stays until
     // its document is replaced or its time runs out.
     if (page && readMark(page).value === mark) {
       page.documentElement.removeAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE);
     }
   });
-  waitingPages.set(h, pending);
-  return pending;
 }

@@ -695,7 +695,6 @@ const repairDocuments = [
   { label: "tenant HTML", mime: "text/html" },
   { label: "initial blank", mime: "text/html", href: "about:blank" },
   { label: "empty location", mime: "text/html", href: "" },
-  { label: "blank with waiting mark", mime: "text/html", href: "about:blank", mark: "waiting" },
   { label: "outgoing document with navigating mark", mime: "text/html", mark: "navigating" },
   { label: "gate 503 JSON", mime: "application/json" },
   { label: "gateway 502 JSON", mime: "application/json" },

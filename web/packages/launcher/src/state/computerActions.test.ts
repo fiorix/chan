@@ -91,7 +91,7 @@ describe("browser action visibility", () => {
     expect(visibility).toHaveBeenCalledExactlyOnceWith("focus native", false, undefined);
   });
 
-  it.each(["waiting", "navigating"])("Show does not focus a peer's %s document", async (phase) => {
+  it.each(["navigating"])("Show does not focus a peer's %s document", async (phase) => {
     vi.useFakeTimers();
     const child = popup();
     child.document.documentElement.setAttribute("data-chan-window-page-owner", `${phase}:${Date.now() + 5_000}`);

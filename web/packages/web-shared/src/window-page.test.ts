@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 describe("window page ownership between callers", () => {
-  test("focuses a window another page is waiting on through navigation commit", async () => {
+  test("follows a window another page is waiting on through navigation commit", async () => {
     vi.useFakeTimers();
     const { owner, peer } = await separateCallers();
     const child = popup();
@@ -49,7 +49,8 @@ describe("window page ownership between callers", () => {
     await vi.advanceTimersByTimeAsync(0);
     child.window.document.body.textContent = "The first page owns this wait.";
 
-    await peer.navigateWindowWhenReady(child.handle, "/peer", peerCheck);
+    const following = peer.navigateWindowWhenReady(child.handle, "/peer", peerCheck);
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(peerCheck).not.toHaveBeenCalled();
     expect(child.window.focus).toHaveBeenCalledTimes(1);
@@ -57,6 +58,7 @@ describe("window page ownership between callers", () => {
     expect(child.navigate).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(2000);
     expect(await pending).toBe(true);
+    expect(await following).toBe(true);
     expect(child.navigate).toHaveBeenCalledExactlyOnceWith("/owner");
     await peer.navigateWindowWhenReady(child.handle, "/peer", peerCheck);
     expect(peerCheck).not.toHaveBeenCalled();
