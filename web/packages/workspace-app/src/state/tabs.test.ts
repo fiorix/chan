@@ -3529,7 +3529,7 @@ describe("file tab loading", () => {
       writable: true,
     });
 
-    beginMissingFileReopen(tab.id);
+    beginMissingFileReopen(tab.id, "open");
     await openInPane(activePane().id, "notes/new.md");
 
     expect(activePane().tabs).toHaveLength(1);
