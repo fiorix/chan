@@ -22,14 +22,8 @@ import { hashPin } from "../screensaver";
 import { api, sessionWindowId } from "../../api/client";
 import { windowCaps } from "../windowCaps";
 import { openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
-import {
-  hideWindowFromCloseConfirm,
-  isTauriDesktop,
-  openNewWindow,
-  openWebInspector,
-  reloadWindow,
-  requestCloseWindow,
-} from "../../api/desktop";
+import { flushAndCloseWindow, flushAndHideWindow } from "../closeConfirm.svelte";
+import { isTauriDesktop, openNewWindow, openWebInspector, reloadWindow } from "../../api/desktop";
 
 /// Run a config write and report the outcome as a transient pill, so a
 /// launcher command that mutates state still gives feedback without an
@@ -291,7 +285,7 @@ registerCommands([
     requirement: "any",
     keywords: ["hide", "window", "bury", "minimize"],
     available: () => isTauriDesktop(),
-    run: () => void hideWindowFromCloseConfirm(),
+    run: () => flushAndHideWindow(),
   },
   {
     // Desktop-only: the host routes by the invoking window's label, and the
@@ -323,6 +317,6 @@ registerCommands([
     },
     available: (ctx) =>
       isTauriDesktop() && allowedInWindow("app.window.close", ctx),
-    run: () => void requestCloseWindow(),
+    run: () => flushAndCloseWindow(),
   },
 ]);
