@@ -2378,7 +2378,7 @@ async fn cmd_ps(json: bool) -> Result<()> {
 /// free).
 async fn serving_kind(holder_pid: u32) -> Option<ServedBy> {
     let socket = control_socket_for_pid(holder_pid).await?;
-    let identity = socket_identity(&socket).await?;
+    let identity = chan_shell::socket_identity(&socket).await?;
     Some(match identity.kind {
         chan_shell::ServeKind::Standalone => ServedBy::Standalone,
         chan_shell::ServeKind::Desktop => ServedBy::Desktop,
@@ -2629,10 +2629,6 @@ async fn control_socket_for_workspace(
     .await
 }
 
-/// Overall bound on one control-socket `Identify` probe, so a wedged server
-/// (accepts but never replies) cannot hang status / `chan ps` / `chan close`.
-const CONTROL_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-
 async fn control_socket_for_pid_in_dirs<I, P>(
     dirs: I,
     pid: u32,
@@ -2660,7 +2656,7 @@ where
     // one who it is and match the reported pid. Dead sockets fail the connect
     // immediately; only a live-but-wedged one costs the probe timeout.
     for dir in &seen {
-        for candidate in stable_control_socket_candidates(dir, require_sock_ext) {
+        for candidate in chan_shell::stable_control_socket_candidates(dir, require_sock_ext) {
             if socket_identity_pid(&candidate).await == Some(pid) {
                 return Some(candidate);
             }
@@ -2686,12 +2682,12 @@ where
         for candidate in control_socket_candidates_for_pid_in(dir, pid, require_sock_ext) {
             push_unique_path(&mut candidates, candidate);
         }
-        for candidate in stable_control_socket_candidates(dir, require_sock_ext) {
+        for candidate in chan_shell::stable_control_socket_candidates(dir, require_sock_ext) {
             push_unique_path(&mut candidates, candidate);
         }
     }
     for candidate in candidates {
-        let Some(identity) = socket_identity(&candidate).await else {
+        let Some(identity) = chan_shell::socket_identity(&candidate).await else {
             continue;
         };
         if identity.pid == pid
@@ -2704,55 +2700,10 @@ where
     None
 }
 
-/// The stable-named control-socket candidates in `dir`, sorted for a
-/// deterministic probe order.
-fn stable_control_socket_candidates(dir: &Path, require_sock_ext: bool) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| {
-            let name = entry.file_name();
-            stable_control_socket_name(&name.to_string_lossy(), require_sock_ext)
-        })
-        .map(|entry| entry.path())
-        .collect();
-    candidates.sort();
-    candidates
-}
-
-/// True when `name` is a devserver's STABLE control socket:
-/// `chan-control-s<16 hex>`, `.sock`-suffixed on unix. The `s` marker and
-/// exact shape separate it from the pid-scoped `chan-control-<digits>-<rand>`
-/// family, which belongs to whatever process minted it; had one been the
-/// holder's, the name pass would already have matched it, so the probe only
-/// knocks on stable candidates instead of every serve's socket.
-fn stable_control_socket_name(name: &str, require_sock_ext: bool) -> bool {
-    let Some(rest) = name.strip_prefix("chan-control-s") else {
-        return false;
-    };
-    let hash = match rest.strip_suffix(".sock") {
-        Some(hash) => hash,
-        None if require_sock_ext => return false,
-        None => rest,
-    };
-    hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
 /// The pid serving `socket`, from a bounded `Identify` round-trip. `None` for
 /// a dead / unreachable / wedged socket or an unparseable reply.
 async fn socket_identity_pid(socket: &Path) -> Option<u32> {
-    Some(socket_identity(socket).await?.pid)
-}
-
-async fn socket_identity(socket: &Path) -> Option<chan_shell::Identity> {
-    let identify = chan_shell::send_control_request(socket, chan_shell::ControlRequest::Identify);
-    let message = tokio::time::timeout(CONTROL_SOCKET_PROBE_TIMEOUT, identify)
-        .await
-        .ok()?
-        .ok()?;
-    serde_json::from_str(&message).ok()
+    Some(chan_shell::socket_identity(socket).await?.pid)
 }
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -10337,40 +10288,6 @@ mod tests {
             control_socket_for_pid_in_dirs([first.path(), second.path()], 4242, true).await,
             Some(want)
         );
-    }
-
-    #[test]
-    fn stable_control_socket_name_excludes_pid_shaped_names() {
-        // A devserver's stable socket (`chan-control-s<16 hex>`, no pid) is a
-        // probe candidate; a pid-named socket or an unrelated file is not.
-        assert!(stable_control_socket_name(
-            "chan-control-s89abcdef01234567.sock",
-            true
-        ));
-        assert!(!stable_control_socket_name(
-            "chan-control-4242-ef01.sock",
-            true
-        ));
-        assert!(!stable_control_socket_name("chan-mcp-4242-ef01.sock", true));
-        // Only the exact 16-lowercase-hex hash shape qualifies.
-        assert!(!stable_control_socket_name(
-            "chan-control-s89abcdef.sock",
-            true
-        ));
-        assert!(!stable_control_socket_name(
-            "chan-control-s89ABCDEF01234567.sock",
-            true
-        ));
-        // The `.sock` suffix is required only on unix (a Windows pipe name
-        // has none).
-        assert!(!stable_control_socket_name(
-            "chan-control-s89abcdef01234567",
-            true
-        ));
-        assert!(stable_control_socket_name(
-            "chan-control-s89abcdef01234567",
-            false
-        ));
     }
 
     /// A stub control server on a unix socket that answers every `Identify`

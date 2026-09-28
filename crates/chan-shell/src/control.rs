@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::wire::{ControlRequest, ControlResponse};
+use crate::wire::{ControlRequest, ControlResponse, Identity};
 
 /// The chan-terminal environment a window-targeting action needs: which
 /// window to act on and which server socket to reach it through.
@@ -75,6 +75,56 @@ pub fn absolutize(path: PathBuf) -> Result<PathBuf> {
             .context("resolving current directory")?
             .join(path))
     }
+}
+
+/// Overall bound on one control-socket `Identify` probe, so a wedged server
+/// (accepts but never replies) cannot hang its caller.
+const CONTROL_SOCKET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The stable-named control-socket candidates in `dir`, sorted for a
+/// deterministic probe order.
+pub fn stable_control_socket_candidates(dir: &Path, require_sock_ext: bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            stable_control_socket_name(&name.to_string_lossy(), require_sock_ext)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    candidates.sort();
+    candidates
+}
+
+/// True when `name` is a devserver's STABLE control socket:
+/// `chan-control-s<16 hex>`, `.sock`-suffixed on unix. The `s` marker and
+/// exact shape separate it from the pid-scoped `chan-control-<digits>-<rand>`
+/// family that `chan serve` and the desktop bind, which belongs to whatever
+/// process minted it.
+fn stable_control_socket_name(name: &str, require_sock_ext: bool) -> bool {
+    let Some(rest) = name.strip_prefix("chan-control-s") else {
+        return false;
+    };
+    let hash = match rest.strip_suffix(".sock") {
+        Some(hash) => hash,
+        None if require_sock_ext => return false,
+        None => rest,
+    };
+    hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Who serves `socket`, from a bounded `Identify` round-trip. `None` for a
+/// dead, unreachable or wedged socket, or an unparseable reply.
+pub async fn socket_identity(socket: &Path) -> Option<Identity> {
+    let identify = send_control_request(socket, ControlRequest::Identify);
+    let message = tokio::time::timeout(CONTROL_SOCKET_PROBE_TIMEOUT, identify)
+        .await
+        .ok()?
+        .ok()?;
+    serde_json::from_str(&message).ok()
 }
 
 /// Connect to the control socket, mapping the two "server is gone" error
@@ -344,6 +394,40 @@ mod transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_control_socket_name_excludes_pid_shaped_names() {
+        // A devserver's stable socket (`chan-control-s<16 hex>`, no pid) is a
+        // probe candidate; a pid-named socket or an unrelated file is not.
+        assert!(stable_control_socket_name(
+            "chan-control-s89abcdef01234567.sock",
+            true
+        ));
+        assert!(!stable_control_socket_name(
+            "chan-control-4242-ef01.sock",
+            true
+        ));
+        assert!(!stable_control_socket_name("chan-mcp-4242-ef01.sock", true));
+        // Only the exact 16-lowercase-hex hash shape qualifies.
+        assert!(!stable_control_socket_name(
+            "chan-control-s89abcdef.sock",
+            true
+        ));
+        assert!(!stable_control_socket_name(
+            "chan-control-s89ABCDEF01234567.sock",
+            true
+        ));
+        // The `.sock` suffix is required only on unix (a Windows pipe name
+        // has none).
+        assert!(!stable_control_socket_name(
+            "chan-control-s89abcdef01234567",
+            true
+        ));
+        assert!(stable_control_socket_name(
+            "chan-control-s89abcdef01234567",
+            false
+        ));
+    }
 
     #[test]
     fn absolutize_resolves_dot_and_relative_paths_against_the_cwd() {
