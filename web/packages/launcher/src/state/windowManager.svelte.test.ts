@@ -608,18 +608,20 @@ describe("reconcileWindows", () => {
     expect(hasWindowAttention("w-local-closed")).toBe(false);
   });
 
-  it("schedules cleanup for a disconnected browser-origin record with no handle", async () => {
+  it("keeps a disconnected browser row without a handle available to open", async () => {
     vi.useFakeTimers();
     const rec = record({ window_id: "w-stale", origin: "browser", connected: false });
 
     reconcileWindows(set([rec]));
 
-    expect(hasWindowAttention("w-stale")).toBe(false);
+    await vi.advanceTimersByTimeAsync(3000);
+
     expect(discardWindow).not.toHaveBeenCalled();
-
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(discardWindow).toHaveBeenCalledWith("w-stale");
+    expect(hasWindowAttention("w-stale")).toBe(true);
+    expect(window.open).not.toHaveBeenCalled();
+    await openWindowRecord(rec);
+    expect(opened[0].win.location.href).toContain("?w=w-stale");
+    expect(hasWindowHandle("w-stale")).toBe(true);
     expect(hasWindowAttention("w-stale")).toBe(false);
   });
 
