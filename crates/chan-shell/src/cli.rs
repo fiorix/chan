@@ -60,8 +60,14 @@ Every chan-spawned terminal carries these. Read them; do not set them.
   CHAN_CONTROL_SOCKET   the serving chan-server's control socket. Every
                         window command needs it; dump-skill is offline.
                         When it names a devserver socket that is gone,
-                        cs asks the devserver sockets beside it and uses
-                        the one serving CHAN_WORKSPACE_PATH.
+                        cs asks the devserver sockets beside it which
+                        one serves CHAN_WORKSPACE_PATH, and uses that
+                        one only when exactly one does. It asks only in
+                        a directory without group or world write, such
+                        as the /run/user/<uid> systemd makes on Linux:
+                        not in /tmp, where the sockets are when
+                        XDG_RUNTIME_DIR is unset (the macOS default),
+                        and never on Windows.
   CHAN_WINDOW_ID        the window to act on. Window-targeting commands
                         use it by default; tab openers and pane commands
                         can override it with --window.
