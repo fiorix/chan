@@ -3876,6 +3876,60 @@ mod devserver_route_tests {
         assert!(host.is_root_mounted(&root), "add tore the tenant down");
     }
 
+    /// The desktop's embedded host installs the launcher through
+    /// `install_launcher_root_fallback`, which asks no mount admission, so its
+    /// add and on mount as a surface with no stop of its own does.
+    #[tokio::test]
+    async fn a_surface_without_a_mount_admission_adds_and_turns_on() {
+        let cfg = tempfile::tempdir().unwrap();
+        let added = tempfile::tempdir().unwrap();
+        let turned_on = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = lib.register_workspace(turned_on.path()).unwrap().root_path;
+        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        let cell = OnceLock::new();
+        let _ = cell.set("127.0.0.1:8080".parse::<SocketAddr>().unwrap());
+        crate::install_launcher_root_fallback(
+            &host,
+            Some(Arc::new(std::sync::RwLock::new(
+                "launcher-token".to_string(),
+            ))),
+            Some(Arc::new(cell)),
+        );
+        let router = host.clone().router();
+        let send = |uri: String, body: String| {
+            router.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, "Bearer launcher-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        };
+
+        let add = send(
+            "/api/library/workspaces".into(),
+            serde_json::json!({"path": added.path()}).to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(add.status(), StatusCode::OK, "the add was not answered");
+        assert!(
+            host.is_root_mounted(added.path()),
+            "the add mounted nothing"
+        );
+
+        let prefix = chan_library::registered_workspace_prefix(&stored).unwrap();
+        let on = send(format!("/api/library/workspaces{prefix}/on"), String::new())
+            .await
+            .unwrap();
+        assert_eq!(on.status(), StatusCode::OK, "the on was not answered");
+        assert!(host.is_root_mounted(&stored), "the on mounted nothing");
+        host.shutdown_all().await.unwrap();
+    }
+
     // Unix-only for the same two reasons as
     // `add_answers_a_replaced_root_with_the_row_the_list_reports`.
     #[cfg(unix)]
