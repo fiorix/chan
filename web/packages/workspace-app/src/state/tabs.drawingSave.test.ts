@@ -60,7 +60,9 @@ function written(write: ReturnType<typeof stubWrites>): string[][] {
 }
 
 /// Every turn a close's save queued has run: a close that is going to ask
-/// has asked by then.
+/// has asked by then. That holds while every step between the conflict
+/// opening its dialog and a close asking is a microtask; an await that
+/// takes a timer there would let a question arrive after the read.
 async function settled(): Promise<void> {
   for (let i = 0; i < 3; i += 1) await new Promise((r) => setTimeout(r, 0));
 }

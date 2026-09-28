@@ -257,11 +257,14 @@ export type FileTab = {
   /// What the file tab shows in place of its editor: a load, a save or a
   /// draft's close that failed.
   error: string | null;
-  /// Why the last save of this buffer wrote nothing, while the buffer stays
-  /// the user's to fix: the tab keeps its editor and says the file was not
-  /// saved. Read only while the tab is dirty, since a buffer equal to the
-  /// file has nothing unsaved. Kept apart from `error`, which the tab shows
-  /// in place of its editor.
+  /// Why the save's check refused this buffer, while the buffer stays the
+  /// user's to fix: the tab keeps its editor and says the file was not
+  /// saved. It follows the buffer within one autosave debounce, since the
+  /// check that refused it clears it when the text parses; a rename out of
+  /// the check and every clear of `refusedUnwritten` clear it too. Read
+  /// only while the tab is dirty, since a buffer equal to the file has
+  /// nothing unsaved. Kept apart from `error`, which the tab shows in place
+  /// of its editor.
   saveError?: string | null;
   /// A text the save refused has not been written since. While set, the tab
   /// takes no live session, so its saves stay with the classic path and the
@@ -2922,8 +2925,10 @@ async function confirmCloseTabs(
     }
     const live = liveFileTabById(tab.id) ?? tab;
     if (!isDirty(live)) continue;
-    // Still dirty with no refusal: a conflict opened its own dialog, which
-    // is what speaks for this tab.
+    // Still dirty with no refusal: a conflict opened its own dialog, a save
+    // of the tab was already running, the save was paused by an outage, or
+    // an edit landed during the write. The close is refused, as for any
+    // tab a save leaves dirty.
     if (!live.saveError) return false;
     refused.push(live);
   }
@@ -5814,8 +5819,9 @@ export function setTabDocState(t: FileTab, doc: DocTabState | null): void {
 /// every save. Only a drawing is checked, since a scene that does not
 /// parse is one the canvas cannot restore. Its refusal writes nothing and
 /// sets `saveError`, not `error`: the tab keeps its editor so the text can
-/// be fixed where it was typed, and no close throws the text away unless
-/// the user says so. Every other text file, a `.json` among them, is
+/// be fixed where it was typed, and a close asks before it throws the text
+/// away, except a forced close and the window's teardown, which ask
+/// nothing of any tab. Every other text file, a `.json` among them, is
 /// written as typed, which is also how a live document session's
 /// authority writes it; the JSON tree is where a `.json` that does not
 /// parse is said.
