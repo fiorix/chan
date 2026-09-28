@@ -633,7 +633,11 @@ impl Listing {
     /// The record the registry row `row` shows among those that join it:
     /// the one whose prefix the host serves; then the one desired on; then
     /// the one keyed by the row's stored root; then the one whose prefix
-    /// sorts first. `None` when no record joins the row.
+    /// sorts first. `None` when no record joins the row. A workspace has one
+    /// record, so two join one row only when the registry holds two rows
+    /// for one directory, one stored at a path and one whose cached
+    /// canonical path is that path, as a reload of a registry another
+    /// process wrote can bring.
     fn shown(&self, row: &KnownWorkspace) -> Option<&WorkspaceRecord> {
         self.records
             .iter()
@@ -1304,9 +1308,10 @@ impl DevserverState {
     /// [`WorkspaceHost::workspace_status`] reports a mounted root as running,
     /// and surfaces later as a stale failure once that tenant closes.
     ///
-    /// The check and the mark go by the attempt's canonical key, touching no
-    /// filesystem: an attempt that expired because its root stopped answering
-    /// must still settle.
+    /// The check and the mark go by the attempt's root, the stored root its
+    /// record goes by and the row's status reads, touching no filesystem: an
+    /// attempt that expired because its root stopped answering must still
+    /// settle.
     fn finish_failed_attempt(&self, attempt: &MountAttempt, reason: String) {
         let adopted_failure = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -1327,8 +1332,8 @@ impl DevserverState {
     }
 
     /// Publish the current record's phase at `prefix` to the host's lifecycle
-    /// row, by the canonical root the record stores, so a settlement asks no
-    /// root's filesystem.
+    /// row, by the root the record stores, so a settlement asks no root's
+    /// filesystem.
     fn restore_current_host_lifecycle(&self, prefix: &str) {
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -1600,17 +1605,14 @@ impl DevserverState {
         let overlay = self.host.workspace_overlay();
         // Durable desired intent → the library-owned overlay store. Starting
         // and failed rows stay desired-on even though no host prefix is live.
-        // A record keys its workspace by one of the two keys the workspace's
-        // registry row goes by: the root the row was registered at, or the
-        // canonical path the row last resolved to, which differ for a root
-        // whose path resolves elsewhere since it was registered. A mount
-        // keys a new record by the canonical path; a restore or an off keys
-        // one by the root the overlay or the registry stores. So a record is
-        // matched to the registry by either key of a row, and to the overlay
-        // row written under the record's own key. Every join is by stored
-        // keys: a save runs on every mount, toggle and removal, and must not
-        // wait on the filesystem of any root, least of all one whose mount
-        // has stalled.
+        // A record goes by the root its workspace's registry row stores,
+        // whichever entry point made it, so it is matched to the registry by
+        // that root and to the overlay row written under it; a row an
+        // earlier build wrote under the canonical path the registry row last
+        // resolved to is read only by the restore, and dropped by the first
+        // save. Every join is by stored keys: a save runs on every mount,
+        // toggle and removal, and must not wait on the filesystem of any
+        // root, least of all one whose mount has stalled.
         if let Some(overlay) = overlay {
             let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
                 .entries()
@@ -1756,8 +1758,9 @@ impl DevserverState {
     /// ([`registry_row_keys`]): the row's stored root, or the canonical path
     /// the row last resolved to, which differ for a root whose path resolves
     /// elsewhere since it was registered once a registration has resolved
-    /// it. A restore or an off keys a record by the root the overlay or the
-    /// registry stores, and a mount by the canonical path. The joined row
+    /// it. Every entry point keys a record by its registry row's stored
+    /// root, so a record joins its own row, and another only when the
+    /// registry holds a second row for the same directory. The joined row
     /// lists the row's stored root, with the prefix, token, `on` and status
     /// of the record [`Listing::shown`] chooses: the one whose prefix the
     /// host serves, then the one desired on, then the one keyed by the
@@ -1777,7 +1780,7 @@ impl DevserverState {
     /// Resolve a route prefix back to a host-library workspace root for a
     /// prefix that names a library workspace the devserver is NOT serving (so
     /// it is absent from `self.workspaces`). Matches on the stable prefix
-    /// mapping, computed from each row's stored canonical root
+    /// mapping, computed from each row's stored root
     /// ([`registered_workspace_prefix`]) so resolving one root never waits on
     /// another root's filesystem.
     fn library_root_for_prefix(&self, prefix: &str) -> Option<PathBuf> {
@@ -1797,7 +1800,7 @@ impl DevserverState {
     }
 
     /// The `on:false` row for a library workspace at `root`, a registry row's
-    /// stored canonical root, served under `prefix`, with the host's status
+    /// stored root, served under `prefix`, with the host's status
     /// for that root and no token.
     fn off_row(&self, prefix: String, root: &Path) -> WorkspaceEntry {
         let (status, error) = self.host.canonical_root_status(root);
@@ -3267,11 +3270,11 @@ fn workspace_label(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-/// The canonical key the devserver stores for a workspace root, spelled the
-/// way the host's key hop computes it, for the tests that set up records and
-/// check them. The devserver itself never resolves a root here: a request's
-/// root comes from the host's key hop, and every other root from a key a
-/// store already holds.
+/// The canonical key of a workspace root, spelled the way the host's key hop
+/// computes it, for the tests that set up records and check them. The
+/// devserver itself never resolves a root here: a request's root comes from
+/// the host's key hop, and every other root from a key a store already
+/// holds.
 #[cfg(test)]
 fn canonical_root(root: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(root)
