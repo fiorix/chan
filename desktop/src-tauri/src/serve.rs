@@ -56,8 +56,12 @@ impl WorkspaceOpenMode {
 
 /// Open a local workspace through the embedded chan-server host.
 ///
+/// `key` is the root the workspace's registry row stores. A workspace the host
+/// already serves is not mounted again.
+///
 /// [`WorkspaceOpenMode::OpenWindow`] mints one window after mounting, even when
-/// persisted windows already exist. [`WorkspaceOpenMode::RestoreOnly`] restores
+/// persisted windows already exist, and for a workspace the host already
+/// serves. [`WorkspaceOpenMode::RestoreOnly`] restores
 /// only the persisted set, so a workspace whose windows were all closed stays
 /// windowless on boot. A buried or hidden window keeps its record, so the
 /// watcher restores it while honoring `should_show`'s `!hidden`.
@@ -70,15 +74,21 @@ pub async fn start<R: tauri::Runtime>(
     let Some(embedded) = state.embedded.get() else {
         return Err("embedded local server is unavailable".to_string());
     };
-    if state.serves.lock().unwrap().contains(&key) {
-        // Served already. A user-requested open still mints its one window:
-        // a handoff reaches this key through the registry row whatever
-        // spelling of the root it was sent. A restore mints nothing.
+    // The host decides whether the workspace is served: the launcher's on
+    // and off, and a close by another spelling of the root, mount and
+    // unmount through it and leave `serves` alone.
+    if embedded.is_workspace_mounted_by_key(Path::new(&key)) {
+        // A user-requested open still mints its one window: a handoff reaches
+        // this key through the registry row whatever spelling of the root it
+        // was sent. A restore mints nothing.
         if open_mode.should_mint() {
             embedded.mint_workspace_window(Path::new(&key))?;
         }
         return Ok(());
     }
+    // An entry the host no longer serves is stale; left in place, the mount
+    // below would read as a lost race and open no window.
+    state.serves.lock().unwrap().remove(&key);
     embedded.open_workspace(&key).await?;
     {
         let mut serves = state.serves.lock().unwrap();
