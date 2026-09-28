@@ -9613,6 +9613,104 @@ mod tests {
         assert_eq!(answered, entries[0], "the off answered another row");
     }
 
+    /// A relinked root whose stored root still resolves, turned on while
+    /// another process holds its workspace lock, reads the error the
+    /// devserver recorded on its row and in the status the host reports for
+    /// its stored root. The host's own error for the open goes under the
+    /// canonical path, which the row does not read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_roots_failed_open_reads_the_devservers_error_on_its_row() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        assert_eq!(
+            canonical_root(&stored),
+            canonical_root(&relinked),
+            "fixture: the stored root does not resolve to the canonical path"
+        );
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let _foreign = hold_foreign_lock(state.host.library(), &stored);
+
+        state
+            .set_workspace_on(&prefix, true, false)
+            .await
+            .expect_err("fixture: the on mounted a root another process holds");
+        let reason = match state.workspaces.lock().unwrap().get(&prefix) {
+            Some(WorkspaceRecord {
+                phase: MountPhase::Failed(reason),
+                ..
+            }) => reason.clone(),
+            _ => panic!("fixture: no failed record at the row's prefix"),
+        };
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            (entries[0].status, entries[0].error.as_deref()),
+            (WorkspaceStatus::Error, Some(reason.as_str())),
+            "the failed row: {entries:?}"
+        );
+        assert_eq!(
+            state.host.canonical_root_status(&stored),
+            (WorkspaceStatus::Error, Some(reason)),
+            "the host's status for the failed row's stored root"
+        );
+    }
+
+    /// The on route asked for the prefix hashed from a relinked root's
+    /// canonical path, which a client may hold from a build that served the
+    /// workspace there, answers 404 and mounts nothing: the workspace's one
+    /// prefix is the one derived from its stored root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_on_route_answers_404_for_a_relinked_roots_canonical_prefix() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let canonical = canonical_root(&relinked);
+        let row = state
+            .host
+            .library()
+            .register_workspace(&relinked)
+            .expect("register the moved spelling");
+        assert!(
+            registry_row_keys(&row).contains(&canonical.as_path()),
+            "fixture: the registry row does not cache the canonical path: {row:?}"
+        );
+        let old_prefix = chan_library::workspace_prefix_for(&relinked, &canonical).expect("prefix");
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        assert_ne!(old_prefix, prefix, "fixture: the two prefixes are one");
+
+        let response = handle_set_workspace_on(
+            State(Arc::clone(&state)),
+            AxumPath(format!("{old_prefix}/on")),
+            Json(SetWorkspaceOnRequest {
+                on: true,
+                force: false,
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "the on route answered a prefix that names no workspace"
+        );
+        assert!(
+            !state.host.is_root_mounted(&relinked),
+            "the on route mounted the workspace at {:?}",
+            state.host.mounted_prefixes()
+        );
+        assert_eq!(only_record(&state), (0, None), "the on route made a record");
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            entries[0].prefix == prefix && !entries[0].on,
+            "the row after the on: {entries:?}"
+        );
+    }
+
     #[tokio::test]
     async fn discovery_registration_mounts_and_mints_one_window_per_request() {
         let _env = chan_home_env_read();
