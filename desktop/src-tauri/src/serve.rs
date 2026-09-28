@@ -1903,7 +1903,7 @@ mod tests {
     fn cli_handoff_mints_for_running_and_stopped_workspaces() {
         const MAIN_RS: &str = include_str!("main.rs");
         let handoff = MAIN_RS
-            .split("fn open_workspace_from_handoff(")
+            .split("fn open_workspace_from_handoff<")
             .nth(1)
             .expect("handoff function exists")
             .split("async fn close_workspace_from_handoff(")
