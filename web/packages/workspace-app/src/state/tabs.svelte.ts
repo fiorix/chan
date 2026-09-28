@@ -4000,6 +4000,10 @@ export function reorderTab(
   // Snapshot the tab before splicing so the proxied entry doesn't get
   // re-wrapped in a way that confuses callers (see moveTab below).
   const src = tabs[from]!;
+  // The pane keeps the board and hands it the copy, and a board whose buffer
+  // is not its own last serialization seeds again from the copy's buffer, so
+  // the copy takes its input first.
+  flushTabEdits([src]);
   const moved = cloneTab(src);
   tabs.splice(from, 1);
   tabs.splice(clamped, 0, moved);
@@ -5175,6 +5179,8 @@ export function moveActiveTabToSide(targetSide: PaneSide): boolean {
   const sourceTabs = mutablePaneTabs(p, sourceSide);
   const sourceIndex = sourceTabs.findIndex((tab) => tab.id === activeId);
   if (sourceIndex < 0) return false;
+  // The copy takes the board's input first, as in `reorderTab`.
+  flushTabEdits([sourceTabs[sourceIndex]!]);
   const moved = cloneTab(sourceTabs[sourceIndex]!);
   sourceTabs.splice(sourceIndex, 1);
   setPaneActiveTabId(
