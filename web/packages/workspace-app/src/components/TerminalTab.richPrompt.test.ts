@@ -48,6 +48,7 @@ import { api } from "../api/client";
 import { allCommands } from "../state/commands";
 import "../state/commands/install";
 import { isRichPromptVisible, richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 import {
   beginPendingPrompt,
@@ -190,6 +191,20 @@ describe("closing the terminal", () => {
 });
 
 describe("the doors to the composer", () => {
+  test("the body menu's row names the chord the keymap holds when it opens", async () => {
+    const { target } = await attached();
+    const before = chordFor("terminal.richPrompt");
+    assignOverride("terminal.richPrompt", "Mod+Alt+J");
+    try {
+      const rebound = chordFor("terminal.richPrompt");
+      expect(rebound, "the override took").not.toBe(before);
+      await openBodyMenu(target);
+      expect(menuRow("Show Rich Prompt").querySelector(".mbtn-chord")?.textContent, "the rebound chord").toBe(rebound);
+    } finally {
+      clearOverride("terminal.richPrompt");
+    }
+  });
+
   test("the body menu's row shows or hides it and names the chord", async () => {
     const { tab, target } = await attached();
     const labels = await openBodyMenu(target);
