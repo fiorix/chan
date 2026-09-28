@@ -30,6 +30,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A scripted team keeps its members' env.** `cs terminal team new --script` and `cs terminal team load --script` pass each member's `env` on its `cs terminal new` line, so a tab the script opens gets the member's `CHAN_AGENT` and every other entry, as a team spawned directly does.
 
+- **The extension proxy sends nothing to an extension that has exited.** Once its supervisor has seen an extension's process exit, or has stopped it, a request or WebSocket upgrade to its path answers 502 `extension_unavailable` without connecting to its port, so its token and the request no longer reach whatever process holds that port by then.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
