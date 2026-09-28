@@ -269,6 +269,18 @@ function claimedPush(
   return { elements: byId, appState: appState ?? null, files: files ?? null };
 }
 
+/// The authority's merge rule for one element (`stored_wins` in the server's
+/// scene sessions, the library's reconcile without its guards for an element
+/// being edited): the element it stores stays against an incoming one of a
+/// lower version, and of the same version when its nonce is the lower. A
+/// missing version or nonce reads as 0, as the authority reads it.
+function storedElementWins(stored: WireElement, incoming: WireElement): boolean {
+  const version = (el: WireElement) => (typeof el.version === "number" ? el.version : 0);
+  const nonce = (el: WireElement) => (typeof el.versionNonce === "number" ? el.versionNonce : 0);
+  if (version(stored) !== version(incoming)) return version(stored) > version(incoming);
+  return nonce(stored) < nonce(incoming);
+}
+
 export class SceneSession {
   readonly tabId: string;
   readonly path: string;
@@ -818,9 +830,9 @@ export class SceneSession {
     // disk. A push this window sent on that socket and the server has not
     // acked is read after it, applied after it and acked on the same socket,
     // so a later snapshot ends none of them: they stay claimed, their parts
-    // stay in the scene over the snapshot's, and while this window's
-    // appState claim stands the snapshot's appState stays off the board, as
-    // an update's does.
+    // stay in the scene over the snapshot's but for an element the authority
+    // keeps against them, and while this window's appState claim stands the
+    // snapshot's appState stays off the board, as an update's does.
     const later = this.ws !== null && this.snapshotSocket === this.ws;
     this.shadowElements = new Map();
     for (const el of f.elements) this.foldIntoShadow(el);
@@ -832,10 +844,11 @@ export class SceneSession {
     if (later) {
       for (const push of [this.unacked, this.queued]) {
         if (push === null) continue;
-        // The authority keeps its own element where it is newer.
+        // The authority applies the push after this snapshot, so the scene
+        // keeps the snapshot's element wherever the authority keeps it.
         for (const el of push.elements.values()) {
-          const held = this.shadowElements.get(el.id as string);
-          if (held === undefined || Number(held.version) <= Number(el.version)) this.foldIntoShadow(el);
+          const stored = this.shadowElements.get(el.id as string);
+          if (stored === undefined || !storedElementWins(stored, el)) this.foldIntoShadow(el);
         }
         if (push.files !== null) this.shadowFiles = { ...this.shadowFiles, ...push.files };
       }
