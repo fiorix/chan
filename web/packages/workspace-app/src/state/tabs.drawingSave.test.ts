@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
-import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
+import { fileTab, readTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { confirmState, resolveConfirm } from "./confirm.svelte";
 import * as notifications from "./notify.svelte";
 import {
@@ -14,6 +14,7 @@ import {
   draftCloseState,
   forceReloadFromDisk,
   isDirty,
+  registerTerminalInputSink,
   rekeyTabsForRename,
   reloadTabFromDisk,
   resolveDraftClose,
@@ -125,6 +126,46 @@ describe("the close of a drawing whose save is refused", () => {
     expect(["board-a", "board-b", "notes-1"].map((id) => readTab(id)?.content)).toEqual([BROKEN, BROKEN, "edited"]);
   });
 
+  test("with a running terminal in the same close, the dialog speaks of closing and names both", async () => {
+    const pane = resetLayout([drawingTab("notes/board.excalidraw"), terminalTab({ id: "term-1", title: "build" })]);
+    stubWrites();
+    const unregister = registerTerminalInputSink("term-1", () => {});
+
+    const close = closePane(pane.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    expect({
+      title: confirmState.title,
+      message: confirmState.message,
+      confirm: confirmState.confirmLabel,
+      cancel: confirmState.cancelLabel,
+      destructive: confirmState.destructive,
+    }).toEqual({
+      title: "Close tabs?",
+      message: `board.excalidraw was not saved because the drawing does not parse (${parseReason(BROKEN)}). Its changes will be lost. build is still running.`,
+      confirm: "Close",
+      cancel: "Cancel",
+      destructive: true,
+    });
+    resolveConfirm(false);
+    await close;
+    unregister();
+  });
+
+  test("names three refused files in one sentence", async () => {
+    const pane = resetLayout([
+      drawingTab("boards/a.excalidraw", BROKEN, "board-a"),
+      drawingTab("boards/b.excalidraw", BROKEN, "board-b"),
+      drawingTab("boards/c.excalidraw", BROKEN, "board-c"),
+    ]);
+    stubWrites();
+
+    const close = closePane(pane.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    expect(confirmState.message).toBe("3 files were not saved: a.excalidraw, b.excalidraw and c.excalidraw. Their changes will be lost.");
+    resolveConfirm(false);
+    await close;
+  });
+
   test("a tab still dirty after a conflict is not asked about and stays open", async () => {
     // The conflict dialog is what speaks for this tab.
     const typed = '{ "type": "excalidraw", "elements": [1] }';
@@ -165,7 +206,7 @@ describe("the close of a drawing whose save is refused", () => {
 });
 
 describe("a refused drawing that does not close says why", () => {
-  test("a draft is not closed, and the notice says why and how it closes", async () => {
+  test("a draft is not closed, and a notice says that it was not saved", async () => {
     const path = ".Drafts/untitled/untitled.excalidraw";
     const pane = resetLayout([drawingTab(path)]);
     const write = stubWrites();
@@ -181,9 +222,7 @@ describe("a refused drawing that does not close says why", () => {
       inspected: inspect.mock.calls.length,
       draftDialog: draftCloseState.open,
     }).toEqual({
-      notices: [[
-        `untitled.excalidraw was not saved because the drawing does not parse (${parseReason(BROKEN)}). The draft closes once the drawing parses or its edits are undone.`,
-      ]],
+      notices: [["untitled.excalidraw was not saved."]],
       content: BROKEN,
       written: [],
       inspected: 0,
@@ -218,7 +257,7 @@ describe("a refused drawing that does not close says why", () => {
     expect({ notices: notice.mock.calls, written: written(write) }).toEqual({ notices: [], written: [] });
   });
 
-  test("a move to another window leaves it here, and the notice says so and why", async () => {
+  test("a move to another window leaves it here, and a notice says that it was not saved", async () => {
     const pane = resetLayout([drawingTab("notes/board.excalidraw")]);
     const write = stubWrites();
     const notice = vi.spyOn(notifications, "notify");
@@ -227,9 +266,7 @@ describe("a refused drawing that does not close says why", () => {
 
     expect({ open: readTab("board-1") !== undefined, notices: notice.mock.calls, written: written(write) }).toEqual({
       open: true,
-      notices: [[
-        `board.excalidraw stays in this window: it was not saved because the drawing does not parse (${parseReason(BROKEN)}).`,
-      ]],
+      notices: [["board.excalidraw was not saved and stays in this window."]],
       written: [],
     });
   });

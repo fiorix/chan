@@ -1485,7 +1485,7 @@ describe("a drawing whose save is refused", () => {
     }).toEqual({
       line: `Not saved: the drawing does not parse (${reason()})`,
       board: false,
-      body: "This drawing does not parse, so the board cannot show it. Switch to Source to fix it.",
+      body: `This drawing does not parse, so the board cannot show it. Use Show source code (${chordFor("app.editor.toggleMode")}) to fix it.`,
     });
   });
 
