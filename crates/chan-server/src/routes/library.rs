@@ -2019,7 +2019,9 @@ async fn handle_workspace_off(
 /// `DELETE /api/library/workspaces/{id}`: unmount if mounted, then UNREGISTER the
 /// workspace from the host library (the single registry) so it disappears
 /// everywhere. Live terminals return 409 unless `force=true`. A mutable launcher
-/// is required. 404 when no workspace maps to the id.
+/// is required. 404 when no workspace maps to the id. A removal that meets an
+/// earlier call of this process on the root that has not let go answers as the
+/// add and the on do: 503, `Retry-After: 1` and the words the root's row reads.
 async fn handle_remove_workspace(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
@@ -2042,6 +2044,9 @@ async fn handle_remove_workspace(
         }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
             live_terminals_response(active_terminals)
+        }
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            workspace_still_releasing()
         }
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
