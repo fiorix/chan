@@ -9487,7 +9487,6 @@ mod tests {
             }
 
             /// Hand `path` off as `chan serve` does while the desktop runs.
-            #[cfg(unix)]
             fn hand_off(&self, path: &Path) -> Result<(), String> {
                 open_workspace_from_handoff(
                     self.app.handle().clone(),
@@ -9719,6 +9718,45 @@ mod tests {
                 paths,
                 [stored.clone(), stored],
                 "a handoff by another spelling did not open a window under the row"
+            );
+        }
+
+        /// A handoff after the launcher turned the workspace off mounts it
+        /// again and opens a window there: the launcher's off goes to the
+        /// host and leaves the desktop's own map of what it serves alone.
+        #[test]
+        fn a_handoff_after_the_launchers_off_mounts_the_workspace_and_opens_a_window() {
+            if !own_home(
+                "a_handoff_after_the_launchers_off_mounts_the_workspace_and_opens_a_window",
+            ) {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = tempfile::tempdir().expect("root");
+            let stored = desktop.register(root.path());
+            desktop
+                .hand_off(&stored)
+                .expect("the first handoff is accepted");
+            desktop.wait_for_windows(1);
+            let off = desktop
+                .runtime
+                .block_on(desktop.embedded().close_workspace_root(&stored, false))
+                .expect("the launcher's off");
+            assert!(
+                off.completed(),
+                "fixture: the launcher's off did not close the workspace: {off:?}"
+            );
+            desktop
+                .hand_off(&stored)
+                .expect("the second handoff is accepted");
+            let windows = desktop.wait_for_windows(2);
+            assert!(
+                desktop.embedded().is_root_mounted(&stored),
+                "the handoff after the launcher's off did not mount the workspace"
+            );
+            assert!(
+                desktop.in_feed(&windows[1].0).is_some(),
+                "the window the handoff opened is not in the feed"
             );
         }
 

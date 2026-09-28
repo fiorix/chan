@@ -271,3 +271,70 @@ async fn on_main<T: Send + 'static>(
     rx.await
         .map_err(|_| "main-thread task dropped before replying".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::handoff_row::Desktop;
+
+    fn own_home(test: &str) -> bool {
+        crate::embedded::in_own_chan_home(&format!("window_ops::tests::{test}"))
+    }
+
+    /// `cs window new` opens a window of a workspace the launcher turned on:
+    /// the host mounted it, and the desktop's own map of what it serves never
+    /// saw it.
+    #[test]
+    fn cs_window_new_opens_a_window_of_a_workspace_the_launcher_turned_on() {
+        if !own_home("cs_window_new_opens_a_window_of_a_workspace_the_launcher_turned_on") {
+            return;
+        }
+        let desktop = Desktop::new();
+        let root = tempfile::tempdir().expect("root");
+        let stored = desktop.register(root.path());
+        let key = stored.to_string_lossy().into_owned();
+        desktop
+            .runtime
+            .block_on(desktop.embedded().open_workspace(&key))
+            .expect("the host mounts the workspace");
+        let opened = desktop
+            .runtime
+            .block_on(new_workspace_window(&desktop.state, &key));
+        assert!(
+            opened.is_ok(),
+            "cs window new refused a workspace the host serves: {opened:?}"
+        );
+        assert_eq!(
+            desktop.window_paths(),
+            [stored],
+            "cs window new did not open a window under the registry row"
+        );
+    }
+
+    /// `cs window new` in a relinked root the boot restored opens a window
+    /// under its registry row: the key a workspace's control socket sends is
+    /// the root the row stores.
+    #[cfg(unix)]
+    #[test]
+    fn cs_window_new_opens_a_window_of_a_restored_relinked_root_under_its_row() {
+        if !own_home("cs_window_new_opens_a_window_of_a_restored_relinked_root_under_its_row") {
+            return;
+        }
+        let desktop = Desktop::new();
+        let root = crate::tests::handoff_row::Relinked::register(&desktop);
+        desktop.restore(&root.stored);
+        let key = root.stored.to_string_lossy().into_owned();
+        let opened = desktop
+            .runtime
+            .block_on(new_workspace_window(&desktop.state, &key));
+        assert!(
+            opened.is_ok(),
+            "cs window new refused a restored relinked root: {opened:?}"
+        );
+        assert_eq!(
+            desktop.window_paths(),
+            std::slice::from_ref(&root.stored),
+            "cs window new did not open a window under the registry row"
+        );
+    }
+}
