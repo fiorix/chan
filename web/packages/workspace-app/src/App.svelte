@@ -1709,6 +1709,8 @@
        is intentionally untouched. */
     --text: #ebebf0;
     --text-secondary: #8e8e93;
+    /* The quiet text and dot colour the status bars read. */
+    --muted: var(--text-secondary);
     --text-heading: #d8d8de;
     --link: #58a6ff;
     /* Code background needs a clear step away from --bg (#1c1c1e) so
@@ -1814,6 +1816,7 @@
     --border: #d1d1d6;
     --text: #1c1c1e;
     --text-secondary: #6c6c70;
+    --muted: var(--text-secondary);
     --text-heading: #1c1c1e;
     --link: #0969da;
     --code-bg: #e8e8ec;
