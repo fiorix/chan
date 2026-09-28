@@ -64,7 +64,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A live drawing shows what its session holds as it opens.** With scene sync on, a drawing opened, or moved to another pane, while another window edited it could show the file's elements and background in place of that window's latest ones, and then write the file's background back over theirs; it shows theirs and writes nothing back. After a reconnect every window agrees on the background: one picked while the window was reconnecting gives way to the one the others hold.
 
-- **A live drawing keeps what a window sent as a conflict is resolved.** With scene sync on, resolving a drawing's conflict could make a window that had just sent a stroke lose it, if its connection then dropped, and show its previous background while the file and the other windows took the new one. Both now stand. A background picked a moment before another window joins or leaves is no longer put back.
+- **A live drawing keeps what a window sent as a conflict is resolved.** With scene sync on, resolving a drawing's conflict could make a window that had just sent a stroke lose it, if its connection then dropped, and could put back, in every window and in the file, the background it had replaced with one it had just picked. Both now stand. A background picked a moment before another window joins or leaves is no longer put back.
 
 ## [v0.100.0] - 2026-09-23
 
