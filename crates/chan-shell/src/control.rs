@@ -1300,7 +1300,8 @@ mod tests {
     // and the search still reaches the tenant after it. The test waits the
     // real two seconds: a paused clock advances whenever the runtime idles,
     // which it does while the search waits on the tenant's real socket, so
-    // it would give up on the tenant that answers as well.
+    // it would give up on the tenant that answers as well. The guard is
+    // twice the bound, so a bound twice as long as the probe's fails it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_wedged_candidate_costs_the_bound_and_no_more() {
@@ -1315,7 +1316,7 @@ mod tests {
         );
         let socket = env_socket(&dir.stable(1), Some(&link));
         let reply = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(4),
             send_control_request(&socket, ControlRequest::WindowList),
         )
         .await
