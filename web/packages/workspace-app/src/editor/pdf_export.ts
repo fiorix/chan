@@ -18,6 +18,7 @@ import {
   paginateDocBlocks,
 } from "./pdf_pages";
 import { api } from "../api/client";
+import { basename } from "../state/format";
 import {
   inlinePageResources,
   snapshotPage,
@@ -107,9 +108,7 @@ export function cssColorToRgb01(color: string): {
 /// when the basename has no extension). Empty paths fall back to a
 /// generic name.
 export function pdfFilenameFor(path: string): string {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  const base = i < 0 ? path : path.slice(i + 1);
-  const trimmed = base.trim();
+  const trimmed = basename(path).trim();
   if (!trimmed) return "document.pdf";
   const dot = trimmed.lastIndexOf(".");
   const stem = dot > 0 ? trimmed.slice(0, dot) : trimmed;
