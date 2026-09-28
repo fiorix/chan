@@ -3006,6 +3006,7 @@ async function loadTabContent(
       start.loadProgress = { loadedBytes: 0, totalBytes: null };
       start.error = null;
       start.saveError = null;
+      start.refusedUnwritten = false;
       start.fileMissing = null;
     }
     const r = await api.readStream(path, {
@@ -3048,7 +3049,6 @@ async function loadTabContent(
       t.diskConflicted = r.disk_conflicted ?? false;
       t.repoRoot = r.repo_root ?? null;
       t.error = null;
-      t.saveError = null;
       t.fileMissing = null;
       // Older servers omit `writable`; treat absent as writable so
       // the lamp behaves the way it did before this field existed.
@@ -5435,6 +5435,11 @@ export function clearTabCaretCommand(tab: FileTab): void {
 /// The tab's buffer, as its editor or its board reports an edit.
 export function setTabContent(tab: FileTab, content: string): void {
   tab.content = content;
+  // A buffer back at the file's text has nothing unwritten.
+  if (tab.refusedUnwritten && content === tab.saved) {
+    tab.saveError = null;
+    tab.refusedUnwritten = false;
+  }
 }
 /// The draft file a terminal's Rich Prompt composer edits, recorded when the
 /// composer creates it.
@@ -5607,6 +5612,7 @@ function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
   tab.fsWritable = response.writable ?? true;
   tab.error = null;
   tab.saveError = null;
+  tab.refusedUnwritten = false;
   tab.fileMissing = null;
   tab.externalChange = false;
   mirrorToSiblings(tab.path, response.content, tab.id);
@@ -5852,10 +5858,14 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // write a scene the canvas then refuses to restore.
   if (isExcalidraw(live.path)) {
     const reason = validateJsonBuffer(live.content);
-    // A pass clears an earlier refusal here, not at the write: a save that
-    // then meets a conflict must not keep a reason the text no longer has.
+    // A pass clears the reason at once, since the text parses, so a save
+    // that then meets a conflict keeps no reason the text no longer has.
+    // The hold stays until the write below lands.
     live.saveError = reason === null ? null : `the drawing does not parse (${reason})`;
-    if (reason !== null) return;
+    if (reason !== null) {
+      live.refusedUnwritten = true;
+      return;
+    }
   }
   const path = live.path;
   const sourceContent = live.content;
@@ -5886,6 +5896,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     done.diskConflicted = r.disk_conflicted ?? false;
     done.error = null;
     done.saveError = null;
+    done.refusedUnwritten = false;
     done.fileMissing = null;
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
@@ -8176,7 +8187,12 @@ export function rekeyTabsForRename(from: string, to: string): void {
       } else if (t.path.startsWith(dirPrefix)) {
         releaseDocSessionForTab(t.id, true);
         t.path = newDirPrefix + t.path.slice(dirPrefix.length);
+      } else {
+        continue;
       }
+      // A refusal's reason names a drawing, and the check reads no other
+      // path. The text is still unwritten, so the hold stays.
+      if (!isExcalidraw(t.path)) t.saveError = null;
     }
   }
 }
