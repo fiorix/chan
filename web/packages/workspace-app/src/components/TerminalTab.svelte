@@ -299,6 +299,12 @@
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
   let resizeScanCols = 0;
+  // A drag of a pane's edge changes the width on every frame, and a
+  // whole-buffer mask rescan of a long scrollback costs a large part of one,
+  // so each change rescans the rows on screen and the whole buffer waits for
+  // the width to stay put this long.
+  const RESIZE_SCAN_QUIET_MS = 150;
+  let resizeScanTimer: ReturnType<typeof setTimeout> | null = null;
   // Scrollback line cap captured at construction time from the
   // persisted MB budget so xterm.js gets a stable number. Held on
   // the component so the "copy scrollback" actions serialize the same
@@ -1266,7 +1272,12 @@
       // by marker tracking.
       if (cols !== resizeScanCols) {
         resizeScanCols = cols;
-        secretMasker?.scanAll();
+        secretMasker?.scanViewport();
+        if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
+        resizeScanTimer = setTimeout(() => {
+          resizeScanTimer = null;
+          secretMasker?.scanAll();
+        }, RESIZE_SCAN_QUIET_MS);
       }
     });
     resizeObserver = new ResizeObserver(queueFit);
@@ -2116,6 +2127,8 @@
     host?.removeEventListener("keydown", onGhosttyHostChord, true);
     ghosttyScrollbarClickGate?.();
     ghosttyScrollbarClickGate = null;
+    if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
+    resizeScanTimer = null;
     secretMasker?.dispose();
     secretMasker = null;
     term?.dispose();
