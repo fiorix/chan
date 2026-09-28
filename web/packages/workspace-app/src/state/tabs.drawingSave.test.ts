@@ -56,6 +56,12 @@ function written(write: ReturnType<typeof stubWrites>): string[][] {
   return write.mock.calls.map((call) => [call[0], call[1] as string]);
 }
 
+/// Every turn a close's save queued has run: a close that is going to ask
+/// has asked by then.
+async function settled(): Promise<void> {
+  for (let i = 0; i < 3; i += 1) await new Promise((r) => setTimeout(r, 0));
+}
+
 describe("the close of a drawing whose save is refused", () => {
   test("asks, naming the file and the reason, and keeps editing on a no", async () => {
     const pane = resetLayout([drawingTab("notes/board.excalidraw")]);
@@ -125,11 +131,13 @@ describe("the close of a drawing whose save is refused", () => {
       new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }),
     );
 
-    await closeTab(pane.id, "board-1");
+    const close = closeTab(pane.id, "board-1");
+    await vi.waitFor(() => expect(conflictDialog.open).toBe(true));
+    await settled();
 
-    expect({ asked: confirmState.open, conflict: conflictDialog.open, open: readTab("board-1") !== undefined }).toEqual({
-      asked: false, conflict: true, open: true,
-    });
+    expect({ asked: confirmState.open, open: readTab("board-1") !== undefined }).toEqual({ asked: false, open: true });
+    resolveConfirm(false);
+    await close;
   });
 
   test("a drawing fixed after a refusal whose save meets a conflict is not asked about", async () => {
@@ -144,11 +152,13 @@ describe("the close of a drawing whose save is refused", () => {
       new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }),
     );
 
-    await closeTab(pane.id, "board-1");
+    const close = closeTab(pane.id, "board-1");
+    await vi.waitFor(() => expect(conflictDialog.open).toBe(true));
+    await settled();
 
-    expect({ asked: confirmState.open, conflict: conflictDialog.open, open: readTab("board-1") !== undefined }).toEqual({
-      asked: false, conflict: true, open: true,
-    });
+    expect({ asked: confirmState.open, open: readTab("board-1") !== undefined }).toEqual({ asked: false, open: true });
+    resolveConfirm(false);
+    await close;
   });
 });
 
