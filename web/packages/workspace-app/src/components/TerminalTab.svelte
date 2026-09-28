@@ -2599,9 +2599,9 @@
   {#if menuOpen}
     <div
       class="terminal-tab-menu-bubble"
-      role="menu"
+      role={tabMenu.source === "body" ? "menu" : "dialog"}
       tabindex="-1"
-      aria-label="terminal tab menu"
+      aria-label={tabMenu.source === "body" ? "terminal menu" : "terminal tab settings"}
       use:portal
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
@@ -2616,7 +2616,7 @@
             <span>Terminal engine</span>
             <span class="terminal-backend-value">{backend}</span>
           </div>
-          <button class="mbtn" onclick={toggleSecretMasking}>
+          <button class="mbtn" role="menuitem" onclick={toggleSecretMasking}>
             <span class="mbtn-icon">
               <EyeOff size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -2630,7 +2630,7 @@
           <div class="msep" role="separator"></div>
           {#if backend === "xterm"}
             <!-- Find rides xterm's SearchAddon; no ghostty-web equivalent. -->
-            <button class="mbtn" onclick={openFind}>
+            <button class="mbtn" role="menuitem" onclick={openFind}>
               <span class="mbtn-icon">
                 <Search size={16} strokeWidth={1.75} aria-hidden="true" />
               </span>
@@ -2638,21 +2638,21 @@
               <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
             </button>
           {/if}
-          <button class="mbtn" onclick={copySelectionOrScrollback}>
+          <button class="mbtn" role="menuitem" onclick={copySelectionOrScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">Copy</span>
             <span class="mbtn-chord">{chordFor("terminal.copy") ?? ""}</span>
           </button>
-          <button class="mbtn" onclick={pasteClipboard}>
+          <button class="mbtn" role="menuitem" onclick={pasteClipboard}>
             <span class="mbtn-icon">
               <ClipboardPaste size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">Paste</span>
             <span class="mbtn-chord">{chordFor("terminal.paste") ?? ""}</span>
           </button>
-          <button class="mbtn" onclick={copyScrollback}>
+          <button class="mbtn" role="menuitem" onclick={copyScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -2664,7 +2664,7 @@
                command gates, and a tenant without the store serves no
                drafts route. -->
           {#if windowCaps.drafts}
-            <button class="mbtn" onclick={toggleRichPromptFromMenu}>
+            <button class="mbtn" role="menuitem" onclick={toggleRichPromptFromMenu}>
               <span class="mbtn-icon">
                 <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />
               </span>
