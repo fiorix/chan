@@ -17,7 +17,13 @@
 // Inert under demoState.enabled: a marketing embed never spawns windows.
 
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
-import { isBlankWindow, isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
+import {
+  isBlankWindow,
+  isWindowNavigating,
+  navigateWindowWhenReady,
+  type WindowConnection,
+  type WindowPageCheck,
+} from "@chan/web-shared/window-page";
 import { backend } from "../api/backend";
 import { ApiError, type WindowKind, type WindowRecord, type WindowSet } from "../api/library";
 import { windowUrl } from "../lib/windowUrl";
@@ -30,6 +36,9 @@ const handles = new Map<string, Window>();
 // window_ids from the last feed push, so the reconciler detects removals (the
 // feed signals a discard by ABSENCE, never a tombstone).
 let prevIds = new Set<string>();
+// The records of the last feed push, read when a repair's page answers. Null
+// until a push arrives.
+let latestWindows: WindowRecord[] | null = null;
 
 function servingOrigin(): string {
   return typeof location === "undefined" ? "" : location.origin;
@@ -48,6 +57,14 @@ function handleState(id: string): "live" | "closed" | "none" {
   if (!h.closed) return "live";
   handles.delete(id);
   return "closed";
+}
+
+// No feed yet says nothing of the record, so the gesture's reading stands.
+function feedConnection(id: string): WindowConnection {
+  if (latestWindows === null) return "disconnected";
+  const current = latestWindows.find((w) => w.window_id === id);
+  if (!current) return "gone";
+  return current.connected ? "connected" : "disconnected";
 }
 
 const checkWindowPage: WindowPageCheck = async (url, signal) => {
@@ -117,7 +134,11 @@ export async function openWindowRecord(
   if ((!blank && record.connected) || isWindowNavigating(h)) return h;
   try {
     const url = windowUrl(record, servingOrigin());
-    if (!(await navigateWindowWhenReady(h, url, checkWindowPage, opts)) || h.closed) {
+    const ready = await navigateWindowWhenReady(h, url, checkWindowPage, {
+      ...opts,
+      readConnection: () => feedConnection(record.window_id),
+    });
+    if (!ready || h.closed) {
       if (handles.get(record.window_id) === h) handles.delete(record.window_id);
       return null;
     }
@@ -165,6 +186,7 @@ export async function toggleWindowVisibility(
  * or native record is never flagged. */
 export function reconcileWindows(set: WindowSet): void {
   if (demoState.enabled) return;
+  latestWindows = set.windows;
   const currentIds = new Set(set.windows.map((w) => w.window_id));
   for (const id of prevIds) {
     if (!currentIds.has(id)) {
@@ -198,4 +220,5 @@ export function hasWindowHandle(id: string): boolean {
 export function resetWindowManager(): void {
   handles.clear();
   prevIds = new Set();
+  latestWindows = null;
 }

@@ -132,9 +132,9 @@ async function withCapability<T>(
   }
 }
 
-export function loadScopedLibrarySnapshot(): Promise<ScopedLibrarySnapshot> {
+export function loadScopedLibrarySnapshot(signal?: AbortSignal): Promise<ScopedLibrarySnapshot> {
   return withCapability((minted) =>
-    requestRoot<ScopedLibrarySnapshot>("GET", capabilityPath(minted.token)),
+    requestRoot<ScopedLibrarySnapshot>("GET", capabilityPath(minted.token), undefined, signal),
   );
 }
 
