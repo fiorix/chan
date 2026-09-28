@@ -77,8 +77,10 @@
     }, 600);
   }
 
-  // Re-query when path changes (tab swap).
+  // Re-query when path changes (tab swap, rename). The timer reads the path
+  // only later, outside the effect, so the effect reads it here.
   $effect(() => {
+    void path;
     lastFetched = "";
     backlinkCount = null;
     scheduleBacklinks();
