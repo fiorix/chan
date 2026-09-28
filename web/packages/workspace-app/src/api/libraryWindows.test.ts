@@ -784,6 +784,22 @@ describe("focusing a capability popup", () => {
     expect(host.runAction).toHaveBeenCalledTimes(outcome === "navigates" ? 1 : 0);
   });
 
+  test.each(["an expired", "an older build's"] as const)("leaves open a blank with %s mark when its repairs are refused", async (kind) => {
+    const popup = fakePopup();
+    popup.document.documentElement.setAttribute("data-chan-window-page-owner",
+      kind === "an expired" ? `navigating:${Date.now() - 1}` : "navigating");
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({ checkPage: vi.fn(async () => pageAnswer(409, "Repair refused.")) });
+
+    for (const attempt of [1, 2]) {
+      await expect(focusLibraryWindow(host, scopedWindow({ hidden: true }))).rejects.toMatchObject({ message: "Repair refused." });
+      expect(popup.close, `attempt ${attempt}`).not.toHaveBeenCalled();
+      expect(popup.document.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(true);
+    }
+    expect(host.checkPage).toHaveBeenCalledTimes(2);
+    expect(host.runAction).not.toHaveBeenCalled();
+  });
+
   test.each(["new_terminal", "new_workspace_window", "focus"] as const)("does not check a page on the native %s branch", async (action) => {
     asDesktop(vi.fn().mockResolvedValue(null));
     const open = vi.spyOn(window, "open");

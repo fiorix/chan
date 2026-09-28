@@ -565,6 +565,26 @@ describe("openWindowRecord", () => {
     expect(hasWindowHandle("w-1")).toBe(false);
   });
 
+  it.each(["an expired", "an older build's"] as const)("leaves open a blank with %s mark when its repairs are refused", async (kind) => {
+    vi.useFakeTimers();
+    const child = fakeWin();
+    child.document.documentElement.setAttribute("data-chan-window-page-owner",
+      kind === "an expired" ? `navigating:${Date.now() - 1}` : "navigating");
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    checkWindowPage.mockImplementation(async () => new Response('{"error":"Repair refused."}', { status: 409 }));
+    const rec = record({ window_id: "w-left", origin: "browser", connected: false });
+
+    for (const attempt of [1, 2]) {
+      const report = vi.fn();
+      await openWindowRecord(rec).catch(report);
+      expect(child.close, `attempt ${attempt}`).not.toHaveBeenCalled();
+      expect(report).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: "Repair refused." }));
+      expect(hasWindowHandle("w-left")).toBe(false);
+      expect(child.document.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(true);
+    }
+    expect(checkWindowPage).toHaveBeenCalledTimes(2);
+  });
+
   it("ends a re-open wait at sixty seconds with the server sentence", async () => {
     vi.useFakeTimers();
     checkWindowPage.mockImplementation(async () => gateResponse("120"));

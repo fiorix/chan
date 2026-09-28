@@ -424,3 +424,30 @@ describe("a caller that finds another page's wait", () => {
     expect(child.navigate).not.toHaveBeenCalled();
   });
 });
+
+describe("what a wait leaves on the document", () => {
+  test("puts back a mark it replaced, and never one that reads live", async () => {
+    vi.useFakeTimers();
+    const child = popup();
+    child.window.document.documentElement.setAttribute(OWNER, `waiting:${Date.now() + 60_000}`);
+    const refused = vi.fn<WindowPageCheck>(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      return answer(409);
+    });
+    let refusal: unknown;
+    void navigateWindowWhenReady(child.handle, "/follower", refused).catch((error: unknown) => { refusal = error; });
+    // The follower counts the mark out on its own timer and starts its own
+    // wait; then the clock is set back, so the replaced value reads live.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(refused).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() - 30_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(refusal).toMatchObject({ message: "Please wait." });
+
+    expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(true);
+    const later = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+    void navigateWindowWhenReady(child.handle, "/later", later);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(later).toHaveBeenCalledTimes(1);
+  });
+});
