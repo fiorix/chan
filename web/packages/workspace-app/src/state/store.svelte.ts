@@ -266,10 +266,9 @@ export const ui = $state<{
   /// statuses (action confirmations: "Copied path", "Saved", short
   /// notify() pings) clear themselves after a short window;
   /// persistent statuses (in-flight ops: "Moving...", errors) stay
-  /// until overwritten or explicitly cleared. A bare `ui.status = ...`
-  /// write leaves `statusKind` null: the pill then has no dismiss
-  /// control and never auto-clears, so a caller that wants a dismissable
-  /// pill sets `statusKind = "persistent"` alongside the write. Transient
+  /// until overwritten or dismissed. A bare `ui.status = ...` write
+  /// leaves `statusKind` null, which the status bar treats as
+  /// persistent: the pill offers Dismiss and never auto-clears. Transient
   /// writes go through `setTransientStatus` (or `notify()` which routes
   /// through that helper).
   statusKind: "transient" | "persistent" | null;

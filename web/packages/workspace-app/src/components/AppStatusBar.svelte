@@ -72,12 +72,13 @@
       ui.statusAction?.kind === "workspace-warnings" &&
       ui.statusAction.label === ui.status,
   );
-  // Persistent statuses with no typed action are the one-shot error pills
-  // (create / rename / upload failures). They have no lifecycle owner, so
-  // give them a click-to-dismiss. Transient statuses auto-clear and the
-  // workspace-warnings action opens its dialog instead.
+  // A status that is not transient never clears on its own: the one-shot
+  // error pills (create / rename / upload failures, most of which set no
+  // kind at all) have no lifecycle owner, so give them a click-to-dismiss.
+  // Transient statuses auto-clear and the workspace-warnings action opens
+  // its dialog instead.
   const statusDismissable = $derived(
-    statusVisible && !statusActionVisible && ui.statusKind === "persistent",
+    statusVisible && !statusActionVisible && ui.statusKind !== "transient",
   );
   const paneModeVisible = $derived(paneMode.active);
   // Session role: shown only when the roster is genuinely SPLIT by origin --

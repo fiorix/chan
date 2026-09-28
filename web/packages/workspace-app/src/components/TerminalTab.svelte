@@ -2343,8 +2343,6 @@
     closeTabMenu();
     requestTerminalCwd();
     ui.status = "PTY did not report CWD";
-    // Persistent so the pill gets a dismiss control; a null statusKind
-    // is neither dismissable nor auto-cleared and would stick forever.
     ui.statusKind = "persistent";
     focusTerminal();
   }
