@@ -4206,8 +4206,9 @@ async fn request_close_window(
 }
 
 /// Close a watcher-managed DEVSERVER window (`lib-<library_id>::<window_id>`).
-/// It closes immediately while its registry DELETE runs asynchronously. Record
-/// the close intent before destroying the native surface. A stale feed
+/// On its connecting page the close hides it and keeps its record. Anywhere
+/// else it closes immediately while its registry DELETE runs asynchronously.
+/// Record the close intent before destroying the native surface. A stale feed
 /// snapshot must keep treating this label as suppressed when the DELETE cannot
 /// reach the server; reconnect retries the same intent without reopening it.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
@@ -4217,6 +4218,16 @@ fn close_devserver_window<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let state = Arc::clone(app.state::<Arc<AppState>>().inner());
     let label = window.label().to_string();
+    // A window still on its connecting page is waiting for its devserver, and
+    // its record there holds the window's terminal sessions. A close there
+    // stops the wait and hides the window, as the live page's Hide does: the
+    // record and its sessions stay, and the window reopens from the Window
+    // menu. The destroy does not wait for the watcher's reconcile, which
+    // closes nothing when the devserver has no view registered.
+    if serve::window_on_connecting_screen(app, &label) {
+        serve::bury_window_now(app, &state, &label);
+        return window.destroy().map_err(err);
+    }
     if let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(&label) {
         state.pending_window_deletes.queue(&devserver_id, &record);
         if let Some(view) = state
