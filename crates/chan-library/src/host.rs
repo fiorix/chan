@@ -6856,6 +6856,51 @@ mod tests {
         );
     }
 
+    /// A close of a relinked root that is not mounted reads a mount in
+    /// flight, and clears the root's lifecycle, under every key its
+    /// registry row goes by, the stored root among them, where a devserver
+    /// marks the attempt of a row restored under that root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_of_a_relinked_root_reads_and_clears_its_stored_roots_marks() {
+        let (host, _overlay, stored, _canonical, _dirs) = relinked_host();
+        host.mark_canonical_root_starting(&stored);
+        assert_eq!(
+            host.close_workspace_for_root(&stored, false).await.unwrap(),
+            WorkspaceLifecycleOutcome::Completed,
+            "a close beside a mount starting under the stored root found nothing starting"
+        );
+        host.mark_canonical_root_failed(&stored, "the mount failed".into());
+        host.close_workspace_for_root(&stored, false).await.unwrap();
+        assert!(
+            !host.mount_state.lock().unwrap().contains_key(&stored),
+            "a failed mount's mark under the stored root outlived the off"
+        );
+    }
+
+    /// A removal of a mounted relinked root clears the root's lifecycle
+    /// under every key the workspace goes by, the stored root it was opened
+    /// at among them, so nothing is left for the life of the process under
+    /// a key no row goes by any more.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_of_a_mounted_relinked_root_clears_its_stored_roots_mark() {
+        let (host, _overlay, stored, _canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        host.mark_canonical_root_failed(&stored, "an earlier mount failed".into());
+        assert!(host
+            .remove_workspace_for_root(&stored, false)
+            .await
+            .unwrap()
+            .completed());
+        assert!(
+            !host.mount_state.lock().unwrap().contains_key(&stored),
+            "a mark under the stored root outlived the removal"
+        );
+    }
+
     /// A workspace window minted by either key of a relinked root's runtime
     /// stores the root that runtime was opened at, the registry row's stored
     /// root, and a key no workspace runtime goes by is stored as given.
