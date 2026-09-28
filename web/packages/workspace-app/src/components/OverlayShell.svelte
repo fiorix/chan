@@ -61,6 +61,28 @@
     children: Snippet;
   } = $props();
 
+  // The element that held focus when the overlay opened. Closing hands focus
+  // back to it when nothing else took it: focus left on the body or on an
+  // element that went with the panel returns, and a caller that moved focus
+  // on (an opened file) keeps it.
+  let returnFocus: HTMLElement | null = null;
+  $effect.pre(() => {
+    if (!open) return;
+    const active = document.activeElement;
+    returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
+    return () => {
+      const target = returnFocus;
+      returnFocus = null;
+      queueMicrotask(() => {
+        const current = document.activeElement;
+        const fell = current === null || current === document.body || !current.isConnected;
+        if (target?.isConnected && fell) {
+          target.focus({ preventScroll: true });
+        }
+      });
+    };
+  });
+
   // 10-step gap per depth so any same-overlay sub-layers (popovers,
   // dropdowns) still have room above their parent without spilling
   // into the next overlay's slot. Closed (depth -1) collapses to the
