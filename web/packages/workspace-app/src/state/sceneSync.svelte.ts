@@ -297,11 +297,19 @@ export class SceneSession {
   /// is an adopt, so a part this left out would be adopted over the push:
   /// the older value would go on the board and never be offered again. A
   /// discarded push leaves its parts here until the next snapshot replaces
-  /// them.
+  /// them, and no replay comes before that snapshot.
   private shadowElements = new Map<string, WireElement>();
   private shadowAppState: WireAppState = {};
   private shadowFiles: WireFiles = {};
-  private haveSnapshot = false;
+  /// The socket the last snapshot came on. Every dial answers with a
+  /// snapshot taken when that socket attached, so until the current socket's
+  /// own has landed, a push would be applied after it and handed back by it
+  /// as never accepted, and a replay could hand the canvas a push a drop
+  /// discarded. Both wait for it.
+  private snapshotSocket: WebSocket | null = null;
+  private get haveSnapshot(): boolean {
+    return this.ws !== null && this.snapshotSocket === this.ws;
+  }
   /// Authority-side dirty flag, tracked from snapshot/update/flush
   /// frames so `flush()` can resolve immediately when there is nothing
   /// unflushed.
@@ -403,7 +411,8 @@ export class SceneSession {
   /// Attach the canvas half. Replays the current authority shadow so a
   /// canvas that mounted after the snapshot landed still converges, then
   /// asks for pending local deltas (offline edits push as soon as the
-  /// channel is up).
+  /// channel is up). Before the current socket's snapshot there is nothing
+  /// to replay: that snapshot reaches the canvas when it lands.
   bindCanvas(binding: SceneCanvasBinding): void {
     if (this.releaseTimer !== null) this.retain();
     this.binding = binding;
@@ -797,7 +806,7 @@ export class SceneSession {
     for (const el of f.elements) this.foldIntoShadow(el);
     this.shadowAppState = f.appState;
     this.shadowFiles = f.files;
-    this.haveSnapshot = true;
+    this.snapshotSocket = this.ws;
     this.tab.authorityVersion = f.version;
     // A snapshot opens a fresh sync epoch: an in-flight push belongs to
     // the pre-resync world and will never be acked on this epoch. Hand its
