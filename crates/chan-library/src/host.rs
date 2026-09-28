@@ -7159,6 +7159,31 @@ mod tests {
         );
     }
 
+    /// A close of a mounted relinked root clears the root's lifecycle under
+    /// the stored root its runtime was opened at too, where a devserver
+    /// marks a mount attempt, so a failed attempt's reason does not outlive
+    /// the off.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_of_a_mounted_relinked_root_clears_its_stored_roots_mark() {
+        let (host, _overlay, stored, _canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        host.mark_canonical_root_failed(&stored, "an earlier mount failed".into());
+        assert!(
+            host.close_workspace_for_root(&stored, false)
+                .await
+                .unwrap()
+                .completed(),
+            "fixture: the close did not take the mount down"
+        );
+        assert!(
+            !host.mount_state.lock().unwrap().contains_key(&stored),
+            "a mark under the stored root outlived the off"
+        );
+    }
+
     /// A close of a relinked root that is not mounted reads a mount in
     /// flight, and clears the root's lifecycle, under every key its
     /// registry row goes by, the stored root among them, where a devserver
