@@ -359,15 +359,21 @@
     },
   };
 
-  // Bind the session once the board has taken its first seed, and rebind
-  // when the session is replaced. bindCanvas replays the session's scene,
-  // where every frame that came before the bind waits. The seed runs in a
-  // task of the library's and this effect in the microtask after it, so no
-  // socket frame lands between the two.
+  // Bind the session once the board has taken its first seed, and bind again
+  // whenever the session prop changes: when the session is replaced, and when
+  // the prop goes through null and back, as at a reload. bindCanvas replays
+  // the session's scene, where every frame that came before the bind waits.
+  // The replay reads the roster and the tab, and a change of either needs no
+  // replay (the roster hook repaints the names, and a push reads the tab when
+  // it is made), so the call is untracked and the bind depends on the prop
+  // and the latch alone. A first seed at the library's change runs in the
+  // library's task and this effect in the microtask after it; one the content
+  // effect makes, when a load ends after the init, is followed by this effect
+  // in a later pass of the same flush. No socket frame lands between the two.
   $effect(() => {
     const s = session;
     if (!s || !seededOnce) return;
-    s.bindCanvas(binding);
+    untrack(() => s.bindCanvas(binding));
     return () => s.unbindCanvas(binding);
   });
 
