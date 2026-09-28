@@ -198,6 +198,18 @@
     void loadTreeDir(parent).catch(() => {});
   });
 
+  /// What the body says for a selected path with no entry: its folder's
+  /// listing is on its way, could not be read, or holds no such entry.
+  const missingEntryHint = $derived.by(() => {
+    if (!path || entry) return null;
+    const parent = parentDir(path);
+    if (parent in tree.dirErrors) {
+      return `cannot list ${parent || "the workspace root"}: ${tree.dirErrors[parent]}`;
+    }
+    if (tree.loadedDirs[parent]) return `${path} is not in its folder's listing`;
+    return "Loading...";
+  });
+
   const dirStats = $derived.by(() => {
     if (!entry || !entry.is_dir) return null;
     const prefix = entry.path ? `${entry.path}/` : "";
@@ -901,7 +913,7 @@
 {#if !entry}
   <div class="empty">
     <div class="empty-title">Details</div>
-    <div class="empty-hint">click a file or directory to inspect</div>
+    <div class="empty-hint">{missingEntryHint ?? "click a file or directory to inspect"}</div>
   </div>
 {:else if entry.is_dir}
   <div class="info">
