@@ -150,8 +150,10 @@ export type Board = {
   /// Steps 1 and 2: the locale import, then the API handover.
   handOver(): Promise<void>;
   /// Steps 3 and 4: the awaited initial data replaces every element, then the
-  /// first `onChange`.
-  init(): Promise<void>;
+  /// first `onChange`. `between` runs after the first and before the second,
+  /// where a task that lands between the init's apply and its first change
+  /// runs.
+  init(between?: () => void): Promise<void>;
   /// Steps 1 to 4.
   start(): Promise<void>;
   /// A user's stroke: the library adds the element and reports the change.
@@ -219,12 +221,13 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
       mountedWith = latest();
       mountedWith.excalidrawAPI(api);
     },
-    async init() {
+    async init(between) {
       const scene = restore((await mountedWith!.initialData) ?? null);
       elements = scene.elements;
       appState = { ...appState, ...scene.appState, viewModeEnabled: mountedWith!.viewModeEnabled ?? false };
       files = { ...scene.files };
       loading = false;
+      between?.();
       latest().onChange();
     },
     async start() {
