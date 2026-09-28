@@ -3712,11 +3712,12 @@ mod tests {
     }
 
     #[test]
-    fn connecting_screen_windows_close_for_real() {
+    fn connecting_screen_windows_close_through_request_close_window() {
         // A window still on connecting.html must be closable. A devserver
-        // window's red button routes through request_close_window so its remote
-        // record becomes a pending delete, while the page offers the same path
-        // from Cmd/Ctrl+W, Ctrl+D, and Disconnect.
+        // window's red button routes through request_close_window, which reads
+        // the page the window shows and hides it with its record kept, while
+        // the page offers the same path from Cmd/Ctrl+W, Ctrl+D, and
+        // Disconnect.
         const SERVE_RS: &str = include_str!("serve.rs");
         let (_, rest) = SERVE_RS
             .split_once("\nfn on_close_requested(")
@@ -3740,11 +3741,48 @@ mod tests {
                 .count(),
             3
         );
-        assert!(KEY_BRIDGE_JS.contains("location.pathname.endsWith('/connecting.html')"));
+        // Each of the bridge's three checks for the connecting page closes
+        // through request_close_window: the first command it invokes after
+        // the check is that one.
+        let checks: Vec<&str> = KEY_BRIDGE_JS
+            .split("location.pathname.endsWith('/connecting.html')")
+            .skip(1)
+            .collect();
+        assert_eq!(checks.len(), 3);
+        for after in checks {
+            let command = after
+                .split("invokeIpc(e, '")
+                .nth(1)
+                .expect("the connecting arm invokes a command");
+            assert!(
+                command.starts_with("request_close_window'"),
+                "a close chord on the connecting page invokes another command: {command:.40}"
+            );
+        }
         const CONNECTING_JS: &str = include_str!("../../src/connecting.js");
-        assert!(CONNECTING_JS.contains("request_close_window"));
         assert!(CONNECTING_JS.contains("key === 'd'"));
         assert!(CONNECTING_JS.contains("key === 'w'"));
+        // The page invokes two commands only: the probe, and the close of its
+        // chords and its Disconnect button, which is request_close_window.
+        let invoked: Vec<&str> = CONNECTING_JS
+            .split("invoke('")
+            .skip(1)
+            .map(|rest| rest.split('\'').next().unwrap_or_default())
+            .collect();
+        assert!(
+            invoked
+                .iter()
+                .all(|command| ["probe_url", "request_close_window"].contains(command)),
+            "the connecting page invokes a command other than the probe and the close: {invoked:?}"
+        );
+        assert_eq!(
+            invoked
+                .iter()
+                .filter(|command| **command == "request_close_window")
+                .count(),
+            2,
+            "the connecting page's chords and its Disconnect do not both close through request_close_window"
+        );
     }
 
     #[test]
