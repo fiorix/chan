@@ -1,17 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { basename, rowLabel, windowRowLabel } from "./windowLabel";
+import { rootName, rowLabel, windowRowLabel } from "./windowLabel";
 import type { WindowRecord } from "../api/library";
 
-describe("basename", () => {
+describe("rootName", () => {
   it("returns the trailing component", () => {
-    expect(basename("/Users/x/notes")).toBe("notes");
+    expect(rootName("/Users/x/notes")).toBe("notes");
   });
   it("tolerates a trailing slash", () => {
-    expect(basename("/Users/x/notes/")).toBe("notes");
+    expect(rootName("/Users/x/notes/")).toBe("notes");
   });
   it("handles empty and root", () => {
-    expect(basename("")).toBe("");
-    expect(basename("/")).toBe("");
+    expect(rootName("")).toBe("");
+    expect(rootName("/")).toBe("");
   });
 });
 

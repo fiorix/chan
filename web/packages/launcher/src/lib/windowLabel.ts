@@ -11,8 +11,10 @@ export { rowLabel };
 /** The baked-in local-disk library's id; everything else is a remote library. */
 export const LOCAL_LIBRARY_ID = "local";
 
-/** Trailing path component, tolerant of a trailing slash. "" for "" or "/". */
-export function basename(path: string): string {
+/** Last component of a workspace's root on its host, tolerant of a
+ *  trailing slash; "" for "" or "/". It cuts at `/` alone, so a Windows
+ *  root reads whole. */
+export function rootName(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   const slash = trimmed.lastIndexOf("/");
   return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;

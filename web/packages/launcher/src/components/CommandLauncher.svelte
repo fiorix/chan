@@ -33,7 +33,7 @@
   import { unactionable, workspaceCondition } from "../api/library";
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
-  import { basename, LOCAL_LIBRARY_ID, windowRowLabel } from "../lib/windowLabel";
+  import { LOCAL_LIBRARY_ID, rootName, windowRowLabel } from "../lib/windowLabel";
   import { buildMachineTree } from "../lib/machineTree";
   import { library, clearError, reportError, disconnectDevserver } from "../state/library.svelte";
   import {
@@ -102,7 +102,7 @@
   const scopes: DeckScope[] = [{ id: "computers", label: "Computers", icon: MonitorCog }];
 
   function workspaceName(workspace: WorkspaceEntry): string {
-    return workspace.label || basename(workspace.path) || workspace.path;
+    return workspace.label || rootName(workspace.path) || workspace.path;
   }
 
   function devserverName(devserver: DevserverEntry): string {
@@ -132,7 +132,7 @@
   function windowContext(window: WindowRecord): string {
     const workspace = workspaceForWindow(window);
     if (window.kind === "workspace") {
-      return workspace ? workspaceName(workspace) : basename(window.workspace_path ?? "") || "Workspace";
+      return workspace ? workspaceName(workspace) : rootName(window.workspace_path ?? "") || "Workspace";
     }
     return window.control ? "Control terminal" : "Terminal";
   }
