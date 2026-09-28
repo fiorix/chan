@@ -117,7 +117,7 @@ The local runtime:
 - opens one workspace webview automatically, with additional Open clicks opening more windows for the same runtime (capped per workspace),
 - closes all of the workspace's windows when the runtime is toggled off.
 
-A workspace already open in another chan process (a standalone `chan serve`, or a second desktop) surfaces as a clear "open in another chan process" error and the toggle reverts; a quick off-then-on retries briefly so the previous handle can release its lock.
+A workspace already open in another chan process (a standalone `chan serve`, or a second desktop) surfaces as a clear "open in another chan process" error and the toggle reverts; a quick off-then-on retries briefly so the previous handle can release its lock, and a workspace this process is still releasing after that answers `workspace is still releasing; retry`, the words its row reads. An open waits on a root that stops answering for at most the devserver mount's bound, 60 seconds from its start, and then answers `mount timed out after 60 seconds: <root> did not answer`, so a close or a removal of that root answers after it.
 
 ### 3.4 Toggle Off (stop)
 
