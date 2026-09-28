@@ -12,8 +12,10 @@ import {
   conflictDialog,
   dismissConflict,
   draftCloseState,
+  forceReloadFromDisk,
   isDirty,
   rekeyTabsForRename,
+  reloadTabFromDisk,
   resolveDraftClose,
   scheduleAutosave,
   setTabContent,
@@ -248,5 +250,40 @@ describe("the reason a drawing was not saved", () => {
     expect({ written: written(write), saveError: tab.saveError, dirty: isDirty(tab) }).toEqual({
       written: [["notes/board.json", BROKEN]], saveError: null, dirty: false,
     });
+  });
+
+  test("goes with the hold at a load, which replaces the text", async () => {
+    const pane = resetLayout([drawingTab("notes/board.excalidraw")]);
+    stubWrites();
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, "board-1");
+    await vi.advanceTimersByTimeAsync(900);
+    vi.useRealTimers();
+    vi.spyOn(api, "readStream").mockResolvedValue({ path: "notes/board.excalidraw", content: SAVED, mtime: 3, mtime_ns: "3000000000" } as never);
+    await reloadTabFromDisk("board-1");
+    setTabContent(readTab("board-1")!, '{ "type": "excalidraw", "elements": [2] }');
+
+    const tab = readTab("board-1")!;
+    expect({ reason: tab.saveError, held: tab.refusedUnwritten }).toEqual({ reason: null, held: false });
+  });
+
+  test("goes with the hold when a conflict's resolution is adopted", async () => {
+    const pane = resetLayout([{ ...drawingTab("notes/board.excalidraw"), diskConflicted: true }]);
+    stubWrites();
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, "board-1");
+    await vi.advanceTimersByTimeAsync(900);
+    vi.useRealTimers();
+    vi.spyOn(api, "resolveSessionConflict").mockResolvedValue({
+      path: "notes/board.excalidraw", content: SAVED, mtime: 4, mtime_ns: "4000000000", authority_version: 2, disk_conflicted: false, writable: true,
+    } as never);
+    const reload = forceReloadFromDisk("board-1");
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    resolveConfirm(true);
+    await reload;
+    setTabContent(readTab("board-1")!, '{ "type": "excalidraw", "elements": [2] }');
+
+    const tab = readTab("board-1")!;
+    expect({ reason: tab.saveError, held: tab.refusedUnwritten }).toEqual({ reason: null, held: false });
   });
 });
