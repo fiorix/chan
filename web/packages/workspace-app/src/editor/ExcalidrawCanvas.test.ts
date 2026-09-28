@@ -309,6 +309,7 @@ type SessionStub = {
   unbindCanvas: ReturnType<typeof vi.fn>;
   pushScene: ReturnType<typeof vi.fn>;
   sendCursor: ReturnType<typeof vi.fn>;
+  bufferMirrored: ReturnType<typeof vi.fn>;
   peerCursorSnapshot: () => Map<number, { w: string; x: number; y: number }>;
 };
 
@@ -329,6 +330,7 @@ async function mountBound(
     unbindCanvas: vi.fn(),
     pushScene: vi.fn(() => true),
     sendCursor: vi.fn(),
+    bufferMirrored: vi.fn(),
     peerCursorSnapshot: () => new Map([[7, { w: "win-peer", x: 1.5, y: 2 }]]),
   };
   mounted.push(

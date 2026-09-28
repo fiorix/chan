@@ -20,10 +20,13 @@ import {
   layout, setTabContent, type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
-const { render, unmountRoot, beforeLibrary } = vi.hoisted(() => ({
+const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
   render: vi.fn(),
   unmountRoot: vi.fn(),
   beforeLibrary: { run: null as (() => void) | null },
+  // Whether a drawing may take a live scene session: off unless a test turns
+  // it on.
+  scene: { live: false },
 }));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render, unmount: unmountRoot }) }));
 vi.mock("react", () => ({ createElement: (_kind: unknown, props: unknown) => props }));
@@ -37,10 +40,10 @@ vi.mock("../editor/excalidrawAssets", () => ({
     run?.();
   },
 }));
-vi.mock("../state/sceneSync.svelte", async (original) => ({
-  ...await original<typeof import("../state/sceneSync.svelte")>(),
-  isSceneSyncEligible: () => false,
-}));
+vi.mock("../state/sceneSync.svelte", async (original) => {
+  const actual = await original<typeof import("../state/sceneSync.svelte")>();
+  return { ...actual, isSceneSyncEligible: (tab: FileTab) => scene.live && actual.isSceneSyncEligible(tab) };
+});
 vi.mock("../state/docSync.svelte", async (original) => ({
   ...await original<typeof import("../state/docSync.svelte")>(),
   isDocSyncEligible: () => false,
