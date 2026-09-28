@@ -94,7 +94,7 @@ describe("browser action visibility", () => {
   it.each(["waiting", "navigating"])("Show does not focus a peer's %s document", async (phase) => {
     vi.useFakeTimers();
     const child = popup();
-    child.document.documentElement.setAttribute("data-chan-window-page-owner", phase);
+    child.document.documentElement.setAttribute("data-chan-window-page-owner", `${phase}:${Date.now() + 5_000}`);
     const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
     const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
     const check = vi.spyOn(backend, "checkWindowPage");

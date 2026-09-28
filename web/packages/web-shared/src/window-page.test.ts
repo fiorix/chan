@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "./window-page";
+import { navigateWindowWhenReady, type WindowPageCheck } from "./window-page";
 
 async function separateCallers() {
   vi.resetModules();
@@ -115,13 +115,12 @@ describe("the connection read before navigation", () => {
     const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(readConnection));
     await vi.advanceTimersByTimeAsync(99);
     expect(readConnection).not.toHaveBeenCalled();
-    expect(child.window.document.documentElement.getAttribute(OWNER)).toBe("waiting");
+    expect(child.window.document.documentElement.getAttribute(OWNER)).toMatch(/^waiting:\d+$/);
     await vi.advanceTimersByTimeAsync(1);
 
     expect(await pending).toBe(true);
     expect(child.navigate).not.toHaveBeenCalled();
     expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(false);
-    expect(isWindowNavigating(child.handle)).toBe(false);
   });
 
   test("navigates a window that still reads disconnected, asking once with the wait's signal", async () => {
@@ -134,7 +133,7 @@ describe("the connection read before navigation", () => {
     expect(await pending).toBe(true);
     expect(readConnection).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal));
     expect(child.navigate).toHaveBeenCalledExactlyOnceWith(PAGE);
-    expect(child.window.document.documentElement.getAttribute(OWNER)).toBe("navigating");
+    expect(child.window.document.documentElement.getAttribute(OWNER)).toMatch(/^navigating:\d+$/);
   });
 
   test("ends the wait as for a closed window when the record is gone", async () => {
@@ -147,7 +146,6 @@ describe("the connection read before navigation", () => {
     expect(await pending).toBe(false);
     expect(child.navigate).not.toHaveBeenCalled();
     expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(false);
-    expect(isWindowNavigating(child.handle)).toBe(false);
   });
 
   test("navigates a blank window without reading its connection", async () => {
