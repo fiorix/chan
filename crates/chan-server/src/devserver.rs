@@ -1526,10 +1526,17 @@ impl DevserverState {
         let overlay = self.host.workspace_overlay();
         // Durable desired intent → the library-owned overlay store. Starting
         // and failed rows stay desired-on even though no host prefix is live.
-        // Records, overlay rows and registry rows all store canonical roots,
-        // so they are joined by those stored keys: a save runs on every
-        // mount, toggle and removal, and must not wait on the filesystem of
-        // any root, least of all one whose mount has stalled.
+        // A record keys its workspace by one of the two keys the workspace's
+        // registry row goes by: the root the row was registered at, or the
+        // canonical path the row last resolved to, which differ for a root
+        // whose path resolves elsewhere since it was registered. A mount
+        // keys a new record by the canonical path; a restore or an off keys
+        // one by the root the overlay or the registry stores. So a record is
+        // matched to the registry by either key of a row, and to the overlay
+        // row written under the record's own key. Every join is by stored
+        // keys: a save runs on every mount, toggle and removal, and must not
+        // wait on the filesystem of any root, least of all one whose mount
+        // has stalled.
         if let Some(overlay) = overlay {
             let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
                 .entries()
