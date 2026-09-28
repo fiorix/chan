@@ -825,11 +825,9 @@ async fn handle_library_command_action(
             if state.host.canonical_root_status(&root).0 != WorkspaceStatus::Running {
                 return command_capability_error(StatusCode::CONFLICT, "workspace is not running");
             }
-            state.host.mint_window_with_origin(
-                WindowKind::Workspace,
-                Some(root.to_string_lossy().into_owned()),
-                WindowOrigin::Browser,
-            )
+            state
+                .host
+                .mint_workspace_window(&root, WindowOrigin::Browser)
         }
         ScopedLibraryAction::SetWindowVisibility { window_id, hidden } => {
             let Some(record) = state
