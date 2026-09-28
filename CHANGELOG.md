@@ -16,7 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A `.json` file is saved as typed.** A `.json` tab without a live editing session no longer refuses to save a buffer that does not parse, which left the parse error in place of the editor and a tab that would not close. It saves the buffer as typed, as it saves any other text file, and the JSON tree shows the parse error. A live-edited `.json` tab was already written as typed, and its tree no longer says that saves are blocked. A drawing edited as source is still not saved while it does not parse.
 
-- **A drawing that does not parse keeps its editor.** A drawing edited as source whose text does not parse is still not saved, but its tab keeps the editor with the text as typed and says on its toolbar that the file was not saved and why, where the parse error took the editor's place. Closing it asks whether to keep editing or close without saving, where the close did nothing; a draft, or a move to another window, says why the tab stays open.
+- **A drawing that does not parse keeps its editor.** A drawing edited as source whose text does not parse is still not saved, but its tab keeps the editor with the text as typed and says on its toolbar that the file was not saved and why, where the parse error took the editor's place. Closing it asks whether to keep editing or close without saving, where the close did nothing; a draft, or a move to another window, says that it was not saved and stays open. Until the text is written, the tab shows no other editor's cursors and merges no live edits.
 
 ### Fixed
 
