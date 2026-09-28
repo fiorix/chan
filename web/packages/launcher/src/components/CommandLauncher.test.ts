@@ -873,7 +873,8 @@ describe("Waiting command refusals", () => {
 });
 
 describe("browser Show readiness", () => {
-  it.each(["ready", "closed", "refused", "connected"])("Show from the deck handles %s before visibility", async (outcome) => {
+  it.each(["ready", "closed", "refused", "connected", "native"])("Show from the deck handles %s before visibility", async (outcome) => {
+    const visibilityOnly = outcome === "connected" || outcome === "native";
     vi.useFakeTimers();
     const realActions = await vi.importActual<typeof import("../state/computerActions")>("../state/computerActions");
     actions.setShown.mockImplementation(realActions.setWindowShown);
@@ -893,7 +894,10 @@ describe("browser Show readiness", () => {
         ? new Response('{"error":"Show refused."}', { status: 409 })
         : new Response("<html></html>");
     });
-    library.windows = [{ ...windowRecord, window_id: `deck show ${outcome}`, hidden: true, connected: outcome === "connected" }];
+    library.windows = [{
+      ...windowRecord, window_id: `deck show ${outcome}`, hidden: true,
+      connected: outcome === "connected", origin: outcome === "native" ? "native" : "browser",
+    }];
     openCommandLauncher("computers");
     flushSync();
     result("Windows").click();
@@ -903,13 +907,13 @@ describe("browser Show readiness", () => {
     result("Show").click();
     await vi.advanceTimersByTimeAsync(99);
     flushSync();
-    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" ? 1 : 0);
-    expect(open).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
-    expect(check).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
+    expect(visibility).toHaveBeenCalledTimes(visibilityOnly ? 1 : 0);
+    expect(open).toHaveBeenCalledTimes(visibilityOnly ? 0 : 1);
+    expect(check).toHaveBeenCalledTimes(visibilityOnly ? 0 : 1);
     if (outcome === "closed") child.closed = true;
     await vi.advanceTimersByTimeAsync(101);
     flushSync();
-    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" || outcome === "ready" ? 1 : 0);
+    expect(visibility).toHaveBeenCalledTimes(visibilityOnly || outcome === "ready" ? 1 : 0);
     if (outcome === "ready") {
       expect(visibility).toHaveBeenCalledExactlyOnceWith(`deck show ${outcome}`, false, undefined);
       expect(child.location.href).toContain("?w=");
