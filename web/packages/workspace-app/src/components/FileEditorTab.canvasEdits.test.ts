@@ -349,7 +349,7 @@ describe("pending drawing edits", () => {
   ];
 
   test.each(PANE_CLOSES)(
-    "an unforced %s reports a pending stroke unsaved, and closes once it is saved", async (kind, blockedSummary) => {
+    "an unforced %s reports a pending stroke unsaved and closes nothing, and the same op closes it once it is saved", async (kind, blockedSummary) => {
       const { pane, tab, strokeAt } = await draw();
       const op = { kind, pane_id: pane.id, tab_id: tab.id };
       const asked = await paneExec(op);
@@ -1009,7 +1009,7 @@ describe("a live drawing", () => {
     expect({ beforeAck, afterAck: isDirty(tab) }).toEqual({ beforeAck: true, afterAck: false });
   });
 
-  test("an unforced close_tab reports a pending stroke unsaved and pushes it, and closes after its ack", async () => {
+  test("an unforced close_tab reports a pending stroke unsaved and pushes it, and the same op closes it after its ack", async () => {
     const { pane, tab, board, socket } = await attachedDrawing();
     vi.useFakeTimers();
     board.stroke(STROKE);
