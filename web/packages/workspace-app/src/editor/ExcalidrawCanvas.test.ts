@@ -718,6 +718,51 @@ describe("a live board's own appState change", () => {
   });
 });
 
+describe("the canvas's mirror and the session's saved mark", () => {
+  test("a mirror carrying an appState the session did not take is not reported as confirmed", async () => {
+    vi.useFakeTimers();
+    try {
+      const onSceneChange = vi.fn();
+      const { api, session, binding } = await mountBound([], onSceneChange);
+      binding.applySnapshot([], { ...boardAppState }, {});
+      libraryChange();
+      vi.advanceTimersByTime(300);
+      // The session drops the push: its socket is closing.
+      session.pushScene.mockReturnValue(false);
+      session.bufferMirrored.mockClear();
+
+      api.setAppState({ gridModeEnabled: true });
+      libraryChange();
+      vi.advanceTimersByTime(300);
+
+      expect({
+        mirrored: String(onSceneChange.mock.calls.at(-1)?.[0] ?? ""),
+        reported: session.bufferMirrored.mock.calls.length,
+      }).toEqual({ mirrored: expect.stringContaining('"gridModeEnabled":true'), reported: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a mirror of a peer's element is reported", async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, binding } = await mountBound([]);
+      binding.applySnapshot([], { ...boardAppState }, {});
+      libraryChange();
+      vi.advanceTimersByTime(300);
+      session.bufferMirrored.mockClear();
+
+      binding.applyUpdate({ elements: [wireEl("peer", 1)] });
+      vi.advanceTimersByTime(300);
+
+      expect(session.bufferMirrored).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("canonicalJson", () => {
   test("the same keys and values in another order give one text, nested too", () => {
     const board = { gridSize: 20, gridStep: 5, grid: { mode: true, step: 5 }, viewBackgroundColor: "#ffffff" };
