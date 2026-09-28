@@ -664,6 +664,74 @@ describe("the force-reload prompt can see unflushed scene state", () => {
   });
 });
 
+describe("the saved mark after the canvas mirrors its board", () => {
+  // The buffer as the canvas writes it after a peer's element reached the board.
+  const MIRRORED = sceneBufferWith("peer");
+
+  test("moves when nothing of this window is unconfirmed", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session } = attached(tab!);
+    tab!.content = MIRRORED;
+    session.bufferMirrored();
+
+    expect(tab!.saved).toBe(MIRRORED);
+  });
+
+  test("stays while an element of this window is not handed over", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding } = attached(tab!);
+    binding.pending.push(elem("mine", 2));
+    tab!.content = MIRRORED;
+    session.bufferMirrored();
+
+    expect(tab!.saved).toBe(SCENE_BUFFER);
+  });
+
+  test("stays while a push of this window is on the wire or queued behind it", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pending.push(elem("mine", 2));
+    binding.flushPendingLocal();
+    binding.pending.push(elem("mine", 3));
+    binding.flushPendingLocal();
+    tab!.content = MIRRORED;
+    session.bufferMirrored();
+    const whileQueued = tab!.saved;
+    sock.frame({ type: "push-ok", version: 1 });
+    session.bufferMirrored();
+
+    expect({ pushes: sock.frames("push").length, whileQueued, onTheWire: tab!.saved }).toEqual({
+      pushes: 2,
+      whileQueued: SCENE_BUFFER,
+      onTheWire: SCENE_BUFFER,
+    });
+  });
+
+  test.each([
+    ["degraded", (session: SceneSession) => session.degrade()],
+    ["reconnecting", (_session: SceneSession, sock: FakeSocket) => sock.drop()],
+  ])("stays while the session is %s", (state, leave) => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    leave(session, sock);
+    tab!.content = MIRRORED;
+    session.bufferMirrored();
+
+    expect({ state: tab!.doc?.state, saved: tab!.saved }).toEqual({ state, saved: SCENE_BUFFER });
+  });
+
+  test("a frame does not move it, since the buffer may hold an appState this window has not pushed", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pendingAppState = { gridModeEnabled: true };
+    tab!.content = MIRRORED;
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
+
+    expect(tab!.saved).toBe(SCENE_BUFFER);
+  });
+});
+
 // ---- does the classic PUT rescue the element? -------------------------------
 //
 // The server is not a participant in the loss: a push is the only way an
