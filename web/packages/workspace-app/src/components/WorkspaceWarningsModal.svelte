@@ -9,43 +9,19 @@
     workspaceWarningLabel,
     workspaceWarningsDialog,
   } from "../state/store.svelte";
-
-  let dialogEl: HTMLElement | undefined = $state();
+  import ModalShell from "./ModalShell.svelte";
 
   const warnings = $derived(workspaceWarningsDialog.warnings);
-
-  $effect(() => {
-    if (workspaceWarningsDialog.open) {
-      queueMicrotask(() => dialogEl?.focus());
-    }
-  });
 
   function keyFor(warning: WorkspaceWarning): string {
     return `${warning.kind}\u0000${warning.path}\u0000${warning.message}`;
   }
 
-  function onKey(e: KeyboardEvent): void {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      closeWorkspaceWarningsDialog();
-    }
-  }
 </script>
 
 {#if workspaceWarningsDialog.open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="workspace-warnings-backdrop" onclick={closeWorkspaceWarningsDialog}>
-    <div
-      bind:this={dialogEl}
-      class="workspace-warnings-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="workspace-warnings-title"
-      tabindex="-1"
-      onkeydown={onKey}
-      onclick={(e) => e.stopPropagation()}
-    >
+  <ModalShell labelledby="workspace-warnings-title" onClose={closeWorkspaceWarningsDialog} gap="0">
+    <div class="workspace-warnings">
       <header class="modal-header">
         <h2 id="workspace-warnings-title">Workspace warnings</h2>
         <button
@@ -113,31 +89,16 @@
         >OK</button>
       </footer>
     </div>
-  </div>
+  </ModalShell>
 {/if}
 
 <style>
-  .workspace-warnings-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 25500;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-    background: rgba(0, 0, 0, 0.42);
-  }
-  .workspace-warnings-modal {
-    width: min(720px, 92vw);
+  .workspace-warnings {
+    width: min(720px, 78vw);
     max-height: min(640px, 86vh);
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    background: var(--bg-elev);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
-    outline: none;
   }
   .modal-header {
     display: flex;
@@ -275,12 +236,8 @@
     border-top: 1px solid var(--border);
   }
   @media (max-width: 640px) {
-    .workspace-warnings-backdrop {
-      padding: 12px;
-      align-items: stretch;
-    }
-    .workspace-warnings-modal {
-      width: 100%;
+    .workspace-warnings {
+      width: auto;
       max-height: none;
     }
     .warning-item {

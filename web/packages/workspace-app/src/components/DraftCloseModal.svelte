@@ -1,6 +1,7 @@
 <script lang="ts">
   import { draftCloseState, resolveDraftClose } from "../state/tabs.svelte";
   import { windowCaps } from "../state/windowCaps";
+  import ModalShell from "./ModalShell.svelte";
 
   // A standalone window has no workspace to save into; its promote
   // targets are paths on the machine's disk. Workspace copy stays
@@ -17,26 +18,11 @@
       inputEl?.select();
     });
   });
-
-  function onKeydown(e: KeyboardEvent): void {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      resolveDraftClose("cancel");
-    }
-  }
 </script>
 
 {#if draftCloseState.open}
-  <div class="modal-backdrop" role="presentation" onclick={() => resolveDraftClose("cancel")}>
-    <div
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="draft-close-title"
-      tabindex="-1"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={onKeydown}
-    >
+  <ModalShell labelledby="draft-close-title" onClose={() => resolveDraftClose("cancel")} gap="0">
+    <div class="draft-close">
       <header>
         <div id="draft-close-title" class="title">Close Draft</div>
         <div class="path">{draftCloseState.path}</div>
@@ -78,27 +64,12 @@
         </button>
       </footer>
     </div>
-  </div>
+  </ModalShell>
 {/if}
 
 <style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 90;
-    display: grid;
-    place-items: center;
-    padding: 18px;
-    background: rgba(0, 0, 0, 0.38);
-  }
-  .modal {
-    width: min(520px, 100%);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--text);
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
-    padding: 16px;
+  .draft-close {
+    width: min(520px, calc(100vw - 64px));
   }
   header {
     display: grid;
