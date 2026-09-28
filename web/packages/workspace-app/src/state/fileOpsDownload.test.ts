@@ -14,12 +14,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 // Mock the desktop capability before the store module evaluates so the
 // import binding fileOps reads is the mock.
 const isTauriDesktop = vi.fn<() => boolean>();
-const runDesktopDownload = vi.fn<(url: string, name: string) => Promise<string>>();
+const runDesktopDownload = vi.fn<(url: string, name: string, source?: unknown) => Promise<string>>();
 
 vi.mock("../api/desktop", () => ({
   isTauriDesktop: () => isTauriDesktop(),
-  runDesktopDownload: (url: string, name: string) =>
-    runDesktopDownload(url, name),
+  runDesktopDownload: (url: string, name: string, source?: unknown) =>
+    runDesktopDownload(url, name, source),
 }));
 
 let fileOps: typeof import("./store.svelte").fileOps;
@@ -69,6 +69,19 @@ describe("fileOps.downloadPathWithProgress branch", () => {
 
     const [url] = runDesktopDownload.mock.calls[0]!;
     expect(url).toContain("/api/fs/tmp/build.bin?download=1&root=filesystem");
+  });
+
+  test("a filesystem-root download records its root for the Retry a reload rebuilds", () => {
+    isTauriDesktop.mockReturnValue(true);
+
+    fileOps.downloadPathWithProgress("tmp/build.bin", false, "filesystem");
+
+    const [, , source] = runDesktopDownload.mock.calls[0]!;
+    expect(source, "the transfer's recorded source").toEqual({
+      path: "tmp/build.bin",
+      isDir: false,
+      root: "filesystem",
+    });
   });
 
   test("browser falls back to the <a download> manager", () => {

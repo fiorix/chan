@@ -148,6 +148,26 @@ describe("a standalone terminal window whose tenant serves files", () => {
     expect(ctx && wirePathFromAbsolute(ctx, `/${HOME}/notes`)).toBe(`${HOME}/notes`);
     expect(ctx && wirePathFromAbsolute(ctx, "/")).toBe("");
   });
+
+  test("a download a reload restores retries under the root it was started with", async () => {
+    // A failed filesystem-root download, persisted before the reload.
+    const transfersModule = await import("./transfers.svelte");
+    const source = { path: "tmp/build.bin", isDir: false, root: "filesystem" as const };
+    const id = transfersModule.beginTransfer({ kind: "download", filename: "build.bin", cancel: null, source });
+    transfersModule.failTransfer(id, "server restarted");
+    transfersModule.transfers.items = [];
+
+    await boot(true);
+    const download = vi.spyOn(store.fileOps, "downloadPathWithProgress").mockImplementation(() => {});
+    const [restored] = transfersModule.transfers.items;
+    restored?.retry?.();
+
+    expect(download, "the Retry asks for the same file under the same root").toHaveBeenCalledWith(
+      "tmp/build.bin",
+      false,
+      "filesystem",
+    );
+  });
 });
 
 describe("a standalone terminal window whose tenant serves drafts", () => {

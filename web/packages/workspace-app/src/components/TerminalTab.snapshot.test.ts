@@ -19,7 +19,8 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 
 import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MAX_MS } from "../api/transport";
-import { ui } from "../state/store.svelte";
+import type { Preferences } from "../api/types";
+import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import { readTerminalSnapshot, writeTerminalSnapshot } from "../terminal/snapshotCache";
 import {
   attach,
@@ -49,6 +50,7 @@ afterEach(() => {
   // stand-in that uninstalling the fake clock removes.
   vi.useRealTimers();
   resetTerminals();
+  __testSetStandalonePreferences(null);
   ui.terminalControl = startControl;
   localStorage.clear();
 });
@@ -56,7 +58,10 @@ afterEach(() => {
 async function attached() {
   const [tab] = seatTerminals([terminalTab()]);
   const mounted = await mountTerminal(TerminalTab, tab!);
-  await attach(TerminalSocket.all.at(-1)!, { id: SESSION, generation: 3, seq: 42 });
+  const socket = TerminalSocket.all.at(-1)!;
+  await attach(socket, { id: SESSION, generation: 3, seq: 42 });
+  // The server ends every attach's replay with `ready`.
+  await receive(socket, { type: "ready", cols: 80, rows: 24 });
   return mounted;
 }
 
@@ -214,4 +219,120 @@ describe("resuming a reattach", () => {
       expect(dialed(TerminalSocket.all[2]!)).toEqual({ since: "15", generation: "2" });
     });
   }
+});
+
+// A socket that drops between a session frame and its `ready` has painted part
+// of the replay, and the prelude's cursor already names the end of it.
+describe("a replay the socket cuts short", () => {
+  const SNAPSHOT = { ansi: "SNAPSHOT SCREEN", generation: 3, lastSeq: 42, cols: 80, rows: 24, updatedAt: 1 };
+
+  function dialed(socket: TerminalSocket): { since: string | null; generation: string | null } {
+    const query = new URL(socket.url, "http://chan.test").searchParams;
+    return { since: query.get("since"), generation: query.get("generation") };
+  }
+
+  async function cutReplay(tail = "") {
+    vi.useFakeTimers();
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first, { id: SESSION, generation: 3, seq: 60 });
+    await output(first, `part of the replay${tail}`);
+    first.close();
+    return { tab: tab!, term, first };
+  }
+
+  async function redial(): Promise<TerminalSocket> {
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+    expect(TerminalSocket.all, "one redial after the cut").toHaveLength(2);
+    return TerminalSocket.all[1]!;
+  }
+
+  test("redials for the whole ring, not from its prelude's cursor or a cached snapshot", async () => {
+    writeTerminalSnapshot(SESSION, SNAPSHOT);
+    await cutReplay();
+    expect(dialed(TerminalSocket.all[0]!), "the first dial resumes from the snapshot").toEqual({
+      since: "42",
+      generation: "3",
+    });
+
+    const second = await redial();
+
+    expect(dialed(second), "the redial asks for the ring from its oldest byte").toEqual({
+      since: "0",
+      generation: null,
+    });
+  });
+
+  for (const [capture, tail] of [
+    ["on", "\x1b[38;5"],
+    ["off", "\x1b[?100"],
+  ] as const) {
+    test(`paints the redial's replay over a reset screen, from a cut inside a sequence, mouse capture ${capture}`, async () => {
+      if (capture === "off") {
+        __testSetStandalonePreferences({ terminal: { mouse_capture: false } } as unknown as Preferences);
+      }
+      const { term } = await cutReplay(tail);
+      const second = await redial();
+      const before = term.written.length;
+
+      await attach(second, { id: SESSION, generation: 3, seq: 60 });
+      await output(second, "the whole ring");
+
+      expect(term.written.slice(before).join(""), "a reset, then the replay alone").toBe("\x1bcthe whole ring");
+    });
+  }
+
+  test("puts the keyboard protocol back as it stood before the cut replay", async () => {
+    vi.useFakeTimers();
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    await mountTerminal(TerminalTab, tab!);
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first, { id: SESSION, generation: 3, seq: 60 });
+    const protocol = tab!.keyboardProtocol!;
+    const before = JSON.parse(JSON.stringify(protocol));
+    // The stand-in xterm parses nothing: this is the push a replayed
+    // `CSI > 1 u` would have made before the cut.
+    protocol.kitty.mainStack.push(protocol.kitty.mainFlags);
+    protocol.kitty.mainFlags = 1;
+    first.close();
+    const second = await redial();
+
+    await attach(second, { id: SESSION, generation: 3, seq: 60 });
+
+    expect(tab!.keyboardProtocol, "the handlers' own object").toBe(protocol);
+    expect(JSON.parse(JSON.stringify(protocol)), "as it stood before the cut replay").toEqual(before);
+  });
+
+  test("writes no snapshot while a replay has not reached its ready", async () => {
+    ui.terminalControl = false;
+    const [tab] = seatTerminals([terminalTab()]);
+    await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket, { id: SESSION, generation: 3, seq: 42 });
+    await output(socket, "part of the replay");
+
+    window.dispatchEvent(new Event("pagehide"));
+    expect(readTerminalSnapshot(SESSION), "no snapshot of a half-painted screen").toBeNull();
+
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    window.dispatchEvent(new Event("pagehide"));
+    expect(readTerminalSnapshot(SESSION), "the screen after ready is the session's").toMatchObject({
+      generation: 3,
+      lastSeq: 42,
+    });
+  });
+
+  test("writes no snapshot between a cut replay and the redial's ready", async () => {
+    ui.terminalControl = false;
+    await cutReplay();
+    const second = await redial();
+
+    window.dispatchEvent(new Event("pagehide"));
+    expect(readTerminalSnapshot(SESSION), "before the redial's session frame").toBeNull();
+
+    await attach(second, { id: SESSION, generation: 3, seq: 60 });
+    window.dispatchEvent(new Event("pagehide"));
+    expect(readTerminalSnapshot(SESSION), "during the redial's replay").toBeNull();
+  });
 });

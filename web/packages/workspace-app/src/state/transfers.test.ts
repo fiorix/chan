@@ -133,6 +133,43 @@ describe("transfer records", () => {
     );
   });
 
+  test("a download the page's teardown cancels restores as interrupted with a Retry", () => {
+    resetTransfers();
+    const cancel = vi.fn();
+    beginTransfer({
+      kind: "download",
+      filename: "dump.sql",
+      cancel,
+      source: { path: "dump.sql", isDir: false },
+    });
+
+    window.dispatchEvent(new Event("pagehide"));
+    expect(cancel, "the transport is still cancelled").toHaveBeenCalledOnce();
+    transfers.items = [];
+    const retry = vi.fn();
+    restoreTransfers(() => retry);
+
+    expect(transfers.items.map((t) => t.state), "the reload finds it cut short").toEqual(["interrupted"]);
+    transfers.items[0]?.retry?.();
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  test("a download the user cancels restores as cancelled", () => {
+    resetTransfers();
+    beginTransfer({
+      kind: "download",
+      filename: "dump.sql",
+      cancel: vi.fn(),
+      source: { path: "dump.sql", isDir: false },
+    });
+
+    transfers.items[0]?.cancel?.();
+    transfers.items = [];
+    restoreTransfers(() => vi.fn());
+
+    expect(transfers.items.map((t) => [t.state, t.retry]), "a choice the user made").toEqual([["cancelled", null]]);
+  });
+
   test("failed download retry reconstructs after a window reload", () => {
     resetTransfers();
     const id = beginTransfer({
