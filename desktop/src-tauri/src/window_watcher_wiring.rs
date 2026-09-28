@@ -962,9 +962,10 @@ pub(crate) fn spawn_local_window_watcher(app: AppHandle, state: Arc<AppState>) {
 #[derive(Clone)]
 struct DevserverWindowFeed {
     snapshot: Arc<Mutex<Vec<WindowRecord>>>,
-    /// Whether the feed connection whose frame wrote `snapshot` is still up.
-    /// Written and read under `snapshot`'s lock, so no reader pairs one
-    /// connection's set with another's state.
+    /// Whether a frame arrived and the feed task has not marked its round
+    /// ended. Stopping inside a stream can leave this set; the watch loop
+    /// consumes the same stop and reads no further snapshot. Written and read
+    /// under `snapshot`'s lock so a set and its state belong to one connection.
     live: Arc<std::sync::atomic::AtomicBool>,
     change: Arc<Notify>,
 }
@@ -987,11 +988,11 @@ impl DevserverWindowFeed {
 }
 
 impl WindowFeed for DevserverWindowFeed {
-    /// The window set for the watch loop, as the last frame left it but for
-    /// one field: a record reads `connected` only when the server said so in
-    /// a frame of the feed connection that is up now. While the feed is down,
-    /// every window reads as not connected. The launcher reads the shared set
-    /// directly, as the last frame left it.
+    /// The window set for the watch loop: the last frame, or the HTTP list's
+    /// seed before any frame. A record reads `connected` only when the frame
+    /// said so and the feed task has not marked that connection's round ended.
+    /// Before a first frame and between connections, every window reads as
+    /// not connected. The launcher reads the shared set directly.
     fn snapshot(&self) -> Vec<WindowRecord> {
         let snapshot = self.snapshot.lock().unwrap();
         let mut records = snapshot.clone();
@@ -2962,10 +2963,8 @@ mod tests {
         );
     }
 
-    // A Reload that found its target not ready is carried out by a later try
-    // once the target answers ready, on a page whose socket is gone, whatever
-    // the page's URL reads: a page stuck after a failed self-reload of its
-    // stripped URL reads as booted.
+    // A Reload that found its target not ready keeps a later try when the
+    // window's record reads not connected. That try navigates when ready.
     #[tokio::test(start_paused = true)]
     async fn a_timer_try_carries_out_a_refused_reload_on_a_disconnected_page() {
         for gateway in [false, true] {
@@ -2987,9 +2986,9 @@ mod tests {
         }
     }
 
-    // A window whose record reads connected has its socket, whatever its
-    // page's URL reads: the timer's try leaves it alone. The Reload's own
-    // dispatch still navigates, as the user asked.
+    // A connected record ends a timer's try when this webview was loaded
+    // with the attempted key. The Reload's own dispatch still navigates,
+    // as the user asked.
     #[tokio::test(start_paused = true)]
     async fn a_timer_try_leaves_a_connected_window_alone() {
         for gateway in [false, true] {
