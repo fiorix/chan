@@ -315,6 +315,23 @@ export class TerminalSecretMasker {
     }
   }
 
+  /// Rescan the rows on screen. A width change reflows every wrapped line,
+  /// and while a resize is dragged the terminal rescans only what the user
+  /// can see, so no secret shows, and leaves the rest to one `scanAll` once
+  /// the width stops changing.
+  scanViewport(): void {
+    if (this.#disposed || !this.#enabled) return;
+    try {
+      const buffer = this.#activeBuffer();
+      if (!buffer) return;
+      const end = Math.min(buffer.length, buffer.viewportY + this.#term.rows);
+      const rows = Array.from({ length: Math.max(0, end - buffer.viewportY) }, (_, i) => buffer.viewportY + i);
+      this.#scanDirtyRows(rows);
+    } catch (error) {
+      this.#fail("xterm secret masking scan failed", error);
+    }
+  }
+
   clear(): void {
     for (const entry of Array.from(this.#decorations)) {
       this.#disposeEntry(entry);
