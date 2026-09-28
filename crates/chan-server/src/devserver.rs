@@ -9454,6 +9454,151 @@ mod tests {
         }
     }
 
+    /// Restore `rows` into `state` as a devserver start does: register them,
+    /// prepare their records, save once before any mount runs, then run the
+    /// mounts. Returns the rows that first save wrote.
+    #[cfg(unix)]
+    async fn restored_from(
+        state: &Arc<DevserverState>,
+        rows: Vec<PersistedWorkspace>,
+    ) -> Vec<PersistedWorkspace> {
+        let rows = state.register_restore_rows(rows).await;
+        let attempts = state.prepare_restore_rows(rows);
+        state.persist_state();
+        let written = state
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(state), attempts, shutdown_rx).await;
+        written
+    }
+
+    /// One overlay a restore reads: its name, its rows as
+    /// [`restore_outcome`] takes them, whether it must come back on, and at
+    /// which generation.
+    #[cfg(unix)]
+    type OverlayCase = (&'static str, &'static [(bool, bool, u64)], bool, u64);
+
+    /// What a restore of `rows` over a fresh relinked devserver leaves: the
+    /// number of records, whether the only one is under the stored root at
+    /// its prefix, whether the host serves that prefix, whether the one row
+    /// reads on there, and the rows the first save wrote, each path named
+    /// `stored`, `canonical` or `other`. Rows are `(stored, desired on,
+    /// generation)`, `stored` false for the canonical path.
+    #[cfg(unix)]
+    async fn restore_outcome(
+        rows: &[(bool, bool, u64)],
+    ) -> (usize, bool, bool, bool, Vec<(&'static str, bool, u64)>) {
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let canonical = canonical_root(&relinked);
+        let rows = rows
+            .iter()
+            .map(
+                |&(under_stored, desired_on, generation)| PersistedWorkspace {
+                    path: if under_stored { &stored } else { &canonical }
+                        .to_string_lossy()
+                        .into_owned(),
+                    desired_on,
+                    generation,
+                },
+            )
+            .collect();
+        let written = restored_from(&state, rows).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let (records, only) = only_record(&state);
+        let entries = state.workspace_entries();
+        let outcome = (
+            records,
+            only == Some((prefix.clone(), stored.clone())),
+            state
+                .host
+                .mounted_prefixes()
+                .unwrap_or_default()
+                .contains(&prefix),
+            entries.len() == 1 && entries[0].prefix == prefix && entries[0].on,
+            written
+                .iter()
+                .map(|row| {
+                    let path = Path::new(&row.path);
+                    let kind = if path == stored {
+                        "stored"
+                    } else if path == canonical {
+                        "canonical"
+                    } else {
+                        "other"
+                    };
+                    (kind, row.desired_on, row.generation)
+                })
+                .collect(),
+        );
+        shut_down_hosted(&state, None).await.expect("shut down");
+        outcome
+    }
+
+    /// An overlay an earlier build wrote for a relinked root, with rows under
+    /// both of its keys or two under one, restores the workspace on when any
+    /// of its rows is on, at the highest generation among them. Generations
+    /// of two rows are two counters and order nothing between them, and the
+    /// earlier build's own restart served such a workspace wherever one of
+    /// its rows was on. The mount stands, the host serves the workspace at
+    /// the prefix derived from its stored root, its row reads on there, and
+    /// the first save writes one row under the stored root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_earlier_overlay_restores_a_workspace_on_when_any_row_is_on() {
+        let _env = chan_home_env_read();
+        let cases: [OverlayCase; 7] = [
+            (
+                "on, then a handoff",
+                &[(true, true, 1), (false, false, 2)],
+                true,
+                2,
+            ),
+            (
+                "off, then a handoff",
+                &[(true, false, 1), (false, true, 1)],
+                true,
+                1,
+            ),
+            (
+                "toggled off, then a handoff",
+                &[(true, false, 3), (false, true, 1)],
+                true,
+                3,
+            ),
+            (
+                "an on, then a handoff",
+                &[(false, true, 1), (false, false, 2)],
+                true,
+                2,
+            ),
+            (
+                "a tie, the stored row on",
+                &[(true, true, 1), (false, false, 1)],
+                true,
+                1,
+            ),
+            ("both off", &[(true, false, 1), (false, false, 2)], false, 2),
+            (
+                "two canonical rows off",
+                &[(false, false, 2), (false, false, 2)],
+                false,
+                2,
+            ),
+        ];
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for (case, rows, on, generation) in cases {
+            observed.push((case, restore_outcome(rows).await));
+            expected.push((case, (1, true, on, on, vec![("stored", on, generation)])));
+        }
+        assert_eq!(observed, expected, "the restored workspaces");
+    }
+
     /// A registered root handed off by an alias whose last component is not
     /// the root's own is served at the prefix derived from the root its
     /// registry row stores, and a handoff by the root's own spelling answers
