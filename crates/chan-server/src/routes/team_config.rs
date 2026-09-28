@@ -579,7 +579,8 @@ fn heredoc_delimiter(base: &str, body: &str) -> String {
 ///   1. the `{dir}/{tasks,journals,followups}` tree,
 ///   2. `{dir}/config.toml` (the validated config),
 ///   3. `{dir}/bootstrap.md` (the server-generated process doc),
-///   4. the lead-first agent spawn (`cs terminal new` + launch), then
+///   4. the lead-first agent spawn (`cs terminal new` with the member's
+///      env + launch), then
 ///   5. an identity poke per agent (`cs terminal write --submit=<agent>`).
 ///
 /// The script resolves `{dir}` against `$PWD` once, at the top, prints the
@@ -671,10 +672,19 @@ pub(crate) fn generate_bootstrap_script(
         let agent = member_agent(m).unwrap_or("shell");
         out.push_str(&format!("# --- {} ({role}, {agent}) ---\n", m.handle));
         out.push_str(&format!(
-            "cs terminal new --tab-name={} --tab-group={}\n",
+            "cs terminal new --tab-name={} --tab-group={}",
             sh_squote(&m.handle),
             sh_squote(group),
         ));
+        // The member's env reaches its tab as the direct spawn's does. Each
+        // entry is one quoted word, so a value with spaces or quotes arrives
+        // whole, and `cs` splits it at the first `=`, which a validated key
+        // cannot hold.
+        for (key, value) in &m.env {
+            out.push_str(" --env ");
+            out.push_str(&sh_squote(&format!("{key}={value}")));
+        }
+        out.push('\n');
         if !m.command.trim().is_empty() {
             // Launch the member's command in the fresh tab; the agent (or
             // shell program) inherits $CHAN_TAB_NAME from the tab's env.
