@@ -24,7 +24,7 @@ use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ChanError, Result};
-use crate::lock::{is_contended, open_lock_file, process_alive, ProcessLiveness};
+use crate::lock::{is_contended, open_lock_file, process_alive, FileLock, ProcessLiveness};
 
 /// Identity written into the daemon pidfile by the process that wins the lock.
 ///
@@ -197,17 +197,17 @@ pub fn read_daemon_record(record_path: &Path) -> Option<DaemonRecord> {
 /// after a `kill -9` left a `daemon.json` behind and that pid was reused. A
 /// caller signalling a recorded pid must gate on this so it never SIGTERMs an
 /// innocent reused-pid process. Probe-only: it momentarily takes the lock for the
-/// check and releases it on return. Conservative -- any open / unexpected error
-/// reads as NOT held, so an ambiguous probe never green-lights a signal.
+/// check and explicitly unlocks it before closing the file. Conservative -- any
+/// open / unexpected error reads as NOT held, so an ambiguous probe never
+/// green-lights a signal.
 pub fn daemon_lock_held(lock_path: &Path) -> bool {
     let Ok(file) = open_lock_file(lock_path) else {
         return false;
     };
-    match FileExt::try_lock_exclusive(&file) {
-        // Acquired -> it was free -> not held (the lock drops with `file`).
-        Ok(()) => {
+    match FileLock::try_exclusive(file) {
+        Ok(_lock) => {
             #[cfg(all(test, unix))]
-            crate::lock::capture_lock_duplicate(&file);
+            crate::lock::capture_lock_duplicate(_lock.file());
             false
         }
         Err(e) if is_contended(&e) => true,

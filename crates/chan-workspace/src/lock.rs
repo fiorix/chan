@@ -38,12 +38,24 @@ const LOCK_FILE: &str = "writer.lock";
 /// Held only during acquire, so it cannot pin a dead writer's lifetime lock.
 const ADMISSION_FILE: &str = "writer.admission";
 
-struct AdmissionLock(File);
+/// Owns an exclusive advisory lock and unlocks before closing its file.
+pub(crate) struct FileLock(File);
 
-impl Drop for AdmissionLock {
+impl FileLock {
+    pub(crate) fn try_exclusive(file: File) -> std::io::Result<Self> {
+        FileExt::try_lock_exclusive(&file)?;
+        Ok(Self(file))
+    }
+
+    pub(crate) fn file(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for FileLock {
     fn drop(&mut self) {
         // Explicit unlock also releases fork-inherited copies of this open
-        // description; closing our fd alone can leave admission pinned.
+        // description; closing our fd alone can leave the lock pinned.
         let _ = FileExt::unlock(&self.0);
     }
 }
@@ -89,7 +101,7 @@ pub struct LockRecord {
 /// Windows).
 pub struct WorkspaceLock {
     /// Holds the lock; the file lives as long as this struct.
-    file: File,
+    file: FileLock,
     /// The [`RECORD_FILE`] this holder published. Removed on release so the
     /// sidecar cannot outlive the tenancy that wrote it and shadow a later
     /// holder's identity (a build that predates the sidecar rewrites only
@@ -187,8 +199,8 @@ impl WorkspaceLock {
     pub fn acquire(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
         fs::create_dir_all(lock_dir)?;
         let admission = open_lock_file(&lock_dir.join(ADMISSION_FILE))?;
-        match FileExt::try_lock_exclusive(&admission) {
-            Ok(()) => {}
+        let _admission = match FileLock::try_exclusive(admission) {
+            Ok(lock) => lock,
             Err(e) if is_contended(&e) => {
                 let own_holder = read_lock_record(lock_dir).is_some_and(|record| {
                     record.pid == std::process::id()
@@ -201,13 +213,12 @@ impl WorkspaceLock {
                 });
             }
             Err(e) => return Err(e.into()),
-        }
-        let _admission = AdmissionLock(admission);
+        };
         let path = lock_dir.join(LOCK_FILE);
         let file = open_lock_file(&path)?;
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => {
-                write_record(&file, lock_dir, workspace_root)?;
+        match FileLock::try_exclusive(file) {
+            Ok(file) => {
+                write_record(file.file(), lock_dir, workspace_root)?;
                 Ok(Self {
                     file,
                     record_path: lock_dir.join(RECORD_FILE),
@@ -275,13 +286,13 @@ impl WorkspaceLock {
         let _ = fs::remove_file(lock_dir.join(RECORD_FILE));
         let _ = fs::remove_file(&path);
         let file = open_lock_file(&path)?;
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => {
+        match FileLock::try_exclusive(file) {
+            Ok(file) => {
                 tracing::warn!(
                     stolen_from = dead_pid,
                     "stole writer lock from a dead holder"
                 );
-                write_record(&file, lock_dir, workspace_root)?;
+                write_record(file.file(), lock_dir, workspace_root)?;
                 Ok(Self {
                     file,
                     record_path: lock_dir.join(RECORD_FILE),
@@ -305,10 +316,9 @@ impl Drop for WorkspaceLock {
         let _ = fs::remove_file(&self.record_path);
         // A clean release must not leave an identity that later readers can
         // mistake for a crashed holder before the next record is published.
-        if let Err(error) = self.file.set_len(0) {
+        if let Err(error) = self.file.file().set_len(0) {
             tracing::warn!(?error, "failed to clear released writer lock record");
         }
-        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -338,8 +348,8 @@ fn read_record_for(lock_dir: &Path) -> Option<(LockRecord, RecordSource)> {
 }
 
 /// Probe whether the writer lock for `lock_dir` is currently free,
-/// without taking it or touching the record. `false` means some open
-/// file description still holds it -- including an in-flight
+/// by briefly taking and explicitly unlocking it without touching the record.
+/// `false` means some open file description still holds it, including an in-flight
 /// `Workspace::drop` whose flock release has not completed yet.
 ///
 /// The close→reopen handoff uses this to confirm the prior holder's
@@ -352,11 +362,10 @@ pub fn is_free(lock_dir: &Path) -> bool {
         // Can't even open the lockfile → treat as not-free (conservative).
         return false;
     };
-    match FileExt::try_lock_exclusive(&file) {
-        // Held only for this probe; `file` drops here and the OS releases it.
-        Ok(()) => {
+    match FileLock::try_exclusive(file) {
+        Ok(_lock) => {
             #[cfg(all(test, unix))]
-            capture_lock_duplicate(&file);
+            capture_lock_duplicate(_lock.file());
             true
         }
         Err(e) if is_contended(&e) => false,
@@ -412,16 +421,7 @@ pub enum ForeignHolder {
 pub fn probe_foreign_holder(lock_dir: &Path, root_key: &Path) -> ForeignHolder {
     let path = lock_dir.join(LOCK_FILE);
     match open_lock_file(&path) {
-        // The file stays open until classification returns, so a lock this
-        // probe did take is held only for the probe and released on drop.
-        Ok(file) => {
-            let attempt = FileExt::try_lock_exclusive(&file);
-            #[cfg(all(test, unix))]
-            if attempt.is_ok() {
-                capture_lock_duplicate(&file);
-            }
-            classify_lock_attempt(attempt, lock_dir, root_key)
-        }
+        Ok(file) => classify_lock_attempt(FileLock::try_exclusive(file), lock_dir, root_key),
         Err(e) => ForeignHolder::Unknown {
             reason: format!("could not open {}: {e}", path.display()),
         },
@@ -432,12 +432,16 @@ pub fn probe_foreign_holder(lock_dir: &Path, root_key: &Path) -> ForeignHolder {
 /// every outcome, including a lock error that is not contention, can be
 /// exercised without contriving the operating-system condition behind it.
 fn classify_lock_attempt(
-    attempt: std::io::Result<()>,
+    attempt: std::io::Result<FileLock>,
     lock_dir: &Path,
     root_key: &Path,
 ) -> ForeignHolder {
     match attempt {
-        Ok(()) => ForeignHolder::Absent,
+        Ok(_lock) => {
+            #[cfg(all(test, unix))]
+            capture_lock_duplicate(_lock.file());
+            ForeignHolder::Absent
+        }
         Err(e) if is_contended(&e) => {
             // Contention is the observation. A record that cannot be read
             // leaves the holder's identity unknown, not whether one exists.
@@ -692,7 +696,7 @@ mod tests {
             started_at: "2000-01-01T00:00:00Z".into(),
         };
         // Stand in for the prior process exiting after a clean release.
-        write_record_body(&prior.file, &serde_json::to_vec(&dead).unwrap()).unwrap();
+        write_record_body(prior.file.file(), &serde_json::to_vec(&dead).unwrap()).unwrap();
         drop(prior);
         let (ready_tx, ready) = mpsc::channel();
         let (resume_tx, resume) = mpsc::channel();
