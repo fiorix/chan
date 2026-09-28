@@ -363,6 +363,51 @@ function libraryChange(): void {
   (renderMock.mock.calls.at(-1)![0] as { props: { onChange: () => void } }).props.onChange();
 }
 
+describe("a board that has not taken its first seed", () => {
+  test("hands its session nothing", async () => {
+    // The host gives a canvas a session only once its tab has loaded, so a
+    // board mounted with a session and a load in flight is a pair of props
+    // the host does not produce. It holds whatever the handover put there,
+    // none of it the user's, and must not offer it.
+    const target = document.createElement("div");
+    document.body.append(target);
+    const session: SessionStub = {
+      bindCanvas: vi.fn(),
+      unbindCanvas: vi.fn(),
+      pushScene: vi.fn(() => true),
+      sendCursor: vi.fn(),
+      bufferMirrored: vi.fn(),
+      peerCursorSnapshot: () => new Map(),
+    };
+    mounted.push(
+      mount(ExcalidrawCanvas, {
+        target,
+        props: {
+          content: JSON.stringify({ elements: [wireEl("handed-over", 1)] }),
+          dark: false,
+          onSceneChange: () => {},
+          session: session as unknown as SceneSession,
+          loaded: false,
+        },
+      }),
+    );
+    await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
+    const rendered = renderMock.mock.calls.at(-1)![0] as {
+      props: { excalidrawAPI: (a: unknown) => void; onChange: () => void };
+    };
+    rendered.props.excalidrawAPI(fakeApi([wireEl("handed-over", 1)], () => rendered.props.onChange()));
+    vi.useFakeTimers();
+    rendered.props.onChange();
+    vi.advanceTimersByTime(300);
+    vi.useRealTimers();
+
+    expect({ bound: session.bindCanvas.mock.calls.length, pushed: session.pushScene.mock.calls.length }).toEqual({
+      bound: 0,
+      pushed: 0,
+    });
+  });
+});
+
 describe("scene session binding loop safety", () => {
   test("a remote apply never enters undo and never re-pushes", async () => {
     const { api, session, binding } = await mountBound([]);
