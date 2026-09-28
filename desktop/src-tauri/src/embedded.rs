@@ -398,6 +398,14 @@ impl EmbeddedServer {
         self.host.is_workspace_mounted_by_key(key)
     }
 
+    /// The root the workspace runtime `key` names was opened at, by its
+    /// canonical root or by that root, which is the root its registry row
+    /// stores; `None` when no workspace runtime goes by `key`. Answered from
+    /// the keys the host stores, touching no filesystem.
+    pub fn mounted_root(&self, key: &Path) -> Option<std::path::PathBuf> {
+        self.host.mounted_root(key)
+    }
+
     pub async fn close_workspace_root(
         &self,
         root: &Path,
