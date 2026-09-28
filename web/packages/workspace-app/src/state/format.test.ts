@@ -15,6 +15,9 @@ describe("parentDir", () => {
     ["a/b/c/d/e.md", "a/b/c/d"],
     ["/a/b", "/a"],
     ["a\\b", ""],
+    ["a\\b.md", ""],
+    ["dir/a\\b.md", "dir"],
+    ["x\\y/a.md", "x\\y"],
     ["a/b/", "a/b"],
   ])("parentDir(%j) is %j", (path, parent) => {
     expect(parentDir(path)).toBe(parent);
@@ -29,7 +32,10 @@ describe("basename", () => {
     ["a", "a"],
     ["a/b", "b"],
     ["/a/b", "b"],
-    ["a\\b", "b"],
+    ["a\\b", "a\\b"],
+    ["a\\b.md", "a\\b.md"],
+    ["dir/a\\b.md", "a\\b.md"],
+    ["x\\y/a.md", "a.md"],
     ["a/b/", ""],
   ])("basename(%j) is %j", (path, base) => {
     expect(basename(path)).toBe(base);

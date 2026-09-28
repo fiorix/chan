@@ -3368,6 +3368,17 @@ describe("tab labels", () => {
     expect(tabLabelInPane(b, tabs)).toBe("y/[...]/foo.md");
   });
 
+  test("names a file whose name holds a backslash whole", () => {
+    const root = fileTab({ id: "root", path: "a\\b.md" });
+    const nested = fileTab({ id: "nested", path: "dir/a\\b.md" });
+
+    expect(tabLabel(root)).toBe("a\\b.md");
+    expect(tabLabel(nested)).toBe("a\\b.md");
+    expect(tabLabelInPane(nested, [nested])).toBe("a\\b.md");
+    expect(graphTitle("semantic", "file:dir/a\\b.md")).toBe("path=a\\b.md");
+    expect(graphTitle("semantic", "dir:x\\y")).toBe("path=x\\y/");
+  });
+
   test("re-collapses when the conflicting tab leaves the pane", () => {
     const a = fileTab({ id: "a", path: "a/foo.md" });
     const b = fileTab({ id: "b", path: "b/foo.md" });

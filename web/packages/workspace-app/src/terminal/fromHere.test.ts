@@ -13,6 +13,14 @@ describe("terminalFromHereTarget", () => {
     });
   });
 
+  test("opens a file whose name holds a backslash beside it, named whole", () => {
+    expect(terminalFromHereTarget("a\\b.md", false)).toEqual({ cwd: "", seedInput: "'a\\b.md'" });
+    expect(terminalFromHereTarget("dir/a\\b.md", false)).toEqual({
+      cwd: "dir",
+      seedInput: "'a\\b.md'",
+    });
+  });
+
   test("quotes file seed paths that need shell quoting", () => {
     expect(terminalFromHereTarget("notes/work/today's plan.md", false)).toEqual({
       cwd: "notes/work",
