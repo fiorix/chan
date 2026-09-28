@@ -692,6 +692,17 @@ enum StartupPhase {
     Stopped,
 }
 
+/// Why the startup gate refuses a request to a mounted tenant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TenantRoutesClosed {
+    /// The devserver is starting: the tenants' routes open once inherited
+    /// terminal sessions are adopted.
+    Starting,
+    /// The devserver is stopping: the tenants' routes do not open again in
+    /// this process.
+    Stopping,
+}
+
 struct StartupInner {
     phase: StartupPhase,
     pending: HashSet<MountAttemptKey>,
@@ -820,8 +831,17 @@ impl StartupCoordinator {
         }
     }
 
-    fn tenant_routes_ready(&self) -> bool {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase == StartupPhase::Ready
+    /// Whether the startup gate refuses a request to a mounted tenant, and
+    /// why, from one reading of the phase.
+    fn tenant_routes_closed(&self) -> Option<TenantRoutesClosed> {
+        match self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase {
+            StartupPhase::Ready => None,
+            StartupPhase::PreparingRows
+            | StartupPhase::Binding
+            | StartupPhase::ServingAndRestoring
+            | StartupPhase::ApplyingFdstore => Some(TenantRoutesClosed::Starting),
+            StartupPhase::Stopping | StartupPhase::Stopped => Some(TenantRoutesClosed::Stopping),
+        }
     }
 
     fn stop(&self) {
@@ -2824,34 +2844,50 @@ fn build_devserver_app(
 
 /// Keep the launcher, health, and management APIs responsive while persisted
 /// workspaces mount, but refuse every mounted tenant until inherited PTYs have
-/// been adopted and continuous parking is active.
+/// been adopted and continuous parking is active, and again from the stop
+/// signal on, when the tenants are going away.
 async fn gate_tenant_during_startup(
     State(state): State<Arc<DevserverState>>,
     req: HttpRequest<Body>,
     next: Next,
 ) -> Response {
-    if state.startup.tenant_routes_ready() {
+    let Some(closed) = state.startup.tenant_routes_closed() else {
         return next.run(req).await;
-    }
-    match startup_refusal(state.host.owns_mounted_tenant_path(req.uri().path())) {
+    };
+    match startup_refusal(
+        closed,
+        state.host.owns_mounted_tenant_path(req.uri().path()),
+    ) {
         Some(response) => response,
         None => next.run(req).await,
     }
 }
 
-fn startup_refusal(ownership: Result<bool, Error>) -> Option<Response> {
+/// The gate's answer to a request while the tenants' routes are `closed`,
+/// or `None` for a path no mounted tenant owns. A start asks the client to
+/// retry, since the routes open soon; a stop does not, and carries a code so
+/// a client that waits out a start can give up on it.
+fn startup_refusal(closed: TenantRoutesClosed, ownership: Result<bool, Error>) -> Option<Response> {
     match ownership {
-        Ok(true) => {
-            let mut response = crate::error::err(
+        Ok(true) => Some(match closed {
+            TenantRoutesClosed::Starting => {
+                let mut response = crate::error::err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "devserver is restoring terminal sessions".into(),
+                );
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("1"),
+                );
+                response
+            }
+            TenantRoutesClosed::Stopping => crate::error::err_code(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "devserver is restoring terminal sessions".into(),
-            );
-            response.headers_mut().insert(
-                header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("1"),
-            );
-            Some(response)
-        }
+                "the devserver is stopping".into(),
+                "devserver_stopping",
+                serde_json::json!({}),
+            ),
+        }),
         Ok(false) => None,
         Err(error) => Some(crate::error::err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4657,7 +4693,10 @@ mod tests {
         startup
             .advance(StartupPhase::ServingAndRestoring)
             .expect("binding -> serving");
-        assert!(!startup.tenant_routes_ready());
+        assert_eq!(
+            startup.tenant_routes_closed(),
+            Some(TenantRoutesClosed::Starting)
+        );
         let during_restore = MountAttemptKey::new("/during-restore", 1);
         startup
             .track(during_restore.clone())
@@ -4682,7 +4721,7 @@ mod tests {
         startup
             .advance(StartupPhase::Ready)
             .expect("fdstore -> ready");
-        assert!(startup.tenant_routes_ready());
+        assert_eq!(startup.tenant_routes_closed(), None);
     }
 
     #[tokio::test]
@@ -5378,16 +5417,21 @@ mod tests {
 
         #[tokio::test]
         async fn startup_state_error_mapper() {
-            let response =
-                startup_refusal(Err(Error::Config("workspace host lock poisoned".into()))).unwrap();
-            assert!(response.headers().get(header::RETRY_AFTER).is_none());
-            assert_refusal(
-                response,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "config: workspace host lock poisoned",
-            )
-            .await;
-            assert!(startup_refusal(Ok(false)).is_none());
+            for closed in [TenantRoutesClosed::Starting, TenantRoutesClosed::Stopping] {
+                let response = startup_refusal(
+                    closed,
+                    Err(Error::Config("workspace host lock poisoned".into())),
+                )
+                .unwrap();
+                assert!(response.headers().get(header::RETRY_AFTER).is_none());
+                assert_refusal(
+                    response,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "config: workspace host lock poisoned",
+                )
+                .await;
+                assert!(startup_refusal(closed, Ok(false)).is_none());
+            }
         }
 
         async fn tunnel(case: &str) {
