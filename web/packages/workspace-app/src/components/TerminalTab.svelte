@@ -340,7 +340,8 @@
   // its own session frame leaves the screen as it was and keeps it; only a
   // disposed xterm clears it.
   let sawSessionControl = false;
-  // Set when a socket closes between a session frame and its `ready`: the
+  // Set when a socket is closed between a session frame and its `ready`
+  // (closeSocket, which every redial's connect runs first, marks it): the
   // screen holds part of a replay and `receivedSeq` names the end of it, so
   // neither the live cursor nor a snapshot is a place to resume from. The
   // redial asks for the whole ring and paints it over a reset screen; the
@@ -1684,7 +1685,6 @@
       }
     };
     ws.onclose = () => {
-      if (attachReplayActive) replayCut = true;
       clearLiveness();
       clearTerminalMetadataSink();
       // Socket gone: any in-flight prompt can no longer observe its
