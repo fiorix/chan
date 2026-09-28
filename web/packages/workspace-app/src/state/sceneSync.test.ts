@@ -1277,6 +1277,28 @@ describe("a snapshot the server fans on a socket that had its own", () => {
       after: [["drawn"]],
     });
   });
+
+  /// This window claims x at version 5 with nonce 20, and the later snapshot
+  /// holds x deleted at version 5 with `snapshotNonce`: what of x the scene a
+  /// canvas binding after the ack replays holds.
+  function replayedOnATie(snapshotNonce: number): { versionNonce: unknown; isDeleted: unknown } {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!, [elem("x", 4)]);
+    binding.pending.push(elem("x", 5, { versionNonce: 20 }));
+    binding.flushPendingLocal();
+    sock.frame(snap([elem("x", 5, { versionNonce: snapshotNonce, isDeleted: true })]));
+    sock.frame({ type: "push-ok", version: 1 });
+    const x = rebind(session, binding).snapshots[0]?.elements.find((e) => e.id === "x");
+    return { versionNonce: x?.versionNonce, isDeleted: x?.isDeleted };
+  }
+
+  test("on a tie of versions leaves the snapshot's element, whose nonce is the lower, in the scene a later bind replays", () => {
+    expect(replayedOnATie(10)).toEqual({ versionNonce: 10, isDeleted: true });
+  });
+
+  test("on a tie of versions leaves the claim's element, whose nonce is the lower, in the scene a later bind replays", () => {
+    expect(replayedOnATie(30)).toEqual({ versionNonce: 20, isDeleted: false });
+  });
 });
 
 describe("the classic PUT during an outage", () => {
