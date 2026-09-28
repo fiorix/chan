@@ -10716,6 +10716,17 @@ mod tests {
                 .mint_window(WindowKind::Terminal, None)
                 .expect("terminal window");
 
+            // Closing an imported session signals its pid, so the pid is a
+            // child of this test, reaped only once the controller that
+            // signals it has stopped: until then its pid cannot be reused.
+            let mut child = std::process::Command::new("sleep")
+                .arg("60")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("sleep child");
+            let pid = child.id();
             let pty = portable_pty::native_pty_system()
                 .openpty(PtySize {
                     rows: 24,
@@ -10742,7 +10753,7 @@ mod tests {
                 env: Default::default(),
                 profile: None,
                 mcp_env: false,
-                child_pid: Some(4242),
+                child_pid: Some(pid),
                 size: crate::terminal_sessions::StoredPtySize {
                     rows: 24,
                     cols: 80,
@@ -10754,7 +10765,7 @@ mod tests {
                 alt_screen: false,
                 private_modes: Vec::new(),
             };
-            let expected_name = crate::terminal_sessions::fdstore_fd_name("restored1", Some(4242));
+            let expected_name = crate::terminal_sessions::fdstore_fd_name("restored1", Some(pid));
             let report = host.restore_fdstore_terminal_sessions(vec![
                 crate::terminal_sessions::FdStoreSessionImport {
                     meta,
@@ -10781,7 +10792,17 @@ mod tests {
                 vec![expected_name],
                 "the adopted session must be in the activation write set"
             );
-            registry.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+            // The wait ends before its bound only when the controller has
+            // recorded how the child ended, which follows its last signal.
+            let bound = Duration::from_secs(30);
+            let started = Instant::now();
+            let closed = registry.close_matching_and_wait(None, None, bound);
+            assert_eq!(closed.len(), 1, "the imported session is closed");
+            assert!(
+                started.elapsed() < bound,
+                "the controller of the closed session never stopped"
+            );
+            child.wait().expect("reap the sleep child");
         }
 
         /// A workspace runtime inserted at `prefix` as a mount publishes one,
