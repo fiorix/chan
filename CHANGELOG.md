@@ -50,6 +50,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A command that fails after its deck closed says so.** In the launcher and the workspace app, a command run from the command deck that fails once the deck has closed, or no longer shows that command's card, reports its error once, after the command's title, in the launcher's notices or on the workspace app's status line, where it was dropped or stayed on the deck's card; the workspace app's theme commands, which close the deck before they run, report their failures there too.
 
+- **The web app names a file whose name holds `\` by its whole name.** On a Unix server the inspector's title and image text, the PDF export's status line and the file name the export asks for named a file called `a\b.md` by the part after its last `\`, as `b.md` and `b.pdf`. They name it `a\b.md` and `a\b.pdf`, as the Files tree, a tab's title and search already did; chan-desktop still saves such a download under the part after the last `\`. The path prompt still refuses a `\` in a typed name, since Windows reads it as a separator, and says so with "\ is not allowed in a name" where it told you to use `/` as the separator.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
