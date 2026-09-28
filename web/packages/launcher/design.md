@@ -14,7 +14,7 @@ flowchart TB
     subgraph cs["chan-server"]
         SL["static asset layer<br/>embedded launcher bundle<br/>serve_launcher(uri, surface)"]
         LR["library router<br/>windows: list/mint/watch/discard/label + desktop open/hide/close<br/>workspaces: list (all) · add/on/off/rm<br/>live-window-bound command capabilities"]
-        IRF["install_launcher_root_fallback(host, bearer, serve_addr)"]
+        IRF["install_launcher_root_fallback(host, bearer, serve_addr) on the desktop<br/>admitting_launcher_router(..., admission) on the devserver"]
     end
 
     subgraph lib["chan-library (lower layer: no frontend bundle)"]
@@ -122,7 +122,7 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 ## Three-surface serving via the `WorkspaceHost` root fallback
 
-`host_dispatch` matches only workspace-tenant prefixes, so the root `/` returned 404. `WorkspaceHost` carries an install-once `root_fallback: OnceLock<Router>` that `host_dispatch` serves when no tenant prefix matches a request. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes) through `install_launcher_root_fallback`. The direction matters: chan-server depends on chan-library, so the launcher bundle, a frontend artifact, lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
+`host_dispatch` matches only workspace-tenant prefixes, so the root `/` returned 404. `WorkspaceHost` carries an install-once `root_fallback: OnceLock<Router>` that `host_dispatch` serves when no tenant prefix matches a request. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes): the desktop loopback through `install_launcher_root_fallback`, and the devserver through `admitting_launcher_router`, which adds the mount admission its stop refuses the launcher's add and on by. The direction matters: chan-server depends on chan-library, so the launcher bundle, a frontend artifact, lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
 
 1. **devserver** (`build_devserver_app`): served over the tunnel to the gateway proxy and on the box's `127.0.0.1` bind;
 2. **desktop loopback** through the embedded `WorkspaceHost`;
@@ -132,7 +132,7 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 ```mermaid
 flowchart TB
-    INST["install_launcher_root_fallback<br/>sets the policy per surface"]
+    INST["install_launcher_root_fallback (desktop)<br/>admitting_launcher_router (devserver)<br/>sets the policy per surface"]
     RTR["launcher_router(host, bearer, serve_addr)<br/>auth-agnostic handlers"]
     INST --> RTR
 
