@@ -7972,6 +7972,99 @@ mod tests {
         drop(stall);
     }
 
+    /// A turn-on of a failed record that lands while its forget waits on the
+    /// host is a later change, which the refused forget leaves as it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_forget_leaves_a_failed_records_later_turn_on_alone() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).unwrap();
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        state.finish_failed_attempt(&attempt, "the mount failed".into());
+        let stall = abandon_a_removal_at_its_unregister(&state, root.path(), &stored).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
+        // The forget has read the record once its removal waits the release
+        // budget for the unregister's permit.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while state.host.canonical_root_status(&stored).0 != WorkspaceStatus::Removing {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("fixture: the forget's removal never waited for the permit");
+        let turned_on = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get_mut(&prefix)
+            .unwrap()
+            .begin_on()
+            .expect("fixture: the turn-on began no attempt");
+        let (status, _, body) = completes_beside(&stall, "a refused forget", async move {
+            forgetting.await.unwrap()
+        })
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        let workspaces = state.workspaces.lock().unwrap();
+        let record = workspaces.get(&prefix).expect("the turned-on record");
+        assert_eq!(
+            (record.desired, record.phase.clone(), record.generation),
+            (DesiredMount::On, MountPhase::Starting, turned_on),
+            "the refused forget undid a later turn-on of a failed record"
+        );
+    }
+
+    /// A later forget's tombstone, at a newer generation than the one a
+    /// refused forget left, is that later forget's to settle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_forget_leaves_a_later_forgets_tombstone_alone() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, _attempt, prefix, _stored, stall) =
+            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while record_intent(&state, &prefix)
+                != Some((DesiredMount::Forgotten, MountPhase::Stopped))
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("fixture: the forget never tombstoned the record");
+        // A turn-on and then a second forget, each a change of its own.
+        let later = {
+            let mut workspaces = state.workspaces.lock().unwrap();
+            let record = workspaces.get_mut(&prefix).unwrap();
+            record
+                .begin_on()
+                .expect("fixture: the turn-on began no attempt");
+            record.forget();
+            record.generation
+        };
+        let (status, _, body) = completes_beside(&stall, "a refused forget", async move {
+            forgetting.await.unwrap()
+        })
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        let workspaces = state.workspaces.lock().unwrap();
+        let record = workspaces.get(&prefix).expect("the later tombstone");
+        assert_eq!(
+            (record.desired, record.phase.clone(), record.generation),
+            (DesiredMount::Forgotten, MountPhase::Stopped, later),
+            "the refused forget put back a later forget's tombstone"
+        );
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
