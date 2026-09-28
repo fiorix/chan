@@ -31,6 +31,9 @@ pub struct EnvControlSocket {
     // Carried with the socket; no request reads it.
     #[allow(dead_code)]
     workspace_path: Option<PathBuf>,
+    /// The lines this socket announced, for the tests to read.
+    #[cfg(all(test, unix))]
+    announced: std::sync::Mutex<Vec<String>>,
 }
 
 impl EnvControlSocket {
@@ -41,6 +44,8 @@ impl EnvControlSocket {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            #[cfg(all(test, unix))]
+            announced: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -908,6 +913,459 @@ mod tests {
             assert_eq!(typed.is_some(), expect_timeout, "{err}");
             server.await.unwrap();
             let _ = std::fs::remove_file(&socket);
+        }
+    }
+
+    /// A stand-in devserver tenant on a unix socket. It answers `Identify`
+    /// with the identity it was given, or never when it was given none (a
+    /// wedged server), and any other request with its own name. It counts
+    /// the connections it accepts and what they asked.
+    #[cfg(unix)]
+    struct FakeTenant {
+        connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        identifies: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        accept: tokio::task::JoinHandle<()>,
+    }
+
+    #[cfg(unix)]
+    impl FakeTenant {
+        fn spawn(path: &Path, identity: Option<Identity>, name: &'static str) -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            let connections = Arc::new(AtomicUsize::new(0));
+            let identifies = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let counts = (connections.clone(), identifies.clone(), requests.clone());
+            let accept = tokio::spawn(async move {
+                let (connections, identifies, requests) = counts;
+                while let Ok((stream, _)) = listener.accept().await {
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    let identity = identity.clone();
+                    let (identifies, requests) = (identifies.clone(), requests.clone());
+                    tokio::spawn(async move {
+                        let (read, mut write) = stream.into_split();
+                        let mut line = String::new();
+                        if BufReader::new(read).read_line(&mut line).await.is_err() {
+                            return;
+                        }
+                        let message = match serde_json::from_str::<ControlRequest>(&line) {
+                            Ok(ControlRequest::Identify) => {
+                                identifies.fetch_add(1, Ordering::SeqCst);
+                                match &identity {
+                                    Some(identity) => serde_json::to_string(identity).unwrap(),
+                                    None => {
+                                        std::future::pending::<()>().await;
+                                        return;
+                                    }
+                                }
+                            }
+                            _ => {
+                                requests.fetch_add(1, Ordering::SeqCst);
+                                name.to_string()
+                            }
+                        };
+                        let mut reply =
+                            serde_json::to_vec(&ControlResponse::Ok { message }).unwrap();
+                        reply.push(b'\n');
+                        let _ = write.write_all(&reply).await;
+                    });
+                }
+            });
+            Self {
+                connections,
+                identifies,
+                requests,
+                accept,
+            }
+        }
+
+        fn connections(&self) -> usize {
+            self.connections.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn identifies(&self) -> usize {
+            self.identifies.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeTenant {
+        fn drop(&mut self) {
+            self.accept.abort();
+        }
+    }
+
+    /// A directory of the test's own under the temp dir, with the mode it
+    /// is given, removed on drop. The name is short: macOS caps a socket
+    /// path at 104 bytes.
+    #[cfg(unix)]
+    struct SocketDir(PathBuf);
+
+    #[cfg(unix)]
+    impl SocketDir {
+        fn new(tag: &str, mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let path = std::env::temp_dir().join(format!("cs-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            Self(path)
+        }
+
+        /// The path of a devserver's stable socket named after `n`.
+        fn stable(&self, n: u64) -> PathBuf {
+            self.0.join(format!("chan-control-s{n:016x}.sock"))
+        }
+
+        /// A workspace folder reached through a symlink: the path a shell's
+        /// environment would name, and the canonical root its tenant
+        /// reports.
+        fn workspace(&self) -> (PathBuf, PathBuf) {
+            let real = self.0.join("ws-real");
+            let link = self.0.join("ws-link");
+            std::fs::create_dir(&real).unwrap();
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            (link, std::fs::canonicalize(&real).unwrap())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SocketDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    fn identity(kind: crate::wire::ServeKind, root: Option<PathBuf>) -> Identity {
+        Identity {
+            kind,
+            version: "test".into(),
+            pid: 1,
+            metadata_key: root.as_ref().map(|_| "key".into()),
+            workspace_root: root,
+        }
+    }
+
+    #[cfg(unix)]
+    fn env_socket(path: &Path, workspace: Option<&Path>) -> EnvControlSocket {
+        EnvControlSocket::new(
+            path.display().to_string(),
+            workspace.map(|path| path.display().to_string()),
+        )
+    }
+
+    // A socket the environment names and that answers is used as it is:
+    // nothing beside it is asked who it is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_environment_socket_is_used_as_it_is() {
+        use crate::wire::ServeKind::Devserver;
+        let dir = SocketDir::new("p0", 0o700);
+        let (link, root) = dir.workspace();
+        let own = FakeTenant::spawn(
+            &dir.stable(1),
+            Some(identity(Devserver, Some(root.clone()))),
+            "own",
+        );
+        let beside = FakeTenant::spawn(
+            &dir.stable(2),
+            Some(identity(Devserver, Some(root))),
+            "beside",
+        );
+        let socket = env_socket(&dir.stable(1), Some(&link));
+        let reply = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .unwrap();
+        assert_eq!(reply, "own");
+        assert_eq!(own.identifies(), 0, "the live socket was asked who it is");
+        assert_eq!(
+            beside.connections(),
+            0,
+            "a socket beside a live one was knocked"
+        );
+        assert!(socket.announced.lock().unwrap().is_empty());
+    }
+
+    // A terminal whose tenant moved to another prefix keeps the socket of
+    // the old one, which nothing binds. Its requests reach the one devserver
+    // tenant beside that socket that serves its workspace, found once for
+    // the run and announced once, whether the old socket's node is gone or
+    // left behind refusing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moved_terminal_reaches_the_tenant_serving_its_workspace() {
+        use crate::wire::ServeKind::Devserver;
+        for stale_node in [false, true] {
+            let dir = SocketDir::new(if stale_node { "p1b" } else { "p1a" }, 0o700);
+            let (link, root) = dir.workspace();
+            let dead = dir.stable(1);
+            if stale_node {
+                // A listener dropped without an unlink leaves a node that
+                // refuses, as a server that crashed does.
+                drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
+            }
+            let other = FakeTenant::spawn(
+                &dir.stable(2),
+                Some(identity(Devserver, Some(dir.0.clone()))),
+                "other",
+            );
+            let moved = FakeTenant::spawn(
+                &dir.stable(3),
+                Some(identity(Devserver, Some(root.clone()))),
+                "moved",
+            );
+            let socket = env_socket(&dead, Some(&link));
+            for request in 0..2 {
+                let reply = send_control_request(&socket, ControlRequest::WindowList)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("stale node {stale_node}, request {request}: {e:#}")
+                    });
+                assert_eq!(reply, "moved", "stale node {stale_node}, request {request}");
+            }
+            assert_eq!(moved.requests(), 2, "stale node {stale_node}");
+            assert_eq!(
+                moved.identifies(),
+                1,
+                "stale node {stale_node}: the search ran more than once for one socket"
+            );
+            assert_eq!(other.requests(), 0, "stale node {stale_node}");
+            let announced = socket.announced.lock().unwrap().clone();
+            assert_eq!(announced.len(), 1, "stale node {stale_node}: {announced:?}");
+            let line = &announced[0];
+            let (dead, found) = (
+                dead.display().to_string(),
+                dir.stable(3).display().to_string(),
+            );
+            assert!(
+                line.contains(&dead) && line.contains(&found),
+                "stale node {stale_node}: the line names neither socket: {line}"
+            );
+        }
+    }
+
+    // A candidate that accepts and never answers costs the probe's bound,
+    // and the search still reaches the tenant after it.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_wedged_candidate_costs_the_bound_and_no_more() {
+        use crate::wire::ServeKind::Devserver;
+        let dir = SocketDir::new("p1c", 0o700);
+        let (link, root) = dir.workspace();
+        let _wedged = FakeTenant::spawn(&dir.stable(2), None, "wedged");
+        let moved = FakeTenant::spawn(
+            &dir.stable(3),
+            Some(identity(Devserver, Some(root))),
+            "moved",
+        );
+        let socket = env_socket(&dir.stable(1), Some(&link));
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            send_control_request(&socket, ControlRequest::WindowList),
+        )
+        .await
+        .expect("the search waited on the wedged candidate past its bound")
+        .unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(reply, "moved");
+        assert_eq!(moved.requests(), 1);
+    }
+
+    // Every case in which the search must not choose. Each answers as a
+    // dead socket answers today, naming the socket the environment names,
+    // and no candidate receives anything but `Identify`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moved_terminal_finds_no_tenant_where_the_choice_is_not_clear() {
+        use crate::wire::ServeKind::{Desktop, Devserver, Standalone};
+        struct Case {
+            name: &'static str,
+            mode: u32,
+            // The dead socket's file name, when it is not stable-shaped.
+            dead_name: Option<&'static str>,
+            // How the environment names the workspace.
+            workspace: fn(&SocketDir, &Path) -> Option<PathBuf>,
+            // The candidates beside the dead socket, by the root they
+            // serve (`None` for the terminal's own root).
+            tenants: Vec<(crate::wire::ServeKind, Option<Option<PathBuf>>)>,
+            // Whether a candidate may be connected to at all.
+            probed: bool,
+            words: &'static str,
+        }
+        let link = |_: &SocketDir, link: &Path| Some(link.to_path_buf());
+        let gone = "no longer running";
+        let cases = vec![
+            Case {
+                name: "a pid-scoped socket",
+                mode: 0o700,
+                dead_name: Some("chan-control-4242-ab01.sock"),
+                workspace: link,
+                tenants: vec![(Devserver, None)],
+                probed: false,
+                words: gone,
+            },
+            Case {
+                name: "no workspace path",
+                mode: 0o700,
+                dead_name: None,
+                workspace: |_, _| None,
+                tenants: vec![(Devserver, None)],
+                probed: false,
+                words: gone,
+            },
+            Case {
+                name: "a workspace path that does not resolve",
+                mode: 0o700,
+                dead_name: None,
+                workspace: |dir, _| Some(dir.0.join("gone")),
+                tenants: vec![(Devserver, None)],
+                probed: true,
+                words: gone,
+            },
+            Case {
+                name: "a tenant of another root",
+                mode: 0o700,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Devserver, Some(Some(PathBuf::from("/"))))],
+                probed: true,
+                words: gone,
+            },
+            Case {
+                name: "a standalone server",
+                mode: 0o700,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Standalone, None)],
+                probed: true,
+                words: gone,
+            },
+            Case {
+                name: "a desktop",
+                mode: 0o700,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Desktop, None)],
+                probed: true,
+                words: gone,
+            },
+            Case {
+                name: "a tenant with no workspace",
+                mode: 0o700,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Devserver, Some(None))],
+                probed: true,
+                words: gone,
+            },
+            Case {
+                name: "two tenants of the root",
+                mode: 0o700,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Devserver, None), (Devserver, None)],
+                probed: true,
+                words: gone,
+            },
+            Case {
+                name: "a directory others can write",
+                mode: 0o777,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Devserver, None)],
+                probed: false,
+                words: gone,
+            },
+            Case {
+                name: "a directory its group can write",
+                mode: 0o770,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Devserver, None)],
+                probed: false,
+                words: gone,
+            },
+            Case {
+                name: "a directory the world can write",
+                mode: 0o707,
+                dead_name: None,
+                workspace: link,
+                tenants: vec![(Devserver, None)],
+                probed: false,
+                words: gone,
+            },
+            Case {
+                name: "a connect error of another kind",
+                mode: 0o700,
+                dead_name: Some("loop"),
+                workspace: link,
+                tenants: vec![(Devserver, None)],
+                probed: false,
+                words: "connecting to chan control socket",
+            },
+        ];
+        for (n, case) in cases.into_iter().enumerate() {
+            let dir = SocketDir::new(&format!("p2{n}"), case.mode);
+            let (link, root) = dir.workspace();
+            let dead = match case.dead_name {
+                // A symlink to itself: the connect fails with ELOOP, and the
+                // name is a stable one, so only the error's kind refuses.
+                Some("loop") => {
+                    let dead = dir.stable(1);
+                    std::os::unix::fs::symlink(&dead, &dead).unwrap();
+                    dead
+                }
+                Some(name) => dir.0.join(name),
+                None => dir.stable(1),
+            };
+            let tenants: Vec<FakeTenant> = case
+                .tenants
+                .iter()
+                .enumerate()
+                .map(|(i, (kind, served))| {
+                    let served = served.clone().unwrap_or_else(|| Some(root.clone()));
+                    FakeTenant::spawn(
+                        &dir.stable(2 + i as u64),
+                        Some(identity(*kind, served)),
+                        "tenant",
+                    )
+                })
+                .collect();
+            let socket = env_socket(&dead, (case.workspace)(&dir, &link).as_deref());
+            let err = send_control_request(&socket, ControlRequest::WindowList)
+                .await
+                .map(|reply| format!("reached a tenant: {reply}"))
+                .unwrap_or_else(|e| e.to_string());
+            assert!(
+                err.contains(case.words) && err.contains(&dead.display().to_string()),
+                "{}: {err}",
+                case.name
+            );
+            for tenant in &tenants {
+                assert_eq!(
+                    tenant.requests(),
+                    0,
+                    "{}: a candidate got the request",
+                    case.name
+                );
+                if !case.probed {
+                    assert_eq!(
+                        tenant.connections(),
+                        0,
+                        "{}: a candidate was knocked",
+                        case.name
+                    );
+                }
+            }
+            assert!(socket.announced.lock().unwrap().is_empty(), "{}", case.name);
         }
     }
 
