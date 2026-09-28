@@ -2675,7 +2675,12 @@ export function registerPendingEditFlush(tabId: string, flush: () => void): () =
 }
 
 /// Commit the buffered input of each of `tabs` that has a mounted editor,
-/// for a caller about to read their buffers.
+/// for a caller about to read their buffers. A commit that throws is not
+/// caught: it stops the caller before the caller reads a buffer that lacks
+/// the input, so a scripted pane close answers with the error and a move
+/// copies nothing, where a caught throw would let either go on without it.
+/// Not called from an effect or a derived, since a commit writes its tab's
+/// buffer.
 export function flushTabEdits(tabs: readonly Tab[]): void {
   for (const tab of tabs) if (tab.kind === "file") pendingEditFlushes.get(tab.id)?.();
 }
@@ -2687,7 +2692,9 @@ export function flushTabEdits(tabs: readonly Tab[]): void {
 /// its buffered input, the effects that queue a recovery write for a buffer
 /// run, and the queued writes are written. It never throws, since its
 /// callers are an unload handler and a window's close, both of which must
-/// finish: a failure is logged and what did commit is still written.
+/// finish: a failure is logged and what did commit is still written. Not
+/// called from an effect or a derived: it runs svelte's flush, which an
+/// effect already runs inside, and each commit writes a tab's buffer.
 export function flushEditsToRecovery(): void {
   for (const flush of pendingEditFlushes.values()) {
     try {
