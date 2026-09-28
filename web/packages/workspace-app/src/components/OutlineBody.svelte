@@ -65,11 +65,27 @@
     return best;
   }
 
+  /// The lines a leading YAML frontmatter block takes, 0 when there is none,
+  /// by the editor's rule (`editor/markdown/frontmatter.ts`): line 0 is
+  /// exactly `---`, and the block ends at the next line that is exactly
+  /// `---` or `...` within 10,000 lines. With no closer there is no block,
+  /// and the opener renders as a rule.
+  function frontmatterLineCount(lines: string[]): number {
+    if (lines[0]?.replace(/\r$/, "") !== "---") return 0;
+    const last = Math.min(lines.length - 1, 10_000);
+    for (let i = 1; i <= last; i++) {
+      const line = lines[i]!.replace(/\r$/, "");
+      if (line === "---" || line === "...") return i + 1;
+    }
+    return 0;
+  }
+
   function parseHeadings(src: string): Heading[] {
     const out: Heading[] = [];
     const fence = fenceLineTracker();
     const lines = src.split("\n");
-    for (let i = 0; i < lines.length; i++) {
+    // A `#` line inside frontmatter is a YAML comment, not a heading.
+    for (let i = frontmatterLineCount(lines); i < lines.length; i++) {
       const line = lines[i] ?? "";
       if (fence(line) !== "text") continue;
       const m = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
