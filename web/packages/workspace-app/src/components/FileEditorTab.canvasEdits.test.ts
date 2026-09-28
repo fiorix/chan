@@ -1022,6 +1022,19 @@ describe("a live drawing", () => {
       .toEqual({ ok: true, gone: true, pushes: [] });
   });
 
+  // A pane's close leaves the tab's scene session to linger, so the board,
+  // still mounted here, pushes the stroke when its wait ends; what these hold
+  // is that the forced arm itself commits nothing before it answers.
+  test.each(["close_pane", "close_all"])("a forced %s pushes nothing of a pending stroke before it answers", async (kind) => {
+    const { pane, tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    board.stroke(STROKE);
+    const closed = await paneExec({ kind, pane_id: pane.id, tab_id: tab.id, force: true });
+
+    expect({ ok: closed.ok, gone: readTab(tab.id) === undefined, pushes: socket.pushes() })
+      .toEqual({ ok: true, gone: true, pushes: [] });
+  });
+
   const BACKGROUND = "#abcdef";
   /// What the authority holds beyond the file: the file's element one version
   /// on, a peer's element and a peer's background.
