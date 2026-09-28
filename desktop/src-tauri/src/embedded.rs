@@ -679,6 +679,18 @@ impl EmbeddedServer {
             .map_err(|e| format!("minting a window: {e}"))
     }
 
+    /// Mint a native window of the workspace whose runtime `key` names, by
+    /// its canonical root or by the root it was opened at. The record stores
+    /// the root the runtime was opened at, the registry row's, which is the
+    /// path the launcher lists the workspace by and nests its windows under,
+    /// whichever of the two keys the caller holds. The host answers from the
+    /// keys it stores, so no root's filesystem is asked.
+    pub fn mint_workspace_window(&self, key: &Path) -> Result<WindowRecord, String> {
+        self.host
+            .mint_workspace_window(key, chan_server::WindowOrigin::Native)
+            .map_err(|e| format!("minting a window: {e}"))
+    }
+
     /// Mint a BROWSER-affinity window: the watcher never opens a native twin for
     /// it (it skips non-native origins), so the record exists purely for a
     /// browser tab that holds its own `window_id`. Backs the Window menu's "Open in Browser".

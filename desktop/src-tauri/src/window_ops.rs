@@ -161,7 +161,7 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
 /// running locally. Returns the new window's composite native label.
 async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String, String> {
     let canon = crate::canonical_key(Path::new(key));
-    if !state.serves.lock().unwrap().contains_key(&canon) {
+    if !state.serves.lock().unwrap().contains(&canon) {
         return Err(format!("workspace {key} is not running"));
     }
     let record = state
