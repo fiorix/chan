@@ -68,10 +68,12 @@ const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25)
 #[cfg(test)]
 type WorkspaceOpenProbe = Box<dyn FnMut(&mut chan_workspace::Result<Arc<Workspace>>) + Send>;
 
-/// The blocking hops a removal makes, named so a test can hold or fail one.
+/// The blocking hops a close or a removal makes, named so a test can hold or
+/// fail one.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RemovalHop {
+    Lookup,
     Unregister,
 }
 
@@ -3353,8 +3355,16 @@ impl WorkspaceHost {
                 let stored = {
                     let library = self.library.clone();
                     let root = root.to_path_buf();
-                    self.off_runtime(move || registered_stored_root(&library, &root))
-                        .await?
+                    #[cfg(test)]
+                    let probe = self.removal_hop_probe.lock().unwrap().clone();
+                    self.off_runtime(move || {
+                        #[cfg(test)]
+                        if let Some(probe) = probe {
+                            probe(RemovalHop::Lookup);
+                        }
+                        registered_stored_root(&library, &root)
+                    })
+                    .await?
                 };
                 let registered = stored.is_some();
                 let starting = self
@@ -5035,6 +5045,127 @@ mod tests {
         abandon_removal_at(RemovalHop::Unregister);
     }
 
+    /// One hop of a host's closes and removals, held on its blocking thread
+    /// until this drops, as a root that has stopped answering holds it,
+    /// counting the callers that reach it.
+    struct HeldHop {
+        entered: tokio::sync::mpsc::UnboundedReceiver<()>,
+        count: usize,
+        _release: std::sync::mpsc::Sender<()>,
+    }
+
+    impl HeldHop {
+        fn new(host: &WorkspaceHost, held: RemovalHop) -> Self {
+            let (entered_tx, entered) = tokio::sync::mpsc::unbounded_channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let released = Mutex::new(released);
+            *host.removal_hop_probe.lock().unwrap() = Some(Arc::new(move |hop| {
+                if hop == held {
+                    let _ = entered_tx.send(());
+                    let _ = released
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30));
+                }
+            }));
+            Self {
+                entered,
+                count: 0,
+                _release: release,
+            }
+        }
+
+        /// Run `caller` until it answers or reaches the held hop, and drop it
+        /// there, as a client that gives up does. `None` for a caller that
+        /// reached the hop. Reads no clock, so a caller on a paused one is
+        /// driven the same way.
+        async fn answer_or_give_up<T>(
+            &mut self,
+            caller: impl std::future::Future<Output = T>,
+        ) -> Option<T> {
+            tokio::pin!(caller);
+            tokio::select! {
+                answer = &mut caller => Some(answer),
+                Some(()) = self.entered.recv() => {
+                    self.count += 1;
+                    None
+                }
+            }
+        }
+
+        /// [`answer_or_give_up`](Self::answer_or_give_up) within ten seconds
+        /// of the real clock.
+        async fn answer_or_give_up_soon<T>(
+            &mut self,
+            caller: impl std::future::Future<Output = T>,
+        ) -> Option<T> {
+            tokio::time::timeout(Duration::from_secs(10), self.answer_or_give_up(caller))
+                .await
+                .expect("a caller neither answered nor reached the held hop")
+        }
+    }
+
+    /// A close of a root whose registry row goes by the root's key finds
+    /// the row without asking the root, so closes of a root that has
+    /// stopped answering whose callers give up leave no thread behind.
+    #[tokio::test]
+    async fn closes_of_a_registered_root_leave_no_lookup_thread() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let host = WorkspaceHost::new(library, fake_builder());
+        let mut held = HeldHop::new(&host, RemovalHop::Lookup);
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            answers.push(
+                held.answer_or_give_up_soon(host.close_workspace_for_root(root.path(), false))
+                    .await,
+            );
+        }
+        assert_eq!(
+            held.count, 0,
+            "closes of a registered root each left a registry lookup behind"
+        );
+        for answer in answers {
+            assert!(
+                matches!(answer, Some(Ok(WorkspaceLifecycleOutcome::NotFound))),
+                "a close of a registered root that is not mounted: {answer:?}"
+            );
+        }
+    }
+
+    /// A close of a path no registry row goes by asks the root which row
+    /// it is. A lookup whose caller gave up keeps its thread until the root
+    /// answers, and later closes of that root answer that nothing is
+    /// mounted without starting another.
+    #[tokio::test]
+    async fn closes_of_a_root_no_row_goes_by_hold_one_lookup_thread() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = WorkspaceHost::new(library, fake_builder());
+        let mut held = HeldHop::new(&host, RemovalHop::Lookup);
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            answers.push(
+                held.answer_or_give_up_soon(host.close_workspace_for_root(root.path(), false))
+                    .await,
+            );
+        }
+        assert_eq!(
+            held.count, 1,
+            "each close whose caller gave up left a registry lookup behind"
+        );
+        assert!(answers[0].is_none(), "the first close did not ask the root");
+        for answer in &answers[1..] {
+            assert!(
+                matches!(answer, Some(Ok(WorkspaceLifecycleOutcome::NotFound))),
+                "a close beside an abandoned lookup: {answer:?}"
+            );
+        }
+    }
+
     #[test]
     fn canonical_key_strips_verbatim_prefix() {
         // A caller path resolved WITH the Windows `\\?\` verbatim prefix and a
@@ -6295,6 +6426,89 @@ mod tests {
             .unwrap()
             .completed());
         assert_eq!(overlay.entries(), Vec::new(), "a row survived the forget");
+    }
+
+    /// Asked by the path it resolves to now, which `chan close` and the
+    /// desktop's handoff send, a relinked root's row goes by neither of its
+    /// stored keys: a close and a removal find it by asking the root, and
+    /// record the off, or forget the overlay, under both spellings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_and_a_removal_of_a_relinked_root_by_its_new_path_leave_no_row_on() {
+        let (host, overlay, _stored, canonical, _dirs) = relinked_host();
+        host.close_workspace_for_root(&canonical, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            overlay.on_paths(),
+            Vec::<String>::new(),
+            "an on-row survived the off by the new path"
+        );
+        assert!(host
+            .remove_workspace_for_root(&canonical, false)
+            .await
+            .unwrap()
+            .completed());
+        assert_eq!(
+            overlay.entries(),
+            Vec::new(),
+            "a row survived the forget by the new path"
+        );
+    }
+
+    /// Beside a lookup of a relinked root whose caller gave up, a second
+    /// close by the root's new path answers that nothing is mounted and
+    /// records nothing, and a removal answers that the workspace is still
+    /// releasing and forgets nothing: neither can learn the row's stored
+    /// root, under which its on-row is kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_and_a_removal_beside_an_abandoned_lookup_record_nothing() {
+        let (host, overlay, stored, canonical, _dirs) = relinked_host();
+        let mut held = HeldHop::new(&host, RemovalHop::Lookup);
+        let first = held
+            .answer_or_give_up_soon(host.close_workspace_for_root(&canonical, false))
+            .await;
+        let second = held
+            .answer_or_give_up_soon(host.close_workspace_for_root(&canonical, false))
+            .await;
+        let removal = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(&canonical, false))
+            .await;
+        assert_eq!(
+            held.count, 1,
+            "a close or a removal beside an abandoned lookup asked the root again"
+        );
+        assert!(first.is_none(), "the first close did not ask the root");
+        assert!(
+            matches!(second, Some(Ok(WorkspaceLifecycleOutcome::NotFound))),
+            "a second close beside an abandoned lookup: {second:?}"
+        );
+        assert!(
+            matches!(
+                removal,
+                Some(Err(Error::Core(ChanError::WorkspaceAlreadyOpen)))
+            ),
+            "a removal beside an abandoned lookup: {removal:?}"
+        );
+        assert_eq!(
+            overlay.on_paths(),
+            vec![stored.to_string_lossy().into_owned()],
+            "a close or a removal beside an abandoned lookup changed the on-row"
+        );
+        assert_eq!(
+            host.workspace_status(&canonical),
+            (
+                WorkspaceStatus::Error,
+                Some("workspace is still releasing; retry".into())
+            ),
+            "the removal's answer is not the row's words"
+        );
+        assert_eq!(
+            host.library().list_workspaces().len(),
+            1,
+            "a removal beside an abandoned lookup unregistered the workspace"
+        );
     }
 
     /// A workspace window minted by either key of a relinked root's runtime
