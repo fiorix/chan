@@ -1482,6 +1482,11 @@ impl DevserverState {
     /// Forget the workspace at `prefix`: unmount it if on, then drop the
     /// registration entirely. Refusal leaves both the live mount and the
     /// registration intact. Distinct from on/off.
+    ///
+    /// A removal the host answers still releasing has run its close, so the
+    /// workspace is off and still registered; a starting record this forget
+    /// tombstoned is put back turned off
+    /// ([`stand_down_refused_forget`](Self::stand_down_refused_forget)).
     async fn forget_workspace(
         &self,
         prefix: &str,
@@ -1508,24 +1513,36 @@ impl DevserverState {
         let Some((root, phase)) = current else {
             return Ok(WorkspaceLifecycleOutcome::NotFound);
         };
-        let pending_original = if phase == MountPhase::Starting {
+        let pending = if phase == MountPhase::Starting {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             workspaces.get_mut(prefix).map(|record| {
                 let original = record.clone();
                 record.forget();
-                original
+                (original, record.generation)
             })
         } else {
             None
         };
-        if pending_original.is_some() {
+        if pending.is_some() {
             // Durable absence and the tombstone win before physical cleanup;
             // no lock is held across the host's potentially blocking teardown.
             self.persist_state();
         }
-        match self.host.remove_workspace_for_root(&root, force).await? {
+        let removed = match self.host.remove_workspace_for_root(&root, force).await {
+            Ok(removed) => removed,
+            Err(error @ Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+                if let Some((_, tombstone)) = pending {
+                    self.stand_down_refused_forget(prefix, tombstone);
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        match removed {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
-                if let Some(original) = pending_original {
+                // Live terminals refuse the removal before its close changes
+                // anything, so the record goes back as it was.
+                if let Some((original, _)) = pending {
                     self.workspaces
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -1541,7 +1558,7 @@ impl DevserverState {
             if workspaces.get(prefix).is_some() {
                 workspaces.remove(prefix);
             }
-        } else if pending_original.is_none() {
+        } else if pending.is_none() {
             // The serving record disappeared between the initial lookup and
             // intent update; physical removal above is still authoritative.
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -1554,6 +1571,39 @@ impl DevserverState {
         }
         self.persist_state();
         Ok(WorkspaceLifecycleOutcome::Completed)
+    }
+
+    /// Put back the tombstone that a forget of a starting record left at
+    /// `prefix`, at generation `tombstone`, once the host has answered that
+    /// forget still releasing: turned off, not as it was.
+    ///
+    /// The host's removal ran its close before it answered, so the host holds
+    /// the workspace off and registered. The record as it was is desired on at
+    /// its attempt's generation: its next save would write the overlay row on
+    /// over the close's off, and its attempt would mount the workspace; and an
+    /// attempt that has already read the tombstone keeps a record that is not
+    /// one when it drops it, which would leave this one starting with nothing
+    /// behind it. Off at the tombstone's generation, which is past the
+    /// attempt's, is what the host holds, and has the attempt stand down
+    /// whenever it lands. A record that is no longer this tombstone belongs to
+    /// a later change and is left alone.
+    fn stand_down_refused_forget(&self, prefix: &str, tombstone: u64) {
+        let put_back = {
+            let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            match workspaces.get_mut(prefix) {
+                Some(record)
+                    if record.desired == DesiredMount::Forgotten
+                        && record.generation == tombstone =>
+                {
+                    record.desired = DesiredMount::Off;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if put_back {
+            self.persist_state();
+        }
     }
 
     /// Persist devserver state across two stores: workspace on/off into the
