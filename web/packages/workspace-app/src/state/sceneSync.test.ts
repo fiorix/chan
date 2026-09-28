@@ -996,6 +996,28 @@ describe("an update that crosses this window's appState claim", () => {
       handed: [{ ids: [], appState: undefined, files: undefined }],
     });
   });
+
+  test("hands an update's appState again once a drop has released the claim", () => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    sock.frame({ type: "update", version: 1, elements: [], appState: PEERS });
+    sock.drop();
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([], { appState: PEERS }));
+    back.frame({ type: "update", version: 2, elements: [], appState: LATER });
+    vi.useRealTimers();
+
+    expect(handed(binding)).toEqual([
+      { ids: [], appState: undefined, files: undefined },
+      { ids: [], appState: LATER, files: undefined },
+    ]);
+  });
 });
 
 describe("the scene a later bind replays", () => {
