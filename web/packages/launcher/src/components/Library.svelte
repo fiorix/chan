@@ -47,7 +47,7 @@
   import { isPending, servedKey, wsKey, dsKey } from "../state/pending.svelte";
   import { hasControlAttention } from "../state/controlAttention.svelte";
   import { openEditDevserver, openNewDialog } from "../state/dialog.svelte";
-  import { basename } from "../lib/windowLabel";
+  import { rootName } from "../lib/windowLabel";
   import {
     buildMachineTree,
     machineWindowCount,
@@ -65,7 +65,7 @@
   const tree = $derived(buildMachineTree(library.devservers, library.workspaces, library.windows));
 
   function displayName(ws: WorkspaceEntry): string {
-    return ws.label || basename(ws.path) || ws.path;
+    return ws.label || rootName(ws.path) || ws.path;
   }
   function devserverName(ds: DevserverEntry): string {
     return ds.label || `${ds.host}:${ds.port}`;
