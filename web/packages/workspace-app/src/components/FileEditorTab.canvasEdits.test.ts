@@ -842,6 +842,10 @@ describe("a live drawing", () => {
     pushes(): Record<string, unknown>[] {
       return this.sent.filter((f) => f.type === "push");
     }
+    drop(): void {
+      this.readyState = 3;
+      this.onclose?.();
+    }
   }
   const sceneSockets: SceneSocket[] = [];
   const PEER = { id: "peer", type: "rectangle", version: 1, versionNonce: 7, isDeleted: false };
@@ -1019,5 +1023,57 @@ describe("a live drawing", () => {
         .filter((p) => p.appState !== undefined && (p.appState as Record<string, unknown>).viewBackgroundColor !== PICKED),
       sockets: sceneSockets.length,
     }).toEqual({ background: PICKED, reverting: [], sockets: 1 });
+  });
+
+  /// The backgrounds the pushes on `socket` carried.
+  const backgroundsPushed = (socket: SceneSocket) =>
+    socket
+      .pushes()
+      .flatMap((p) => (p.appState === undefined ? [] : [(p.appState as Record<string, unknown>).viewBackgroundColor]));
+
+  /// Step the session's redial on fake time until its next socket opens.
+  async function nextSocket(): Promise<SceneSocket> {
+    const before = sceneSockets.length;
+    for (let i = 0; i < 40 && sceneSockets.length === before; i += 1) await vi.advanceTimersByTimeAsync(250);
+    expect(sceneSockets.length).toBeGreaterThan(before);
+    const next = sceneSockets.at(-1)!;
+    next.open();
+    return next;
+  }
+
+  test.each([
+    ["refused while the socket is down", true],
+    ["on the wire when the socket drops", false],
+  ])("a background %s gives way to the reattach's snapshot and is not offered again", async (_when, refused) => {
+    const PICKED = "#123456";
+    const { tab, board, socket } = await attachedDrawing();
+    // The library's render of the snapshot's appState comes first.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    if (refused) socket.drop();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    const beforeDrop = backgroundsPushed(socket);
+    if (!refused) socket.drop();
+    const next = await nextSocket();
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      beforeDrop,
+      background: board.appState.viewBackgroundColor,
+      buffer: tab.content.includes(PICKED),
+      pushed: backgroundsPushed(next),
+      dirty: isDirty(tab),
+      state: tab.doc?.state,
+    }).toEqual({
+      beforeDrop: refused ? [] : [PICKED],
+      background: "#ffffff",
+      buffer: false,
+      pushed: [],
+      dirty: false,
+      state: "attached",
+    });
   });
 });
