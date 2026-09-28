@@ -55,6 +55,7 @@ use crate::devserver_api::{
 };
 use crate::extract::{Json, Path as AxumPath, Query};
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
+use chan_library::host::registry_row_keys;
 // Prefix allocation lives in chan-library (the window-record assembly needs the
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
 use chan_library::windows::{WindowOrigin, WindowRegistry};
@@ -3134,15 +3135,16 @@ fn canonical_root(root: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(root)
 }
 
-/// Every registered root by the keys the registry stores for it: the root
-/// as written, which is canonical, and the canonical path it last resolved
-/// to. A devserver record's canonical root is registered when it is one of
-/// these, which says so without touching any root's filesystem.
+/// Every registered root by the keys its registry row goes by
+/// ([`registry_row_keys`]): the root as written, which is canonical, and the
+/// canonical path it last resolved to. A devserver record's canonical root
+/// is registered when it is one of these, which says so without touching
+/// any root's filesystem.
 fn registered_root_keys(library: &Library) -> HashSet<PathBuf> {
     library
         .list_workspaces()
-        .into_iter()
-        .flat_map(|row| [row.cached_canonical_path().to_path_buf(), row.root_path])
+        .iter()
+        .flat_map(|row| registry_row_keys(row).map(Path::to_path_buf))
         .collect()
 }
 

@@ -3862,7 +3862,7 @@ impl WorkspaceHost {
             .library
             .list_workspaces()
             .into_iter()
-            .find(|row| row.root_path == key || row.cached_canonical_path() == key);
+            .find(|row| registry_row_keys(row).contains(&key));
         match row {
             Some(row) => self.registered_workspace_status(&row),
             None => self.workspace_status_by_key(key, || ForeignHolder::Absent),
@@ -4524,6 +4524,15 @@ fn canonical_key(root: &Path) -> PathBuf {
     #[cfg(test)]
     observe_canonicalization("canonical_key");
     chan_workspace::paths::canonicalize_normalized(root)
+}
+
+/// The keys a registry row goes by without touching any filesystem: the
+/// root it stores, and the canonical path it last resolved to. The two
+/// differ for a root whose path resolves elsewhere since it was
+/// registered, and a store that keys that workspace by either one names
+/// this row.
+pub fn registry_row_keys(row: &chan_workspace::KnownWorkspace) -> [&Path; 2] {
+    [row.root_path.as_path(), row.cached_canonical_path()]
 }
 
 /// The key a window record's workspace path is matched by: the path as
