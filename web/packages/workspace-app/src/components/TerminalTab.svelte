@@ -1907,7 +1907,7 @@
   // Rich Prompt: the right-click "Show/Hide Rich Prompt" entry mirrors the
   // `terminal.richPrompt` chord (App.svelte onWindowKey); the label comes
   // from the shortcut store so menu and keymap can't drift.
-  const richPromptChord = chordFor("terminal.richPrompt") ?? "";
+  const richPromptChord = $derived(chordFor("terminal.richPrompt") ?? "");
   function toggleRichPromptFromMenu(): void {
     closeTabMenu();
     toggleRichPromptForTab(tab.id);
