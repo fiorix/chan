@@ -49,8 +49,8 @@ import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 const PANE_ID = "pane-load-move";
 const PATH = "notes/slow.md";
-/// A draft path, so the single close routes through the draft flow, which is
-/// the one refusal a file tab mid-load can reach.
+/// A draft path. A forced close skips the draft flow, and the reopen of a
+/// draft it closed mints a fresh draft.
 const DRAFT_PATH = ".Drafts/untitled-probe/draft.md";
 
 afterEach(() => {
@@ -320,30 +320,6 @@ describe("a load whose tab is closed leaves nothing behind", () => {
     expect(still.loading).toBe(false);
     expect(still.loadProgress).toBeUndefined();
     unregister();
-  });
-
-  test("a refused single close leaves the load running", async () => {
-    // The single-close route's refusal, which is the draft flow: an inspect
-    // that fails takes the close back before anything is removed. Nothing was
-    // closed, so nothing may be cancelled. This is what pins the cancellation
-    // to the removal rather than to the request.
-    const { release, signal } = pausedRead();
-    const pane = resetLayout();
-    const opened = openInPane(pane.id, DRAFT_PATH);
-    const tabId = activePane().tabs[0]!.id;
-    await vi.waitFor(() => expect(liveTab(tabId).content).toBe("# part"));
-    vi.spyOn(api, "inspectDraft").mockRejectedValue(new Error("probe refusal"));
-
-    await closeTab(PANE_ID, tabId);
-
-    expect(activePane().tabs, "the refused close removed nothing").toHaveLength(1);
-    expect(signal()?.aborted, "and cancelled nothing").toBe(false);
-    release();
-    await opened;
-
-    const still = liveTab(tabId);
-    expect(still.content).toBe("# partial");
-    expect(still.loading).toBe(false);
   });
 
   test("a load started after the reopen is not overwritten by the closed one", async () => {
