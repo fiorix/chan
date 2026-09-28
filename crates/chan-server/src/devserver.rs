@@ -7798,6 +7798,158 @@ mod tests {
         );
     }
 
+    /// A removal of `stored`, whose root is `root`, whose caller left while
+    /// its unregister was held: that unregister keeps the root's
+    /// registry-write permit until the returned stall lets it go.
+    async fn abandon_a_removal_at_its_unregister(
+        state: &Arc<DevserverState>,
+        root: &Path,
+        stored: &Path,
+    ) -> root_stall::RootStall {
+        let stall = root_stall::stall_matching(root, &[root_stall::UNREGISTER_WORKSPACE]);
+        let removing = Arc::clone(&state.host);
+        let removed = stored.to_path_buf();
+        let first =
+            tokio::spawn(async move { removing.remove_workspace_for_root(&removed, false).await });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the first removal never reached its unregister"
+        );
+        first.abort();
+        assert!(
+            first.await.unwrap_err().is_cancelled(),
+            "fixture: the first removal answered"
+        );
+        stall
+    }
+
+    /// What a devserver restarted over `home` holds at `prefix` once it has
+    /// prepared its restore: the record's intent and phase, and whether it
+    /// would mount the workspace.
+    async fn restored_at(home: &Path, prefix: &str) -> (Option<(DesiredMount, MountPhase)>, bool) {
+        let restarted = test_state(home, "127.0.0.1:0".parse().unwrap());
+        let rows = restarted.host.workspace_overlay().unwrap().entries();
+        let rows = restarted.register_restore_rows(rows).await;
+        let attempts = restarted.prepare_restore_rows(rows);
+        (
+            record_intent(&restarted, prefix),
+            attempts.iter().any(|attempt| attempt.prefix == prefix),
+        )
+    }
+
+    /// A forget of a record whose mount failed, which the host answers
+    /// still releasing, leaves the record off, since the removal's close has
+    /// turned the workspace off: a record left desired on would write its
+    /// row on at the next save, over the close's fresh off row, and the next
+    /// start would mount a workspace whose user asked for its removal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_record_whose_forget_must_retry_is_left_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).unwrap();
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        state.finish_failed_attempt(&attempt, "the mount failed".into());
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(true),
+            "fixture: a failed record's row stays on"
+        );
+        let stall = abandon_a_removal_at_its_unregister(&state, root.path(), &stored).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgotten = prefix.clone();
+        let (status, _, body) = completes_beside(
+            &stall,
+            "a forget of a failed record beside an abandoned unregister",
+            async move { forget_over_the_router(app, forgotten).await },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the failed record a forget answered still releasing left"
+        );
+        state.persist_state();
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(false),
+            "the overlay row at the next save"
+        );
+        let (restored, mounts) = restored_at(home.path(), &prefix).await;
+        assert_eq!(
+            (restored, mounts),
+            (Some((DesiredMount::Off, MountPhase::Stopped)), false),
+            "what a restart restores of a workspace whose forget must retry"
+        );
+        drop(stall);
+    }
+
+    /// The same for a mounted record: the first removal took its tenant
+    /// down, and a save during a stop keeps a mounted record's desired state,
+    /// so a record left mounted would write its row on there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mounted_record_whose_forget_must_retry_is_left_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).unwrap();
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        state
+            .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+            .await
+            .expect("fixture: the mount");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::On, MountPhase::Mounted)),
+            "fixture: the record did not mount"
+        );
+        let stall = abandon_a_removal_at_its_unregister(&state, root.path(), &stored).await;
+        assert!(
+            !state.host.is_root_mounted(&stored),
+            "fixture: the first removal left the workspace mounted"
+        );
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgotten = prefix.clone();
+        let (status, _, body) = completes_beside(
+            &stall,
+            "a forget of a mounted record beside an abandoned unregister",
+            async move { forget_over_the_router(app, forgotten).await },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the mounted record a forget answered still releasing left"
+        );
+        // A save during a stop, as a mount settling between its sweeps runs.
+        state.shutting_down.store(true, Ordering::Release);
+        state.persist_state();
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(false),
+            "the overlay row at a save during a stop"
+        );
+        let (restored, mounts) = restored_at(home.path(), &prefix).await;
+        assert_eq!(
+            (restored, mounts),
+            (Some((DesiredMount::Off, MountPhase::Stopped)), false),
+            "what a restart restores of a workspace whose forget must retry"
+        );
+        drop(stall);
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
