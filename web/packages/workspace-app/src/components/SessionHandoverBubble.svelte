@@ -9,15 +9,18 @@
      server-side as a timeout. Mounted once at the App root. -->
 <script lang="ts">
   import { sessionState, acceptHandover, rejectHandover } from "../state/session.svelte";
+  import { createCardFocus } from "./cardFocus";
 
   const active = $derived(sessionState.handover);
 
   // Steal focus to the card on appear so Enter / Escape land here, not in the
-  // terminal or editor underneath. Keyed on requestId so a replacing request
-  // re-focuses.
+  // terminal or editor underneath, and give it back when the card goes. Keyed
+  // on requestId so a replacing request re-focuses.
   let card = $state<HTMLDivElement | null>(null);
+  const focus = createCardFocus();
   $effect(() => {
-    if (active?.requestId && card) card.focus();
+    if (active?.requestId && card) focus.take(card);
+    else if (!active) focus.release();
   });
 
   // Enter accepts, Escape rejects. Scoped to the focused card (not the window)
