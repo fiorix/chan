@@ -507,6 +507,95 @@ describe("scene session binding loop safety", () => {
   });
 });
 
+describe("an untouched live board pushes no appState", () => {
+  // The authority's frames carry an object's keys sorted, where the board
+  // holds them in the library's order.
+  const AUTHORITY_ORDER = { gridModeEnabled: false, gridSize: 20, gridStep: 5, viewBackgroundColor: "#ffffff" };
+
+  const pushedAppStates = (session: SessionStub) =>
+    session.pushScene.mock.calls.map((call) => call[1]).filter((appState) => appState !== undefined);
+
+  /// The library reports a change, as it does after each render.
+  function libraryChange(): void {
+    (renderMock.mock.calls.at(-1)![0] as { props: { onChange: () => void } }).props.onChange();
+  }
+
+  test("a stored appState of {} is not pushed back as the library's defaults", async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, binding } = await mountBound([]);
+      binding.applySnapshot([], {}, {});
+      binding.flushPendingLocal();
+      libraryChange();
+      vi.advanceTimersByTime(300);
+
+      expect(pushedAppStates(session)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a stored appState with keys the serializer drops is not pushed", async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, binding } = await mountBound([]);
+      binding.applySnapshot([], { ...boardAppState, theme: "dark", zoom: { value: 2 } }, {});
+      libraryChange();
+      vi.advanceTimersByTime(300);
+
+      expect(pushedAppStates(session)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("the serializer's keys in the authority's order are not pushed back", async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, binding } = await mountBound([]);
+      binding.applySnapshot([], AUTHORITY_ORDER, {});
+      libraryChange();
+      vi.advanceTimersByTime(300);
+
+      expect(pushedAppStates(session)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("an adopt hands the board only the appState keys the serializer keeps", async () => {
+    const { api, binding } = await mountBound([]);
+    api.updateScene.mockClear();
+    binding.applySnapshot([], { ...boardAppState, theme: "dark", zoom: { value: 2 } }, {});
+
+    const handed = api.updateScene.mock.calls
+      .map((call) => (call[0] as { appState?: Record<string, unknown> }).appState)
+      .filter((appState) => appState !== undefined);
+    expect(handed.map((appState) => Object.keys(appState!).sort())).toEqual([Object.keys(boardAppState).sort()]);
+  });
+
+  test("a peer's change in the authority's order reaches the board and is not pushed back", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, session, binding } = await mountBound([]);
+      binding.applySnapshot([], { ...boardAppState }, {});
+      libraryChange();
+      vi.advanceTimersByTime(300);
+      session.pushScene.mockClear();
+
+      binding.applyUpdate({ elements: [], appState: { ...AUTHORITY_ORDER, viewBackgroundColor: "#000000" } });
+      vi.advanceTimersByTime(300);
+
+      expect({ shown: api.getAppState().viewBackgroundColor, pushed: pushedAppStates(session) }).toEqual({
+        shown: "#000000",
+        pushed: [],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("sceneDeltas bookkeeping", () => {
   test("delta detection keys on the recorded version", () => {
     const map = new Map<string, number>();
