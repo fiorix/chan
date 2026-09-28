@@ -9667,6 +9667,150 @@ mod tests {
         );
     }
 
+    /// Add `root` through the launcher's add route on `state`'s devserver, as
+    /// a browser on its launcher does, and return the prefix of the row the
+    /// add answers.
+    #[cfg(unix)]
+    async fn launcher_add(state: &Arc<DevserverState>, root: &Path) -> String {
+        use tower::ServiceExt;
+        let (app, serve_addr) = build_devserver_app(Arc::clone(state), state.host.clone());
+        let _ = serve_addr.set(state.addr);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/library/workspaces")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({ "path": root }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "fixture: the add failed");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let row: serde_json::Value = serde_json::from_slice(&body).expect("row");
+        format!("/{}", row["prefix"].as_str().expect("the row's prefix"))
+    }
+
+    /// A relinked root added through the launcher on a devserver by either
+    /// of its spellings, then handed off by the other, is served at the
+    /// prefix derived from the root its registry row stores, as one record:
+    /// the add and the handoff answer that prefix, the row reads on there
+    /// with the tenant's token, and an off from the row closes the tenant.
+    /// Added and handed off, it is restored on at that prefix after a
+    /// restart.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_added_through_the_launcher_then_handed_off_is_one_record() {
+        let _env = chan_home_env_read();
+        for added_by_stored in [false, true] {
+            let case = if added_by_stored {
+                "added by its stored root"
+            } else {
+                "added by its moved spelling"
+            };
+            let home = tempfile::tempdir().expect("home");
+            let holder = tempfile::tempdir().expect("holder");
+            let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+            let (added, handed) = if added_by_stored {
+                (&stored, &relinked)
+            } else {
+                (&relinked, &stored)
+            };
+            let prefix = registered_workspace_prefix(&stored).expect("prefix");
+
+            assert_eq!(
+                launcher_add(&state, added).await,
+                prefix,
+                "{case}: the add answered a prefix other than its row's"
+            );
+            assert_eq!(
+                hand_off(&state, handed).await,
+                prefix,
+                "{case}: the handoff answered another prefix"
+            );
+            assert_eq!(
+                only_record(&state),
+                (1, Some((prefix.clone(), stored.clone()))),
+                "{case}: the workspace is not one record under its stored root"
+            );
+            state.persist_state();
+            let entries = state.workspace_entries();
+            assert_eq!(entries.len(), 1, "{case}: {entries:?}");
+            assert_on_row_of(&state, &entries[0], &stored, &prefix);
+
+            updated_row(
+                state
+                    .set_workspace_on(&prefix, false, false)
+                    .await
+                    .expect("turn the added root off"),
+            );
+            assert!(
+                !state.host.is_root_mounted(&relinked),
+                "{case}: the off left the tenant serving at {:?}",
+                state.host.mounted_prefixes()
+            );
+            let entries = state.workspace_entries();
+            assert!(
+                entries.len() == 1 && !entries[0].on,
+                "{case}: the row after the off: {entries:?}"
+            );
+        }
+
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        launcher_add(&state, &relinked).await;
+        hand_off(&state, &relinked).await;
+        state.persist_state();
+        let restarted = restarted(&state, home.path()).await;
+        let entries = restarted.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_on_row_of(&restarted, &entries[0], &stored, &prefix);
+        shut_down_hosted(&restarted, None).await.expect("shut down");
+    }
+
+    /// A root added through the launcher on a devserver by an alias whose
+    /// last component is not the root's own is served at the prefix derived
+    /// from the root its registry row stores, and a handoff by the root's
+    /// own spelling answers the same prefix, as one record.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_alias_added_through_the_launcher_serves_at_its_rows_prefix() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let real = holder.path().join("real");
+        std::fs::create_dir_all(&real).expect("mkdir");
+        let alias = holder.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("link the alias");
+        let state = devserver_with_windows(home.path()).await;
+
+        let answered = launcher_add(&state, &alias).await;
+        let rows = state.host.library().list_workspaces();
+        assert_eq!(rows.len(), 1, "fixture: the registry holds {rows:?}");
+        let stored = rows[0].root_path.clone();
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        assert_eq!(
+            answered, prefix,
+            "the add by the alias answered a prefix other than its row's"
+        );
+        assert_eq!(
+            hand_off(&state, &real).await,
+            prefix,
+            "a handoff by the root's own spelling answered another prefix"
+        );
+        assert_eq!(
+            only_record(&state),
+            (1, Some((prefix, stored))),
+            "the workspace is not one record under its stored root"
+        );
+    }
+
     /// A relinked root's row, while its on is pending and after the mount
     /// fails, reads starting and then the mount's error, in the devserver's
     /// list and in the status the host reports for the row's stored root.
