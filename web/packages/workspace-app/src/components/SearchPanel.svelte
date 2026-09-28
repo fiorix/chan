@@ -762,6 +762,7 @@
 </script>
 
 <OverlayShell
+  label="Search"
   id="search"
   open={searchPanel.open}
   onClose={close}

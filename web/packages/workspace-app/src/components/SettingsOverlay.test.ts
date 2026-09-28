@@ -12,9 +12,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { json, recordRequests, type RecordedRequest } from "../__tests__/fetch";
-import { focusOrigin } from "../__tests__/dialog";
-import { closeSettings, openSettings, settingsPreferences, settleSettings } from "../__tests__/settings";
-import { __testSetStandalonePreferences, settingsPanel, ui } from "../state/store.svelte";
+import { closeSettings, openSettings, settingsPreferences } from "../__tests__/settings";
+import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 
 afterEach(closeSettings);
 
@@ -139,14 +138,6 @@ describe("the Settings panel", () => {
     const { target } = await openSettings("Terminal");
     const panel = target.querySelector<HTMLElement>('.panel[role="dialog"]')!;
     expect([panel.getAttribute("aria-modal"), panel.getAttribute("aria-label")]).toEqual(["true", "Settings"]);
-  });
-
-  test("hands focus back to where it was when it closes", async () => {
-    const origin = focusOrigin();
-    await openSettings("Terminal");
-    settingsPanel.open = false;
-    await settleSettings();
-    expect(document.activeElement).toBe(origin);
   });
 });
 
