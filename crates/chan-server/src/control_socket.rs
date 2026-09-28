@@ -5861,6 +5861,55 @@ mod tests {
         .unwrap();
     }
 
+    /// A removal over the control socket beside an earlier removal whose
+    /// caller left while its unregister was held says the words the root's
+    /// row reads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_control_removal_beside_an_abandoned_unregister_says_still_releasing() {
+        use chan_workspace::paths::root_stall;
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = lib.register_workspace(root.path()).unwrap().root_path;
+        let host = Arc::new(chan_library::WorkspaceHost::new(
+            lib,
+            crate::route_builder(),
+        ));
+        let control: Arc<dyn chan_library::HostControl> = host.clone();
+        let scope = UnserveScope::Host(Arc::downgrade(&control));
+        let stall = root_stall::stall_matching(root.path(), &["unregister_workspace"]);
+        let removing = Arc::clone(&host);
+        let removed = stored.clone();
+        let first =
+            tokio::spawn(async move { removing.remove_workspace_for_root(&removed, false).await });
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(10)),
+            "fixture: the first removal never reached its unregister"
+        );
+        first.abort();
+        assert!(
+            first.await.unwrap_err().is_cancelled(),
+            "fixture: the first removal answered"
+        );
+        let again = stored.clone();
+        let response = crate::devserver::hung_root_support::completes_beside(
+            &stall,
+            "a control removal beside an abandoned unregister",
+            async move { handle_unserve(&scope, &again, true).await },
+        )
+        .await;
+        match response {
+            ControlResponse::Error { message } => assert_eq!(
+                message,
+                format!(
+                    "removing {}: workspace is still releasing; retry",
+                    stored.display()
+                )
+            ),
+            other => panic!("a removal still releasing answered {other:?}"),
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn control_close_reply_survives_its_own_unmount() {
