@@ -18,6 +18,16 @@ Which content holds which native command. `desktop/src-tauri/capabilities/launch
 
 The edge inventory. `.agents/gateway.md` tells a contributor to keep new plaintext PAT paths in `gateway/design.md`'s inventory, and the same file then states one such path, the TLS-terminating edge, which was deliberately left out of it. One sentence saying so removes the tension.
 
+**Added on 2026-09-28, at the landing of the desktop's mint and of `cs` in a moved terminal:** comments in files that those two ranges did not own, which the ranges made stale, read at `d440ab656`. They are a sixth family, and this item's boundary names the five above, so taking them widens it, which is the owner's to rule.
+
+- `crates/chan-library/src/host.rs:2513-2514`, the doc of `WorkspaceHost::mint_window`, says that chan-desktop mints through it, its workspace windows included, with the key it computed. The desktop's handoff, `serve::start` and `cs window new` mint a workspace window through `mint_workspace_window` (`desktop/src-tauri/src/main.rs:2979`; `serve.rs:86`, `:109`, `:120`; `window_ops.rs:174`), and the command deck and the two menu commands mint through `mint_window` with a registry row's root or the path of a window they copy (`main.rs:4405-4408`, `:6474-6478`).
+- `desktop/src-tauri/src/embedded.rs:686-687`, the doc of `EmbeddedServer::mint_window`, says that a workspace window resolves its live tenant and that the workspace must be running; the host's mint creates the record with no such check (`mint_window_with_origin`, `host.rs:2536-2556`).
+- `crates/chan-server/src/handoff.rs:85-88`, the doc of `OpenWorkspace.workspace_path`, says that the desktop canonicalizes the path and registers it; the desktop asks its host by the path as sent and, when no runtime goes by it, registers it as sent (`main.rs:2978`, `:2985-2986`).
+- `crates/chan/src/lib.rs:3295-3297`, the doc of `absolutize_serve_root`, and the test's doc at `:11165-11166` say that chan-desktop titles the window with the root the CLI hands it; the desktop titles a window with the path its record stores (`desktop/src-tauri/src/serve.rs:226-241`), which for a relinked root is the registered path and not the one handed.
+- `crates/chan-server/src/control_socket.rs:391-392`, the doc of `stable_socket_name`, says that the stable-candidate classifier is in the `chan` CLI; it is chan-shell's (`stable_control_socket_name`, `crates/chan-shell/src/control.rs:281-296`), which the CLI calls (`crates/chan/src/lib.rs:2659`, `:2685`).
+
+The first four are the independent review's (`dev/v0101-team/reviews/review-Services-17.md` in the development tree, F5, and the report it reviewed, `dev/v0101-team/reports/report-Services-36.md`, "Residuals"); the fifth is the report of `cs` in a moved terminal (`dev/v0101-team/reports/report-Services-35.md`, "Residuals").
+
 ## Desired contract
 
 Each family says one true thing, checked against the code it describes, and the edge exception is stated where the inventory rule is.
