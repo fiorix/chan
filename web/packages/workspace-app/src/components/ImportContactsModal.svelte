@@ -12,6 +12,7 @@
 
   import { api } from "../api/client";
   import { tree, refreshTree, importStatus } from "../state/store.svelte";
+  import ModalShell from "./ModalShell.svelte";
 
   type Provider = { id: "google"; label: string; instructions: string };
   type Outcome = Awaited<ReturnType<typeof api.importContacts>>;
@@ -145,14 +146,6 @@
     onClose();
   }
 
-  function onKey(e: KeyboardEvent): void {
-    if (!open) return;
-    if (e.key === "Escape" && !busy) {
-      e.preventDefault();
-      close();
-    }
-  }
-
   // Pretty-print a directory path for the picker. Empty path = root.
   function fmtFolder(p: string): string {
     return p === "" ? "/ (workspace root)" : p;
@@ -165,15 +158,11 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} />
-
 {#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={close}>
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+  <ModalShell labelledby="import-contacts-title" onClose={close} gap="0.75rem">
+    <div class="wizard">
       <div class="hd">
-        <span class="title">Import contacts</span>
+        <span id="import-contacts-title" class="title">Import contacts</span>
         <span class="step">step {stepNumber(step)} of 4</span>
       </div>
 
@@ -335,7 +324,7 @@
         {/if}
       </div>
     </div>
-  </div>
+  </ModalShell>
 {/if}
 
 <script lang="ts" module>
@@ -362,29 +351,13 @@
 </script>
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.45);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 26000;
-    cursor: pointer;
-  }
-  .modal {
-    background: var(--bg-elev);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
-    padding: 1rem;
+  .wizard {
     width: min(560px, calc(100vw - 32px));
-    max-height: calc(100vh - 64px);
+    max-height: calc(100vh - 96px);
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    cursor: default;
   }
   .hd {
     display: flex;
