@@ -119,14 +119,15 @@ export async function mintWindow(
 
 /** Open (or re-focus) an existing record's window in-app. The window is named by
  * window_id so a second click focuses the same same-origin window instead of
- * opening a duplicate. Used by the follower open-click and orphan re-open. */
+ * opening a duplicate. Used by the follower open-click and orphan re-open. A
+ * popup the browser blocks rejects, so the caller reports it. */
 export async function openWindowRecord(
   record: WindowRecord,
   opts: { focus?: boolean } = {},
 ): Promise<Window | null> {
   if (demoState.enabled || !servingOrigin()) return null;
   const h = window.open("", record.window_id);
-  if (!h) return null;
+  if (!h) throw new Error("The browser blocked the Chan window");
   handles.set(record.window_id, h);
   clearWindowAttention(record.window_id);
   if (opts.focus !== false) h.focus?.();
