@@ -9,6 +9,7 @@ import { api } from "../api/client";
 import { setSocketFactory } from "../api/transport";
 import { demoSocketFactory } from "../demo/socket";
 import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
+import { applySessionRoster } from "../state/session.svelte";
 import { ApiError } from "../api/errors";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
@@ -864,6 +865,7 @@ describe("a live drawing", () => {
     scene.live = false;
     resetSceneSyncForTests();
     setSocketFactory(demoSocketFactory);
+    applySessionRoster({ participants: [], leader: null });
   });
 
   /// A drawing on its board, attached to a session whose snapshot holds the
@@ -1111,6 +1113,32 @@ describe("a live drawing", () => {
       pushed: [],
       dirty: false,
       state: "attached",
+    });
+  });
+
+  test("a roster frame does not replay the session's scene over a background picked inside the debounce", async () => {
+    const PICKED = "#123456";
+    const { tab, board, socket } = await openingDrawing();
+    // A peer's pointer is known when the board binds, so the bind's replay
+    // names that peer through the session's roster.
+    socket.frame({
+      ...snapshotOf(tab, { elements: [ON_DISK], appState: {} }),
+      cursors: [{ id: 7, w: "win-peer", x: 1, y: 2 }],
+    });
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(400);
+    board.pickBackground(PICKED);
+    applySessionRoster({
+      participants: [{ window_id: "win-peer", name: "Peer", role: "follower", status: "live" }],
+      leader: null,
+    });
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({ background: board.appState.viewBackgroundColor, pushed: backgroundsPushed(socket) }).toEqual({
+      background: PICKED,
+      pushed: [PICKED],
     });
   });
 });
