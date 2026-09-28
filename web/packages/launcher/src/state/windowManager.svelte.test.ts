@@ -702,7 +702,7 @@ function repairPopup(spec: (typeof repairDocuments)[number]) {
     ? document.implementation.createDocument(null, "message")
     : document.implementation.createHTMLDocument();
   if (page.body) page.body.textContent = spec.label;
-  if (spec.mark) page.documentElement.setAttribute("data-chan-window-page-owner", spec.mark);
+  if (spec.mark) page.documentElement.setAttribute("data-chan-window-page-owner", `${spec.mark}:${Date.now() + 5_000}`);
   const contentType = vi.fn(() => spec.mime);
   Object.defineProperty(page, "contentType", { get: contentType });
   const readDocument = vi.fn(() => {

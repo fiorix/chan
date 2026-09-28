@@ -21,7 +21,6 @@
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import {
   isBlankWindow,
-  isWindowNavigating,
   navigateWindowWhenReady,
   type WindowConnection,
   type WindowPageCheck,
@@ -135,7 +134,7 @@ export async function openWindowRecord(
   clearWindowAttention(record.window_id);
   if (opts.focus !== false) h.focus?.();
   const blank = isBlankWindow(h);
-  if ((!blank && record.connected) || isWindowNavigating(h)) return h;
+  if (!blank && record.connected) return h;
   try {
     const url = windowUrl(record, servingOrigin());
     const ready = await navigateWindowWhenReady(h, url, checkWindowPage, {

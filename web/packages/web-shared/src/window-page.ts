@@ -7,10 +7,25 @@ export type WindowPageCheck = (url: string, signal: AbortSignal) => Promise<{
 
 const WINDOW_PAGE_OWNER_ATTRIBUTE = "data-chan-window-page-owner";
 const WINDOW_PAGE_WAIT_MS = 60_000;
+// Long enough for the assigned location, and the capability redirect before
+// it, to commit a document right after the check fetched the same URL. It is a
+// policy: a slower commit can be navigated twice, and a stopped one keeps
+// every caller out for this long.
+const WINDOW_PAGE_NAVIGATION_MS = 10_000;
 const WINDOW_CLOSED_POLL_MS = 100;
 const WINDOW_PAGE_RETRY_MIN_MS = 1000;
 const waitingPages = new WeakMap<Window, Promise<boolean>>();
-const navigatingDocuments = new WeakMap<Window, Document>();
+
+type MarkPhase = "waiting" | "navigating";
+
+const MARK_BOUND_MS: Record<MarkPhase, number> = {
+  waiting: WINDOW_PAGE_WAIT_MS,
+  navigating: WINDOW_PAGE_NAVIGATION_MS,
+};
+
+type Mark =
+  | { phase: "absent"; value: string | null }
+  | { phase: MarkPhase; value: string; remainingMs: number };
 
 /** A caller's reading of a window's record once its page answers: a socket
  * tagged with the window's id is live, none is, or the record no longer
@@ -34,6 +49,28 @@ function readableDocument(h: Window): Document | undefined {
   } catch {
     return undefined;
   }
+}
+
+// Opener pages share the document, not their module state, so the mark says
+// until when its phase holds by the clock every page of the browser reads. A
+// value that has expired, or promises more than its phase allows, as after
+// the clock was set back, is no mark: the window is repaired rather than kept
+// out of reach.
+function readMark(page: Document | undefined): Mark {
+  const value = page?.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) ?? null;
+  const match = value === null ? null : /^(waiting|navigating):(\d{1,16})$/.exec(value);
+  if (value === null || match === null) return { phase: "absent", value };
+  const phase = match[1] as MarkPhase;
+  const remainingMs = Number(match[2]) - Date.now();
+  if (remainingMs <= 0 || remainingMs > MARK_BOUND_MS[phase]) return { phase: "absent", value };
+  return { phase, value, remainingMs };
+}
+
+function writeMark(page: Document | undefined, phase: MarkPhase): string | undefined {
+  if (!page) return undefined;
+  const value = `${phase}:${Date.now() + MARK_BOUND_MS[phase]}`;
+  page.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, value);
+  return value;
 }
 
 function retryAfterMs(header: string | null): number {
@@ -61,12 +98,12 @@ export function navigateWindowWhenReady(
   if (h.closed) return Promise.resolve(false);
   const page = readableDocument(h);
   // Other opener pages have their own module state but share this document.
-  if (page?.documentElement.hasAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE)) {
+  if (readMark(page).phase !== "absent") {
     if (opts.focus !== false) h.focus?.();
     return Promise.resolve(true);
   }
   if (page?.body && isBlankWindow(h)) page.body.textContent = "Waiting for the window to be ready...";
-  page?.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "waiting");
+  const mark = writeMark(page, "waiting");
   const controller = new AbortController();
   let lastRefusal: Error = new Error("Timed out waiting for the window page");
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -112,9 +149,11 @@ export function navigateWindowWhenReady(
   const pending = Promise.race([arrive(), stopped]).then((arrival) => {
     if (arrival === "closed" || h.closed) return false;
     if (arrival === "stay") return true;
+    // The navigation replaces the document the window holds now, which need
+    // not be the one the wait began on.
+    const current = readableDocument(h);
     h.location.href = url;
-    if (page) navigatingDocuments.set(h, page);
-    page?.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "navigating");
+    writeMark(current, "navigating");
     return true;
   }).finally(() => {
     clearTimeout(retryTimer);
@@ -122,20 +161,12 @@ export function navigateWindowWhenReady(
     clearInterval(closedPoll);
     controller.abort();
     waitingPages.delete(h);
-    // Keep ownership through navigation commit, when the document is replaced.
-    if (page?.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) === "waiting") {
+    // Only this wait's own waiting mark goes; a navigating mark stays until
+    // its document is replaced or its time runs out.
+    if (page && readMark(page).value === mark) {
       page.documentElement.removeAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE);
     }
   });
   waitingPages.set(h, pending);
   return pending;
-}
-
-/** Location can still describe the outgoing document until navigation commits.
- * A later refusal document on this window must remain retryable. */
-export function isWindowNavigating(h: Window): boolean {
-  const page = readableDocument(h);
-  if (page && navigatingDocuments.get(h) === page) return true;
-  navigatingDocuments.delete(h);
-  return false;
 }
