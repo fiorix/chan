@@ -3326,8 +3326,8 @@ impl WorkspaceHost {
     /// root that hangs while its key is resolved holds one blocking thread
     /// for it however many callers ask, and every caller of it waits without
     /// holding a runtime worker. This bound covers key resolution; separate
-    /// call permits admit the open, its root check, mounted revalidation and
-    /// a close's or removal's registry lookup.
+    /// call permits admit the open, its root check, mounted revalidation, a
+    /// close's or removal's registry lookup and a removal's unregister.
     pub async fn root_key(&self, root: &Path) -> Result<PathBuf, Error> {
         #[cfg(test)]
         let probe = self.blocking_thread_probe.lock().unwrap().clone();
@@ -3510,11 +3510,14 @@ impl WorkspaceHost {
     /// registry) serialize their writes under locks of their own, which is
     /// what keeps removals of different roots safe beside each other.
     ///
-    /// A removal whose close could not ask the root which registry row it is,
-    /// because an earlier lookup of that root has not returned, changes
-    /// nothing, leaves its row reading `workspace is still releasing; retry`
-    /// and answers [`ChanError::WorkspaceAlreadyOpen`], as an open beside a
-    /// holder that has not let go does.
+    /// The unregister holds the root's registry-write permit, which the
+    /// removal waits for at most the open's release budget before it forgets
+    /// or purges anything. A removal that does not get it in time, or whose
+    /// close could not ask the root which registry row it is because an
+    /// earlier lookup of that root has not returned, changes nothing, leaves
+    /// its row reading `workspace is still releasing; retry` and answers
+    /// [`ChanError::WorkspaceAlreadyOpen`], as an open beside a holder that
+    /// has not let go does.
     pub async fn remove_workspace_for_root(
         &self,
         root: &Path,
@@ -3548,6 +3551,28 @@ impl WorkspaceHost {
 
         let mut removing = WorkspaceRemoveGuard::new(self, target.clone());
         self.mark_mount_removing_by_key(&target);
+        // The unregister's permit can be held by an unregister whose caller
+        // left and whose registry call has not returned. Wait for it as long
+        // as an open waits for its mount permit, then change nothing and
+        // answer as that open does, before any bookkeeping, so the root's
+        // lock goes back to its other callers.
+        #[cfg(test)]
+        let release_budget = self.open_release_budget;
+        #[cfg(not(test))]
+        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
+        let permit = match tokio::time::timeout(
+            release_budget,
+            self.root_calls
+                .lock(&(target.clone(), RootCall::RegistryWrite)),
+        )
+        .await
+        {
+            Ok(held) => held.into_owned(),
+            Err(_) => {
+                removing.error = Some(WORKSPACE_STILL_RELEASING.into());
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+        };
         // The bookkeeping keyed by the workspace runs before the unregister,
         // so a caller that gives up at any await leaves either a registered
         // workspace with a retryable row or a finished removal. Both steps are
@@ -3576,6 +3601,7 @@ impl WorkspaceHost {
             let probe = self.removal_hop_probe.lock().unwrap().clone();
             match self
                 .off_runtime(move || {
+                    let _permit = permit;
                     #[cfg(test)]
                     if let Some(probe) = probe {
                         probe(RemovalHop::Unregister);
@@ -5467,9 +5493,10 @@ mod tests {
                 ),
                 "the removal's answer is not the row's words"
             );
-            assert_eq!(
-                overlay.on_paths(),
-                vec![overlay_key],
+            // Its close has recorded the off; the row itself stays until an
+            // unregister can follow its forget.
+            assert!(
+                overlay.entries().iter().any(|row| row.path == overlay_key),
                 "a removal beside an abandoned unregister forgot the overlay row"
             );
             assert_eq!(
