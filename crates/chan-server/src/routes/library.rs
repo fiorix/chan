@@ -3320,7 +3320,7 @@ mod devserver_route_tests {
         /// The bound, written out so that moving it is a deliberate edit here.
         const MOUNT_BOUND: Duration = Duration::from_secs(60);
         const JUST_SHORT: Duration = Duration::from_millis(1);
-        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        pub(super) const STILL_RELEASING: &str = "workspace is still releasing; retry";
 
         /// Run `scenario` on a current-thread runtime whose clock starts
         /// paused, on a thread of its own, and panic naming `what` and the
@@ -3405,7 +3405,7 @@ mod devserver_route_tests {
         /// One request through `router`: its status, its `Retry-After` and its
         /// JSON body. It owns its arguments, so a test can run it as a task of
         /// its own and watch whether it has answered.
-        async fn send(
+        pub(super) async fn send(
             router: axum::Router,
             method: &'static str,
             uri: String,
@@ -3432,7 +3432,7 @@ mod devserver_route_tests {
             (status, retry_after, json)
         }
 
-        fn workspace_id(root: &Path) -> String {
+        pub(super) fn workspace_id(root: &Path) -> String {
             allocate_workspace_prefix(root)
                 .unwrap()
                 .trim_start_matches('/')
@@ -3440,7 +3440,7 @@ mod devserver_route_tests {
         }
 
         /// The `error` of the launcher's row for the registered root `stored`.
-        async fn row_error(router: &axum::Router, stored: &Path) -> serde_json::Value {
+        pub(super) async fn row_error(router: &axum::Router, stored: &Path) -> serde_json::Value {
             let (status, _, rows) = send(
                 router.clone(),
                 "GET",
@@ -3627,6 +3627,96 @@ mod devserver_route_tests {
                     send(router.clone(), "DELETE", removal, None).await;
                 },
             );
+        }
+    }
+
+    /// The launcher's add and on of a root that an earlier open, whose caller
+    /// left, still holds: they answer with the words the root's row reads and
+    /// a retry time, the host's release budget.
+    #[cfg(unix)]
+    mod still_releasing {
+        use std::path::Path;
+        use std::time::Duration;
+
+        use chan_workspace::paths::root_stall;
+
+        use super::mount_bound::{row_error, send, workspace_id, STILL_RELEASING};
+        use super::*;
+        use crate::devserver::hung_root_support::completes_beside;
+
+        /// Send `method` `uri` and leave it held in the root's open, as a
+        /// client that goes away does, then send it again beside that open.
+        /// Answers the second request and what the row of `stored` then reads.
+        async fn again_beside_an_abandoned_open(
+            router: &axum::Router,
+            root: &Path,
+            stored: &Path,
+            method: &'static str,
+            uri: String,
+            body: Option<String>,
+        ) -> (
+            (StatusCode, Option<String>, serde_json::Value),
+            serde_json::Value,
+        ) {
+            let stall = root_stall::stall_matching(root, &["Library::open_workspace"]);
+            let first = tokio::spawn(send(router.clone(), method, uri.clone(), body.clone()));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the first request never reached the root's open"
+            );
+            first.abort();
+            assert!(
+                first.await.unwrap_err().is_cancelled(),
+                "fixture: the first request answered"
+            );
+            let again = router.clone();
+            let answer =
+                completes_beside(&stall, "a request beside an abandoned open", async move {
+                    send(again, method, uri, body).await
+                })
+                .await;
+            let row = row_error(router, stored).await;
+            (answer, row)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_launcher_on_beside_an_abandoned_open_answers_still_releasing() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let stored = lib.register_workspace(root.path()).unwrap().root_path;
+            let on = format!("/api/library/workspaces/{}/on", workspace_id(root.path()));
+            let (_host, router) = mutable_router(lib);
+            let ((status, retry_after, body), row) =
+                again_beside_an_abandoned_open(&router, root.path(), &stored, "POST", on, None)
+                    .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "on: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "on: {body}");
+            assert_eq!(body["error"], STILL_RELEASING);
+            assert_eq!(row, body["error"], "the answer is not the row's words");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_launcher_add_beside_an_abandoned_open_answers_still_releasing() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let stored = chan_workspace::paths::canonicalize_normalized(root.path());
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let (_host, router) = mutable_router(lib);
+            let body = serde_json::json!({ "path": root.path().to_string_lossy() }).to_string();
+            let ((status, retry_after, body), row) = again_beside_an_abandoned_open(
+                &router,
+                root.path(),
+                &stored,
+                "POST",
+                "/api/library/workspaces".into(),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "add: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "add: {body}");
+            assert_eq!(body["error"], STILL_RELEASING);
+            assert_eq!(row, body["error"], "the answer is not the row's words");
         }
     }
 
