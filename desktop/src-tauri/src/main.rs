@@ -2949,10 +2949,11 @@ fn register_devserver_from_handoff(
 /// canonical root or its registry row's root, gets another window at once:
 /// the host answers from the keys it stores and mints the window under the
 /// row's root, the path the launcher nests it under, so the answer waits on
-/// no filesystem.
+/// no workspace root's filesystem. The mint writes the window store under
+/// the chan home before it returns.
 ///
-/// Otherwise the workspace is registered through the shared embedded
-/// Library, which creates the directory for a fresh path, and
+/// Otherwise [`register_workspace_path`] creates the directory for a fresh
+/// path and registers it through the shared embedded Library, and
 /// `serve::start` mounts it, restores its persisted windows and mints one
 /// new window, keyed by the root its registry row stores: the path as sent
 /// may resolve elsewhere since the row was stored, or not exist until the
@@ -4533,10 +4534,10 @@ fn zoom_reset(window: tauri::WebviewWindow, state: State<Arc<AppState>>) -> Resu
     apply_zoom(&window, &state, 1.0)
 }
 
-/// Canonical-path key used for desktop config, serve identity, and
-/// the displayed path. `canonicalize` falls back to the input on
-/// error so we still produce a stable key for not-yet-existing or
-/// asleep paths.
+/// The canonical form of `p`, by which the handoff's close finds the
+/// workspace runtime that the path it was sent names. `canonicalize` falls
+/// back to the input on error, so a path that does not exist still gives a
+/// stable key.
 fn canonical_key(p: &Path) -> String {
     // The registry's own normalization: a Windows key never carries the
     // `\\?\` verbatim prefix into the SPA list, a window title, or a log.
