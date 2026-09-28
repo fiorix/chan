@@ -12,7 +12,7 @@
 // the popup dance stays exactly as it was. This module owns that split so it
 // can be driven directly by tests, rather than only through the deck UI.
 
-import { isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
+import { isBlankWindow, isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import {
   blockedWindowMessage,
@@ -120,16 +120,6 @@ function popupFor(window: ScopedLibraryWindow, bridge: LibraryWindowBridge): Win
   return popup;
 }
 
-function popupNeedsNavigation(popup: Window): boolean {
-  try {
-    if (isWindowNavigating(popup)) return false;
-    return popup.location.href === "about:blank" || popup.location.href === "";
-  } catch {
-    // A window on another origin belongs to the user who navigated it there.
-    return false;
-  }
-}
-
 /// Create a terminal or workspace window in this window's library.
 export async function createLibraryWindow(
   bridge: LibraryWindowBridge,
@@ -188,11 +178,12 @@ export async function focusLibraryWindow(
     return;
   }
   const popup = popupFor(window, bridge);
-  if (popup !== globalThis.window && popupNeedsNavigation(popup)) {
+  const blank = popup !== globalThis.window && isBlankWindow(popup);
+  if (popup !== globalThis.window && (blank || !window.connected) && !isWindowNavigating(popup)) {
     try {
       if (!(await navigateWindowWhenReady(popup, window.launch_path, bridge.checkPage))) return;
     } catch (error) {
-      popup.close();
+      if (blank) popup.close();
       throw error;
     }
   }

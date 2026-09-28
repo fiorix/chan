@@ -12,6 +12,23 @@ const WINDOW_PAGE_RETRY_MIN_MS = 1000;
 const waitingPages = new WeakMap<Window, Promise<boolean>>();
 const navigatingDocuments = new WeakMap<Window, Document>();
 
+/** An unreadable location is not evidence of an empty window. */
+export function isBlankWindow(h: Window): boolean {
+  try {
+    return h.location.href === "" || h.location.href === "about:blank";
+  } catch {
+    return false;
+  }
+}
+
+function readableDocument(h: Window): Document | undefined {
+  try {
+    return h.document;
+  } catch {
+    return undefined;
+  }
+}
+
 function retryAfterMs(header: string | null): number {
   if (header === null || header.trim() === "") return WINDOW_PAGE_RETRY_MIN_MS;
   const seconds = Number(header);
@@ -24,14 +41,14 @@ export function navigateWindowWhenReady(h: Window, url: string, checkPage: Windo
   const waiting = waitingPages.get(h);
   if (waiting) return waiting;
   if (h.closed) return Promise.resolve(false);
-  const page = h.document;
+  const page = readableDocument(h);
   // Other opener pages have their own module state but share this document.
-  if (page.documentElement.hasAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE)) {
+  if (page?.documentElement.hasAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE)) {
     h.focus?.();
     return Promise.resolve(true);
   }
-  page.body.textContent = "Waiting for the window to be ready...";
-  page.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "waiting");
+  if (page?.body && isBlankWindow(h)) page.body.textContent = "Waiting for the window to be ready...";
+  page?.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "waiting");
   const controller = new AbortController();
   let lastRefusal: Error = new Error("Timed out waiting for the window page");
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -66,8 +83,8 @@ export function navigateWindowWhenReady(h: Window, url: string, checkPage: Windo
   const pending = Promise.race([check(), stopped]).then((ready) => {
     if (!ready || h.closed) return false;
     h.location.href = url;
-    navigatingDocuments.set(h, page);
-    page.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "navigating");
+    if (page) navigatingDocuments.set(h, page);
+    page?.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, "navigating");
     return true;
   }).finally(() => {
     clearTimeout(retryTimer);
@@ -76,7 +93,7 @@ export function navigateWindowWhenReady(h: Window, url: string, checkPage: Windo
     controller.abort();
     waitingPages.delete(h);
     // Keep ownership through navigation commit, when the document is replaced.
-    if (page.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) === "waiting") {
+    if (page?.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) === "waiting") {
       page.documentElement.removeAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE);
     }
   });
@@ -87,7 +104,8 @@ export function navigateWindowWhenReady(h: Window, url: string, checkPage: Windo
 /** Location can still describe the outgoing document until navigation commits.
  * A later refusal document on this window must remain retryable. */
 export function isWindowNavigating(h: Window): boolean {
-  if (navigatingDocuments.get(h) === h.document) return true;
+  const page = readableDocument(h);
+  if (page && navigatingDocuments.get(h) === page) return true;
   navigatingDocuments.delete(h);
   return false;
 }
