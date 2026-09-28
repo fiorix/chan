@@ -3317,8 +3317,9 @@ impl WorkspaceHost {
     /// holds at most its root's lock across the hop, and the hop that
     /// computes the key choosing that lock runs before any lock is taken.
     /// A closure takes no host guard, except the removal's unregister, which
-    /// takes the mount-state mutex alone after the registry call returns, so
-    /// no hop adds an edge to the lock order.
+    /// takes the overlay's locks and then the mount-state mutex, each alone,
+    /// after the registry call returns, so no hop adds an edge to the lock
+    /// order.
     async fn off_runtime<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> T + Send + 'static,
@@ -3552,13 +3553,24 @@ impl WorkspaceHost {
     /// what keeps removals of different roots safe beside each other.
     ///
     /// The unregister holds the root's registry-write permit, which the
-    /// removal waits for at most the open's release budget before it forgets
-    /// or purges anything. A removal that does not get it in time, or whose
-    /// close could not ask the root which registry row it is because an
-    /// earlier lookup of that root has not returned, changes nothing, leaves
-    /// its row reading `workspace is still releasing; retry` and answers
+    /// removal waits for after its close, at most the open's release budget,
+    /// before it forgets or purges anything. A removal answers
     /// [`ChanError::WorkspaceAlreadyOpen`], as an open beside a holder that
-    /// has not let go does.
+    /// has not let go does, and writes `workspace is still releasing; retry`
+    /// under the root's key, at three points, none of which unregisters.
+    /// When its close could not ask the root which registry row it is,
+    /// because an earlier lookup of that root has not returned, it has
+    /// changed nothing but that lifecycle row. When it does not get the
+    /// permit in time, its close has recorded the off and taken the
+    /// workspace down if it was mounted. When the unregister meets a handle
+    /// of the root this process still holds, it has also forgotten the
+    /// overlay rows and purged the window records.
+    ///
+    /// The unregister forgets the overlay rows again once the registry has
+    /// answered it, whether or not it found a row, so an off recorded beside
+    /// it before that forget, by a removal refused at its permit or by a
+    /// close, does not outlive the registry's row: a devserver's start
+    /// registers every overlay row the registry lacks.
     pub async fn remove_workspace_for_root(
         &self,
         root: &Path,
@@ -3594,9 +3606,11 @@ impl WorkspaceHost {
         self.mark_mount_removing_by_key(&target);
         // The unregister's permit can be held by an unregister whose caller
         // left and whose registry call has not returned. Wait for it as long
-        // as an open waits for its mount permit, then change nothing and
-        // answer as that open does, before any bookkeeping, so the root's
-        // lock goes back to its other callers.
+        // as an open waits for its mount permit, then answer as that open
+        // does before the forget, the purge and the unregister, so the root's
+        // lock goes back to its other callers. What the close did stands;
+        // the unregister that holds the permit forgets its off rows once it
+        // returns.
         #[cfg(test)]
         let release_budget = self.open_release_budget;
         #[cfg(not(test))]
@@ -3620,8 +3634,9 @@ impl WorkspaceHost {
         // idempotent, so a retry repeats them harmlessly.
         //
         // Forget the on/off state so a devserver restart doesn't re-mount it.
+        let spellings = overlay_spellings(&target, stored);
         if let Some(overlay) = self.workspace_overlay() {
-            overlay.forget_each(&overlay_spellings(&target, stored));
+            overlay.forget_each(&spellings);
         }
         // FORGET is the ONLY path that purges the window records: the workspace is
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
@@ -3629,12 +3644,15 @@ impl WorkspaceHost {
         // them.) A no-op when the workspace had no windows.
         self.discard_workspace_windows(&target, root);
         // The hop runs to its end even when the caller is dropped during it,
-        // so it clears the row itself: no await separates the unregister from
-        // the last of its bookkeeping.
+        // so it forgets the overlay rows again and clears the row itself: no
+        // await separates the unregister from the last of its bookkeeping.
+        // It takes the overlay's locks and then the mount state's mutex,
+        // each alone, after the registry's lock is released.
         let removed = {
             let library = self.library.clone();
             let root = root.to_path_buf();
             let keys = row.lifecycle_keys(&target);
+            let overlay = self.workspace_overlay().cloned();
             let mount_state = Arc::clone(&self.mount_state);
             let changed = Arc::clone(&self.library_change_notify);
             let unregistered = Arc::clone(&removing.unregistered);
@@ -3648,6 +3666,15 @@ impl WorkspaceHost {
                         probe(RemovalHop::Unregister);
                     }
                     let removed = unregister_registered_workspace(&library, &root)?;
+                    // Found or not, the removal answers as if the workspace
+                    // is gone, and an off recorded beside this call, by a
+                    // removal refused at its permit or by a close, would name
+                    // a path a devserver's start registers again. A failed
+                    // unregister returns above and keeps the rows of a
+                    // workspace still registered.
+                    if let Some(overlay) = &overlay {
+                        overlay.forget_each(&spellings);
+                    }
                     {
                         let mut state = mount_state.lock().unwrap_or_else(|e| e.into_inner());
                         for key in &keys {
