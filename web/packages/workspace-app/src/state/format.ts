@@ -24,16 +24,20 @@ export function formatMtime(seconds: number | null): string {
   return new Date(seconds * 1000).toISOString().slice(0, 10);
 }
 
-/** Last path segment, with both `/` and `\` accepted as separators. */
+/** Last component of a workspace path. A workspace path is separated
+ *  by `/` alone: on a Unix server `\` is a character of a name, and a
+ *  Windows server spells its paths with `/`. A host's path, such as a
+ *  workspace root, is not a workspace path and has rules of its own. */
 export function basename(path: string): string {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const i = path.lastIndexOf("/");
   return i < 0 ? path : path.slice(i + 1);
 }
 
-/// Workspace-relative parent directory of `path`. Returns "" for paths
-/// at the workspace root (no parent) and for the empty string. Directories
-/// follow the same rule as files; the caller decides whether to
-/// treat the empty parent as "workspace scope" or skip.
+/// Workspace-relative parent directory of `path`, cut at `/` alone as
+/// `basename` is. Returns "" for paths at the workspace root (no parent)
+/// and for the empty string. Directories follow the same rule as files;
+/// the caller decides whether to treat the empty parent as "workspace
+/// scope" or skip.
 export function parentDir(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? "" : path.slice(0, i);
