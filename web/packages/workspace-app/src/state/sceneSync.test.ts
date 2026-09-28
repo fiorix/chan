@@ -226,6 +226,16 @@ function attached(
   return { session: session!, binding, sock };
 }
 
+/// A canvas that binds in place of `old`, as after a remount, with the
+/// session's replay recorded on it.
+function rebind(session: SceneSession, old: FakeBinding): FakeBinding {
+  session.unbindCanvas(old);
+  const next = new FakeBinding();
+  next.session = session;
+  session.bindCanvas(next);
+  return next;
+}
+
 async function flushMicro(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
@@ -975,6 +985,45 @@ describe("an update that crosses this window's appState claim", () => {
       handed: [{ ids: [], appState: undefined, files: undefined }],
     });
   });
+});
+
+describe("the scene a later bind replays", () => {
+  const MINE = { viewBackgroundColor: "#111111" };
+  const PEERS = { viewBackgroundColor: "#222222" };
+
+  test("holds the appState and files this window pushed", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pendingAppState = MINE;
+    binding.pendingFiles = { "file-m": { dataURL: "data:image/png;base64,AAA" } };
+    binding.flushPendingLocal();
+    sock.frame({ type: "push-ok", version: 1 });
+    const replay = rebind(session, binding).snapshots[0];
+
+    expect({ appState: replay?.appState, files: Object.keys(replay?.files ?? {}) }).toEqual({
+      appState: MINE,
+      files: ["file-m"],
+    });
+  });
+
+  test.each(["on the wire", "queued behind a push on the wire"])(
+    "holds this window's appState claim, %s, over an update that crossed it",
+    (where) => {
+      const [tab] = installTabs([sceneTab()]);
+      const { session, binding, sock } = attached(tab!);
+      if (where !== "on the wire") {
+        binding.pending.push(elem("mine", 2));
+        binding.flushPendingLocal();
+      }
+      binding.pendingAppState = MINE;
+      binding.flushPendingLocal();
+      sock.frame({ type: "update", version: 1, elements: [], appState: PEERS });
+      sock.frame({ type: "push-ok", version: 2 });
+      if (where !== "on the wire") sock.frame({ type: "push-ok", version: 3 });
+
+      expect(rebind(session, binding).snapshots[0]?.appState).toEqual(MINE);
+    },
+  );
 });
 
 describe("the classic PUT during an outage", () => {
