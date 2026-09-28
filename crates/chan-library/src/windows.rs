@@ -967,6 +967,57 @@ mod tests {
         (out, lines)
     }
 
+    /// Set in the re-run of [`a_capture_sees_a_callsite_another_thread_registered_first`],
+    /// the one run in which its half does real work.
+    const CALLSITE_CHILD: &str = "CHAN_TEST_CAPTURE_CALLSITE_CHILD";
+
+    /// A warning only the capture pin reaches, so its first registration is
+    /// the one the pin arranges.
+    fn warn_from_a_callsite_of_its_own() {
+        tracing::warn!("a warning only the capture pin logs");
+    }
+
+    // The re-run's half. Alone in its process, the capture is the only
+    // dispatcher registered unless the capture registers another, so the
+    // callsite, first registered on a thread with no subscriber, caches the
+    // interest it caches when a test without a capture reaches it first.
+    #[test]
+    fn a_capture_sees_a_callsite_another_thread_registered_first_child() {
+        if std::env::var_os(CALLSITE_CHILD).is_none() {
+            return;
+        }
+        let ((), lines) = capture_logs(|| {
+            std::thread::spawn(warn_from_a_callsite_of_its_own)
+                .join()
+                .unwrap();
+            warn_from_a_callsite_of_its_own();
+        });
+        assert_eq!(
+            lines.len(),
+            1,
+            "the capture sees the warning its own thread logs: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_capture_sees_a_callsite_another_thread_registered_first() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CALLSITE_CHILD, "1")
+            .args([
+                "--exact",
+                "windows::tests::a_capture_sees_a_callsite_another_thread_registered_first_child",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the re-run's half ran and passed\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
     // A stored workspace ordinal at the top of the range (a damaged or
     // hand-edited store) still mints the next window instead of panicking.
     #[test]
