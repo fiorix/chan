@@ -869,7 +869,7 @@ describe("a live drawing", () => {
   /// A drawing on its board, attached to a session whose snapshot holds the
   /// file as it is.
   async function attachedDrawing() {
-    const { pane, tab } = await loadedTab("notes/live.excalidraw", DRAWING);
+    const { pane, tab, reads } = await loadedTab("notes/live.excalidraw", DRAWING);
     const { board } = await mountBoard(tab);
     await board.start();
     await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
@@ -880,7 +880,7 @@ describe("a live drawing", () => {
       dirty: false, mtime_ns: "1000000000", cursors: [],
     });
     expect(tab.doc?.state).toBe("attached");
-    return { pane, tab, board, socket };
+    return { pane, tab, board, socket, reads };
   }
 
   test("a peer's edit leaves the drawing saved, and its close closes it", async () => {
@@ -1023,6 +1023,43 @@ describe("a live drawing", () => {
         .filter((p) => p.appState !== undefined && (p.appState as Record<string, unknown>).viewBackgroundColor !== PICKED),
       sockets: sceneSockets.length,
     }).toEqual({ background: PICKED, reverting: [], sockets: 1 });
+  });
+
+  const shownIds = (board: ReturnType<typeof excalidrawBoard>) =>
+    board.elements.map((e) => (e as { id: string }).id).sort();
+
+  test("a reload within the session's linger shows what the session holds and pushes nothing of the file's", async () => {
+    const { tab, board, socket, reads } = await attachedDrawing();
+    socket.frame({ type: "update", version: 2, elements: [PEER], appState: { viewBackgroundColor: BACKGROUND } });
+    await vi.waitFor(() => expect(board.appState.viewBackgroundColor).toBe(BACKGROUND));
+    vi.useFakeTimers();
+    // The read answers the file, which holds neither the peer's element nor
+    // its background. The board reseeds from it when the load ends and binds
+    // again after that, and the bind's replay puts the session's scene back.
+    const loading = reloadTabFromDisk(tab.id);
+    await vi.advanceTimersByTimeAsync(0);
+    await reads.finish(DRAWING);
+    await loading;
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      board: shownIds(board),
+      background: board.appState.viewBackgroundColor,
+      pushes: socket.pushes(),
+      sockets: sceneSockets.length,
+    }).toEqual({ board: ["on-disk", "peer"], background: BACKGROUND, pushes: [], sockets: 1 });
+  });
+
+  test("a buffer written without the board, as a conflict's resolution writes it, reseeds a bound board with no replay over it", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    socket.frame({ type: "update", version: 2, elements: [PEER] });
+    await vi.waitFor(() => expect(tab.content).toContain('"peer"'));
+    tab.content = DRAWING;
+    tab.saved = DRAWING;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect({ board: shownIds(board), pushes: socket.pushes() }).toEqual({ board: ["on-disk"], pushes: [] });
   });
 
   /// The backgrounds the pushes on `socket` carried.
