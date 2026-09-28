@@ -618,9 +618,9 @@ fn validated_frames(
 
 /// Whether `rel` has the exact shape the walker emits: slash-separated,
 /// non-empty segments, none of them `.` or `..`, and no leading slash.
-/// Deliberately not `normalize_rel`, which also rewrites `\\` to `/` and so
-/// would refuse a legitimate frame for a Unix directory whose name contains a
-/// backslash.
+/// Deliberately not `normalize_rel`: that repairs a leading slash, an empty
+/// segment or a `.` segment into another spelling, and a frame the walker
+/// emitted has none of them, so one that does is refused, not repaired.
 fn rel_is_normal_form(rel: &str) -> bool {
     !rel.is_empty()
         && !rel.starts_with('/')
@@ -722,7 +722,7 @@ fn normalize_rel(requested: &str) -> String {
             _ => return trimmed.to_owned(),
         }
     }
-    out.to_string_lossy().replace('\\', "/")
+    chan_workspace::fs_ops::rel_path_text(&out)
 }
 
 #[cfg(unix)]

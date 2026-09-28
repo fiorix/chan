@@ -650,10 +650,8 @@ fn directory_label(path: &str) -> String {
 fn parent_directory(path: &str) -> String {
     std::path::Path::new(path)
         .parent()
-        .and_then(|p| p.to_str())
-        .filter(|p| !p.is_empty())
-        .unwrap_or("")
-        .replace('\\', "/")
+        .map(chan_workspace::fs_ops::rel_path_text)
+        .unwrap_or_default()
 }
 
 /// Case-insensitive language match shared by the language graph and
