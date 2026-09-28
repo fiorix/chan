@@ -1906,8 +1906,8 @@ async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> Cont
                         }
                     }
                     // An earlier call of this process on the root has not
-                    // let go: say the words its row reads, which a retry
-                    // answers, as the launcher's routes do.
+                    // let go: say `workspace is still releasing; retry`, as
+                    // the launcher's routes do.
                     Err(chan_library::Error::Core(
                         chan_workspace::ChanError::WorkspaceAlreadyOpen,
                     )) => ControlResponse::Error {

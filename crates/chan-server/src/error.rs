@@ -98,10 +98,11 @@ pub fn err_settings_locked() -> Response {
 pub use chan_library::WORKSPACE_STILL_RELEASING;
 
 /// The refusal of a request that finds its root held by an earlier call of
-/// this process that has not let go of it: 503 with the words the root's row
-/// reads, and a retry worth making once the host's one-second release budget
-/// has passed. Every route that answers this state answers with it, so its
-/// status, header and body have one definition.
+/// this process that has not let go of it: 503 with the words `workspace is
+/// still releasing; retry` and `Retry-After: 1`, which spaces retries a
+/// second apart, since nothing says when that call lets go. The launcher's
+/// add, on and delete and the devserver's forget answer this state with it,
+/// so their status, header and body have one definition.
 pub(crate) fn workspace_still_releasing() -> Response {
     let mut response = err(
         StatusCode::SERVICE_UNAVAILABLE,

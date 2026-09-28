@@ -2021,7 +2021,8 @@ async fn handle_workspace_off(
 /// everywhere. Live terminals return 409 unless `force=true`. A mutable launcher
 /// is required. 404 when no workspace maps to the id. A removal that meets an
 /// earlier call of this process on the root that has not let go answers as the
-/// add and the on do: 503, `Retry-After: 1` and the words the root's row reads.
+/// add and the on do: 503, `Retry-After: 1` and the words `workspace is still
+/// releasing; retry`.
 async fn handle_remove_workspace(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
