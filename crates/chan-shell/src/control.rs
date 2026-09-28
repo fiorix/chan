@@ -16,13 +16,69 @@ use crate::wire::{ControlRequest, ControlResponse, Identity};
 #[derive(Debug)]
 pub struct OpenEnv {
     pub window_id: String,
-    pub control_socket: PathBuf,
+    pub control_socket: EnvControlSocket,
+}
+
+/// The control socket a chan terminal's environment names
+/// (`$CHAN_CONTROL_SOCKET`), with the workspace path the same environment
+/// names beside it (`$CHAN_WORKSPACE_PATH`). Only `cs`'s resolvers make one,
+/// so a request can tell a socket the terminal was handed from one that a
+/// caller found by path. There is no `Deref` to [`Path`]: a call site cannot
+/// pass it on as a bare path without saying so.
+#[derive(Debug)]
+pub struct EnvControlSocket {
+    path: PathBuf,
+    // Carried with the socket; no request reads it.
+    #[allow(dead_code)]
+    workspace_path: Option<PathBuf>,
+}
+
+impl EnvControlSocket {
+    fn new(path: String, workspace_path: Option<String>) -> Self {
+        Self {
+            path: PathBuf::from(path),
+            workspace_path: workspace_path
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        }
+    }
+}
+
+/// Where a control request goes: a socket its caller found by path, or the
+/// one a chan terminal's environment names. Other crates never name it; they
+/// pass a path, which converts.
+pub enum ControlTarget<'a> {
+    Path(&'a Path),
+    Env(&'a EnvControlSocket),
+}
+
+impl<'a> From<&'a Path> for ControlTarget<'a> {
+    fn from(path: &'a Path) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a PathBuf> for ControlTarget<'a> {
+    fn from(path: &'a PathBuf) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a EnvControlSocket> for ControlTarget<'a> {
+    fn from(socket: &'a EnvControlSocket) -> Self {
+        Self::Env(socket)
+    }
 }
 
 /// Build an [`OpenEnv`] from explicit values (the env-var lookups live in
 /// [`open_env`]; this split keeps the validation unit-testable without
 /// touching the process environment).
-pub fn open_env_from(window_id: Option<String>, control_socket: Option<String>) -> Result<OpenEnv> {
+pub fn open_env_from(
+    window_id: Option<String>,
+    control_socket: Option<String>,
+    workspace_path: Option<String>,
+) -> Result<OpenEnv> {
     let window_id = window_id
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -37,7 +93,7 @@ pub fn open_env_from(window_id: Option<String>, control_socket: Option<String>) 
         })?;
     Ok(OpenEnv {
         window_id,
-        control_socket: PathBuf::from(control_socket),
+        control_socket: EnvControlSocket::new(control_socket, workspace_path),
     })
 }
 
@@ -47,13 +103,14 @@ pub fn open_env() -> Result<OpenEnv> {
     open_env_from(
         std::env::var("CHAN_WINDOW_ID").ok(),
         std::env::var("CHAN_CONTROL_SOCKET").ok(),
+        std::env::var("CHAN_WORKSPACE_PATH").ok(),
     )
 }
 
 /// Resolve just the control socket, for category-2 actions (`cs terminal
 /// write` / `terminal list` / `search`) that act on the server's live
 /// sessions and so do not need a window to target.
-pub fn control_socket_env() -> Result<PathBuf> {
+pub fn control_socket_env() -> Result<EnvControlSocket> {
     let socket = std::env::var("CHAN_CONTROL_SOCKET")
         .ok()
         .map(|s| s.trim().to_string())
@@ -61,7 +118,10 @@ pub fn control_socket_env() -> Result<PathBuf> {
         .ok_or_else(|| {
             anyhow::anyhow!("not running inside a chan terminal; this needs $CHAN_CONTROL_SOCKET")
         })?;
-    Ok(PathBuf::from(socket))
+    Ok(EnvControlSocket::new(
+        socket,
+        std::env::var("CHAN_WORKSPACE_PATH").ok(),
+    ))
 }
 
 /// Make a path absolute against the shell's current working directory.
@@ -130,7 +190,13 @@ pub async fn socket_identity(socket: &Path) -> Option<Identity> {
 /// Connect to the control socket, mapping the two "server is gone" error
 /// kinds to a friendly message. Shared by the one-shot and streaming
 /// request paths so both report a dead server the same way.
-async fn connect_control(socket: &Path) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
+async fn connect_control(
+    target: ControlTarget<'_>,
+) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
+    let socket = match target {
+        ControlTarget::Path(path) => path,
+        ControlTarget::Env(env) => env.path.as_path(),
+    };
     transport::connect(socket).await.map_err(|err| {
         // A missing or refused socket means the chan window or server that
         // spawned this terminal has exited, leaving a stale
@@ -231,10 +297,13 @@ where
 /// Connect to the control socket, write one JSON request line, and return
 /// the server's reply message (or its error, surfaced as an `Err`).
 /// Platform-neutral over the `transport` module.
-pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Result<String> {
+pub async fn send_control_request<'a>(
+    socket: impl Into<ControlTarget<'a>>,
+    request: ControlRequest,
+) -> Result<String> {
     use tokio::io::{AsyncWriteExt, BufReader};
 
-    let (read, mut write) = connect_control(socket).await?;
+    let (read, mut write) = connect_control(socket.into()).await?;
     let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
     payload.push(b'\n');
     write
@@ -252,7 +321,10 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
 /// Send a blocking request while retaining the client's write half until the
 /// first response arrives. The server may use EOF on that half to cancel work
 /// if the client exits while the request is parked.
-pub async fn send_control_request_held(socket: &Path, request: ControlRequest) -> Result<String> {
+pub async fn send_control_request_held<'a>(
+    socket: impl Into<ControlTarget<'a>>,
+    request: ControlRequest,
+) -> Result<String> {
     Ok(send_control_request_streaming(socket, request).await?.ack)
 }
 
@@ -310,13 +382,13 @@ impl TunnelSession {
 /// is meaningful to the server: `cs tunnel` retains the returned session for
 /// the tunnel's lifetime, while [`send_control_request_held`] drops it after
 /// the first response to bound a parked request's lifetime.
-pub async fn send_control_request_streaming(
-    socket: &Path,
+pub async fn send_control_request_streaming<'a>(
+    socket: impl Into<ControlTarget<'a>>,
     request: ControlRequest,
 ) -> Result<TunnelSession> {
     use tokio::io::{AsyncWriteExt, BufReader};
 
-    let (read, mut write) = connect_control(socket).await?;
+    let (read, mut write) = connect_control(socket.into()).await?;
     let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
     payload.push(b'\n');
     write
@@ -451,19 +523,36 @@ mod tests {
 
     #[test]
     fn open_env_requires_window_id_and_control_socket() {
-        let err = open_env_from(None, Some("/tmp/chan-control.sock".into())).unwrap_err();
+        let err = open_env_from(None, Some("/tmp/chan-control.sock".into()), None).unwrap_err();
         assert!(err.to_string().contains("CHAN_WINDOW_ID"));
 
-        let err = open_env_from(Some("win".into()), None).unwrap_err();
+        let err = open_env_from(Some("win".into()), None, None).unwrap_err();
         assert!(err.to_string().contains("CHAN_CONTROL_SOCKET"));
 
         let env = open_env_from(
             Some(" win ".into()),
             Some(" /tmp/chan-control.sock ".into()),
+            Some(" /work/notes ".into()),
         )
         .unwrap();
         assert_eq!(env.window_id, "win");
-        assert_eq!(env.control_socket, PathBuf::from("/tmp/chan-control.sock"));
+        assert_eq!(
+            env.control_socket.path,
+            PathBuf::from("/tmp/chan-control.sock")
+        );
+        assert_eq!(
+            env.control_socket.workspace_path,
+            Some(PathBuf::from("/work/notes"))
+        );
+
+        // A blank workspace path is no workspace path.
+        let env = open_env_from(
+            Some("win".into()),
+            Some("/tmp/chan-control.sock".into()),
+            Some("  ".into()),
+        )
+        .unwrap();
+        assert_eq!(env.control_socket.workspace_path, None);
     }
 
     #[cfg(unix)]
