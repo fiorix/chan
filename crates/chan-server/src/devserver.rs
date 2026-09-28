@@ -1920,16 +1920,20 @@ impl DevserverState {
     /// A row's path is the root of the record that saved it. The rows are
     /// grouped by the registry row that path names ([`registered_row_for`]),
     /// and each group makes one record under that row's stored root, at the
-    /// prefix derived from it, from the group's row with the highest
-    /// generation, then the row under the stored root, then the row desired
-    /// on. Generations are counted per path, so comparing two paths' is a
-    /// rule for an overlay an earlier build wrote with rows under both of a
-    /// workspace's keys, or two rows under one; no run of this build writes
-    /// either, since every save writes one row per record, under its stored
-    /// root. A row no registry row goes by keeps its own path. The prefix,
-    /// the record and the starting mark are built without asking any root's
-    /// filesystem; [`register_restore_rows`](Self::register_restore_rows) has
-    /// registered the rows first.
+    /// prefix derived from it, desired on when any row of the group is, at
+    /// the highest generation among them. A group holds more than one row
+    /// when an earlier build's records went by either of a workspace's keys,
+    /// or when the host's close or removal by root wrote an off row under
+    /// each. Generations are counted per path and order nothing between two
+    /// rows, and the earlier build's own restart served the workspace
+    /// wherever one of its rows was on, so an off under one key does not
+    /// outrank an on under the other: a workspace turned off under one key
+    /// beside an on row under the other comes back on, since nothing in the
+    /// rows tells that off from one a save wrote for a record it found
+    /// unserved. A row no registry row goes by keeps its own path. The
+    /// prefix, the record and the starting mark are built without asking any
+    /// root's filesystem; [`register_restore_rows`](Self::register_restore_rows)
+    /// has registered the rows first.
     fn prepare_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<MountAttempt> {
         let registry = self.host.library().list_workspaces();
         let mut grouped: Vec<(PathBuf, PersistedWorkspace)> = Vec::new();
@@ -1940,12 +1944,9 @@ impl DevserverState {
                 grouped.push((root, row));
                 continue;
             };
-            let rank = |row: &PersistedWorkspace| {
-                (row.generation, Path::new(&row.path) == root, row.desired_on)
-            };
-            if rank(&row) > rank(&grouped[i].1) {
-                grouped[i].1 = row;
-            }
+            let group = &mut grouped[i].1;
+            group.desired_on |= row.desired_on;
+            group.generation = group.generation.max(row.generation);
         }
         let mut attempts = Vec::new();
         for (root, row) in grouped {
@@ -9386,8 +9387,8 @@ mod tests {
 
     /// An overlay an earlier build wrote, with a relinked root's rows under
     /// both of its keys or two rows under one, restores one record under the
-    /// stored root, from the row with the higher generation, and the first
-    /// save writes that one row back under the stored root.
+    /// stored root, desired on when either row is, at the higher generation,
+    /// and the first save writes that one row back under the stored root.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_earlier_overlay_restores_a_relinked_root_as_one_record() {
@@ -9403,7 +9404,7 @@ mod tests {
                 "two canonical rows",
                 None,
                 vec![(true, 1), (false, 2)],
-                false,
+                true,
             ),
         ] {
             let home = tempfile::tempdir().expect("home");
