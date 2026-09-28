@@ -97,6 +97,22 @@ pub fn err_settings_locked() -> Response {
 // the routes that answer with them and the desktop read them from here.
 pub use chan_library::WORKSPACE_STILL_RELEASING;
 
+/// The refusal of a request that finds its root held by an earlier call of
+/// this process that has not let go of it: 503 with the words the root's row
+/// reads, and a retry worth making once the host's one-second release budget
+/// has passed. Every route that answers this state answers with it, so its
+/// status, header and body have one definition.
+pub(crate) fn workspace_still_releasing() -> Response {
+    let mut response = err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        WORKSPACE_STILL_RELEASING.into(),
+    );
+    response
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
 /// The refusal of a request to mount a workspace whose root did not answer
 /// within [`WORKSPACE_MOUNT_TIMEOUT`](crate::WORKSPACE_MOUNT_TIMEOUT) of the
 /// request's start, naming `root`. The launcher's add and on and the desktop's

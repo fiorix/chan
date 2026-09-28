@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
 use crate::devserver::{bytes_eq, ForceQuery};
+use crate::error::workspace_still_releasing;
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,
@@ -1831,21 +1832,6 @@ fn mount_timed_out_refusal(root: &Path) -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         crate::error::mount_timed_out(root),
     )
-}
-
-/// The answer to an add or an on of a root that an earlier open of this
-/// process has not let go of yet: 503 with the words the root's row reads,
-/// and a retry worth making once the host's one-second release budget has
-/// passed.
-fn workspace_still_releasing() -> Response {
-    let mut response = crate::error::err(
-        StatusCode::SERVICE_UNAVAILABLE,
-        crate::error::WORKSPACE_STILL_RELEASING.into(),
-    );
-    response
-        .headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-    response
 }
 
 /// `POST /api/library/workspaces` `{path}`: register the local folder in the host
