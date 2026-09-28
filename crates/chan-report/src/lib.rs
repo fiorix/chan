@@ -33,6 +33,23 @@ use chrono::Utc;
 
 use crate::walk::Filter;
 
+/// The text of a root-relative path, the one spelling every walk, store
+/// key and wire path uses: components joined by `/`. On Unix `\` is an
+/// ordinary character of a name and stays in it; on Windows it is the
+/// separator and reads as `/`.
+///
+/// It lives in this crate because chan-workspace depends on it and not the
+/// other way round: the workspace re-exports it from `fs_ops`, so the
+/// report's keys and the workspace's keys cannot spell one name two ways.
+pub fn rel_path_text(rel: &Path) -> String {
+    let text = rel.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
 /// Workspace-owned scope adapter used by both full and incremental reports.
 /// When set, it replaces the crate's own hidden, gitignore and exclude
 /// filtering entirely.
@@ -599,6 +616,17 @@ fn roll_up(files: &[FileStats]) -> (Vec<LanguageStats>, Totals) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rel_path_text_reads_a_backslash_as_the_platform_does() {
+        assert_eq!(rel_path_text(Path::new("dir/a.md")), "dir/a.md");
+        let expected = if cfg!(windows) {
+            "dir/a/b.md"
+        } else {
+            "dir/a\\b.md"
+        };
+        assert_eq!(rel_path_text(Path::new("dir/a\\b.md")), expected);
+    }
 
     #[test]
     fn a_count_error_removes_an_existing_row_on_update() {

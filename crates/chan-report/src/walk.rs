@@ -151,7 +151,7 @@ pub(crate) fn walk_root(
                 let Ok(rel) = entry.path().strip_prefix(&root) else {
                     return false;
                 };
-                let rel = rel.to_string_lossy().replace('\\', "/");
+                let rel = crate::rel_path_text(rel);
                 let is_dir = entry
                     .file_type()
                     .is_some_and(|file_type| file_type.is_dir());
@@ -229,11 +229,15 @@ fn collect_entries(
         if !is_file {
             continue;
         }
-        let Some(rel) = abs.strip_prefix(root).ok().and_then(|rel| rel.to_str()) else {
+        let Some(rel) = abs
+            .strip_prefix(root)
+            .ok()
+            .filter(|rel| rel.to_str().is_some())
+        else {
             skipped += 1;
             continue;
         };
-        out.push(rel.replace('\\', "/"));
+        out.push(crate::rel_path_text(rel));
     }
     Ok(WalkResult {
         paths: out,
