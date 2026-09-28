@@ -7199,6 +7199,7 @@ mod tests {
     /// An unregister that fails with anything but a handle of the root this
     /// process holds settles the removal's row with that failure's own
     /// sentence, not with the words a retry answers.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_removal_whose_unregister_fails_otherwise_keeps_its_errors_sentence() {
         let cfg = tempfile::tempdir().unwrap();
