@@ -43,6 +43,12 @@ export function canvasCssNumber(
   return Number.isFinite(raw) ? raw : fallback;
 }
 
+/// The speed control's multiplier for the animation on `canvas`: its host's
+/// --canvas-animation-speed variable, 1 when unset.
+export function canvasAnimationSpeed(canvas: HTMLCanvasElement): number {
+  return canvasCssNumber(canvas, "--canvas-animation-speed", 1);
+}
+
 // Reads an "r, g, b" CSS variable (the format 2D canvas animations feed to
 // rgb()) as normalized 0..1 channels for WebGL uniforms.
 export function canvasCssRgb(
@@ -240,11 +246,7 @@ function animate(
 
   function loop(timeMs: number): void {
     if (timeMs - lastDrawMs >= frameIntervalMs) {
-      const speed = canvasCssNumber(
-        canvas,
-        "--canvas-animation-speed",
-        1,
-      );
+      const speed = canvasAnimationSpeed(canvas);
       virtualMs +=
         (lastDrawMs === 0 ? frameIntervalMs : timeMs - lastDrawMs) *
         speed;

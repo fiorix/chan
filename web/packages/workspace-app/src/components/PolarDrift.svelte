@@ -8,6 +8,7 @@
     type PolarDriftRenderer,
   } from "./polarDrift";
   import {
+    canvasAnimationSpeed,
     canvasCssNumber,
     canvasCssRgb,
     runWebgl2Animation,
@@ -16,6 +17,9 @@
   const PHASE_SPEED = 0.06;
   const SOURCE_FRAMES_PER_SECOND = 60;
   const SOURCE_FADE_ALPHA = 5 / 255;
+  // The source frames one paint may catch up after a stall, at 1x. The cap
+  // grows with the speed control, whose clock runs that much faster, so a
+  // faster speed is not clipped back to the one this cap allows.
   const MAX_FRAME_SCALE = 4;
 
   let canvas = $state<HTMLCanvasElement | undefined>();
@@ -112,7 +116,7 @@
             ? 1000 / SOURCE_FRAMES_PER_SECOND
             : timeMs - lastSimulationMs;
         const frameScale = Math.min(
-          MAX_FRAME_SCALE,
+          MAX_FRAME_SCALE * Math.max(1, canvasAnimationSpeed(host)),
           (elapsedMs * SOURCE_FRAMES_PER_SECOND) / 1000,
         );
         lastSimulationMs = timeMs;
