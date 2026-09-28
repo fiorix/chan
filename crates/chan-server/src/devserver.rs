@@ -8962,13 +8962,13 @@ mod tests {
             let holder = tempfile::tempdir().expect("holder");
             // The parent's new name decides the canonical path's prefix.
             let base = canonical_root(holder.path());
-            let served = registered_workspace_prefix(&base.join("parent").join("ws"))
-                .expect("prefix");
+            let served =
+                registered_workspace_prefix(&base.join("parent").join("ws")).expect("prefix");
             let moved = (0..)
                 .map(|n| format!("moved-{n}"))
                 .find(|name| {
-                    let other = registered_workspace_prefix(&base.join(name).join("ws"))
-                        .expect("prefix");
+                    let other =
+                        registered_workspace_prefix(&base.join(name).join("ws")).expect("prefix");
                     (served < other) == served_sorts_first
                 })
                 .expect("a name");
