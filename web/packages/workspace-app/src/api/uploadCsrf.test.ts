@@ -207,4 +207,14 @@ describe("upload refusal", () => {
     await expect(api.uploadFile(new File(["x"], "a.txt"), "inbox"))
       .rejects.toMatchObject({ status: 409, message: body.error, data: body });
   });
+
+  test.each(["", " \t"])("gives the raw body for a blank error %j and keeps its envelope", async (blank) => {
+    const body = { error: blank, code: "upload_refused" };
+    const text = JSON.stringify(body);
+    setXhrFactory(() => new FakeXhr(409, text) as unknown as XMLHttpRequest);
+    const error = await api.uploadFile(new File(["x"], "a.txt"), "inbox")
+      .then(() => null, (reason: unknown) => reason);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 409, message: text, data: body });
+  });
 });
