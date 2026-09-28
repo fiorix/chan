@@ -690,6 +690,32 @@ describe("a push between an adopt and the library's render of it", () => {
   });
 });
 
+describe("a live board's own appState change", () => {
+  test.each([
+    ["the grid", { gridModeEnabled: true }],
+    ["the background", { viewBackgroundColor: "#123456" }],
+  ])("a change of %s after an adopt pushes once", async (_what, change) => {
+    vi.useFakeTimers();
+    try {
+      const { api, session, binding } = await mountBound([]);
+      // The authority's frames sort an object's keys.
+      binding.applySnapshot([], { gridModeEnabled: false, gridSize: 20, gridStep: 5, viewBackgroundColor: "#ffffff" }, {});
+      libraryChange();
+      vi.advanceTimersByTime(300);
+
+      api.setAppState(change);
+      libraryChange();
+      vi.advanceTimersByTime(300);
+      libraryChange();
+      vi.advanceTimersByTime(300);
+
+      expect(pushedAppStates(session)).toEqual([{ ...boardAppState, ...change }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("canonicalJson", () => {
   test("the same keys and values in another order give one text, nested too", () => {
     const board = { gridSize: 20, gridStep: 5, grid: { mode: true, step: 5 }, viewBackgroundColor: "#ffffff" };
