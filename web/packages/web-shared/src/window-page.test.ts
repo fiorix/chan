@@ -194,12 +194,14 @@ describe("the connection read before navigation", () => {
     vi.useFakeTimers();
     const child = popup(PAGE);
     const reading = heldReading();
-    const pending = navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(reading.readConnection));
+    let settled: unknown = "pending";
+    void navigateWindowWhenReady(child.handle, PAGE, slowCheck(), withReader(reading.readConnection))
+      .then((ready) => { settled = ready; }, (error: unknown) => { settled = error; });
     await vi.advanceTimersByTimeAsync(100);
     child.window.closed = true;
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(await pending).toBe(false);
+    expect(settled).toBe(false);
     reading.answer("disconnected");
     await vi.advanceTimersByTimeAsync(0);
     expect(child.navigate).not.toHaveBeenCalled();
