@@ -117,6 +117,7 @@ import {
   restoreTransfers,
   setTransferProgress,
   setTransferSignalSink,
+  type TransferSource,
   waitForTransferSlot,
 } from "./transfers.svelte";
 import {
@@ -2452,9 +2453,7 @@ async function bootstrapStandalone(): Promise<void> {
       }
       if (windowCaps.files && !fresh) {
         applyTreeExpandedReloadSnapshot();
-        restoreTransfers(
-          (source) => () => fileOps.downloadPathWithProgress(source.path, source.isDir),
-        );
+        restoreTransfers(fileOps.downloadRetry);
       }
     } catch (e) {
       ui.status = `restore failed: ${(e as Error).message}`;
@@ -2626,9 +2625,7 @@ export async function bootstrap(): Promise<void> {
       // re-runs a download from its source (uploads cannot retry -- the File is
       // gone). Fresh windows start with no transfers.
       if (!fresh) {
-        restoreTransfers(
-          (source) => () => fileOps.downloadPathWithProgress(source.path, source.isDir),
-        );
+        restoreTransfers(fileOps.downloadRetry);
       }
       // Per-overlay state from the hash lands on top of any
       // session-restored knobs so a shared URL always wins. Skipped
@@ -5688,14 +5685,20 @@ export const fileOps = {
         window.location.href,
       ).toString();
       // Pass the source so an interrupted download (window reload) can offer
-      // Retry from the transfer bubble.
+      // Retry from the transfer bubble, under the same root.
       void runDesktopDownload(url, downloadFilename(path, isDir), {
         path,
         isDir,
+        root,
       }).catch(() => {});
       return;
     }
     this.downloadPath(path, isDir, root);
+  },
+  /// The Retry a reload rebuilds for an interrupted or failed download: it
+  /// asks for the recorded source again, under the root it was started with.
+  downloadRetry(source: TransferSource): () => void {
+    return () => fileOps.downloadPathWithProgress(source.path, source.isDir, source.root);
   },
   async replaceFileAt(targetPath: string, picked: File): Promise<void> {
     const draftsReason = fileBrowserDraftsPathReason(targetPath);
