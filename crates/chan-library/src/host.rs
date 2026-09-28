@@ -827,8 +827,10 @@ impl Drop for WorkspaceMountGuard<'_> {
 
 /// What a close by root learned of the workspace's registry row.
 enum ClosingRow {
-    /// The root the row stores, or the root a mounted runtime was opened at.
-    Found(PathBuf),
+    /// The keys the workspace goes by: the root the row stores and the
+    /// canonical path it last resolved to, or for a mounted workspace the
+    /// root its runtime was opened at and the runtime's canonical root.
+    Found { stored: PathBuf, resolved: PathBuf },
     /// No row goes by the root.
     Absent,
     /// The root was not asked: a lookup of it whose caller gave up has not
@@ -839,9 +841,24 @@ enum ClosingRow {
 impl ClosingRow {
     fn stored(&self) -> Option<&Path> {
         match self {
-            ClosingRow::Found(stored) => Some(stored),
+            ClosingRow::Found { stored, .. } => Some(stored),
             ClosingRow::Absent | ClosingRow::Unasked => None,
         }
+    }
+
+    /// Every key the workspace's lifecycle row can be under: `target`, the
+    /// key the close resolved, and the keys the workspace goes by. A
+    /// devserver marks a mount attempt under the root a row stores.
+    fn lifecycle_keys(&self, target: &Path) -> Vec<PathBuf> {
+        let mut keys = vec![target.to_path_buf()];
+        if let ClosingRow::Found { stored, resolved } = self {
+            for key in [stored, resolved] {
+                if !keys.contains(key) {
+                    keys.push(key.clone());
+                }
+            }
+        }
+        keys
     }
 }
 
@@ -3345,8 +3362,13 @@ impl WorkspaceHost {
     /// root. `target` is `root`'s canonical key, which the caller computed off
     /// the runtime thread before taking the lock.
     ///
+    /// A root no runtime holds reads a mount in flight, and has its lifecycle
+    /// cleared, under every key its registry row goes by as well as `target`:
+    /// a devserver marks a mount attempt under the root a row stores.
+    ///
     /// Also returns what the close learned of the workspace's registry row,
-    /// for a removal to forget its overlay rows by. A root no runtime holds
+    /// for a removal to forget its overlay rows and clear its lifecycle by.
+    /// A root no runtime holds
     /// whose lookup was not asked (see [`closing_row`](Self::closing_row))
     /// closes as a root no row goes by: it answers `NotFound` and records
     /// no off, since it cannot tell under which spelling the row's on-row
@@ -3378,24 +3400,30 @@ impl WorkspaceHost {
                         overlay.set_each(&overlay_spellings(target, Some(&stored)), false);
                     }
                 }
-                Ok((outcome, ClosingRow::Found(stored)))
+                Ok((
+                    outcome,
+                    ClosingRow::Found {
+                        stored,
+                        resolved: target.to_path_buf(),
+                    },
+                ))
             }
             None => {
                 let row = self.closing_row(root, target).await?;
                 let stored = row.stored();
                 let registered = stored.is_some();
-                let starting = self
-                    .mount_state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(target)
-                    .is_some_and(|state| matches!(state, MountState::Starting));
+                let keys = row.lifecycle_keys(target);
+                let starting = {
+                    let states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+                    keys.iter()
+                        .any(|key| matches!(states.get(key), Some(MountState::Starting)))
+                };
                 if record_off && registered {
                     if let Some(overlay) = self.workspace_overlay() {
                         overlay.set_each(&overlay_spellings(target, stored), false);
                     }
                 }
-                self.clear_workspace_lifecycle_by_key(target);
+                self.clear_workspace_lifecycle_by_keys(&keys);
                 let outcome = if registered && starting {
                     WorkspaceLifecycleOutcome::Completed
                 } else {
@@ -3431,7 +3459,10 @@ impl WorkspaceHost {
             let keys = registry_row_keys(row);
             keys.contains(&target) || keys.contains(&given.as_path())
         }) {
-            return Ok(ClosingRow::Found(row.root_path));
+            return Ok(ClosingRow::Found {
+                resolved: row.cached_canonical_path().to_path_buf(),
+                stored: row.root_path,
+            });
         }
         let Some(permit) = self
             .root_calls
@@ -3451,10 +3482,15 @@ impl WorkspaceHost {
                 if let Some(probe) = probe {
                     probe(RemovalHop::Lookup);
                 }
-                registered_stored_root(&library, &root)
+                registered_row_roots(&library, &root)
             })
             .await?;
-        Ok(stored.map_or(ClosingRow::Absent, ClosingRow::Found))
+        Ok(
+            stored.map_or(ClosingRow::Absent, |(stored, resolved)| ClosingRow::Found {
+                stored,
+                resolved,
+            }),
+        )
     }
 
     /// Remove the workspace at `root`: unmount it if mounted, forget it from the
@@ -3559,7 +3595,7 @@ impl WorkspaceHost {
         let removed = {
             let library = self.library.clone();
             let root = root.to_path_buf();
-            let key = target.clone();
+            let keys = row.lifecycle_keys(&target);
             let mount_state = Arc::clone(&self.mount_state);
             let changed = Arc::clone(&self.library_change_notify);
             let unregistered = Arc::clone(&removing.unregistered);
@@ -3575,7 +3611,9 @@ impl WorkspaceHost {
                     let removed = unregister_registered_workspace(&library, &root)?;
                     {
                         let mut state = mount_state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.remove(&key);
+                        for key in &keys {
+                            state.remove(key);
+                        }
                         unregistered.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     changed.notify_waiters();
@@ -4075,6 +4113,22 @@ impl WorkspaceHost {
     /// devserver record; touches no filesystem.
     pub fn clear_canonical_root_lifecycle(&self, key: &Path) {
         self.clear_workspace_lifecycle_by_key(key);
+    }
+
+    /// [`clear_workspace_lifecycle_by_key`](Self::clear_workspace_lifecycle_by_key)
+    /// for every key one workspace's lifecycle row can be under, firing the
+    /// watch feed once.
+    fn clear_workspace_lifecycle_by_keys(&self, keys: &[PathBuf]) {
+        let mut had = false;
+        {
+            let mut states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+            for key in keys {
+                had |= states.remove(key).is_some();
+            }
+        }
+        if had {
+            self.notify_window_change();
+        }
     }
 
     /// [`clear_workspace_lifecycle`](Self::clear_workspace_lifecycle) for a
@@ -4692,17 +4746,22 @@ fn overlay_spellings(key: &Path, stored: Option<&Path>) -> Vec<String> {
     paths
 }
 
-/// The root the registry row matching `root` stores, found by the lookup
-/// [`registered_workspace_paths`] makes: the row whose metadata directory
-/// that lookup names, read from the rows as listed, which asks no
-/// filesystem. `None` when no row matches.
-fn registered_stored_root(library: &Library, root: &Path) -> Option<PathBuf> {
+/// The root the registry row matching `root` stores and the canonical path
+/// it last resolved to, found by the lookup [`registered_workspace_paths`]
+/// makes: the row whose metadata directory that lookup names, read from the
+/// rows as listed, which asks no filesystem. `None` when no row matches.
+fn registered_row_roots(library: &Library, root: &Path) -> Option<(PathBuf, PathBuf)> {
     let paths = registered_workspace_paths(library, root)?;
     library
         .list_workspaces()
         .into_iter()
         .find(|row| library.workspace_paths_for_row(row).root == paths.root)
-        .map(|row| row.root_path)
+        .map(|row| {
+            (
+                row.root_path.clone(),
+                row.cached_canonical_path().to_path_buf(),
+            )
+        })
 }
 
 /// [`Library::workspace_paths_for`] for the close path, which must call it
