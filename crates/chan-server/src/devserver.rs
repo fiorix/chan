@@ -5327,27 +5327,52 @@ mod tests {
             .await;
         }
 
+        /// The gate answers a request to a mounted tenant with one refusal in
+        /// every phase before `Ready`, its `Retry-After` included.
         #[tokio::test]
         async fn startup_restoring() {
             let home = tempfile::tempdir().unwrap();
             let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
             state.mount_shared_terminal_tenant().await.unwrap();
             let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-            let response = app
-                .oneshot(
-                    HttpRequest::get("/api/terminal/api/session?w=test")
-                        .body(Body::empty())
-                        .unwrap(),
+            for phase in [
+                StartupPhase::PreparingRows,
+                StartupPhase::Binding,
+                StartupPhase::ServingAndRestoring,
+                StartupPhase::ApplyingFdstore,
+            ] {
+                match phase {
+                    StartupPhase::PreparingRows => {}
+                    StartupPhase::ApplyingFdstore => {
+                        assert!(state.startup.begin_fdstore_apply_after_restore().await);
+                    }
+                    next => state.startup.advance(next).expect("startup transition"),
+                }
+                assert_eq!(state.startup.phase(), phase);
+                let response = app
+                    .clone()
+                    .oneshot(
+                        HttpRequest::get("/api/terminal/api/session?w=test")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("1"),
+                    "{phase:?}"
+                );
+                assert_refusal(
+                    response,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "devserver is restoring terminal sessions",
                 )
-                .await
-                .unwrap();
-            assert_eq!(response.headers()[header::RETRY_AFTER], "1");
-            assert_refusal(
-                response,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "devserver is restoring terminal sessions",
-            )
-            .await;
+                .await;
+            }
             state.host.shutdown_all().await.unwrap();
         }
 
@@ -9067,6 +9092,36 @@ mod tests {
         #[tokio::test]
         async fn a_pending_mount_repeat_refuses_after_the_stop_signal() {
             refuses_after_signal("pending").await;
+        }
+
+        /// A request to a mounted tenant after the stop signal is told that
+        /// the devserver is stopping, with the code a client that waits out
+        /// a start gives up on, and is not asked to retry.
+        #[tokio::test]
+        async fn a_tenant_request_after_the_stop_signal_hears_that_the_devserver_stops() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let prefix = state.register_workspace(root.path()).await.expect("mount");
+            signal_stop(&state, false).await;
+
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let response = app
+                .oneshot(
+                    HttpRequest::get(format!("{prefix}/api/health"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+            assert_eq!(
+                refusal_body(response).await,
+                r#"{"error":"the devserver is stopping","code":"devserver_stopping"}"#
+            );
+            assert_eq!(retry_after, None, "a stopping devserver asks for no retry");
+            state.host.shutdown_all().await.unwrap();
         }
 
         /// A mount admitted before the signal can finish registering after it.
