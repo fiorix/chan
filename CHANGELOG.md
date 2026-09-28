@@ -18,9 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **A live drawing is written only when someone edits it.** With scene sync on, a drawing whose `appState` is `{}`, holds other keys or lists its keys in another order is no longer rewritten by a window that only opened it. A peer's change of the grid or the background is no longer pushed back by a window that has not shown it yet, and two windows that change the background at once end with the same one. A drawing another window edited no longer reads as unsaved here, and closing it closes it.
+- **A live drawing's `appState` is not rewritten by a window that only opens it.** With scene sync on, a drawing whose `appState` is `{}`, holds other keys or lists its keys in another order is no longer rewritten by a window that only opened it. A peer's change of the grid or the background is no longer pushed back by a window that has not shown it yet, and two windows that change the background at once end with the same one. A drawing another window edited no longer reads as unsaved here, and closing it closes it.
 
-- **A live drawing shows what its session holds as it opens.** With scene sync on, a drawing opened, or moved to another pane, while another window edited it could show the file's elements and background in place of that window's latest ones, and then write the file's background back over theirs; it shows theirs and writes nothing back. A background picked in a window stays when its drawing moves to another pane. After a reconnect every window agrees on the background: one picked while the window was reconnecting gives way to the one the others hold.
+- **A live drawing shows what its session holds as it opens.** With scene sync on, a drawing opened, or moved to another pane, while another window edited it could show the file's elements and background in place of that window's latest ones, and then write the file's background back over theirs; it shows theirs and writes nothing back. After a reconnect every window agrees on the background: one picked while the window was reconnecting gives way to the one the others hold.
+
+- **A live drawing keeps what a window sent as a conflict is resolved.** With scene sync on, resolving a drawing's conflict could make a window that had just sent a stroke lose it, if its connection then dropped, and show its previous background while the file and the other windows took the new one. Both now stand. A background picked a moment before another window joins or leaves is no longer put back.
 
 ## [v0.100.0] - 2026-09-23
 
