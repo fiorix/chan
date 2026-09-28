@@ -65,6 +65,18 @@ describe("Mutual Force Starburst", () => {
     expect(advance).toHaveBeenCalledTimes(4);
   });
 
+  test("keeps up with the speed control: at 4x a paint of 150 ms of clock takes 9 source steps", () => {
+    const { run, callbacks } = startAnimation(MutualForceStarburst, recordingContext2d().ctx);
+    run.canvas.parentElement!.style.setProperty("--canvas-animation-speed", "4");
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const advance = vi.mocked(advanceMutualForceParticles);
+    advance.mockClear();
+    callbacks.frame(1150);
+
+    expect(advance).toHaveBeenCalledTimes(9);
+  });
+
   test("fades each source step by 9/255 of the background its theme token names", () => {
     const { ctx, ops } = recordingContext2d();
     const { run, callbacks } = startAnimation(MutualForceStarburst, ctx);

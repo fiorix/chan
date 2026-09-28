@@ -43,4 +43,20 @@ describe("OutlineBody", () => {
       "Two",
     ]);
   });
+
+  test("leaves out a comment line of leading YAML frontmatter, and keeps the body's lines", () => {
+    const content = "---\ntitle: Plan\n# a YAML comment\n---\n# Body\n";
+    expect(outlineRows(content)).toEqual(["Body"]);
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const selected: number[] = [];
+    mounted.push(mount(OutlineBody, { target, props: { content, onSelect: (h: { line: number }) => selected.push(h.line) } }));
+    flushSync();
+    [...target.querySelectorAll<HTMLButtonElement>(".outline-list button")].at(-1)!.click();
+    expect(selected, "the body heading keeps its source line").toEqual([4]);
+  });
+
+  test("reads an opening --- with no closer as a rule, so the heading below it stays", () => {
+    expect(outlineRows("---\n# Title\ntext\n")).toEqual(["Title"]);
+  });
 });

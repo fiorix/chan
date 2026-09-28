@@ -39,6 +39,18 @@ describe("Polar Drift", () => {
     expect(advance.mock.calls[0]?.[0], "the same particles drift on").toBe(before);
   });
 
+  test("keeps up with the speed control: at 4x a paint of 150 ms of clock takes 9 source steps", () => {
+    const { run, callbacks } = startAnimation(PolarDrift, recordingWebgl2().gl);
+    run.canvas.parentElement!.style.setProperty("--canvas-animation-speed", "4");
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const advance = vi.mocked(advancePolarDriftParticles);
+    advance.mockClear();
+    callbacks.frame(1150);
+
+    expect(advance).toHaveBeenCalledTimes(9);
+  });
+
   test("turns its drift 0.06 radians per second of animation time", () => {
     const { callbacks } = startAnimation(PolarDrift, recordingWebgl2().gl);
     callbacks.resize(800, 800, false, 0);

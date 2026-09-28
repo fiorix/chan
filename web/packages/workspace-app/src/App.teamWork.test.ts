@@ -84,4 +84,22 @@ describe("Team Work", () => {
     expect(teamDialogState.request).toBeNull();
     expect(event.defaultPrevented).toBe(false);
   });
+
+  test("its command while the team dialog is open opens no second lead", async () => {
+    const pane = await appWithTerminal();
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.teamWork" } }));
+    await settle();
+    const first = pane.tabs.find((t) => t.id !== "term-existing")!;
+
+    // The launcher answers over an open dialog, and "New team" is one of its rows.
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.teamWork" } }));
+    await settle();
+
+    expect(pane.tabs.map((t) => t.id), "one lead terminal").toEqual(["term-existing", first.id]);
+    expect(teamDialogState.request?.leadTabId).toBe(first.id);
+
+    document.querySelector<HTMLButtonElement>('[aria-labelledby="team-dialog-title"] [aria-label="Close"]')!.click();
+    await settle();
+    expect(pane.tabs.map((t) => t.id), "cancel closes the lead it opened").toEqual(["term-existing"]);
+  });
 });
