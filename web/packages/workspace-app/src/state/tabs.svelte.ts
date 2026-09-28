@@ -2858,6 +2858,18 @@ function closeRisk(t: Tab): "live-terminal" | null {
   return null;
 }
 
+/// What a close tells the user of the tabs whose save was refused, file
+/// names first, one reason when there is one tab.
+function notSavedSentence(refused: FileTab[]): string {
+  if (refused.length === 1) {
+    const t = refused[0]!;
+    return `${tabLabel(t)} was not saved because ${t.saveError}. Its changes will be lost.`;
+  }
+  const names = refused.map((t) => tabLabel(t));
+  const last = names.pop()!;
+  return `${refused.length} files were not saved: ${names.join(", ")} and ${last}. Their changes will be lost.`;
+}
+
 async function confirmCloseTabs(
   tabs: Tab[],
   opts?: CloseTabsOptions,
@@ -2867,6 +2879,9 @@ async function confirmCloseTabs(
     notify("Close Drafts individually to save or discard them");
     return false;
   }
+  // Tabs whose save refused their buffer. Whether that buffer is thrown
+  // away is the user's answer, asked once for all of them below.
+  const refused: FileTab[] = [];
   for (const tab of tabs) {
     if (tab.kind !== "file") continue;
     pendingEditFlushes.get(tab.id)?.();
@@ -2881,10 +2896,15 @@ async function confirmCloseTabs(
       live.error = `save failed: ${(e as Error).message}`;
       return false;
     }
-    if (isDirty(liveFileTabById(tab.id) ?? tab)) return false;
+    const live = liveFileTabById(tab.id) ?? tab;
+    if (!isDirty(live)) continue;
+    // Still dirty with no refusal: a conflict opened its own dialog, which
+    // is what speaks for this tab.
+    if (!live.saveError) return false;
+    refused.push(live);
   }
   const risky = tabs.filter((t) => closeRisk(t) !== null);
-  if (risky.length === 0) return true;
+  if (risky.length === 0 && refused.length === 0) return true;
   const terminals = risky.filter((t) => closeRisk(t) === "live-terminal");
   const parts: string[] = [];
   if (terminals.length > 0) {
@@ -2893,6 +2913,15 @@ async function confirmCloseTabs(
         ? terminalTabName(terminals[0] as TerminalTab)
         : `${terminals.length} live terminals`;
     parts.push(`${label} is still running`);
+  }
+  if (refused.length > 0) {
+    return uiConfirm({
+      title: "Close without saving?",
+      message: [notSavedSentence(refused), ...parts.map((part) => `${part}.`)].join(" "),
+      confirmLabel: "Close without saving",
+      cancelLabel: "Keep editing",
+      destructive: true,
+    });
   }
   return uiConfirm({
     title: "Close tab?",
@@ -3650,7 +3679,17 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       (tab.content === NEW_DRAFT_SEED || tab.content === NEW_DIAGRAM_SEED);
     if (!contentIsEmpty && isDirty(tab)) {
       await performSave(tab);
-      if (isDirty(tab)) return false;
+      if (isDirty(tab)) {
+        // A draft has its own close flow, so a refused buffer is not asked
+        // about here: the close is refused, and says why.
+        const live = liveFileTabById(tab.id) ?? tab;
+        if (live.saveError) {
+          notify(
+            `${tabLabel(live)} was not saved because ${live.saveError}. The draft closes once the drawing parses or its edits are undone.`,
+          );
+        }
+        return false;
+      }
     }
     const info = await api.inspectDraft(tab.path);
     if ((contentIsEmpty || isPristineSeed) && !info.has_attachments) {
@@ -5800,10 +5839,10 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // write a scene the canvas then refuses to restore.
   if (isExcalidraw(live.path)) {
     const reason = validateJsonBuffer(live.content);
-    if (reason !== null) {
-      live.saveError = `the drawing does not parse (${reason})`;
-      return;
-    }
+    // A pass clears an earlier refusal here, not at the write: a save that
+    // then meets a conflict must not keep a reason the text no longer has.
+    live.saveError = reason === null ? null : `the drawing does not parse (${reason})`;
+    if (reason !== null) return;
   }
   const path = live.path;
   const sourceContent = live.content;
@@ -6901,7 +6940,13 @@ export async function closeFileTabAfterMove(
       tab.error = `save failed: ${(e as Error).message}`;
       return;
     }
-    if (isDirty(tab)) return;
+    if (isDirty(tab)) {
+      const live = liveFileTabById(tab.id) ?? tab;
+      if (live.saveError) {
+        notify(`${tabLabel(live)} stays in this window: it was not saved because ${live.saveError}.`);
+      }
+      return;
+    }
   }
   await closeTab(paneId, tabId, { force: true });
 }
