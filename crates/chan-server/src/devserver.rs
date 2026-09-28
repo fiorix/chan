@@ -8065,6 +8065,48 @@ mod tests {
         );
     }
 
+    /// A removal whose unregister meets a handle of the root this process
+    /// holds answers still releasing after it has forgotten the workspace's
+    /// overlay rows. A forget of a starting record told so puts its
+    /// tombstone back off, and the save writes the workspace's one row off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_starting_record_whose_forget_meets_a_held_handle_is_left_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).unwrap();
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        let handle = state
+            .host
+            .library()
+            .open_workspace(&stored)
+            .expect("fixture: hold a handle of the root");
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the starting record a forget beside a held handle left"
+        );
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(false),
+            "the overlay row the put-back saved"
+        );
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "a forget beside a held handle unregistered the workspace"
+        );
+        drop(handle);
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
