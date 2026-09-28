@@ -254,6 +254,19 @@ impl EmbeddedServer {
             .install_workspace_overlay(Arc::new(chan_server::WorkspaceOverlay::open(store)));
     }
 
+    /// Install the local window registry, which [`for_tests`](Self::for_tests)
+    /// leaves out, at its production store under the chan home. That store is
+    /// `CHAN_HOME`'s, and the user's `~/.chan/windows.json` when none is set,
+    /// so only a test running under [`in_own_chan_home`] may install it.
+    #[cfg(test)]
+    pub fn install_local_window_registry_for_tests(&self) {
+        assert!(
+            std::env::var_os("CHAN_HOME").is_some(),
+            "a test that installs the local window registry runs in its own chan home"
+        );
+        chan_server::install_local_window_registry(&self.host);
+    }
+
     /// The shared window-title map the desktop writes (on window build /
     /// rename / destroy) and the server reads for `cs window list`.
     pub fn window_titles(&self) -> SharedWindowTitles {
@@ -779,6 +792,42 @@ async fn serve_router(
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
+/// Run the test whose full path in the test binary is `test` in a child
+/// process of that binary whose `CHAN_HOME` is a fresh temporary directory,
+/// and answer whether this process is that child. The chan home's stores,
+/// the local window registry among them, are found through `CHAN_HOME`
+/// alone, so a test that installs one in this process would share it with
+/// every other test, and with the user's own home when none is set; a child
+/// gives each such test a private home without racing other tests' reads of
+/// the environment. The parent answers `false` once the child has run exactly
+/// that one test and it passed.
+#[cfg(test)]
+pub(crate) fn in_own_chan_home(test: &str) -> bool {
+    const CHILD: &str = "CHAN_TEST_OWN_HOME";
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return true;
+    }
+    let home = tempfile::tempdir().expect("chan home");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD, test)
+        .env("CHAN_HOME", home.path())
+        .output()
+        .expect("run the test in its own chan home");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    print!("{stdout}");
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{test} failed in its own chan home"
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "the child did not run exactly {test}"
+    );
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,40 +835,15 @@ mod tests {
     mod home_workspace {
         use super::*;
 
-        // The production registry installer uses CHAN_HOME. A child process
-        // gives it a private store without racing other tests' environment reads.
         fn isolated(test: &str) -> bool {
-            const CHILD: &str = "CHAN_TEST_HOME_WORKSPACE";
-            if std::env::var(CHILD).as_deref() == Ok(test) {
-                return true;
-            }
-            let config = tempfile::tempdir().unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    &format!("embedded::tests::home_workspace::{test}"),
-                    "--nocapture",
-                ])
-                .env(CHILD, test)
-                .env("CHAN_HOME", config.path())
-                .output()
-                .unwrap();
-            print!("{}", String::from_utf8_lossy(&output.stdout));
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            assert!(output.status.success(), "the isolated desktop test failed");
-            assert!(
-                String::from_utf8_lossy(&output.stdout)
-                    .contains("test result: ok. 1 passed; 0 failed;"),
-                "the child did not run exactly one test"
-            );
-            false
+            in_own_chan_home(&format!("embedded::tests::home_workspace::{test}"))
         }
 
         async fn with_terminal() -> (EmbeddedServer, std::path::PathBuf, String) {
             let config = chan_workspace::paths::config_dir();
             let library = chan_workspace::Library::open_at(config.join("config.toml")).unwrap();
             let embedded = EmbeddedServer::for_tests(library).await;
-            chan_server::install_local_window_registry(&embedded.host);
+            embedded.install_local_window_registry_for_tests();
             embedded.install_workspace_overlay_for_tests(config.join("workspaces.json"));
             embedded.open_terminal_in(config).await.unwrap();
             let row = embedded
