@@ -18,6 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A drawing that does not parse keeps its editor.** A drawing edited as source whose text does not parse is still not saved, but its tab keeps the editor with the text as typed and says on its toolbar that the file was not saved and why, where the parse error took the editor's place. Closing it asks whether to keep editing or close without saving, where the close did nothing; a draft, or a move to another window, says that it was not saved and stays open. Until the text is written, the tab shows no other editor's cursors and merges no live edits.
 
+- **The desktop shows a devserver's refusal as its sentence.** When a connected devserver refuses to list its workspaces, turn one on or off, forget one, or act on one of its library windows, the desktop's message gives the status and the server's sentence where it gave the status alone, and a refused workspace add, download or upload gives the sentence where it gave the response's body as it came. `chan serve PATH --on TARGET` reports a refused add the same way.
+
 ### Fixed
 
 - **A devserver lists a workspace whose folder moved behind a symlink once, with its windows under it.** When the path a workspace was registered at reaches its folder through a symlink that changed after the registration, the devserver's workspace list showed it twice, off at the registered path and on at the folder's new location, and a window that `chan serve` opened sat outside the workspace's row. The list shows one row at the registered path, and windows opened through the devserver or from its launcher nest under it. A window an earlier build stored at the new location stays outside the row until it is closed.
@@ -31,6 +33,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A scripted team keeps its members' env.** `cs terminal team new --script` and `cs terminal team load --script` pass each member's `env` on its `cs terminal new` line, so a tab the script opens gets the member's `CHAN_AGENT` and every other entry, as a team spawned directly does.
 
 - **The extension proxy sends nothing to an extension that has exited.** Once its supervisor has seen an extension's process exit, or has stopped it, a request or WebSocket upgrade to its path answers 502 `extension_unavailable` without connecting to its port, so its token and the request no longer reach whatever process holds that port by then.
+
+- **A desktop window waits for a devserver that is restarting.** A new window on a devserver on this machine stays on its connecting page and retries while the devserver answers that it is restoring terminal sessions, where it loaded that refusal as its page. An open window whose devserver restarts keeps its page until the devserver answers again and is then reloaded in place, within about fifteen seconds of the devserver being ready; Reload tries again at once.
 
 ## [v0.100.0] - 2026-09-23
 
