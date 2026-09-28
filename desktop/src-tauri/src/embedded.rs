@@ -703,10 +703,12 @@ impl Drop for EmbeddedServer {
 /// Map an embedded open error to a user-facing string. A workspace
 /// already held by another chan process (typically a standalone
 /// `chan serve <workspace>` started before the desktop tried to mount
-/// it) surfaces as `WorkspaceLocked`; an in-process handle that hasn't
-/// dropped yet surfaces as `WorkspaceAlreadyOpen`. Both reach the SPA
-/// verbatim and revert the row's On toggle, so they must read as a
-/// clear, non-fatal instruction rather than a raw error chain.
+/// it) surfaces as `WorkspaceLocked` and reads as an instruction to quit
+/// that process. An in-process handle that hasn't dropped yet surfaces as
+/// `WorkspaceAlreadyOpen` and reads as the words the root's row reads.
+/// Both reach the user verbatim in the notice of the `chan serve` handoff
+/// or of the restore at boot, so they must read as clear, non-fatal
+/// sentences rather than a raw error chain.
 fn map_open_error(key: &str, e: chan_server::Error) -> String {
     use chan_workspace::ChanError;
     match e {

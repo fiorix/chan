@@ -22,6 +22,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A devserver lists a workspace whose folder moved behind a symlink once, with its windows under it.** When the path a workspace was registered at reaches its folder through a symlink that changed after the registration, the devserver's workspace list showed it twice, off at the registered path and on at the folder's new location, and a window that `chan serve` opened sat outside the workspace's row. The list shows one row at the registered path, and windows opened through the devserver or from its launcher nest under it. A window an earlier build stored at the new location stays outside the row until it is closed.
 
+- **An open of a root that stops answering gives the root back.** The launcher's add and on and the desktop's open of a workspace wait at most 60 seconds, the devserver mount's bound, counted from the request's start, for a root that answers its key and then hangs. They then answer `mount timed out after 60 seconds: <root> did not answer`, the launcher with HTTP 503, and an off, a forget or a removal of that root answers after them instead of waiting for as long as the open does.
+
+- **A workspace still releasing says so.** The launcher's add and on of a root that an earlier open of this process has not let go of answer HTTP 503 with `Retry-After: 1` and `workspace is still releasing; retry`, the words the root's row reads, where they answered 400 and 500 with an internal sentence, and the desktop's notices say the same where they told the user to quit another chan process.
+
 - **AUR packages preserve their release binaries through testing.** Both recipes install a copy saved by `build()` before `check()` runs, so cargo's integration-test build cannot replace the shipped executable with one carrying dev-dependency features.
 
 - **Lock probes release their temporary locks before returning.** A concurrent process spawn can no longer keep a completed workspace or daemon lock probe held until the child executes, avoiding spurious locked-workspace refusals.
