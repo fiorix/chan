@@ -123,4 +123,35 @@ describe("draft tabs in a standalone window", () => {
     expect(promote).toHaveBeenCalledWith(DRAFT_PATH, "home/u/notes/kept.md");
     expect(tabs.activePane().tabs).toHaveLength(0);
   });
+
+  test("a draft closed before its first chunk keeps its file in the store", async () => {
+    // The store's discard moves the draft to its trash, so a close that
+    // reads the not-yet-loaded buffer as empty would trash a draft whose
+    // text never arrived.
+    await bootMiniWindow();
+    let release: () => void = () => {};
+    vi.spyOn(api, "readStream").mockImplementation(async (_path, opts) => {
+      opts?.onMeta?.({ path: DRAFT_PATH, mtime: 1, mtime_ns: "1", writable: true, size: 20 });
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { path: DRAFT_PATH, content: "# Draft\n\nkept words\n", mtime: 1, mtime_ns: "1", writable: true };
+    });
+    vi.spyOn(api, "inspectDraft").mockResolvedValue(inspection());
+    const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+    const pane = harness.resetLayout([], { id: "pane-mini" });
+    const opened = tabs.openInPane(pane.id, DRAFT_PATH);
+    const tabId = tabs.activePane().tabs[0]!.id;
+    await vi.waitFor(() => {
+      const t = tabs.activePane().tabs[0];
+      expect(t?.kind === "file" ? t.loadProgress?.totalBytes : undefined).toBe(20);
+    });
+
+    await tabs.closeTab(pane.id, tabId);
+
+    expect(discard, "a close before the first chunk sends no discard").not.toHaveBeenCalled();
+    expect(tabs.activePane().tabs).toHaveLength(0);
+    release();
+    await opened;
+  });
 });
