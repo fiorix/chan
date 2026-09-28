@@ -2403,15 +2403,15 @@ mod tests {
         harness.stop(WatchLoopStop::KeepWindows).await;
     }
     #[tokio::test(start_paused = true)]
-    async fn reload_resolve_failure_keeps_retry() {
+    async fn reload_resolve_failure_keeps_retry_on_a_disconnected_record() {
         requested_failure("resolve").await;
     }
     #[tokio::test(start_paused = true)]
-    async fn reload_session_failure_keeps_retry() {
+    async fn reload_session_failure_keeps_retry_on_a_disconnected_record() {
         requested_failure("session").await;
     }
     #[tokio::test(start_paused = true)]
-    async fn reload_navigation_failure_keeps_retry() {
+    async fn reload_navigation_failure_keeps_retry_on_a_disconnected_record() {
         requested_failure("navigation").await;
     }
 
@@ -2873,6 +2873,93 @@ mod tests {
         harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::Navigated));
         assert!(harness.applied(&record));
         harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_navigates_a_connected_window_kept_by_a_new_watcher() {
+        let mut record = retry_record("kept-connected", 0);
+        record.connected = true;
+        // The native window exists, but this watcher has no attempt for it.
+        let harness = RetryHarness::start(vec![record.clone()], false, true).await;
+        let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
+        harness.drain().await;
+        tokio::time::advance(RETRY_NUDGE).await;
+        harness.drain().await;
+        assert_eq!(
+            harness.times(&record),
+            vec![0, 15],
+            "a kept window's unknown loaded key cannot end its connected retry"
+        );
+        assert_eq!(harness.raised(&record), vec![true, false]);
+        let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
+        harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::Navigated));
+        assert!(harness.applied(&record));
+        harness.stop(WatchLoopStop::KeepWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_admission_applies_the_connected_attempt() {
+        let mut record = retry_record("applied-connected", 0);
+        record.connected = true;
+        let label = native_label(&record);
+        let launches = RemoteLaunches::default();
+        let tickets = serve::RetargetTickets::default();
+        let builds = WindowBuilds::new(Arc::default(), Arc::default());
+        launches.begin_remote(&record, false, false, &tickets);
+        let ticket = launches
+            .begin_remote(&record, false, true, &tickets)
+            .unwrap();
+        launches.finish_retarget(
+            &label,
+            &tickets,
+            &ticket,
+            &builds,
+            Ok(serve::RetargetOutcome::NotReady),
+        );
+        tokio::time::advance(RETRY_NUDGE).await;
+        // One admission exposes a waiting deadline without spinning a watch
+        // loop if the admission forgets to mark the attempt applied.
+        let admitted = launches.admit(&record, false, false, true);
+        assert!(
+            launches.0.lock().unwrap().entries[&label].phase == LaunchPhase::Applied,
+            "a connected try must mark its waiting attempt applied"
+        );
+        assert_eq!(admitted, None);
+        assert_eq!(launches.retry_deadline(&builds), None);
+    }
+
+    #[test]
+    fn a_superseded_navigation_keeps_the_last_loaded_key() {
+        let mut record = retry_record("superseded-loaded", 0);
+        record.connected = true;
+        let label = native_label(&record);
+        let loaded = RemoteLaunchKey::from_record(&record, false);
+        let launches = RemoteLaunches::default();
+        let tickets = serve::RetargetTickets::default();
+        let builds = WindowBuilds::new(Arc::default(), Arc::default());
+        launches.begin_remote(&record, false, false, &tickets);
+        record.token = "intermediate-token".into();
+        let older = launches
+            .begin_remote(&record, false, true, &tickets)
+            .unwrap();
+        record.token = "newest-token".into();
+        let _current = launches
+            .begin_remote(&record, false, true, &tickets)
+            .unwrap();
+        // A native navigation can finish before its settlement loses currency.
+        launches.finish_retarget(
+            &label,
+            &tickets,
+            &older,
+            &builds,
+            Ok(serve::RetargetOutcome::Navigated),
+        );
+        assert_eq!(
+            launches.0.lock().unwrap().entries[&label].loaded,
+            Some(loaded),
+            "a superseded settlement cannot claim this webview loaded the current key"
+        );
     }
 
     // A Reload that found its target not ready is carried out by a later try
