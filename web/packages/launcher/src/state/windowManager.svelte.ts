@@ -42,6 +42,10 @@ let prevIds = new Set<string>();
 // The records of the last feed push, read when a repair's page answers. Null
 // until a push arrives.
 let latestWindows: WindowRecord[] | null = null;
+// window_id -> how many Opens of it are still deciding. A window closed under a
+// pending Open is that Open's answer to give, as when another page's refusal
+// closes a blank it follows, not a user's close for the reconciler to discard.
+const pendingOpens = new Map<string, number>();
 
 function servingOrigin(): string {
   return typeof location === "undefined" ? "" : location.origin;
@@ -138,6 +142,7 @@ export async function openWindowRecord(
   const blank = isBlankWindow(h);
   const opened = isUnmarkedBlankWindow(h);
   if (!blank && record.connected) return h;
+  pendingOpens.set(record.window_id, (pendingOpens.get(record.window_id) ?? 0) + 1);
   try {
     const url = windowUrl(record, servingOrigin());
     const ready = await navigateWindowWhenReady(h, url, checkWindowPage, {
@@ -153,6 +158,10 @@ export async function openWindowRecord(
     if (opened) h.close();
     if (handles.get(record.window_id) === h) handles.delete(record.window_id);
     throw e;
+  } finally {
+    const left = (pendingOpens.get(record.window_id) ?? 1) - 1;
+    if (left > 0) pendingOpens.set(record.window_id, left);
+    else pendingOpens.delete(record.window_id);
   }
 }
 
@@ -190,7 +199,7 @@ export async function toggleWindowVisibility(
  * this launcher holds no live handle for as an orphan (a reload lost the handle,
  * a peer surface minted it, or its window is gone and the record stays until
  * Close) so its row flashes for a re-open click. A hidden or native record is
- * never flagged. */
+ * never flagged. A record an Open is still deciding is left to that Open. */
 export function reconcileWindows(set: WindowSet): void {
   if (demoState.enabled) return;
   latestWindows = set.windows;
@@ -203,6 +212,7 @@ export function reconcileWindows(set: WindowSet): void {
     }
   }
   for (const w of set.windows) {
+    if (pendingOpens.has(w.window_id)) continue;
     const state = handleState(w.window_id);
     if (state === "live") {
       clearWindowAttention(w.window_id);
@@ -226,6 +236,7 @@ export function hasWindowHandle(id: string): boolean {
 /** Test/reset hook: drop all handles and the diff snapshot. */
 export function resetWindowManager(): void {
   handles.clear();
+  pendingOpens.clear();
   prevIds = new Set();
   latestWindows = null;
 }
