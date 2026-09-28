@@ -183,3 +183,46 @@ describe("WindowRow self-managed actions", () => {
     vis.mockRestore();
   });
 });
+
+describe("browser Show readiness", () => {
+  it.each(["ready", "closed", "refused", "connected"])("Show from the row handles %s before visibility", async (outcome) => {
+    vi.useFakeTimers();
+    const { backend } = await import("../api/backend");
+    const child = {
+      closed: false,
+      location: { href: "https://chan.test/refusal" },
+      document: document.implementation.createHTMLDocument(),
+      focus: vi.fn(),
+      close: vi.fn(() => { child.closed = true; }),
+    };
+    child.document.body.textContent = "Refusal page";
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const check = vi.spyOn(backend, "checkWindowPage").mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return outcome === "refused"
+        ? new Response('{"error":"Show refused."}', { status: 409 })
+        : new Response("<html></html>");
+    });
+    const rec = win({ window_id: `row show ${outcome}`, library_id: "local", hidden: true, connected: outcome === "connected" });
+    const el = render(rec);
+    (el.querySelector('[aria-label="Show window"]') as HTMLButtonElement).click();
+    await vi.advanceTimersByTimeAsync(99);
+    flushSync();
+    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" ? 1 : 0);
+    expect(open).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
+    expect(check).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
+    if (outcome === "closed") child.closed = true;
+    await vi.advanceTimersByTimeAsync(101);
+    flushSync();
+    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" || outcome === "ready" ? 1 : 0);
+    if (outcome === "ready") {
+      expect(visibility).toHaveBeenCalledExactlyOnceWith(`row show ${outcome}`, false, undefined);
+      expect(child.location.href).toContain("?w=");
+    }
+    expect(child.focus).not.toHaveBeenCalled();
+    expect(child.close).not.toHaveBeenCalled();
+    expect(child.document.body.textContent).toBe("Refusal page");
+    if (outcome === "refused") expect(library.error).toBe("Show refused.");
+  });
+});
