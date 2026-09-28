@@ -59,9 +59,10 @@ impl WorkspaceOpenMode {
 /// `key` is the root the workspace's registry row stores. A workspace the host
 /// already serves is not mounted again.
 ///
-/// [`WorkspaceOpenMode::OpenWindow`] mints one window after mounting, even when
-/// persisted windows already exist, and for a workspace the host already
-/// serves. [`WorkspaceOpenMode::RestoreOnly`] restores
+/// [`WorkspaceOpenMode::OpenWindow`] mints one window, even when persisted
+/// windows already exist: after mounting, for a workspace the host already
+/// serves, and for one whose mount another start published while this one
+/// waited for it. [`WorkspaceOpenMode::RestoreOnly`] restores
 /// only the persisted set, so a workspace whose windows were all closed stays
 /// windowless on boot. A buried or hidden window keeps its record, so the
 /// watcher restores it while honoring `should_show`'s `!hidden`.
@@ -90,22 +91,24 @@ pub async fn start<R: tauri::Runtime>(
     // below would read as a lost race and open no window.
     state.serves.lock().unwrap().remove(&key);
     embedded.open_workspace(&key).await?;
-    {
-        let mut serves = state.serves.lock().unwrap();
-        if serves.contains(&key) {
-            // A concurrent `start` for this key won the race across the mount
-            // await (the pre-check above guards only the pre-await instant).
-            // Both callers are holding the SAME tenant: the prefix is derived
-            // from the key alone and `open_or_get_registered_workspace` returns
-            // the EXISTING mount for an already-mounted root, so the loser
-            // mounted nothing of its own and has nothing to clean up. Closing
-            // the shared prefix here would tear down the tenant the winner just
-            // published and minted a window for, and a forced close skips the
-            // live-terminal refusal, so it would kill the user's running
-            // terminals too. Report the workspace as running, which it is.
-            return Ok(());
+    let published_first = state.serves.lock().unwrap().insert(key.clone());
+    if !published_first {
+        // A concurrent `start` for this key won the race across the mount
+        // await (the pre-check above guards only the pre-await instant).
+        // Both callers are holding the SAME tenant: the prefix is derived
+        // from the key alone and `open_or_get_registered_workspace` returns
+        // the EXISTING mount for an already-mounted root, so the loser
+        // mounted nothing of its own and has nothing to clean up. Closing
+        // the shared prefix here would tear down the tenant the winner just
+        // published, and a forced close skips the live-terminal refusal, so
+        // it would kill the user's running terminals too. The workspace is
+        // running, so a user-requested open mints its window as it would
+        // for a workspace the host already serves, and a failed mint rolls
+        // nothing back: the tenant is the winner's.
+        if open_mode.should_mint() {
+            embedded.mint_workspace_window(Path::new(&key))?;
         }
-        serves.insert(key.clone());
+        return Ok(());
     }
     let _ = app.emit(SERVES_CHANGED, ());
     // A user-requested open always mints after the mount. Persisted rows became
