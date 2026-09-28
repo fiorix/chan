@@ -1911,16 +1911,41 @@ impl DevserverState {
         kept
     }
 
-    /// Insert every durable row before any desired-on restore future spawns.
+    /// Insert every durable row before any desired-on restore future spawns,
+    /// one record per workspace.
     ///
-    /// A row's path is the canonical root the overlay stores, so the prefix,
-    /// the record and the starting mark are all built from it without asking
-    /// any root's filesystem; [`register_restore_rows`](
-    /// Self::register_restore_rows) has registered the rows first.
+    /// A row's path is the root of the record that saved it. The rows are
+    /// grouped by the registry row that path names ([`registered_row_for`]),
+    /// and each group makes one record under that row's stored root, at the
+    /// prefix derived from it, from the group's row with the highest
+    /// generation, then the row under the stored root, then the row desired
+    /// on. Generations are counted per path, so comparing two paths' is a
+    /// rule for an overlay an earlier build wrote with rows under both of a
+    /// workspace's keys, or two rows under one; no run of this build writes
+    /// either, since every save writes one row per record, under its stored
+    /// root. A row no registry row goes by keeps its own path. The prefix,
+    /// the record and the starting mark are built without asking any root's
+    /// filesystem; [`register_restore_rows`](Self::register_restore_rows) has
+    /// registered the rows first.
     fn prepare_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<MountAttempt> {
-        let mut attempts = Vec::new();
+        let registry = self.host.library().list_workspaces();
+        let mut grouped: Vec<(PathBuf, PersistedWorkspace)> = Vec::new();
         for row in rows {
-            let root = PathBuf::from(&row.path);
+            let path = PathBuf::from(&row.path);
+            let root = registered_row_for(&registry, &path).map_or(path, |ws| ws.root_path.clone());
+            let Some(i) = grouped.iter().position(|(kept, _)| *kept == root) else {
+                grouped.push((root, row));
+                continue;
+            };
+            let rank = |row: &PersistedWorkspace| {
+                (row.generation, Path::new(&row.path) == root, row.desired_on)
+            };
+            if rank(&row) > rank(&grouped[i].1) {
+                grouped[i].1 = row;
+            }
+        }
+        let mut attempts = Vec::new();
+        for (root, row) in grouped {
             let prefix = match registered_workspace_prefix(&root) {
                 Ok(prefix) => prefix,
                 Err(error) => {
@@ -3250,6 +3275,16 @@ fn workspace_label(root: &Path) -> String {
 #[cfg(test)]
 fn canonical_root(root: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(root)
+}
+
+/// The registry row among `rows` that goes by `key`: the row that stores it
+/// as its root, else the first whose cached canonical path it is
+/// ([`registry_row_keys`]). Asks no filesystem.
+fn registered_row_for<'a>(rows: &'a [KnownWorkspace], key: &Path) -> Option<&'a KnownWorkspace> {
+    rows.iter().find(|row| row.root_path == key).or_else(|| {
+        rows.iter()
+            .find(|row| registry_row_keys(row).contains(&key))
+    })
 }
 
 /// Every registered root by the keys its registry row goes by
@@ -9030,9 +9065,9 @@ mod tests {
     }
 
     /// A relinked root restored after a restart from an overlay row kept
-    /// under its canonical path, which is how a mount of it is saved, lists
-    /// once: on, under the root its registry row stores, with the restored
-    /// record's prefix and token.
+    /// under its canonical path, as an earlier build saved a mount of it, is
+    /// one record under the root its registry row stores, at the prefix
+    /// derived from it, and lists once: on, with the record's token.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_relinked_root_restored_from_its_canonical_path_lists_once() {
@@ -9055,14 +9090,12 @@ mod tests {
             1,
             "fixture: the restore registered the canonical path a second time"
         );
-        let prefix = state
-            .workspaces
-            .lock()
-            .unwrap()
-            .values()
-            .find(|record| record.root == canonical)
-            .map(|record| record.prefix.clone())
-            .expect("fixture: no record under the canonical path");
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        assert_eq!(
+            only_record(&state),
+            (1, Some((prefix.clone(), stored.clone()))),
+            "the relinked root is not one record under its stored root"
+        );
 
         let entries = state.workspace_entries();
         assert_eq!(
