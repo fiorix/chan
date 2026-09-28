@@ -845,7 +845,7 @@ describe("a push coalesced behind another", () => {
 describe("a push the authority never accepted", () => {
   /// Drive one push, drop the socket before its ack, and run the redial to
   /// the snapshot that opens the next epoch. Returns the reconnected socket.
-  function dropAndRedial(): FakeSocket {
+  function dropAndRedial(snapshot: Record<string, unknown> = snap([])): FakeSocket {
     lastSocket().drop();
     vi.advanceTimersByTime(600);
     const beforeRedial = sockets.length;
@@ -854,7 +854,7 @@ describe("a push the authority never accepted", () => {
     }
     const back = lastSocket();
     back.open();
-    back.frame(snap([]));
+    back.frame(snapshot);
     return back;
   }
 
@@ -915,6 +915,65 @@ describe("a push the authority never accepted", () => {
       gridSize: 40,
     });
     vi.useRealTimers();
+  });
+
+  test("hands the canvas the appState an update's withhold kept from it", () => {
+    // The claim that kept a peer's appState off the board never reached the
+    // authority, so the peer's appState is what stands, and the snapshot of
+    // the next epoch carries it.
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+    sock.frame({ type: "update", version: 1, elements: [], appState: { viewBackgroundColor: "#222222" } });
+
+    dropAndRedial(snap([], { appState: { viewBackgroundColor: "#222222" } }));
+
+    expect(binding.snapshots.at(-1)?.appState).toEqual({ viewBackgroundColor: "#222222" });
+    vi.useRealTimers();
+  });
+});
+
+describe("an update that crosses this window's appState claim", () => {
+  // The authority applies a push after every update it fanned before the
+  // push arrived, so while this window's appState claim is on the wire or
+  // queued, an update's appState is one the claim replaces.
+  const MINE = { viewBackgroundColor: "#111111" };
+  const PEERS = { viewBackgroundColor: "#222222" };
+  const LATER = { viewBackgroundColor: "#333333" };
+  const handed = (binding: FakeBinding) =>
+    binding.updates.map((u) => ({ ids: u.elements.map((e) => e.id), appState: u.appState, files: u.files }));
+
+  test("hands its elements and files and withholds its appState until the claim's ack", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    const files = { "file-p": { dataURL: "data:image/png;base64,AAA" } };
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)], appState: PEERS, files });
+    sock.frame({ type: "push-ok", version: 2 });
+    sock.frame({ type: "update", version: 3, elements: [], appState: LATER });
+
+    expect(handed(binding)).toEqual([
+      { ids: ["peer"], appState: undefined, files },
+      { ids: [], appState: LATER, files: undefined },
+    ]);
+  });
+
+  test("withholds its appState while the claim waits behind a push on the wire", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pending.push(elem("mine", 2));
+    binding.flushPendingLocal();
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    sock.frame({ type: "update", version: 1, elements: [], appState: PEERS });
+
+    expect({ pushes: sock.frames("push").length, handed: handed(binding) }).toEqual({
+      pushes: 1,
+      handed: [{ ids: [], appState: undefined, files: undefined }],
+    });
   });
 });
 
