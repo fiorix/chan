@@ -406,6 +406,14 @@ impl EmbeddedServer {
         self.host.mounted_root(key)
     }
 
+    /// The canonical root the workspace runtime `key` names was mounted at,
+    /// found as [`mounted_root`](Self::mounted_root) finds it; `None` when no
+    /// workspace runtime goes by `key`. Answered from the keys the host
+    /// stores, touching no filesystem.
+    pub fn mounted_canonical_root(&self, key: &Path) -> Option<std::path::PathBuf> {
+        self.host.mounted_canonical_root(key)
+    }
+
     pub async fn close_workspace_root(
         &self,
         root: &Path,

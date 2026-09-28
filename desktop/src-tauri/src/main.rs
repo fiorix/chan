@@ -3025,9 +3025,13 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
 /// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
 /// (handoff `CloseWorkspace`). Runs through the embedded host's owner operation
 /// so live-terminal refusal is reported before anything is unregistered.
-/// A mounted workspace is forgotten, and dropped from the desktop's map of
-/// what it mounted, by the root its registry row stores, which the host
-/// reads from its runtime before the close takes it away.
+/// A mounted workspace is dropped from the desktop's map of what it mounted
+/// by the root its registry row stores, which the host reads from its
+/// runtime before the close takes it away. It is forgotten by that root
+/// while the root still resolves to the canonical root the runtime was
+/// mounted at, and by that canonical root otherwise: the host resolves the
+/// root it is named again, and a stored root that resolves to another
+/// workspace's folder would forget that workspace.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 async fn close_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -3047,8 +3051,13 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
     let outcome = if remove {
         // Named by the row's root, the host's purge matches the windows stored
         // under it, where the desktop stores them, and under the canonical
-        // path that root resolves to.
-        embedded.remove_workspace_root(&stored, false).await?
+        // path that root resolves to. Named by the canonical root, it matches
+        // the windows stored under that root alone.
+        let named = match embedded.mounted_canonical_root(Path::new(&key)) {
+            Some(canonical) if Path::new(&canonical_key(&stored)) != canonical => canonical,
+            _ => stored.clone(),
+        };
+        embedded.remove_workspace_root(&named, false).await?
     } else {
         embedded
             .close_workspace_root(Path::new(&key), false)
@@ -4535,9 +4544,10 @@ fn zoom_reset(window: tauri::WebviewWindow, state: State<Arc<AppState>>) -> Resu
 }
 
 /// The canonical form of `p`, by which the handoff's close finds the
-/// workspace runtime that the path it was sent names. `canonicalize` falls
-/// back to the input on error, so a path that does not exist still gives a
-/// stable key.
+/// workspace runtime that the path it was sent names, and asks whether the
+/// root that runtime's registry row stores still resolves to where the
+/// runtime was mounted. `canonicalize` falls back to the input on error, so
+/// a path that does not exist still gives a stable key.
 fn canonical_key(p: &Path) -> String {
     // The registry's own normalization: a Windows key never carries the
     // `\\?\` verbatim prefix into the SPA list, a window title, or a log.
