@@ -9,6 +9,11 @@ import {
 } from "./pathValidate";
 
 describe("validatePath", () => {
+  test("a backslash is refused as a character a name cannot hold", () => {
+    for (const path of ["a\\b.md", "dir/a\\b.md"]) {
+      expect(validatePath(path)).toEqual({ ok: false, reason: "\\ is not allowed in a name" });
+    }
+  });
   test("empty input is rejected", () => {
     expect(validatePath("")).toEqual({ ok: false, reason: "path is empty" });
   });

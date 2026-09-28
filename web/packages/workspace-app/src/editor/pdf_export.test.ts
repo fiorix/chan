@@ -72,6 +72,11 @@ describe("pdfFilenameFor", () => {
     expect(pdfFilenameFor("dir/readme")).toBe("readme.pdf");
   });
 
+  test("keeps a name that holds a backslash whole", () => {
+    expect(pdfFilenameFor("a\\b.md")).toBe("a\\b.pdf");
+    expect(pdfFilenameFor("dir/a\\b.md")).toBe("a\\b.pdf");
+  });
+
   test("falls back on empty input", () => {
     expect(pdfFilenameFor("")).toBe("document.pdf");
     expect(pdfFilenameFor("dir/")).toBe("document.pdf");

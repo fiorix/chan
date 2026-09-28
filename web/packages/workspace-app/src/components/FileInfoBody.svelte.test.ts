@@ -761,3 +761,30 @@ describe("the shared graph load", () => {
     expect(api.graphStream).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("a name that holds a backslash", () => {
+  function title(target: HTMLElement): string {
+    return target.querySelector("h3.title")?.textContent?.trim() ?? "";
+  }
+
+  test("titles a file by its whole name", async () => {
+    h.entries = [file("a\\b.md"), file("dir/a\\b.md")];
+
+    expect(title(await render({ path: "a\\b.md" }))).toBe("a\\b.md");
+    expect(title(await render({ path: "dir/a\\b.md" }))).toBe("a\\b.md");
+  });
+
+  test("titles a folder by its whole name", async () => {
+    h.entries = [dir("x\\y"), dir("dir/x\\y")];
+
+    expect(title(await render({ path: "x\\y" }))).toBe("x\\y");
+    expect(title(await render({ path: "dir/x\\y" }))).toBe("x\\y");
+  });
+
+  test("gives an image's preview its whole name", async () => {
+    h.entries = [file("dir/a\\p.png", "media")];
+
+    const target = await render({ path: "dir/a\\p.png" });
+    expect(target.querySelector(".image-preview img")?.getAttribute("alt")).toBe("a\\p.png");
+  });
+});
