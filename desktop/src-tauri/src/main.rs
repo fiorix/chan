@@ -9760,6 +9760,82 @@ mod tests {
             );
         }
 
+        /// A forget handed to the desktop purges a relinked root's windows
+        /// stored under either of its paths: the path it resolves to, where an
+        /// earlier build stored them, and its registry row's root.
+        #[cfg(unix)]
+        #[test]
+        fn a_forget_purges_a_relinked_roots_windows_under_both_paths() {
+            if !own_home("a_forget_purges_a_relinked_roots_windows_under_both_paths") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            for path in [&root.now, &root.stored] {
+                desktop
+                    .embedded()
+                    .mint_window(
+                        chan_server::WindowKind::Workspace,
+                        Some(path.to_string_lossy().into_owned()),
+                    )
+                    .expect("mint a window");
+            }
+            assert_eq!(
+                desktop.window_paths(),
+                [root.now.clone(), root.stored.clone()],
+                "fixture: one window under each path"
+            );
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                root.now.clone(),
+                true,
+            ));
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+            );
+            assert_eq!(
+                desktop.window_paths(),
+                Vec::<PathBuf>::new(),
+                "the forget left windows of the workspace behind"
+            );
+        }
+
+        /// A close handed to the desktop of a relinked root the boot restored
+        /// leaves nothing in the desktop's map of what it serves.
+        #[cfg(unix)]
+        #[test]
+        fn a_close_of_a_restored_relinked_root_leaves_nothing_served() {
+            if !own_home("a_close_of_a_restored_relinked_root_leaves_nothing_served") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            assert_eq!(
+                desktop.served_keys(),
+                [root.stored.to_string_lossy().into_owned()],
+                "fixture: the restore serves the row's root"
+            );
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                root.now.clone(),
+                false,
+            ));
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+            );
+            assert_eq!(
+                desktop.served_keys(),
+                Vec::<String>::new(),
+                "the close left the workspace in the desktop's map of what it serves"
+            );
+        }
+
         /// A handoff of a root that is not mounted answers while that root
         /// stops answering: the arm that registers it runs on a task of its
         /// own, and the handler asks the root nothing. Once the root answers,
