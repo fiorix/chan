@@ -7492,6 +7492,218 @@ mod tests {
         );
     }
 
+    /// A devserver whose workspace's record is starting, its attempt not yet
+    /// run, beside a removal of that workspace whose caller left while its
+    /// unregister was held: that unregister keeps the root's registry-write
+    /// permit until `stall` lets it go. Answers the state, the attempt, its
+    /// prefix, the root the registry row stores and the stall.
+    async fn starting_beside_an_abandoned_unregister(
+        home: &Path,
+        root: &Path,
+    ) -> (
+        Arc<DevserverState>,
+        MountAttempt,
+        String,
+        PathBuf,
+        root_stall::RootStall,
+    ) {
+        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root).unwrap();
+        let attempt = state
+            .begin_mount(root, &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        let stall = root_stall::stall_matching(root, &["unregister_workspace"]);
+        let removing = Arc::clone(&state.host);
+        let removed = stored.clone();
+        let first =
+            tokio::spawn(async move { removing.remove_workspace_for_root(&removed, false).await });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the first removal never reached its unregister"
+        );
+        first.abort();
+        assert!(
+            first.await.unwrap_err().is_cancelled(),
+            "fixture: the first removal answered"
+        );
+        (state, attempt, prefix, stored, stall)
+    }
+
+    /// The intent and phase of the record at `prefix`.
+    fn record_intent(state: &DevserverState, prefix: &str) -> Option<(DesiredMount, MountPhase)> {
+        state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get(prefix)
+            .map(|record| (record.desired, record.phase.clone()))
+    }
+
+    /// Whether the overlay row stored under `root` is on.
+    fn overlay_on(state: &DevserverState, root: &Path) -> Option<bool> {
+        state
+            .host
+            .workspace_overlay()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .find(|row| Path::new(&row.path) == root)
+            .map(|row| row.desired_on)
+    }
+
+    /// A forget of a starting record that the host answers still releasing
+    /// leaves the record off, since the removal's close has turned the
+    /// workspace off, and a save then keeps an off row for it. A retry once
+    /// the earlier removal lets go completes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_starting_record_whose_forget_must_retry_is_left_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, _attempt, prefix, stored, stall) =
+            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgetting = app.clone();
+        let forgotten = prefix.clone();
+        let (status, _, body) = completes_beside(
+            &stall,
+            "a forget of a starting record beside an abandoned unregister",
+            async move { forget_over_the_router(forgetting, forgotten).await },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the record a forget answered still releasing left"
+        );
+        state.persist_state();
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(false),
+            "the overlay row at the next save"
+        );
+
+        drop(stall);
+        // The earlier removal's unregister runs to its end once let go.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !state.host.library().list_workspaces().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the abandoned unregister did not finish");
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "retry: {body}");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            None,
+            "the retry left the record"
+        );
+    }
+
+    /// The attempt a refused forget's record stood for, run after that
+    /// forget, stands down: it neither mounts the workspace the forget's
+    /// removal turned off nor forgets it for a caller who was told to retry,
+    /// and the record stays off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_attempt_behind_a_refused_forget_stands_down_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, attempt, prefix, stored, stall) =
+            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgotten = prefix.clone();
+        let (status, _, body) = completes_beside(
+            &stall,
+            "a forget of a starting record beside an abandoned unregister",
+            async move { forget_over_the_router(app, forgotten).await },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+
+        let landing = Arc::clone(&state);
+        let landed = completes_beside(&stall, "the attempt behind a refused forget", async move {
+            landing
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        })
+        .await;
+        assert!(landed.is_ok(), "the attempt: {landed:?}");
+        assert!(
+            !state.host.is_root_mounted(&stored),
+            "the attempt mounted a workspace its forget turned off"
+        );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the record after its attempt landed"
+        );
+        assert_eq!(overlay_on(&state, &stored), Some(false));
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "the attempt forgot a workspace whose caller was told to retry"
+        );
+    }
+
+    /// The other order: the attempt lands while the forget waits on the host
+    /// and reads the tombstone, and drops it once the forget has answered.
+    /// The attempt's two record steps are taken here in that order, around a
+    /// forget the host refuses; they leave the record off, not starting with
+    /// no attempt behind it. The attempt's task and its own removal are not
+    /// run, so this cannot show that the task reaches those steps in this
+    /// order, only what the record holds if it does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_attempt_that_read_a_refused_forgets_tombstone_leaves_the_record_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, attempt, prefix, stored, stall) =
+            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
+        // The forget has tombstoned the record once it waits the release
+        // budget for the unregister's permit.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while record_intent(&state, &prefix)
+                != Some((DesiredMount::Forgotten, MountPhase::Stopped))
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("fixture: the forget never tombstoned the record");
+        let read = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get_mut(&prefix)
+            .unwrap()
+            .complete_success(attempt.generation, String::new());
+        assert_eq!(
+            read,
+            MountCompletion::ForgetStale,
+            "fixture: the attempt did not read the tombstone"
+        );
+        let (status, _, body) = completes_beside(&stall, "a refused forget", async move {
+            forgetting.await.unwrap()
+        })
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        state.remove_finished_tombstone(&prefix);
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the record after the attempt dropped its tombstone"
+        );
+        state.persist_state();
+        assert_eq!(overlay_on(&state, &stored), Some(false));
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
