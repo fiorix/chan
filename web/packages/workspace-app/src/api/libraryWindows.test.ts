@@ -9,7 +9,7 @@ import {
 } from "./libraryWindows";
 import { readApiError } from "./errors";
 import { resetHostVocabularyForTests } from "./nativeVocabulary";
-import type { ScopedLibraryWindow } from "./libraryCommand";
+import type { ScopedLibrarySnapshot, ScopedLibraryWindow } from "./libraryCommand";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
 
@@ -86,7 +86,10 @@ async function rejection(promise: Promise<unknown>): Promise<Error> {
   return outcome;
 }
 
-type TestBridge = LibraryWindowBridge & { checkPage: WindowPageCheck };
+type TestBridge = LibraryWindowBridge & {
+  checkPage: WindowPageCheck;
+  readSnapshot: (signal: AbortSignal) => Promise<ScopedLibrarySnapshot>;
+};
 
 function bridge(overrides: Partial<TestBridge> = {}): TestBridge {
   return {
@@ -97,8 +100,15 @@ function bridge(overrides: Partial<TestBridge> = {}): TestBridge {
       response: new Response("<html></html>"),
       readRefusal: async () => new Error("unexpected refusal"),
     })),
+    readSnapshot: vi.fn(async () => {
+      throw new Error("unexpected snapshot read");
+    }),
     ...overrides,
   };
+}
+
+function snapshotWith(...windows: ScopedLibraryWindow[]): ScopedLibrarySnapshot {
+  return { library_id: "lib-test", windows, workspaces: [] };
 }
 
 function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibraryWindow {
@@ -808,11 +818,14 @@ describe("record-based window repair", () => {
         vi.spyOn(window, "open").mockReturnValue(fixture.handle);
         const blank = spec.href === "about:blank" || spec.href === "";
         const needsRepair = !spec.self && !spec.mark && (blank || !connected);
-        const host = bridge({ checkPage: vi.fn(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-          return pageAnswer();
-        }) });
         const rec = scopedWindow({ window_id: `rule ${spec.label} ${connected}`, connected });
+        const host = bridge({
+          checkPage: vi.fn(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            return pageAnswer();
+          }),
+          readSnapshot: vi.fn(async () => snapshotWith(rec)),
+        });
         if (spec.self) {
           host.currentWindowId = () => rec.window_id;
           vi.stubGlobal("window", fixture.child);
@@ -856,4 +869,81 @@ describe("record-based window repair", () => {
       expect(vi.getTimerCount()).toBe(0);
     });
   }
+});
+
+describe("the snapshot read before a repair", () => {
+  const PAGE = "https://chan.test/project/?w=w-other";
+
+  function pagePopup(): FakePopup {
+    const popup = fakePopup(PAGE);
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    return popup;
+  }
+
+  test("leaves a popup whose fresh snapshot reads connected, then unhides it", async () => {
+    const popup = pagePopup();
+    const calls: string[] = [];
+    const host = bridge({
+      checkPage: vi.fn(async () => { calls.push("check"); return pageAnswer(); }),
+      readSnapshot: vi.fn(async () => {
+        calls.push("read");
+        return snapshotWith(scopedWindow({ connected: true, hidden: true }));
+      }),
+      runAction: vi.fn(async () => { calls.push("unhide"); return undefined; }),
+    });
+
+    await focusLibraryWindow(host, scopedWindow({ connected: false, hidden: true }));
+
+    expect(popup.location.href).toBe(PAGE);
+    expect(calls).toEqual(["check", "read", "unhide"]);
+    expect(host.readSnapshot).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal));
+    expect(vi.mocked(host.readSnapshot).mock.calls[0][0].aborted).toBe(true);
+    expect(popup.document.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(false);
+    expect(popup.focus).toHaveBeenCalled();
+  });
+
+  test("navigates a popup whose fresh snapshot still reads disconnected", async () => {
+    const popup = pagePopup();
+    const host = bridge({
+      readSnapshot: vi.fn(async () => snapshotWith(scopedWindow({ connected: false, hidden: true }))),
+    });
+
+    await focusLibraryWindow(host, scopedWindow({ connected: false, hidden: true }));
+
+    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(host.runAction).toHaveBeenCalledExactlyOnceWith({
+      action: "set_window_visibility", window_id: "w-other", hidden: false,
+    });
+  });
+
+  test("leaves a popup alone and unhides nothing when its window left the snapshot", async () => {
+    const popup = pagePopup();
+    const host = bridge({
+      readSnapshot: vi.fn(async () => snapshotWith(scopedWindow({ window_id: "w-another" }))),
+    });
+
+    await focusLibraryWindow(host, scopedWindow({ connected: false, hidden: true }));
+
+    expect(popup.location.href).toBe(PAGE);
+    expect(host.runAction).not.toHaveBeenCalled();
+    expect(host.refresh).not.toHaveBeenCalled();
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(popup.document.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(false);
+  });
+
+  test("rejects once and keeps the popup when the snapshot cannot be read", async () => {
+    const popup = pagePopup();
+    const host = bridge({
+      readSnapshot: vi.fn(async () => {
+        throw new Error("The library could not be read.");
+      }),
+    });
+
+    await expect(focusLibraryWindow(host, scopedWindow({ connected: false, hidden: true })))
+      .rejects.toThrow("The library could not be read.");
+
+    expect(popup.location.href).toBe(PAGE);
+    expect(host.runAction).not.toHaveBeenCalled();
+    expect(popup.close).not.toHaveBeenCalled();
+  });
 });

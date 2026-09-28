@@ -732,6 +732,44 @@ describe("contextual command deck", () => {
     expect(titles(target)).toEqual(["Show", "Close"]);
   });
 
+  test("Focus reads a snapshot of its own before it navigates a disconnected window", async () => {
+    const shown = {
+      ...librarySnapshot,
+      windows: [librarySnapshot.windows[0], { ...librarySnapshot.windows[1], connected: false }],
+    };
+    let answerRead: ((snapshot: unknown) => void) | undefined;
+    scopedLibrary.load.mockImplementation((signal?: AbortSignal) =>
+      signal ? new Promise((resolve) => { answerRead = resolve; }) : Promise.resolve(shown));
+    const navigate = vi.fn();
+    const popup = {
+      close: vi.fn(),
+      focus: vi.fn(),
+      closed: false,
+      document: document.implementation.createHTMLDocument(),
+      location: {
+        get href() { return "https://chan.test/project-a/?w=w-captioned"; },
+        set href(url: string) { navigate(url); },
+      },
+    };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    row(target, "Focus").click();
+    await flush();
+
+    expect(scopedLibrary.load).toHaveBeenCalledWith(expect.any(AbortSignal));
+    answerRead?.({
+      ...shown,
+      windows: [shown.windows[0], { ...shown.windows[1], connected: true }],
+    });
+    await flush();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(popup.focus).toHaveBeenCalled();
+  });
+
   test("a control terminal offers Focus alone, matching what the capability route allows", async () => {
     const target = openLauncher();
     await flush();
