@@ -20,6 +20,7 @@
     resolveCloseConfirm,
   } from "../state/closeConfirm.svelte";
   import { discardWindowSession, ui } from "../state/store.svelte";
+  import { flushEditsToRecovery } from "../state/tabs.svelte";
   import {
     isTauriDesktop,
     requestCloseWindow,
@@ -56,6 +57,7 @@
   // Close: discard this window's session blob (the server reaps its terminals)
   // and ask the host to destroy the window, so it leaves no hidden/empty row.
   function close(): void {
+    flushEditsToRecovery();
     discardWindowSession({ reap: true });
     if (isTauriDesktop()) void requestCloseWindow();
     resolveCloseConfirm("close");

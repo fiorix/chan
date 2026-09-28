@@ -78,6 +78,7 @@
     activePane,
     activeTerminalTab,
     allPaneTabs,
+    flushEditsToRecovery,
     hasAnyTab,
     closeFind,
     closePane,
@@ -129,7 +130,7 @@
     type PaneModeStagedDraftEditor,
   } from "./state/tabs.svelte";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
-  import { flushPendingBufferWrites, pruneEditorBuffers } from "./state/editorBuffer";
+  import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
   import {
     hideWindowFromCloseConfirm,
@@ -1418,6 +1419,7 @@
       // window can be re-surfaced.
       case "app.window.close":
         if (closeActiveEmptyPane()) return;
+        flushEditsToRecovery();
         discardWindowSession();
         if (isTauriDesktop()) void requestCloseWindow();
         return;
@@ -1429,6 +1431,7 @@
       // other window prompts Hide / Close / Cancel; the overlay owns the outcome.
       case "app.window.confirmClose":
         if (ui.disconnectBlocking || !hasAnyTab()) {
+          flushEditsToRecovery();
           discardWindowSession({ reap: true });
           if (isTauriDesktop()) void requestCloseWindow();
           return;
@@ -1503,15 +1506,16 @@
     pruneTerminalSnapshots();
   });
 
-  // Synchronously flush in-flight debounced editor-buffer writes before the
-  // page tears down. window.location.reload() does NOT trigger Svelte
-  // component cleanup, so the last ~500ms of edits would be lost without
-  // this. `beforeunload` + `pagehide` both fire reliably; pagehide is the
-  // mobile-safe variant, beforeunload covers desktop reloads.
+  // Synchronously put every tab's unsaved input in its recovery buffer before
+  // the page tears down. window.location.reload() does NOT trigger Svelte
+  // component cleanup, so a drawing's stroke still waiting for its serialize
+  // and the last ~500ms of edits would be lost without this. `beforeunload` +
+  // `pagehide` both fire reliably; pagehide is the mobile-safe variant,
+  // beforeunload covers desktop reloads.
   // Handlers are deliberately synchronous - async work in beforeunload is
   // unreliable, and a synchronous localStorage write is fine.
   function onUnloadFlushBuffers(): void {
-    flushPendingBufferWrites();
+    flushEditsToRecovery();
     // The caret is only mirrored into the URL hash on layout changes, not
     // on every selection move. Flush the layout here (which serializes each
     // tab's caret as the `c` field) so a reload restores the exact caret
