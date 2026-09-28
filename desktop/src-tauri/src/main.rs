@@ -10007,6 +10007,70 @@ mod tests {
             );
         }
 
+        /// A forget handed to the desktop of a restored workspace whose stored
+        /// root no longer resolves, named by the folder it is mounted from,
+        /// closes the workspace and leaves its registry row.
+        #[cfg(unix)]
+        #[test]
+        fn a_forget_of_a_restored_root_that_resolves_nowhere_closes_it_and_keeps_its_row() {
+            if !own_home(
+                "a_forget_of_a_restored_root_that_resolves_nowhere_closes_it_and_keeps_its_row",
+            ) {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            let link = root.stored.parent().expect("the linked parent");
+            std::fs::remove_file(link).expect("unlink the old parent");
+            assert!(
+                std::fs::canonicalize(&root.stored).is_err(),
+                "fixture: the stored root still resolves"
+            );
+            assert!(
+                desktop.embedded().is_workspace_mounted_by_key(&root.now),
+                "fixture: the workspace is not mounted at the folder it resolved to"
+            );
+            assert_eq!(
+                desktop
+                    .row(&root.stored)
+                    .expect("fixture: the root is registered")
+                    .cached_canonical_path(),
+                root.stored,
+                "fixture: the row's cache is not the root it stores"
+            );
+
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                root.now.clone(),
+                true,
+            ));
+
+            assert!(
+                !desktop.embedded().is_workspace_mounted_by_key(&root.now),
+                "the forget left the workspace it names mounted: {outcome:?}"
+            );
+            // The forget names the canonical root: the root the row stores
+            // resolves nowhere, so its key is that root itself, which is not
+            // the canonical root the runtime was mounted at. The host's removal
+            // unregisters by the name it is given, and a name matches a row by
+            // the canonical path the row last resolved to or by resolving the
+            // root the row stores again. This row last resolved to the root it
+            // stores, which resolves nowhere now, so no name matches it: it
+            // stays registered, and the removal finds nothing to remove. Named
+            // by the root the row stores, the removal fails and leaves the
+            // workspace mounted.
+            assert!(
+                desktop.row(&root.stored).is_some(),
+                "the forget did not leave the workspace it names registered: {outcome:?}"
+            );
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound)
+            );
+        }
+
         /// A close handed to the desktop of a relinked root the boot restored
         /// leaves nothing in the desktop's map of what it serves.
         #[cfg(unix)]
