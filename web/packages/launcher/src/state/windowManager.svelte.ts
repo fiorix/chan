@@ -102,18 +102,21 @@ export async function mintWindow(
 /** Open (or re-focus) an existing record's window in-app. The window is named by
  * window_id so a second click focuses the same same-origin window instead of
  * opening a duplicate. Used by the follower open-click and orphan re-open. */
-export async function openWindowRecord(record: WindowRecord): Promise<Window | null> {
+export async function openWindowRecord(
+  record: WindowRecord,
+  opts: { focus?: boolean } = {},
+): Promise<Window | null> {
   if (demoState.enabled || !servingOrigin()) return null;
   const h = window.open("", record.window_id);
   if (!h) return null;
   handles.set(record.window_id, h);
   clearWindowAttention(record.window_id);
-  h.focus?.();
+  if (opts.focus !== false) h.focus?.();
   const blank = isBlankWindow(h);
   if ((!blank && record.connected) || isWindowNavigating(h)) return h;
   try {
     const url = windowUrl(record, servingOrigin());
-    if (!(await navigateWindowWhenReady(h, url, checkWindowPage)) || h.closed) {
+    if (!(await navigateWindowWhenReady(h, url, checkWindowPage, opts)) || h.closed) {
       if (handles.get(record.window_id) === h) handles.delete(record.window_id);
       return null;
     }

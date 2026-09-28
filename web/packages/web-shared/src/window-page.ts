@@ -37,14 +37,19 @@ function retryAfterMs(header: string | null): number {
   return Number.isFinite(date) ? Math.min(WINDOW_PAGE_WAIT_MS, Math.max(WINDOW_PAGE_RETRY_MIN_MS, date - Date.now())) : WINDOW_PAGE_RETRY_MIN_MS;
 }
 
-export function navigateWindowWhenReady(h: Window, url: string, checkPage: WindowPageCheck): Promise<boolean> {
+export function navigateWindowWhenReady(
+  h: Window,
+  url: string,
+  checkPage: WindowPageCheck,
+  opts: { focus?: boolean } = {},
+): Promise<boolean> {
   const waiting = waitingPages.get(h);
   if (waiting) return waiting;
   if (h.closed) return Promise.resolve(false);
   const page = readableDocument(h);
   // Other opener pages have their own module state but share this document.
   if (page?.documentElement.hasAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE)) {
-    h.focus?.();
+    if (opts.focus !== false) h.focus?.();
     return Promise.resolve(true);
   }
   if (page?.body && isBlankWindow(h)) page.body.textContent = "Waiting for the window to be ready...";
