@@ -6932,6 +6932,42 @@ mod tests {
         );
     }
 
+    /// The launcher's off and delete pass a relinked root's stored root,
+    /// which of the row's keys only the path as given matches while the
+    /// row's cached path is that root: its closes and its removal find the
+    /// row in memory and ask the root nothing, however many of their
+    /// callers give up.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closes_of_a_relinked_root_by_its_stored_root_start_no_lookup() {
+        let (host, _overlay, stored, _canonical, _dirs) = relinked_host();
+        let mut held = HeldHop::new(&host, RemovalHop::Lookup);
+        let mut closes = Vec::new();
+        for _ in 0..3 {
+            closes.push(
+                held.answer_or_give_up_soon(host.close_workspace_for_root(&stored, false))
+                    .await,
+            );
+        }
+        let removal = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(&stored, false))
+            .await;
+        assert_eq!(
+            held.count, 0,
+            "a close or a removal of a relinked root by its stored root asked the root"
+        );
+        for close in closes {
+            assert!(
+                matches!(close, Some(Ok(WorkspaceLifecycleOutcome::NotFound))),
+                "a close of a relinked root that is not mounted: {close:?}"
+            );
+        }
+        assert!(
+            matches!(removal, Some(Ok(WorkspaceLifecycleOutcome::Completed))),
+            "a removal of a relinked root by its stored root: {removal:?}"
+        );
+    }
+
     /// A close of a relinked root that is not mounted reads a mount in
     /// flight, and clears the root's lifecycle, under every key its
     /// registry row goes by, the stored root among them, where a devserver
