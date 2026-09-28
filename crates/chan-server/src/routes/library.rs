@@ -1828,21 +1828,55 @@ fn workspace_registration_task_error(error: tokio::task::JoinError) -> Response 
     )
 }
 
+/// The refusal of an add or an on whose root did not answer within the mount
+/// bound. 503 with no `Retry-After`: nothing says when the root will answer.
+fn mount_timed_out_refusal(root: &Path) -> Response {
+    crate::error::err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        crate::error::mount_timed_out(root),
+    )
+}
+
 /// `POST /api/library/workspaces` `{path}`: register the local folder in the host
 /// library and mount it (on), persisting its on-state. Returns the new row.
 /// Loopback-only.
+///
+/// Everything the add asks of the root, its key, its registration and its
+/// open, shares the devserver mount's bound, counted from the request's
+/// start. A root that stops answering in any of them is refused at the bound,
+/// and an open waiting on it gives the root's lock back to a close or a
+/// removal when it is dropped there.
 async fn handle_add_workspace(
     State(state): State<Arc<LauncherState>>,
     Json(req): Json<AddWorkspace>,
 ) -> Response {
+    let started = tokio::time::Instant::now();
     let addr = match require_mutable(&state) {
         Ok(addr) => addr,
         Err(resp) => return *resp,
     };
+    let root = Path::new(&req.path);
+    match tokio::time::timeout_at(
+        started + crate::WORKSPACE_MOUNT_TIMEOUT,
+        add_workspace(&state, addr, root, req.label.clone()),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => mount_timed_out_refusal(root),
+    }
+}
+
+/// [`handle_add_workspace`]'s steps on `root`, unbounded.
+async fn add_workspace(
+    state: &LauncherState,
+    addr: SocketAddr,
+    root: &Path,
+    label: Option<String>,
+) -> Response {
     // Resolving and registering the root ask its filesystem, so both run
     // off the runtime: an add of a root that stopped answering waits on the
     // blocking pool, not on a worker every other request needs.
-    let root = Path::new(&req.path);
     let key = match state.host.root_key(root).await {
         Ok(key) => key,
         Err(e) => return add_workspace_root_error(e),
@@ -1854,7 +1888,6 @@ async fn handle_add_workspace(
     let registering = {
         let library = state.host.library().clone();
         let root = root.to_path_buf();
-        let label = req.label.clone();
         tokio::task::spawn_blocking(move || library.register_workspace_with_name(&root, label))
     };
     let registered = match registering.await {
@@ -1899,11 +1932,14 @@ async fn handle_add_workspace(
 /// rechecked before the answer unless an earlier recheck whose caller left is
 /// still in flight, and then a root that has stopped answering reads running
 /// until the health probe marks it.
+/// The open and a mounted root's recheck share the devserver mount's bound,
+/// counted from the request's start, as the add's steps do.
 /// Loopback-only.
 async fn handle_workspace_on(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
+    let started = tokio::time::Instant::now();
     let addr = match require_mutable(&state) {
         Ok(addr) => addr,
         Err(resp) => return *resp,
@@ -1912,11 +1948,15 @@ async fn handle_workspace_on(
         return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     let root = registered.root_path.clone();
-    match state
+    let opening = state
         .host
-        .open_or_get_registered_workspace(&root, tenant_config(addr, &prefix))
-        .await
-    {
+        .open_or_get_registered_workspace(&root, tenant_config(addr, &prefix));
+    let Ok(opened) =
+        tokio::time::timeout_at(started + crate::WORKSPACE_MOUNT_TIMEOUT, opening).await
+    else {
+        return mount_timed_out_refusal(&root);
+    };
+    match opened {
         Ok(_) => {
             set_overlay(&state.host, &root, true);
             Json(local_launcher_row(

@@ -389,10 +389,10 @@ pub fn persisted_devserver_port() -> Option<u16> {
     (port != 0).then_some(port)
 }
 
-/// A single workspace mount attempt may spend at most this long acquiring the
-/// workspace and building its tenant. A timeout remains a visible desired-on
-/// failure; it never wedges systemd READY forever.
-const WORKSPACE_MOUNT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a request that mounts a workspace may wait on its root: a
+/// devserver mount attempt, the launcher's add and on, and the desktop's open.
+/// A timeout is a visible failure; it never wedges systemd READY forever.
+pub const WORKSPACE_MOUNT_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often a mounted workspace's root is probed for reachability and for a
 /// remount underneath it. Cheap (one `lstat` per mounted root) and far below
 /// the human threshold for noticing a degraded row. A stalled mount's hung
