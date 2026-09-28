@@ -743,3 +743,112 @@ describe("focusing a capability popup", () => {
     expect(host.checkPage).not.toHaveBeenCalled();
   });
 });
+
+const repairDocuments = [
+  { label: "tenant HTML", mime: "text/html" },
+  { label: "booting tenant HTML", mime: "text/html" },
+  { label: "initial blank", mime: "text/html", href: "about:blank" },
+  { label: "empty location", mime: "text/html", href: "" },
+  { label: "blank with waiting mark", mime: "text/html", href: "about:blank", mark: "waiting" },
+  { label: "outgoing document with navigating mark", mime: "text/html", mark: "navigating" },
+  { label: "gate 503 JSON", mime: "application/json" },
+  { label: "gateway 502 JSON", mime: "application/json" },
+  { label: "gateway 502 body-cap text", mime: "text/plain" },
+  { label: "gateway 504 text", mime: "text/plain" },
+  { label: "gateway 404 HTML", mime: "text/html" },
+  { label: "gateway 404 JSON", mime: "application/json" },
+  { label: "engine connection-error page", mime: "text/html", opaque: true },
+  { label: "engine JSON viewer", mime: "text/html" },
+  { label: "user text", mime: "text/plain" },
+  { label: "user image", mime: "image/png" },
+  { label: "user PDF", mime: "application/pdf" },
+  { label: "user XML", mime: "application/xml", xml: true },
+  { label: "user HTML", mime: "text/html" },
+  { label: "user foreign page", mime: "text/html", opaque: true },
+];
+
+function repairPopup(spec: (typeof repairDocuments)[number]) {
+  const page = spec.xml
+    ? document.implementation.createDocument(null, "message")
+    : document.implementation.createHTMLDocument();
+  if (page.body) page.body.textContent = spec.label;
+  if (spec.mark) page.documentElement.setAttribute("data-chan-window-page-owner", spec.mark);
+  const contentType = vi.fn(() => spec.mime);
+  Object.defineProperty(page, "contentType", { get: contentType });
+  const readDocument = vi.fn(() => {
+    if (spec.opaque) throw new DOMException("Document access denied", "SecurityError");
+    return page;
+  });
+  const href = spec.href ?? `https://chan.test/${encodeURIComponent(spec.label)}`;
+  const navigate = vi.fn();
+  const child = {
+    closed: false,
+    focus: vi.fn(),
+    close: vi.fn(() => { child.closed = true; }),
+    get document() { return readDocument(); },
+    location: {
+      get href() {
+        if (spec.opaque) throw new DOMException("Location access denied", "SecurityError");
+        return href;
+      },
+      set href(value: string) { navigate(value); },
+    },
+  };
+  return { child, page, navigate, contentType, readDocument, handle: child as unknown as Window };
+}
+
+describe("record-based window repair", () => {
+  for (const spec of repairDocuments) {
+    for (const connected of [false, true]) {
+      test(`repairs ${spec.label} with connected=${connected}`, async () => {
+        vi.useFakeTimers();
+        const fixture = repairPopup(spec);
+        const { child, page, navigate, contentType, readDocument } = fixture;
+        vi.spyOn(window, "open").mockReturnValue(fixture.handle);
+        const blank = spec.href === "about:blank" || spec.href === "";
+        const needsRepair = !spec.mark && (blank || !connected);
+        const host = bridge({ checkPage: vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return pageAnswer();
+        }) });
+        const rec = scopedWindow({ window_id: `rule ${spec.label} ${connected}`, connected });
+        const failed = vi.fn();
+        const pending = focusLibraryWindow(host, rec).catch(failed);
+        const check = host.checkPage;
+        await vi.advanceTimersByTimeAsync(99);
+        expect(check).toHaveBeenCalledTimes(needsRepair ? 1 : 0);
+        expect(navigate).not.toHaveBeenCalled();
+        expect(contentType).not.toHaveBeenCalled();
+        if (connected && !blank) expect(readDocument).not.toHaveBeenCalled();
+        if (page.body) expect(page.body.textContent).toBe(needsRepair && blank
+          ? "Waiting for the window to be ready..." : spec.label);
+        await vi.advanceTimersByTimeAsync(1);
+        await pending;
+        expect(failed).not.toHaveBeenCalled();
+        expect(navigate).toHaveBeenCalledTimes(needsRepair ? 1 : 0);
+        if (needsRepair) expect(navigate).toHaveBeenCalledWith(rec.launch_path);
+        expect(child.close).not.toHaveBeenCalled();
+        expect(child.focus).toHaveBeenCalled();
+      });
+    }
+  }
+
+  for (const label of ["initial blank", "gateway 404 HTML", "user XML", "user foreign page"]) {
+    test(`refused repair preserves only nonblank ${label}`, async () => {
+      vi.useFakeTimers();
+      const spec = repairDocuments.find((entry) => entry.label === label)!;
+      const fixture = repairPopup(spec);
+      vi.spyOn(window, "open").mockReturnValue(fixture.handle);
+      const report = vi.fn();
+      const host = bridge({ checkPage: vi.fn().mockResolvedValue(pageAnswer(409, "Repair refused.")) });
+      await focusLibraryWindow(host, scopedWindow({ window_id: `refusal ${label}`, connected: false, hidden: true })).catch(report);
+      expect(host.runAction).not.toHaveBeenCalled();
+      expect(host.refresh).not.toHaveBeenCalled();
+      expect(report).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: "Repair refused." }));
+      expect(fixture.child.close).toHaveBeenCalledTimes(label === "initial blank" ? 1 : 0);
+      expect(fixture.navigate).not.toHaveBeenCalled();
+      if (fixture.page.body && label !== "initial blank") expect(fixture.page.body.textContent).toBe(label);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  }
+});
