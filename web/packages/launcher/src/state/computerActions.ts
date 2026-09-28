@@ -141,7 +141,10 @@ export async function setWindowShown(window: WindowRecord, shown: boolean): Prom
     await toggleWindow(window);
     return;
   }
-  if (shown && !window.connected && !(await openWindowRecord(window, { focus: false }))) return;
+  // chan-desktop owns a native record's window and opens it again once it is
+  // shown, so a browser acquires only a browser record's window here.
+  const repair = shown && window.origin === "browser" && !window.connected;
+  if (repair && !(await openWindowRecord(window, { focus: false }))) return;
   if (!!window.hidden === !shown) return;
   await toggleWindowVisibility(window, actingFor(window.prefix));
 }
