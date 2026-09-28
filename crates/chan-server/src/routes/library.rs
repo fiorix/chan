@@ -27,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use chan_library::{registered_workspace_prefix, workspace_prefix_for, ServeConfig};
+use chan_library::{registered_workspace_prefix, ServeConfig};
 use chan_workspace::KnownWorkspace;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
@@ -1813,10 +1813,6 @@ struct AddWorkspace {
     label: Option<String>,
 }
 
-fn add_workspace_root_error(error: crate::Error) -> Response {
-    crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-}
-
 fn add_workspace_prefix_error(error: crate::Error) -> Response {
     crate::error::err(StatusCode::BAD_REQUEST, error.to_string())
 }
@@ -1856,8 +1852,12 @@ fn workspace_still_releasing() -> Response {
 /// library and mount it (on), persisting its on-state. Returns the new row.
 /// Loopback-only.
 ///
-/// Everything the add asks of the root, its key, its registration and its
-/// open, shares the devserver mount's bound, counted from the request's
+/// The workspace mounts at the prefix derived from the root its registry row
+/// stores, whichever spelling of it `path` is, which is the prefix a devserver
+/// mounts the same workspace at, so the two find one tenant.
+///
+/// Everything the add asks of the root, its registration and its open,
+/// shares the devserver mount's bound, counted from the request's
 /// start. A root that stops answering in any of them is refused at the bound,
 /// and an open waiting on it gives the root's lock back to a close or a
 /// removal when it is dropped there.
@@ -1889,17 +1889,9 @@ async fn add_workspace(
     root: &Path,
     label: Option<String>,
 ) -> Response {
-    // Resolving and registering the root ask its filesystem, so both run
-    // off the runtime: an add of a root that stopped answering waits on the
+    // Registering and opening the root ask its filesystem, so both run off
+    // the runtime: an add of a root that stopped answering waits on the
     // blocking pool, not on a worker every other request needs.
-    let key = match state.host.root_key(root).await {
-        Ok(key) => key,
-        Err(e) => return add_workspace_root_error(e),
-    };
-    let prefix = match workspace_prefix_for(root, &key) {
-        Ok(prefix) => prefix,
-        Err(e) => return add_workspace_prefix_error(e),
-    };
     let registering = {
         let library = state.host.library().clone();
         let root = root.to_path_buf();
@@ -1909,6 +1901,10 @@ async fn add_workspace(
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => return crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
         Err(e) => return workspace_registration_task_error(e),
+    };
+    let prefix = match registered_workspace_prefix(&registered.root_path) {
+        Ok(prefix) => prefix,
+        Err(e) => return add_workspace_prefix_error(e),
     };
     match state
         .host
@@ -6127,19 +6123,6 @@ mod refusal_envelopes {
         let address = std::sync::OnceLock::new();
         address.set("127.0.0.1:9605".parse().unwrap()).unwrap();
         launcher_router(host, None, Some(Arc::new(address)))
-    }
-
-    #[tokio::test]
-    async fn workspace_add_root() {
-        let error = crate::Error::Io(std::io::Error::other(
-            "workspace host blocking task failed: resolving root ended without an answer",
-        ));
-        assert_refusal(
-            add_workspace_root_error(error),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "io: workspace host blocking task failed: resolving root ended without an answer",
-        )
-        .await;
     }
 
     #[tokio::test]
