@@ -8,10 +8,12 @@
 // the host is already waiting on the answer. A terminal-only window accepts
 // it too. On the web, closing the browser tab is a hide: it flushes buffers
 // and the layout and discards nothing, while the explicit close-window
-// command clears the window and asks the desktop to close it. However a
-// window goes, what its tabs hold and have not saved, a drawing's stroke
-// still waiting for its serialize included, is where the next open of the
-// file finds it.
+// command clears the window and asks the desktop to close it. Every way the
+// page asks the desktop to hide or close its window, and an unload, first
+// writes what its tabs hold and have not saved, a drawing's stroke still
+// waiting for its serialize included, to the recovery buffer the next open
+// of the file reads. A hide or close the desktop makes with no page code,
+// and a webview destroyed with no unload event, write nothing.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -27,6 +29,7 @@ vi.mock("./api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api/desktop")>()),
   isTauriDesktop: () => host.desktop,
   requestCloseWindow: vi.fn(async () => {}),
+  hideWindowFromCloseConfirm: vi.fn(async () => {}),
   reloadWindow: vi.fn(async () => {}),
 }));
 
@@ -36,12 +39,14 @@ vi.mock("./state/store.svelte", async (importOriginal) => ({
   persistLayoutToHash: vi.fn(),
 }));
 
-import { reloadWindow, requestCloseWindow } from "./api/desktop";
-import { hostCommand, mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { hideWindowFromCloseConfirm, reloadWindow, requestCloseWindow } from "./api/desktop";
+import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { drawableBoard, drawableBoards } from "./__tests__/excalidraw";
 import { fileTab, readTab, resetLayout } from "./__tests__/tabs";
+import { allCommands } from "./state/commands";
 import { bufferKey, divergentBufferOrNull } from "./state/editorBuffer";
-import { setTabContent } from "./state/tabs.svelte";
+import { assignOverride, hydrateOverrides } from "./state/keymapOverrides.svelte";
+import { setTabContent, type FileTab } from "./state/tabs.svelte";
 import { resolveCloseConfirm } from "./state/closeConfirm.svelte";
 import { lockNow, screensaver } from "./state/screensaver.svelte";
 import { discardWindowSession, persistLayoutToHash, ui } from "./state/store.svelte";
@@ -153,17 +158,20 @@ describe("what a window that goes leaves for the next open", () => {
   afterEach(() => {
     vi.useRealTimers();
     localStorage.clear();
+    hydrateOverrides(null);
   });
 
   /// A drawing open on a board a test can draw on, with a stroke drawn and
-  /// its serialize still waiting on a clock that does not move.
-  async function strokeInDebounce(): Promise<void> {
+  /// its serialize still waiting on a clock that does not move, and `beside`
+  /// open after it in the pane.
+  async function strokeInDebounce(beside: FileTab[] = []): Promise<void> {
     drawableBoards();
     resetLayout([
       fileTab({
         id: "board", path: BOARD, fileKind: "text", mode: "canvas",
         content: EMPTY, saved: EMPTY, savedMtimeNs: DISK_MTIME_NS,
       }),
+      ...beside,
     ]);
     const board = await drawableBoard();
     await board.start();
@@ -205,6 +213,60 @@ describe("what a window that goes leaves for the next open", () => {
 
     expect(nextOpenOffers(BOARD, EMPTY)).toContain("last-stroke");
   });
+
+  /// A stroke waiting as `strokeInDebounce` leaves it, beside a text tab
+  /// whose edit waits on its recovery write's debounce.
+  async function strokeAndEditInWait(): Promise<void> {
+    await strokeInDebounce([fileTab({ id: "a-file", path: "README.md", content: "hello", saved: "hello" })]);
+    setTabContent(readTab("a-file")!, "hello, edited");
+    await settle();
+  }
+
+  const HIDE_CHORD = { key: "H", code: "KeyH", ctrlKey: true, shiftKey: true } as const;
+
+  function runDeckRow(id: string): void {
+    allCommands().find((command) => command.id === id)!.run();
+  }
+
+  function pressAssignedChord(id: string): void {
+    assignOverride(id, "Ctrl+Alt+J", "web");
+    press({ key: "j", code: "KeyJ", ctrlKey: true, altKey: true });
+  }
+
+  const HIDES_AND_CLOSES: [way: string, go: () => Promise<void>, asks: "hide" | "close"][] = [
+    ["the red dot's Hide", async () => {
+      hostCommand("app.window.confirmClose");
+      await settle();
+      document.querySelector<HTMLButtonElement>(".actions button.hide")!.click();
+    }, "hide"],
+    ["the hide chord", async () => void press(HIDE_CHORD), "hide"],
+    ["the host's hide command", async () => hostCommand("app.window.hide"), "hide"],
+    ["the command deck's Hide window", async () => runDeckRow("app.window.hide"), "hide"],
+    ["a chord assigned to Hide window", async () => pressAssignedChord("app.window.hide"), "hide"],
+    ["the command deck's Close window", async () => runDeckRow("app.window.close"), "close"],
+    ["a chord assigned to Close window", async () => pressAssignedChord("app.window.close"), "close"],
+  ];
+
+  test.each(HIDES_AND_CLOSES)(
+    "%s leaves a drawing's pending stroke and a text tab's queued edit for the next open",
+    async (_way, go, asks) => {
+      await strokeAndEditInWait();
+      await go();
+
+      expect({
+        asked: {
+          hide: vi.mocked(hideWindowFromCloseConfirm).mock.calls.length,
+          close: vi.mocked(requestCloseWindow).mock.calls.length,
+        },
+        drawing: nextOpenOffers(BOARD, EMPTY),
+        text: nextOpenOffers("README.md", "hello"),
+      }).toEqual({
+        asked: asks === "hide" ? { hide: 1, close: 0 } : { hide: 0, close: 1 },
+        drawing: expect.stringContaining("last-stroke"),
+        text: "hello, edited",
+      });
+    },
+  );
 
   test("the close-window command leaves a text tab's edit whose recovery write is queued", async () => {
     vi.useFakeTimers();
