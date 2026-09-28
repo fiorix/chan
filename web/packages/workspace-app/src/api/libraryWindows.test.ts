@@ -740,6 +740,27 @@ describe("focusing a capability popup", () => {
     expect(navigate).toHaveBeenCalledTimes(2);
   });
 
+  test.each(["blank", "stayed page"] as const)("repairs a %s whose navigation did not commit once ten seconds pass", async (state) => {
+    vi.useFakeTimers();
+    const href = state === "blank" ? "about:blank" : "https://chan.test/project/index.html?w=w-other";
+    const popup = fakePopup(href);
+    const navigate = vi.fn();
+    Object.defineProperty(popup.location, "href", { get: () => href, set: navigate });
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const rec = scopedWindow({ connected: false });
+    const host = bridge({ readSnapshot: vi.fn(async () => snapshotWith(rec)) });
+
+    await focusLibraryWindow(host, rec);
+    await focusLibraryWindow(host, rec);
+    expect(host.checkPage).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await focusLibraryWindow(host, rec);
+
+    expect(host.checkPage).toHaveBeenCalledTimes(2);
+    expect(navigate).toHaveBeenCalledTimes(2);
+  });
+
   test.each(["new_terminal", "new_workspace_window", "focus"] as const)("does not check a page on the native %s branch", async (action) => {
     asDesktop(vi.fn().mockResolvedValue(null));
     const open = vi.spyOn(window, "open");
