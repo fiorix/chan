@@ -10708,6 +10708,359 @@ mod tests {
             registry.close_all(crate::terminal_sessions::CloseReason::Shutdown);
         }
 
+        /// A workspace runtime inserted at `prefix` as a mount publishes one,
+        /// with its two keys as given: the stored root it was opened at and
+        /// the canonical root that resolved to. Nothing on disk backs them:
+        /// every lookup these tests reach compares the stored keys.
+        fn insert_workspace_runtime(
+            host: &WorkspaceHost,
+            prefix: &str,
+            root: &str,
+            canonical_root: &str,
+        ) -> Arc<TerminalRegistry> {
+            let artifacts = fake_artifacts(Router::new(), Arc::new(FakeTerminalCell));
+            let registry = artifacts.terminal_sessions.clone();
+            host.workspaces.write().expect("host map").insert(
+                prefix.to_string(),
+                HostedWorkspaceRuntime {
+                    clear_started: false,
+                    holds_workspace: true,
+                    root: PathBuf::from(root),
+                    canonical_root: PathBuf::from(canonical_root),
+                    handle: ServeHandle {
+                        addr: ([127, 0, 0, 1], 0).into(),
+                        prefix: prefix.to_string(),
+                        token: None,
+                    },
+                    artifacts,
+                },
+            );
+            registry
+        }
+
+        fn install_windows(host: &WorkspaceHost) -> Arc<WindowRegistry> {
+            let dir = tempfile::tempdir().expect("windows dir");
+            let registry = Arc::new(WindowRegistry::open(dir.path().join("windows.json")));
+            std::mem::forget(dir);
+            host.install_window_registry(registry.clone(), "lib-test".into());
+            registry
+        }
+
+        /// One session parked under `tenant_prefix` in window `window_id`,
+        /// over a real PTY master whose pair the caller keeps open. It has no
+        /// child pid, so closing the restored session signals no process.
+        fn parked_import(
+            session_id: &str,
+            tenant_prefix: &str,
+            window_id: &str,
+        ) -> (
+            crate::terminal_sessions::FdStoreSessionImport,
+            portable_pty::PtyPair,
+        ) {
+            let pty = portable_pty::native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect("openpty");
+            let raw = pty.master.as_raw_fd().expect("master raw fd");
+            let master_fd = crate::terminal_sessions::clone_master_fd(raw).expect("dup master");
+            let meta = crate::terminal_sessions::FdStoreSessionMeta {
+                tenant_prefix: tenant_prefix.into(),
+                session_id: session_id.into(),
+                tab_name: None,
+                tab_group: None,
+                spawn_name: None,
+                spawn_group: None,
+                window_id: Some(window_id.into()),
+                pane_id: None,
+                side: None,
+                tab_id: None,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+                profile: None,
+                mcp_env: false,
+                child_pid: None,
+                size: crate::terminal_sessions::StoredPtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                seq: 0,
+                generation: 1,
+                alt_screen: false,
+                private_modes: Vec::new(),
+            };
+            let import = crate::terminal_sessions::FdStoreSessionImport {
+                meta,
+                master_fd,
+                ring_fd: None,
+                replay: Vec::new(),
+                sealed_manifest: true,
+            };
+            (import, pty)
+        }
+
+        /// The sessions the next restart manifest would name, as
+        /// `(session id, tenant prefix)`.
+        fn manifested(host: &WorkspaceHost) -> Vec<(String, String)> {
+            let mut sessions: Vec<(String, String)> = host
+                .fdstore_manifest_sessions()
+                .into_iter()
+                .map(|entry| (entry.meta.session_id, entry.meta.tenant_prefix))
+                .collect();
+            sessions.sort();
+            sessions
+        }
+
+        /// Clears this thread's canonicalization probe when dropped, so a
+        /// failed assertion cannot leave it installed for the next test.
+        struct ProbeReset;
+
+        impl Drop for ProbeReset {
+            fn drop(&mut self) {
+                CANONICAL_KEY_PROBE.with(|probe| *probe.borrow_mut() = None);
+            }
+        }
+
+        const MOVED_ROOT: &str = "/nonexistent-chan-test/link/notes";
+        const MOVED_CANONICAL_ROOT: &str = "/nonexistent-chan-test/real/notes";
+
+        /// A session parked under a prefix no tenant is mounted at, as after
+        /// a build that derives its workspace's prefix differently, is
+        /// restored in the tenant the window feed shows its window under,
+        /// whichever of that runtime's two keys the window stores, and the
+        /// import asks no filesystem to find it.
+        #[tokio::test]
+        async fn restore_moves_a_session_into_its_windows_workspace() {
+            for (spelling, stored) in [
+                ("the stored root", MOVED_ROOT),
+                ("the canonical root", MOVED_CANONICAL_ROOT),
+            ] {
+                let hook = HostProbePark::default();
+                let (host, terminal) = host_with_terminal_runtime();
+                let workspace =
+                    insert_workspace_runtime(&host, "/notes-new", MOVED_ROOT, MOVED_CANONICAL_ROOT);
+                workspace.install_fd_parker(hook.parker());
+                let windows = install_windows(&host);
+                let window = windows
+                    .create(WindowKind::Workspace, Some(stored.into()))
+                    .window_id;
+                let (import, _pty) = parked_import("moved1", "/notes-old", &window);
+
+                let canonicalized = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                CANONICAL_KEY_PROBE.with(|probe| {
+                    let canonicalized = std::rc::Rc::clone(&canonicalized);
+                    *probe.borrow_mut() = Some(Box::new(move |call| {
+                        canonicalized.borrow_mut().push(call);
+                    }));
+                });
+                let reset = ProbeReset;
+                let report = host.restore_fdstore_terminal_sessions(vec![import]);
+                drop(reset);
+
+                assert_eq!(
+                    report.restored, 1,
+                    "a window storing {spelling}: skipped {:?}",
+                    report.skipped
+                );
+                assert!(
+                    canonicalized.borrow().is_empty(),
+                    "a window storing {spelling}: the import canonicalized through {:?}",
+                    canonicalized.borrow()
+                );
+                assert_eq!(
+                    manifested(&host),
+                    vec![("moved1".to_string(), "/notes-new".to_string())],
+                    "a window storing {spelling}: the session is not in the tenant \
+                     the next manifest names at the new prefix"
+                );
+                let record = host
+                    .assemble_window_records()
+                    .into_iter()
+                    .find(|record| record.window_id == window)
+                    .expect("the feed lists the window");
+                assert_eq!(
+                    record.prefix, "/notes-new",
+                    "a window storing {spelling}: the feed shows the window under \
+                     another tenant than the one the session was restored in"
+                );
+                workspace.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+                terminal.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+            }
+        }
+
+        /// A session whose own prefix is mounted is restored there, whatever
+        /// workspace its window names: its window decides only for a session
+        /// whose prefix no tenant is mounted at.
+        #[tokio::test]
+        async fn restore_keeps_a_session_at_its_own_mounted_prefix() {
+            let hook = HostProbePark::default();
+            let (host, terminal) = host_with_terminal_runtime();
+            let own = insert_workspace_runtime(
+                &host,
+                "/alpha",
+                "/nonexistent-chan-test/alpha",
+                "/nonexistent-chan-test/alpha",
+            );
+            let other = insert_workspace_runtime(
+                &host,
+                "/beta",
+                "/nonexistent-chan-test/beta",
+                "/nonexistent-chan-test/beta",
+            );
+            own.install_fd_parker(hook.parker());
+            other.install_fd_parker(hook.parker());
+            let windows = install_windows(&host);
+            let window = windows
+                .create(
+                    WindowKind::Workspace,
+                    Some("/nonexistent-chan-test/beta".into()),
+                )
+                .window_id;
+            let (import, _pty) = parked_import("kept1", "/alpha", &window);
+
+            let report = host.restore_fdstore_terminal_sessions(vec![import]);
+
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert_eq!(
+                manifested(&host),
+                vec![("kept1".to_string(), "/alpha".to_string())],
+                "a session whose own prefix is mounted must stay in that tenant"
+            );
+            own.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+            other.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+            terminal.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+        }
+
+        /// What the window of a session parked under an unmounted prefix
+        /// stores, for the refusals below.
+        #[derive(Clone, Copy)]
+        enum ParkedWindow {
+            Terminal(&'static str),
+            WorkspaceWithoutPath,
+            Workspace(&'static str),
+            Missing,
+        }
+
+        /// A session parked under a prefix no tenant is mounted at is not
+        /// restored when its window names no single mounted workspace, and
+        /// its skip says why, so the devserver ends it as any skipped
+        /// session. A window the feed hides is refused too.
+        #[tokio::test]
+        async fn restore_refuses_a_moved_session_its_window_cannot_place() {
+            let moved = "tenant prefix /notes-old is not mounted and its window";
+            let cases = [
+                (
+                    "a terminal window storing the workspace's root",
+                    ParkedWindow::Terminal(MOVED_ROOT),
+                    "is a terminal window",
+                    false,
+                ),
+                (
+                    "a workspace window storing no path",
+                    ParkedWindow::WorkspaceWithoutPath,
+                    "stores no workspace path",
+                    false,
+                ),
+                (
+                    "a window storing an alias's spelling",
+                    ParkedWindow::Workspace("/nonexistent-chan-test/alias/notes"),
+                    "which no mounted workspace goes by",
+                    true,
+                ),
+                (
+                    "a window storing the terminal tenant's root",
+                    ParkedWindow::Workspace("/"),
+                    "which no mounted workspace goes by",
+                    true,
+                ),
+                (
+                    "a window storing a path two workspaces go by",
+                    ParkedWindow::Workspace(MOVED_ROOT),
+                    "which more than one mounted workspace goes by",
+                    false,
+                ),
+                (
+                    "a window no longer persisted",
+                    ParkedWindow::Missing,
+                    "is no longer persisted",
+                    false,
+                ),
+            ];
+            for (case, parked_window, why, feed_hides) in cases {
+                let (host, terminal) = host_with_terminal_runtime();
+                let workspace =
+                    insert_workspace_runtime(&host, "/notes-new", MOVED_ROOT, MOVED_CANONICAL_ROOT);
+                let other = (case == "a window storing a path two workspaces go by").then(|| {
+                    insert_workspace_runtime(
+                        &host,
+                        "/elsewhere",
+                        "/nonexistent-chan-test/elsewhere",
+                        MOVED_ROOT,
+                    )
+                });
+                let windows = install_windows(&host);
+                let window = match parked_window {
+                    ParkedWindow::Terminal(path) => {
+                        windows
+                            .create(WindowKind::Terminal, Some(path.into()))
+                            .window_id
+                    }
+                    ParkedWindow::WorkspaceWithoutPath => {
+                        windows.create(WindowKind::Workspace, None).window_id
+                    }
+                    ParkedWindow::Workspace(path) => {
+                        windows
+                            .create(WindowKind::Workspace, Some(path.into()))
+                            .window_id
+                    }
+                    ParkedWindow::Missing => "window-gone".to_string(),
+                };
+                let (import, _pty) = parked_import("refused1", "/notes-old", &window);
+
+                let report = host.restore_fdstore_terminal_sessions(vec![import]);
+
+                assert_eq!(report.restored, 0, "{case}: the session was restored");
+                let skipped = report
+                    .skipped_sessions
+                    .iter()
+                    .find(|skipped| skipped.session_id == "refused1")
+                    .unwrap_or_else(|| panic!("{case}: the session is not among the skipped"));
+                if !matches!(parked_window, ParkedWindow::Missing) {
+                    assert!(
+                        skipped.reason.starts_with(moved),
+                        "{case}: the skip does not name the unmounted prefix and the \
+                         window: {:?}",
+                        skipped.reason
+                    );
+                }
+                assert!(
+                    skipped.reason.contains(why),
+                    "{case}: the skip does not say why ({why}): {:?}",
+                    skipped.reason
+                );
+                if feed_hides {
+                    assert!(
+                        !host
+                            .assemble_window_records()
+                            .iter()
+                            .any(|record| record.window_id == window),
+                        "{case}: the feed shows the window the import refused"
+                    );
+                }
+                workspace.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+                if let Some(other) = other {
+                    other.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+                }
+                terminal.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+            }
+        }
+
         /// A child the liveness probe never sees die is reported lingering,
         /// not silently claimed dead.
         #[tokio::test]
