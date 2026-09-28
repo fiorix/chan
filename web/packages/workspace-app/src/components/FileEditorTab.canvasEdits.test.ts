@@ -990,4 +990,34 @@ describe("a live drawing", () => {
       expect(await settled(tab, board, socket)).toEqual(SHOWS_THE_AUTHORITY);
     },
   );
+
+  test("a background this window picked stays on its board through a remount within the session's linger", async () => {
+    const PICKED = "#123456";
+    const { tab, board, socket } = await attachedDrawing();
+    // The library's render of the snapshot's appState comes first, or it
+    // shows that appState over the pick.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    board.pickBackground(PICKED);
+    await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
+    socket.frame({ type: "push-ok", version: 2 });
+    await vi.waitFor(() => expect(tab.content).toContain(PICKED));
+    // A move between panes mounts the tab's editor again, and the session's
+    // linger carries the session over to the new one.
+    await unmount(mounted.pop()!);
+    const { board: next } = await mountBoard(readTab(tab.id)!);
+    const before = socket.pushes().length;
+    vi.useFakeTimers();
+    await next.start();
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      background: next.appState.viewBackgroundColor,
+      reverting: socket
+        .pushes()
+        .slice(before)
+        .filter((p) => p.appState !== undefined && (p.appState as Record<string, unknown>).viewBackgroundColor !== PICKED),
+      sockets: sceneSockets.length,
+    }).toEqual({ background: PICKED, reverting: [], sockets: 1 });
+  });
 });
