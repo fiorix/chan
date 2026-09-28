@@ -710,8 +710,11 @@ impl Drop for EmbeddedServer {
 fn map_open_error(key: &str, e: chan_server::Error) -> String {
     use chan_workspace::ChanError;
     match e {
-        chan_server::Error::Core(ChanError::WorkspaceLocked | ChanError::WorkspaceAlreadyOpen) => {
+        chan_server::Error::Core(ChanError::WorkspaceLocked) => {
             "This workspace is open in another chan process. Quit it and try again.".to_string()
+        }
+        chan_server::Error::Core(ChanError::WorkspaceAlreadyOpen) => {
+            chan_server::WORKSPACE_STILL_RELEASING.to_string()
         }
         other => format!("opening embedded workspace {key}: {other}"),
     }
