@@ -12,8 +12,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { json, recordRequests, type RecordedRequest } from "../__tests__/fetch";
-import { closeSettings, openSettings, settingsPreferences } from "../__tests__/settings";
-import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
+import { focusOrigin } from "../__tests__/dialog";
+import { closeSettings, openSettings, settingsPreferences, settleSettings } from "../__tests__/settings";
+import { __testSetStandalonePreferences, settingsPanel, ui } from "../state/store.svelte";
 
 afterEach(closeSettings);
 
@@ -132,3 +133,20 @@ describe("an open form in a window with no workspace", () => {
     await vi.waitFor(() => expect(select.value).toBe("source-code-pro"));
   });
 });
+
+describe("the Settings panel", () => {
+  test("is a modal dialog named Settings", async () => {
+    const { target } = await openSettings("Terminal");
+    const panel = target.querySelector<HTMLElement>('.panel[role="dialog"]')!;
+    expect([panel.getAttribute("aria-modal"), panel.getAttribute("aria-label")]).toEqual(["true", "Settings"]);
+  });
+
+  test("hands focus back to where it was when it closes", async () => {
+    const origin = focusOrigin();
+    await openSettings("Terminal");
+    settingsPanel.open = false;
+    await settleSettings();
+    expect(document.activeElement).toBe(origin);
+  });
+});
+
