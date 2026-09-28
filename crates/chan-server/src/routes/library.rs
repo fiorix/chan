@@ -228,6 +228,11 @@ pub fn launcher_router(
         .route("/api/library/fs/pick-folder", post(handle_pick_folder))
         .merge(tunnel_legs())
         .with_state(host.clone());
+    // The workspace, config, gateway and devserver routes share one state.
+    let launcher_state = Arc::new(LauncherState {
+        host: host.clone(),
+        serve_addr,
+    });
     // Workspaces: list always; the mutation routes are always present but
     // refuse with 403 on the read-only surface (gated by `serve_addr` inside the
     // handlers), so a direct call can never escalate to mutation.
@@ -245,10 +250,7 @@ pub fn launcher_router(
             "/api/library/workspaces/{id}",
             delete(handle_remove_workspace),
         )
-        .with_state(Arc::new(LauncherState {
-            host: host.clone(),
-            serve_addr: serve_addr.clone(),
-        }));
+        .with_state(launcher_state.clone());
     // Library config: this library's own pane-highlight colour. GET + PUT on
     // EVERY surface (a no-store surface reports `null` = default accent / 404s the
     // PUT): a library's colour belongs to that library, set from a pane's
@@ -276,14 +278,7 @@ pub fn launcher_router(
             "/api/library/collapsed-machines",
             get(handle_get_collapsed_machines).put(handle_set_collapsed_machines),
         )
-        .with_state(Arc::new(LauncherState {
-            host: host.clone(),
-            serve_addr: serve_addr.clone(),
-        }));
-    // Captured before `host` is moved into the devservers state below: the
-    // surface-bearer gate needs the host to validate a window's per-tenant
-    // token against the live tenants.
-    let host_for_surface = host.clone();
+        .with_state(launcher_state.clone());
     // A workspace mints one short-lived, live-window-bound capability with its
     // own tenant token. Uses are authenticated by the opaque capability itself,
     // so the browser can navigate a popup through the launch redirect without
@@ -296,7 +291,7 @@ pub fn launcher_router(
         .route_layer(middleware::from_fn(command_capability_response_headers))
         .with_state(command_state.clone());
     let command_mint = if let Some(surface_token) = bearer.clone() {
-        let host = host_for_surface.clone();
+        let host = host.clone();
         command_mint.route_layer(middleware::from_fn(move |req, next| {
             let token = surface_token.clone();
             let host = host.clone();
@@ -336,10 +331,7 @@ pub fn launcher_router(
             "/api/library/gateways/{id}",
             put(handle_update_gateway).delete(handle_remove_gateway),
         )
-        .with_state(Arc::new(LauncherState {
-            host: host.clone(),
-            serve_addr: serve_addr.clone(),
-        }));
+        .with_state(launcher_state.clone());
     // Devservers: list on BOTH surfaces (a registry-less surface returns empty);
     // add/update/remove gated mutable (403 read-only, 404 no registry) inside the
     // handlers, same as workspaces.
@@ -352,7 +344,7 @@ pub fn launcher_router(
             "/api/library/devservers/{id}",
             put(handle_update_devserver).delete(handle_remove_devserver),
         )
-        .with_state(Arc::new(LauncherState { host, serve_addr }));
+        .with_state(launcher_state);
     // The launcher-management routes (windows / workspaces / devservers) stay
     // gated on the launcher token. The local-color (`config`) routes set the
     // surface's OWN cosmetic colour from a pane menu, called by whatever window
@@ -370,7 +362,7 @@ pub fn launcher_router(
             }));
             let config = config.route_layer(middleware::from_fn(move |req, next| {
                 let token = surface_token.clone();
-                let host = host_for_surface.clone();
+                let host = host.clone();
                 async move { require_surface_bearer(token, host, req, next).await }
             }));
             (launcher_api, config)
