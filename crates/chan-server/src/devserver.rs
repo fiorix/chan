@@ -9600,6 +9600,33 @@ mod tests {
         assert_eq!(observed, expected, "the restored workspaces");
     }
 
+    /// Overlay rows whose highest generation is 0, which a build from before
+    /// generations were counted wrote and no run toggled since, restore at
+    /// generation 1: a save gives a row of generation 0 a generation of its
+    /// own, and the mount the restore starts must be the one the first save
+    /// keeps. The workspace is served and its row reads on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restored_generation_zero_row_mounts_once() {
+        let _env = chan_home_env_read();
+        let cases: [OverlayCase; 2] = [
+            ("a canonical row on", &[(false, true, 0)], true, 1),
+            (
+                "a tie, the stored row off",
+                &[(true, false, 0), (false, true, 0)],
+                true,
+                1,
+            ),
+        ];
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for (case, rows, on, generation) in cases {
+            observed.push((case, restore_outcome(rows).await));
+            expected.push((case, (1, true, on, on, vec![("stored", on, generation)])));
+        }
+        assert_eq!(observed, expected, "the restored workspaces");
+    }
+
     /// A registered root handed off by an alias whose last component is not
     /// the root's own is served at the prefix derived from the root its
     /// registry row stores, and a handoff by the root's own spelling answers
