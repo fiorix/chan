@@ -13,6 +13,8 @@ Beside them, the shared mapper answers the same error 409 with its own sentence 
 
 No client of the add reads its status: the web launcher shows the body's `error` of any refusal (`req`, `web/packages/launcher/src/api/library.ts:601-619`), and the desktop's gateway arm reports the add's refusal whatever its status, while it reads the on's 409 as a conflict (`add_workspace`, `desktop/src-tauri/src/devserver.rs:2389-2396`; `set_workspace_on`, `:2512-2514`). So a user who adds a folder another chan holds reads an internal sentence where the on's row gives another.
 
+**Added on 2026-09-28, at the landing after the one that raised this item:** the launcher's removal is a third status for the same fact, as named above, read again at `ada0ecc4c`: it answers another process's lock 500 with the error's own sentence (`handle_remove_workspace`, `crates/chan-server/src/routes/library.rs:2037-2062`, the arm at `:2060`; pinned as it is, `workspace_remove_locked`, `:6352-6368`), beside the add's 400 (`:1935`; `workspace_add_mount`, `:6194-6212`) and the on's 409 (`:1987-1990`). The boundary below leaves the removal to the ruling, and the lead's recommendation now asks the ruling to take it in: one status and one sentence for another process's lock at every caller that answers it, the removal among them. Not run.
+
 ## Desired contract
 
 The launcher's add and on answer another process's lock with one status and one sentence, and `crates/chan-server/design.md` says which.
