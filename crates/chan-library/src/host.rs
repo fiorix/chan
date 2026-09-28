@@ -6317,6 +6317,55 @@ mod tests {
         );
     }
 
+    /// With no workspace runtime mounted, a workspace window minted by
+    /// either key of a relinked root's registry row stores the row's stored
+    /// root, and one minted by a key no row goes by stores that key as
+    /// given.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workspace_window_minted_with_no_runtime_stores_its_registry_rows_root() {
+        let (host, _overlay, stored, canonical, dirs) = relinked_host();
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json"))),
+            "local".into(),
+        );
+        // A registration of the canonical path caches it on the row, as a
+        // serve handoff's does before it mints.
+        host.library()
+            .register_workspace(&canonical)
+            .expect("register the canonical path");
+        let rows = host.library().list_workspaces();
+        assert!(
+            rows.len() == 1 && rows[0].cached_canonical_path() == canonical,
+            "fixture: the row does not cache the canonical path: {rows:?}"
+        );
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "fixture: a workspace runtime goes by the root"
+        );
+        let stored_path = stored.to_string_lossy().into_owned();
+        for key in [&canonical, &stored] {
+            let record = host
+                .mint_workspace_window(key, WindowOrigin::Native)
+                .expect("mint");
+            assert_eq!(
+                record.workspace_path.as_deref(),
+                Some(stored_path.as_str()),
+                "a window minted by {} with no runtime stores another root",
+                key.display()
+            );
+        }
+        let unregistered = dirs[1].path().join("unregistered");
+        let record = host
+            .mint_workspace_window(&unregistered, WindowOrigin::Native)
+            .expect("mint");
+        assert_eq!(
+            record.workspace_path,
+            Some(unregistered.to_string_lossy().into_owned()),
+            "a window minted by a key no row goes by stores another path"
+        );
+    }
+
     /// A terminal tenant built across the last shutdown sweep is refused at
     /// publication and shuts its runtime down before it reports the refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
