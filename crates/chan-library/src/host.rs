@@ -64,10 +64,12 @@ const ROOT_HEALTH_MISSED_TICKS: u32 = 2;
 /// through [`ROOT_HEALTH_MISSED_TICKS`] budgets without answering.
 const ROOT_NOT_ANSWERING: &str = "not answering: its health check has not returned";
 const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// The reason a row shows while an earlier call of this process on its root
-/// has not let go: a mount whose caller left, or a lookup that has not
-/// returned.
-const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
+/// The reason a workspace's row shows while an earlier call of this process
+/// on its root has not let go: a mount whose caller left, or a lookup or an
+/// unregister that has not returned. An open or a removal that meets such a
+/// call answers [`ChanError::WorkspaceAlreadyOpen`] and leaves these words on
+/// the row, and a retry once the call lets go completes.
+pub const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
 
 #[cfg(test)]
 type WorkspaceOpenProbe = Box<dyn FnMut(&mut chan_workspace::Result<Arc<Workspace>>) + Send>;

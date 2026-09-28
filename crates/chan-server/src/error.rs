@@ -92,9 +92,10 @@ pub fn err_settings_locked() -> Response {
     )
 }
 
-/// What an open of a root answers while an earlier open of this process has
-/// not let go of it: the words the host's row for that root reads.
-pub const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
+// The words a root's row reads while an earlier call of this process has not
+// let go of it live in chan-library, beside the host that writes that row;
+// the routes that answer with them and the desktop read them from here.
+pub use chan_library::WORKSPACE_STILL_RELEASING;
 
 /// The refusal of a request to mount a workspace whose root did not answer
 /// within [`WORKSPACE_MOUNT_TIMEOUT`](crate::WORKSPACE_MOUNT_TIMEOUT) of the
