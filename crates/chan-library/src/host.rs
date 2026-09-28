@@ -65,10 +65,11 @@ const ROOT_HEALTH_MISSED_TICKS: u32 = 2;
 const ROOT_NOT_ANSWERING: &str = "not answering: its health check has not returned";
 const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// The reason a workspace's row shows while an earlier call of this process
-/// on its root has not let go: a mount whose caller left, or a lookup or an
-/// unregister that has not returned. An open or a removal that meets such a
-/// call answers [`ChanError::WorkspaceAlreadyOpen`] and leaves these words on
-/// the row, and a retry once the call lets go completes.
+/// on its root has not let go: a mount or a revalidation whose caller left, a
+/// lookup or an unregister that has not returned, or a tenant still being
+/// built. An open or a removal that meets such a call answers
+/// [`ChanError::WorkspaceAlreadyOpen`] and leaves these words on the row, and
+/// a retry once the call lets go completes.
 pub const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
 
 #[cfg(test)]
@@ -3626,7 +3627,15 @@ impl WorkspaceHost {
                 Ok(Ok(removed)) => removed,
                 Ok(Err(error)) => {
                     let error = Error::from(error);
-                    removing.error = Some(error.to_string());
+                    // A handle of the root that this process still holds is
+                    // an earlier call that has not let go, as it is for an
+                    // open: the row reads the words a retry answers.
+                    removing.error = Some(match &error {
+                        Error::Core(ChanError::WorkspaceAlreadyOpen) => {
+                            WORKSPACE_STILL_RELEASING.into()
+                        }
+                        other => other.to_string(),
+                    });
                     return Err(error);
                 }
                 Err(error) => {
@@ -7077,7 +7086,10 @@ mod tests {
             );
             assert_eq!(
                 host.workspace_status(root.path()),
-                (WorkspaceStatus::Error, Some(error.to_string()))
+                (
+                    WorkspaceStatus::Error,
+                    Some("workspace is still releasing; retry".into())
+                )
             );
             changed.await;
             assert!(library.workspace_paths_for(root.path()).is_some());
