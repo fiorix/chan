@@ -173,6 +173,7 @@ class FakeBinding implements SceneCanvasBinding {
   session: SceneSession | null = null;
   applySnapshot(elements: WireElement[], appState: WireAppState, files: WireFiles): void {
     this.snapshots.push({ elements, appState, files });
+    this.adopt(elements, appState, files);
   }
   applyUpdate(f: {
     elements: WireElement[];
@@ -180,6 +181,19 @@ class FakeBinding implements SceneCanvasBinding {
     files?: WireFiles;
   }): void {
     this.updates.push(f);
+    this.adopt(f.elements, f.appState, f.files);
+  }
+  /// The canvas's adopt of a frame moves its three marks: an element the
+  /// frame holds at the same or a newer version is noted as the authority's,
+  /// a file the frame names is known, and a handed appState becomes both what
+  /// the next push offers and the authority's, so none of them stays pending.
+  private adopt(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void {
+    const held = new Map(elements.map((el) => [el.id, Number(el.version)]));
+    this.pending = this.pending.filter((el) => !(Number(el.version) <= (held.get(el.id) ?? -1)));
+    if (files !== undefined) {
+      this.pendingFiles = Object.fromEntries(Object.entries(this.pendingFiles).filter(([k]) => !(k in files)));
+    }
+    if (appState !== undefined) this.pendingAppState = null;
   }
   collaboratorsChanged(): void {
     this.collabCalls += 1;
@@ -203,7 +217,7 @@ class FakeBinding implements SceneCanvasBinding {
   forgetBroadcast(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void {
     // The canvas drops the broadcast mark, which puts the element back in
     // its delta set; here the pending list is that set. The file keys and
-    // the appState come back the same way.
+    // the appState come back the same way, until an adopt moves them.
     this.pending.push(...elements);
     if (files !== undefined) this.pendingFiles = { ...this.pendingFiles, ...files };
     if (appState !== undefined) this.pendingAppState = appState;
@@ -898,39 +912,36 @@ describe("a push the authority never accepted", () => {
     vi.useRealTimers();
   });
 
-  test("offers its appState again", () => {
-    // Same drop with an appState change riding the push. The canvas takes
-    // the pushed value as the authority's new baseline, so a later push
-    // computes no appState change at all and the value never arrives.
+  test("gives up its appState to the reattach's snapshot and pushes its element", () => {
+    // Same drop with an appState change riding the push. The session hands
+    // the canvas the reattach's snapshot before it asks for a push, and the
+    // adopt makes the snapshot's appState both what the next push offers and
+    // the authority's, so the change is not offered again. The element the
+    // snapshot lacks is.
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { binding } = attached(tab!);
 
     binding.pending.push(elem("a", 2));
-    binding.pendingAppState = { gridSize: 40 };
+    binding.pendingAppState = { gridModeEnabled: true };
     binding.flushPendingLocal();
     expect(lastSocket().frames("push")).toHaveLength(1);
 
-    const back = dropAndRedial();
+    const back = dropAndRedial(snap([], { appState: { gridModeEnabled: false } }));
 
-    const ids = back
-      .frames("push")
-      .flatMap((f) => (f.elements as WireElement[]).map((e) => e.id));
-    expect(ids, "the element half already works").toContain("a");
-    const states = back
-      .frames("push")
-      .map((f) => f.appState)
-      .filter((a): a is WireAppState => a !== undefined);
-    expect(states, "the appState change reaches the authority").toContainEqual({
-      gridSize: 40,
-    });
+    expect({
+      elements: back.frames("push").flatMap((f) => (f.elements as WireElement[]).map((e) => e.id)),
+      appStates: back.frames("push").flatMap((f) => (f.appState === undefined ? [] : [f.appState])),
+      adopted: binding.snapshots.at(-1)?.appState,
+      pending: binding.pendingAppState,
+    }).toEqual({ elements: ["a"], appStates: [], adopted: { gridModeEnabled: false }, pending: null });
     vi.useRealTimers();
   });
 
   test("hands the canvas the appState an update's withhold kept from it", () => {
-    // The claim that kept a peer's appState off the board never reached the
-    // authority, so the peer's appState is what stands, and the snapshot of
-    // the next epoch carries it.
+    // Here the claim that kept a peer's appState off the board is dropped
+    // with its socket before the authority reads it, so the peer's appState
+    // is what stands, and the next socket's snapshot carries it.
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { binding, sock } = attached(tab!);
