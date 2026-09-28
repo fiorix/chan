@@ -98,6 +98,11 @@ export type OpenFileOptions = {
   /// (search, wiki/mention links, backlink navigation) so they keep their
   /// jump target or last-known caret.
   landAtTop?: boolean;
+  /// The view a tab moved from another window had there: its mode, taken
+  /// when it is valid for the path, and whether its inspector was open. A
+  /// new tab takes them; a tab already open for the path keeps its own.
+  mode?: Mode;
+  inspectorOpen?: boolean;
 };
 
 /// Default mode for a freshly opened file. Excalidraw scenes land in
@@ -3193,11 +3198,14 @@ export async function openInPane(
     savedMtimeNs: null,
     authorityVersion: null,
     diskConflicted: false,
-    mode: defaultModeForPath(path, fileKind),
+    mode:
+      opts.mode !== undefined && isModeValidForPath(opts.mode, path, fileKind)
+        ? opts.mode
+        : defaultModeForPath(path, fileKind),
     loading: true,
     error: null,
     fileMissing: null,
-    inspectorOpen: false,
+    inspectorOpen: opts.inspectorOpen ?? false,
     outlineOpen: false,
     slidePreview: { open: false, index: 0, mode: "preview" },
     repoRoot: null,
