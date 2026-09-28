@@ -477,7 +477,6 @@ enum MountCompletion {
 struct WorkspaceRecord {
     root: PathBuf,
     prefix: String,
-    label: String,
     desired: DesiredMount,
     phase: MountPhase,
     generation: u64,
@@ -486,11 +485,9 @@ struct WorkspaceRecord {
 
 impl WorkspaceRecord {
     fn prepared(root: PathBuf, prefix: String, desired_on: bool, generation: u64) -> Self {
-        let label = workspace_label(&root);
         Self {
             root,
             prefix,
-            label,
             desired: if desired_on {
                 DesiredMount::On
             } else {
@@ -1381,8 +1378,9 @@ impl DevserverState {
     }
 
     /// The current [`WorkspaceEntry`] for `prefix`, or `None` when no
-    /// workspace is registered there. The record is copied out of the map
-    /// before its row is built, as the list's rows are.
+    /// workspace is registered there. The row lists the stored root of the
+    /// registry row the record joins, as the list does. The record is copied
+    /// out of the map before its row is built, as the list's rows are.
     fn entry_for(&self, prefix: &str) -> Option<WorkspaceEntry> {
         let record = self
             .workspaces
@@ -1390,7 +1388,14 @@ impl DevserverState {
             .unwrap_or_else(|e| e.into_inner())
             .get(prefix)
             .cloned()?;
-        Some(self.entry_from_record(&record))
+        let root = self
+            .host
+            .library()
+            .list_workspaces()
+            .into_iter()
+            .find(|row| registry_row_keys(row).contains(&record.root.as_path()))
+            .map_or_else(|| record.root.clone(), |row| row.root_path);
+        Some(self.entry_from_record(&record, &root))
     }
 
     /// Forget the workspace at `prefix`: unmount it if on, then drop the
@@ -1620,6 +1625,16 @@ impl DevserverState {
     /// derived prefix with no token; toggling it on mounts it (see
     /// [`set_workspace_on`](Self::set_workspace_on)). Sorted by prefix.
     ///
+    /// A record joins the registry row that goes by its root
+    /// ([`registry_row_keys`]): the row's stored root, or the canonical path
+    /// the row last resolved to, which is how a record made for a root whose
+    /// path resolves elsewhere since it was registered is keyed. The joined
+    /// row lists the row's stored root, with the record's prefix, token, `on`
+    /// and status. When two records join one row, the row shows the one
+    /// desired on; when neither or both are, the one keyed by the stored
+    /// root, and then the one whose prefix sorts first. The other is not
+    /// listed.
+    ///
     /// The records are copied out of the record map before any row is built,
     /// so a row's status probe never runs while this holds the map that
     /// mounts, the on and off toggle, forget and persistence all take.
@@ -1632,16 +1647,24 @@ impl DevserverState {
                 .cloned()
                 .collect()
         };
-        let by_root: HashMap<PathBuf, WorkspaceEntry> = records
-            .into_iter()
-            .map(|record| (record.root.clone(), self.entry_from_record(&record)))
-            .collect();
         let mut entries: Vec<WorkspaceEntry> = Vec::new();
-        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut joined: HashSet<&str> = HashSet::new();
         for ws in self.host.library().list_workspaces() {
-            seen.insert(ws.root_path.clone());
-            if let Some(entry) = by_root.get(&ws.root_path) {
-                entries.push(entry.clone());
+            let keys = registry_row_keys(&ws);
+            let joining: Vec<&WorkspaceRecord> = records
+                .iter()
+                .filter(|record| keys.contains(&record.root.as_path()))
+                .collect();
+            joined.extend(joining.iter().map(|record| record.prefix.as_str()));
+            let shown = joining.into_iter().min_by_key(|record| {
+                (
+                    record.desired != DesiredMount::On,
+                    record.root != ws.root_path,
+                    record.prefix.as_str(),
+                )
+            });
+            if let Some(record) = shown {
+                entries.push(self.entry_from_record(record, &ws.root_path));
             } else if let Ok(prefix) = registered_workspace_prefix(&ws.root_path) {
                 entries.push(self.off_row(prefix, &ws.root_path));
             }
@@ -1650,10 +1673,15 @@ impl DevserverState {
         // while still mounted) must still surface so a live mount never
         // silently vanishes from the list. Once the host has also unmounted it,
         // the stale devserver map row is not a real workspace anymore; this is
-        // the control-socket `chan workspace forget` path.
-        for (root, entry) in &by_root {
-            if !seen.contains(root) && entry.on {
-                entries.push(entry.clone());
+        // the control-socket `chan workspace forget` path. A record that joined
+        // a row is that row's, listed or not, and is not listed again here.
+        for record in &records {
+            if joined.contains(record.prefix.as_str()) {
+                continue;
+            }
+            let entry = self.entry_from_record(record, &record.root);
+            if entry.on {
+                entries.push(entry);
             }
         }
         entries.sort_by(|a, b| a.prefix.cmp(&b.prefix));
@@ -1698,9 +1726,12 @@ impl DevserverState {
         }
     }
 
-    /// Build the wire [`WorkspaceEntry`] for a registered workspace record: an
-    /// off row reports `on:false` with an empty token; an on row its live token.
-    fn entry_from_record(&self, record: &WorkspaceRecord) -> WorkspaceEntry {
+    /// Build the wire [`WorkspaceEntry`] for a registered workspace record,
+    /// listed at `root` and labelled by it: the stored root of the registry
+    /// row the record joins, or the record's own root when it joins none. An
+    /// off row reports `on:false` with an empty token; an on row its live
+    /// token.
+    fn entry_from_record(&self, record: &WorkspaceRecord, root: &Path) -> WorkspaceEntry {
         #[cfg(test)]
         row_build_hold::point(&record.root);
         let mounted = self.host.is_canonical_root_mounted(&record.root);
@@ -1734,8 +1765,8 @@ impl DevserverState {
         };
         WorkspaceEntry {
             prefix: record.prefix.clone(),
-            path: record.root.to_string_lossy().into_owned(),
-            label: record.label.clone(),
+            path: root.to_string_lossy().into_owned(),
+            label: workspace_label(root),
             on,
             status,
             error,
