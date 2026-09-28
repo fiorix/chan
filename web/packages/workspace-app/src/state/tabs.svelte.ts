@@ -684,6 +684,9 @@ type ClosedTab = {
   paneId: string;
   side: PaneSide;
   tab: Tab;
+  /// The close left this draft's file as it was, because the buffer was not
+  /// the file, so the reopen opens that draft rather than a new one.
+  keptDraft: boolean;
 };
 
 /// Middle-elision for tab strip titles. Targets a 15-code-point cap as
@@ -1336,8 +1339,13 @@ export function clearRecentlyClosedTabsForTest(): void {
   localTabDrops.clear();
 }
 
-function rememberClosedTab(paneId: string, side: PaneSide, tab: Tab): void {
-  recentlyClosedTabs.push({ paneId, side, tab: cloneTab(tab) });
+function rememberClosedTab(
+  paneId: string,
+  side: PaneSide,
+  tab: Tab,
+  keptDraft = false,
+): void {
+  recentlyClosedTabs.push({ paneId, side, tab: cloneTab(tab), keptDraft });
   if (recentlyClosedTabs.length > CLOSED_TAB_LIMIT) {
     recentlyClosedTabs.splice(0, recentlyClosedTabs.length - CLOSED_TAB_LIMIT);
   }
@@ -1349,12 +1357,13 @@ export function reopenClosedTab(): boolean {
   const targetNode = layout.nodes[entry.paneId];
   const target =
     targetNode && targetNode.kind === "leaf" ? targetNode : activePane();
-  // A closed draft's backing file is always gone after its close (the close
-  // path discards, promotes, or already found it missing), so re-adding its
-  // dead path would open a missing-file tab pointing at the just-deleted
-  // draft. Mint a fresh draft and carry the closed buffer's content into it
-  // instead, so a reopen restores the user's text.
-  if (isDraftTab(entry.tab)) {
+  // A draft whose close discarded, promoted or found its file missing has no
+  // file left at its path, so re-adding that path would open a missing-file
+  // tab pointing at the just-deleted draft. Mint a fresh draft and carry the
+  // closed buffer's content into it instead, so a reopen restores the user's
+  // text. A draft the close kept still has its file, and reopens by its path
+  // like any other file.
+  if (isDraftTab(entry.tab) && !entry.keptDraft) {
     void recoverClosedDraft(target.id, entry.side, entry.tab);
     return true;
   }
@@ -1368,8 +1377,11 @@ export function reopenClosedTab(): boolean {
   target.side = side;
   layout.activePaneId = target.id;
   // The close retired the load that was running (`endTabLoad`), so a tab
-  // whose load never finished starts a new one.
-  if (tab.kind === "file" && tab.loading) void loadTabContent(tab.id, tab.path);
+  // whose load never finished starts a new one. So does a kept draft whose
+  // last read failed: its buffer holds only the bytes that had arrived.
+  if (tab.kind === "file" && (tab.loading || entry.keptDraft)) {
+    void loadTabContent(tab.id, tab.path);
+  }
   return true;
 }
 
@@ -2896,6 +2908,10 @@ async function confirmCloseTabs(
 /// object literal don't propagate to the array element.
 const tabLoadVersions = new Map<string, number>();
 const tabLoadControllers = new Map<string, AbortController>();
+/// Tabs whose last read failed for a reason other than a missing file. Such a
+/// tab's buffer holds at most the bytes that had arrived, and nothing on the
+/// tab itself says so: its `error` is also written by failed saves and closes.
+const tabLoadFailures = new Set<string>();
 
 /// End the load running for `tabId`, because its tab has left the layout.
 ///
@@ -2913,6 +2929,7 @@ const tabLoadControllers = new Map<string, AbortController>();
 function endTabLoad(tabId: string): void {
   tabLoadControllers.get(tabId)?.abort();
   tabLoadControllers.delete(tabId);
+  tabLoadFailures.delete(tabId);
   tabLoadVersions.set(tabId, (tabLoadVersions.get(tabId) ?? 0) + 1);
 }
 
@@ -2925,6 +2942,7 @@ async function loadTabContent(
   tabLoadControllers.get(tabId)?.abort();
   const controller = new AbortController();
   tabLoadControllers.set(tabId, controller);
+  tabLoadFailures.delete(tabId);
   // Resolve by id across the whole layout, the way the close path does, so a
   // tab finishes its load wherever it now is.
   //
@@ -3018,6 +3036,7 @@ async function loadTabContent(
         t.error = (e as Error).message;
         t.fileMissing = null;
         t.saved = t.content;
+        tabLoadFailures.add(tabId);
       }
     }
   } finally {
@@ -3521,8 +3540,9 @@ async function closeTabOnce(
   let discarded = false;
   // Draft and empty-file closes inspect the buffer before the save funnel.
   if (tab.kind === "file" && !opts?.force) pendingEditFlushes.get(tab.id)?.();
+  const keptDraft = isDraftTab(tab) && !opts?.force && closeKeepsDraftFile(tab);
   if (isDraftTab(tab) && !opts?.force) {
-    if (!(await handleDraftTabClose(tab))) return;
+    if (!keptDraft && !(await handleDraftTabClose(tab))) return;
   } else if (
     !opts?.force &&
     shouldDiscardEmptyFileOnClose(tab) &&
@@ -3554,7 +3574,7 @@ async function closeTabOnce(
   // authority version, `openedEmpty`) belongs to a load that ended. Replaying
   // one onto a path something else has since recreated is how a later close
   // deletes a file this tab never read.
-  if (!discarded) rememberClosedTab(now.paneId, now.side, now.tab);
+  if (!discarded) rememberClosedTab(now.paneId, now.side, now.tab, keptDraft);
   // Close releases the doc session NOW (no remount linger): any dirty
   // buffer was flushed through the save funnel above, and the immediate
   // detach asks the server for a prompt flush of anything residual.
@@ -3622,6 +3642,17 @@ const NEW_DRAFT_SEED = "# Draft\n";
 /// check simply does not match and the normal close path runs.
 const NEW_DIAGRAM_SEED =
   '{"type":"excalidraw","version":2,"source":"chan","elements":[],"appState":{},"files":{}}';
+
+/// Whether a draft's close leaves its file as it is: its load is running, or
+/// its last read failed and nothing has been typed over what arrived. Either
+/// way the buffer is not the file, so an empty buffer is not an empty draft,
+/// and a discard or a promote decided from it would act on text the user has
+/// not seen. A loading tab is never dirty, and its editor is read-only. A
+/// failed read's tab takes typing only once a sibling's save has replaced its
+/// buffer, and the ordinary close saves that typing.
+function closeKeepsDraftFile(tab: FileTab): boolean {
+  return tab.loading || (tabLoadFailures.has(tab.id) && !isDirty(tab));
+}
 
 async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
   // A draft whose backing file vanished (the user moved or deleted it
