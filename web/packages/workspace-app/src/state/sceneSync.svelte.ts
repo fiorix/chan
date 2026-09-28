@@ -829,9 +829,14 @@ export class SceneSession {
     if (f.appState !== undefined) this.shadowAppState = f.appState;
     if (f.files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...f.files };
     this.serverDirty = true;
+    // The authority applies a push after every update it fanned before the
+    // push arrived, so while this window's appState claim is on the wire or
+    // queued behind one, the claim replaces this update's appState there and
+    // the board keeps its own. The shadow keeps the update's.
+    const claimed = (this.unacked?.appState ?? this.queued?.appState ?? null) !== null;
     this.binding?.applyUpdate({
       elements: f.elements,
-      appState: f.appState,
+      appState: claimed ? undefined : f.appState,
       files: f.files,
     });
     this.checkFlushWaiters();
