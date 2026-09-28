@@ -12,7 +12,13 @@
 // the popup dance stays exactly as it was. This module owns that split so it
 // can be driven directly by tests, rather than only through the deck UI.
 
-import { isBlankWindow, isWindowNavigating, navigateWindowWhenReady, type WindowPageCheck } from "@chan/web-shared/window-page";
+import {
+  isBlankWindow,
+  isWindowNavigating,
+  navigateWindowWhenReady,
+  type WindowConnection,
+  type WindowPageCheck,
+} from "@chan/web-shared/window-page";
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import {
   blockedWindowMessage,
@@ -24,6 +30,7 @@ import { hostVocabulary, isAclRefusal } from "./nativeVocabulary";
 import type {
   ScopedLibraryAction,
   ScopedLibraryActionResult,
+  ScopedLibrarySnapshot,
   ScopedLibraryWindow,
 } from "./libraryCommand";
 
@@ -42,6 +49,9 @@ export interface LibraryWindowBridge {
   runAction: (action: ScopedLibraryAction) => Promise<ScopedLibraryActionResult | undefined>;
   /// Re-read the scoped snapshot after a mutation.
   refresh: () => Promise<void>;
+  /// Read a snapshot for one repair, after its page answers. It joins no
+  /// display poll and is not shown.
+  readSnapshot: (signal: AbortSignal) => Promise<ScopedLibrarySnapshot>;
   /// This window's own library window id, so a self-targeting action reuses
   /// this window instead of asking for a second handle on it.
   currentWindowId: () => string;
@@ -113,6 +123,12 @@ async function invokeNative(
   }
 }
 
+function snapshotConnection(snapshot: ScopedLibrarySnapshot, windowId: string): WindowConnection {
+  const current = snapshot.windows.find((w) => w.window_id === windowId);
+  if (!current) return "gone";
+  return current.connected ? "connected" : "disconnected";
+}
+
 function popupFor(window: ScopedLibraryWindow, bridge: LibraryWindowBridge): Window {
   if (window.window_id === bridge.currentWindowId()) return globalThis.window;
   const popup = globalThis.window.open("", window.window_id);
@@ -181,7 +197,11 @@ export async function focusLibraryWindow(
   const blank = popup !== globalThis.window && isBlankWindow(popup);
   if (popup !== globalThis.window && (blank || !window.connected) && !isWindowNavigating(popup)) {
     try {
-      if (!(await navigateWindowWhenReady(popup, window.launch_path, bridge.checkPage))) return;
+      const ready = await navigateWindowWhenReady(popup, window.launch_path, bridge.checkPage, {
+        readConnection: async (signal) =>
+          snapshotConnection(await bridge.readSnapshot(signal), window.window_id),
+      });
+      if (!ready) return;
     } catch (error) {
       if (blank) popup.close();
       throw error;

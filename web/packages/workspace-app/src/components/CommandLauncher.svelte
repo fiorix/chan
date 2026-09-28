@@ -320,6 +320,7 @@
     checkPage: checkScopedWindowPage,
     runAction: runScopedLibraryAction,
     refresh: refreshScopedLibrary,
+    readSnapshot: loadScopedLibrarySnapshot,
     currentWindowId: sessionWindowId,
   };
 

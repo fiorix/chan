@@ -52,6 +52,8 @@ describe("scoped library command client", () => {
       2,
       "GET",
       "/api/library/command-capabilities/cap-secret",
+      undefined,
+      undefined,
     );
     expect(sessionStorage.length).toBe(0);
   });
@@ -83,6 +85,8 @@ describe("scoped library command client", () => {
       4,
       "GET",
       "/api/library/command-capabilities/cap-new",
+      undefined,
+      undefined,
     );
   });
 
