@@ -60,8 +60,7 @@ use chan_library::host::registry_row_keys;
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
 use chan_library::windows::{WindowOrigin, WindowRegistry};
 use chan_library::{
-    registered_workspace_prefix, workspace_prefix_for, FileLocalColor, KeyedLocks,
-    PersistedWorkspace, WorkspaceOverlay,
+    registered_workspace_prefix, FileLocalColor, KeyedLocks, PersistedWorkspace, WorkspaceOverlay,
 };
 
 mod fdstore;
@@ -998,11 +997,12 @@ impl Drop for WorkspaceOffSettlement<'_> {
 }
 
 impl DevserverState {
-    /// Register the workspace at `root` and mount it (on). Allocates the
-    /// stable prefix, mounts via [`mount_at`](Self::mount_at), persists, and
-    /// returns the prefix. Idempotent on the root (an already-mounted root
-    /// returns its existing prefix). Used by `POST workspaces` and the
-    /// discovery socket; `POST .../{prefix}/on` is the explicit-toggle sibling.
+    /// Register the workspace at `root` and mount it (on) at the stable
+    /// prefix derived from the root its registry row stores, whichever
+    /// spelling of the workspace `root` is, persist, and return the prefix.
+    /// Idempotent on the root (an already-mounted root returns its existing
+    /// prefix). Used by `POST workspaces` and the discovery socket;
+    /// `POST .../{prefix}/on` is the explicit-toggle sibling.
     async fn register_workspace(&self, root: &Path) -> Result<String, Error> {
         self.register_workspace_keyed(root)
             .await
@@ -1021,8 +1021,7 @@ impl DevserverState {
         let key = self
             .within_mount_bound(started, root, self.host.root_key(root))
             .await??;
-        let prefix = workspace_prefix_for(root, &key)?;
-        let mounted = self.mount_key_at(root, &key, &prefix, started).await?;
+        let mounted = self.mount_key_at(root, &key, None, started).await?;
         Ok((mounted, key))
     }
 
@@ -1039,11 +1038,15 @@ impl DevserverState {
         let key = self
             .within_mount_bound(started, root, self.host.root_key(root))
             .await??;
-        self.mount_key_at(root, &key, prefix, started).await
+        self.mount_key_at(root, &key, Some(prefix), started).await
     }
 
     /// [`mount_at`](Self::mount_at) once `root` has resolved to `key`, for a
-    /// request that started at `started`. The registration and the attempt
+    /// request that started at `started`, at `prefix`, or when the request
+    /// names none, at the prefix derived from the root the registration's
+    /// registry row stores. The workspace's record goes by that stored root
+    /// whichever spelling `root` is, so one workspace has one record and one
+    /// prefix, which every entry point finds. The registration and the attempt
     /// share the one mount bound with the resolution before them, so the
     /// request answers within it whichever step the root stops answering in;
     /// only the wait for the prefix's attempt lock falls outside it, as for
@@ -1052,26 +1055,33 @@ impl DevserverState {
         &self,
         root: &Path,
         key: &Path,
-        prefix: &str,
+        prefix: Option<&str>,
         started: tokio::time::Instant,
     ) -> Result<String, Error> {
         self.startup.refuse_mount_at_stop(root)?;
-        reject_reserved_prefix(prefix)?;
+        if let Some(prefix) = prefix {
+            reject_reserved_prefix(prefix)?;
+        }
         let library = self.host.library().clone();
         let registering = root.to_path_buf();
-        self.within_mount_bound(
-            started,
-            root,
-            tokio::task::spawn_blocking(move || library.register_workspace(&registering)),
-        )
-        .await?
-        .map_err(|error| {
-            Error::from(std::io::Error::other(format!(
-                "workspace registration task failed: {error}"
-            )))
-        })??;
-        let Some(attempt) = self.begin_registered_mount(root, key, prefix)? else {
-            return Ok(prefix.to_string());
+        let row = self
+            .within_mount_bound(
+                started,
+                root,
+                tokio::task::spawn_blocking(move || library.register_workspace(&registering)),
+            )
+            .await?
+            .map_err(|error| {
+                Error::from(std::io::Error::other(format!(
+                    "workspace registration task failed: {error}"
+                )))
+            })??;
+        let prefix = match prefix {
+            Some(prefix) => prefix.to_string(),
+            None => registered_workspace_prefix(&row.root_path)?,
+        };
+        let Some(attempt) = self.begin_registered_mount(&row.root_path, key, &prefix)? else {
+            return Ok(prefix);
         };
         self.persist_state();
         self.execute_mount_attempt(
@@ -1107,16 +1117,18 @@ impl DevserverState {
     #[cfg(test)]
     fn begin_mount(&self, root: &Path, prefix: &str) -> Result<Option<MountAttempt>, Error> {
         reject_reserved_prefix(prefix)?;
-        self.host.library().register_workspace(root)?;
-        self.begin_registered_mount(root, &canonical_root(root), prefix)
+        let row = self.host.library().register_workspace(root)?;
+        self.begin_registered_mount(&row.root_path, &canonical_root(root), prefix)
     }
 
-    /// Record desired-on for the registered root `root`, whose canonical key
-    /// is `key`, at `prefix`, and return the attempt to run, or `None` when
-    /// an equivalent attempt is already pending. Goes by stored keys and asks
-    /// no filesystem: a record stores its root's canonical key, which is
-    /// either `key` or, for a root that moved since, the stored spelling a
-    /// caller passes back as `root`.
+    /// Record desired-on for the workspace whose registry row stores `root`,
+    /// whose canonical key is `key`, at `prefix`, and return the attempt to
+    /// run, or `None` when an equivalent attempt is already pending. A new
+    /// record and the attempt go by `root`, the stored root, which is the
+    /// row's key the overlay and the list read and the root the host opens
+    /// the workspace at; `key` differs from it for a root whose path resolves
+    /// elsewhere since it was registered. Goes by stored keys and asks no
+    /// filesystem.
     fn begin_registered_mount(
         &self,
         root: &Path,
@@ -1140,13 +1152,13 @@ impl DevserverState {
                     }
                     record
                 }
-                None => WorkspaceRecord::prepared(key.to_path_buf(), prefix.to_string(), false, 0),
+                None => WorkspaceRecord::prepared(root.to_path_buf(), prefix.to_string(), false, 0),
             };
             let Some(generation) = record.begin_on() else {
                 return Ok(None);
             };
             let attempt = MountAttempt {
-                root: key.to_path_buf(),
+                root: root.to_path_buf(),
                 prefix: prefix.to_string(),
                 generation,
             };
@@ -8820,12 +8832,12 @@ mod tests {
         );
     }
 
-    /// Two records join a relinked root's row, the off kept under the stored
-    /// root and the on a handoff made under the canonical path: the row shows
-    /// the record desired on, and the other is not listed.
+    /// A relinked root turned off from its row and then handed off is one
+    /// record: the handoff finds the off record under the stored root, at
+    /// the prefix derived from it, and turns it on, and the row reads on.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_relinked_root_joined_by_an_off_and_an_on_record_lists_the_on_one() {
+    async fn a_relinked_root_turned_off_then_handed_off_is_one_record() {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let holder = tempfile::tempdir().expect("holder");
@@ -8838,19 +8850,14 @@ mod tests {
                 .expect("turn the relinked root off"),
         );
         let prefix = hand_off(&state, &relinked).await;
-        assert_ne!(
+        assert_eq!(
             prefix, stored_prefix,
-            "fixture: the handoff took the off record's prefix"
+            "the handoff answered another prefix than the off record's"
         );
         assert_eq!(
-            state
-                .workspaces
-                .lock()
-                .unwrap()
-                .get(&stored_prefix)
-                .map(|record| record.root.clone()),
-            Some(stored.clone()),
-            "fixture: no off record under the stored root"
+            only_record(&state),
+            (1, Some((stored_prefix.clone(), stored.clone()))),
+            "the relinked root is not one record under its stored root"
         );
 
         let entries = state.workspace_entries();
@@ -8945,12 +8952,12 @@ mod tests {
 
     /// A relinked root restored from an overlay row under its stored root
     /// while its link's target is away fails and stays desired on; a later
-    /// handoff mounts it under the canonical path. The row shows the record
-    /// the host serves, with its prefix and token, and the on route answers
-    /// that same row whichever of the two records' prefixes it is asked.
+    /// handoff finds that record, under the stored root at the prefix derived
+    /// from it, and mounts it. The workspace is one record, the row reads on
+    /// with its prefix and token, and the on route answers that same row.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_relinked_root_shows_the_served_record_beside_a_failed_restore() {
+    async fn a_relinked_root_handed_off_after_a_failed_restore_is_one_record() {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let holder = tempfile::tempdir().expect("holder");
@@ -8983,9 +8990,14 @@ mod tests {
         );
         std::fs::rename(&away, &target).expect("bring the link's target back");
         let prefix = hand_off(&state, &relinked).await;
-        assert_ne!(
+        assert_eq!(
             prefix, stored_prefix,
-            "fixture: the handoff took the failed record's prefix"
+            "the handoff answered another prefix than the failed record's"
+        );
+        assert_eq!(
+            only_record(&state),
+            (1, Some((stored_prefix.clone(), stored.clone()))),
+            "the relinked root is not one record under its stored root"
         );
 
         let entries = state.workspace_entries();
@@ -8995,7 +9007,8 @@ mod tests {
             "the relinked root does not list once: {entries:?}"
         );
         assert_on_row_of(&state, &entries[0], &stored, &prefix);
-        for asked in [&stored_prefix, &prefix] {
+        {
+            let asked = &prefix;
             let answered = updated_row(
                 state
                     .set_workspace_on(asked, true, false)
@@ -9125,13 +9138,13 @@ mod tests {
     }
 
     /// A relinked root turned on through the on route and then handed off
-    /// has two records keyed by its canonical path, at the stored root's
-    /// prefix, which the host serves, and at the canonical path's, which it
-    /// does not. After the saves that follow, the row lists the prefix the
-    /// host serves, whichever of the two sorts first.
+    /// is one record, at the stored root's prefix, which the host serves,
+    /// whichever of that prefix and the canonical path's would sort first.
+    /// After the saves that follow, the row reads on at that prefix with the
+    /// record's token.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_relinked_root_turned_on_and_handed_off_lists_the_served_prefix() {
+    async fn a_relinked_root_turned_on_and_handed_off_stays_on_after_saves() {
         let _env = chan_home_env_read();
         for served_sorts_first in [true, false] {
             let home = tempfile::tempdir().expect("home");
@@ -9164,17 +9177,12 @@ mod tests {
             let answered = hand_off(&state, &relinked).await;
             assert_eq!(
                 answered, served,
-                "fixture: the handoff answered another mount"
+                "the handoff answered another prefix (served sorts first: {served_sorts_first})"
             );
-            let prefixes: Vec<String> = {
-                let map = state.workspaces.lock().unwrap();
-                let mut prefixes: Vec<String> = map.keys().cloned().collect();
-                prefixes.sort();
-                prefixes
-            };
-            assert!(
-                prefixes.len() == 2 && (prefixes[0] == served) == served_sorts_first,
-                "fixture: the handoff did not make a second record after the served one: {prefixes:?}"
+            assert_eq!(
+                only_record(&state),
+                (1, Some((served.clone(), stored.clone()))),
+                "the relinked root is not one record under its stored root"
             );
             state.persist_state();
             state.persist_state();
@@ -9185,16 +9193,7 @@ mod tests {
                 1,
                 "the relinked root does not list once: {entries:?}"
             );
-            assert_eq!(
-                entries[0].prefix, served,
-                "the row lists a prefix the host does not serve (served sorts first: \
-                 {served_sorts_first}): {entries:?}"
-            );
-            assert_eq!(
-                entries[0].path,
-                stored.to_string_lossy(),
-                "the row lists another path: {entries:?}"
-            );
+            assert_on_row_of(&state, &entries[0], &stored, &served);
         }
     }
 
