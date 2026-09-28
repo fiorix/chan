@@ -11,6 +11,7 @@
 // Drag-rearrange of tabs is deferred; for v1 the menu offers explicit
 // actions instead.
 
+import { flushSync } from "svelte";
 import { api, sessionWindowId } from "../api/client";
 import { ApiError, apiErrorCode } from "../api/errors";
 import type {
@@ -54,6 +55,7 @@ import {
 // store's eager draft-promotion-sink registration. See the cycle note
 // below.
 import { isDraftPath } from "./workspace.svelte";
+import { flushPendingBufferWrites } from "./editorBuffer";
 import {
   clearCaretsUnder,
   readCaret,
@@ -2676,6 +2678,30 @@ export function registerPendingEditFlush(tabId: string, flush: () => void): () =
 /// for a caller about to read their buffers.
 export function flushPendingEdits(tabs: readonly Tab[]): void {
   for (const tab of tabs) if (tab.kind === "file") pendingEditFlushes.get(tab.id)?.();
+}
+
+/// Put every tab's unsaved input in its recovery buffer now, for a window
+/// that goes without closing its tabs: a close of the window runs none of a
+/// tab's closes, and an unload runs no component teardown and may not come
+/// at all when a desktop webview is destroyed. Each mounted editor commits
+/// its buffered input, the effects that queue a recovery write for a buffer
+/// run, and the queued writes are written. It never throws, since its
+/// callers are an unload handler and a window's close, both of which must
+/// finish: a failure is logged and what did commit is still written.
+export function flushEditsToRecovery(): void {
+  for (const flush of pendingEditFlushes.values()) {
+    try {
+      flush();
+    } catch (err) {
+      console.error("[chan] committing an editor's input before the window goes failed", err);
+    }
+  }
+  try {
+    flushSync();
+  } catch (err) {
+    console.error("[chan] running effects before the window goes failed", err);
+  }
+  flushPendingBufferWrites();
 }
 
 export function registerTerminalCloseSink(tabId: string, sink: TerminalCloseSink): () => void {
