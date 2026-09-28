@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   isTauriDesktop,
   openWebInspector,
+  readClipboardText,
   readGatewayCsrfToken,
   reloadWindow,
   runDesktopDownload,
@@ -408,6 +409,20 @@ describe("native streaming transfers", () => {
     } finally {
       meta.remove();
       window.history.replaceState(null, "", "/");
+    }
+  });
+
+  test("a browser that refuses the clipboard read answers as an empty clipboard", async () => {
+    clearTauriGlobals();
+    const readText = vi.fn(async () => {
+      throw new DOMException("Read permission denied.", "NotAllowedError");
+    });
+    Object.defineProperty(navigator, "clipboard", { value: { readText }, configurable: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(readClipboardText(), "nothing to paste").resolves.toBe("");
+    } finally {
+      delete (navigator as { clipboard?: unknown }).clipboard;
     }
   });
 
