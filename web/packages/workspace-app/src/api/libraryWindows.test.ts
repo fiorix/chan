@@ -532,7 +532,8 @@ describe("creating a capability popup", () => {
     expect(popup.close).toHaveBeenCalledTimes(1);
     expect(popup.location.href).toBe("about:blank");
     expect(answer.readRefusal).toHaveBeenCalledTimes(1);
-    expect(host.runAction).toHaveBeenCalledTimes(1);
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
     expect(host.refresh).not.toHaveBeenCalled();
   });
 
@@ -595,6 +596,8 @@ describe("creating a capability popup", () => {
     expect(await outcome).toMatchObject({ message: "Restoring sessions." });
     expect(popup.close).toHaveBeenCalledTimes(1);
     expect(host.checkPage).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
     expect(host.refresh).not.toHaveBeenCalled();
   });
 
@@ -616,8 +619,24 @@ describe("creating a capability popup", () => {
     expect(finished).toBe(true);
     await pending;
     expect(popup.location.href).toBe("about:blank");
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
     expect(host.refresh).not.toHaveBeenCalled();
     expect(vi.mocked(host.checkPage).mock.calls[0][1].aborted).toBe(true);
+  });
+
+  test("discards nothing when the refresh after its page opened rejects", async () => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({
+      runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }),
+      refresh: vi.fn().mockRejectedValue(new Error("Snapshot refused.")),
+    });
+
+    await expect(createLibraryWindow(host, { action: "new_terminal" })).rejects.toThrow("Snapshot refused.");
+
+    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(host.runAction).toHaveBeenCalledTimes(1);
   });
 });
 
