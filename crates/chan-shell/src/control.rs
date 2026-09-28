@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::wire::{ControlRequest, ControlResponse, Identity};
+use crate::wire::{ControlRequest, ControlResponse, Identity, ServeKind};
 
 /// The chan-terminal environment a window-targeting action needs: which
 /// window to act on and which server socket to reach it through.
@@ -28,9 +28,12 @@ pub struct OpenEnv {
 #[derive(Debug)]
 pub struct EnvControlSocket {
     path: PathBuf,
-    // Carried with the socket; no request reads it.
-    #[allow(dead_code)]
+    // Read by the search, which runs on unix only.
+    #[cfg_attr(not(unix), allow(dead_code))]
     workspace_path: Option<PathBuf>,
+    /// The socket that answered in this one's place, so a `cs` run searches
+    /// once.
+    found: std::sync::OnceLock<PathBuf>,
     /// The lines this socket announced, for the tests to read.
     #[cfg(all(test, unix))]
     announced: std::sync::Mutex<Vec<String>>,
@@ -44,10 +47,122 @@ impl EnvControlSocket {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            found: std::sync::OnceLock::new(),
             #[cfg(all(test, unix))]
             announced: std::sync::Mutex::new(Vec::new()),
         }
     }
+
+    /// Connect to this socket. When it is gone, the devserver tenant that
+    /// spawned the terminal may serve on under another prefix, as after a
+    /// restart that restored the terminal in a tenant mounted elsewhere; the
+    /// request then goes to the one tenant beside this socket that serves
+    /// the terminal's workspace (see [`Self::find_moved_server`]). Otherwise
+    /// the connect fails as it would for any path.
+    async fn connect(&self) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
+        if let Some(found) = self.found.get() {
+            return connect_path(found).await;
+        }
+        let err = match transport::connect(&self.path).await {
+            Ok(halves) => return Ok(halves),
+            Err(err) => err,
+        };
+        #[cfg(unix)]
+        if is_gone(&err) {
+            if let Some((found, root)) = self.find_moved_server().await {
+                if let Ok(halves) = transport::connect(&found).await {
+                    if self.found.set(found.clone()).is_ok() {
+                        self.announce(&found, &root);
+                    }
+                    return Ok(halves);
+                }
+            }
+        }
+        Err(connect_error(&self.path, err))
+    }
+
+    /// The one devserver tenant beside this gone socket that serves the
+    /// terminal's workspace, with the root it reports. The search runs only
+    /// when this socket has a devserver's stable name (a `chan serve` or
+    /// desktop socket belongs to its own process), when its directory's
+    /// mode has no group or world write bit, and when the environment names
+    /// a workspace. It then asks each stable socket beside this one who it
+    /// is, and answers only when exactly one devserver tenant reports the
+    /// canonical path of that workspace as its root.
+    ///
+    /// The directory rule is why a name found there may be believed: the
+    /// users who can create an entry in a directory without those two bits
+    /// are its owner and root, and both can already replace the socket the
+    /// environment names, so the search trusts nobody that connecting to
+    /// the environment's path does not. Where others can add names, as in
+    /// `/tmp`, anybody could answer as a devserver.
+    #[cfg(unix)]
+    async fn find_moved_server(&self) -> Option<(PathBuf, PathBuf)> {
+        let name = self.path.file_name()?.to_str()?;
+        if !stable_control_socket_name(name, true) {
+            return None;
+        }
+        let dir = self.path.parent()?;
+        if !only_owner_writes(dir) {
+            return None;
+        }
+        let workspace = self.workspace_path.as_deref()?;
+        let mut serving = Vec::new();
+        for candidate in stable_control_socket_candidates(dir, true) {
+            if candidate == self.path {
+                continue;
+            }
+            let Some(identity) = socket_identity(&candidate).await else {
+                continue;
+            };
+            if identity.kind != ServeKind::Devserver {
+                continue;
+            }
+            if let Some(root) = identity.workspace_root {
+                serving.push((candidate, root));
+            }
+        }
+        if serving.is_empty() {
+            return None;
+        }
+        // Resolved only once a devserver tenant has answered: a workspace
+        // folder that does not answer holds `cs` here, until it does or the
+        // user interrupts, and only in a terminal with such a tenant beside
+        // its socket.
+        let root = std::fs::canonicalize(workspace).ok()?;
+        let mut matching = serving.into_iter().filter(|(_, served)| *served == root);
+        let found = matching.next()?;
+        matching.next().is_none().then_some(found)
+    }
+
+    /// Say once, and only to a person at a terminal, that this terminal's
+    /// server answered at another socket than the one its environment
+    /// names. A script or an agent reads `cs`'s stderr through a pipe and
+    /// sees nothing new.
+    #[cfg(unix)]
+    fn announce(&self, found: &Path, root: &Path) {
+        use std::io::IsTerminal;
+        let line = format!(
+            "this terminal's server moved: $CHAN_CONTROL_SOCKET {} is gone, reached {} \
+             (serving {}); a new terminal connects directly",
+            self.path.display(),
+            found.display(),
+            root.display()
+        );
+        if std::io::stderr().is_terminal() {
+            eprintln!("{line}");
+        }
+        #[cfg(test)]
+        self.announced.lock().expect("announced lines").push(line);
+    }
+}
+
+/// Whether only the owner of `dir` (and root) can create entries in it: its
+/// mode has neither the group's nor the world's write bit.
+#[cfg(unix)]
+fn only_owner_writes(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(dir).is_ok_and(|meta| meta.is_dir() && meta.permissions().mode() & 0o022 == 0)
 }
 
 /// Where a control request goes: a socket its caller found by path, or the
@@ -184,7 +299,10 @@ fn stable_control_socket_name(name: &str, require_sock_ext: bool) -> bool {
 /// Who serves `socket`, from a bounded `Identify` round-trip. `None` for a
 /// dead, unreachable or wedged socket, or an unparseable reply.
 pub async fn socket_identity(socket: &Path) -> Option<Identity> {
-    let identify = send_control_request(socket, ControlRequest::Identify);
+    let identify = async {
+        let (read, write) = connect_path(socket).await?;
+        round_trip(read, write, ControlRequest::Identify).await
+    };
     let message = tokio::time::timeout(CONTROL_SOCKET_PROBE_TIMEOUT, identify)
         .await
         .ok()?
@@ -198,32 +316,45 @@ pub async fn socket_identity(socket: &Path) -> Option<Identity> {
 async fn connect_control(
     target: ControlTarget<'_>,
 ) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
-    let socket = match target {
-        ControlTarget::Path(path) => path,
-        ControlTarget::Env(env) => env.path.as_path(),
-    };
-    transport::connect(socket).await.map_err(|err| {
-        // A missing or refused socket means the chan window or server that
-        // spawned this terminal has exited, leaving a stale
-        // $CHAN_CONTROL_SOCKET (common after a devserver restart). Say that
-        // instead of surfacing a raw connect trace for a path the user never
-        // set by hand.
-        if matches!(
-            err.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-        ) {
-            anyhow::anyhow!(
-                "the chan window or server that spawned this terminal is no longer running \
-                 (stale $CHAN_CONTROL_SOCKET {})",
-                socket.display()
-            )
-        } else {
-            anyhow::Error::new(err).context(format!(
-                "connecting to chan control socket {}",
-                socket.display()
-            ))
-        }
-    })
+    match target {
+        ControlTarget::Path(path) => connect_path(path).await,
+        ControlTarget::Env(env) => env.connect().await,
+    }
+}
+
+async fn connect_path(socket: &Path) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
+    transport::connect(socket)
+        .await
+        .map_err(|err| connect_error(socket, err))
+}
+
+/// Whether a failed connect means no server is behind the socket: its node
+/// is gone, or left behind and refusing.
+fn is_gone(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
+fn connect_error(socket: &Path, err: std::io::Error) -> anyhow::Error {
+    // A missing or refused socket means the chan window or server that
+    // spawned this terminal has exited, leaving a stale
+    // $CHAN_CONTROL_SOCKET (common after a devserver restart). Say that
+    // instead of surfacing a raw connect trace for a path the user never
+    // set by hand.
+    if is_gone(&err) {
+        anyhow::anyhow!(
+            "the chan window or server that spawned this terminal is no longer running \
+             (stale $CHAN_CONTROL_SOCKET {})",
+            socket.display()
+        )
+    } else {
+        anyhow::Error::new(err).context(format!(
+            "connecting to chan control socket {}",
+            socket.display()
+        ))
+    }
 }
 
 /// Map the server's first response line to the request's outcome. Shared by
@@ -306,9 +437,21 @@ pub async fn send_control_request<'a>(
     socket: impl Into<ControlTarget<'a>>,
     request: ControlRequest,
 ) -> Result<String> {
+    let (read, write) = connect_control(socket.into()).await?;
+    round_trip(read, write, request).await
+}
+
+/// Write one JSON request line on a connected socket, half-close it, and
+/// read the reply. The search for a moved terminal's server probes through
+/// this with a connect of its own, since a probe that went through
+/// [`connect_control`] could search in turn.
+async fn round_trip(
+    read: transport::ReadEnd,
+    mut write: transport::WriteEnd,
+    request: ControlRequest,
+) -> Result<String> {
     use tokio::io::{AsyncWriteExt, BufReader};
 
-    let (read, mut write) = connect_control(socket.into()).await?;
     let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
     payload.push(b'\n');
     write
@@ -1154,9 +1297,12 @@ mod tests {
     }
 
     // A candidate that accepts and never answers costs the probe's bound,
-    // and the search still reaches the tenant after it.
+    // and the search still reaches the tenant after it. The test waits the
+    // real two seconds: a paused clock advances whenever the runtime idles,
+    // which it does while the search waits on the tenant's real socket, so
+    // it would give up on the tenant that answers as well.
     #[cfg(unix)]
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_wedged_candidate_costs_the_bound_and_no_more() {
         use crate::wire::ServeKind::Devserver;
         let dir = SocketDir::new("p1c", 0o700);
