@@ -185,7 +185,8 @@ describe("WindowRow self-managed actions", () => {
 });
 
 describe("browser Show readiness", () => {
-  it.each(["ready", "closed", "refused", "connected"])("Show from the row handles %s before visibility", async (outcome) => {
+  it.each(["ready", "closed", "refused", "connected", "native"])("Show from the row handles %s before visibility", async (outcome) => {
+    const visibilityOnly = outcome === "connected" || outcome === "native";
     vi.useFakeTimers();
     const { backend } = await import("../api/backend");
     const child = {
@@ -204,18 +205,21 @@ describe("browser Show readiness", () => {
         ? new Response('{"error":"Show refused."}', { status: 409 })
         : new Response("<html></html>");
     });
-    const rec = win({ window_id: `row show ${outcome}`, library_id: "local", hidden: true, connected: outcome === "connected" });
+    const rec = win({
+      window_id: `row show ${outcome}`, library_id: "local", hidden: true,
+      connected: outcome === "connected", origin: outcome === "native" ? "native" : "browser",
+    });
     const el = render(rec);
     (el.querySelector('[aria-label="Show window"]') as HTMLButtonElement).click();
     await vi.advanceTimersByTimeAsync(99);
     flushSync();
-    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" ? 1 : 0);
-    expect(open).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
-    expect(check).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
+    expect(visibility).toHaveBeenCalledTimes(visibilityOnly ? 1 : 0);
+    expect(open).toHaveBeenCalledTimes(visibilityOnly ? 0 : 1);
+    expect(check).toHaveBeenCalledTimes(visibilityOnly ? 0 : 1);
     if (outcome === "closed") child.closed = true;
     await vi.advanceTimersByTimeAsync(101);
     flushSync();
-    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" || outcome === "ready" ? 1 : 0);
+    expect(visibility).toHaveBeenCalledTimes(visibilityOnly || outcome === "ready" ? 1 : 0);
     if (outcome === "ready") {
       expect(visibility).toHaveBeenCalledExactlyOnceWith(`row show ${outcome}`, false, undefined);
       expect(child.location.href).toContain("?w=");

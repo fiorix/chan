@@ -14,7 +14,7 @@ const record: WindowRecord = {
   window_id: "action-window", library_id: "local", kind: "terminal",
   title: "Terminal", ordinal: 1, workspace_path: null, prefix: "terminal",
   token: "", persisted: true, connected: false, hidden: true,
-  active_transfer: false, control: false,
+  active_transfer: false, control: false, origin: "browser",
 };
 
 function popup() {
@@ -52,6 +52,31 @@ describe("browser action visibility", () => {
     expect(visibility).not.toHaveBeenCalled();
     expect(report).toHaveBeenCalledTimes(outcome === "refused" ? 1 : 0);
     expect(check).toHaveBeenCalledTimes(outcome === "blocked" ? 0 : 1);
+  });
+
+  it.each([
+    ["a native", "native"],
+    ["an omitted", undefined],
+  ] as const)("Show only changes visibility for a record of %s origin", async (label, origin) => {
+    const child = popup();
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const check = vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response("<html></html>"));
+    await setWindowShown({ ...record, window_id: `show ${label}`, origin }, true);
+    expect(open).not.toHaveBeenCalled();
+    expect(check).not.toHaveBeenCalled();
+    expect(visibility).toHaveBeenCalledExactlyOnceWith(`show ${label}`, false, undefined);
+  });
+
+  it("Focus still acquires and repairs the window of a native record", async () => {
+    const child = popup();
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response("<html></html>"));
+    await focusComputerWindow({ ...record, window_id: "focus native", origin: "native" });
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "focus native");
+    expect(child.location.href).toContain("?w=focus+native");
+    expect(visibility).toHaveBeenCalledExactlyOnceWith("focus native", false, undefined);
   });
 
   it.each(["waiting", "navigating"])("Show does not focus a peer's %s document", async (phase) => {
