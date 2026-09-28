@@ -9198,6 +9198,386 @@ mod tests {
         }
     }
 
+    /// The number of devserver records, and the prefix of the only one.
+    #[cfg(unix)]
+    fn only_record(state: &DevserverState) -> (usize, Option<(String, PathBuf)>) {
+        let map = state.workspaces.lock().unwrap();
+        let only = map
+            .values()
+            .next()
+            .map(|record| (record.prefix.clone(), record.root.clone()));
+        (map.len(), only)
+    }
+
+    /// Shut `state` down, start a devserver over the same `home`, and restore
+    /// what its overlay holds, as a restart does.
+    #[cfg(unix)]
+    async fn restarted(state: &DevserverState, home: &Path) -> Arc<DevserverState> {
+        shut_down_hosted(state, None).await.expect("shut down");
+        let restarted = devserver_with_windows(home).await;
+        let rows = restarted
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        let rows = restarted.register_restore_rows(rows).await;
+        let attempts = restarted.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(&restarted), attempts, shutdown_rx).await;
+        restarted
+    }
+
+    /// A relinked root turned on through the on route and then handed off
+    /// is one devserver record, under the root its registry row stores, at
+    /// the prefix derived from it. The row reads on with that prefix and the
+    /// record's token, a save writes one overlay row under the stored root,
+    /// and a restart restores it on at the same prefix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_turned_on_then_handed_off_is_one_record_across_a_restart() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        updated_row(
+            state
+                .set_workspace_on(&prefix, true, false)
+                .await
+                .expect("turn the relinked root on"),
+        );
+        let answered = hand_off(&state, &relinked).await;
+
+        assert_eq!(
+            only_record(&state),
+            (1, Some((prefix.clone(), stored.clone()))),
+            "the relinked root is not one record under its stored root"
+        );
+        assert_eq!(answered, prefix, "the handoff answered another prefix");
+        state.persist_state();
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+        let rows = state
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.path.as_str(), row.desired_on))
+                .collect::<Vec<_>>(),
+            vec![(&*stored.to_string_lossy(), true)],
+            "the save wrote other rows"
+        );
+
+        let restarted = restarted(&state, home.path()).await;
+        let entries = restarted.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_on_row_of(&restarted, &entries[0], &stored, &prefix);
+        shut_down_hosted(&restarted, None).await.expect("shut down");
+    }
+
+    /// A relinked root handed off and then turned on through the on route at
+    /// the prefix its row listed before the handoff is one record, at that
+    /// prefix, and the row reads on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_handed_off_then_turned_on_is_one_record() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        hand_off(&state, &relinked).await;
+        updated_row(
+            state
+                .set_workspace_on(&prefix, true, false)
+                .await
+                .expect("turn the relinked root on"),
+        );
+
+        assert_eq!(
+            only_record(&state),
+            (1, Some((prefix.clone(), stored.clone()))),
+            "the relinked root is not one record under its stored root"
+        );
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+    }
+
+    /// The devserver's open route, asked for a relinked root by the path it
+    /// resolves to now, mounts it at the prefix derived from the root its
+    /// registry row stores, as one record, and the row reads on there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_open_route_mounts_a_relinked_root_at_its_rows_prefix() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let response = handle_open(
+            State(Arc::clone(&state)),
+            Json(OpenWorkspaceRequest {
+                path: relinked.to_string_lossy().into_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "fixture: the open failed"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let answered: MountedPrefix = serde_json::from_slice(&body).expect("prefix");
+
+        assert_eq!(
+            answered.prefix, prefix,
+            "the open route answered a prefix other than its row's"
+        );
+        assert_eq!(
+            only_record(&state),
+            (1, Some((prefix.clone(), stored.clone()))),
+            "the relinked root is not one record under its stored root"
+        );
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+    }
+
+    /// An overlay an earlier build wrote, with a relinked root's rows under
+    /// both of its keys or two rows under one, restores one record under the
+    /// stored root, from the row with the higher generation, and the first
+    /// save writes that one row back under the stored root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_earlier_overlay_restores_a_relinked_root_as_one_record() {
+        let _env = chan_home_env_read();
+        for (case, stored_row, canonical_rows, on) in [
+            (
+                "stored off, canonical on",
+                Some((false, 1)),
+                vec![(true, 2)],
+                true,
+            ),
+            (
+                "two canonical rows",
+                None,
+                vec![(true, 1), (false, 2)],
+                false,
+            ),
+        ] {
+            let home = tempfile::tempdir().expect("home");
+            let holder = tempfile::tempdir().expect("holder");
+            let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+            let canonical = canonical_root(&relinked);
+            let row = |path: &Path, (desired_on, generation): (bool, u64)| PersistedWorkspace {
+                path: path.to_string_lossy().into_owned(),
+                desired_on,
+                generation,
+            };
+            let rows: Vec<PersistedWorkspace> = stored_row
+                .map(|stored_row| row(&stored, stored_row))
+                .into_iter()
+                .chain(canonical_rows.into_iter().map(|r| row(&canonical, r)))
+                .collect();
+            let rows = state.register_restore_rows(rows).await;
+            let attempts = state.prepare_restore_rows(rows);
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx).await;
+            let prefix = registered_workspace_prefix(&stored).expect("prefix");
+
+            assert_eq!(
+                only_record(&state),
+                (1, Some((prefix.clone(), stored.clone()))),
+                "{case}: the relinked root is not one record under its stored root"
+            );
+            let entries = state.workspace_entries();
+            assert_eq!(entries.len(), 1, "{case}: {entries:?}");
+            assert_eq!(
+                (entries[0].prefix.as_str(), entries[0].on),
+                (prefix.as_str(), on),
+                "{case}: the row: {entries:?}"
+            );
+            state.persist_state();
+            let rows = state
+                .host
+                .workspace_overlay()
+                .expect("the overlay is installed")
+                .entries();
+            assert_eq!(
+                rows.iter()
+                    .map(|row| (row.path.as_str(), row.desired_on, row.generation))
+                    .collect::<Vec<_>>(),
+                vec![(&*stored.to_string_lossy(), on, 2)],
+                "{case}: the first save wrote other rows"
+            );
+        }
+    }
+
+    /// A registered root handed off by an alias whose last component is not
+    /// the root's own is served at the prefix derived from the root its
+    /// registry row stores, and a handoff by the root's own spelling answers
+    /// the same prefix: one workspace, one prefix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_handoff_by_an_alias_answers_the_rows_prefix() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let real = holder.path().join("real");
+        std::fs::create_dir_all(&real).expect("mkdir");
+        let alias = holder.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("link the alias");
+        let state = devserver_with_windows(home.path()).await;
+        let stored = state
+            .host
+            .library()
+            .register_workspace(&real)
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+
+        assert_eq!(
+            hand_off(&state, &alias).await,
+            prefix,
+            "a handoff by the alias answered another prefix"
+        );
+        assert_eq!(
+            hand_off(&state, &real).await,
+            prefix,
+            "a handoff by the root's own spelling answered another prefix"
+        );
+        assert_eq!(
+            only_record(&state),
+            (1, Some((prefix, stored))),
+            "the workspace is not one record under its stored root"
+        );
+    }
+
+    /// A relinked root's row, while its on is pending and after the mount
+    /// fails, reads starting and then the mount's error, in the devserver's
+    /// list and in the status the host reports for the row's stored root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_roots_pending_and_failed_on_read_on_its_row() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, _relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let held = state.mount_attempt_locks.lock(prefix.as_str()).await;
+        let turning_on = {
+            let state = Arc::clone(&state);
+            let prefix = prefix.clone();
+            tokio::spawn(async move { state.set_workspace_on(&prefix, true, false).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !state
+                .workspaces
+                .lock()
+                .unwrap()
+                .values()
+                .any(|record| record.phase == MountPhase::Starting)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fixture: the on never reached its attempt");
+
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            entries[0].status,
+            WorkspaceStatus::Starting,
+            "the pending row: {entries:?}"
+        );
+        assert_eq!(
+            state.host.canonical_root_status(&stored),
+            (WorkspaceStatus::Starting, None),
+            "the host's status for the pending row's stored root"
+        );
+
+        std::fs::rename(holder.path().join("moved"), holder.path().join("away"))
+            .expect("take the link's target away");
+        drop(held);
+        turning_on
+            .await
+            .expect("the on task")
+            .expect_err("fixture: the on mounted a root that is gone");
+        let reason = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .values()
+            .find_map(|record| match &record.phase {
+                MountPhase::Failed(reason) => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("fixture: no failed record");
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            (entries[0].status, entries[0].error.as_deref()),
+            (WorkspaceStatus::Error, Some(reason.as_str())),
+            "the failed row: {entries:?}"
+        );
+        assert_eq!(
+            state.host.canonical_root_status(&stored),
+            (WorkspaceStatus::Error, Some(reason)),
+            "the host's status for the failed row's stored root"
+        );
+    }
+
+    /// A relinked root turned on and handed off, turned off from its row,
+    /// closes its tenant, and the row reads off.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_turned_off_from_its_row_closes_its_tenant() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        updated_row(
+            state
+                .set_workspace_on(&prefix, true, false)
+                .await
+                .expect("turn the relinked root on"),
+        );
+        hand_off(&state, &relinked).await;
+        state.persist_state();
+        let listed = state.workspace_entries();
+        assert!(
+            listed.len() == 1 && listed[0].on,
+            "fixture: the row is not on: {listed:?}"
+        );
+
+        let answered = updated_row(
+            state
+                .set_workspace_on(&listed[0].prefix, false, false)
+                .await
+                .expect("turn the relinked root off"),
+        );
+        assert!(
+            !state.host.is_root_mounted(&relinked),
+            "the off left the tenant serving at {:?}",
+            state.host.mounted_prefixes()
+        );
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            !entries[0].on && entries[0].status == WorkspaceStatus::Stopped,
+            "the row after the off: {entries:?}"
+        );
+        assert_eq!(answered, entries[0], "the off answered another row");
+    }
+
     #[tokio::test]
     async fn discovery_registration_mounts_and_mints_one_window_per_request() {
         let _env = chan_home_env_read();
