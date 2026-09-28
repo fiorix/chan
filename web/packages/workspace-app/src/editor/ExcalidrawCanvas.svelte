@@ -156,9 +156,9 @@
   const lastBroadcast = new Map<string, number>();
   /// File ids the authority already knows (pushed by us or fanned in).
   const knownFiles = new Set<string>();
-  /// Cleaned appState from the latest serialize with its canonical JSON,
-  /// plus the canonical JSON of the appState the authority is known to hold
-  /// (from our last push OR any adopted snapshot/update, taken as the
+  /// Cleaned appState from the latest serialize or adopt with its canonical
+  /// JSON, plus the canonical JSON of the appState the authority is known to
+  /// hold (from our last push OR any adopted snapshot/update, taken as the
   /// serializer keeps it). Only a divergence from that baseline rides a
   /// push: adopting an incoming appState must move the baseline too, or the
   /// echo would re-push forever between two live canvases.
@@ -253,8 +253,14 @@
     }
     if (kept !== undefined) {
       // Any adopted appState is the new authority baseline; only later
-      // local divergence should ride a push.
-      lastAuthorityAppStateJson = canonicalJson(kept);
+      // local divergence should ride a push. The board shows it only at the
+      // library's next render, so until then every serialization lays it
+      // over the board's earlier one, as for a seed, and it is what the next
+      // push offers: a push made first, from a timer, a close or the session
+      // right after this frame, then sends nothing older over it.
+      handedAppState = { ...(handedAppState ?? {}), ...kept };
+      cleanedAppState = kept;
+      cleanedAppStateJson = lastAuthorityAppStateJson = canonicalJson(kept);
     }
   }
 
@@ -339,8 +345,9 @@
       }
       if (appState !== undefined) {
         // The appState rides a push as a whole value rather than a delta, so
-        // clearing the baseline offers whatever the canvas holds now. At
-        // worst that is one redundant push of a value the authority has.
+        // clearing the baseline offers the latest flush's or adopt's
+        // appState again. At worst that is one redundant push of a value the
+        // authority has; a snapshot adopted before that push replaces it.
         lastAuthorityAppStateJson = "";
       }
     },
