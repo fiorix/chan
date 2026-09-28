@@ -187,19 +187,21 @@ function mutationPatch(
   });
 
   // Cross-window live refresh. A sibling window's PATCH broadcasts
-  // config_changed, which refreshes workspace.info.preferences; mirror
-  // that into the buffer so the open form reflects it. Guarded on the
+  // config_changed, which refreshes this window's preferences (in
+  // `workspace.info`, or the standalone copy in a window with no
+  // workspace; `currentPreferences` reads either); mirror them into the
+  // buffer so the open form reflects them. Guarded on the
   // server snapshot (a content-identical reassign would churn the
   // $state proxy and re-fire this effect: Svelte 5's
   // effect_update_depth_exceeded) and skipped while a local write is in
   // flight so it can't revert an edit mid-round-trip.
   $effect(() => {
-    const info = workspace.info;
-    if (!settingsPanel.open || !info || inflight > 0) return;
-    const snap = JSON.stringify(info.preferences);
+    const preferences = currentPreferences();
+    if (!settingsPanel.open || !preferences || inflight > 0) return;
+    const snap = JSON.stringify(preferences);
     if (snap === lastServerSnap) return;
     lastServerSnap = snap;
-    editing = normalize(clone(info.preferences));
+    editing = normalize(clone(preferences));
   });
 
   // Live-apply the editor theme so it is already in place when the surface
