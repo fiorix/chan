@@ -871,3 +871,55 @@ describe("Waiting command refusals", () => {
     expect(target.querySelector(".deck-operation")).toBeNull();
   });
 });
+
+describe("browser Show readiness", () => {
+  it.each(["ready", "closed", "refused", "connected"])("Show from the deck handles %s before visibility", async (outcome) => {
+    vi.useFakeTimers();
+    const realActions = await vi.importActual<typeof import("../state/computerActions")>("../state/computerActions");
+    actions.setShown.mockImplementation(realActions.setWindowShown);
+    const child = {
+      closed: false,
+      location: { href: "https://chan.test/refusal" },
+      document: document.implementation.createHTMLDocument(),
+      focus: vi.fn(),
+      close: vi.fn(() => { child.closed = true; }),
+    };
+    child.document.body.textContent = "Refusal page";
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const check = vi.spyOn(backend, "checkWindowPage").mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return outcome === "refused"
+        ? new Response('{"error":"Show refused."}', { status: 409 })
+        : new Response("<html></html>");
+    });
+    library.windows = [{ ...windowRecord, window_id: `deck show ${outcome}`, hidden: true, connected: outcome === "connected" }];
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Show").click();
+    await vi.advanceTimersByTimeAsync(99);
+    flushSync();
+    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" ? 1 : 0);
+    expect(open).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
+    expect(check).toHaveBeenCalledTimes(outcome === "connected" ? 0 : 1);
+    if (outcome === "closed") child.closed = true;
+    await vi.advanceTimersByTimeAsync(101);
+    flushSync();
+    expect(visibility).toHaveBeenCalledTimes(outcome === "connected" || outcome === "ready" ? 1 : 0);
+    if (outcome === "ready") {
+      expect(visibility).toHaveBeenCalledExactlyOnceWith(`deck show ${outcome}`, false, undefined);
+      expect(child.location.href).toContain("?w=");
+    }
+    expect(child.focus).not.toHaveBeenCalled();
+    expect(child.close).not.toHaveBeenCalled();
+    expect(child.document.body.textContent).toBe("Refusal page");
+    if (outcome === "refused") {
+      expect(target.querySelector(".deck-operation")?.textContent).toContain("Show refused.");
+      expect(notices.items).toHaveLength(0);
+    }
+  });
+});
