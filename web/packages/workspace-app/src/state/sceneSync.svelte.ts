@@ -109,12 +109,15 @@ export function sceneSyncEnabled(): boolean {
 
 /// Whether `tab` qualifies for a live scene session. Reads exactly the
 /// fields the acquire/release $effect should track: path, mode, loading,
-/// fileMissing. Deliberately NOT content (size is checked untracked at
-/// acquire time) and NOT readMode/fsWritable (read-only tabs still
-/// attach, they just never send).
+/// fileMissing and the hold on a refused text. Deliberately NOT content
+/// (size is checked untracked at acquire time), NOT the refusal's reason
+/// (a new reason is the same hold) and NOT readMode/fsWritable (read-only
+/// tabs still attach, they just never send).
 export function isSceneSyncEligible(tab: FileTab): boolean {
   if (!sceneSyncEnabled()) return false;
   if (tab.loading || tab.fileMissing) return false;
+  // A refused text stays with the classic save until a write of it lands.
+  if (tab.refusedUnwritten) return false;
   if (tab.mode !== "canvas") return false;
   if (!isExcalidraw(tab.path)) return false;
   // Draft close/promote interleaves saves with file moves; excluded v1.
