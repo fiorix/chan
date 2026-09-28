@@ -3,11 +3,12 @@
 //! devserver. Key computations share one in-flight answer per spelling.
 //!
 //! A lifecycle caller keeps its root lock through settlement. The open, its
-//! root check and mounted revalidation own call permits, so cancelling a
-//! caller releases the root lock while its abandoned work still prevents
-//! another call of the same kind. A registered open waits for its permit at
-//! most the open's release budget, and an open of a mounted root skips a
-//! revalidation already in flight.
+//! root check, mounted revalidation and a close's or removal's registry
+//! lookup own call permits, so cancelling a caller releases the root lock
+//! while its abandoned work still prevents another call of the same kind. A
+//! registered open waits for its permit at most the open's release budget,
+//! an open of a mounted root skips a revalidation already in flight, and a
+//! close or removal skips a lookup already in flight.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -161,6 +162,7 @@ pub(crate) type RootLocks = KeyedLocks<PathBuf>;
 pub(crate) enum RootCall {
     Mount,
     Revalidate,
+    Lookup,
 }
 
 /// A permit moves into blocking work and returns with its result. A caller
@@ -168,8 +170,9 @@ pub(crate) enum RootCall {
 /// has dropped its own workspace reference, and references held elsewhere,
 /// such as the tasks of a tenant its caller dropped, can outlast it. A mount
 /// waiter that gets the permit within the open's release budget then
-/// dispatches its own call; the revalidation's permit has no waiter, since an
-/// open that finds it held skips the check.
+/// dispatches its own call; the revalidation's and the lookup's permits have
+/// no waiter, since an open that finds the one held skips the check and a
+/// close or removal that finds the other held answers without the row.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 
 /// Canonical root keys computed on the blocking pool, with one computation
@@ -180,7 +183,8 @@ pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 ///
 /// Completed computations are removed, so later callers resolve afresh.
 /// This bound covers key resolution; the host uses separate call permits
-/// for its filesystem open, post-build root check and mounted revalidation.
+/// for its filesystem open, post-build root check, mounted revalidation and
+/// a close's or removal's registry lookup.
 /// The entry-map mutex is held only for lookup, insertion and removal.
 #[derive(Default)]
 pub(crate) struct RootKeys {
