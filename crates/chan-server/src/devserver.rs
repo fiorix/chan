@@ -9489,16 +9489,20 @@ mod tests {
     /// its prefix, whether the host serves that prefix, whether the one row
     /// reads on there, and the rows the first save wrote, each path named
     /// `stored`, `canonical` or `other`. Rows are `(stored, desired on,
-    /// generation)`, `stored` false for the canonical path.
+    /// generation)`, `stored` false for the canonical path. They are written
+    /// to the overlay's store as an earlier build leaves it, and a devserver
+    /// started over it reads them back, so the first save folds and replaces
+    /// the rows the store holds, as it does at a start.
     #[cfg(unix)]
     async fn restore_outcome(
         rows: &[(bool, bool, u64)],
     ) -> (usize, bool, bool, bool, Vec<(&'static str, bool, u64)>) {
         let home = tempfile::tempdir().expect("home");
         let holder = tempfile::tempdir().expect("holder");
-        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let (earlier, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        shut_down_hosted(&earlier, None).await.expect("shut down");
         let canonical = canonical_root(&relinked);
-        let rows = rows
+        let rows: Vec<PersistedWorkspace> = rows
             .iter()
             .map(
                 |&(under_stored, desired_on, generation)| PersistedWorkspace {
@@ -9510,7 +9514,26 @@ mod tests {
                 },
             )
             .collect();
-        let written = restored_from(&state, rows).await;
+        let store = home.path().join("devserver").join("workspaces.json");
+        std::fs::create_dir_all(store.parent().expect("the store's directory")).expect("mkdir");
+        std::fs::write(&store, serde_json::to_vec(&rows).expect("rows json")).expect("write rows");
+        let state = devserver_with_windows(home.path()).await;
+        let stored_rows = state
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        let row_keys = |rows: &[PersistedWorkspace]| {
+            rows.iter()
+                .map(|row| (row.path.clone(), row.desired_on, row.generation))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            row_keys(&stored_rows),
+            row_keys(&rows),
+            "fixture: the overlay's store does not hold the rows written"
+        );
+        let written = restored_from(&state, stored_rows).await;
         let prefix = registered_workspace_prefix(&stored).expect("prefix");
         let (records, only) = only_record(&state);
         let entries = state.workspace_entries();
