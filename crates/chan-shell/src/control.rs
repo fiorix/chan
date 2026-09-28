@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::wire::{ControlRequest, ControlResponse, Identity, ServeKind};
+use crate::wire::{ControlRequest, ControlResponse, Identity};
 
 /// The chan-terminal environment a window-targeting action needs: which
 /// window to act on and which server socket to reach it through.
@@ -115,7 +115,7 @@ impl EnvControlSocket {
             let Some(identity) = socket_identity(&candidate).await else {
                 continue;
             };
-            if identity.kind != ServeKind::Devserver {
+            if identity.kind != crate::wire::ServeKind::Devserver {
                 continue;
             }
             if let Some(root) = identity.workspace_root {
