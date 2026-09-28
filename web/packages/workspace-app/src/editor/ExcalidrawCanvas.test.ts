@@ -3,7 +3,7 @@
 import { mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import ExcalidrawCanvas, { noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
+import ExcalidrawCanvas, { canonicalJson, noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
 // Build-time contract: the offscreen shell is display: none (WKWebView leaks the island through visibility: hidden), and the island imports Excalidraw's stylesheet so it rides the island's chunk; vitest drops CSS.
 import canvasSrc from "./ExcalidrawCanvas.svelte?raw";
 import type {
@@ -605,6 +605,15 @@ describe("sceneDeltas bookkeeping", () => {
     expect(sceneDeltas(els, map)).toHaveLength(0);
     const bumped = [wireEl("a", 2), wireEl("b", 2)];
     expect(sceneDeltas(bumped, map).map((e) => e.id)).toEqual(["a"]);
+  });
+});
+
+describe("canonicalJson", () => {
+  test("the same keys and values in another order give one text, nested too", () => {
+    const board = { gridSize: 20, gridStep: 5, grid: { mode: true, step: 5 }, viewBackgroundColor: "#ffffff" };
+    const authority = { grid: { step: 5, mode: true }, gridSize: 20, gridStep: 5, viewBackgroundColor: "#ffffff" };
+    expect(canonicalJson(board)).toBe(canonicalJson(authority));
+    expect(canonicalJson(board)).not.toBe(canonicalJson({ ...authority, gridSize: 10 }));
   });
 });
 
