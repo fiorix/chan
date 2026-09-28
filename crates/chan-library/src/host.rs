@@ -6968,6 +6968,93 @@ mod tests {
         );
     }
 
+    /// A removal waits for its unregister's permit after its close, so a
+    /// removal of a mounted workspace refused there, beside an unregister
+    /// whose caller gave up, has taken the workspace down and recorded its
+    /// off, and has forgotten, purged and unregistered nothing.
+    #[tokio::test]
+    async fn a_mounted_removal_refused_at_the_registry_permit_takes_the_workspace_down() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let overlay_key = canonical_key(root.path()).to_string_lossy().into_owned();
+        let host = WorkspaceHost::new(library, fake_builder());
+        let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+        host.install_workspace_overlay(Arc::clone(&overlay));
+        let store = tempfile::tempdir().unwrap();
+        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        host.install_window_registry(registry.clone(), "local".into());
+        let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+        let first = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(root.path(), false))
+            .await;
+        assert!(
+            first.is_none(),
+            "fixture: the first removal did not reach its unregister"
+        );
+        // Turned on again beside the held unregister, as the launcher's on
+        // mounts it and writes its row, with a window of its own.
+        host.open_registered_workspace(root.path(), serve_config("/ws"))
+            .await
+            .expect("fixture: mount beside the held unregister");
+        overlay.set(&overlay_key, true);
+        registry.create(
+            WindowKind::Workspace,
+            Some(root.path().to_string_lossy().into_owned()),
+        );
+
+        let refused = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(root.path(), false))
+            .await;
+        assert_eq!(
+            held.count, 1,
+            "a removal beside a held unregister reached an unregister of its own"
+        );
+        assert!(
+            matches!(
+                refused,
+                Some(Err(Error::Core(ChanError::WorkspaceAlreadyOpen)))
+            ),
+            "a mounted removal beside a held unregister: {refused:?}"
+        );
+        assert!(
+            !host.is_root_mounted(root.path()),
+            "a mounted removal refused at the permit left the workspace mounted"
+        );
+        assert_eq!(
+            overlay
+                .entries()
+                .into_iter()
+                .find(|row| row.path == overlay_key)
+                .map(|row| row.desired_on),
+            Some(false),
+            "a mounted removal refused at the permit did not record the off"
+        );
+        assert_eq!(
+            overlay.on_paths(),
+            Vec::<String>::new(),
+            "an on-row survived a mounted removal refused at the permit"
+        );
+        assert_eq!(
+            registry.snapshot().len(),
+            1,
+            "a removal refused at the permit purged the window records"
+        );
+        assert!(
+            host.library().workspace_paths_for(root.path()).is_some(),
+            "a removal refused at the permit unregistered the workspace"
+        );
+        assert_eq!(
+            host.workspace_status(root.path()),
+            (
+                WorkspaceStatus::Error,
+                Some("workspace is still releasing; retry".into())
+            ),
+            "the refused removal's answer is not the row's words"
+        );
+    }
+
     /// A close of a relinked root that is not mounted reads a mount in
     /// flight, and clears the root's lifecycle, under every key its
     /// registry row goes by, the stored root among them, where a devserver
