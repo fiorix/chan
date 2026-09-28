@@ -12,7 +12,8 @@
 // Missing handles cannot prove a window is gone; those rows stay for an explicit
 // Open or Close. A blocked popup leaves its record available by the same rule.
 // Open repairs a blank window or a disconnected record regardless of document
-// type, leaving a connected nonblank page untouched. Refusals close only blanks.
+// type, leaving a connected nonblank page untouched. Refusals close only a
+// blank this gesture opened, never one an earlier wait left marked.
 // A disconnected record is looked up again in the latest feed once its page
 // answers, before its window is navigated.
 //
@@ -21,6 +22,7 @@
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import {
   isBlankWindow,
+  isUnmarkedBlankWindow,
   navigateWindowWhenReady,
   type WindowConnection,
   type WindowPageCheck,
@@ -134,6 +136,7 @@ export async function openWindowRecord(
   clearWindowAttention(record.window_id);
   if (opts.focus !== false) h.focus?.();
   const blank = isBlankWindow(h);
+  const opened = isUnmarkedBlankWindow(h);
   if (!blank && record.connected) return h;
   try {
     const url = windowUrl(record, servingOrigin());
@@ -147,7 +150,7 @@ export async function openWindowRecord(
     }
     return h;
   } catch (e) {
-    if (blank) h.close();
+    if (opened) h.close();
     if (handles.get(record.window_id) === h) handles.delete(record.window_id);
     throw e;
   }
