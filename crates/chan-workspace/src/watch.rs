@@ -2771,4 +2771,19 @@ mod tests {
             );
         }
     }
+
+    /// An event's path is the name as the filesystem has it: on Unix a
+    /// `\` in a name is part of the name, not a directory separator.
+    #[cfg(unix)]
+    #[test]
+    fn an_event_path_keeps_a_backslash_name() {
+        let roots = [WatchRoot {
+            abs: PathBuf::from("/w"),
+            prefix: None,
+        }];
+        for name in ["a\\b.md", "dir/a\\b.md"] {
+            let located = locate_root(&roots, &Path::new("/w").join(name));
+            assert_eq!(located.map(|(_, rel)| rel).as_deref(), Some(name));
+        }
+    }
 }

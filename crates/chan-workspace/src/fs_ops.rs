@@ -3255,4 +3255,224 @@ mod tests {
             ChanError::PathEscape
         ));
     }
+
+    /// On Unix `\` is an ordinary character of a name, so a file may be
+    /// called `a\b.md`. Every surface carries it as that name: one that sent
+    /// `a/b.md` would name a different file, which no store could read.
+    #[cfg(unix)]
+    mod backslash_name {
+        use super::*;
+        use crate::workspace::SearchOpts;
+
+        const ROOT_NAME: &str = "a\\b.md";
+        const NESTED_NAME: &str = "dir/a\\b.md";
+        /// A real file at the path the rewritten spelling would name.
+        const TWIN_NAME: &str = "a/b.md";
+
+        fn fixture() -> (TempDir, TempDir, std::sync::Arc<crate::Workspace>) {
+            let (cfg, root, workspace) = workspace_fixture();
+            std::fs::write(root.path().join(ROOT_NAME), "# Root\n\nrootslashword\n").unwrap();
+            std::fs::create_dir(root.path().join("dir")).unwrap();
+            std::fs::write(
+                root.path().join(NESTED_NAME),
+                "# Nested\n\nnestedslashword\n",
+            )
+            .unwrap();
+            (cfg, root, workspace)
+        }
+
+        fn add_twin(root: &Path) {
+            std::fs::create_dir(root.join("a")).unwrap();
+            std::fs::write(root.join(TWIN_NAME), "# Twin\n\ntwinword\n").unwrap();
+        }
+
+        fn file_paths(entries: &[TreeEntry]) -> Vec<String> {
+            let mut paths: Vec<String> = entries
+                .iter()
+                .filter(|entry| !entry.is_dir)
+                .map(|entry| entry.path.clone())
+                .collect();
+            paths.sort();
+            paths
+        }
+
+        fn hits(workspace: &crate::Workspace, word: &str) -> Vec<String> {
+            let opts = SearchOpts {
+                mode: crate::SearchMode::Bm25,
+                ..SearchOpts::default()
+            };
+            let mut paths: Vec<String> = workspace
+                .search(word, &opts)
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect();
+            paths.sort();
+            paths.dedup();
+            paths
+        }
+
+        #[test]
+        fn a_backslash_name_walks_as_itself() {
+            let (_cfg, _root, workspace) = fixture();
+            let listed: Vec<String> = workspace
+                .list("dir")
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            assert_eq!(listed, ["a\\b.md"], "one-level listing");
+
+            for (surface, tree) in [
+                ("tree", workspace.list_tree().unwrap()),
+                (
+                    "scoped tree",
+                    workspace.list_tree_filtered_unified().unwrap(),
+                ),
+            ] {
+                assert_eq!(file_paths(&tree), [ROOT_NAME, NESTED_NAME], "{surface}");
+            }
+            for (surface, tree) in [
+                (
+                    "prefix tree",
+                    workspace.list_tree_prefix_unified("dir").unwrap(),
+                ),
+                (
+                    "scoped prefix tree",
+                    workspace.list_tree_prefix_filtered_unified("dir").unwrap(),
+                ),
+            ] {
+                assert_eq!(file_paths(&tree), [NESTED_NAME], "{surface}");
+            }
+        }
+
+        #[test]
+        fn a_backslash_name_is_searched_as_itself() {
+            let (_cfg, _root, workspace) = fixture();
+            workspace.reindex(None).unwrap();
+            assert_eq!(hits(&workspace, "rootslashword"), [ROOT_NAME]);
+            assert_eq!(hits(&workspace, "nestedslashword"), [NESTED_NAME]);
+            let mut indexed = workspace.indexed_paths().unwrap();
+            indexed.sort();
+            assert_eq!(indexed, [ROOT_NAME, NESTED_NAME]);
+        }
+
+        #[test]
+        fn a_backslash_name_is_graphed_as_itself() {
+            let (_cfg, _root, workspace) = fixture();
+            workspace.reindex(None).unwrap();
+            assert_eq!(
+                workspace.graph().unwrap().files().unwrap(),
+                [ROOT_NAME, NESTED_NAME]
+            );
+        }
+
+        #[test]
+        fn reconcile_indexes_a_backslash_name_beside_its_slash_twin() {
+            let (_cfg, root, workspace) = fixture();
+            add_twin(root.path());
+            let report = workspace.reconcile().unwrap();
+            assert_eq!(report.failed, Vec::<String>::new(), "failed");
+            assert_eq!(report.upserted, [TWIN_NAME, ROOT_NAME, NESTED_NAME]);
+            assert_eq!(hits(&workspace, "twinword"), [TWIN_NAME]);
+            assert_eq!(hits(&workspace, "rootslashword"), [ROOT_NAME]);
+            assert_eq!(
+                workspace.graph().unwrap().files().unwrap(),
+                [TWIN_NAME, ROOT_NAME, NESTED_NAME]
+            );
+        }
+
+        #[test]
+        fn a_backslash_name_is_reported_as_itself() {
+            let (_cfg, _root, workspace) = fixture();
+            let mut reported: Vec<String> = workspace
+                .report()
+                .unwrap()
+                .files
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
+            reported.sort();
+            assert_eq!(reported, [ROOT_NAME, NESTED_NAME]);
+        }
+
+        /// An excluded directory `a` excludes what is inside a directory
+        /// named `a`, never a file whose own name starts `a\`.
+        #[test]
+        fn scope_policy_reads_a_backslash_name_as_one_name() {
+            let (_cfg, _root, workspace) = fixture();
+            workspace.set_excluded_dirs(vec!["a".to_string()]).unwrap();
+
+            assert_eq!(
+                file_paths(&workspace.list_tree_filtered_unified().unwrap()),
+                [ROOT_NAME, NESTED_NAME],
+                "scoped tree"
+            );
+            assert_eq!(
+                file_paths(&workspace.list_tree_prefix_filtered_unified("dir").unwrap()),
+                [NESTED_NAME],
+                "scoped prefix tree"
+            );
+            let bootstrap = workspace.bootstrap().unwrap();
+            let names: Vec<&str> = bootstrap.files.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, [ROOT_NAME], "bootstrap files");
+            let dir = bootstrap.dirs.iter().find(|d| d.name == "dir").unwrap();
+            assert_eq!(dir.subtree.files, 1, "bootstrap subtree of dir");
+            let mut reported: Vec<String> = workspace
+                .report()
+                .unwrap()
+                .files
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
+            reported.sort();
+            assert_eq!(reported, [ROOT_NAME, NESTED_NAME], "report");
+        }
+
+        #[test]
+        fn removing_a_backslash_name_keeps_its_slash_twin() {
+            let (_cfg, root, workspace) = fixture();
+            add_twin(root.path());
+            workspace.reconcile().unwrap();
+            workspace.remove(ROOT_NAME).unwrap();
+            assert_eq!(hits(&workspace, "twinword"), [TWIN_NAME]);
+            assert!(workspace
+                .graph()
+                .unwrap()
+                .files()
+                .unwrap()
+                .contains(&TWIN_NAME.to_string()));
+        }
+
+        #[test]
+        fn a_backslash_directory_moves_into_its_slash_twin() {
+            let (_cfg, root, workspace) = fixture();
+            std::fs::create_dir(root.path().join("x\\y")).unwrap();
+            std::fs::write(root.path().join("x\\y/f.md"), "f").unwrap();
+            std::fs::create_dir_all(root.path().join("x/y/z")).unwrap();
+            let moved = workspace.rename("x\\y", "x/y/z/x\\y");
+            assert!(moved.is_ok(), "{moved:?}");
+            assert!(root.path().join("x/y/z/x\\y/f.md").is_file());
+        }
+
+        #[test]
+        fn a_standalone_start_directory_keeps_a_backslash_name() {
+            let root = TempDir::new().unwrap();
+            let start = root.path().join("a\\b");
+            std::fs::create_dir(&start).unwrap();
+            let mini = crate::MiniWorkspace::open(root.path(), &start, 1024).unwrap();
+            assert_eq!(mini.start_rel(), "a\\b");
+        }
+
+        #[test]
+        fn promoting_a_draft_reports_a_backslash_target_as_itself() {
+            let (_cfg, root, workspace) = workspace_fixture();
+            let draft = workspace.create_draft_dir("untitled-1").unwrap();
+            std::fs::write(draft.abs.join("draft.md"), b"# hello\n").unwrap();
+            let report = workspace.promote_draft("untitled-1", ROOT_NAME).unwrap();
+            assert_eq!(report.target_path, ROOT_NAME);
+            assert!(root.path().join(ROOT_NAME).is_file());
+        }
+    }
 }
