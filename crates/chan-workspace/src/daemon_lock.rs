@@ -205,7 +205,11 @@ pub fn daemon_lock_held(lock_path: &Path) -> bool {
     };
     match FileExt::try_lock_exclusive(&file) {
         // Acquired -> it was free -> not held (the lock drops with `file`).
-        Ok(()) => false,
+        Ok(()) => {
+            #[cfg(all(test, unix))]
+            crate::lock::capture_lock_duplicate(&file);
+            false
+        }
         Err(e) if is_contended(&e) => true,
         Err(_) => false,
     }
@@ -485,6 +489,21 @@ mod tests {
         drop(guard);
         // Released on exit -> a leftover pidfile is provably stale (no signal).
         assert!(!daemon_lock_held(&lock));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_probe_releases_a_duplicated_lock() {
+        let tmp = TempDir::new().unwrap();
+        let (lock, record) = paths(&tmp);
+        let (held, duplicate) = crate::lock::with_lock_duplicate(|| daemon_lock_held(&lock));
+        assert!(!held);
+        let next = DaemonLock::acquire(&lock, &record, "127.0.0.1:8787", false);
+        assert!(
+            matches!(next, Ok(DaemonAcquire::Daemon(_))),
+            "daemon probe left its duplicate locked"
+        );
+        drop(duplicate);
     }
 
     #[test]

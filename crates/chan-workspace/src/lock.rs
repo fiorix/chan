@@ -119,6 +119,38 @@ thread_local! {
     static ACQUIRE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(all(test, unix))]
+type LockDuplicateHook = Box<dyn FnOnce(&File)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static LOCK_DUPLICATE_HOOK: std::cell::RefCell<Option<LockDuplicateHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn capture_lock_duplicate(file: &File) {
+    LOCK_DUPLICATE_HOOK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook(file);
+        }
+    });
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn with_lock_duplicate<T>(operation: impl FnOnce() -> T) -> (T, File) {
+    let duplicate = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let captured = duplicate.clone();
+    LOCK_DUPLICATE_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |file| {
+            // dup shares the open file description, just as fork does.
+            *captured.borrow_mut() = Some(file.try_clone().unwrap());
+        }));
+    });
+    let result = operation();
+    let file = duplicate.borrow_mut().take().expect("locked file captured");
+    (result, file)
+}
+
 impl WorkspaceLock {
     /// Acquire the writer lock for `lock_dir`, recording the holder's
     /// identity (`workspace_root`, this pid, now).
@@ -322,7 +354,11 @@ pub fn is_free(lock_dir: &Path) -> bool {
     };
     match FileExt::try_lock_exclusive(&file) {
         // Held only for this probe; `file` drops here and the OS releases it.
-        Ok(()) => true,
+        Ok(()) => {
+            #[cfg(all(test, unix))]
+            capture_lock_duplicate(&file);
+            true
+        }
         Err(e) if is_contended(&e) => false,
         // An unexpected error is not a free lock.
         Err(_) => false,
@@ -378,7 +414,14 @@ pub fn probe_foreign_holder(lock_dir: &Path, root_key: &Path) -> ForeignHolder {
     match open_lock_file(&path) {
         // The file stays open until classification returns, so a lock this
         // probe did take is held only for the probe and released on drop.
-        Ok(file) => classify_lock_attempt(FileExt::try_lock_exclusive(&file), lock_dir, root_key),
+        Ok(file) => {
+            let attempt = FileExt::try_lock_exclusive(&file);
+            #[cfg(all(test, unix))]
+            if attempt.is_ok() {
+                capture_lock_duplicate(&file);
+            }
+            classify_lock_attempt(attempt, lock_dir, root_key)
+        }
         Err(e) => ForeignHolder::Unknown {
             reason: format!("could not open {}: {e}", path.display()),
         },
@@ -452,6 +495,8 @@ pub(crate) fn open_lock_file(path: &Path) -> Result<File> {
 /// rename), so a reader racing the write sees either the previous record or
 /// this one, never a torn half.
 fn write_record(file: &File, lock_dir: &Path, workspace_root: &Path) -> Result<()> {
+    #[cfg(all(test, unix))]
+    capture_lock_duplicate(file);
     #[cfg(test)]
     ACQUIRE_TEST_HOOK.with(|hook| {
         if let Some(hook) = hook.take() {
@@ -778,6 +823,114 @@ mod tests {
         assert_eq!(probe(), ForeignHolder::Absent);
         drop(held);
         assert_eq!(probe(), ForeignHolder::Absent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_free_releases_a_duplicated_lock() {
+        let tmp = TempDir::new().unwrap();
+        let (free, duplicate) = with_lock_duplicate(|| is_free(tmp.path()));
+        assert!(free);
+        let next = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            next.is_ok(),
+            "is_free left its duplicate locked: {:?}",
+            next.as_ref().err()
+        );
+        drop(duplicate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreign_probe_releases_a_duplicated_lock() {
+        let tmp = TempDir::new().unwrap();
+        let (holder, duplicate) =
+            with_lock_duplicate(|| probe_foreign_holder(tmp.path(), &root(&tmp)));
+        assert_eq!(holder, ForeignHolder::Absent);
+        let next = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            next.is_ok(),
+            "foreign probe left its duplicate locked: {:?}",
+            next.as_ref().err()
+        );
+        drop(duplicate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_acquire_releases_a_duplicated_lock() {
+        let tmp = TempDir::new().unwrap();
+        // A directory refuses atomic record publication even when run as root.
+        fs::create_dir(tmp.path().join(RECORD_FILE)).unwrap();
+        let (result, duplicate) =
+            with_lock_duplicate(|| WorkspaceLock::acquire(tmp.path(), &root(&tmp)));
+        assert!(matches!(result, Err(ChanError::Io(_))));
+        fs::remove_dir(tmp.path().join(RECORD_FILE)).unwrap();
+        let next = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            next.is_ok(),
+            "failed acquire left its duplicate locked: {:?}",
+            next.as_ref().err()
+        );
+        drop(duplicate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_steal_releases_a_duplicated_lock() {
+        let tmp = TempDir::new().unwrap();
+        let pinned = open_lock_file(&tmp.path().join(LOCK_FILE)).unwrap();
+        FileExt::try_lock_exclusive(&pinned).unwrap();
+        let dead = LockRecord {
+            pid: reaped_child_pid(),
+            path: canonical_string(&root(&tmp)),
+            started_at: "2000-01-01T00:00:00Z".into(),
+        };
+        write_record_body(&pinned, &serde_json::to_vec(&dead).unwrap()).unwrap();
+        fs::create_dir(tmp.path().join(RECORD_FILE)).unwrap();
+        let (result, duplicate) =
+            with_lock_duplicate(|| WorkspaceLock::acquire(tmp.path(), &root(&tmp)));
+        assert!(matches!(result, Err(ChanError::Io(_))));
+        fs::remove_dir(tmp.path().join(RECORD_FILE)).unwrap();
+        let next = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            next.is_ok(),
+            "failed steal left its duplicate locked: {:?}",
+            next.as_ref().err()
+        );
+        drop(duplicate);
+        drop(pinned);
+    }
+
+    #[test]
+    fn contended_probes_preserve_the_holders_lock() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(LOCK_FILE);
+        let holder = open_lock_file(&path).unwrap();
+        FileExt::try_lock_exclusive(&holder).unwrap();
+        let contender = open_lock_file(&path).unwrap();
+
+        assert!(!is_free(tmp.path()), "is_free must report the holder");
+        assert!(is_contended(
+            &FileExt::try_lock_exclusive(&contender).unwrap_err()
+        ));
+        assert_eq!(
+            probe_foreign_holder(tmp.path(), &root(&tmp)),
+            ForeignHolder::Present
+        );
+        assert!(is_contended(
+            &FileExt::try_lock_exclusive(&contender).unwrap_err()
+        ));
+        assert!(
+            crate::daemon_lock::daemon_lock_held(&path),
+            "daemon probe must report the holder"
+        );
+        assert!(is_contended(
+            &FileExt::try_lock_exclusive(&contender).unwrap_err()
+        ));
+        FileExt::unlock(&holder).unwrap();
+        FileExt::try_lock_exclusive(&contender).unwrap();
+        FileExt::unlock(&contender).unwrap();
     }
 
     /// A lock file the probe cannot open establishes nothing about a holder,
