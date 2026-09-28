@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A browser window left waiting can be opened again.** In the launcher and the workspace app's command deck, a window whose opening page was reloaded, or whose navigation was stopped, is repaired by the next Open, Focus or Show once its wait's mark runs out, after at most sixty or ten seconds, instead of only being focused. A Focus or Show on a window another page is still opening waits for that page's outcome before un-hiding it, and another page's refused repair no longer closes such a window or discards its record.
 
+- **A new window's tab that you take elsewhere is left alone.** In the launcher and the workspace app's command deck, a New terminal or New window whose blank tab you close, or take to another page, before Chan answers no longer closes or reloads that tab: the window record made for it is discarded, and the deck says that the new window was not opened because its tab was taken to another page. The workspace app's deck also discards that record when the new window's page is refused, times out or is closed, where it stayed listed in the launcher until closed by hand, and no longer closes a new window that opened when the refresh after it fails.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
