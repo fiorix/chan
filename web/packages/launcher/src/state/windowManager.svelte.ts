@@ -51,11 +51,27 @@ function servingOrigin(): string {
   return typeof location === "undefined" ? "" : location.origin;
 }
 
+function discardRecord(id: string): void {
+  clearWindowAttention(id);
+  void backend.discardWindow(id).catch(() => {});
+}
+
 function discardBrowserWindow(id: string): void {
   handles.get(id)?.close();
   handles.delete(id);
-  clearWindowAttention(id);
-  void backend.discardWindow(id).catch(() => {});
+  discardRecord(id);
+}
+
+// The discard is awaited so that the sentence says whether the record went.
+async function movedTabError(id: string): Promise<Error> {
+  try {
+    await backend.discardWindow(id);
+    return new Error("The new window was not opened because its tab was taken to another page.");
+  } catch {
+    return new Error(
+      "The new window was not opened because its tab was taken to another page, and its record could not be removed; close it from the list of windows.",
+    );
+  }
 }
 
 function handleState(id: string): "live" | "closed" | "none" {
@@ -88,8 +104,10 @@ const checkWindowPage: WindowPageCheck = async (url, signal) => {
 /** Mint a browser window of the local library and open it in-app. Call this
  * DIRECTLY from a user gesture: it opens the blank window synchronously, before
  * the mint await, so the browser does not treat the later navigation as a popup.
- * A refused mint or page check closes the blank window and rethrows the error
- * for the caller's banner. `actingWindowId` claims
+ * A refused mint or page check closes the blank window, while it is still the
+ * blank this gesture opened, and rethrows the error for the caller's banner. A
+ * tab its user took to another page before the mint answered is left to them,
+ * and its record is discarded. `actingWindowId` claims
  * the leader identity for the per-tenant mint gate. */
 export async function mintWindow(
   kind: WindowKind,
@@ -106,6 +124,14 @@ export async function mintWindow(
       actingWindowId: opts.actingWindowId,
     });
     if (blank) {
+      // A tab its user closed before the answer cancels the mint. One whose
+      // location reads anything but blank, or cannot be read, is a page its
+      // user went to, and nothing here names, marks, navigates or closes it.
+      if (blank.closed) {
+        discardRecord(rec.window_id);
+        return null;
+      }
+      if (!isBlankWindow(blank)) throw await movedTabError(rec.window_id);
       blank.name = rec.window_id;
       handles.set(rec.window_id, blank);
       const url = windowUrl(rec, servingOrigin());
@@ -118,8 +144,13 @@ export async function mintWindow(
     clearWindowAttention(rec.window_id);
     return rec;
   } catch (e) {
-    blank?.close();
-    if (rec && handles.get(rec.window_id) === blank) discardBrowserWindow(rec.window_id);
+    // Only the blank this gesture opened closes: its user may have taken the
+    // tab elsewhere during the wait.
+    if (blank && isUnmarkedBlankWindow(blank)) blank.close();
+    if (rec && handles.get(rec.window_id) === blank) {
+      handles.delete(rec.window_id);
+      discardRecord(rec.window_id);
+    }
     throw e;
   }
 }

@@ -171,8 +171,17 @@ export async function createLibraryWindow(
   try {
     const result = await bridge.runAction(action);
     if (!result?.window) throw new Error("Chan did not return the new window");
-    unshown = result.window.window_id;
-    popup.name = result.window.window_id;
+    const created = result.window.window_id;
+    // A popup its user closed before the answer cancels the create. One whose
+    // location reads anything but blank, or cannot be read, is a page its
+    // user went to, and nothing here names, marks, navigates or closes it.
+    if (popup.closed) {
+      discardCreated(bridge, created);
+      return;
+    }
+    if (!isBlankWindow(popup)) throw await movedPopupError(bridge, created);
+    unshown = created;
+    popup.name = created;
     if (!(await navigateWindowWhenReady(popup, result.window.launch_path, bridge.checkPage))) {
       discardCreated(bridge, unshown);
       return;
@@ -181,9 +190,24 @@ export async function createLibraryWindow(
     popup.focus();
     await bridge.refresh();
   } catch (error) {
-    popup.close();
+    // Only the blank this gesture opened closes: its user may have taken the
+    // popup elsewhere during the wait, and a popup whose navigation was
+    // assigned carries that wait's mark.
+    if (isUnmarkedBlankWindow(popup)) popup.close();
     if (unshown) discardCreated(bridge, unshown);
     throw error;
+  }
+}
+
+// The discard is awaited so that the sentence says whether the record went.
+async function movedPopupError(bridge: LibraryWindowBridge, windowId: string): Promise<Error> {
+  try {
+    await bridge.runAction({ action: "close_window", window_id: windowId });
+    return new Error("The new window was not opened because its tab was taken to another page.");
+  } catch {
+    return new Error(
+      "The new window was not opened because its tab was taken to another page, and its record could not be removed; close it from the list of windows.",
+    );
   }
 }
 
