@@ -6050,7 +6050,7 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
 /// is the only bar, so this is its Window submenu alone. Empty before
 /// the launcher window exists (early setup) or if the bar lost the
 /// submenu.
-fn window_submenus(app: &tauri::AppHandle) -> Vec<Submenu<tauri::Wry>> {
+fn window_submenus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Submenu<R>> {
     #[cfg(target_os = "macos")]
     {
         app.menu()
@@ -6077,7 +6077,7 @@ fn window_submenus(app: &tauri::AppHandle) -> Vec<Submenu<tauri::Wry>> {
 /// on the main thread -- muda requires menu mutation there on macOS --
 /// and is best-effort throughout: a menu glitch must never take down a
 /// close/destroy handler.
-pub fn rebuild_window_menu(app: &tauri::AppHandle) {
+pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         let submenus = window_submenus(&app);
@@ -6541,7 +6541,7 @@ async fn mint_another_devserver_window(
 /// close path and the feed-reconnect driver use this owner so completion and
 /// the one terminal notice cannot diverge.
 pub(crate) fn spawn_pending_window_delete_attempt(
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<impl tauri::Runtime>,
     state: Arc<AppState>,
     conn: devserver::DevserverConn,
     attempt: window_watcher::PendingDeleteAttempt,

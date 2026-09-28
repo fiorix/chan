@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use chan_server::{WindowKind, WindowRecord, WorkspaceLifecycleOutcome};
 
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::config::{self, WindowGeometry};
@@ -702,7 +702,7 @@ pub fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), String> 
 
 /// The live window's OS title, else its label (a window whose webview is gone
 /// or whose title cannot be read).
-fn window_title_or_label(app: &AppHandle, label: &str) -> String {
+fn window_title_or_label(app: &AppHandle<impl Runtime>, label: &str) -> String {
     app.get_webview_window(label)
         .and_then(|w| w.title().ok())
         .unwrap_or_else(|| label.to_string())
@@ -714,14 +714,14 @@ fn window_title_or_label(app: &AppHandle, label: &str) -> String {
 /// so close affordances treat it as cancel-and-really-close instead of
 /// burying. Guard the URL read because a dead webview's `url()` can panic on a
 /// nil URL; any failure reads as "not the connecting screen".
-pub fn window_on_connecting_screen(app: &AppHandle, label: &str) -> bool {
+pub fn window_on_connecting_screen(app: &AppHandle<impl Runtime>, label: &str) -> bool {
     webview_url(app, label).is_some_and(|url| on_connecting_page(&url))
 }
 
 /// What a window's webview reports as its own URL, or `None` when there is
 /// no such window or its URL cannot be read. A dead webview's `url()` can
 /// panic on a nil URL.
-pub(crate) fn webview_url(app: &AppHandle, label: &str) -> Option<tauri::Url> {
+pub(crate) fn webview_url(app: &AppHandle<impl Runtime>, label: &str) -> Option<tauri::Url> {
     let window = app.get_webview_window(label)?;
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.url()))
         .ok()?
@@ -1348,7 +1348,7 @@ const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('c
 /// launcher Hide action) and the SPA's Hide choice from the close-confirm
 /// overlay. Close is the sibling choice and rides the existing
 /// `request_close_window` discard/destroy cascade.
-pub(crate) fn bury_window_now(app: &AppHandle, state: &Arc<AppState>, label: &str) {
+pub(crate) fn bury_window_now(app: &AppHandle<impl Runtime>, state: &Arc<AppState>, label: &str) {
     // A watcher-managed local window (`local::<id>`): bury it through the
     // watcher view state (should_show false -> the reconcile closes the native
     // window; the record stays, reopenable from the Window menu). Mirror into
@@ -1512,7 +1512,7 @@ fn prompt_devserver_transfer_close(app: &AppHandle, state: &Arc<AppState>, label
 /// for the signature; work area for the clamp). Empty on a monitor-query error,
 /// which yields the degenerate `"0|"` signature -- a window then restores
 /// size-only (no off-screen position) rather than crashing the open.
-fn current_monitors(app: &AppHandle) -> Vec<config::MonitorDesc> {
+fn current_monitors(app: &AppHandle<impl Runtime>) -> Vec<config::MonitorDesc> {
     app.available_monitors()
         .unwrap_or_default()
         .iter()
@@ -1682,7 +1682,7 @@ fn reveal_window(window: &tauri::WebviewWindow, label: &str) {
 /// size; geometry is desktop-owned, so this runs for local and devserver windows
 /// alike. Logs a `WINGEO capture` line (signature + points + scale +
 /// monitors) for the host.
-pub(crate) fn capture_window_geometry(app: &AppHandle, label: &str) {
+pub(crate) fn capture_window_geometry(app: &AppHandle<impl Runtime>, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
