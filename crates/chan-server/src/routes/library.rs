@@ -1139,16 +1139,14 @@ async fn handle_create_library_window(
     State(host): State<Arc<WorkspaceHost>>,
     Json(req): Json<CreateWindow>,
 ) -> Response {
-    let mut workspace_path = req.workspace_path;
-    if req.kind == WindowKind::Workspace {
-        let Some(path) = workspace_path.as_deref() else {
+    // A workspace window is minted by the key of the root the client names,
+    // one the window feed finds the runtime by without asking any root's
+    // filesystem. Resolving the client's spelling asks this root's, so it
+    // runs off the runtime.
+    let key = if req.kind == WindowKind::Workspace {
+        let Some(path) = req.workspace_path.as_deref() else {
             return crate::error::err(StatusCode::BAD_REQUEST, "workspace_path is required".into());
         };
-        // The record stores the root the workspace's runtime was opened at,
-        // the registry's stored root: the path the launcher lists it by and
-        // nests its windows under, and one the window feed finds the runtime
-        // by without asking any root's filesystem. Resolving the client's
-        // spelling asks this root's, so it runs off the runtime.
         let key = match host.root_key(Path::new(path)).await {
             Ok(key) => key,
             Err(e) => return create_window_root_error(e),
@@ -1160,21 +1158,31 @@ async fn handle_create_library_window(
                 "workspace is not running; turn it on before opening a window".into(),
             );
         }
-        let stored = host.mounted_root(&key).unwrap_or(key);
-        workspace_path = Some(stored.to_string_lossy().into_owned());
-    }
-    // Leader gate on the TARGET tenant of the mint (workspace path, or the shared
-    // terminal tenant for a terminal mint); leaderless establishes leadership at
-    // the later /ws connect, so it is allowed.
+        Some(key)
+    } else {
+        None
+    };
+    // Leader gate on the TARGET tenant of the mint (the workspace's runtime,
+    // found by its key, or the shared terminal tenant for a terminal mint);
+    // leaderless establishes leadership at the later /ws connect, so it is
+    // allowed.
+    let tenant_path = key.as_deref().map(|key| key.to_string_lossy().into_owned());
     if let Err(resp) = leader_gate(
-        host.tenant_leader(req.kind, workspace_path.as_deref()),
+        host.tenant_leader(req.kind, tenant_path.as_deref()),
         req.acting_window_id.as_deref(),
     ) {
         return *resp;
     }
     // Stamp the client-claimed affinity at mint so chan-desktop never opens a
-    // native twin for a browser-minted window (honest-client input).
-    match host.mint_window_with_origin(req.kind, workspace_path, req.origin) {
+    // native twin for a browser-minted window (honest-client input). A
+    // workspace window's record stores the root its runtime was opened at,
+    // the path the launcher lists the workspace by and nests its windows
+    // under.
+    let minted = match key {
+        Some(key) => host.mint_workspace_window(&key, req.origin),
+        None => host.mint_window_with_origin(req.kind, req.workspace_path, req.origin),
+    };
+    match minted {
         Ok(record) => Json(record).into_response(),
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }

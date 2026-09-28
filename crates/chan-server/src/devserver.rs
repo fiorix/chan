@@ -57,7 +57,7 @@ use crate::extract::{Json, Path as AxumPath, Query};
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
 // Prefix allocation lives in chan-library (the window-record assembly needs the
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
-use chan_library::windows::{WindowKind, WindowRegistry};
+use chan_library::windows::{WindowOrigin, WindowRegistry};
 use chan_library::{
     registered_workspace_prefix, workspace_prefix_for, FileLocalColor, KeyedLocks,
     PersistedWorkspace, WorkspaceOverlay,
@@ -2788,8 +2788,7 @@ async fn handle_discovery_request(
             let root = Path::new(&workspace_path);
             match state.register_workspace_keyed(root).await {
                 Ok((prefix, key)) => {
-                    let key = key.to_string_lossy().into_owned();
-                    match state.host.mint_window(WindowKind::Workspace, Some(key)) {
+                    match state.host.mint_workspace_window(&key, WindowOrigin::Native) {
                         Ok(_) => crate::devserver_handoff::Response::Registered {
                             devserver_version: crate::devserver_handoff::CHAN_VERSION.to_string(),
                             prefix,
@@ -3407,6 +3406,7 @@ mod tests {
         test_gateway_assertion, test_tunnel_assertion, test_tunnel_registration,
     };
     use super::*;
+    use chan_library::windows::WindowKind;
     use chan_library::{allocate_workspace_prefix, workspace_slug};
     use chan_workspace::paths::root_stall;
     use std::sync::atomic::AtomicBool;

@@ -2473,8 +2473,10 @@ impl WorkspaceHost {
     /// returns it directly). The registry's create fires the watch via the
     /// bridge; this also fires it directly so the push does not hinge on the
     /// bridge task's scheduling. The tenant side ensures a serving tenant exists
-    /// for the new window. The desktop and CLI mint through here; the launcher's
-    /// browser mint uses [`Self::mint_window_with_origin`].
+    /// for the new window. chan-desktop mints through here. A mint that holds a
+    /// workspace's key goes through [`Self::mint_workspace_window`], which
+    /// stores the root the workspace's runtime was opened at; the launcher's
+    /// other browser mints use [`Self::mint_window_with_origin`].
     pub fn mint_window(
         &self,
         kind: WindowKind,
@@ -2513,6 +2515,28 @@ impl WorkspaceHost {
         let library_id = self.library_id().to_string();
         let (prefix, token, connected) = self.window_live_state(&row);
         Ok(row.to_record(library_id, prefix, token, connected))
+    }
+
+    /// Mint a workspace window for the workspace runtime `key` names, by its
+    /// canonical root or the root it was opened at, with the client `origin`
+    /// stamped at creation. The record stores the root that runtime was
+    /// opened at, the registry row's stored root, which is the path the
+    /// launcher lists the workspace by and nests its windows under, whichever
+    /// of the two keys the caller holds: they differ for a root whose path
+    /// resolves elsewhere since it was registered. When no workspace runtime
+    /// goes by `key`, the record stores `key` itself, and the window feed
+    /// shows it once a workspace runtime that goes by that path is mounted.
+    pub fn mint_workspace_window(
+        &self,
+        key: &Path,
+        origin: WindowOrigin,
+    ) -> Result<WindowRecord, Error> {
+        let root = self.mounted_root(key).unwrap_or_else(|| key.to_path_buf());
+        self.mint_window_with_origin(
+            WindowKind::Workspace,
+            Some(root.to_string_lossy().into_owned()),
+            origin,
+        )
     }
 
     /// Mint a devserver CONTROL terminal as a real registry row:
@@ -6245,6 +6269,43 @@ mod tests {
             .unwrap()
             .completed());
         assert_eq!(overlay.entries(), Vec::new(), "a row survived the forget");
+    }
+
+    /// A workspace window minted by either key of a relinked root's runtime
+    /// stores the root that runtime was opened at, the registry row's stored
+    /// root, and a key no workspace runtime goes by is stored as given.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workspace_window_stores_the_root_its_runtime_was_opened_at() {
+        let (host, _overlay, stored, canonical, dirs) = relinked_host();
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json"))),
+            "local".into(),
+        );
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        let stored_path = stored.to_string_lossy().into_owned();
+        for key in [&canonical, &stored] {
+            let record = host
+                .mint_workspace_window(key, WindowOrigin::Native)
+                .expect("mint");
+            assert_eq!(
+                record.workspace_path.as_deref(),
+                Some(stored_path.as_str()),
+                "a window minted by {} stores another root",
+                key.display()
+            );
+        }
+        let unmounted = dirs[1].path().join("unmounted");
+        let record = host
+            .mint_workspace_window(&unmounted, WindowOrigin::Native)
+            .expect("mint");
+        assert_eq!(
+            record.workspace_path,
+            Some(unmounted.to_string_lossy().into_owned()),
+            "a window minted by a key no runtime goes by stores another path"
+        );
     }
 
     /// A terminal tenant built across the last shutdown sweep is refused at
