@@ -12,8 +12,16 @@
     showProfileNotice,
   } from "./state/notice.svelte";
   import { takeDesktopAuthorized } from "./lib/desktopAuthorized";
+  import { describeRejection } from "./state/unhandledRejection.svelte";
 
   type Tab = "profile" | "tokens" | "workspaces";
+
+  /// A refused sign-out leaves the page signed in, so it says so.
+  function signOut(): void {
+    meStore.logout().catch((error: unknown) => {
+      showProfileNotice(`Sign out failed: ${describeRejection(error)}`, "error");
+    });
+  }
   let tab = $state<Tab>(tabFromHash());
 
   function tabFromHash(): Tab {
@@ -82,7 +90,7 @@
   {:else if meStore.status === "loaded" && meStore.me}
     {@const sharesOn = !!meStore.me.flags?.share_workspaces}
     {@const activeTab = visibleTab(tab, sharesOn)}
-    <Topbar me={meStore.me.user} onSignOut={() => meStore.logout()} />
+    <Topbar me={meStore.me.user} onSignOut={signOut} />
     <nav class="tabs">
       <button
         class:active={activeTab === "profile"}
