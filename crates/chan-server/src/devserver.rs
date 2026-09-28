@@ -8606,6 +8606,224 @@ mod tests {
         );
     }
 
+    /// Hand `root` off as a serve request does and return the prefix the
+    /// devserver answered.
+    #[cfg(unix)]
+    async fn hand_off(state: &DevserverState, root: &Path) -> String {
+        match handle_discovery_request(state, 8787, register_request(root)).await {
+            crate::devserver_handoff::Response::Registered { prefix, .. } => prefix,
+            other => panic!("fixture: the serve request failed: {other:?}"),
+        }
+    }
+
+    /// Assert that `entry` is the on row of the registry row that stores
+    /// `stored`, with the prefix and token of the record at `prefix`.
+    #[cfg(unix)]
+    fn assert_on_row_of(
+        state: &DevserverState,
+        entry: &WorkspaceEntry,
+        stored: &Path,
+        prefix: &str,
+    ) {
+        let token = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get(prefix)
+            .expect("fixture: no record at the prefix")
+            .token
+            .clone();
+        assert_eq!(
+            entry.path,
+            stored.to_string_lossy(),
+            "the row lists a path other than its registry row's root: {entry:?}"
+        );
+        assert_eq!(
+            entry.prefix, prefix,
+            "the row shows another record: {entry:?}"
+        );
+        assert!(entry.on, "the row lists off: {entry:?}");
+        assert!(
+            !token.is_empty() && entry.token == token,
+            "the row carries a token other than its record's: {entry:?}"
+        );
+    }
+
+    /// A relinked root handed off by its moved spelling lists once: on,
+    /// under the root its registry row stores, with the prefix the handoff
+    /// answered and the token of the mount it made.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_lists_once_after_a_handoff() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = hand_off(&state, &relinked).await;
+
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the relinked root does not list once: {entries:?}"
+        );
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+    }
+
+    /// A relinked root turned on through the on route, with no record
+    /// before it, lists once: on, under the root its registry row stores,
+    /// at the row's prefix. The on route answers that same row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_lists_once_after_the_on_route() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, _relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let answered = updated_row(
+            state
+                .set_workspace_on(&prefix, true, false)
+                .await
+                .expect("turn the relinked root on"),
+        );
+
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the relinked root does not list once: {entries:?}"
+        );
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+        assert_eq!(
+            answered, entries[0],
+            "the on route answers a row other than the list's"
+        );
+    }
+
+    /// Two records join a relinked root's row, the off kept under the stored
+    /// root and the on a handoff made under the canonical path: the row shows
+    /// the record desired on, and the other is not listed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_joined_by_an_off_and_an_on_record_lists_the_on_one() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let stored_prefix = registered_workspace_prefix(&stored).expect("prefix");
+        updated_row(
+            state
+                .set_workspace_on(&stored_prefix, false, false)
+                .await
+                .expect("turn the relinked root off"),
+        );
+        let prefix = hand_off(&state, &relinked).await;
+        assert_ne!(
+            prefix, stored_prefix,
+            "fixture: the handoff took the off record's prefix"
+        );
+        assert_eq!(
+            state
+                .workspaces
+                .lock()
+                .unwrap()
+                .get(&stored_prefix)
+                .map(|record| record.root.clone()),
+            Some(stored.clone()),
+            "fixture: no off record under the stored root"
+        );
+
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the relinked root does not list once: {entries:?}"
+        );
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+    }
+
+    /// Two records join a relinked root's row and are alike in being desired
+    /// on: whether neither or both are, the row shows the one kept under the
+    /// stored root, though the other's prefix sorts first. Two records kept
+    /// under one root show the one whose prefix sorts first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_joined_by_two_records_alike_lists_the_stored_ones() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        // A registration of the moved spelling caches the canonical path on
+        // the row, as a handoff's does.
+        state
+            .host
+            .library()
+            .register_workspace(&relinked)
+            .expect("register the moved spelling");
+        let canonical = canonical_root(&relinked);
+        let rows = state.host.library().list_workspaces();
+        assert!(
+            rows.len() == 1 && rows[0].cached_canonical_path() == canonical,
+            "fixture: the row does not cache the canonical path: {rows:?}"
+        );
+        let stored_prefix = registered_workspace_prefix(&stored).expect("prefix");
+        assert!(
+            "/b-canonical" < stored_prefix.as_str(),
+            "fixture: {stored_prefix} sorts first"
+        );
+
+        let cases = [
+            (
+                "neither desired on",
+                [
+                    (&stored, stored_prefix.as_str(), false),
+                    (&canonical, "/a-canonical", false),
+                ],
+                stored_prefix.as_str(),
+            ),
+            (
+                "both desired on",
+                [
+                    (&stored, stored_prefix.as_str(), true),
+                    (&canonical, "/a-canonical", true),
+                ],
+                stored_prefix.as_str(),
+            ),
+            (
+                "both kept under the canonical path",
+                [
+                    (&canonical, "/b-canonical", false),
+                    (&canonical, "/a-canonical", false),
+                ],
+                "/a-canonical",
+            ),
+        ];
+        for (case, records, expected) in cases {
+            {
+                let mut map = state.workspaces.lock().unwrap();
+                map.clear();
+                for (root, prefix, desired_on) in records {
+                    map.insert(
+                        prefix.to_string(),
+                        WorkspaceRecord::prepared(root.clone(), prefix.to_string(), desired_on, 1),
+                    );
+                }
+            }
+            let entries = state.workspace_entries();
+            assert_eq!(entries.len(), 1, "{case}: {entries:?}");
+            assert_eq!(
+                entries[0].prefix, expected,
+                "{case}: the row shows another record: {entries:?}"
+            );
+            assert_eq!(
+                entries[0].path,
+                stored.to_string_lossy(),
+                "{case}: the row lists another path: {entries:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn discovery_registration_mounts_and_mints_one_window_per_request() {
         let _env = chan_home_env_read();
