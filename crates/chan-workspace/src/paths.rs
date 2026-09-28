@@ -787,6 +787,127 @@ pub mod root_stall {
         let steps: Vec<&str> = open.iter().rev().map(|step| step.name()).collect();
         format!("{} @ {}", steps.join(" <- "), path.display())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const OUTER: Step = Step::new("root_stall::tests::outer");
+        const INNER: Step = Step::new("root_stall::tests::inner");
+        const BOUND: Duration = Duration::from_secs(10);
+
+        /// A step marks the calls of the thread that opened it and of no
+        /// other: while one thread has the step open, a call under the root
+        /// on another thread goes through, and the opening thread's call is
+        /// held. So a closure that moves to another thread leaves its
+        /// caller's steps behind.
+        #[test]
+        fn a_step_holds_calls_on_its_own_thread_only() {
+            let root = tempfile::tempdir().expect("root");
+            let stall = stall_matching(root.path(), &[OUTER]);
+            let (opened, open) = std::sync::mpsc::channel();
+            let (ask, asked) = std::sync::mpsc::channel::<()>();
+            let inside = root.path().join("inside");
+            let stepping = std::thread::spawn(move || {
+                let _step = OUTER.open();
+                opened.send(()).expect("test thread");
+                asked.recv().expect("test thread");
+                stall_point(&inside);
+            });
+            open.recv_timeout(BOUND).expect("the step never opened");
+            let outside = root.path().join("outside");
+            stall.finishes_beside("a call outside the step", BOUND, move || {
+                stall_point(&outside)
+            });
+            assert_eq!(
+                stall.passed(),
+                1,
+                "the call outside the step was not let through"
+            );
+            assert!(
+                stall.entered().is_empty(),
+                "a call outside the step was held: {:#?}",
+                stall.entered()
+            );
+            ask.send(()).expect("stepping thread");
+            assert!(
+                stall.wait_entered(BOUND),
+                "the call inside the step was not held"
+            );
+            drop(stall);
+            stepping.join().expect("stepping thread");
+        }
+
+        /// A held call's record names the steps open on it, innermost first,
+        /// and the path it asked; a step is held while an outer one is open.
+        #[test]
+        fn a_held_call_records_its_steps_innermost_first() {
+            let root = tempfile::tempdir().expect("root");
+            let stall = stall_matching(root.path(), &[INNER]);
+            let path = root.path().join("asked");
+            let asked = path.clone();
+            let holding = std::thread::spawn(move || {
+                let _outer = OUTER.open();
+                let _inner = INNER.open();
+                stall_point(&asked);
+            });
+            assert!(
+                stall.wait_entered(BOUND),
+                "the call inside both steps was not held"
+            );
+            assert_eq!(
+                stall.entered(),
+                vec![format!("{INNER} <- {OUTER} @ {}", path.display())]
+            );
+            drop(stall);
+            holding.join().expect("holding thread");
+        }
+
+        /// A step closes when its function unwinds: a later call on the same
+        /// thread is let through.
+        #[test]
+        fn a_step_closes_when_its_function_unwinds() {
+            let root = tempfile::tempdir().expect("root");
+            let stall = stall_matching(root.path(), &[OUTER]);
+            let after = root.path().join("after");
+            stall.finishes_beside("a call after its step unwound", BOUND, move || {
+                let unwound = std::panic::catch_unwind(|| {
+                    let _step = OUTER.open();
+                    panic!("the step's function fails");
+                });
+                assert!(unwound.is_err(), "the step's function did not unwind");
+                stall_point(&after);
+            });
+            assert_eq!(
+                stall.passed(),
+                1,
+                "the call after the unwind was not let through"
+            );
+        }
+
+        /// The guard of an open step is not `Send`, so a spawned future cannot
+        /// hold a step open across an await. This stops compiling when the
+        /// guard is `Send`: both impls below then apply and the call is
+        /// ambiguous.
+        #[test]
+        fn an_open_step_is_not_send() {
+            trait AmbiguousIfSend<A> {
+                fn some_item() {}
+            }
+            impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+            impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+            <OpenStep as AmbiguousIfSend<_>>::some_item();
+        }
+
+        /// A stall asked to hold no step refuses: holding every call is what
+        /// `stall` does.
+        #[test]
+        #[should_panic(expected = "stall_matching needs at least one step")]
+        fn stall_matching_refuses_no_steps() {
+            let root = tempfile::tempdir().expect("root");
+            let _stall = stall_matching(root.path(), &[]);
+        }
+    }
 }
 
 /// Strip a leading Windows `\\?\` verbatim prefix (`\\?\UNC\srv\share` ->
