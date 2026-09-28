@@ -1246,10 +1246,14 @@ impl WorkspaceHost {
     /// Open a registered workspace path and mount it under
     /// `config.prefix`.
     ///
-    /// The path must already be registered with this host's
-    /// `Library`. Desktop first-launch code can create/register the
-    /// workspace before calling this method; the CLI compatibility path
-    /// keeps its existing auto-create behavior outside the host.
+    /// The path must already be registered with this host's `Library`. This
+    /// entry is not idempotent and takes no root lock, so its caller must not
+    /// run it beside another open, a close or a removal of the same root.
+    /// Beside an open of that root in flight, it answers
+    /// `ChanError::WorkspaceAlreadyOpen` after the open's release budget and
+    /// leaves the retry state on that open's row until the other open
+    /// settles. The idempotent entry is
+    /// [`open_or_get_registered_workspace`](Self::open_or_get_registered_workspace).
     pub async fn open_registered_workspace(
         &self,
         root: impl AsRef<Path>,
@@ -1284,8 +1288,13 @@ impl WorkspaceHost {
         let release_budget = self.open_release_budget;
         #[cfg(not(test))]
         let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
-        // Declared before the guard, so a caller that leaves settles its row
-        // before its permit goes to the next caller.
+        // Declared before the guard. While the permit is back in this frame,
+        // through the tenant build and a failed mount's teardown, a caller
+        // that leaves settles its row before the permit is released. While
+        // the permit is with blocking work, or in a completed result nobody
+        // received, it is released with that work instead. Under the
+        // idempotent entry the root's lock, released after both, hides the
+        // order from every other caller.
         let mut permit;
         // Mark the mount in flight (status `starting`) and fire the watch feed
         // so the launcher spins this row while the mount waits for its permit

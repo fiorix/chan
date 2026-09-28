@@ -138,12 +138,15 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// Lock order: a caller holds at most one root lock. The only lock it may
 /// already hold when it takes one is the devserver's mount-attempt lock for
 /// that root's prefix (below). Every other lock on its path is taken after
-/// the root lock: call permits, the routing map, the mount-state map, the
-/// overlay's and window registry's data and save locks, and the library's
-/// registry mutex. Those are taken and released while the root lock is held and
-/// none is held while a root lock is awaited. The maps of key computations
-/// ([`RootKeys`]) and health checks in flight are leaves, held across no
-/// await and no filesystem call.
+/// the root lock: the routing map, the mount-state map, the overlay's and
+/// window registry's data and save locks, and the library's registry mutex.
+/// Those are taken and released while the root lock is held and none is held
+/// while a root lock is awaited. A call permit is also taken after the root
+/// lock, but it is not bound to it: a permit whose caller left outlives that
+/// caller's root lock, and the public open of an already-open workspace takes
+/// one with no root lock. No permit is held while a root lock is awaited.
+/// The maps of key computations ([`RootKeys`]) and health checks in flight
+/// are leaves, held across no await and no filesystem call.
 ///
 /// The devserver's mount-attempt locks, a [`KeyedLocks`] by prefix, sit
 /// above the root locks: an attempt holds its prefix's lock across its
@@ -163,8 +166,10 @@ pub(crate) enum RootCall {
 /// A permit moves into blocking work and returns with its result. A caller
 /// that leaves drops its lifecycle lock; the work keeps this permit until it
 /// has dropped its own workspace reference, and references held elsewhere,
-/// such as the tasks of a tenant its caller dropped, can outlast it. A
-/// waiter then dispatches its own call.
+/// such as the tasks of a tenant its caller dropped, can outlast it. A mount
+/// waiter that gets the permit within the open's release budget then
+/// dispatches its own call; the revalidation's permit has no waiter, since an
+/// open that finds it held skips the check.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 
 /// Canonical root keys computed on the blocking pool, with one computation
