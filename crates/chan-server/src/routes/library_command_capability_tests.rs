@@ -929,4 +929,86 @@ mod refusal_envelopes {
         server.abort();
         let _ = server.await;
     }
+
+    /// A workspace mint in a relinked root is gated on the leader of the
+    /// root's tenant whichever of the two paths the client names, the root
+    /// its registry row stores or the canonical path: a claimed acting
+    /// window that is not the leader is refused, and the leader's is not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_roots_workspace_mint_is_gated_on_its_leader_by_either_path() {
+        use futures::StreamExt;
+        let (fixture, stored, canonical) = super::relinked_fixture().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = fixture.host.clone().router();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!(
+            "ws://{addr}{}/ws?t={}&w={}",
+            fixture.prefix, fixture.tenant_token, fixture.window_id
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let roster = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let frame = socket.next().await.unwrap().unwrap();
+                if let Ok(text) = frame.to_text() {
+                    let value: serde_json::Value = serde_json::from_str(text).unwrap();
+                    if value["type"] == "session_roster" {
+                        break value;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            roster["leader"], fixture.window_id,
+            "fixture: the invoking window does not lead"
+        );
+        let app = launcher_router(fixture.host.clone(), None, None);
+        for path in [&stored, &canonical] {
+            let mint = |acting: &str| {
+                serde_json::json!({
+                    "kind": "workspace",
+                    "workspace_path": path,
+                    "acting_window_id": acting,
+                })
+            };
+            assert_refusal(
+                send(
+                    &app,
+                    "POST",
+                    "/api/library/windows",
+                    None,
+                    Some(mint("follower")),
+                )
+                .await,
+                StatusCode::FORBIDDEN,
+                "not the session leader for this window",
+            )
+            .await;
+            let (status, record) = json(
+                send(
+                    &app,
+                    "POST",
+                    "/api/library/windows",
+                    None,
+                    Some(mint(&fixture.window_id)),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "the leader's mint by {} was refused: {record}",
+                path.display()
+            );
+        }
+        socket.close(None).await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
 }

@@ -9010,6 +9010,114 @@ mod tests {
         }
     }
 
+    /// A relinked root restored after a restart from an overlay row kept
+    /// under its canonical path, which is how a mount of it is saved, lists
+    /// once: on, under the root its registry row stores, with the restored
+    /// record's prefix and token.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_root_restored_from_its_canonical_path_lists_once() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let canonical = canonical_root(&relinked);
+        let rows = vec![PersistedWorkspace {
+            path: canonical.to_string_lossy().into_owned(),
+            desired_on: true,
+            generation: 1,
+        }];
+        let rows = state.register_restore_rows(rows).await;
+        let attempts = state.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx).await;
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "fixture: the restore registered the canonical path a second time"
+        );
+        let prefix = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| record.root == canonical)
+            .map(|record| record.prefix.clone())
+            .expect("fixture: no record under the canonical path");
+
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the relinked root does not list once: {entries:?}"
+        );
+        assert_on_row_of(&state, &entries[0], &stored, &prefix);
+    }
+
+    /// A registered root whose own last component became a symlink to a
+    /// directory of another name fails to mount. The list then has one row
+    /// for it: the root its registry row stores as its path, that root's
+    /// basename as its label, off, with the mount's error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_relinked_to_another_name_lists_its_stored_label() {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        std::fs::create_dir_all(holder.path().join("named")).expect("mkdir");
+        let state = devserver_with_windows(home.path()).await;
+        let stored = state
+            .host
+            .library()
+            .register_workspace(&holder.path().join("named"))
+            .expect("register")
+            .root_path;
+        let other = holder.path().join("other");
+        std::fs::rename(&stored, &other).expect("move the root");
+        symlink(&other, &stored).expect("link the old root");
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let _ = state.set_workspace_on(&prefix, true, false).await;
+        let reason = match state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get(&prefix)
+            .map(|record| record.phase.clone())
+        {
+            Some(MountPhase::Failed(reason)) => reason,
+            phase => panic!("fixture: the on did not fail: {phase:?}"),
+        };
+
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the relinked root does not list once: {entries:?}"
+        );
+        assert_eq!(
+            entries[0].path,
+            stored.to_string_lossy(),
+            "the row lists another path: {entries:?}"
+        );
+        assert_eq!(
+            entries[0].label,
+            workspace_label(&stored),
+            "the row is labelled by another path: {entries:?}"
+        );
+        assert_ne!(
+            workspace_label(&stored),
+            workspace_label(&other),
+            "fixture: the two basenames are one"
+        );
+        assert!(!entries[0].on, "the row lists on: {entries:?}");
+        assert_eq!(
+            (entries[0].status, entries[0].error.as_deref()),
+            (WorkspaceStatus::Error, Some(reason.as_str())),
+            "the row does not carry the mount's error: {entries:?}"
+        );
+    }
+
     /// A relinked root turned on through the on route and then handed off
     /// has two records keyed by its canonical path, at the stored root's
     /// prefix, which the host serves, and at the canonical path's, which it

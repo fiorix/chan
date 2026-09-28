@@ -6378,6 +6378,33 @@ mod tests {
         );
     }
 
+    /// A workspace window minted by a relinked root's key carries the client
+    /// origin its caller names, in the mint's answer and in the window feed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workspace_window_carries_the_origin_its_caller_names() {
+        let (host, _overlay, stored, canonical, dirs) = relinked_host();
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json"))),
+            "local".into(),
+        );
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        for origin in [WindowOrigin::Browser, WindowOrigin::Native] {
+            let record = host
+                .mint_workspace_window(&canonical, origin)
+                .expect("mint");
+            assert_eq!(record.origin, origin, "the mint answered another origin");
+            let fed = host
+                .assemble_window_records()
+                .into_iter()
+                .find(|fed| fed.window_id == record.window_id)
+                .expect("the window is missing from the feed");
+            assert_eq!(fed.origin, origin, "the feed carries another origin");
+        }
+    }
+
     /// A terminal tenant built across the last shutdown sweep is refused at
     /// publication and shuts its runtime down before it reports the refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
