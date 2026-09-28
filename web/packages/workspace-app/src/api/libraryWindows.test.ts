@@ -512,6 +512,47 @@ function pageAnswer(status = 200, message = "", retryAfter = "1"): Awaited<Retur
   return { response, readRefusal: vi.fn(() => readApiError(response)) };
 }
 
+const MOVED = "The new window was not opened because its tab was taken to another page.";
+const MOVED_KEPT =
+  "The new window was not opened because its tab was taken to another page, and its record could not be removed; close it from the list of windows.";
+
+type MoveTarget = "another site" | "a page of this origin";
+
+/// Take a new popup to another page, as its user can while its create is
+/// pending. Another site refuses every read and the name; a page of this
+/// origin is a document of its own. Returns the page a same-origin popup holds.
+function moveTab(popup: FakePopup, to: MoveTarget): Document {
+  const page = document.implementation.createHTMLDocument();
+  page.body.textContent = "User page";
+  if (to === "another site") {
+    const denied = () => { throw new DOMException("Blocked cross-origin access", "SecurityError"); };
+    Object.defineProperty(popup, "location", { get: denied });
+    Object.defineProperty(popup, "document", { get: denied });
+    Object.defineProperty(popup, "name", { get: denied, set: denied });
+  } else {
+    popup.location.href = "http://localhost:3000/elsewhere";
+    popup.document = page;
+  }
+  return page;
+}
+
+/// A create whose answer the test gives, so the popup can change before it;
+/// every later action answers `later`.
+function pendingCreate(later: () => Promise<undefined> = async () => undefined) {
+  const create = {
+    answer: (_result: { window: ScopedLibraryWindow }) => {},
+    refuse: (_error: Error) => {},
+    runAction: vi.fn(),
+  };
+  create.runAction
+    .mockImplementationOnce(() => new Promise((resolve, reject) => {
+      create.answer = resolve;
+      create.refuse = reject;
+    }))
+    .mockImplementation(later);
+  return create;
+}
+
 describe("creating a capability popup", () => {
   test.each([
     [401, "invalid or expired library command capability"],
@@ -637,6 +678,137 @@ describe("creating a capability popup", () => {
 
     expect(popup.location.href).toBe(scopedWindow().launch_path);
     expect(host.runAction).toHaveBeenCalledTimes(1);
+  });
+
+  test("leaves a popup its user took to another site before the create answered", async () => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const create = pendingCreate();
+    const host = bridge({ runAction: create.runAction });
+    const outcome = createLibraryWindow(host, { action: "new_terminal" }).then(() => null, (error: unknown) => error);
+    moveTab(popup, "another site");
+    create.answer({ window: scopedWindow() });
+
+    expect(await outcome).toMatchObject({ message: MOVED });
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test("leaves a popup its user took to a page of this origin before the create answered", async () => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const create = pendingCreate();
+    const host = bridge({ runAction: create.runAction });
+    const outcome = createLibraryWindow(host, { action: "new_terminal" }).then(() => null, (error: unknown) => error);
+    const page = moveTab(popup, "a page of this origin");
+    create.answer({ window: scopedWindow() });
+
+    expect(await outcome).toMatchObject({ message: MOVED });
+    expect(popup.name).toBe("");
+    expect(popup.location.href).toBe("http://localhost:3000/elsewhere");
+    expect(page.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(false);
+    expect(page.body.textContent).toBe("User page");
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test.each(["another site", "a page of this origin"] as const)("leaves a popup its user took to %s when the create is refused", async (to) => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const create = pendingCreate();
+    const host = bridge({ runAction: create.runAction });
+    const outcome = createLibraryWindow(host, { action: "new_terminal" }).then(() => null, (error: unknown) => error);
+    moveTab(popup, to);
+    const refusal = new Error("window tenant is not running");
+    create.refuse(refusal);
+
+    expect(await outcome).toBe(refusal);
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(host.runAction).toHaveBeenCalledTimes(1);
+  });
+
+  test("says a moved popup's record stays when its discard is refused", async () => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const create = pendingCreate(async () => { throw new Error("capability revoked"); });
+    const host = bridge({ runAction: create.runAction });
+    const outcome = createLibraryWindow(host, { action: "new_terminal" }).then(() => null, (error: unknown) => error);
+    moveTab(popup, "another site");
+    create.answer({ window: scopedWindow() });
+
+    expect(await outcome).toMatchObject({ message: MOVED_KEPT });
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
+    expect(popup.close).not.toHaveBeenCalled();
+  });
+
+  test("discards the record of a popup its user closed before the create answered", async () => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const create = pendingCreate();
+    const host = bridge({ runAction: create.runAction });
+    const outcome = createLibraryWindow(host, { action: "new_terminal" }).then(() => "resolved", (error: unknown) => error);
+    // Closed first: a closed popup whose location an engine will not read is
+    // not a moved one.
+    popup.closed = true;
+    Object.defineProperty(popup, "location", {
+      get() { throw new DOMException("The window is closed", "SecurityError"); },
+    });
+    create.answer({ window: scopedWindow() });
+
+    expect(await outcome).toBe("resolved");
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test("leaves a popup its user took to another page during the wait when its page is refused", async () => {
+    vi.useFakeTimers();
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({
+      runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }),
+      checkPage: vi.fn()
+        .mockResolvedValueOnce(pageAnswer(503, "Restoring sessions.", "30"))
+        .mockResolvedValueOnce(pageAnswer(409, "Page is unavailable.")),
+    });
+    const outcome = createLibraryWindow(host, { action: "new_terminal" }).then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.checkPage).toHaveBeenCalledTimes(1);
+    moveTab(popup, "a page of this origin");
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(await outcome).toMatchObject({ status: 409, message: "Page is unavailable." });
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(popup.location.href).toBe("http://localhost:3000/elsewhere");
+    expect(host.runAction).toHaveBeenCalledTimes(2);
+    expect(host.runAction).toHaveBeenLastCalledWith({ action: "close_window", window_id: "w-other" });
+  });
+
+  test("keeps open a popup whose page it navigated when the refresh after it rejects", async () => {
+    const navigate = vi.fn();
+    const popup = fakePopup();
+    // A navigation that has not committed yet: the location still reads blank.
+    Object.defineProperty(popup, "location", {
+      value: { get href() { return "about:blank"; }, set href(url: string) { navigate(url); } },
+    });
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({
+      runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }),
+      refresh: vi.fn().mockRejectedValue(new Error("Snapshot refused.")),
+    });
+
+    await expect(createLibraryWindow(host, { action: "new_terminal" })).rejects.toThrow("Snapshot refused.");
+
+    expect(navigate).toHaveBeenCalledExactlyOnceWith(scopedWindow().launch_path);
+    expect(popup.close).not.toHaveBeenCalled();
   });
 });
 

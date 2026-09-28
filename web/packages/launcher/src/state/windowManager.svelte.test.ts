@@ -101,6 +101,40 @@ function gateResponse(retryAfter: string | null = "1"): Response {
   });
 }
 
+const MOVED = "The new window was not opened because its tab was taken to another page.";
+const MOVED_KEPT =
+  "The new window was not opened because its tab was taken to another page, and its record could not be removed; close it from the list of windows.";
+
+type MoveTarget = "another site" | "a page of this origin";
+
+/** Take a new tab to another page, as its user can while its mint is pending.
+ * Another site refuses every read and the name; a page of this origin is a
+ * document of its own. Returns the page a same-origin tab holds. */
+function moveTab(win: FakeWin, to: MoveTarget): Document {
+  const page = document.implementation.createHTMLDocument();
+  page.body.textContent = "User page";
+  if (to === "another site") {
+    const denied = () => { throw new DOMException("Blocked cross-origin access", "SecurityError"); };
+    Object.defineProperty(win, "location", { get: denied });
+    Object.defineProperty(win, "document", { get: denied });
+    Object.defineProperty(win, "name", { get: denied, set: denied });
+  } else {
+    win.location.href = "http://localhost:3000/elsewhere";
+    win.document = page;
+  }
+  return page;
+}
+
+/** A mint whose answer the test gives, so the tab can change before it. */
+function pendingCreate(): { answer: (rec: WindowRecord) => void; refuse: (error: Error) => void } {
+  const settle = { answer: (_rec: WindowRecord) => {}, refuse: (_error: Error) => {} };
+  createWindow.mockImplementation(() => new Promise<WindowRecord>((resolve, reject) => {
+    settle.answer = resolve;
+    settle.refuse = reject;
+  }));
+  return settle;
+}
+
 beforeEach(() => {
   sessionStorage.clear();
   resetWindowManager();
@@ -363,6 +397,95 @@ describe("mintWindow", () => {
     expect(await pending).toMatchObject({ message: "devserver is restoring terminal sessions" });
     expect((checkWindowPage.mock.calls[1][1] as AbortSignal).aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("leaves a tab its user took to another site before the mint answered", async () => {
+    const create = pendingCreate();
+    const outcome = mintWindow("terminal").then(() => null, (error: unknown) => error);
+    const child = opened[0].win;
+    moveTab(child, "another site");
+    create.answer(record({ window_id: "w-new" }));
+    expect(await outcome).toMatchObject({ message: MOVED });
+    expect(discardWindow).toHaveBeenCalledExactlyOnceWith("w-new");
+    expect(child.close).not.toHaveBeenCalled();
+    expect(checkWindowPage).not.toHaveBeenCalled();
+    expect(hasWindowHandle("w-new")).toBe(false);
+  });
+
+  it("leaves a tab its user took to a page of this origin before the mint answered", async () => {
+    const create = pendingCreate();
+    const outcome = mintWindow("terminal").then(() => null, (error: unknown) => error);
+    const child = opened[0].win;
+    const page = moveTab(child, "a page of this origin");
+    create.answer(record({ window_id: "w-new" }));
+    expect(await outcome).toMatchObject({ message: MOVED });
+    expect(child.name).toBe("");
+    expect(child.location.href).toBe("http://localhost:3000/elsewhere");
+    expect(page.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(false);
+    expect(page.body.textContent).toBe("User page");
+    expect(checkWindowPage).not.toHaveBeenCalled();
+    expect(child.close).not.toHaveBeenCalled();
+    expect(discardWindow).toHaveBeenCalledExactlyOnceWith("w-new");
+    expect(hasWindowHandle("w-new")).toBe(false);
+  });
+
+  it.each(["another site", "a page of this origin"] as const)("leaves a tab its user took to %s when the mint is refused", async (to) => {
+    const create = pendingCreate();
+    const outcome = mintWindow("terminal").then(() => null, (error: unknown) => error);
+    const child = opened[0].win;
+    moveTab(child, to);
+    const refusal = new Error("workspace is not running");
+    create.refuse(refusal);
+    expect(await outcome).toBe(refusal);
+    expect(child.close).not.toHaveBeenCalled();
+    expect(discardWindow).not.toHaveBeenCalled();
+  });
+
+  it("says a moved tab's record stays when its discard is refused", async () => {
+    discardWindow.mockRejectedValue(new Error("not the session leader for this window"));
+    const create = pendingCreate();
+    const outcome = mintWindow("terminal").then(() => null, (error: unknown) => error);
+    const child = opened[0].win;
+    moveTab(child, "another site");
+    create.answer(record({ window_id: "w-new" }));
+    expect(await outcome).toMatchObject({ message: MOVED_KEPT });
+    expect(discardWindow).toHaveBeenCalledExactlyOnceWith("w-new");
+    expect(child.close).not.toHaveBeenCalled();
+  });
+
+  it("discards the record of a tab its user closed before the mint answered", async () => {
+    const create = pendingCreate();
+    const outcome = mintWindow("terminal").then((value) => value, (error: unknown) => error);
+    const child = opened[0].win;
+    // Closed first: a closed tab whose location an engine will not read is
+    // not a moved one.
+    child.closed = true;
+    Object.defineProperty(child, "location", {
+      get() { throw new DOMException("The window is closed", "SecurityError"); },
+    });
+    create.answer(record({ window_id: "w-new" }));
+    expect(await outcome).toBeNull();
+    expect(discardWindow).toHaveBeenCalledExactlyOnceWith("w-new");
+    expect(checkWindowPage).not.toHaveBeenCalled();
+    expect(hasWindowHandle("w-new")).toBe(false);
+  });
+
+  it("leaves a tab its user took to another page during the wait when its page is refused", async () => {
+    vi.useFakeTimers();
+    createWindow.mockResolvedValue(record({ window_id: "w-new" }));
+    checkWindowPage.mockImplementationOnce(async () => gateResponse("30"));
+    checkWindowPage.mockImplementationOnce(async () => new Response(JSON.stringify({ error: "Page is unavailable." }), { status: 409 }));
+    const outcome = mintWindow("terminal").then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    const child = opened[0].win;
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    moveTab(child, "a page of this origin");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await outcome).toMatchObject({ status: 409, message: "Page is unavailable." });
+    expect(child.close).not.toHaveBeenCalled();
+    expect(child.location.href).toBe("http://localhost:3000/elsewhere");
+    expect(discardWindow).toHaveBeenCalledExactlyOnceWith("w-new");
+    expect(hasWindowHandle("w-new")).toBe(false);
   });
 
   it("is inert under demoState.enabled (no window opened, no mint)", async () => {
