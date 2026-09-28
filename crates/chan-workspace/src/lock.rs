@@ -1259,12 +1259,7 @@ mod tests {
         let stored_key = crate::paths::canonicalize_normalized(parent.path()).join("stored");
         let moved_key = crate::paths::canonicalize_normalized(&moved);
         let _held = WorkspaceLock::acquire(lock_dir.path(), &moved_key).unwrap();
-        // A pid above every unix pid limit, rather than a reaped child: a child
-        // spawned here holds a duplicate of every descriptor this process has
-        // open until its close-on-exec sweep, so a concurrent test's lock
-        // released by closing its descriptor, as `is_free` and the probe
-        // release theirs, stays held meanwhile. A lock released by `unlock`,
-        // as `WorkspaceLock` releases its own on drop, is not exposed.
+        // Keep this record-only check independent of child-process scheduling.
         let dead_pid = 999_999_999;
         assert_eq!(process_alive(dead_pid), ProcessLiveness::Dead);
         let dead = LockRecord {
