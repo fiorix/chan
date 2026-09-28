@@ -358,11 +358,12 @@
         for (const k of Object.keys(files)) knownFiles.delete(k);
       }
       if (appState !== undefined) {
-        // Clearing the baseline would offer the latest flush's or adopt's
-        // appState again, but nothing reads it before an adopt replaces it:
-        // the session adopts the next socket's first snapshot before it takes
-        // a push, and the adopt sets the baseline and what the next push
-        // offers to that snapshot's appState. A released appState is not
+        // Clearing the baseline offers the latest flush's or adopt's appState
+        // again: a flush before the next adopt offers it, the session refuses
+        // it, and the flush does not ask the session to mark the buffer saved.
+        // The session takes no push before it has adopted the next socket's
+        // first snapshot, and the adopt sets the baseline and what the next
+        // push offers to that snapshot's appState. A released appState is not
         // offered again.
         lastAuthorityAppStateJson = "";
       }
