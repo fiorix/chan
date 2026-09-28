@@ -42,6 +42,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A desktop window waits for a devserver that is restarting.** A new window on a devserver on this machine stays on its connecting page and retries while the devserver answers that it is restoring terminal sessions, where it loaded that refusal as its page. An open window whose devserver restarts keeps its page until the devserver answers again and is then reloaded in place, within about fifteen seconds of the devserver being ready; Reload tries again at once.
 
+- **A browser window left waiting can be opened again.** In the launcher and the workspace app's command deck, a window whose opening page was reloaded, or whose navigation was stopped, is repaired by the next Open, Focus or Show once its wait's mark runs out, after at most sixty or ten seconds, instead of only being focused. A Focus or Show on a window another page is still opening waits for that page's outcome before un-hiding it, and another page's refused repair no longer closes such a window or discards its record.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
