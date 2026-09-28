@@ -2473,10 +2473,12 @@ impl WorkspaceHost {
     /// returns it directly). The registry's create fires the watch via the
     /// bridge; this also fires it directly so the push does not hinge on the
     /// bridge task's scheduling. The tenant side ensures a serving tenant exists
-    /// for the new window. chan-desktop mints through here. A mint that holds a
-    /// workspace's key goes through [`Self::mint_workspace_window`], which
-    /// stores the root the workspace's runtime was opened at; the launcher's
-    /// other browser mints use [`Self::mint_window_with_origin`].
+    /// for the new window. chan-desktop mints through here, its workspace
+    /// windows included, with the key it computed. The devserver's serve
+    /// handoff and the launcher's window route and command action mint a
+    /// workspace window through [`Self::mint_workspace_window`], which stores
+    /// the root the workspace's runtime was opened at; the launcher's other
+    /// browser mints use [`Self::mint_window_with_origin`].
     pub fn mint_window(
         &self,
         kind: WindowKind,
@@ -4539,10 +4541,13 @@ fn canonical_key(root: &Path) -> PathBuf {
 }
 
 /// The keys a registry row goes by without touching any filesystem: the
-/// root it stores, and the canonical path it last resolved to. The two
-/// differ for a root whose path resolves elsewhere since it was
-/// registered, and a store that keys that workspace by either one names
-/// this row.
+/// root it stores, and the canonical path it last resolved to. Loading the
+/// registry primes that path to the stored root, and a registration that
+/// finds the row refreshes it, so for a root whose path resolves elsewhere
+/// since it was registered the two differ only once a registration has
+/// resolved it: a store that keys that workspace by its stored root names
+/// this row, and one that keys it by the canonical path names it only
+/// after that registration.
 pub fn registry_row_keys(row: &chan_workspace::KnownWorkspace) -> [&Path; 2] {
     [row.root_path.as_path(), row.cached_canonical_path()]
 }

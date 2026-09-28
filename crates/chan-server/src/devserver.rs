@@ -1255,10 +1255,12 @@ impl DevserverState {
     /// a newer off row supersedes this attempt, while an absent registry row
     /// means a concurrent remove won.
     ///
-    /// The attempt's root is canonical, and the registry and the overlay
-    /// store canonical roots, so both are matched by their stored keys: this
-    /// check runs before the attempt's bound starts and never waits on a
-    /// filesystem, the attempt's own root's or another's.
+    /// The attempt's root is the key its mount resolved, or the root a
+    /// restored overlay row stores, and it is matched by equality against
+    /// the keys the registry rows go by ([`registry_row_keys`]) and the root
+    /// each overlay row stores: this check runs before the attempt's bound
+    /// starts and never waits on a filesystem, the attempt's own root's or
+    /// another's.
     fn reconcile_attempt_intent(&self, attempt: &MountAttempt, mounted: bool) -> bool {
         let registered = registered_root_keys(self.host.library()).contains(&attempt.root);
         let persisted = self.host.workspace_overlay().and_then(|overlay| {
@@ -1741,13 +1743,16 @@ impl DevserverState {
     /// A record joins the registry row that goes by its root
     /// ([`registry_row_keys`]): the row's stored root, or the canonical path
     /// the row last resolved to, which differ for a root whose path resolves
-    /// elsewhere since it was registered. The joined row lists the row's
-    /// stored root, with the prefix, token, `on` and status of the record
-    /// [`Listing::shown`] chooses: the one whose prefix the host serves, so
-    /// the row's prefix and token are the mount a client reaches, before the
-    /// one desired on, the one keyed by the stored root and the one whose
-    /// prefix sorts first. The other records are not listed. A row no record
-    /// joins is listed off at the prefix derived from its stored root.
+    /// elsewhere since it was registered once a registration has resolved
+    /// it. A restore or an off keys a record by the root the overlay or the
+    /// registry stores, and a mount by the canonical path. The joined row
+    /// lists the row's stored root, with the prefix, token, `on` and status
+    /// of the record [`Listing::shown`] chooses: the one whose prefix the
+    /// host serves, then the one desired on, then the one keyed by the
+    /// stored root, then the one whose prefix sorts first. Serving comes
+    /// first so that the row's prefix, and a toggle sent to it, reach the
+    /// tenant the host serves. The other records are not listed. A row no
+    /// record joins is listed off at the prefix derived from its stored root.
     fn registry_row_entry(&self, ws: &KnownWorkspace, listing: &Listing) -> Option<WorkspaceEntry> {
         match listing.shown(ws) {
             Some(record) => Some(self.entry_from_record(record, &ws.root_path)),
@@ -3236,10 +3241,10 @@ fn canonical_root(root: &Path) -> PathBuf {
 }
 
 /// Every registered root by the keys its registry row goes by
-/// ([`registry_row_keys`]): the root as written, which is canonical, and the
-/// canonical path it last resolved to. A devserver record's canonical root
-/// is registered when it is one of these, which says so without touching
-/// any root's filesystem.
+/// ([`registry_row_keys`]): the root as written, which was canonical when it
+/// was registered, and the canonical path it last resolved to. A devserver
+/// record's root is registered when it is one of these, which says so
+/// without touching any root's filesystem.
 fn registered_root_keys(library: &Library) -> HashSet<PathBuf> {
     library
         .list_workspaces()
@@ -8686,7 +8691,8 @@ mod tests {
 
     /// A relinked root's handed-off window stores the root its registry row
     /// stores, the path the launcher lists the workspace by and nests the
-    /// workspace's windows under, whichever spelling the serve request named.
+    /// workspace's windows under, when the serve request names the path the
+    /// root resolves to now.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_relinked_roots_handed_off_window_stores_its_registry_rows_root() {
