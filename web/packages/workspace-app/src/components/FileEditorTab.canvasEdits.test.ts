@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 import FileEditorTab from "./FileEditorTab.svelte";
 import { api } from "../api/client";
+import { setSocketFactory } from "../api/transport";
+import { demoSocketFactory } from "../demo/socket";
+import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { ApiError } from "../api/errors";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
@@ -808,5 +811,112 @@ describe("a seed the library has not shown yet", () => {
     expect((JSON.parse(disk.get(tab.path)?.content ?? "{}") as { appState?: unknown }).appState).toEqual({
       ...TINTED, viewBackgroundColor: "#b2f2bb",
     });
+  });
+});
+
+describe("a live drawing", () => {
+  /// A scene session's socket that answers only what a test feeds it.
+  class SceneSocket {
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onmessage: ((e: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    sent: Record<string, unknown>[] = [];
+    constructor(readonly url: string) {
+      sceneSockets.push(this);
+    }
+    send(data: string): void {
+      this.sent.push(JSON.parse(data) as Record<string, unknown>);
+    }
+    close(): void {
+      this.readyState = 3;
+    }
+    open(): void {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    frame(f: unknown): void {
+      this.onmessage?.({ data: JSON.stringify(f) });
+    }
+    pushes(): Record<string, unknown>[] {
+      return this.sent.filter((f) => f.type === "push");
+    }
+  }
+  const sceneSockets: SceneSocket[] = [];
+  const PEER = { id: "peer", type: "rectangle", version: 1, versionNonce: 7, isDeleted: false };
+  const STROKE = { id: "stroke", type: "rectangle", version: 1, versionNonce: 3, isDeleted: false };
+
+  beforeEach(() => {
+    scene.live = true;
+    sceneSockets.length = 0;
+    resetSceneSyncForTests();
+    setSocketFactory((url) =>
+      url.includes("/api/scene/ws") ? (new SceneSocket(url) as unknown as WebSocket) : demoSocketFactory(url),
+    );
+  });
+
+  afterEach(() => {
+    scene.live = false;
+    resetSceneSyncForTests();
+    setSocketFactory(demoSocketFactory);
+  });
+
+  /// A drawing on its board, attached to a session whose snapshot holds the
+  /// file as it is.
+  async function attachedDrawing() {
+    const { pane, tab } = await loadedTab("notes/live.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    await board.start();
+    await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+    const socket = sceneSockets[0]!;
+    socket.open();
+    socket.frame({
+      type: "snapshot", path: tab.path, version: 1, elements: [ON_DISK], appState: {}, files: {},
+      dirty: false, mtime_ns: "1000000000", cursors: [],
+    });
+    expect(tab.doc?.state).toBe("attached");
+    return { pane, tab, board, socket };
+  }
+
+  test("a peer's edit leaves the drawing saved, and its close closes it", async () => {
+    const { pane, tab, socket } = await attachedDrawing();
+    socket.frame({ type: "update", version: 2, elements: [PEER] });
+    await vi.waitFor(() => expect(tab.content).toContain('"peer"'));
+    const edited = { dirty: isDirty(tab), pushes: socket.pushes().length };
+    // The authority has written the peer's edit.
+    socket.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    await closeTab(pane.id, tab.id);
+
+    expect({ edited, closed: readTab(tab.id) === undefined }).toEqual({
+      edited: { dirty: false, pushes: 0 },
+      closed: true,
+    });
+  });
+
+  test("a stroke a save pushes before the board's flush reads saved once that flush mirrors it", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    board.stroke(STROKE);
+    // The save hands the stroke over at once, and its ack lands before the
+    // flush writes the stroke into the buffer.
+    const saving = saveTab(tab);
+    await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
+    socket.frame({ type: "push-ok", version: 2 });
+    await saving;
+    await vi.waitFor(() => expect(tab.content).toContain('"stroke"'));
+
+    expect(isDirty(tab)).toBe(false);
+  });
+
+  test("a stroke on the wire keeps the drawing unsaved through a peer's edit until its ack", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    board.stroke(STROKE);
+    await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
+    socket.frame({ type: "update", version: 2, elements: [PEER] });
+    await vi.waitFor(() => expect(tab.content).toContain('"peer"'));
+    const beforeAck = isDirty(tab);
+    socket.frame({ type: "push-ok", version: 3 });
+
+    expect({ beforeAck, afterAck: isDirty(tab) }).toEqual({ beforeAck: true, afterAck: false });
   });
 });
