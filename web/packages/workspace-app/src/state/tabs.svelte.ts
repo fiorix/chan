@@ -751,8 +751,7 @@ export function tabLabel(t: Tab, ctx?: BrowserLabelCtx): string {
   if (t.kind === "extension") return t.title;
   const p = t.path;
   if (!p) return p;
-  const slash = p.lastIndexOf("/");
-  return slash < 0 ? p : p.slice(slash + 1);
+  return basename(p);
 }
 
 /// Files tab title is always a directory. File selection shows the
@@ -3708,7 +3707,7 @@ async function discardEmptyFileOnClose(tab: FileTab): Promise<boolean> {
     return false;
   }
   clearCaretsUnder(tab.path);
-  const name = tab.path.split("/").pop() ?? tab.path;
+  const name = basename(tab.path);
   notify(`Discarded empty file ${name}`);
   return true;
 }

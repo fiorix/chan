@@ -28,7 +28,7 @@
   import { portal } from "./portal";
   import type { TreeEntry } from "../api/types";
   import { isEditableText } from "../state/fileTypes";
-  import { parentDir } from "../state/format";
+  import { basename, parentDir } from "../state/format";
   import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor, isOpenableTextKind } from "../state/kinds";
   import { windowCaps } from "../state/windowCaps";
@@ -244,16 +244,14 @@
     if (src.isDir && (destDir === src.path || destDir.startsWith(`${src.path}/`))) {
       return true;
     }
-    const srcParent = src.path.includes("/")
-      ? src.path.slice(0, src.path.lastIndexOf("/"))
-      : "";
+    const srcParent = parentDir(src.path);
     return srcParent === destDir;
   }
 
   /// Compute the target path for dropping `src` into `destDir`.
   /// destDir == "" means the workspace root.
   function dropTargetPath(src: string, destDir: string): string {
-    const base = src.split("/").pop() ?? src;
+    const base = basename(src);
     return destDir === "" ? base : `${destDir}/${base}`;
   }
 
@@ -1112,7 +1110,7 @@
     if (!q) return [];
     const out: string[] = [];
     for (const r of visibleRows) {
-      const name = r.path.split("/").pop() ?? r.path;
+      const name = basename(r.path);
       if (name.toLowerCase().includes(q)) out.push(r.path);
     }
     return out;

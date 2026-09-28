@@ -44,6 +44,7 @@ import { selectionInRange } from "../decorations/selection";
 import { decodePercent, normalizeHref } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
+import { parentDir } from "../../state/format";
 import { openPreviewPopover } from "../overlays/preview_popover";
 import { resolvePreviewTarget } from "../link_preview";
 import { windowCaps } from "../../state/windowCaps";
@@ -155,7 +156,7 @@ export function parseInternalLink(
   // (no such file) and renders as a broken link even though the on-disk
   // edge is valid. Malformed escapes fall back to the raw path.
   const path = decodePercent(rawPath);
-  const sourceDir = fromPath ? fromPath.split("/").slice(0, -1).join("/") : "";
+  const sourceDir = fromPath ? parentDir(fromPath) : "";
   const target = normalizeHref(path, sourceDir);
   if (target === null) return null;
   const wasAbs = path.startsWith("/");

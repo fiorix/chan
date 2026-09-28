@@ -8,6 +8,7 @@
 
 import { withTokenQuery } from "../../api/client";
 import { decodePercent, normalizeHref } from "../links";
+import { parentDir } from "../../state/format";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg"] as const;
 
@@ -99,9 +100,7 @@ export function resolveImageSrc(src: string, fromPath?: string | null): string {
   const { base } = parseImageSrc(src);
   if (!base) return "";
   if (/^(https?:|data:|blob:)/i.test(base)) return base;
-  const sourceDir = fromPath
-    ? fromPath.split("/").slice(0, -1).join("/")
-    : "";
+  const sourceDir = fromPath ? parentDir(fromPath) : "";
   // Decode first: the on-disk src is percent-encoded (a spaced
   // filename is written `./My%20Image.png` so pulldown-cmark produces
   // a graph edge). normalizeHref + the `/api/fs` re-encode below

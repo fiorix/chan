@@ -137,7 +137,7 @@ import {
   preserveExtension,
   proposeDefaultFilename,
 } from "./pathValidate";
-import { parentDir } from "./format";
+import { basename, parentDir } from "./format";
 import { setNotifyHandler } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
 import { defaultScopeId } from "./scope.svelte";
@@ -1355,7 +1355,7 @@ function resolveWindowCommandDestination(
 /// A tab's display title for `cs pane`: a file tab's basename, else its
 /// explicit `title`.
 function paneTabTitle(tab: Tab): string {
-  return tab.kind === "file" ? (tab.path.split("/").pop() ?? tab.path) : tab.title;
+  return tab.kind === "file" ? basename(tab.path) : tab.title;
 }
 
 /// The close-blocker for a tab, or null when it closes freely. A non-null
@@ -2770,8 +2770,7 @@ function fbScopeForSelection(selected: string | null | undefined): string {
   if (!selected) return "";
   const entry = tree.entries.find((e) => e.path === selected);
   if (entry?.is_dir) return selected;
-  const slash = selected.lastIndexOf("/");
-  return slash > 0 ? selected.slice(0, slash) : "";
+  return parentDir(selected);
 }
 
 /// Snapshot every open FB's current scope: the dock side panes plus
@@ -3923,8 +3922,7 @@ export function openFsGraphForFile(path: string): void {
   // the focal file lives in a meaningful neighbourhood (its cohort)
   // rather than getting lost in the whole-workspace view. Files at the
   // workspace root fall back to workspace scope.
-  const slash = path.lastIndexOf("/");
-  const parent = slash > 0 ? path.slice(0, slash) : "";
+  const parent = parentDir(path);
   openGraphInActivePane({
     mode: "filesystem",
     scopeId: parent ? `dir:${parent}` : "workspace",
@@ -5465,7 +5463,7 @@ function occupiedNameStatus(label: string, target: string): string {
 
 /// Where `source` lands when it is moved or copied into `destDir`.
 function transferLandingPath(source: string, destDir: string): string {
-  const base = source.split("/").pop() ?? source;
+  const base = basename(source);
   return destDir === "" ? base : `${destDir}/${base}`;
 }
 
@@ -6003,7 +6001,7 @@ export const fileOps = {
   /// blast radius before confirming. Resolves true once the path is
   /// deleted.
   async remove(path: string, isDir = false): Promise<boolean> {
-    const name = path.split("/").pop() ?? path;
+    const name = basename(path);
     let message: string;
     if (isDir) {
       const prefix = `${path}/`;

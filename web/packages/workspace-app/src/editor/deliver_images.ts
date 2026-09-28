@@ -15,6 +15,7 @@
 import { fenceLineTracker } from "./commands/fence";
 import { parseImageSrc } from "./extensions/image";
 import { decodePercent, normalizeHref } from "./links";
+import { parentDir } from "../state/format";
 
 /// Replace each markdown image ref in `text` with the bare absolute on-disk
 /// path of the file it points at, followed by a single space. `fromPath` is the
@@ -27,7 +28,7 @@ export function rewriteImagePathsForDelivery(
   workspaceRoot: string | null,
 ): string {
   if (!fromPath || !workspaceRoot || !text.includes("![")) return text;
-  const sourceDir = fromPath.split("/").slice(0, -1).join("/");
+  const sourceDir = parentDir(fromPath);
   const root = workspaceRoot.replace(/\/+$/, "");
 
   // Skip fenced code blocks line by line; inside a fence nothing is rewritten.
