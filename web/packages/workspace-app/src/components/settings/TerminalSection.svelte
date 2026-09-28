@@ -19,7 +19,7 @@
     TERMINAL_FONT_SIZE_MIN,
     TERMINAL_FONT_SIZE_MAX,
   } from "../../terminal/fontSize";
-  import { readStandardTerminalColors } from "../../state/paneColor";
+  import { normalizeHexColor, readStandardTerminalColors } from "../../state/paneColor";
   import type { CommitFn, CommitOptions, SaveStatus } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
@@ -112,19 +112,45 @@
     return { ...colors, contrast: "auto" };
   }
 
+  /// The stored palette in the form the config route accepts. The route
+  /// refuses the whole palette for one hex it cannot parse (it wants the
+  /// leading `#`), and a hand edit of the file can leave such a hex, so a
+  /// write that copied the palette as stored would fail. Each hex goes in
+  /// its normalized form, and one that does not parse takes the standard
+  /// colour in its place.
+  function acceptedCustomColors(
+    custom: TerminalCustomColors,
+    current: Preferences,
+  ): TerminalCustomColors {
+    const background = normalizeHexColor(custom.background);
+    const foreground = normalizeHexColor(custom.foreground);
+    const cursor = normalizeHexColor(custom.cursor);
+    if (background && foreground && cursor) return { ...custom, background, foreground, cursor };
+    const standard = snapshotStandardTerminalColors(current);
+    return {
+      ...custom,
+      background: background ?? standard.background,
+      foreground: foreground ?? standard.foreground,
+      cursor: cursor ?? standard.cursor,
+    };
+  }
+
   function toggleCustomTerminalColors(on: boolean): void {
-    commit((p) => ({
-      ...p,
-      terminal_colors: on
-        ? {
-            mode: "custom",
-            custom: p.terminal_colors?.custom ?? snapshotStandardTerminalColors(p),
-          }
-        : {
-            mode: "standard",
-            ...(p.terminal_colors?.custom ? { custom: p.terminal_colors.custom } : {}),
-          },
-    }));
+    commit((p) => {
+      const stored = p.terminal_colors?.custom;
+      return {
+        ...p,
+        terminal_colors: on
+          ? {
+              mode: "custom",
+              custom: stored ? acceptedCustomColors(stored, p) : snapshotStandardTerminalColors(p),
+            }
+          : {
+              mode: "standard",
+              ...(stored ? { custom: acceptedCustomColors(stored, p) } : {}),
+            },
+      };
+    });
   }
 
   function commitCustomTerminalColors(
@@ -136,7 +162,7 @@
       if (!current) return p;
       return {
         ...p,
-        terminal_colors: { mode: "custom", custom: update({ ...current }) },
+        terminal_colors: { mode: "custom", custom: update(acceptedCustomColors(current, p)) },
       };
     }, undefined, options);
   }
