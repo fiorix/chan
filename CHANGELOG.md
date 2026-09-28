@@ -16,6 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A drawing that does not parse keeps its editor.** A drawing edited as source whose text does not parse is still not saved, but its tab keeps the editor with the text as typed and says on its toolbar that the file was not saved and why, where the parse error took the editor's place. Closing it asks whether to keep editing or close without saving, where the close did nothing; a draft, or a move to another window, says that it was not saved and stays open. Until the text is written, the tab shows no other editor's cursors and merges no live edits.
 
+### Fixed
+
+- **A live drawing is written only when someone edits it.** With scene sync on, a drawing whose `appState` is `{}`, holds other keys or lists its keys in another order is no longer rewritten by a window that only opened it. A peer's change of the grid or the background is no longer pushed back by a window that has not shown it yet, and two windows that change the background at once end with the same one. A drawing another window edited no longer reads as unsaved here, and closing it closes it.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
