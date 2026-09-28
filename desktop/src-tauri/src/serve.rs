@@ -710,9 +710,9 @@ fn window_title_or_label(app: &AppHandle<impl Runtime>, label: &str) -> String {
 
 /// True when the webview is still showing the bundled connecting/retry
 /// screen (`connecting.html`, the remote pre-navigation page). Such a
-/// window has no per-window session, no shells, and nothing to restore,
-/// so close affordances treat it as cancel-and-really-close instead of
-/// burying. Guard the URL read because a dead webview's `url()` can panic on a
+/// window is a devserver window waiting for its devserver, whose record
+/// there holds the window's terminal sessions, so its close hides it
+/// (`close_devserver_window`) instead of discarding the record. Guard the URL read because a dead webview's `url()` can panic on a
 /// nil URL; any failure reads as "not the connecting screen".
 pub fn window_on_connecting_screen(app: &AppHandle<impl Runtime>, label: &str) -> bool {
     webview_url(app, label).is_some_and(|url| on_connecting_page(&url))
@@ -1002,9 +1002,10 @@ fn build_workspace_window_with_completion(
 /// where the SPA shows a Hide / Close / Cancel overlay and
 /// calls back (`hide_window_from_close_confirm` for Hide,
 /// `request_close_window` for Close). No bury happens here
-/// until the SPA decides. A few cases REAL-close with no
-/// prompt when there is no live SPA to ask, such as a control terminal
-/// still connecting or a window still on the pre-SPA connecting screen.
+/// until the SPA decides. With no live SPA to ask, a control
+/// terminal still connecting REAL-closes with no prompt, and a
+/// devserver window still on the pre-SPA connecting screen is
+/// hidden through `request_close_window` with no prompt.
 /// Programmatic closes (the SPA's empty-window cascade,
 /// workspace-off teardown) call `destroy()`
 /// and never reach this handler.
@@ -1066,8 +1067,9 @@ fn on_close_requested(
     }
     // A devserver window still on the connecting page has no
     // SPA command handler to answer a prompt. Route its OS
-    // close through the same pending-delete path as the
-    // page's close chords and Disconnect button.
+    // close through `request_close_window`, as the page's
+    // close chords and Disconnect button do, which hides it
+    // and keeps its record.
     let on_connecting = window_on_connecting_screen(app, label);
     if on_connecting && label.starts_with("lib-") {
         api.prevent_close();
@@ -1083,7 +1085,7 @@ fn on_close_requested(
     }
     // Decide whether there is a live workspace SPA to ASK. A
     // `local::` or connected `lib-` watcher window has one. A
-    // `control-terminal-` still connecting and any window
+    // `control-terminal-` still connecting and any other window
     // still on the pre-SPA connecting screen have nothing to
     // keep or no SPA to ask, so they real-close (return without
     // prevent_close; the Destroyed branch cleans up).
@@ -1344,10 +1346,11 @@ const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('c
 ///   - a connected `control-terminal-`: hide the webview in place and persist
 ///     hidden=true for its registry row.
 ///
-/// Two callers reach here: an explicit hide gesture (`cs window hide` / the
-/// launcher Hide action) and the SPA's Hide choice from the close-confirm
-/// overlay. Close is the sibling choice and rides the existing
-/// `request_close_window` discard/destroy cascade.
+/// Three callers reach here: an explicit hide gesture (`cs window hide` / the
+/// launcher Hide action), the SPA's Hide choice from the close-confirm
+/// overlay, and the close of a devserver window on its connecting page
+/// (`close_devserver_window`). Close is the live page's sibling choice and
+/// rides the `request_close_window` discard/destroy cascade.
 pub(crate) fn bury_window_now(app: &AppHandle<impl Runtime>, state: &Arc<AppState>, label: &str) {
     // A watcher-managed local window (`local::<id>`): bury it through the
     // watcher view state (should_show false -> the reconcile closes the native
