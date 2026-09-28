@@ -14,6 +14,7 @@
 
 import {
   isBlankWindow,
+  isUnmarkedBlankWindow,
   navigateWindowWhenReady,
   type WindowConnection,
   type WindowPageCheck,
@@ -194,6 +195,9 @@ export async function focusLibraryWindow(
   }
   const popup = popupFor(window, bridge);
   const blank = popup !== globalThis.window && isBlankWindow(popup);
+  // A refusal closes only a blank this gesture opened, never one an earlier
+  // wait left marked.
+  const opened = popup !== globalThis.window && isUnmarkedBlankWindow(popup);
   if (popup !== globalThis.window && (blank || !window.connected)) {
     try {
       const ready = await navigateWindowWhenReady(popup, window.launch_path, bridge.checkPage, {
@@ -202,7 +206,7 @@ export async function focusLibraryWindow(
       });
       if (!ready) return;
     } catch (error) {
-      if (blank) popup.close();
+      if (opened) popup.close();
       throw error;
     }
   }

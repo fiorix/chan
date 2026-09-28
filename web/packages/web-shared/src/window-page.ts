@@ -43,6 +43,16 @@ export function isBlankWindow(h: Window): boolean {
   }
 }
 
+/** A blank window whose readable document carries no mark of any age or form,
+ * as `window.open` makes one. A wait marks every readable document it takes
+ * and leaves a mark on one that carried a mark, so a blank that an earlier
+ * wait left answers false. So does an unreadable document. */
+export function isUnmarkedBlankWindow(h: Window): boolean {
+  if (!isBlankWindow(h)) return false;
+  const page = readableDocument(h);
+  return page !== undefined && readMark(page).value === null;
+}
+
 function readableDocument(h: Window): Document | undefined {
   try {
     return h.document;
@@ -56,8 +66,10 @@ function readableDocument(h: Window): Document | undefined {
 // value that has expired, or promises more than its phase allows, as after
 // the clock was set back, is no mark: the window is repaired rather than kept
 // out of reach.
-function readMark(page: Document | undefined): Mark {
-  const value = page?.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) ?? null;
+function readMark(
+  page: Document | undefined,
+  value = page?.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) ?? null,
+): Mark {
   const match = value === null ? null : /^(waiting|navigating):(\d{1,16})$/.exec(value);
   if (value === null || match === null) return { phase: "absent", value };
   const phase = match[1] as MarkPhase;
@@ -155,6 +167,7 @@ function own(
   opts: WaitOptions,
 ): Promise<boolean | Again> {
   if (page?.body && isBlankWindow(h)) page.body.textContent = "Waiting for the window to be ready...";
+  const replaced = readMark(page).value;
   const mark = writeMark(page, "waiting");
   const controller = new AbortController();
   let lastRefusal: Error = new Error("Timed out waiting for the window page");
@@ -227,9 +240,16 @@ function own(
     clearInterval(closedPoll);
     controller.abort();
     // Only this wait's own waiting mark goes; a navigating mark stays until
-    // its document is replaced or its time runs out.
+    // its document is replaced or its time runs out. A document that carried
+    // a mark keeps one, spent if the replaced value still reads live, as it
+    // can when a follower's timer counted it out before the clock did.
     if (page && readMark(page).value === mark) {
-      page.documentElement.removeAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE);
+      if (replaced === null) {
+        page.documentElement.removeAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE);
+      } else {
+        const back = readMark(page, replaced);
+        page.documentElement.setAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE, back.phase === "absent" ? replaced : `${back.phase}:0`);
+      }
     }
   });
 }
