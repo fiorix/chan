@@ -67,11 +67,11 @@ export function validatePath(
   if (/[\x00-\x1f]/.test(trimmed)) {
     return { ok: false, reason: "control characters are not allowed" };
   }
-  // Backslash-as-separator is a Windows-ism; chan-workspace treats `/`
-  // as the only separator so a `\` would either land in a single
-  // segment (illegal char) or confuse the user. Reject early.
+  // On a Unix server `\` is a character of a name, but Windows reads it
+  // as a separator, so a name that holds one would not open there. It is
+  // refused with the other characters Windows does not allow in a name.
   if (trimmed.includes("\\")) {
-    return { ok: false, reason: "use / as the path separator" };
+    return { ok: false, reason: "\\ is not allowed in a name" };
   }
   const segments = pathForSegments.startsWith("/")
     ? pathForSegments.slice(1).split("/")
