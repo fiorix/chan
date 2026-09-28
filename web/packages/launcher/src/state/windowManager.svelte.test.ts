@@ -504,6 +504,22 @@ describe("openWindowRecord", () => {
     expect(replacement.location.href).toContain("/proj-1/?w=w-1");
   });
 
+  it("returns a window another page waits on only once that wait navigates", async () => {
+    vi.useFakeTimers();
+    const child = fakeWin();
+    child.document.documentElement.setAttribute("data-chan-window-page-owner", `waiting:${Date.now() + 30_000}`);
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    let answered: unknown = "pending";
+    void openWindowRecord(record({ connected: false })).then((h) => { answered = h; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(answered).toBe("pending");
+    expect(checkWindowPage).not.toHaveBeenCalled();
+    child.document.documentElement.setAttribute("data-chan-window-page-owner", `navigating:${Date.now() + 10_000}`);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(answered).toBe(child);
+    expect(checkWindowPage).not.toHaveBeenCalled();
+  });
+
   it.each(["blank", "stayed page"] as const)("repairs a %s whose navigation did not commit once ten seconds pass", async (state) => {
     vi.useFakeTimers();
     const child = fakeWin();
