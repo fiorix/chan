@@ -335,4 +335,16 @@ describe("a replay the socket cuts short", () => {
     window.dispatchEvent(new Event("pagehide"));
     expect(readTerminalSnapshot(SESSION), "during the redial's replay").toBeNull();
   });
+
+  test("snapshots again once the redial's replay reaches its ready", async () => {
+    ui.terminalControl = false;
+    await cutReplay();
+    const second = await redial();
+    await attach(second, { id: SESSION, generation: 3, seq: 60 });
+    await receive(second, { type: "ready", cols: 80, rows: 24 });
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(readTerminalSnapshot(SESSION), "the whole ring's screen").toMatchObject({ generation: 3, lastSeq: 60 });
+  });
 });
