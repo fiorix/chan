@@ -106,9 +106,13 @@
   let react: typeof import("react") | null = null;
   let ex: typeof import("@excalidraw/excalidraw") | null = null;
   let api: ExcalidrawImperativeAPI | null = null;
-  /// Reactive mirror of "the imperative API exists", so the session
-  /// bind effect re-runs once the async chunk delivers it.
-  let apiReady = $state(false);
+  /// Set by the board's first seed and never cleared. The library is past
+  /// its init then, whose apply replaces every element put on the board
+  /// before it, so the session binds from here on and its replay stays on
+  /// the board. A later reseed keeps the binding it has and replays nothing
+  /// over the buffer it put there, which could bring back an element that
+  /// buffer deleted.
+  let seededOnce = $state(false);
 
   // The scene the board and the buffer last agreed on: nothing until the
   // board is seeded, then the library's serialization of each seed and of
@@ -353,12 +357,14 @@
     },
   };
 
-  // Bind the session once the imperative API exists; rebind when the
-  // session is replaced. bindCanvas replays the authority snapshot into
-  // a late-mounting canvas.
+  // Bind the session once the board has taken its first seed, and rebind
+  // when the session is replaced. bindCanvas replays the session's scene,
+  // where every frame that came before the bind waits. The seed runs in a
+  // task of the library's and this effect in the microtask after it, so no
+  // socket frame lands between the two.
   $effect(() => {
     const s = session;
-    if (!s || !apiReady) return;
+    if (!s || !seededOnce) return;
     s.bindCanvas(binding);
     return () => s.unbindCanvas(binding);
   });
@@ -423,6 +429,7 @@
     if (files.length > 0) api.addFiles(files);
     lastSerialized = serializeScene(api, ex);
     seeded = true;
+    seededOnce = true;
   }
 
   /// Every change the library reports. The first comes from its init, and
@@ -484,7 +491,6 @@
         viewModeEnabled: readonly,
         excalidrawAPI: (a: ExcalidrawImperativeAPI) => {
           api = a;
-          apiReady = true;
           // The library reports its loading state when it hands the API over,
           // so on the library this returns; it seeds a board whose library is
           // past its init when the API arrives.
