@@ -208,13 +208,22 @@
     return snap.phase === "ready" && snap.readiness?.state !== "recovering";
   }
 
+  // Poll and decide both write the snapshot after an await, and only the
+  // latest request's answer may: a poll in flight when the user answers
+  // would land after the answer and bring the answered step back.
+  let snapshotSeq = 0;
+
   async function poll(): Promise<void> {
     if (stopped) return;
+    const seq = ++snapshotSeq;
     try {
-      snapshot = await api.preflight();
+      const next = await api.preflight();
+      if (seq !== snapshotSeq) return;
+      snapshot = next;
       errorStreak = 0;
       if (!settled(snapshot)) schedule();
     } catch {
+      if (seq !== snapshotSeq) return;
       errorStreak += 1;
       if (errorStreak < MAX_ERROR_STREAK) {
         schedule(POLL_MS * 2);
@@ -232,8 +241,11 @@
   async function decide(step: string, choice: string): Promise<void> {
     if (deciding) return;
     deciding = true;
+    const seq = ++snapshotSeq;
     try {
-      snapshot = await api.preflightDecision({ step, choice });
+      const next = await api.preflightDecision({ step, choice });
+      if (seq !== snapshotSeq) return;
+      snapshot = next;
       if (!settled(snapshot)) schedule();
     } catch {
       schedule();
