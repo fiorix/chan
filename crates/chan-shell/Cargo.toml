@@ -43,5 +43,3 @@ base64 = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-# `start_paused` lives behind tokio's own `test-util` feature.
-tokio = { workspace = true, features = ["test-util"] }
