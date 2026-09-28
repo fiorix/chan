@@ -30,6 +30,7 @@
     moveTab,
     openExtensionInPane,
     openInPane,
+    type Mode,
     openTerminalInPane,
     reattachTerminalInPane,
     paneMode,
@@ -960,6 +961,8 @@
       group?: string;
       cwd?: string;
       ser?: SerTab;
+      mode?: string;
+      inspectorOpen?: boolean;
     };
     try {
       parsed = JSON.parse(payload);
@@ -1011,7 +1014,12 @@
       );
     }
     if (!parsed.path) return false;
-    void openInPane(pane.id, parsed.path);
+    // The source's view of the file comes with it; a mode this build does
+    // not pair with the path falls back to the default there.
+    void openInPane(pane.id, parsed.path, {
+      mode: parsed.mode as Mode | undefined,
+      inspectorOpen: parsed.inspectorOpen === true,
+    });
     return true;
   }
 
