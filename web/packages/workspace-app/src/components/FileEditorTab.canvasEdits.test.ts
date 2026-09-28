@@ -1116,6 +1116,56 @@ describe("a live drawing", () => {
     });
   });
 
+  /// The element ids of each push on `socket`.
+  const idsPushed = (socket: SceneSocket) =>
+    socket.pushes().map((p) => (p.elements as { id: string }[]).map((e) => e.id));
+
+  test("a snapshot fanned on the socket over a push on the wire loses no stroke to a drop after that push's ack", async () => {
+    const X = { id: "x", type: "rectangle", version: 1, versionNonce: 3, isDeleted: false };
+    const Y = { id: "y", type: "rectangle", version: 1, versionNonce: 4, isDeleted: false };
+    const { tab, board, socket } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    board.stroke(X);
+    await vi.advanceTimersByTimeAsync(250);
+    board.stroke(Y);
+    await vi.advanceTimersByTimeAsync(250);
+    // A conflict's resolution fans a snapshot that overtakes the push on the
+    // wire; the authority reads and acks that push after it.
+    socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    await vi.advanceTimersByTimeAsync(0);
+    const afterFan = idsPushed(socket);
+    socket.frame({ type: "push-ok", version: 2 });
+    socket.drop();
+    const next = await nextSocket();
+    // The authority applied the first push and never read the second.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK, X], appState: {} }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({ afterFan, pushedAgain: idsPushed(next) }).toEqual({ afterFan: [["x"]], pushedAgain: [["y"]] });
+  });
+
+  test("a snapshot fanned on the socket over a background on the wire leaves the pick on the board and in the buffer", async () => {
+    const PICKED = "#123456";
+    const { tab, board, socket } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    socket.frame({ type: "push-ok", version: 2 });
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      pushed: backgroundsPushed(socket),
+      background: board.appState.viewBackgroundColor,
+      buffer: tab.content.includes(PICKED),
+      dirty: isDirty(tab),
+    }).toEqual({ pushed: [PICKED], background: PICKED, buffer: true, dirty: false });
+  });
+
   test("a roster frame does not replay the session's scene over a background picked inside the debounce", async () => {
     const PICKED = "#123456";
     const { tab, board, socket } = await openingDrawing();

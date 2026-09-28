@@ -161,7 +161,7 @@ function snap(
 }
 
 class FakeBinding implements SceneCanvasBinding {
-  snapshots: { elements: WireElement[]; appState: WireAppState; files: WireFiles }[] = [];
+  snapshots: { elements: WireElement[]; appState: WireAppState | undefined; files: WireFiles }[] = [];
   updates: { elements: WireElement[]; appState?: WireAppState; files?: WireFiles }[] = [];
   collabCalls = 0;
   pending: WireElement[] = [];
@@ -171,7 +171,7 @@ class FakeBinding implements SceneCanvasBinding {
   pendingFiles: WireFiles = {};
   pendingAppState: WireAppState | null = null;
   session: SceneSession | null = null;
-  applySnapshot(elements: WireElement[], appState: WireAppState, files: WireFiles): void {
+  applySnapshot(elements: WireElement[], appState: WireAppState | undefined, files: WireFiles): void {
     this.snapshots.push({ elements, appState, files });
     this.adopt(elements, appState, files);
   }
@@ -1151,6 +1151,55 @@ describe("a socket's snapshot comes before anything else on it", () => {
       beforeSnapshot: 0,
       replays: [["authority"]],
     });
+  });
+});
+
+describe("a snapshot the server fans on a socket that had its own", () => {
+  // A conflict's resolution fans a snapshot to every attachment on the socket
+  // it has. The authority applies a push it reads after that snapshot and
+  // acks it on the same socket, so the snapshot ends none of this window's
+  // pushes.
+  const MINE = { viewBackgroundColor: "#111111" };
+  const PEERS = { viewBackgroundColor: "#222222" };
+  const idsOf = (sock: FakeSocket) =>
+    sock.frames("push").map((p) => (p.elements as WireElement[]).map((e) => e.id));
+
+  test("keeps the push on the wire: its ack is that push's, and a drop after the next push hands that one back", () => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pending.push(elem("x", 2));
+    binding.flushPendingLocal();
+    binding.pending.push(elem("y", 2));
+    binding.flushPendingLocal();
+    sock.frame(snap([]));
+    const afterFan = idsOf(sock);
+    sock.frame({ type: "push-ok", version: 1 });
+    const afterAck = idsOf(sock);
+    sock.drop();
+    vi.useRealTimers();
+
+    expect({ afterFan, afterAck, handedBack: binding.pending.map((e) => e.id) }).toEqual({
+      afterFan: [["x"]],
+      afterAck: [["x"], ["y"]],
+      handedBack: ["y"],
+    });
+  });
+
+  test("withholds its appState while this window's claim stands, and a later bind replays the claim", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    sock.frame(snap([], { appState: PEERS }));
+    const handed = binding.snapshots.at(-1)?.appState;
+    sock.frame({ type: "push-ok", version: 1 });
+
+    expect({
+      handed,
+      pushes: sock.frames("push").length,
+      replayed: rebind(session, binding).snapshots[0]?.appState,
+    }).toEqual({ handed: undefined, pushes: 1, replayed: MINE });
   });
 });
 
