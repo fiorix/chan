@@ -23,6 +23,22 @@ vi.mock("./polarDrift", async (importOriginal) => {
 afterEach(stopAnimations);
 
 describe("Polar Drift", () => {
+  test("keeps its particles across a resize", () => {
+    const { callbacks } = startAnimation(PolarDrift, recordingWebgl2().gl);
+    const advance = vi.mocked(advancePolarDriftParticles);
+    callbacks.resize(800, 800, false, 0);
+    advance.mockClear();
+    callbacks.frame(1000);
+    const before = advance.mock.calls[0]?.[0];
+    expect(before, "a frame advances the particles").toBeDefined();
+
+    callbacks.resize(600, 800, false, 1000);
+    advance.mockClear();
+    callbacks.frame(2000);
+
+    expect(advance.mock.calls[0]?.[0], "the same particles drift on").toBe(before);
+  });
+
   test("turns its drift 0.06 radians per second of animation time", () => {
     const { callbacks } = startAnimation(PolarDrift, recordingWebgl2().gl);
     callbacks.resize(800, 800, false, 0);

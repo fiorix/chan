@@ -24,6 +24,7 @@ vi.mock("../api/client", async (importOriginal) => {
   };
 });
 
+import { labelFor } from "../state/kinds";
 import { searchPanel } from "../state/store.svelte";
 import SearchPanel from "./SearchPanel.svelte";
 
@@ -81,5 +82,17 @@ describe("a typed path's rows", () => {
     search("dir/");
 
     await vi.waitFor(() => expect(previews()).toContain("a\\b.md"), { timeout: 2_000 });
+  });
+
+  test("chip a directory as a folder and a file as a document", async () => {
+    search("dir/");
+    await vi.waitFor(() => expect(previews()).toContain("a\\b.md"), { timeout: 2_000 });
+
+    const rows = [...target.querySelectorAll(".row1")].map((row) => [
+      row.querySelector(".path")?.textContent?.trim(),
+      row.querySelector(".kind-chip")?.textContent?.trim(),
+    ]);
+    expect(rows, "the file's chip").toContainEqual(["dir/a\\b.md", labelFor("document")]);
+    expect(rows, "the directory's chip").toContainEqual(["dir/x\\y/", labelFor("folder")]);
   });
 });
