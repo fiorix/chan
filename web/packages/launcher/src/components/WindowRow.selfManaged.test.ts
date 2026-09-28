@@ -118,7 +118,7 @@ describe("WindowRow self-managed actions", () => {
     const navigate = vi.fn();
     Object.defineProperty(child.location, "href", { get: () => "http://localhost:3000/p/?w=w", set: navigate });
     vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
-    const rec = win({ window_id: "w", library_id: "local" });
+    const rec = win({ window_id: "w", library_id: "local", connected: false });
     let pending: Promise<void> | undefined;
     if (action === "Open") {
       const el = render(rec);
