@@ -1060,6 +1060,19 @@ mod tests {
         assert_eq!(tenant_prefix_for_window(&records, "missing"), None);
     }
 
+    /// A lock another chan process holds keeps its own sentence, apart from a
+    /// root this process is still releasing.
+    #[test]
+    fn a_lock_another_process_holds_keeps_its_own_sentence() {
+        assert_eq!(
+            map_open_error(
+                "/w",
+                chan_server::Error::Core(chan_workspace::ChanError::WorkspaceLocked)
+            ),
+            "This workspace is open in another chan process. Quit it and try again."
+        );
+    }
+
     /// The embedded open shares the devserver mount's bound over all its
     /// attempts. The bound's pin runs on a paused clock, which moves only when
     /// the test advances it: a blocking task holds tokio's auto-advance off
@@ -1198,6 +1211,39 @@ mod tests {
                     Ok(WorkspaceLifecycleOutcome::Completed)
                 );
             });
+        }
+
+        /// An open beside an earlier open whose caller left, and which still
+        /// holds the root, answers the words the root's row reads.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_open_beside_an_abandoned_open_answers_the_rows_words() {
+            let (library, stored, key, _dirs) = registered_root();
+            let embedded = Arc::new(EmbeddedServer::for_tests(library).await);
+            let stall = root_stall::stall_matching(&stored, &["Library::open_workspace"]);
+            let first = {
+                let embedded = Arc::clone(&embedded);
+                let key = key.clone();
+                tokio::spawn(async move { embedded.open_workspace(&key).await })
+            };
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the first open never reached its root"
+            );
+            first.abort();
+            assert!(
+                first.await.unwrap_err().is_cancelled(),
+                "fixture: the first open answered"
+            );
+            let refused = tokio::time::timeout(HANG_GUARD, embedded.open_workspace(&key))
+                .await
+                .expect("an open beside an abandoned open did not answer")
+                .expect_err("an open beside an abandoned open mounted the root");
+            assert_eq!(refused, STILL_RELEASING);
+            assert_eq!(
+                embedded.host.workspace_status(&stored).1.as_deref(),
+                Some(refused.as_str()),
+                "the answer is not the row's words"
+            );
         }
     }
 }
