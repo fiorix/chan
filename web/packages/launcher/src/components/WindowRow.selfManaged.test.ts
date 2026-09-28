@@ -185,6 +185,26 @@ describe("WindowRow self-managed actions", () => {
 });
 
 describe("browser Show readiness", () => {
+  it("reports a blocked window from Show and from Open", async () => {
+    const { backend } = await import("../api/backend");
+    vi.spyOn(window, "open").mockReturnValue(null);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const el = render(win({
+      window_id: "row blocked", library_id: "local", hidden: true, connected: false, origin: "browser",
+    }));
+    (el.querySelector('[aria-label="Show window"]') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushSync();
+    expect(library.error).toBe("The browser blocked the Chan window");
+    expect(visibility).not.toHaveBeenCalled();
+
+    library.error = null;
+    (el.querySelector('[aria-label="Open window"]') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushSync();
+    expect(library.error).toBe("The browser blocked the Chan window");
+  });
+
   it.each(["ready", "closed", "refused", "connected", "native"])("Show from the row handles %s before visibility", async (outcome) => {
     const visibilityOnly = outcome === "connected" || outcome === "native";
     vi.useFakeTimers();

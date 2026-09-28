@@ -50,8 +50,20 @@ describe("browser action visibility", () => {
     await vi.advanceTimersByTimeAsync(200);
     await pending;
     expect(visibility).not.toHaveBeenCalled();
-    expect(report).toHaveBeenCalledTimes(outcome === "refused" ? 1 : 0);
+    expect(report).toHaveBeenCalledTimes(outcome === "closed" ? 0 : 1);
+    if (outcome === "blocked") {
+      expect(report).toHaveBeenCalledWith(expect.objectContaining({ message: "The browser blocked the Chan window" }));
+    }
     expect(check).toHaveBeenCalledTimes(outcome === "blocked" ? 0 : 1);
+  });
+
+  it("Show reports a blocked window once and changes no visibility", async () => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const report = vi.fn();
+    await setWindowShown({ ...record, window_id: "show blocked" }, true).catch(report);
+    expect(report).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: "The browser blocked the Chan window" }));
+    expect(visibility).not.toHaveBeenCalled();
   });
 
   it.each([
