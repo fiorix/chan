@@ -3024,6 +3024,9 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
 /// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
 /// (handoff `CloseWorkspace`). Runs through the embedded host's owner operation
 /// so live-terminal refusal is reported before anything is unregistered.
+/// A mounted workspace is forgotten, and dropped from the desktop's map of
+/// what it mounted, by the root its registry row stores, which the host
+/// reads from its runtime before the close takes it away.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 async fn close_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -3037,10 +3040,14 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
         return Err("embedded local server is unavailable".to_string());
     };
     let key = canonical_key(&path);
+    let stored = embedded
+        .mounted_root(Path::new(&key))
+        .unwrap_or_else(|| PathBuf::from(&key));
     let outcome = if remove {
-        embedded
-            .remove_workspace_root(Path::new(&key), false)
-            .await?
+        // Named by the row's root, the host's purge matches the windows stored
+        // under it, where the desktop stores them, and under the canonical
+        // path that root resolves to.
+        embedded.remove_workspace_root(&stored, false).await?
     } else {
         embedded
             .close_workspace_root(Path::new(&key), false)
@@ -3049,7 +3056,11 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
     match outcome {
         chan_server::WorkspaceLifecycleOutcome::Completed
         | chan_server::WorkspaceLifecycleOutcome::NotFound => {
-            state.serves.lock().unwrap().remove(&key);
+            state
+                .serves
+                .lock()
+                .unwrap()
+                .remove(stored.to_string_lossy().as_ref());
             persist_workspaces(&state);
             let _ = app.emit(serve::SERVES_CHANGED, ());
         }
