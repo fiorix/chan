@@ -263,6 +263,9 @@ type FakeApi = {
   setElements: (next: Record<string, unknown>[]) => void;
   setAppState: (patch: Record<string, unknown>) => void;
   setFiles: (next: Record<string, unknown>) => void;
+  /// How long after an `updateScene` the library's render shows its appState;
+  /// a timer due sooner runs first.
+  renderAfter: number;
 };
 
 /// A board whose `updateScene` replaces the elements at once and shows the
@@ -278,9 +281,10 @@ function fakeApi(initial: WireElement[] = [], report: () => void = () => {}): Fa
     setTimeout(() => {
       if (next) appState = { ...appState, ...next };
       report();
-    }, 0);
+    }, fake.renderAfter);
   });
-  return {
+  const fake: FakeApi = {
+    renderAfter: 0,
     getSceneElementsIncludingDeleted: () => elements,
     getSceneElements: () => elements.filter((e) => e.isDeleted !== true),
     getAppState: () => appState,
@@ -297,6 +301,7 @@ function fakeApi(initial: WireElement[] = [], report: () => void = () => {}): Fa
       files = next;
     },
   };
+  return fake;
 }
 
 type SessionStub = {
@@ -345,6 +350,15 @@ async function mountBound(
   rendered.props.excalidrawAPI(api);
   await vi.waitFor(() => expect(session.bindCanvas).toHaveBeenCalled());
   return { api, session, binding: bound! };
+}
+
+/// The appStates the canvas handed the session to push.
+const pushedAppStates = (session: SessionStub) =>
+  session.pushScene.mock.calls.map((call) => call[1]).filter((appState) => appState !== undefined);
+
+/// The library reports a change, as it does after each render.
+function libraryChange(): void {
+  (renderMock.mock.calls.at(-1)![0] as { props: { onChange: () => void } }).props.onChange();
 }
 
 describe("scene session binding loop safety", () => {
@@ -512,13 +526,6 @@ describe("an untouched live board pushes no appState", () => {
   // holds them in the library's order.
   const AUTHORITY_ORDER = { gridModeEnabled: false, gridSize: 20, gridStep: 5, viewBackgroundColor: "#ffffff" };
 
-  const pushedAppStates = (session: SessionStub) =>
-    session.pushScene.mock.calls.map((call) => call[1]).filter((appState) => appState !== undefined);
-
-  /// The library reports a change, as it does after each render.
-  function libraryChange(): void {
-    (renderMock.mock.calls.at(-1)![0] as { props: { onChange: () => void } }).props.onChange();
-  }
 
   test("a stored appState of {} is not pushed back as the library's defaults", async () => {
     vi.useFakeTimers();
@@ -605,6 +612,81 @@ describe("sceneDeltas bookkeeping", () => {
     expect(sceneDeltas(els, map)).toHaveLength(0);
     const bumped = [wireEl("a", 2), wireEl("b", 2)];
     expect(sceneDeltas(bumped, map).map((e) => e.id)).toEqual(["a"]);
+  });
+});
+
+describe("a push between an adopt and the library's render of it", () => {
+  // A peer's background, which the board shows only at the library's render.
+  const PEER = { ...boardAppState, viewBackgroundColor: "#000000" };
+
+  /// A bound board that has adopted the authority's appState and flushed it.
+  async function settledBoard(onSceneChange: (json: string) => void = () => {}) {
+    const bound = await mountBound([], onSceneChange);
+    bound.binding.applySnapshot([], { ...boardAppState }, {});
+    libraryChange();
+    vi.advanceTimersByTime(300);
+    bound.session.pushScene.mockClear();
+    return bound;
+  }
+
+  test("a flush that comes due before the render pushes nothing older", async () => {
+    vi.useFakeTimers();
+    try {
+      const onSceneChange = vi.fn();
+      const { api, session, binding } = await settledBoard(onSceneChange);
+      // A cursor frame's render arms the flush, and the library renders the
+      // adopt after that timer has run.
+      libraryChange();
+      vi.advanceTimersByTime(150);
+      api.renderAfter = 100;
+      binding.applyUpdate({ elements: [], appState: PEER });
+      vi.advanceTimersByTime(60);
+
+      expect({
+        shown: api.getAppState().viewBackgroundColor,
+        pushed: pushedAppStates(session),
+        mirrored: String(onSceneChange.mock.calls.at(-1)?.[0] ?? ""),
+      }).toEqual({ shown: "#ffffff", pushed: [], mirrored: expect.stringContaining("#000000") });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a close's flush before the render pushes nothing older", async () => {
+    vi.useFakeTimers();
+    try {
+      const onSceneChange = vi.fn();
+      const { api, session, binding } = await settledBoard(onSceneChange);
+      libraryChange();
+      binding.applyUpdate({ elements: [], appState: PEER });
+      (mounted.at(-1) as unknown as { flushPendingEdits: () => void }).flushPendingEdits();
+
+      expect({
+        shown: api.getAppState().viewBackgroundColor,
+        pushed: pushedAppStates(session),
+        mirrored: String(onSceneChange.mock.calls.at(-1)?.[0] ?? ""),
+      }).toEqual({ shown: "#ffffff", pushed: [], mirrored: expect.stringContaining("#000000") });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The session pushes at once after a snapshot, after the bind's replay and
+  // after an update while a save waits, with no render in between.
+  test.each([
+    ["a snapshot", (binding: SceneCanvasBinding) => binding.applySnapshot([], PEER, {})],
+    ["an update", (binding: SceneCanvasBinding) => binding.applyUpdate({ elements: [], appState: PEER })],
+  ])("a push right after %s is adopted sends nothing older", async (_frame, adopt) => {
+    vi.useFakeTimers();
+    try {
+      const { session, binding } = await settledBoard();
+      adopt(binding);
+      binding.flushPendingLocal();
+
+      expect(pushedAppStates(session)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
