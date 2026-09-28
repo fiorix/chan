@@ -4194,48 +4194,51 @@ async fn request_close_window(
             }
         }
     }
-    // A watcher-managed DEVSERVER window (`lib-<library_id>::<window_id>`) closes
-    // immediately while its registry DELETE runs asynchronously. Record the
-    // close intent before destroying the native surface. A stale feed snapshot
-    // must keep treating this label as suppressed when the DELETE cannot reach
-    // the server; reconnect retries the same intent without reopening it.
     if closing.starts_with("lib-") {
-        let state = Arc::clone(app.state::<Arc<AppState>>().inner());
-        let label = closing.to_string();
-        if let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(&label) {
-            state.pending_window_deletes.queue(&devserver_id, &record);
-            if let Some(view) = state
-                .devserver_watcher_views
-                .lock()
-                .unwrap()
-                .get(&devserver_id)
-                .cloned()
-            {
-                // The watcher view closes the surface on any reconcile that
-                // races the direct destroy. The process-wide pending state is
-                // the durable suppression across watcher replacement.
-                view.bury(&label);
-            }
-            if let Some(conn) = state.devservers.get(&devserver_id) {
-                if let Some(attempt) = state.pending_window_deletes.begin(&label) {
-                    spawn_pending_window_delete_attempt(
-                        app.clone(),
-                        Arc::clone(&state),
-                        conn,
-                        attempt,
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(window = %label, "closed devserver window is absent from the feed");
-        }
-        return window.destroy().map_err(err);
+        return close_devserver_window(&app, &window);
     }
     // `destroy()`, not `close()`: this is the SPA's DELIBERATE close-cascade
     // (last tab, then last pane, just closed -- the window is empty). `close()`
     // would fire `CloseRequested`, where the close-on-red-dot handler prompts
     // instead of closing SPA windows; an empty window is worthless buried.
     // Destroy skips the request phase and goes straight to `Destroyed` cleanup.
+    window.destroy().map_err(err)
+}
+
+/// Close a watcher-managed DEVSERVER window (`lib-<library_id>::<window_id>`).
+/// It closes immediately while its registry DELETE runs asynchronously. Record
+/// the close intent before destroying the native surface. A stale feed
+/// snapshot must keep treating this label as suppressed when the DELETE cannot
+/// reach the server; reconnect retries the same intent without reopening it.
+/// Generic over the Tauri runtime so a test can drive it with the mock app.
+fn close_devserver_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+) -> Result<(), String> {
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    let label = window.label().to_string();
+    if let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(&label) {
+        state.pending_window_deletes.queue(&devserver_id, &record);
+        if let Some(view) = state
+            .devserver_watcher_views
+            .lock()
+            .unwrap()
+            .get(&devserver_id)
+            .cloned()
+        {
+            // The watcher view closes the surface on any reconcile that
+            // races the direct destroy. The process-wide pending state is
+            // the durable suppression across watcher replacement.
+            view.bury(&label);
+        }
+        if let Some(conn) = state.devservers.get(&devserver_id) {
+            if let Some(attempt) = state.pending_window_deletes.begin(&label) {
+                spawn_pending_window_delete_attempt(app.clone(), Arc::clone(&state), conn, attempt);
+            }
+        }
+    } else {
+        tracing::warn!(window = %label, "closed devserver window is absent from the feed");
+    }
     window.destroy().map_err(err)
 }
 
@@ -8157,11 +8160,11 @@ mod tests {
         const MAIN_RS: &str = include_str!("main.rs");
         let close = source_region(
             MAIN_RS,
-            "\nasync fn request_close_window(",
+            "\nfn close_devserver_window<",
             "\nfn hide_window_from_close_confirm(",
         );
         let lib_branch = close
-            .split("if closing.starts_with(\"lib-\")")
+            .split("record_for_native_label(&label)")
             .nth(1)
             .expect("devserver close branch exists");
         let pending = lib_branch
