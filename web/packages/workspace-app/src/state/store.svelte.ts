@@ -5166,6 +5166,9 @@ async function pollIndexStatusOnce(): Promise<void> {
 
 type PromptState = {
   open: boolean;
+  /// Bumped by every prompt, so the modal starts afresh for one asked over
+  /// an open prompt, the same default or not.
+  seq: number;
   title: string;
   defaultValue: string;
   resolve: ((value: string | null) => void) | null;
@@ -5173,6 +5176,7 @@ type PromptState = {
 
 export const promptState = $state<PromptState>({
   open: false,
+  seq: 0,
   title: "",
   defaultValue: "",
   resolve: null,
@@ -5190,6 +5194,7 @@ export function uiPrompt(
     promptState.title = title;
     promptState.defaultValue = defaultValue;
     promptState.resolve = resolve;
+    promptState.seq += 1;
     promptState.open = true;
   });
 }
