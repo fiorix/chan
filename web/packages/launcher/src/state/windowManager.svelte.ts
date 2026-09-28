@@ -29,31 +29,15 @@ const handles = new Map<string, Window>();
 // window_ids from the last feed push, so the reconciler detects removals (the
 // feed signals a discard by ABSENCE, never a tombstone).
 let prevIds = new Set<string>();
-// Disconnected browser-origin rows may be a transient /ws reconnect, so rows
-// without a local closed handle get a short cancellation window before cleanup.
-const DISCONNECTED_BROWSER_WINDOW_DISCARD_MS = 2500;
-const pendingDiscards = new Set<string>();
-
 function servingOrigin(): string {
   return typeof location === "undefined" ? "" : location.origin;
 }
 
 function discardBrowserWindow(id: string): void {
-  pendingDiscards.delete(id);
   handles.get(id)?.close();
   handles.delete(id);
   clearWindowAttention(id);
   void backend.discardWindow(id).catch(() => {});
-}
-
-function scheduleBrowserWindowDiscard(id: string): void {
-  if (pendingDiscards.has(id)) return;
-  pendingDiscards.add(id);
-  clearWindowAttention(id);
-  const timer = setTimeout(() => {
-    if (pendingDiscards.has(id)) discardBrowserWindow(id);
-  }, DISCONNECTED_BROWSER_WINDOW_DISCARD_MS);
-  (timer as { unref?: () => void }).unref?.();
 }
 
 function handleState(id: string): "live" | "closed" | "none" {
@@ -98,7 +82,6 @@ export async function mintWindow(
     if (blank) {
       blank.name = rec.window_id;
       handles.set(rec.window_id, blank);
-      pendingDiscards.delete(rec.window_id);
       const url = windowUrl(rec, servingOrigin());
       if (!(await navigateWindowWhenReady(blank, url, checkWindowPage)) || blank.closed) {
         if (handles.get(rec.window_id) === blank) discardBrowserWindow(rec.window_id);
@@ -107,7 +90,6 @@ export async function mintWindow(
     }
     // A blocked popup leaves no handle; if the record never gets a /ws presence
     // the reconciler treats it like any other stale browser row and discards it.
-    pendingDiscards.delete(rec.window_id);
     clearWindowAttention(rec.window_id);
     return rec;
   } catch (e) {
@@ -125,7 +107,6 @@ export async function openWindowRecord(record: WindowRecord): Promise<Window | n
   const h = window.open("", record.window_id);
   if (!h) return null;
   handles.set(record.window_id, h);
-  pendingDiscards.delete(record.window_id);
   clearWindowAttention(record.window_id);
   h.focus?.();
   let blank: boolean;
@@ -164,7 +145,6 @@ export async function closeWindowRecord(
   else await backend.discardWindow(record.window_id, opts.actingWindowId);
   handles.get(record.window_id)?.close();
   handles.delete(record.window_id);
-  pendingDiscards.delete(record.window_id);
   clearWindowAttention(record.window_id);
 }
 
@@ -194,24 +174,18 @@ export function reconcileWindows(set: WindowSet): void {
     if (!currentIds.has(id)) {
       handles.get(id)?.close();
       handles.delete(id);
-      pendingDiscards.delete(id);
       clearWindowAttention(id);
     }
   }
   for (const w of set.windows) {
     const state = handleState(w.window_id);
     if (state === "live") {
-      pendingDiscards.delete(w.window_id);
       clearWindowAttention(w.window_id);
     } else if (w.origin === "browser" && state === "closed") {
       discardBrowserWindow(w.window_id);
-    } else if (w.origin === "browser" && !w.connected) {
-      scheduleBrowserWindowDiscard(w.window_id);
     } else if (w.origin === "browser" && !w.hidden) {
-      pendingDiscards.delete(w.window_id);
       markWindowAttention(w.window_id);
     } else {
-      pendingDiscards.delete(w.window_id);
       clearWindowAttention(w.window_id);
     }
   }
@@ -228,5 +202,4 @@ export function hasWindowHandle(id: string): boolean {
 export function resetWindowManager(): void {
   handles.clear();
   prevIds = new Set();
-  pendingDiscards.clear();
 }
