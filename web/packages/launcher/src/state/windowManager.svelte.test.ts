@@ -1,7 +1,7 @@
 // The client-side window manager: mint (open-blank-then-navigate + 409 close),
-// re-open, leader-side close/hide, and the feed reconciler that flags connected
-// browser windows opened elsewhere while discarding stale disconnected browser
-// rows. backend is mocked; window.open is spied so we can inspect the spawned
+// re-open, leader-side close/hide, and the feed reconciler that retains and
+// flags visible browser records without a local handle. backend is mocked;
+// window.open is spied so we can inspect the spawned
 // handle and its navigation.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -625,7 +625,7 @@ describe("reconcileWindows", () => {
     expect(hasWindowAttention("w-stale")).toBe(false);
   });
 
-  it("cancels stale cleanup when a browser-origin record reconnects", async () => {
+  it("keeps a browser-origin record available when it reconnects", async () => {
     vi.useFakeTimers();
     const rec = record({ window_id: "w-reconnect", origin: "browser", connected: false });
     reconcileWindows(set([rec]));

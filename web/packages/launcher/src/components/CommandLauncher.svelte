@@ -137,9 +137,8 @@
     return window.control ? "Control terminal" : "Terminal";
   }
 
-  /// The actions this particular window can take. Unlike the workspace app,
-  /// Show here is a pure visibility flip that does not steal focus, so a
-  /// hidden window keeps both it and Focus.
+  /// Show avoids explicit focus while Focus requests it, so a hidden window
+  /// offers both. A browser may still raise the named window Show acquires.
   function windowActions(window: WindowRecord): WindowActionId[] {
     if (!canManageWindow(window)) return [];
     return window.hidden ? ["focus", "show", "close"] : ["focus", "hide", "close"];

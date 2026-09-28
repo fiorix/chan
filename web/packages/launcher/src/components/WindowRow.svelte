@@ -8,7 +8,7 @@
   //     responding slow-flashes its eye yellow for attention; acting on the window
   //     clears it.
   //   - self-managed (devserver/PWA): no bridge, so [OPEN] opens the window as an
-  //     in-app browser window. A connected browser window with no live handle
+  //     in-app browser window. A visible browser window with no live handle
   //     here flashes for a re-open click.
   //   - readonly (gateway): static, connection dot only, no actions.
   //
@@ -184,7 +184,7 @@
   </div>
 {:else if selfManagedWindows}
   <!-- Self-managed (devserver/PWA): no desktop bridge, so [OPEN] opens the
-       window in-app as a browser window. A connected browser window with no
+       window in-app as a browser window. A visible browser window with no
        live handle here flashes for a re-open click. -->
   <div class="row">
     {#if icon}
@@ -194,10 +194,9 @@
     {/if}
     {@render windowName()}
     <div class="row-actions">
-      <!-- Bridgeless SHOW/HIDE: flips the shared, server-persisted visibility
-           (the `/visibility` web op), leader-gated like the create controls, so a
-           follower tab sees it disabled. Separate from OPEN, which owns this
-           launcher's local browser handle. -->
+      <!-- SHOW repairs a disconnected browser window before unhiding it.
+           Both visibility actions are leader-gated, so followers cannot run
+           them. OPEN remains available for acquiring a named window. -->
       <button
         class="icon-btn"
         class:on={!w.hidden}
