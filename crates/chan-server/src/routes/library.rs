@@ -1837,6 +1837,21 @@ fn mount_timed_out_refusal(root: &Path) -> Response {
     )
 }
 
+/// The answer to an add or an on of a root that an earlier open of this
+/// process has not let go of yet: 503 with the words the root's row reads,
+/// and a retry worth making once the host's one-second release budget has
+/// passed.
+fn workspace_still_releasing() -> Response {
+    let mut response = crate::error::err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        crate::error::WORKSPACE_STILL_RELEASING.into(),
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
 /// `POST /api/library/workspaces` `{path}`: register the local folder in the host
 /// library and mount it (on), persisting its on-state. Returns the new row.
 /// Loopback-only.
@@ -1915,6 +1930,9 @@ async fn add_workspace(
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
         }
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            workspace_still_releasing()
+        }
         Err(e @ crate::Error::ShuttingDown(_)) => {
             crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
@@ -1974,6 +1992,9 @@ async fn handle_workspace_on(
             StatusCode::CONFLICT,
             "workspace is open in another Chan process".into(),
         ),
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            workspace_still_releasing()
+        }
         Err(e @ crate::Error::ShuttingDown(_)) => {
             crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }

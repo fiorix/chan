@@ -92,6 +92,10 @@ pub fn err_settings_locked() -> Response {
     )
 }
 
+/// What an open of a root answers while an earlier open of this process has
+/// not let go of it: the words the host's row for that root reads.
+pub const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
+
 /// The refusal of a request to mount a workspace whose root did not answer
 /// within [`WORKSPACE_MOUNT_TIMEOUT`](crate::WORKSPACE_MOUNT_TIMEOUT) of the
 /// request's start, naming `root`. The launcher's add and on and the desktop's
