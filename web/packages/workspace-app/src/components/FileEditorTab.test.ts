@@ -1453,6 +1453,17 @@ describe("a drawing whose save is refused", () => {
     }).toEqual({ line: undefined, editor: fixed, disk: fixed });
   });
 
+  test("hides the line when the text is undone back to the file's", async () => {
+    const { tab, target } = await refused();
+    setTabContent(tab, SAVED);
+    await settle();
+
+    expect({
+      line: toolbarLine(target),
+      editor: target.querySelector(".cm-content") ? editorView(target).state.doc.toString() : null,
+    }).toEqual({ line: undefined, editor: SAVED });
+  });
+
   test("on the board keeps the board unmounted and says to fix it in source", async () => {
     const { tab, target } = await refused();
     setMode(tab, "canvas");
