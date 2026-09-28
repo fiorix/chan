@@ -337,7 +337,7 @@ interface UploadProgressOptions {
   root?: TransferRoot;
 }
 
-function transferSuffix(root: TransferRoot | undefined, includeFilesApp: boolean): string {
+export function transferSuffix(root: TransferRoot | undefined, includeFilesApp: boolean): string {
   const standalone = filesMutationSuffix(false, { app: includeFilesApp });
   if (root !== "filesystem") return standalone;
   return standalone ? `${standalone}&root=filesystem` : "?root=filesystem";
