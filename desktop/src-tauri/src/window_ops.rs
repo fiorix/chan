@@ -157,17 +157,21 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
 
 /// `cs window new` (workspace tenant): open another window of the
 /// workspace rooted at `key` by minting a window into the library registry
-/// (the watcher opens it). Errors when that workspace isn't currently
-/// running locally. Returns the new window's composite native label.
+/// (the watcher opens it). Errors when no workspace runtime of the embedded
+/// host goes by `key`. The host is asked rather than the desktop's own map
+/// of what it mounted, since the launcher's on and off mount and unmount
+/// through the host alone; it answers from the keys it stores, and `key`,
+/// the root the workspace's registry row stores as its control socket sends
+/// it, is one of them, so nothing is resolved. Returns the new window's
+/// composite native label.
 async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String, String> {
-    let canon = crate::canonical_key(Path::new(key));
-    if !state.serves.lock().unwrap().contains(&canon) {
+    let embedded = state
+        .embedded()
+        .ok_or_else(|| "embedded local server is unavailable".to_string())?;
+    if !embedded.is_workspace_mounted_by_key(Path::new(key)) {
         return Err(format!("workspace {key} is not running"));
     }
-    let record = state
-        .embedded()
-        .ok_or_else(|| "embedded local server is unavailable".to_string())?
-        .mint_window(chan_server::WindowKind::Workspace, Some(canon))?;
+    let record = embedded.mint_workspace_window(Path::new(key))?;
     Ok(crate::window_watcher::native_label(&record))
 }
 
