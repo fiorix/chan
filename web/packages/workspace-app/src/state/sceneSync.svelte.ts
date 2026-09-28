@@ -198,7 +198,8 @@ export type ScenePeerCursor = {
 const PERMANENT_ERROR_REASONS = new Set(["attach-failed", "doc-too-large"]);
 
 /// The canvas half of a session (ExcalidrawCanvas.svelte implements it).
-/// All calls arrive from socket callbacks, never from effects.
+/// Every call arrives from a socket callback, except the replay `bindCanvas`
+/// makes when the canvas binds.
 export type SceneCanvasBinding = {
   /// Full authority state: reconcile every element (tombstones
   /// included) into the canvas, adopt appState, register files.
