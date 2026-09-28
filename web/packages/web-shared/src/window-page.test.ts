@@ -229,3 +229,58 @@ describe("the connection read before navigation", () => {
     expect(child.window.document.documentElement.hasAttribute(OWNER)).toBe(false);
   });
 });
+
+describe("a window page mark that expires", () => {
+  test.each([
+    ["waiting", "whose time has passed", -1],
+    ["navigating", "whose time has passed", -1],
+    ["waiting", "that promises more than sixty seconds", 60_001],
+    ["navigating", "that promises more than ten seconds", 10_001],
+  ] as const)("a %s mark %s does not keep a caller out", async (phase, _label, offset) => {
+    vi.useFakeTimers();
+    const child = popup();
+    child.window.document.documentElement.setAttribute(OWNER, `${phase}:${Date.now() + offset}`);
+    const check = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+
+    expect(await navigateWindowWhenReady(child.handle, "/caller", check)).toBe(true);
+
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(child.navigate).toHaveBeenCalledExactlyOnceWith("/caller");
+    expect(child.window.document.documentElement.getAttribute(OWNER)).toMatch(/^navigating:\d+$/);
+  });
+
+  test("a navigation that has not committed keeps its window for ten seconds", async () => {
+    vi.useFakeTimers();
+    const child = popup();
+    const check = vi.fn<WindowPageCheck>().mockImplementation(async () => answer());
+
+    expect(await navigateWindowWhenReady(child.handle, PAGE, check)).toBe(true);
+    expect(await navigateWindowWhenReady(child.handle, PAGE, check)).toBe(true);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(await navigateWindowWhenReady(child.handle, PAGE, check)).toBe(true);
+    expect(check).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await navigateWindowWhenReady(child.handle, PAGE, check)).toBe(true);
+
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(child.navigate).toHaveBeenCalledTimes(2);
+  });
+
+  test("marks the document the window holds when its location is assigned", async () => {
+    vi.useFakeTimers();
+    const child = popup();
+    const check = vi.fn<WindowPageCheck>()
+      .mockImplementationOnce(async () => {
+        child.window.document = document.implementation.createHTMLDocument();
+        return answer();
+      })
+      .mockImplementation(async () => answer());
+
+    expect(await navigateWindowWhenReady(child.handle, PAGE, check)).toBe(true);
+
+    expect(child.window.document.documentElement.getAttribute(OWNER)).toMatch(/^navigating:\d+$/);
+    expect(await navigateWindowWhenReady(child.handle, PAGE, check)).toBe(true);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(child.navigate).toHaveBeenCalledTimes(1);
+  });
+});

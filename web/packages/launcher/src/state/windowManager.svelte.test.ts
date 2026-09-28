@@ -504,6 +504,26 @@ describe("openWindowRecord", () => {
     expect(replacement.location.href).toContain("/proj-1/?w=w-1");
   });
 
+  it.each(["blank", "stayed page"] as const)("repairs a %s whose navigation did not commit once ten seconds pass", async (state) => {
+    vi.useFakeTimers();
+    const child = fakeWin();
+    const href = state === "blank" ? "about:blank" : "http://localhost:3000/proj-1/?w=w-1";
+    const navigate = vi.fn();
+    Object.defineProperty(child.location, "href", { get: () => href, set: navigate });
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const rec = record({ connected: false });
+
+    await openWindowRecord(rec);
+    await openWindowRecord(rec);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await openWindowRecord(rec);
+
+    expect(checkWindowPage).toHaveBeenCalledTimes(2);
+    expect(navigate).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["mint", "re-open"] as const)("keeps a replacement handle when a %s wait ends", async (action) => {
     vi.useFakeTimers();
     const rec = record({});
