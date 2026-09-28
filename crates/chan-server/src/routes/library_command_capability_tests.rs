@@ -134,6 +134,64 @@ async fn fixture_with_registry(registry: bool, local_feed: bool) -> Fixture {
     }
 }
 
+/// A fixture over a root registered at `holder/parent/ws` whose parent then
+/// moved under a symlink, so the registry row keeps the root it stored while
+/// the root resolves under the moved parent, mounted by that stored root with
+/// one connected invoking window. Returns the stored root and the canonical
+/// path.
+#[cfg(unix)]
+async fn relinked_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
+    let config = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let holder = tempfile::tempdir().unwrap();
+    let parent = holder.path().join("parent");
+    std::fs::create_dir_all(parent.join("ws")).unwrap();
+    let library = Library::open_at(config.path().join("config.toml")).unwrap();
+    let stored = library
+        .register_workspace(&parent.join("ws"))
+        .unwrap()
+        .root_path;
+    let moved = holder.path().join("moved");
+    std::fs::rename(&parent, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &parent).unwrap();
+    let canonical = chan_workspace::paths::canonicalize_normalized(&stored);
+    assert_ne!(canonical, stored, "fixture: the root did not relink");
+    let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+    host.install_window_registry(
+        Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
+        "local".into(),
+    );
+    host.install_devserver_feed(Arc::new(RemoteFeed));
+    let prefix = super::registered_workspace_prefix(&stored).unwrap();
+    host.open_or_get_registered_workspace(
+        &stored,
+        tenant_config("127.0.0.1:0".parse().unwrap(), &prefix),
+    )
+    .await
+    .expect("mount the relinked root");
+    let record = host
+        .mint_window_with_origin(
+            WindowKind::Workspace,
+            Some(stored.to_string_lossy().into_owned()),
+            WindowOrigin::Browser,
+        )
+        .expect("mint invoking window");
+    let presence = host
+        .test_connect_window_presence(&prefix, &record.window_id)
+        .expect("connect invoking window");
+    let fixture = Fixture {
+        _config: config,
+        _store: store,
+        _workspace: holder,
+        host,
+        prefix,
+        window_id: record.window_id,
+        tenant_token: record.token,
+        presence: Some(presence),
+    };
+    (fixture, stored, canonical)
+}
+
 async fn send(
     router: &axum::Router,
     method: &str,
@@ -503,6 +561,35 @@ async fn a_grantee_capability_inspects_and_acts_like_the_owner() {
         assert_eq!(status, StatusCode::OK, "{caller:?} act");
         assert!(action["window"]["window_id"].is_string(), "{caller:?} act");
     }
+}
+
+/// A workspace window the command action opens in a relinked root stores
+/// the root its registry row stores, the path the launcher lists the
+/// workspace by and nests its windows under.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_window_in_a_relinked_root_stores_its_rows_root() {
+    let (fixture, stored, _canonical) = relinked_fixture().await;
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+    let action = send(
+        &router,
+        "POST",
+        &format!("/api/library/command-capabilities/{capability}/actions"),
+        None,
+        Some(serde_json::json!({
+            "action": "new_workspace_window",
+            "workspace_id": fixture.prefix.trim_start_matches('/'),
+        })),
+    )
+    .await;
+    let (status, action) = json(action).await;
+    assert_eq!(status, StatusCode::OK, "fixture: the action: {action}");
+    assert_eq!(
+        action["window"]["workspace_path"],
+        &*stored.to_string_lossy(),
+        "the command's window stores a path other than its registry row's root"
+    );
 }
 
 mod refusal_envelopes {
