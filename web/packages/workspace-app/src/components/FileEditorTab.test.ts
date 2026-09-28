@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileEditorTab from "./FileEditorTab.svelte";
 import Pane from "./Pane.svelte";
+import { api } from "../api/client";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { bufferKey, flushPendingBufferWrites, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
@@ -37,7 +38,10 @@ import {
   ensureTabSlidePreview,
   layout,
   openFind,
+  reloadTabFromDisk,
   saveTab,
+  setMode,
+  setTabContent,
   type FileTab,
   type LeafNode,
 } from "../state/tabs.svelte";
@@ -1383,5 +1387,99 @@ describe("a right-click in the JSON tree and the table", () => {
     } finally {
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
     }
+  });
+});
+
+describe("a drawing whose save is refused", () => {
+  const PATH = "notes/board.excalidraw";
+  const SAVED = '{"type":"excalidraw","elements":[]}';
+  // What a typo in source mode leaves: a trailing comma.
+  const BROKEN = '{"type":"excalidraw","elements":[],}';
+
+  function reason(): string {
+    try {
+      JSON.parse(BROKEN);
+    } catch (e) {
+      return (e as Error).message;
+    }
+    throw new Error("the buffer parses");
+  }
+
+  /// The drawing on disk and open in source mode with the typo, after the
+  /// save the autosave runs has refused it.
+  async function refused() {
+    disk.write(PATH, SAVED);
+    const tab = seat(fileTab({ id: "board-1", path: PATH, fileKind: "text", mode: "source", content: BROKEN, saved: SAVED }));
+    const { target } = await render(tab);
+    const write = vi.spyOn(api, "write");
+    await saveTab(tab);
+    await settle();
+    return { tab, target, write };
+  }
+
+  function toolbarLine(target: HTMLElement): string | undefined {
+    return target.querySelector(".editor-toolbar .error")?.textContent?.trim();
+  }
+
+  test("keeps the editor with the buffer as typed and says that the file was not saved", async () => {
+    const { target, write } = await refused();
+
+    expect({
+      line: toolbarLine(target),
+      placeholder: target.querySelector(".error-placeholder") !== null,
+      editor: target.querySelector(".cm-content") ? editorView(target).state.doc.toString() : null,
+      writes: write.mock.calls.length,
+      disk: disk.get(PATH)?.content,
+    }).toEqual({
+      line: `Not saved: the drawing does not parse (${reason()})`,
+      placeholder: false,
+      editor: BROKEN,
+      writes: 0,
+      disk: SAVED,
+    });
+  });
+
+  test("writes the buffer at the next save once it parses, and the line goes", async () => {
+    const { tab, target } = await refused();
+    const fixed = '{"type":"excalidraw","elements":[] }';
+    setTabContent(tab, fixed);
+    await saveTab(tab);
+    await settle();
+
+    expect({
+      line: toolbarLine(target),
+      editor: target.querySelector(".cm-content") ? editorView(target).state.doc.toString() : null,
+      disk: disk.get(PATH)?.content,
+    }).toEqual({ line: undefined, editor: fixed, disk: fixed });
+  });
+
+  test("on the board keeps the board unmounted and says to fix it in source", async () => {
+    const { tab, target } = await refused();
+    setMode(tab, "canvas");
+    await settle();
+
+    expect({
+      line: toolbarLine(target),
+      board: island.props !== null,
+      body: target.querySelector(".refused-placeholder")?.textContent?.trim(),
+    }).toEqual({
+      line: `Not saved: the drawing does not parse (${reason()})`,
+      board: false,
+      body: "This drawing does not parse, so the board cannot show it. Switch to Source to fix it.",
+    });
+  });
+
+  test("a tab whose load failed still shows the error in place of the editor", async () => {
+    const tab = seat(fileTab({ mode: "source" }));
+    const { target } = await render(tab);
+    vi.spyOn(api, "readStream").mockRejectedValue(new Error("read failed"));
+    await reloadTabFromDisk(tab.id);
+    await settle();
+
+    expect({
+      line: toolbarLine(target),
+      placeholder: target.querySelector(".error-placeholder")?.textContent?.trim(),
+      editor: target.querySelector(".cm-content") !== null,
+    }).toEqual({ line: "read failed", placeholder: "read failed", editor: false });
   });
 });

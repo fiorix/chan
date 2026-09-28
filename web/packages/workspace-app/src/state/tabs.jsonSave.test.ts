@@ -64,8 +64,8 @@ describe("a drawing in source mode keeps the parse check", () => {
     const { pane, tab, write } = sourceTab("notes/board.excalidraw", BROKEN);
     await autosave(pane.id, tab.id);
 
-    expect({ writes: write.mock.calls.length, error: tab.error?.startsWith("JSON parse error: "), dirty: isDirty(tab) }).toEqual({
-      writes: 0, error: true, dirty: true,
+    expect({ writes: write.mock.calls.length, error: tab.error, saveError: tab.saveError?.startsWith("the drawing does not parse ("), dirty: isDirty(tab) }).toEqual({
+      writes: 0, error: null, saveError: true, dirty: true,
     });
   });
 });
