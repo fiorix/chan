@@ -20,8 +20,10 @@
 /// binding from socket callbacks and the binding hands local deltas to
 /// [`SceneSession.pushScene`]. Saved-state semantics are ack-based:
 /// `tab.saved` advances to `tab.content` whenever a `push-ok` lands with
-/// nothing left unpushed, so dirty keeps meaning "unconfirmed local
-/// changes" for every existing consumer.
+/// nothing left unpushed, and whenever the canvas mirrors its board into
+/// the buffer with nothing of its own unconfirmed, as after a peer's edit,
+/// so dirty keeps meaning "unconfirmed local changes" for every existing
+/// consumer.
 ///
 /// Import cycle note: tabs.svelte.ts consumes this module only through the
 /// live-session kind registered at the bottom, whose members are shared
@@ -467,6 +469,18 @@ export class SceneSession {
     return true;
   }
 
+  /// The canvas has mirrored its board into the tab's buffer, with none of
+  /// its appState left unpushed. A mirror that follows a peer's edit or an
+  /// ack carries only what the authority holds, and no push-ok comes for
+  /// it; one that carries a local change finds that change pending or on
+  /// the wire and leaves the mark to its push-ok. Only an attached session
+  /// owns the mark: a degraded one's buffer is the classic save's, and a
+  /// connecting or reconnecting one has no snapshot of this socket yet.
+  bufferMirrored(): void {
+    if (this.status !== "attached") return;
+    this.confirmSaved();
+  }
+
   /// Outbound presence: trailing-edge throttle on pointer moves.
   sendCursor(x: number, y: number, tool?: string, selected?: string[]): void {
     if (this.isReadOnlyAttach()) return;
@@ -723,10 +737,7 @@ export class SceneSession {
         this.pushInFlight = false;
         this.unacked = null;
         this.drainQueued();
-        if (!this.pushInFlight && !(this.binding?.hasPendingLocal() ?? false)) {
-          // Ack-based saved semantics: everything local is confirmed.
-          this.tab.saved = this.tab.content;
-        }
+        this.confirmSaved();
         this.checkFlushWaiters();
         return;
       case "cursor":
@@ -877,6 +888,14 @@ export class SceneSession {
 
   private mirror(): void {
     setTabDocState(this.tab, { state: this.status, peers: this.peers() });
+  }
+
+  /// Ack-based saved semantics: with nothing local on the wire, queued or
+  /// not yet handed over, the buffer holds what the authority holds.
+  private confirmSaved(): void {
+    if (this.pushInFlight || this.queued !== null) return;
+    if (this.binding?.hasPendingLocal() ?? false) return;
+    this.tab.saved = this.tab.content;
   }
 
   private allLocalConfirmed(): boolean {

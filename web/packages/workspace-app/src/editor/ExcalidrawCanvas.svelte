@@ -460,6 +460,10 @@
     if (json === lastSerialized) return;
     lastSerialized = json;
     onSceneChange(json);
+    // A peer's edit reaches the buffer only here, and no push-ok follows
+    // it. The session knows what of the elements is still this board's; an
+    // appState the authority has not taken is known only here.
+    if (session && cleanedAppStateJson === lastAuthorityAppStateJson) session.bufferMirrored();
   }
 
   // The library's App reads its initial data once, when it mounts, from the
