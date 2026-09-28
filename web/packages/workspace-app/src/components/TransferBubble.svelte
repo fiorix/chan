@@ -2,7 +2,8 @@
   // The transfer bubble: the prominent surface for cs upload / cs download
   // progress, opened from the status-bar transfers entry. One row per transfer
   // with a progress bar + a state-appropriate action -- Cancel while active,
-  // Retry for an interrupted/failed download, Dismiss for any finished row.
+  // Dismiss for any finished row, and Retry beside it for an interrupted or
+  // failed download.
   // Bound to browser XHR or desktop-native progress + cancellation; the bar
   // look mirrors the SPA's download-progress idiom (adapted, not cross-imported).
   import {
@@ -11,6 +12,13 @@
     hideTransfers,
     type Transfer,
   } from "../state/transfers.svelte";
+
+  // A Retry starts a transfer of its own, so the row it answers goes.
+  function retry(t: Transfer): void {
+    const run = t.retry;
+    dismissTransfer(t.id);
+    run?.();
+  }
 
   function pct(t: Transfer): number | null {
     return t.progress === null ? null : Math.round(t.progress * 100);
@@ -80,14 +88,17 @@
           </div>
           <div class="tb-line-row">
             <span class="tb-line">{statusLine(t)}</span>
-            {#if t.state === "active" && t.cancel}
-              <button class="tb-action" type="button" onclick={() => t.cancel?.()}>Cancel</button>
-            {:else if t.retry}
-              <button class="tb-action" type="button" onclick={() => t.retry?.()}>Retry</button>
-            {:else}
-              <button class="tb-action" type="button" onclick={() => dismissTransfer(t.id)}
-                >Dismiss</button>
-            {/if}
+            <span class="tb-actions">
+              {#if t.state === "active" && t.cancel}
+                <button class="tb-action" type="button" onclick={() => t.cancel?.()}>Cancel</button>
+              {:else}
+                {#if t.retry}
+                  <button class="tb-action" type="button" onclick={() => retry(t)}>Retry</button>
+                {/if}
+                <button class="tb-action" type="button" onclick={() => dismissTransfer(t.id)}
+                  >Dismiss</button>
+              {/if}
+            </span>
           </div>
         </li>
       {/each}
@@ -205,6 +216,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .tb-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 0.375rem;
   }
 
   .tb-action {
