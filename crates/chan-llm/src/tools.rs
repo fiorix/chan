@@ -29,13 +29,14 @@ use serde_json::Value as Json;
 
 use crate::error::{LlmError, Result};
 
-/// Soft cap on `read_file` output. 256 KiB is roughly 250k chars of
-/// English, well past any realistic single-shot read for assistant
-/// reasoning, and a tiny fraction of any frontier model's context
-/// window. Past this we truncate and tell the model to issue a
-/// follow-up read with the suffix it actually wants. Without the
-/// cap, a misnamed binary or a runaway pasted-image markdown can
-/// bloat the next turn's request body and the user's token bill.
+/// Cap on how much of a file `read_file` reads and answers. 256 KiB is
+/// roughly 250k chars of English, well past any realistic single-shot
+/// read for assistant reasoning, and a tiny fraction of any frontier
+/// model's context window. A larger file is read only up to the cap,
+/// cut back to a character boundary, and answered as truncated with the
+/// whole file's size from its stat, so the model can narrow its read.
+/// Without the cap, a misnamed binary or a runaway pasted-image markdown
+/// can bloat the next turn's request body and the user's token bill.
 pub const READ_FILE_CAP_BYTES: usize = 256 * 1024;
 
 /// Soft cap on `list_files` entries. The workspace layer caps the walk

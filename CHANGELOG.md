@@ -22,6 +22,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Lock probes release their temporary locks before returning.** A concurrent process spawn can no longer keep a completed workspace or daemon lock probe held until the child executes, avoiding spurious locked-workspace refusals.
 
+- **An MCP read of a file over its cap no longer reads the whole file.** `read_media` refuses a file over its size cap before reading any of it, and `read_file` reads at most its 256 KiB cap, taking the file's size from its metadata, so a very large file no longer holds its workspace while it is read into memory. A file over `read_file`'s cap whose bytes past the cap are not UTF-8 is answered with its text up to the cap instead of being refused.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.

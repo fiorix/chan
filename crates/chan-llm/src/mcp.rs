@@ -433,11 +433,13 @@ impl Server {
     #[tool(description = "\
 Read the UTF-8 content of a file in the active workspace. The path is \
 POSIX-style in chan's public namespace. Returns { path, content, \
-size, mtime_ns }. Files \
-larger than 256 KiB are truncated and the response includes \
-`truncated: true` plus a `note` describing the cap; in that case \
-re-issue with a smaller scope (or open the file in the editor if \
-you need the full thing). Pass `mtime_ns` back on `write_file` as \
+size, mtime_ns }. A file \
+larger than 256 KiB is read only up to 256 KiB, cut back to a \
+character boundary, and the response includes `truncated: true` \
+plus a `note` describing the cap; `size` is the whole file's, taken \
+from its metadata rather than by reading it. In that case re-issue \
+with a smaller scope (or open the file in the editor if you need \
+the full thing). Pass `mtime_ns` back on `write_file` as \
 `expected_mtime_ns` to detect concurrent edits.")]
     async fn read_file(
         &self,
@@ -554,7 +556,8 @@ must be classified by chan-workspace as Image (.png, .jpg, .jpeg, \
 refused (text files use read_file). Image responses are MCP image \
 content blocks. PDF responses are MCP blob resources with \
 application/pdf MIME type. Single-call cap defaults to 10 MiB; \
-oversized files error with `media too large` so you can pick a \
+a file over the cap errors with `media too large` before any of it \
+is read, its size taken from its metadata, so you can pick a \
 smaller file (the host may have widened or narrowed this cap via \
 config).")]
     async fn read_media(
