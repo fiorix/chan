@@ -6914,10 +6914,10 @@ fn handle_close_window(app: &tauri::AppHandle) {
 /// Close `window` by its kind: control terminals route through
 /// `request_close_window` (reap the control row/tenant, disconnect only
 /// if it still owns a live devserver connection); SPA webviews get the
-/// close command dispatched (or a real destroy on the connecting/retry
-/// screen, where the close means cancel); anything else (the launcher,
-/// the About window) closes natively -- the launcher's `CloseRequested`
-/// handler turns that into a hide.
+/// close command dispatched, except on the connecting screen, where the
+/// window closes through `request_close_window` as its close button does;
+/// anything else (the launcher, the About window) closes natively -- the
+/// launcher's `CloseRequested` handler turns that into a hide.
 fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWindow) {
     if window.label().starts_with("control-terminal-") {
         let app = app.clone();
@@ -6927,11 +6927,16 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
         return;
     }
     if serve::is_workspace_webview_label(window.label()) {
-        // A window still on the connecting/retry screen has no tabs to
-        // close and nothing to bury: the close chord means cancel, so destroy
-        // for real (destroy skips the bury-on-close handler).
+        // A window still on its connecting page has no tabs to close. The
+        // chord closes the window as its close button does, through
+        // `request_close_window`, which hides it and keeps its record: a
+        // bare destroy leaves the record shown, and the watcher opens the
+        // window again.
         if serve::window_on_connecting_screen(app, window.label()) {
-            let _ = window.destroy();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = request_close_window(app, window).await;
+            });
             return;
         }
         // macOS Cmd+W is tab-close; off-mac Ctrl+Alt+W is window-close (its
