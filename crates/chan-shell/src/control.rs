@@ -81,12 +81,16 @@ impl EnvControlSocket {
     /// is, and answers only when exactly one devserver tenant reports the
     /// canonical path of that workspace as its root.
     ///
-    /// The directory rule is why a name found there may be believed: the
-    /// users who can create an entry in a directory without those two bits
-    /// are its owner and root, and both can already replace the socket the
-    /// environment names, so the search trusts nobody that connecting to
-    /// the environment's path does not. Where others can add names, as in
-    /// `/tmp`, anybody could answer as a devserver.
+    /// The directory rule is why a name found there may be believed. On
+    /// Linux the users who can create an entry in a directory without those
+    /// two bits are its owner and root, since a user that a POSIX access
+    /// list names may write only where the list's mask allows, and the mask
+    /// is the mode's group bits (acl(5)); both can already replace the
+    /// socket the environment names, so the search trusts nobody that
+    /// connecting to the environment's path does not. Where a system keeps
+    /// an access list beside the mode, the mode does not say who else may
+    /// add a name, and the search does not read the list. Where others can
+    /// add names, as in `/tmp`, anybody could answer as a devserver.
     #[cfg(unix)]
     async fn find_moved_server(&self) -> Option<(PathBuf, PathBuf)> {
         let name = self.path.file_name()?.to_str()?;
@@ -127,9 +131,9 @@ impl EnvControlSocket {
     }
 
     /// Say, only to a person at a terminal, that this terminal's server
-    /// answered at another socket than the one its environment
-    /// names. A script or an agent reads `cs`'s stderr through a pipe and
-    /// sees nothing new.
+    /// answered at another socket than the one its environment names. A
+    /// script or an agent that reads `cs`'s stderr through a pipe is not
+    /// given the line.
     #[cfg(unix)]
     fn announce(&self, found: &Path, root: &Path) {
         use std::io::IsTerminal;
@@ -148,8 +152,12 @@ impl EnvControlSocket {
     }
 }
 
-/// Whether only the owner of `dir` (and root) can create entries in it: its
-/// mode has neither the group's nor the world's write bit.
+/// Whether the mode of `dir`, read through a link, has neither the group's
+/// nor the world's write bit. On Linux that leaves only its owner and root
+/// able to create entries in it, since an access list's named entries write
+/// only within its mask, which is the mode's group bits (acl(5)). Where a
+/// system keeps an access list beside the mode, this does not see whom else
+/// the list lets create an entry.
 #[cfg(unix)]
 fn only_owner_writes(dir: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -434,8 +442,9 @@ pub async fn send_control_request<'a>(
 
 /// Write one JSON request line on a connected socket, half-close it, and
 /// read the reply. The search for a moved terminal's server probes through
-/// this with a connect of its own, since a probe that went through
-/// [`connect_control`] could search in turn.
+/// this with a connect of its own: through [`connect_control`], the probe's
+/// future would contain the search's, which contains the probe's, and an
+/// async fn's future cannot contain itself without a box (E0733).
 async fn round_trip(
     read: transport::ReadEnd,
     mut write: transport::WriteEnd,
@@ -1313,9 +1322,9 @@ mod tests {
         assert_eq!(moved.requests(), 1);
     }
 
-    // Every case in which the search must not choose. Each answers as a
-    // dead socket answers today, naming the socket the environment names,
-    // and no candidate receives anything but `Identify`.
+    // Every case in which the search must not choose. Each answers in the
+    // words of a dead socket, naming the socket the environment names, and
+    // no candidate receives anything but `Identify`.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_moved_terminal_finds_no_tenant_where_the_choice_is_not_clear() {
