@@ -3092,6 +3092,10 @@ async fn handle_open(
     }
 }
 
+/// `DELETE /api/devserver/workspaces/{prefix}`: forget the workspace. A removal
+/// that meets an earlier call of this process on the root that has not let go
+/// answers as the launcher's delete does: 503, `Retry-After: 1` and the words
+/// the root's row reads.
 async fn handle_forget(
     State(state): State<Arc<DevserverState>>,
     AxumPath(prefix_tail): AxumPath<String>,
@@ -3113,6 +3117,9 @@ async fn handle_forget(
             }),
         )
             .into_response(),
+        Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            crate::error::workspace_still_releasing()
+        }
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
