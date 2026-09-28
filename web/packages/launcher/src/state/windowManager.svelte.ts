@@ -13,6 +13,8 @@
 // Open or Close. A blocked popup leaves its record available by the same rule.
 // Open repairs a blank window or a disconnected record regardless of document
 // type, leaving a connected nonblank page untouched. Refusals close only blanks.
+// A disconnected record is looked up again in the latest feed once its page
+// answers, before its window is navigated.
 //
 // Inert under demoState.enabled: a marketing embed never spawns windows.
 
@@ -119,8 +121,9 @@ export async function mintWindow(
 
 /** Open (or re-focus) an existing record's window in-app. The window is named by
  * window_id so a second click focuses the same same-origin window instead of
- * opening a duplicate. Used by the follower open-click and orphan re-open. A
- * popup the browser blocks rejects, so the caller reports it. */
+ * opening a duplicate. Used by the row's Open, by Focus, and by a browser
+ * record's Show, which repair a window before changing its visibility. A popup
+ * the browser blocks rejects, so the caller reports it. */
 export async function openWindowRecord(
   record: WindowRecord,
   opts: { focus?: boolean } = {},
@@ -166,12 +169,12 @@ export async function closeWindowRecord(
   clearWindowAttention(record.window_id);
 }
 
-/** Flip a window's server-persisted visibility from a self-managed launcher (the
- * bridgeless Eye toggle): hide a visible window, un-hide a hidden one, keyed on
- * the feed's `hidden`. `actingWindowId` claims the leader identity for the
- * per-tenant gate (the server 403s a mismatching claim). This touches only the
- * shared visibility state; the local browser handle is the OPEN button's job, so
- * nothing here opens or closes it. */
+/** Flip a window's server-persisted visibility from a self-managed launcher:
+ * hide a visible window, un-hide a hidden one, keyed on the feed's `hidden`.
+ * `actingWindowId` claims the leader identity for the per-tenant gate (the
+ * server 403s a mismatching claim). This touches only the shared visibility
+ * state and opens or closes no window; the eye's Show goes through
+ * `setWindowShown`, which repairs a browser record's window first. */
 export async function toggleWindowVisibility(
   record: WindowRecord,
   actingWindowId?: string,
@@ -183,8 +186,9 @@ export async function toggleWindowVisibility(
 /** Reconcile the handle map against a feed snapshot. Closes handles whose record
  * left the feed (absence == discard), and flags a VISIBLE browser-origin record
  * this launcher holds no live handle for as an orphan (a reload lost the handle,
- * or a peer surface minted it) so its row flashes for a re-open click. A hidden
- * or native record is never flagged. */
+ * a peer surface minted it, or its window is gone and the record stays until
+ * Close) so its row flashes for a re-open click. A hidden or native record is
+ * never flagged. */
 export function reconcileWindows(set: WindowSet): void {
   if (demoState.enabled) return;
   latestWindows = set.windows;
