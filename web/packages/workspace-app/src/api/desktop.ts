@@ -11,6 +11,7 @@ import {
   failTransfer,
   finishTransfer,
   setTransferProgress,
+  type TransferSource,
   waitForTransferSlot,
 } from "../state/transfers.svelte";
 import type { ScopedWindowKind } from "./libraryCommand";
@@ -531,7 +532,7 @@ function pollNativeProgress(nativeId: string, transferId: string): () => void {
 export async function runDesktopDownload(
   url: string,
   filename: string,
-  source: { path: string; isDir: boolean } | null = null,
+  source: TransferSource | null = null,
 ): Promise<string> {
   if (!isTauriDesktop()) {
     throw new Error("runDesktopDownload called outside chan-desktop");

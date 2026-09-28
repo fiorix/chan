@@ -11,7 +11,7 @@
 // A download can be retried from its persisted source; an upload cannot (the
 // File bytes do not survive the reload), so it restores Dismiss-only.
 
-import { sessionWindowId } from "../api/client";
+import { sessionWindowId, type TransferRoot } from "../api/client";
 
 export type TransferKind = "upload" | "download";
 
@@ -61,7 +61,7 @@ export interface Transfer {
   savedPath: string | null;
   /// A download's source, persisted so an interrupted download can be retried
   /// after a reload. null for uploads (the File cannot be persisted).
-  source: { path: string; isDir: boolean } | null;
+  source: TransferSource | null;
   /// Live abort handle, set only while active. NOT persisted.
   cancel: (() => void) | null;
   /// Live retry handle for an interrupted/failed download, reconstructed on
@@ -109,7 +109,7 @@ interface PersistedTransfer {
   state: TransferState;
   error: string | null;
   savedPath: string | null;
-  source: { path: string; isDir: boolean } | null;
+  source: TransferSource | null;
 }
 
 function persist(): void {
@@ -208,11 +208,15 @@ function emitSignal(): void {
 /// window has started it; whether the server runs it immediately or holds it is
 /// the server's call and arrives later in `queue`. `source` lets an interrupted
 /// download retry.
+/// A download's source: its path, whether it is a directory, and the root
+/// it was started under when that is not the workspace.
+export type TransferSource = { path: string; isDir: boolean; root?: TransferRoot };
+
 export function beginTransfer(opts: {
   kind: TransferKind;
   filename: string;
   cancel: (() => void) | null;
-  source?: { path: string; isDir: boolean } | null;
+  source?: TransferSource | null;
 }): string {
   const id = transferId();
   const state: TransferState = "active";
@@ -424,7 +428,7 @@ export function toggleTransfers(): void {
 /// `reconstructDownloadRetry` rebuilds the retry handle for an interrupted
 /// download from its source (uploads get none -- the File is gone).
 export function restoreTransfers(
-  reconstructDownloadRetry: (source: { path: string; isDir: boolean }) => () => void,
+  reconstructDownloadRetry: (source: TransferSource) => () => void,
 ): void {
   if (typeof window === "undefined") return;
   let raw: string | null = null;
