@@ -11,10 +11,12 @@
 //! just the basename, so two workspaces with the same basename under different
 //! parents (`foo/hello`, `bar/hello`) get DISTINCT prefixes and both mount:
 //! a same-basename pair never collides at mount time.
-//! The window-record assembly on `WorkspaceHost` calls
-//! [`allocate_workspace_prefix`] for the off-workspace case; the devserver
-//! calls it on mount. Both derive the suffix identically from the canonical
-//! root, so the gateway and devserver agree on the prefix.
+//! A registered workspace's prefix is derived from the root its registry row
+//! stores ([`registered_workspace_prefix`]): the devserver's mounts, the
+//! launcher's add and on, and both lists derive it so, whichever spelling of
+//! the workspace a request names, so one workspace has one prefix. The
+//! window-record assembly on `WorkspaceHost` derives an off workspace's
+//! prefix from the path its window stores with [`workspace_prefix_for`].
 
 use std::path::Path;
 
