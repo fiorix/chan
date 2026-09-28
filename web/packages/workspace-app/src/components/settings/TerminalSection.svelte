@@ -310,7 +310,7 @@
   hint="Font size for newly constructed terminal surfaces. Mounted renderers and their PTY geometry stay unchanged."
 >
   <NumberField
-    class="font-size"
+    class="terminal-font-size"
     value={prefs.terminal.font_size ?? 14}
     min={TERMINAL_FONT_SIZE_MIN}
     max={TERMINAL_FONT_SIZE_MAX}
@@ -371,7 +371,7 @@
   }
   /* The number input lives inside NumberField now, so the width
      reaches it through :global (same trick SettingField uses). */
-  :global(input.font-size) {
+  :global(input.terminal-font-size) {
     width: 6em;
     min-width: 6em;
   }
