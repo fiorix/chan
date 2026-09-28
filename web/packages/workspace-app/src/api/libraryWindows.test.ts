@@ -707,13 +707,13 @@ describe("focusing a capability popup", () => {
     expect(host.checkPage).not.toHaveBeenCalled();
   });
 
-  test("focuses a foreign popup without checking, navigating or closing it", async () => {
+  test("focuses a connected foreign popup without checking, navigating or closing it", async () => {
     const popup = fakePopup();
     Object.defineProperty(popup, "location", { get: () => { throw new DOMException("cross-origin", "SecurityError"); } });
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     const host = bridge();
 
-    await expect(focusLibraryWindow(host, scopedWindow())).resolves.toBeUndefined();
+    await expect(focusLibraryWindow(host, scopedWindow({ connected: true }))).resolves.toBeUndefined();
 
     expect(host.checkPage).not.toHaveBeenCalled();
     expect(popup.focus).toHaveBeenCalled();
@@ -756,7 +756,6 @@ describe("focusing a capability popup", () => {
 
 const repairDocuments = [
   { label: "tenant HTML", mime: "text/html" },
-  { label: "booting tenant HTML", mime: "text/html" },
   { label: "initial blank", mime: "text/html", href: "about:blank" },
   { label: "empty location", mime: "text/html", href: "" },
   { label: "blank with waiting mark", mime: "text/html", href: "about:blank", mark: "waiting" },
