@@ -9168,6 +9168,109 @@ mod tests {
             state.host.shutdown_all().await.unwrap();
         }
 
+        /// A launcher add through the devserver's root fallback after the
+        /// stop signal is refused before it registers its root, in the
+        /// devserver's own words for a mount refused at the stop.
+        #[tokio::test]
+        async fn a_launcher_add_after_the_stop_signal_registers_nothing() {
+            let _env = chan_home_env_read();
+            for fully_stopped in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let state = devserver_with_windows(home.path()).await;
+                let (app, serve_addr) = build_devserver_app(state.clone(), state.host.clone());
+                serve_addr.set("127.0.0.1:0".parse().unwrap()).unwrap();
+                signal_stop(&state, fully_stopped).await;
+
+                let response = app
+                    .oneshot(mount_request(
+                        "/api/library/workspaces",
+                        serde_json::json!({"path": root.path()}),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    state.host.library().list_workspaces().is_empty(),
+                    "a launcher add after the stop signal registered its root, \
+                     fully_stopped={fully_stopped}"
+                );
+                assert!(
+                    !state.host.is_root_mounted(root.path()),
+                    "a launcher add after the stop signal mounted its root, \
+                     fully_stopped={fully_stopped}"
+                );
+                let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+                assert_eq!(
+                    refusal_body(response).await,
+                    serde_json::json!({
+                        "error": format!(
+                            "the devserver is stopping; {} was not mounted",
+                            root.path().display()
+                        )
+                    })
+                    .to_string(),
+                    "fully_stopped={fully_stopped}"
+                );
+                assert_eq!(retry_after, None, "fully_stopped={fully_stopped}");
+            }
+        }
+
+        /// A launcher on through the devserver's root fallback after the stop
+        /// signal is refused before the host is asked: it mounts nothing and
+        /// records nothing on for the next start.
+        #[tokio::test]
+        async fn a_launcher_on_after_the_stop_signal_mounts_nothing() {
+            let _env = chan_home_env_read();
+            for fully_stopped in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let key = canonical_root(root.path());
+                let prefix = registered_workspace_prefix(&key).unwrap();
+                let state = devserver_with_windows(home.path()).await;
+                state
+                    .host
+                    .library()
+                    .register_workspace(root.path())
+                    .unwrap();
+                let (app, serve_addr) = build_devserver_app(state.clone(), state.host.clone());
+                serve_addr.set("127.0.0.1:0".parse().unwrap()).unwrap();
+                signal_stop(&state, fully_stopped).await;
+
+                let response = app
+                    .oneshot(mount_request(
+                        &format!("/api/library/workspaces{prefix}/on"),
+                        serde_json::json!({}),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    !state.host.is_root_mounted(root.path()),
+                    "a launcher on after the stop signal mounted its root, \
+                     fully_stopped={fully_stopped}"
+                );
+                let intents = overlay_intents(&state);
+                assert!(
+                    intents.iter().all(|(_, on)| !on),
+                    "a launcher on after the stop signal recorded its root on, \
+                     fully_stopped={fully_stopped}: {intents:?}"
+                );
+                let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+                // The on names the root the library stored, its canonical form.
+                assert_eq!(
+                    refusal_body(response).await,
+                    serde_json::json!({
+                        "error": format!(
+                            "the devserver is stopping; {} was not mounted",
+                            key.display()
+                        )
+                    })
+                    .to_string(),
+                    "fully_stopped={fully_stopped}"
+                );
+                assert_eq!(retry_after, None, "fully_stopped={fully_stopped}");
+            }
+        }
+
         /// A mount admitted before the signal can finish registering after it.
         /// Its refusal keeps that row: unregistering would erase workspace
         /// state. The later coordinator check must still identify the stop.
