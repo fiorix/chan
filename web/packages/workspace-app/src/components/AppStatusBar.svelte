@@ -217,7 +217,7 @@
             </span>
           {/if}
         {/if}
-        {#if (indexVisible || importVisible || statusVisible) && paneModeVisible}
+        {#if (indexVisible || importVisible || transfersBubbleVisible || statusVisible) && paneModeVisible}
           <span class="sep"> - </span>
         {/if}
         {#if paneModeVisible}
