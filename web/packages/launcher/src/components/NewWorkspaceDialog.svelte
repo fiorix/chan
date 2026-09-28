@@ -24,7 +24,7 @@
     saveDevserver,
     updateGateway,
   } from "../state/library.svelte";
-  import { readOnly } from "../state/capabilities";
+  import { hasDesktopBridge, readOnly } from "../state/capabilities";
 
   const editing = dialog.editing;
   // The gateway body doubles as the rename form, prefilled from the entry.
@@ -271,7 +271,7 @@
           autocomplete="off"
           spellcheck="false"
           onkeydown={(e) => onFieldKey(e, submitLocal)} />
-        {#if !readOnly}
+        {#if !readOnly && hasDesktopBridge}
           <button class="btn" type="button" onclick={browse}>Browse…</button>
         {/if}
       </div>
