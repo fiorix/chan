@@ -12,8 +12,9 @@
 /// session outlives canvas remounts (cross-pane move) via a short release
 /// linger. Unlike docSync there is no CodeMirror shadow/rebase machinery:
 /// the canvas IS the local state, remote content applies through
-/// `reconcileElements`, and a lightweight element shadow only serves
-/// snapshot replay for a canvas that binds after the frames landed.
+/// `reconcileElements`, and a shadow of the scene (its elements, appState
+/// and files) only serves snapshot replay for a canvas that binds after the
+/// frames landed.
 ///
 /// The canvas half plugs in through [`SceneCanvasBinding`]
 /// (ExcalidrawCanvas.svelte implements it): the session drives the
@@ -290,11 +291,13 @@ export class SceneSession {
 
   private binding: SceneCanvasBinding | null = null;
 
-  /// Element shadow keyed by id, kept in step with snapshot/update
-  /// frames plus our own outbound pushes (optimistic: a discarded push
-  /// leaves a stale entry, which is harmless because every replay goes
-  /// through the canvas's LWW reconciliation). Serves snapshot replay
-  /// for a canvas that binds after the frames landed.
+  /// The scene replayed into a canvas that binds after the frames landed:
+  /// snapshot and update frames, plus this window's own pushes, each with
+  /// all three of its parts, taken when `pushScene` takes the push. A replay
+  /// is an adopt, so a part this left out would be adopted over the push:
+  /// the older value would go on the board and never be offered again. A
+  /// discarded push leaves its parts here until the next snapshot replaces
+  /// them.
   private shadowElements = new Map<string, WireElement>();
   private shadowAppState: WireAppState = {};
   private shadowFiles: WireFiles = {};
@@ -443,6 +446,8 @@ export class SceneSession {
     if (this.status === "degraded" || this.status === "off") return false;
     if (this.isReadOnlyAttach()) return false;
     for (const el of elements) this.foldIntoShadow(el);
+    if (appState !== undefined) this.shadowAppState = appState;
+    if (files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...files };
     if (this.pushInFlight) {
       const q = this.queued ?? {
         elements: new Map<string, WireElement>(),
@@ -825,15 +830,15 @@ export class SceneSession {
 
   private onUpdate(f: Extract<ServerFrame, { type: "update" }>): void {
     this.tab.authorityVersion = f.version;
-    for (const el of f.elements) this.foldIntoShadow(el);
-    if (f.appState !== undefined) this.shadowAppState = f.appState;
-    if (f.files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...f.files };
-    this.serverDirty = true;
     // The authority applies a push after every update it fanned before the
     // push arrived, so while this window's appState claim is on the wire or
-    // queued behind one, the claim replaces this update's appState there and
-    // the board keeps its own. The shadow keeps the update's.
+    // queued behind one, the claim replaces this update's appState there:
+    // the board keeps its own and the shadow keeps the claim.
     const claimed = (this.unacked?.appState ?? this.queued?.appState ?? null) !== null;
+    for (const el of f.elements) this.foldIntoShadow(el);
+    if (f.appState !== undefined && !claimed) this.shadowAppState = f.appState;
+    if (f.files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...f.files };
+    this.serverDirty = true;
     this.binding?.applyUpdate({
       elements: f.elements,
       appState: claimed ? undefined : f.appState,
