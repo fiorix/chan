@@ -106,7 +106,7 @@ The auto-start on add is specific to the desktop UI: the user's intent there is 
 
 ### 3.3 Toggle On (serve)
 
-Toggling On opens the workspace through the embedded chan-server `WorkspaceHost`. The desktop owns one loopback listener for the whole process and mounts each workspace under a distinct path prefix (derived from the hash of the canonical path). Each mounted workspace gets isolated AppState, watcher, indexer, terminal registry, MCP bridge, control socket, and token state.
+Toggling On opens the workspace through the embedded chan-server `WorkspaceHost`. The desktop owns one loopback listener for the whole process and mounts each workspace under a distinct path prefix: the prefix the launcher derives for the workspace's registry row when the launcher turns it on, and `workspace-<hash>` of the root that row stores when the desktop opens it itself, for a `chan serve` handed off to it or at the boot's restore. Each mounted workspace gets isolated AppState, watcher, indexer, terminal registry, MCP bridge, control socket, and token state.
 
 Embedded local serving keeps chan-server's bearer token gate enabled. The desktop webview receives the token-bearing URL and the SPA stores the token in sessionStorage.
 
@@ -138,7 +138,7 @@ For an external `chan serve` the registry only records that the workspace exists
 The desktop avoids inventing durable validation rules. It defers to chan-workspace where that surface already owns a contract, so anything the desktop accepts is also accepted by every other chan surface.
 
 - **Workspace display name**: an optional label stored by the library add route through `register_workspace_with_name`. It is separate from the path-derived route prefix and is not checked with the tunnel protocol's workspace-name validator.
-- **Path**: canonicalised via `std::fs::canonicalize` before being registered or opened, so the registry key the desktop uses matches what the user sees. When canonicalisation fails (broken symlink, asleep network mount), the literal path is used.
+- **Path**: registered as given. The registry matches it to a row by its canonical form and stores a new row's root in that form, and the desktop opens the workspace, serves it and stores its windows by the root the row stores, which is the path the launcher lists it by; for a row stored before a directory above it was replaced by a symlink, that root is not the path's canonical form. When canonicalisation fails (broken symlink, asleep network mount), the literal path is used.
 
 ## 5. Self-contained runtime
 
@@ -159,7 +159,7 @@ The macOS artifact is a single codesigned and notarised app; Windows signs the d
 Every window is a Tauri webview with a label prefix that encodes its kind, and Tauri capabilities are granted by label glob:
 
 - `main`: the singleton launcher (section 3.1). The `main-*` glob is also covered by the launcher capability so any launcher-class window inherits the same permission set.
-- `local::<window_id>`: watcher-opened local workspace and standalone-terminal windows, labeled by the library-minted window record. A workspace's embedded route prefix stays `workspace-<hash>` (hash of the canonical path); it is a URL route, not a native window label.
+- `local::<window_id>`: watcher-opened local workspace and standalone-terminal windows, labeled by the library-minted window record. A workspace's embedded route prefix stays `workspace-<hash>` (hash of the root its registry row stores) when the desktop mounted it; it is a URL route, not a native window label.
 - `lib-<hex>::<window_id>`: watcher-opened devserver windows, the same composite `{library_id}::{window_id}` label scheme with the SPA served by the remote devserver.
 - `control-terminal-<devserver id>`: the embedded terminal-only window that runs a devserver's connect script.
 - `about`: the bundled About window: singleton, same content on every platform (mirrors the SPA Dashboard About slide), and the target the macOS system About item is redirected to.
