@@ -130,6 +130,25 @@ describe("the close of a drawing whose save is refused", () => {
       asked: false, conflict: true, open: true,
     });
   });
+
+  test("a drawing fixed after a refusal whose save meets a conflict is not asked about", async () => {
+    const pane = resetLayout([drawingTab("notes/board.excalidraw")]);
+    stubWrites();
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, "board-1");
+    await vi.advanceTimersByTimeAsync(900);
+    vi.useRealTimers();
+    setTabContent(readTab("board-1")!, '{ "type": "excalidraw", "elements": [1] }');
+    vi.spyOn(api, "write").mockRejectedValue(
+      new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }),
+    );
+
+    await closeTab(pane.id, "board-1");
+
+    expect({ asked: confirmState.open, conflict: conflictDialog.open, open: readTab("board-1") !== undefined }).toEqual({
+      asked: false, conflict: true, open: true,
+    });
+  });
 });
 
 describe("a refused drawing that does not close says why", () => {
