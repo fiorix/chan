@@ -1201,6 +1201,82 @@ describe("a snapshot the server fans on a socket that had its own", () => {
       replayed: rebind(session, binding).snapshots[0]?.appState,
     }).toEqual({ handed: undefined, pushes: 1, replayed: MINE });
   });
+
+  test("leaves a claimed element it lacks in the scene a later bind replays", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pending.push(elem("drawn", 2));
+    binding.flushPendingLocal();
+    sock.frame(snap([elem("peer", 3)]));
+    sock.frame({ type: "push-ok", version: 1 });
+
+    expect(rebind(session, binding).snapshots[0]?.elements.map((e) => e.id)).toEqual(["peer", "drawn"]);
+  });
+
+  test("puts its own element in the scene a later bind replays where it is newer than the claim", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!, [elem("x", 1)]);
+    binding.pending.push(elem("x", 2));
+    binding.flushPendingLocal();
+    sock.frame(snap([elem("x", 3)]));
+    sock.frame({ type: "push-ok", version: 1 });
+
+    expect(rebind(session, binding).snapshots[0]?.elements.map((e) => [e.id, e.version])).toEqual([["x", 3]]);
+  });
+
+  test("leaves a claimed file in the scene a later bind replays", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pendingFiles = { "file-m": { dataURL: "data:image/png;base64,AAA" } };
+    binding.flushPendingLocal();
+    sock.frame(snap([], { files: { "file-p": { dataURL: "data:image/png;base64,BBB" } } }));
+    sock.frame({ type: "push-ok", version: 1 });
+
+    expect(Object.keys(rebind(session, binding).snapshots[0]?.files ?? {}).sort()).toEqual(["file-m", "file-p"]);
+  });
+
+  test("takes the appState claim queued behind the push on the wire as the one that stands", () => {
+    const QUEUED = { viewBackgroundColor: "#333333" };
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    binding.pendingAppState = QUEUED;
+    binding.flushPendingLocal();
+    sock.frame(snap([], { appState: PEERS }));
+    const handed = binding.snapshots.at(-1)?.appState;
+    sock.frame({ type: "push-ok", version: 1 });
+    sock.frame({ type: "push-ok", version: 2 });
+
+    expect({ handed, replayed: rebind(session, binding).snapshots[0]?.appState }).toEqual({
+      handed: undefined,
+      replayed: QUEUED,
+    });
+  });
+
+  test("hands its appState to the board when no claim of this window stands", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    sock.frame(snap([], { appState: PEERS }));
+
+    expect(binding.snapshots.map((s) => s.appState)).toEqual([{}, PEERS]);
+  });
+
+  test("attaches a degraded session whose socket stayed open and pushes what it refused", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    session.degrade();
+    binding.pending.push(elem("drawn", 2));
+    binding.flushPendingLocal();
+    const whileDegraded = idsOf(sock);
+    sock.frame(snap([]));
+
+    expect({ whileDegraded, state: tab!.doc?.state, after: idsOf(sock) }).toEqual({
+      whileDegraded: [],
+      state: "attached",
+      after: [["drawn"]],
+    });
+  });
 });
 
 describe("the classic PUT during an outage", () => {
