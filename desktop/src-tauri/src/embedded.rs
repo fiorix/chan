@@ -1042,4 +1042,145 @@ mod tests {
         // An unknown / already-gone window resolves to no tenant.
         assert_eq!(tenant_prefix_for_window(&records, "missing"), None);
     }
+
+    /// The embedded open shares the devserver mount's bound over all its
+    /// attempts. The bound's pin runs on a paused clock, which moves only when
+    /// the test advances it: a blocking task holds tokio's auto-advance off
+    /// while it is outstanding, and a call held on the root keeps one
+    /// outstanding. So the bound expires when the test says and at no other
+    /// time, and the one real-clock bound, the hang guard, only decides how
+    /// soon an open that never answers is reported.
+    #[cfg(unix)]
+    mod open_bound {
+        use std::future::Future;
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        use chan_workspace::paths::root_stall::{self, RootStall};
+
+        use super::*;
+
+        /// The bound, written out so that moving it is a deliberate edit here.
+        const MOUNT_BOUND: Duration = Duration::from_secs(60);
+        const JUST_SHORT: Duration = Duration::from_millis(1);
+        /// Far above what an open that needs only a healthy root costs on a
+        /// loaded host; it decides only how soon a hang is reported.
+        const HANG_GUARD: Duration = Duration::from_secs(30);
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+
+        /// Run `scenario` on a current-thread runtime whose clock starts
+        /// paused, on a thread of its own, and panic naming `what` and the
+        /// calls `stall` holds when it has not ended within [`HANG_GUARD`] of
+        /// real time. The stall goes before the thread is joined: dropping
+        /// the scenario's runtime waits for its blocking tasks, and a held
+        /// call is one.
+        fn on_a_paused_clock(
+            stall: Arc<RootStall>,
+            what: &str,
+            scenario: impl Future<Output = ()> + Send + 'static,
+        ) {
+            let (done, finished) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .start_paused(true)
+                    .build()
+                    .expect("paused runtime");
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(scenario)
+                }));
+                let _ = done.send(outcome);
+            });
+            match finished.recv_timeout(HANG_GUARD) {
+                Ok(outcome) => {
+                    drop(stall);
+                    worker.join().expect("scenario thread");
+                    if let Err(panic) = outcome {
+                        std::panic::resume_unwind(panic);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => panic!("{what} ended without an outcome"),
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "{what} did not finish; calls held on the root: {:#?}",
+                    stall.entered()
+                ),
+            }
+        }
+
+        /// A registered root and a desktop over its library: the root as the
+        /// registry stores it, the key the desktop opens it by, and the dirs.
+        fn registered_root() -> (
+            chan_workspace::Library,
+            std::path::PathBuf,
+            String,
+            [tempfile::TempDir; 2],
+        ) {
+            let cfg = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("root");
+            let library =
+                chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
+            let stored = library
+                .register_workspace(root.path())
+                .expect("register")
+                .root_path;
+            let key = stored.to_str().expect("utf-8 root").to_string();
+            (library, stored, key, [cfg, root])
+        }
+
+        /// An open whose root answers its key and then hangs in its open is
+        /// refused at the bound with the root's name, and gives the root's
+        /// lock back: a close and a removal of that root answer after it.
+        #[test]
+        fn an_open_whose_root_hangs_answers_at_the_mount_bound() {
+            let (library, stored, key, _dirs) = registered_root();
+            let stall = Arc::new(root_stall::stall_matching(
+                &stored,
+                &["Library::open_workspace"],
+            ));
+            let open = Arc::clone(&stall);
+            on_a_paused_clock(stall, "an open whose root hangs", async move {
+                let embedded = Arc::new(EmbeddedServer::for_tests(library).await);
+                let opening = Arc::clone(&embedded);
+                let opened_key = key.clone();
+                let opened = tokio::spawn(async move { opening.open_workspace(&opened_key).await });
+                let waiting = Arc::clone(&open);
+                let entered = tokio::task::spawn_blocking(move || {
+                    waiting.wait_entered(Duration::from_secs(10))
+                })
+                .await
+                .expect("wait task");
+                assert!(entered, "fixture: the open never reached its root");
+                tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    !opened.is_finished(),
+                    "the open answered before the mount bound"
+                );
+                tokio::time::advance(JUST_SHORT).await;
+                let refused = opened
+                    .await
+                    .expect("open task")
+                    .expect_err("the open of a root that hangs mounted it");
+                assert_eq!(
+                    refused,
+                    format!("mount timed out after 60 seconds: {key} did not answer")
+                );
+                assert_eq!(
+                    embedded.host.workspace_status(&stored).1.as_deref(),
+                    Some(STILL_RELEASING),
+                    "the row after the bound"
+                );
+                assert_eq!(
+                    embedded.close_workspace_root(&stored, false).await,
+                    Ok(WorkspaceLifecycleOutcome::NotFound)
+                );
+                assert_eq!(
+                    embedded.remove_workspace_root(&stored, false).await,
+                    Ok(WorkspaceLifecycleOutcome::Completed)
+                );
+            });
+        }
+    }
 }
