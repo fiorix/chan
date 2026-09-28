@@ -187,6 +187,10 @@ No launcher route is exempt from the refusal checker. The typed `live_terminals`
 
 `POST /{id}/on` answers `200` with the workspace's row, in the same shape a row of the list carries: a healthy mount comes back `running`, a mount whose root is not usable comes back `on: true`, `unavailable`, and the reason in `error`. The verb succeeded either way, so no error bubble opens; the launcher discards that body and re-lists, the way it does after an add, and the degraded row reaches the screen with its reason. The `409` for a workspace another Chan process holds reaches the bubble as the sentence in its JSON `error` field.
 
+## A workspace row's name
+
+A row shows its workspace's label and, when the label is empty, `rootName` of its root (`lib/windowLabel.ts`): the root's last component on its host, cut at `/` alone. A Windows root with no label therefore reads whole. The command deck gives a workspace window whose workspace has no row the same name, from its `workspace_path`.
+
 ## Build integration
 
 The launcher bundle is embedded beside the main workspace bundle and follows the same rebuild contract: fresh checkouts and isolated gate worktrees compile before the frontend artifact exists, while a rebuilt launcher forces the embedding server crate to relink. The top-level web targets build the launcher before any CLI, desktop, packaging, or release consumer embeds the server bundle, so every distribution path ships the same launcher without per-consumer wiring.
