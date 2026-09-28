@@ -3138,10 +3138,7 @@ impl WorkspaceHost {
         let path = Path::new(path);
         let target = stored_window_key(path);
         if let Ok(workspaces) = self.workspaces.read() {
-            if let Some(runtime) = workspaces
-                .values()
-                .find(|runtime| runtime.found_by(&target))
-            {
+            if let Some((_, runtime)) = window_path_runtimes(&workspaces, path).next() {
                 let connected = runtime
                     .artifacts
                     .window_presence
@@ -4559,6 +4556,22 @@ pub fn registry_row_keys(row: &chan_workspace::KnownWorkspace) -> [&Path; 2] {
 /// root's filesystem, which the window feed must not do for every record.
 fn stored_window_key(path: &Path) -> PathBuf {
     chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(path))
+}
+
+/// The workspace runtimes a window record's stored `workspace_path` goes by,
+/// each with the prefix it is mounted at: those whose canonical or opened-at
+/// root is the path's [`stored_window_key`]. Answered from the stored keys,
+/// touching no filesystem, so a caller may ask under the routing map's lock.
+/// The window feed shows the window under the first, and the map's order
+/// decides which that is when more than one runtime goes by the path.
+fn window_path_runtimes<'a>(
+    workspaces: &'a HashMap<String, HostedWorkspaceRuntime>,
+    workspace_path: &Path,
+) -> impl Iterator<Item = (&'a String, &'a HostedWorkspaceRuntime)> {
+    let key = stored_window_key(workspace_path);
+    workspaces
+        .iter()
+        .filter(move |(_, runtime)| runtime.found_by(&key))
 }
 
 /// The overlay rows one workspace is kept under: the key a user's action
