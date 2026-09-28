@@ -8155,6 +8155,205 @@ mod tests {
         assert!(!by_id.contains("cfg.devservers"));
     }
 
+    /// The label of the devserver window the close tests close.
+    const CLOSED_LABEL: &str = "lib-close::w-1";
+
+    /// A page of the devserver the window's tenant serves.
+    const LIVE_PAGE: &str = "http://127.0.0.1:9/terminal/index.html?w=w-1";
+
+    /// A desktop connected to one devserver, with one window, `CLOSED_LABEL`,
+    /// in its feed and in its watcher's view. The devserver's stand-in answers
+    /// every request with 204 and records it as `METHOD path`.
+    struct ClosingDevserver {
+        app: tauri::App<tauri::test::MockRuntime>,
+        state: Arc<AppState>,
+        view: Arc<window_watcher::WatcherViewState>,
+        requests: Arc<Mutex<Vec<String>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl ClosingDevserver {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&requests);
+            let stand_in = axum::Router::new().fallback(move |request: axum::extract::Request| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.lock().unwrap().push(format!(
+                        "{} {}",
+                        request.method(),
+                        request.uri().path()
+                    ));
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            });
+            let server =
+                tokio::spawn(async move { axum::serve(listener, stand_in).await.unwrap() });
+            let state = empty_state();
+            state.devservers.set(
+                "ds-close".to_string(),
+                devserver::DevserverConn {
+                    host: "127.0.0.1".into(),
+                    port,
+                    token: "devserver-token".into(),
+                    name: "test".into(),
+                    gateway: None,
+                },
+            );
+            let record = chan_server::WindowRecord {
+                window_id: "w-1".into(),
+                library_id: "lib-close".into(),
+                kind: chan_server::WindowKind::Terminal,
+                title: "Terminal".into(),
+                ordinal: 1,
+                label: String::new(),
+                workspace_path: None,
+                prefix: "/terminal".into(),
+                token: "tok".into(),
+                persisted: true,
+                connected: false,
+                active_transfer: false,
+                control: false,
+                hidden: false,
+                origin: chan_server::WindowOrigin::Native,
+            };
+            state
+                .devserver_feed
+                .register_windows("ds-close".to_string(), Arc::new(Mutex::new(vec![record])));
+            let view = Arc::new(window_watcher::WatcherViewState::with_pending_deletes(
+                Arc::clone(&state.pending_window_deletes),
+            ));
+            state
+                .devserver_watcher_views
+                .lock()
+                .unwrap()
+                .insert("ds-close".to_string(), Arc::clone(&view));
+            let app = tauri::test::mock_app();
+            app.manage(Arc::clone(&state));
+            Self {
+                app,
+                state,
+                view,
+                requests,
+                server,
+            }
+        }
+
+        /// The window at `url`, as the watcher's build or a navigation left it.
+        fn window_at(&self, url: WebviewUrl) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
+            WebviewWindowBuilder::new(&self.app, CLOSED_LABEL, url)
+                .build()
+                .expect("mock webview window")
+        }
+
+        /// The requests the stand-in answered, once one of them is `request`.
+        async fn requests_through(&self, request: &str) -> Vec<String> {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let seen = self.requests.lock().unwrap().clone();
+                if seen.iter().any(|sent| sent == request) {
+                    return seen;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the devserver was not sent {request} within five seconds: {seen:?}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        /// The close discarded the window: its delete is queued and sent.
+        async fn assert_discarded(&self) {
+            assert!(
+                self.state.pending_window_deletes.contains(CLOSED_LABEL),
+                "the close queued no delete of the window"
+            );
+            self.requests_through("DELETE /api/library/windows/w-1")
+                .await;
+        }
+    }
+
+    impl Drop for ClosingDevserver {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    /// A close of a devserver window still on its connecting page hides it:
+    /// the window leaves the screen and is listed for reopening, and its
+    /// record, which holds its terminal sessions, stays on the devserver.
+    #[tokio::test]
+    async fn a_close_on_the_connecting_page_hides_the_window_and_keeps_its_record() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        assert!(
+            serve::window_on_connecting_screen(devserver.app.handle(), CLOSED_LABEL),
+            "fixture: the window is not on the connecting page"
+        );
+
+        close_devserver_window(devserver.app.handle(), &window).expect("the close");
+
+        assert!(
+            !devserver
+                .state
+                .pending_window_deletes
+                .contains(CLOSED_LABEL),
+            "a close on the connecting page queued the window's delete"
+        );
+        assert!(
+            devserver.view.is_buried(CLOSED_LABEL),
+            "a close on the connecting page left the window shown in its watcher's view"
+        );
+        assert!(
+            devserver
+                .state
+                .buried_snapshot()
+                .iter()
+                .any(|(label, _)| label == CLOSED_LABEL),
+            "a close on the connecting page left the window out of the hidden windows"
+        );
+        let sent = devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        assert!(
+            !sent.iter().any(|request| request.starts_with("DELETE ")),
+            "a close on the connecting page sent the window's delete: {sent:?}"
+        );
+    }
+
+    /// A close of a devserver window on its live page discards it, as the
+    /// live page's Close and the page's empty-window cascade ask.
+    #[tokio::test]
+    async fn a_close_on_the_live_page_discards_the_devserver_window() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::External(LIVE_PAGE.parse().unwrap()));
+
+        close_devserver_window(devserver.app.handle(), &window).expect("the close");
+
+        devserver.assert_discarded().await;
+    }
+
+    /// A window that left its connecting page for its live page is closed as
+    /// a live one: the close reads the page the window shows when it closes.
+    #[tokio::test]
+    async fn a_close_after_the_connecting_page_navigated_discards_the_devserver_window() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        window
+            .navigate(LIVE_PAGE.parse().unwrap())
+            .expect("navigate to the live page");
+        assert!(
+            !serve::window_on_connecting_screen(devserver.app.handle(), CLOSED_LABEL),
+            "fixture: the window is still on the connecting page"
+        );
+
+        close_devserver_window(devserver.app.handle(), &window).expect("the close");
+
+        devserver.assert_discarded().await;
+    }
+
     #[test]
     fn devserver_window_close_records_pending_delete_before_destroy() {
         const MAIN_RS: &str = include_str!("main.rs");
