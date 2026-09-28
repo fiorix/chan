@@ -71,3 +71,29 @@ test("real xterm masks wrapped ANSI assignments across buffer switches", async (
   masker.dispose();
   term.dispose();
 });
+
+test("real xterm rescans the rows on screen after a reflow", async () => {
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    createLinearGradient: () => ({ addColorStop() {} }),
+  })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  const { Terminal } = await import("@xterm/xterm");
+  const term = new Terminal({ allowProposedApi: true, cols: 12, rows: 2 });
+  const masker = new TerminalSecretMasker(term as XtermTerminal, ["TOKEN"], "#6c6c70", true);
+  const snapshot = masker.captureWrite();
+  await new Promise<void>((resolve) => {
+    term.write("NAME_TOKEN=abcdef", () => {
+      masker.scanWrite(snapshot);
+      resolve();
+    });
+  });
+  expect(masker.maskCount, "the value wraps over two rows").toBe(2);
+
+  term.resize(20, 2);
+  const scanViewport = (masker as unknown as { scanViewport?: () => void }).scanViewport;
+  expect(scanViewport, "the masker can rescan the rows on screen").toBeTypeOf("function");
+  scanViewport!.call(masker);
+
+  expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe("NAME_TOKEN=abcdef");
+  expect(masker.maskCount, "one mask on the one row the value fills now").toBe(1);
+});
+
