@@ -3,6 +3,7 @@ import ThreefoldVeil from "./ThreefoldVeil.svelte";
 import {
   buildThreefoldVeilPoints,
   fitThreefoldVeil,
+  THREEFOLD_VEIL_BOUNDS,
   THREEFOLD_VEIL_POINT_COUNT,
 } from "./threefoldVeil";
 import {
@@ -14,6 +15,14 @@ import {
 vi.mock("./canvasAnimation", async (importOriginal) =>
   (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
 );
+const pointCloud = vi.hoisted(() => ({ draws: [] as Array<{ points: Float32Array; bounds: unknown }> }));
+vi.mock("./yuruyurauPointCloud", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./yuruyurauPointCloud")>()),
+  createYuruyurauPointCloudRenderer: () => ({
+    draw: (frame: { points: Float32Array; bounds: unknown }) => pointCloud.draws.push(frame),
+    destroy: () => {},
+  }),
+}));
 vi.mock("./threefoldVeil", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./threefoldVeil")>();
   return { ...actual, buildThreefoldVeilPoints: vi.fn(actual.buildThreefoldVeilPoints) };
@@ -22,6 +31,18 @@ vi.mock("./threefoldVeil", async (importOriginal) => {
 afterEach(stopAnimations);
 
 describe("Threefold Veil", () => {
+  test("draws its points through the shared WebGL2 point-cloud host", () => {
+    const { run, callbacks } = startAnimation(ThreefoldVeil, recordingContext2d().ctx);
+    expect(run.runner, "the WebGL2 loop, not 10,000 2D fills a frame").toBe("webgl2");
+    pointCloud.draws.length = 0;
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+
+    const frame = pointCloud.draws.at(-1)!;
+    expect(frame.points).toHaveLength(THREEFOLD_VEIL_POINT_COUNT * 2);
+    expect(frame.bounds).toEqual(THREEFOLD_VEIL_BOUNDS);
+  });
+
   test("advances pi radians per second of animation time", () => {
     const { callbacks } = startAnimation(ThreefoldVeil, recordingContext2d().ctx);
     callbacks.resize(800, 800, false, 0);

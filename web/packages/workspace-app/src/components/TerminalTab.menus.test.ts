@@ -167,3 +167,28 @@ describe("both menus", () => {
     expect(bodyMenu).toContain("Find");
   });
 });
+
+// The tab menu holds fields and toggles, so it is a dialog; the body menu
+// holds only actions, so it is a menu whose buttons are its items.
+describe("the menus' roles", () => {
+  test("the tab menu is a named dialog", async () => {
+    const { tab } = await attached();
+    await openTerminalMenu(tab);
+    const bubble = document.body.querySelector<HTMLElement>(".terminal-tab-menu-bubble")!;
+    expect([bubble.getAttribute("role"), bubble.getAttribute("aria-label")]).toEqual([
+      "dialog",
+      "terminal tab settings",
+    ]);
+  });
+
+  test("the body menu is a menu of menu items", async () => {
+    const { target } = await attached();
+    await openBodyMenu(target);
+    const bubble = document.body.querySelector<HTMLElement>(".terminal-tab-menu-bubble")!;
+    expect(bubble.getAttribute("role")).toBe("menu");
+    const buttons = [...bubble.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.filter((b) => b.getAttribute("role") !== "menuitem").map((b) => b.textContent?.trim())).toEqual([]);
+  });
+});
+
