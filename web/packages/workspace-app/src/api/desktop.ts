@@ -14,7 +14,7 @@ import {
   waitForTransferSlot,
 } from "../state/transfers.svelte";
 import type { ScopedWindowKind } from "./libraryCommand";
-import type { TransferRoot } from "./client";
+import { transferSuffix, type TransferRoot } from "./client";
 import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
 type TauriWindow = Window &
@@ -598,8 +598,11 @@ export async function runDesktopUpload(
   try {
     if (!(await waitForTransferSlot(xferId))) return [];
     stopProgress = pollNativeProgress(nativeId, xferId);
+    // The query the browser's upload sends: in a standalone Files window it
+    // names the app and this window, or the route writes through the lane
+    // that has no replace.
     const url = new URL(
-      withTokenQuery(`/api/fs/upload${root === "filesystem" ? "?root=filesystem" : ""}`),
+      withTokenQuery(`/api/fs/upload${transferSuffix(root, true)}`),
       window.location.href,
     ).toString();
     const uploaded = await tauriInvoke<NativeUploadedFile[]>("upload_files_native", {
