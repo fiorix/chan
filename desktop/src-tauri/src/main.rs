@@ -8365,6 +8365,36 @@ mod tests {
         devserver.assert_discarded().await;
     }
 
+    /// The macOS menu's close of a window on its connecting page takes the
+    /// path of the window's close button, which hides it and keeps its
+    /// record. A bare destroy leaves the record shown, and the watcher opens
+    /// the window again. The menu handler reads the focused window, which a
+    /// mock window cannot be, so this reads the arm.
+    #[test]
+    fn the_menu_closes_a_connecting_window_through_request_close_window() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let close = source_region(
+            MAIN_RS,
+            "\nfn close_spa_or_native_window(",
+            "\nfn spawn_terminal_window(",
+        );
+        let connecting = close
+            .split("window_on_connecting_screen(")
+            .nth(1)
+            .expect("the menu's close reads the connecting page")
+            .split("return;")
+            .next()
+            .expect("the connecting arm returns");
+        assert!(
+            connecting.contains("request_close_window(app, window)"),
+            "the menu's close of a connecting window does not take its close button's path"
+        );
+        assert!(
+            !connecting.contains("destroy()"),
+            "the menu's close destroys a connecting window itself"
+        );
+    }
+
     #[test]
     fn devserver_window_close_records_pending_delete_before_destroy() {
         const MAIN_RS: &str = include_str!("main.rs");
