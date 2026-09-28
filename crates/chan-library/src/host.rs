@@ -3404,7 +3404,10 @@ impl WorkspaceHost {
     ///
     /// A root no runtime holds reads a mount in flight, and has its lifecycle
     /// cleared, under every key its registry row goes by as well as `target`:
-    /// a devserver marks a mount attempt under the root a row stores.
+    /// a devserver marks a mount attempt under the root a row stores. A
+    /// mounted root that the close takes down has its lifecycle cleared
+    /// under the root its runtime was opened at as well as the runtime's
+    /// key, for the same reason.
     ///
     /// Also returns what the close learned of the workspace's registry row,
     /// for a removal to forget its overlay rows and clear its lifecycle by.
@@ -3440,13 +3443,18 @@ impl WorkspaceHost {
                         overlay.set_each(&overlay_spellings(target, Some(&stored)), false);
                     }
                 }
-                Ok((
-                    outcome,
-                    ClosingRow::Found {
-                        stored,
-                        resolved: target.to_path_buf(),
-                    },
-                ))
+                let row = ClosingRow::Found {
+                    stored,
+                    resolved: target.to_path_buf(),
+                };
+                // The close by prefix clears the runtime's key alone. A close
+                // that took the runtime down clears the root it was opened at
+                // too; a refused one changed nothing, and one that found the
+                // runtime gone leaves its row to whoever took it down.
+                if outcome.completed() {
+                    self.clear_workspace_lifecycle_by_keys(&row.lifecycle_keys(target));
+                }
+                Ok((outcome, row))
             }
             None => {
                 let row = self.closing_row(root, target).await?;
