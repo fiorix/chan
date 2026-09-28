@@ -6767,13 +6767,19 @@ mod tests {
             ),
             "a live workspace must retain its typed removal refusal"
         );
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while workspace.upgrade().is_some() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
+        // The last reference ends before the workspace's fields drop, the
+        // writer lock among them, so wait as a close does for both.
+        let lock_dir = library.workspace_paths_for(root.path()).unwrap().lock;
+        wait_for_workspace_release(
+            root.path(),
+            &workspace,
+            &lock_dir,
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert!(
+            chan_workspace::lock::is_free(&lock_dir),
+            "the abandoned open's workspace kept its writer lock"
+        );
         assert!(host
             .remove_workspace_for_root(root.path(), false)
             .await
@@ -6863,13 +6869,19 @@ mod tests {
             ),
             "a live workspace must retain its typed removal error"
         );
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while workspace.upgrade().is_some() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
+        // The last reference ends before the workspace's fields drop, the
+        // writer lock among them, so wait as a close does for both.
+        let lock_dir = library.workspace_paths_for(root.path()).unwrap().lock;
+        wait_for_workspace_release(
+            root.path(),
+            &workspace,
+            &lock_dir,
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert!(
+            chan_workspace::lock::is_free(&lock_dir),
+            "the abandoned open's workspace kept its writer lock"
+        );
         assert!(host
             .remove_workspace_for_root(root.path(), false)
             .await
