@@ -666,6 +666,49 @@ mod tests {
         assert!(content.len() <= READ_FILE_CAP_BYTES);
     }
 
+    /// A file over the cap is answered with its text up to the cap: the
+    /// tool reads no further, so bytes past the cap that are not UTF-8 are
+    /// neither read nor validated.
+    #[test]
+    fn read_file_answers_a_file_whose_bytes_past_the_cap_are_not_utf8() {
+        let (_cfg, root, ctx) = fixture();
+        let mut bytes = "x".repeat(READ_FILE_CAP_BYTES).into_bytes();
+        bytes.extend_from_slice(&[0xff; 1024]);
+        std::fs::write(root.path().join("big.md"), &bytes).unwrap();
+        let v = execute("read_file", &serde_json::json!({"path": "big.md"}), &ctx)
+            .expect("the tool refuses a file whose bytes past its cap are not UTF-8");
+        assert_eq!(
+            v["content"].as_str().map(str::len),
+            Some(READ_FILE_CAP_BYTES)
+        );
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["size"].as_u64(), Some(bytes.len() as u64));
+        assert_eq!(
+            v["note"],
+            format!(
+                "file truncated to {READ_FILE_CAP_BYTES} bytes; full size {}",
+                bytes.len()
+            )
+        );
+    }
+
+    /// A character that straddles the cap is cut at its first byte, so the
+    /// text answered is valid UTF-8 and one byte short of the cap here.
+    #[test]
+    fn read_file_cuts_a_character_straddling_the_cap_at_its_first_byte() {
+        let (_cfg, root, ctx) = fixture();
+        let text = format!(
+            "{}\u{e9}{}",
+            "x".repeat(READ_FILE_CAP_BYTES - 1),
+            "y".repeat(16)
+        );
+        std::fs::write(root.path().join("big.md"), &text).unwrap();
+        let v = execute("read_file", &serde_json::json!({"path": "big.md"}), &ctx).unwrap();
+        assert_eq!(v["content"], text[..READ_FILE_CAP_BYTES - 1]);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["size"].as_u64(), Some(text.len() as u64));
+    }
+
     #[test]
     fn list_files_filters_by_prefix_and_caps() {
         let (_cfg, root, ctx) = fixture();
