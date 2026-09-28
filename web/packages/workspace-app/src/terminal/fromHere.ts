@@ -1,4 +1,4 @@
-import { parentDir } from "../state/format";
+import { basename, parentDir } from "../state/format";
 
 export type TerminalFromHereTarget = {
   cwd: string;
@@ -29,9 +29,4 @@ function normalizeWorkspacePath(path: string): string {
     .split("/")
     .filter((part) => part !== "" && part !== ".")
     .join("/");
-}
-
-function basename(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? path : path.slice(slash + 1);
 }
