@@ -112,6 +112,7 @@ import {
   setTerminalBroadcastBySession,
   setTerminalBroadcastEnabled,
   setTerminalBroadcastTarget,
+  terminalBroadcastReachCount,
   setWindowFocusColor,
   setTerminalSession,
   setTerminalSubmitAgent,
@@ -4074,6 +4075,28 @@ describe("terminal broadcast groups", () => {
       "term-c",
     ]);
     expect(tab("term-c").broadcastEnabled).toBe(true);
+  });
+
+  // The input fan-out reaches only the source's group, and the count on its
+  // indicator says how many it reaches.
+  test("a terminal's reach counts only the members of its own group", () => {
+    resetLayout([
+      terminalTab({ id: "a1", title: "A1", group: "alpha" }),
+      terminalTab({ id: "a2", title: "A2", group: "alpha" }),
+      terminalTab({ id: "b1", title: "B1", group: "beta" }),
+      terminalTab({ id: "b2", title: "B2", group: "beta" }),
+    ]);
+    const tab = (id: string) =>
+      activePane().tabs.find((candidate) => candidate.id === id) as TerminalTab;
+    setTerminalBroadcastEnabled(tab("a1"), true);
+    setTerminalBroadcastTarget(tab("a1"), "a2", true);
+    setTerminalBroadcastEnabled(tab("b1"), true);
+    setTerminalBroadcastTarget(tab("b1"), "b2", true);
+
+    expect(
+      ["a1", "a2", "b1", "b2"].map((id) => terminalBroadcastReachCount(tab(id))),
+      "each reaches its one peer",
+    ).toEqual([1, 1, 1, 1]);
   });
 
   test("select-all toggle flips the whole group on the active terminal", () => {

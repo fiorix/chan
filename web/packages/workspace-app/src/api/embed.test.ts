@@ -46,6 +46,14 @@ describe("detectEmbed: Google Maps", () => {
     expect(e?.src).toContain("https://www.google.com/maps/embed?pb=");
   });
 
+  test("a share-embed on another Google host lands on the host the frame allowlist admits", () => {
+    for (const host of ["maps.google.com", "google.com"]) {
+      const e = detectEmbed(`https://${host}/maps/embed?pb=!1m18!1m12!1m3`);
+      expect(e?.src, host).toBe("https://www.google.com/maps/embed?pb=!1m18!1m12!1m3");
+      expect(isAllowedEmbedSrc(e?.src), host).toBe(true);
+    }
+  });
+
   test("a place/search link becomes the output=embed form", () => {
     const e = detectEmbed(
       "https://www.google.com/maps/place/Eiffel+Tower/@48.8584,2.2945,17z",
