@@ -7245,10 +7245,10 @@ mod tests {
     }
 
     /// A serve of a root whose abandoned mount still holds its workspace
-    /// answers within the open's release budget rather than its own mount
+    /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
     #[test]
-    fn a_serve_beside_an_abandoned_root_check_answers_within_the_release_budget() {
+    fn a_serve_beside_an_abandoned_root_check_answers_already_open_inside_its_bound() {
         const CHECK: &str =
             "host::canonical_key <- chan_library::host::WorkspaceHost::open_workspace";
         let runtime = tokio::runtime::Builder::new_current_thread()
