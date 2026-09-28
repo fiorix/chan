@@ -6966,6 +6966,83 @@ mod tests {
         );
     }
 
+    /// A removal refused at the registry-write permit, beside an unregister
+    /// whose caller gave up, has recorded the off in its close. Once that
+    /// unregister returns, having dropped the registry's row, no overlay row
+    /// of the workspace is left under either spelling of a relinked root: a
+    /// devserver's start registers every overlay row the registry lacks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_held_unregister_that_returns_leaves_no_overlay_row_of_a_refused_removal() {
+        let (host, overlay, stored, canonical, _dirs) = relinked_host();
+        let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+        let first = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(&stored, false))
+            .await;
+        assert!(
+            first.is_none(),
+            "fixture: the first removal did not reach its unregister"
+        );
+        let refused = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(&stored, false))
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Some(Err(Error::Core(ChanError::WorkspaceAlreadyOpen)))
+            ),
+            "a removal beside a held unregister: {refused:?}"
+        );
+        let mut recorded = overlay
+            .entries()
+            .into_iter()
+            .map(|row| (row.path, row.desired_on))
+            .collect::<Vec<_>>();
+        recorded.sort();
+        let mut off = vec![
+            (canonical.to_string_lossy().into_owned(), false),
+            (stored.to_string_lossy().into_owned(), false),
+        ];
+        off.sort();
+        assert_eq!(
+            recorded, off,
+            "a removal refused at the permit did not record the off under both spellings"
+        );
+        assert_eq!(
+            host.library().list_workspaces().len(),
+            1,
+            "a removal refused at the permit unregistered the workspace"
+        );
+
+        drop(held);
+        // The unregister's closure drops the permit last, after all of its
+        // bookkeeping, so holding it means that unregister has returned.
+        drop(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                host.root_calls
+                    .lock(&(canonical.clone(), RootCall::RegistryWrite)),
+            )
+            .await
+            .expect("the held unregister did not return"),
+        );
+        assert!(
+            host.library().list_workspaces().is_empty(),
+            "fixture: the held unregister kept the registry's row"
+        );
+        assert_eq!(
+            overlay.entries(),
+            Vec::new(),
+            "the overlay holds a row for a workspace the registry no longer holds"
+        );
+        let states = host.mount_state.lock().unwrap();
+        assert!(
+            !states.contains_key(&canonical) && !states.contains_key(&stored),
+            "the held unregister left a lifecycle row: {:?}",
+            states.keys().collect::<Vec<_>>()
+        );
+    }
+
     /// A close of a relinked root that is not mounted reads a mount in
     /// flight, and clears the root's lifecycle, under every key its
     /// registry row goes by, the stored root among them, where a devserver
