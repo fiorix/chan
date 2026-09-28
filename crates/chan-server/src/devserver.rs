@@ -3167,7 +3167,7 @@ async fn handle_open(
 /// `DELETE /api/devserver/workspaces/{prefix}`: forget the workspace. A removal
 /// that meets an earlier call of this process on the root that has not let go
 /// answers as the launcher's delete does: 503, `Retry-After: 1` and the words
-/// the root's row reads.
+/// `workspace is still releasing; retry`.
 async fn handle_forget(
     State(state): State<Arc<DevserverState>>,
     AxumPath(prefix_tail): AxumPath<String>,
