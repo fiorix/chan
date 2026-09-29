@@ -246,6 +246,9 @@ enum ServerFrame {
         /// snapshot whose generation no longer matches.
         generation: u64,
         missed_bytes: u64,
+        /// Ring bytes sent immediately after this frame, excluding the
+        /// alternate-screen prelude and private-mode reassert.
+        replay_bytes: usize,
         bytes_since_focus: u64,
         /// MESSAGE depth of the shared write queue at attach time (a gemini
         /// text+chord pair counts once), so every (re)attach re-syncs the
@@ -1268,6 +1271,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         seq: session.seq,
         generation: session.generation,
         missed_bytes: session.missed_bytes,
+        replay_bytes: session.replay.iter().map(Vec::len).sum(),
         bytes_since_focus: session.bytes_since_focus(),
         queue_depth: session.queue_depth(),
         queued_prompt_ids: session.queued_prompt_ids(),
@@ -2255,6 +2259,7 @@ mod tests {
             seq: 7,
             generation: 3,
             missed_bytes: 0,
+            replay_bytes: 7,
             bytes_since_focus: 0,
             queue_depth: 2,
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
@@ -2262,7 +2267,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session).unwrap(),
-            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"submit_agent":"opencode"}"#
+            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"submit_agent":"opencode"}"#
         );
         // Empty list still serializes as `[]` (always present; the SPA can
         // assume the field exists -- pre-release, no back-compat).
@@ -2275,6 +2280,7 @@ mod tests {
             seq: 0,
             generation: 0,
             missed_bytes: 0,
+            replay_bytes: 0,
             bytes_since_focus: 0,
             queue_depth: 0,
             queued_prompt_ids: vec![],
@@ -2282,7 +2288,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session_empty).unwrap(),
-            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[]}"#
+            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[]}"#
         );
         // cancel-prompt decode (client→server) -- pin the tag + field so a
         // rename can't silently break the SPA wire with a green build.
