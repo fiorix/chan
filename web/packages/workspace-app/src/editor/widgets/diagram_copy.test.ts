@@ -113,3 +113,21 @@ describe("diagramCopyButton", () => {
     expect(writeClipboardPayload).not.toHaveBeenCalled();
   });
 });
+
+describe("a copy that fails twice in a row", () => {
+  test("gives the button its own title back once both have passed", async () => {
+    vi.useFakeTimers();
+    try {
+      const btn = diagramCopyButton("x-copy", () => null, "svg");
+      const title = btn.title;
+      document.body.append(btn);
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(btn.title).toBe(title);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
