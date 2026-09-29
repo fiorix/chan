@@ -911,17 +911,11 @@
     searchPanel.open = true;
   }
 
-  // The "choose the moved file" reopen instruction (set in
-  // doReopenMissing) is a deliberately persistent status (see
-  // FileEditorTab.test.ts, "re-opening a moved file asks the user to pick
-  // it in Files, until the tab goes"). Clear it when this tab unmounts, so an
-  // abandoned reopen (the user closes the tab instead of picking the
-  // moved file) does not leave the status stuck in the bar. The literal
-  // must match the one set below.
+  // Only the armed tab owns the pick instruction. An unrelated host can
+  // unmount while the user is still choosing the moved file.
   onDestroy(() => {
     slidePreviewHandle?.close({ notify: false });
-    endMissingFileReopen(tab.id);
-    if (missingFileReopenInstructionShows()) {
+    if (endMissingFileReopen(tab.id) && missingFileReopenInstructionShows()) {
       ui.status = null;
     }
   });

@@ -8141,9 +8141,11 @@ export function beginMissingFileReopen(tabId: string, by: "pick" | "open"): void
   layout.activePaneId = found.paneId;
 }
 
-/// End the re-open of `tabId`, when it is the one armed.
-export function endMissingFileReopen(tabId: string): void {
-  if (pendingMissingFileReopen?.tabId === tabId) pendingMissingFileReopen = null;
+/// End the re-open of `tabId`; return whether it owned the armed request.
+export function endMissingFileReopen(tabId: string): boolean {
+  if (pendingMissingFileReopen?.tabId !== tabId) return false;
+  pendingMissingFileReopen = null;
+  return true;
 }
 
 /// Refresh a non-dirty tab's content from disk. Used by user-initiated
