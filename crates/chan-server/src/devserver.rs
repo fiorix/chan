@@ -9314,6 +9314,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             assert_eq!(
                 refusal_body(response).await,
