@@ -1348,11 +1348,21 @@ mod tests {
             let d = lib.open_workspace(workspace.path()).unwrap();
             let entries = d.list_tree().unwrap();
             assert!(entries.iter().any(|e| e.path == "notes/keep.md"));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let started = std::time::Instant::now();
+            let deadline = started + std::time::Duration::from_secs(20);
             while !d.recovery_status().is_ready() && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            assert!(d.recovery_status().is_ready());
+            assert!(
+                d.recovery_status().is_ready(),
+                "startup recovery not ready: root={} elapsed={:?} status={:?} worker_running={} unowned={} observation={:?}; state samples are separate",
+                d.root().display(),
+                started.elapsed(),
+                d.recovery_status(),
+                d.recovery_worker_running_for_test(),
+                d.recovery_is_unowned(),
+                d.recovery_observation_for_test()
+            );
             d.join_open_recovery();
         }
 

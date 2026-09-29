@@ -579,6 +579,45 @@ pub(crate) struct RecoveryPlan {
     action: Option<RecoveryAction>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryObservation {
+    pub(crate) events: std::collections::VecDeque<String>,
+    pub(crate) last_result: Option<String>,
+    pub(crate) last_error: Option<String>,
+}
+
+#[cfg(test)]
+impl RecoveryObservation {
+    fn new(plan: String) -> Self {
+        Self {
+            events: std::collections::VecDeque::from([plan]),
+            last_result: None,
+            last_error: None,
+        }
+    }
+
+    fn record(&mut self, event: String) {
+        if self.events.len() == 24 {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+}
+
+#[cfg(test)]
+struct RecoveryWorkerExit<'a>(&'a Workspace);
+
+#[cfg(test)]
+impl Drop for RecoveryWorkerExit<'_> {
+    fn drop(&mut self) {
+        self.0.observe_recovery(format!(
+            "worker exit panicking={}",
+            std::thread::panicking()
+        ));
+    }
+}
+
 impl RecoveryPlan {
     fn derive(
         needs_rebuild: bool,
@@ -913,6 +952,8 @@ pub struct Workspace {
     /// One owned startup worker. It executes the metadata-derived recovery
     /// plan off the open caller and joins on ordinary workspace teardown.
     recovery_worker: RecoveryWorker,
+    #[cfg(test)]
+    recovery_observation: std::sync::Mutex<RecoveryObservation>,
     /// Installed by whatever process claims this workspace's recovery passes,
     /// and woken every time one is parked. The startup worker covers only the
     /// plan derived at open, so without a driver a pass requested later has no
@@ -942,6 +983,10 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
+    #[cfg(test)]
+    let _exit = RecoveryWorkerExit(&workspace);
+    #[cfg(test)]
+    workspace.observe_recovery("worker preclaim".to_string());
     #[cfg(any(test, feature = "test-hooks"))]
     open_recovery_pause_for_test(&workspace, stop);
     #[cfg(any(test, feature = "test-hooks"))]
@@ -959,6 +1004,8 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
         && !stop.load(Ordering::Acquire)
     {
         if let Err(error) = workspace.replay_pending_writes() {
+            #[cfg(test)]
+            workspace.observe_recovery_result(format!("preclaim replay error: {error:?}"), true);
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 ?error,
@@ -969,23 +1016,40 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
     }
 
     while !stop.load(Ordering::Acquire) {
+        #[cfg(test)]
+        workspace.observe_recovery("before claim".to_string());
         let Some(pass) = workspace.begin_recovery() else {
             break;
         };
+        #[cfg(test)]
+        workspace.observe_recovery(format!("claimed {pass:?}"));
         let mut result = match pass.action {
             RecoveryAction::Replay => workspace.replay_pending_writes().map(|_| ()),
             RecoveryAction::Reconcile => workspace.reconcile().map(|_| ()),
             RecoveryAction::FullRebuild => workspace.reindex(Some(stop)).map(|_| ()),
         };
+        #[cfg(test)]
+        workspace.observe_recovery_result(format!("action {pass:?}: {result:?}"), result.is_err());
         if result.is_ok() && !stop.load(Ordering::Acquire) {
             result = workspace.refresh_persisted_report_if_owed();
+            #[cfg(test)]
+            workspace.observe_recovery_result(
+                format!("report refresh {pass:?}: {result:?}"),
+                result.is_err(),
+            );
         }
         let outcome = if result.is_ok() {
             RecoveryOutcome::Complete
         } else {
             RecoveryOutcome::Retry
         };
-        if let Err(error) = workspace.finish_recovery(pass, outcome) {
+        let finished = workspace.finish_recovery(pass, outcome);
+        #[cfg(test)]
+        workspace.observe_recovery_result(
+            format!("finish {pass:?} {outcome:?}: {finished:?}"),
+            finished.is_err(),
+        );
+        if let Err(error) = finished {
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 ?error,
@@ -1230,6 +1294,11 @@ impl Workspace {
                 PersistedReportRefresh::Settled
             })),
             recovery_worker: RecoveryWorker::new(),
+            #[cfg(test)]
+            recovery_observation: std::sync::Mutex::new(RecoveryObservation::new(format!(
+                "plan needs_rebuild={needs_rebuild} replay_pending_writes={needs_replay_writes} readiness={state_readiness:?} refresh_report={refresh_report} action={:?}",
+                recovery_plan.action
+            ))),
             recovery_driver: std::sync::RwLock::new(None),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
@@ -1241,6 +1310,40 @@ impl Workspace {
 
     pub(crate) fn start_open_recovery(self: &Arc<Self>, plan: RecoveryPlan) -> Result<()> {
         self.recovery_worker.start(Arc::downgrade(self), plan)
+    }
+
+    #[cfg(test)]
+    fn observe_recovery(&self, event: String) {
+        self.recovery_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(event);
+    }
+
+    #[cfg(test)]
+    fn observe_recovery_result(&self, result: String, failed: bool) {
+        let mut observation = self
+            .recovery_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if failed {
+            observation.last_error = Some(result.clone());
+        }
+        observation.last_result = Some(result.clone());
+        observation.record(result);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_observation_for_test(&self) -> RecoveryObservation {
+        self.recovery_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_worker_running_for_test(&self) -> bool {
+        self.recovery_worker.is_running()
     }
 
     /// Cancel and synchronously join the owned startup recovery worker.
@@ -4013,7 +4116,11 @@ impl Workspace {
     /// stat check.
     pub fn reconcile(&self) -> Result<ReconcileReport> {
         let recovery = self.recovery_execution(RecoveryAction::Reconcile);
+        #[cfg(test)]
+        self.observe_recovery("reconcile before write_serial".to_string());
         let _serial = self.write_serial.lock().unwrap();
+        #[cfg(test)]
+        self.observe_recovery("reconcile acquired write_serial".to_string());
         #[cfg(test)]
         open_recovery_probe(self);
         #[cfg(test)]
@@ -5592,6 +5699,97 @@ mod tests {
         assert!(workspace.persisted_report_refresh_is_owed());
         assert_eq!(workspace.recovery_status().pending, Some(pass));
         assert_eq!(take_report_refresh_attempts(workspace.root()), 1);
+    }
+
+    #[test]
+    fn startup_recovery_observation_retains_error_and_isolates_roots() {
+        let (_healthy_cfg, healthy_root, healthy_lib, _entry) = persisted_report_fixture();
+        let healthy = healthy_lib.open_workspace(healthy_root.path()).unwrap();
+        healthy.join_open_recovery();
+        let healthy_before = healthy.recovery_observation_for_test();
+
+        let (_cfg, root, lib, _entry) = persisted_report_fixture();
+        arm_report_refresh_probe(root.path().canonicalize().unwrap(), true);
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while workspace.recovery_worker_running_for_test() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!workspace.recovery_worker_running_for_test());
+        let status = workspace.recovery_status();
+        let observed = workspace.recovery_observation_for_test();
+        assert!(workspace.recovery_is_unowned(), "{status:?} {observed:?}");
+        assert_eq!(status.pending.unwrap().action, RecoveryAction::Reconcile);
+        assert!(
+            observed
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("injected persisted report refresh failure")),
+            "{observed:?}"
+        );
+        assert!(
+            observed
+                .events
+                .iter()
+                .any(|event| event.contains("finish") && event.contains("Retry")),
+            "{observed:?}"
+        );
+        assert!(
+            observed
+                .events
+                .iter()
+                .any(|event| event == "worker exit panicking=false"),
+            "{observed:?}"
+        );
+        let healthy_after = healthy.recovery_observation_for_test();
+        assert_eq!(healthy_after.events, healthy_before.events);
+        assert_eq!(healthy_after.last_result, healthy_before.last_result);
+        assert_eq!(healthy_after.last_error, healthy_before.last_error);
+        assert_eq!(take_report_refresh_attempts(workspace.root()), 1);
+    }
+
+    #[test]
+    fn startup_recovery_observation_distinguishes_active_write_lock_wait() {
+        let (_cfg, root, lib, _entry) = persisted_report_fixture();
+        let (reached, release) =
+            arm_open_recovery_pause_for_test(root.path().canonicalize().unwrap());
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        reached
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("startup worker did not reach preclaim pause");
+        let serial = workspace.write_serial.lock().unwrap();
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !workspace
+            .recovery_observation_for_test()
+            .events
+            .iter()
+            .any(|event| event == "reconcile before write_serial")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let observed = workspace.recovery_observation_for_test();
+        assert!(
+            observed
+                .events
+                .iter()
+                .any(|event| event == "reconcile before write_serial"),
+            "{observed:?}"
+        );
+        assert!(
+            !observed
+                .events
+                .iter()
+                .any(|event| event == "reconcile acquired write_serial"),
+            "{observed:?}"
+        );
+        assert!(workspace.recovery_status().active.is_some());
+        assert!(workspace.recovery_worker_running_for_test());
+        assert!(!workspace.recovery_is_unowned());
+        drop(serial);
+        workspace.join_open_recovery();
+        assert!(workspace.recovery_status().is_ready());
     }
 
     #[test]
