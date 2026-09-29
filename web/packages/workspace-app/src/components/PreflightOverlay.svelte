@@ -187,7 +187,7 @@
   }
 
   function schedule(ms = POLL_MS): void {
-    if (stopped) return;
+    if (stopped || deciding) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(poll, ms);
   }
@@ -214,16 +214,16 @@
   let snapshotSeq = 0;
 
   async function poll(): Promise<void> {
-    if (stopped) return;
+    if (stopped || deciding) return;
     const seq = ++snapshotSeq;
     try {
       const next = await api.preflight();
-      if (seq !== snapshotSeq) return;
+      if (stopped || seq !== snapshotSeq) return;
       snapshot = next;
       errorStreak = 0;
       if (!settled(snapshot)) schedule();
     } catch {
-      if (seq !== snapshotSeq) return;
+      if (stopped || seq !== snapshotSeq) return;
       errorStreak += 1;
       if (errorStreak < MAX_ERROR_STREAK) {
         schedule(POLL_MS * 2);
@@ -239,18 +239,23 @@
   }
 
   async function decide(step: string, choice: string): Promise<void> {
-    if (deciding) return;
+    if (stopped || deciding) return;
     deciding = true;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
     const seq = ++snapshotSeq;
+    let resumePolling = false;
     try {
       const next = await api.preflightDecision({ step, choice });
-      if (seq !== snapshotSeq) return;
+      if (stopped || seq !== snapshotSeq) return;
       snapshot = next;
-      if (!settled(snapshot)) schedule();
+      resumePolling = !settled(next);
     } catch {
-      schedule();
+      if (stopped || seq !== snapshotSeq) return;
+      resumePolling = true;
     } finally {
       deciding = false;
+      if (!stopped && seq === snapshotSeq && resumePolling) schedule();
     }
   }
 
@@ -259,7 +264,9 @@
   });
   onDestroy(() => {
     stopped = true;
-    if (timer) clearTimeout(timer);
+    snapshotSeq += 1;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
     setCoverBlocking("preflight", false);
   });
 </script>
