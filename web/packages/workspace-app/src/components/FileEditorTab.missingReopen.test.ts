@@ -234,6 +234,8 @@ test("unmounting the pick owner preserves an ordinary replacement status", async
   button(target, "Re-open").click();
   await settle();
   ui.status = "copy failed: unavailable";
+  await settle();
+  expect(ui.status, "ordinary status is visible before unmount").toBe("copy failed: unavailable");
   await removeHost(owner);
   expect(ui.status).toBe("copy failed: unavailable");
 });
