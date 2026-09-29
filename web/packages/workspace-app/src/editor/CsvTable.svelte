@@ -82,6 +82,12 @@
     }
     if (!editing) return;
     const { row, col } = editing;
+    // A cell left as it was is not an edit: re-serializing would rewrite
+    // the whole file (line endings, quoting, a ragged row's padding).
+    if (draft === (rows[row]?.[col] ?? "")) {
+      cancelEdit();
+      return;
+    }
     // Pad short rows up to the column index so an edit into an
     // empty cell of a ragged row materializes the missing fields
     // as empty strings rather than overflowing the array.
