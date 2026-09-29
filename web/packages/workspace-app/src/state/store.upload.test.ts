@@ -10,13 +10,13 @@
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { api } from "../api/client";
+import { api, sessionWindowId } from "../api/client";
 import { setXhrFactory } from "../api/transport";
 import AppStatusBar from "../components/AppStatusBar.svelte";
 import { demoData } from "../__tests__/app";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { fileOps, loadTreeDir, tree, ui } from "./store.svelte";
-import { transfers } from "./transfers.svelte";
+import { transfers, restoreTransfers } from "./transfers.svelte";
 
 beforeEach(async () => {
   installDemoWorkspace(
@@ -36,6 +36,9 @@ afterEach(() => {
   transfers.items = [];
   transfers.shown = false;
   ui.status = null;
+  window.dispatchEvent(new Event("pageshow"));
+  sessionStorage.clear();
+  vi.useRealTimers();
 });
 
 /// An upload request that stays open until the test finishes it, recording
@@ -197,4 +200,27 @@ describe("the status bar", () => {
       HeldXhr.last?.abort();
     }
   });
+});
+
+
+test("pagehide keeps an aborted browser upload interrupted after its rejection settles", async () => {
+  vi.useFakeTimers();
+  holdUploads();
+  const upload = fileOps.uploadFilesTo("docs", [new File(["0123456789"], "c.md")]);
+  await vi.waitFor(() => expect(HeldXhr.last?.body).toBeTruthy());
+  HeldXhr.last!.progress(5, 10);
+  const key = `chan.transfers:${sessionWindowId()}`;
+
+  window.dispatchEvent(new Event("pagehide"));
+  const record = sessionStorage.getItem(key);
+  await upload;
+  expect(HeldXhr.last!.aborted, "XHR abort rejects the request").toBe(true);
+  expect(transfers.items[0].state, "the transport settled in memory").toBe("cancelled");
+  expect(sessionStorage.getItem(key), "cancel's rejection cannot replace the teardown record").toBe(record);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(sessionStorage.getItem(key), "pending progress cannot replace the teardown record").toBe(record);
+
+  transfers.items = [];
+  restoreTransfers(() => vi.fn());
+  expect(transfers.items[0], "a fresh page reads an interrupted upload").toMatchObject({ state: "interrupted", retry: null });
 });
