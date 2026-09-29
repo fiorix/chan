@@ -37,6 +37,8 @@ import {
   flagExternalChange,
   isDocAttached,
   isDocSavePaused,
+  isDocUnflushed,
+  isDirty,
   layout,
   reorderTab,
   saveTab,
@@ -477,12 +479,15 @@ describe("resync", () => {
     type(view, "L"); // unconfirmed local append -> "helloL"
     await flushMicro();
     expect(sock.frames("push")).toHaveLength(1);
-    // The push is never acked; the server hard-resyncs us at a newer
-    // version whose text includes a peer prefix.
+    // The push is still pending when the server fans a newer snapshot
+    // on this socket. Its later refusal, not the snapshot, retires it.
     sock.frame(snap("Phello", 7));
     await flushMicro();
     expect(view.state.doc.toString()).toBe("PhelloL");
     expect(tab.saved).toBe("Phello");
+    expect(sock.frames("push")).toHaveLength(1);
+    sock.frame({ type: "push-stale", version: 7 });
+    await flushMicro();
     const pushes = sock.frames("push");
     expect(pushes).toHaveLength(2);
     expect(pushes[1]!.version).toBe(7);
@@ -719,12 +724,13 @@ describe("connection-outage suppression", () => {
     scheduleAutosave(pane.id, t.id);
     await vi.advanceTimersByTimeAsync(1000);
     expect(writeSpy).not.toHaveBeenCalled();
-    // Heal: the pending reconnect dial fires; the resumed socket (collab
-    // still installed) reattaches and re-pushes the buffered edit instead
-    // of losing it - no classic PUT ever fires.
+    // Heal: an unresolved old push requires a fresh authority snapshot
+    // before the buffered edit is offered again.
     await vi.advanceTimersByTimeAsync(2000);
     const healed = lastSocket();
     healed.open();
+    expect(healed.url).not.toContain("version=");
+    healed.frame(snap("hello"));
     await flushMicro();
     expect(t.doc?.state).toBe("attached");
     expect(isDocSavePaused(t)).toBe(true); // attached -> still paused (flush path)
@@ -823,7 +829,7 @@ describe("save funnel", () => {
     cleanup();
   });
 
-  test("flush timeout degrades the session and falls back to a classic CAS PUT", async () => {
+  test("a late document ack after both bounds permits a later classic CAS PUT", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
     resetLayout([tab]);
@@ -831,22 +837,108 @@ describe("save funnel", () => {
     const writeSpy = vi
       .spyOn(api, "write")
       .mockResolvedValue({ mtime: 2, mtime_ns: "999" });
-    const { view, cleanup } = await attached(t, "hello");
+    const { sock, view, cleanup } = await attached(t, "hello");
     type(view, "!");
     await flushMicro();
-    // Push never acked; the flush cannot confirm. The channel stays
-    // silent through the quiet window AND the fallback settle bound, so
-    // the PUT finally fires with the last token that ever arrived.
+    // Silence ends both waits, leaving the first save withheld.
     const save = saveTab(t);
     await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + 50);
     await vi.advanceTimersByTimeAsync(DOC_FALLBACK_SETTLE_MS + 50);
     await save;
     expect(t.doc?.state).toBe("degraded");
+    expect(writeSpy).not.toHaveBeenCalled();
+    await ackLastPush(sock, 0);
+    await saveTab(t);
     expect(writeSpy).toHaveBeenCalledTimes(1);
     expect(writeSpy.mock.calls[0]![2]).toBe(MTIME);
-    expect(writeSpy.mock.calls[0]![4]).toBe(0);
+    expect(writeSpy.mock.calls[0]![4]).toBe(1);
     expect(t.saved).toBe("hello!");
     expect(t.savedMtimeNs).toBe("999");
+    cleanup();
+  });
+
+  test("a missing document ack beyond both save bounds withholds the PUT", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    const pane = resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "999" });
+    const { view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    const saving = saveTab(t);
+    await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + DOC_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    expect(write, "unresolved document push must not race a PUT").not.toHaveBeenCalled();
+    expect(t.content).toBe("hello!");
+    expect(t.saveError).toContain("push");
+    expect(t.error).toBeNull();
+    expect(isDirty(t)).toBe(true);
+    expect(isDocUnflushed(t.id)).toBe(true);
+    await saveTab(t);
+    scheduleAutosave(pane.id, t.id);
+    await vi.advanceTimersByTimeAsync(801);
+    expect(write, "repeated save and autosave must stay withheld").not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  test("an unresolved document save marks the replacement tab after a reorder", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    resetLayout([tab, fileTab()]);
+    const t = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write");
+    const { view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    const saving = saveTab(t);
+    await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + 1);
+    reorderTab("pane-test", t.id, 1);
+    const moved = readTab(t.id)!;
+    expect(moved).not.toBe(t);
+    await vi.advanceTimersByTimeAsync(DOC_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    expect({ reason: moved.saveError, dirty: isDirty(moved), buffer: moved.content }).toEqual({
+      reason: "the previous live push has not been confirmed",
+      dirty: true,
+      buffer: "hello!",
+    });
+    expect(write).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  test("a lost document socket waits for a fresh snapshot before live recovery", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write");
+    const { sock, view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    const saving = saveTab(t);
+    await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + DOC_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    sock.frame(snap("hello", 0));
+    expect(t.unresolvedLivePush).toBe(true);
+    expect(write, "same-socket snapshot cannot settle the claim").not.toHaveBeenCalled();
+    sock.drop();
+    expect(t.unresolvedLivePush).toBe(true);
+    expect(write, "socket close cannot settle the claim").not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    const back = lastSocket();
+    expect(back.url).not.toContain("version=");
+    back.open();
+    back.frame(snap("hello", 0));
+    await flushMicro();
+    expect(back.frames("push")).toHaveLength(1);
+    const recovered = saveTab(t);
+    await ackLastPush(back, 0);
+    back.frame({ type: "flush", dirty: false, mtime_ns: "9000000000" });
+    await recovered;
+    expect(write).not.toHaveBeenCalled();
+    expect(t.saveError).toBeNull();
+    expect(isDirty(t)).toBe(false);
     cleanup();
   });
 
@@ -913,11 +1005,11 @@ describe("save funnel", () => {
     const { sock, view, cleanup } = await attached(t, "hello");
     type(view, "!");
     await flushMicro();
-    // Silence degrades the funnel and the settle bound expires
-    // unanswered; the classic PUT lands.
+    // The flush times out, but an ack inside the settle bound permits
+    // the classic PUT and its heal.
     const save = saveTab(t);
     await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + 50);
-    await vi.advanceTimersByTimeAsync(DOC_FALLBACK_SETTLE_MS + 50);
+    await ackLastPush(sock, 0);
     await save;
     expect(t.doc?.state).toBe("degraded");
     // The successful fallback save triggered a heal: a fresh snapshot
@@ -1448,4 +1540,3 @@ describe("a session follows its tab through a move", () => {
     cleanup();
   });
 });
-

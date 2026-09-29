@@ -15,6 +15,7 @@ import {
   isSceneSyncEligible,
   resetSceneSyncForTests,
   SCENE_FLUSH_TIMEOUT_MS,
+  SCENE_FALLBACK_SETTLE_MS,
   sceneSessionFor,
   sceneWsPath,
   type SceneCanvasBinding,
@@ -33,8 +34,10 @@ import {
   isDocAttached,
   isDocSavePaused,
   isDocUnflushed,
+  isDirty,
   reorderTab,
   saveTab,
+  scheduleAutosave,
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
@@ -600,6 +603,83 @@ describe("save funnel", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("a delayed scene ack beyond both save bounds withholds the PUT", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("late", 2)]);
+    tab.content = sceneBufferWith("late");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + SCENE_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    expect(write, "unresolved scene push must not race a PUT").not.toHaveBeenCalled();
+    expect(tab.content).toContain("late");
+    expect(tab.saveError).toContain("push");
+    expect(tab.error).toBeNull();
+    expect(isDirty(tab)).toBe(true);
+    expect(isDocUnflushed(tab.id)).toBe(true);
+    await saveTab(tab);
+    expect(write, "repeated save must stay withheld").not.toHaveBeenCalled();
+    scheduleAutosave("pane-scene-test", tab.id);
+    await vi.advanceTimersByTimeAsync(801);
+    expect(write, "autosave must stay withheld").not.toHaveBeenCalled();
+    sock.frame({ type: "push-ok", version: 1 });
+    await saveTab(tab);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  test("a queued second scene push keeps fallback withheld after the first ack", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("first", 2)]);
+    session.pushScene([elem("second", 2)]);
+    tab.content = sceneBufferWith("second");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + SCENE_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    sock.frame({ type: "push-ok", version: 1 });
+    expect(sock.frames("push")).toHaveLength(2);
+    await saveTab(tab);
+    expect(write, "first ack cannot settle a queued second push").not.toHaveBeenCalled();
+    sock.frame({ type: "push-ok", version: 2 });
+    await saveTab(tab);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  test("a lost scene socket retains its claim until a fresh snapshot and live flush", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock, binding } = attached(tab);
+    session.pushScene([elem("local", 2)]);
+    tab.content = sceneBufferWith("local");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + SCENE_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    sock.frame(snap([]));
+    expect(tab.unresolvedLivePush).toBe(true);
+    expect(write, "same-socket snapshot cannot settle the claim").not.toHaveBeenCalled();
+    sock.drop();
+    expect(binding.pending.map((e) => e.id)).toContain("local");
+    expect(tab.unresolvedLivePush).toBe(true);
+    expect(write, "socket close cannot settle the claim").not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600);
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([]));
+    expect(back.frames("push")).toHaveLength(1);
+    const recovered = saveTab(tab);
+    back.frame({ type: "push-ok", version: 1 });
+    back.frame({ type: "flush", dirty: false, mtime_ns: "9000000000" });
+    await recovered;
+    expect(write).not.toHaveBeenCalled();
+    expect(tab.saveError).toBeNull();
+    expect(isDirty(tab)).toBe(false);
   });
 });
 
@@ -1380,4 +1460,3 @@ describe("the classic PUT during an outage", () => {
     expect(String(write.mock.calls[0]![1])).toContain("drawn-during-outage");
   });
 });
-

@@ -1445,6 +1445,20 @@ describe("the not-saved line", () => {
     const { target } = await render(tab);
     expect(line(target)).toBeNull();
   });
+
+  test("keeps the editor and unsaved line when a live push has no answer", async () => {
+    const tab = seat(fileTab({
+      id: "not-saved-3",
+      saveError: "the previous live push has not been confirmed",
+      unresolvedLivePush: true,
+      unresolvedLiveSave: true,
+    }));
+    const { target } = await render(tab);
+    expect({ line: line(target), editor: target.querySelector(".cm-content") !== null }).toEqual({
+      line: "Not saved: the previous live push has not been confirmed",
+      editor: true,
+    });
+  });
 });
 
 describe("a drawing whose save is refused", () => {

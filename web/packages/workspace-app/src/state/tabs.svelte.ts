@@ -265,15 +265,18 @@ export type FileTab = {
   /// What the file tab shows in place of its editor: a load, a save or a
   /// draft's close that failed.
   error: string | null;
-  /// Why the save's check refused this buffer, while the buffer stays the
-  /// user's to fix: the tab keeps its editor and says the file was not
-  /// saved. It follows the buffer within one autosave debounce, since the
-  /// check that refused it clears it when the text parses; a rename out of
-  /// the check and every clear of `refusedUnwritten` clear it too. Read
-  /// only while the tab is dirty, since a buffer equal to the file has
-  /// nothing unsaved. Kept apart from `error`, which the tab shows in place
-  /// of its editor.
+  /// Why a save was refused while its buffer stays in the editor. A
+  /// drawing parse error follows the buffer; an unresolved live push
+  /// remains until an authority answer or fresh reconciliation permits a
+  /// writer to save. Kept apart from `error`, which replaces the editor.
   saveError?: string | null;
+  /// A live push whose outcome is unknown must not race a classic PUT.
+  /// Kept on the tab across a session release until an ack or a fresh
+  /// authority reconciliation establishes the outcome.
+  unresolvedLivePush?: boolean;
+  /// A save was withheld for that push. Keep the dirty dot and close
+  /// warning until a confirmed live flush or a classic PUT writes it.
+  unresolvedLiveSave?: boolean;
   /// A text the save refused has not been written since. While set, the tab
   /// takes no live session, so its saves stay with the classic path and the
   /// tokens of its load, and the write of the text meets the conflict check
@@ -3097,6 +3100,8 @@ async function loadTabContent(
       start.error = null;
       start.saveError = null;
       start.refusedUnwritten = false;
+      start.unresolvedLivePush = false;
+      start.unresolvedLiveSave = false;
       start.fileMissing = null;
     }
     const r = await api.readStream(path, {
@@ -4133,6 +4138,8 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   queueDepth: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
+  unresolvedLivePush: "carry",
+  unresolvedLiveSave: "carry",
   repoRoot: "carry",
   richPromptCaret: "carry",
   richPromptDraftPath: "carry",
@@ -4388,6 +4395,9 @@ const PANE_MODE_SESSION_FIELDS = [
   "doc",
   "error",
   "fileMissing",
+  "saveError",
+  "unresolvedLivePush",
+  "unresolvedLiveSave",
 ] as const;
 
 /// The other half: the bytes the authority holds and the version that names
@@ -5642,7 +5652,7 @@ export function setTabReadMode(tab: FileTab, on: boolean): void {
 export function isDirty(t: Tab): boolean {
   if (t.kind !== "file") return false;
   if (t.loading) return false;
-  return t.content !== t.saved;
+  return t.content !== t.saved || t.unresolvedLiveSave === true;
 }
 
 // ---- autosave + CAS conflict prompt -------------------------------------
@@ -5735,6 +5745,8 @@ function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
   tab.error = null;
   tab.saveError = null;
   tab.refusedUnwritten = false;
+  tab.unresolvedLivePush = false;
+  tab.unresolvedLiveSave = false;
   tab.fileMissing = null;
   tab.externalChange = false;
   mirrorToSiblings(tab.path, response.content, tab.id);
@@ -5805,10 +5817,32 @@ export async function overwriteConflictedTab(): Promise<void> {
 
 /// Save-funnel delegate: "saved" consumed the save (every local edit is
 /// confirmed and the authority flushed to disk); "degraded" and
-/// "classic" fall through to the PUT path below.
+/// "classic" fall through to the PUT path below. "unresolved" keeps
+/// the buffer without starting a competing PUT.
 export type DocSaveDelegate = (
   t: FileTab,
-) => Promise<"saved" | "degraded" | "classic">;
+) => Promise<"saved" | "degraded" | "classic" | "unresolved">;
+
+export type PushSettlement = "settled" | "unresolved";
+
+const UNRESOLVED_LIVE_PUSH_REASON = "the previous live push has not been confirmed";
+
+/// Preserve a save refusal on the tab object the layout holds now. A move
+/// can replace it while the flush and settle bounds are running.
+export function withholdUnresolvedLiveSave(t: FileTab): void {
+  const live = liveFileTabById(t.id) ?? t;
+  live.unresolvedLivePush = true;
+  live.unresolvedLiveSave = true;
+  live.saveError = UNRESOLVED_LIVE_PUSH_REASON;
+}
+
+/// A successful live flush has reached disk after the uncertain push.
+export function clearUnresolvedLiveSave(t: FileTab): void {
+  const live = liveFileTabById(t.id) ?? t;
+  live.unresolvedLivePush = false;
+  live.unresolvedLiveSave = false;
+  if (live.saveError === UNRESOLVED_LIVE_PUSH_REASON) live.saveError = null;
+}
 
 /// One live-session kind's whole integration with the classic save path.
 ///
@@ -5873,23 +5907,21 @@ export function releaseDocSessionForTab(tabId: string, immediate = false): void 
 /// a window (first connect / reconnect grace) where a classic CAS PUT
 /// could race the authority's own flush. Autosave, the sibling mirror,
 /// and the external-change banner stay quiet in these states; `degraded`
-/// and `off` read false so the classic path resumes.
+/// and `off` defer to the outstanding-push and outage guards below.
 export function isDocAttached(t: FileTab): boolean {
   const s = t.doc?.state;
   return s === "attached" || s === "connecting" || s === "reconnecting";
 }
 
 /// True when the classic autosave/PUT path must stay quiet: either the
-/// authority owns saves (`isDocAttached`), or the session is degraded by
-/// a still-retrying connection outage (dead server) where a PUT is doomed
-/// and its `tab.error` would unmount the editor and lose the unconfirmed
-/// buffer. Reads the mirrored `t.doc.state` (reactive) and, only for the
-/// degraded case, the session query for the connection-outage nuance - a
-/// degraded-but-reachable session (flush-timeout) and every permanent
-/// stop read false, so the classic path (including error surfacing)
-/// resumes exactly as before.
+/// authority owns saves (`isDocAttached`), a previous push is unresolved,
+/// or the session is degraded by a still-retrying connection outage where
+/// a doomed PUT would replace the editor with an error placeholder. The
+/// tab carries the unresolved claim across session release and object
+/// replacement; the degraded outage query handles the remaining case.
 export function isDocSavePaused(t: FileTab): boolean {
   if (isDocAttached(t)) return true;
+  if (t.unresolvedLivePush) return true;
   if (t.doc?.state !== "degraded") return false;
   return docSavePausedQueries.some((q) => q(t.id));
 }
@@ -5931,7 +5963,7 @@ async function performSave(t: FileTab): Promise<void> {
     do {
       saveAgainAfterCurrent.delete(t.id);
       await performSaveOnce(t);
-    } while (saveAgainAfterCurrent.has(t.id) && t.content !== t.saved);
+    } while (saveAgainAfterCurrent.has(t.id) && isDirty(liveFileTabById(t.id) ?? t));
   } finally {
     savingTabs.delete(t.id);
     saveAgainAfterCurrent.delete(t.id);
@@ -5948,16 +5980,22 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // (the ConflictModal is unreachable while attached). Delegates run in
   // registration order; "classic" means "not my session, ask the next
   // one". A flush failure degrades the owning session, stops its pump,
-  // waits out any in-flight push, and falls through to the classic path
-  // below with the freshest flush token stamped; a successful classic
-  // save then heals the session back to attached via the fallback-saved
-  // hook.
+  // waits a finite time for any in-flight push. An unresolved result
+  // retains the buffer and reason; a positive answer permits the classic
+  // path below with its latest flush token. A successful classic save
+  // then heals the session through the fallback-saved hook.
   if (isDocAttached(t)) {
     for (const delegate of docSaveDelegates) {
       const r = await delegate(t);
       if (r === "classic") continue;
       if (r === "saved") {
-        t.error = null;
+        const live = liveFileTabById(t.id) ?? t;
+        live.error = null;
+        clearUnresolvedLiveSave(live);
+        return;
+      }
+      if (r === "unresolved") {
+        withholdUnresolvedLiveSave(t);
         return;
       }
       break;
@@ -5974,9 +6012,12 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // unreachable server and its `tab.error` would swap the editor for the
   // error placeholder, unmounting the collab view and losing the buffer.
   // Stay quiet; the edits live in the buffer (and editorBuffer) for the
-  // reattach diff-push. A reachable-but-degraded session (flush timeout)
-  // reads false here and PUTs normally.
-  if (isDocSavePaused(live)) return;
+  // reattach diff-push. A reachable degraded session may PUT only after
+  // its prior push has a known outcome.
+  if (isDocSavePaused(live)) {
+    if (live.unresolvedLivePush) withholdUnresolvedLiveSave(live);
+    return;
+  }
   // A drawing's buffer must parse: a source-mode typo would otherwise
   // write a scene the canvas then refuses to restore.
   if (isExcalidraw(live.path)) {
@@ -6020,6 +6061,8 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     done.error = null;
     done.saveError = null;
     done.refusedUnwritten = false;
+    done.unresolvedLivePush = false;
+    done.unresolvedLiveSave = false;
     done.fileMissing = null;
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
@@ -6071,7 +6114,7 @@ export function scheduleAutosave(paneId: string, tabId: string): void {
     const found = findTabInPane(node, tabId);
     const t = found?.tab.kind === "file" ? found.tab : undefined;
     if (!t) return;
-    if (t.loading || t.content === t.saved) return;
+    if (t.loading || !isDirty(t)) return;
     // Attached tabs save through the doc session, and a connection-outage
     // degraded tab suppresses the doomed PUT; the autosave effect already
     // skips both, this re-check covers a status flip in the debounce

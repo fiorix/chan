@@ -68,6 +68,26 @@ async function settled(): Promise<void> {
 }
 
 describe("the close of a drawing whose save is refused", () => {
+  test("an unanswered live push keeps a clean-looking buffer open until the user decides", async () => {
+    const tab = fileTab({
+      id: "unanswered-live-push",
+      content: "same text",
+      saved: "same text",
+      unresolvedLivePush: true,
+      unresolvedLiveSave: true,
+      saveError: "the previous live push has not been confirmed",
+    });
+    const pane = resetLayout([tab]);
+    const write = vi.spyOn(api, "write");
+    const close = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    expect(confirmState.message).toContain("previous live push has not been confirmed");
+    expect(write).not.toHaveBeenCalled();
+    resolveConfirm(false);
+    await close;
+    expect(readTab(tab.id)).toBeDefined();
+  });
+
   test("asks, naming the file and the reason, and keeps editing on a no", async () => {
     const pane = resetLayout([drawingTab("notes/board.excalidraw")]);
     const write = stubWrites();

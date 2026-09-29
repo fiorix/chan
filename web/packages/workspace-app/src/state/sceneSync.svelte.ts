@@ -5,8 +5,8 @@
 /// and fans accepted values to the other attachments), remote changes
 /// arrive as `update` frames the canvas reconciles, and saves become
 /// flush confirmations instead of PUTs. When the channel is unavailable
-/// the tab degrades to the classic autosave + CAS path with a valid mtime
-/// token from the last `flush` frame.
+/// the tab degrades to the classic autosave + CAS path with the last
+/// flush token, once no unresolved push can race that replacement.
 ///
 /// One SceneSession per TAB (not per path), mirroring docSync: the
 /// session outlives canvas remounts (cross-pane move) via a short release
@@ -46,11 +46,14 @@ import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
   markTabFileMissing,
+  clearUnresolvedLiveSave,
   registerLiveSessionKind,
   registerPaneModeSettledSink,
   setTabDocState,
+  withholdUnresolvedLiveSave,
   type DocSyncStatus,
   type FileTab,
+  type PushSettlement,
 } from "./tabs.svelte";
 
 /// Feature flag. Default ON; localStorage `chan.scenesync = "0"` opts a
@@ -66,8 +69,9 @@ export const SCENE_RELEASE_LINGER_MS = 250;
 
 /// Reconnect grace, mirroring docSync: a socket drop shows as
 /// `reconnecting` (classic autosave stays suppressed) for at most this
-/// many attempts / this long, then the session degrades and classic
-/// autosave resumes. Background retries continue at capped backoff.
+/// many attempts / this long, then the session degrades. Classic saves
+/// resume only when no old push outcome remains unresolved; background
+/// retries continue at capped backoff.
 export const SCENE_RECONNECT_GRACE_ATTEMPTS = 2;
 export const SCENE_RECONNECT_GRACE_MS = 3000;
 
@@ -79,10 +83,9 @@ export const SCENE_ATTACH_TIMEOUT_MS = 5000;
 /// flush debounce plus the write with margin.
 export const SCENE_FLUSH_TIMEOUT_MS = 4000;
 
-/// Bound on the degraded-fallback wait for an in-flight push to settle
-/// before the classic PUT fires. Keeps the two writers serialized: the
-/// push already on the wire lands (and its push-ok restamps the CAS
-/// token) before the PUT reads that token.
+/// Bound on waiting for a push before considering a classic fallback.
+/// Expiry leaves that fallback withheld until the push is acknowledged
+/// or a fresh session snapshot reconciles it.
 export const SCENE_FALLBACK_SETTLE_MS = 2000;
 
 /// Outbound pointer cadence: trailing-edge throttle on pointer moves,
@@ -348,10 +351,11 @@ export class SceneSession {
   private flushError: string | null = null;
 
   private pushInFlight = false;
-  /// Fallback-settle waiters: resolved the moment no push is in flight
-  /// (or on their own bound). See awaitPushSettled.
+  private pushOutcomeUnresolved = false;
+  /// Fallback-settle waiters receive a positive result only after all
+  /// queued pushes are acknowledged.
   private pushSettleWaiters: {
-    resolve: () => void;
+    resolve: (outcome: PushSettlement) => void;
     timer: ReturnType<typeof setTimeout>;
   }[] = [];
   /// The push currently on the wire, in the same three parts the queued one
@@ -414,7 +418,7 @@ export class SceneSession {
   /// prompt that guards a discard, and the alternative reads the save path
   /// from here to learn which of the two wrote last.
   hasUnflushedState(): boolean {
-    if (this.serverDirty || this.pushInFlight || this.queued !== null) return true;
+    if (this.serverDirty || this.pushOutcomeUnresolved || this.queued !== null) return true;
     return this.binding?.hasPendingLocal() ?? false;
   }
 
@@ -513,6 +517,7 @@ export class SceneSession {
       return true;
     }
     this.pushInFlight = true;
+    this.pushOutcomeUnresolved = true;
     this.unacked = claimedPush(elements, appState, files);
     this.send({
       type: "push",
@@ -556,9 +561,8 @@ export class SceneSession {
   }
 
   /// Save-funnel entry: ensure every local change is confirmed by the
-  /// authority and the authority has flushed to disk. Resolves false on
-  /// timeout or flush error; the caller degrades the session and falls
-  /// back to the classic PUT.
+  /// authority and the authority has flushed to disk. A timeout or flush
+  /// error degrades the session; fallback still needs a settled push.
   flush(timeoutMs: number = SCENE_FLUSH_TIMEOUT_MS): Promise<boolean> {
     if (!this.ownsSaves()) return Promise.resolve(false);
     this.binding?.flushPendingLocal();
@@ -583,34 +587,43 @@ export class SceneSession {
     this.setStatus("degraded");
   }
 
-  /// Fallback settle: resolves once no push is in flight, bounded by
-  /// `timeoutMs`. The degrade gate in pushScene stops NEW pushes; this
-  /// waits out the one already on the wire so the classic fallback PUT
-  /// never interleaves with it, and so the push's own push-ok gets its
-  /// chance to restamp the tab's CAS token before the PUT reads it.
-  awaitPushSettled(timeoutMs: number = SCENE_FALLBACK_SETTLE_MS): Promise<void> {
-    if (!this.pushInFlight) return Promise.resolve();
-    return new Promise<void>((resolve) => {
+  /// A bounded wait cannot turn silence or socket closure into an ack.
+  awaitPushSettled(timeoutMs: number = SCENE_FALLBACK_SETTLE_MS): Promise<PushSettlement> {
+    if (!this.pushOutcomeUnresolved) return Promise.resolve("settled");
+    if (!this.pushInFlight) return Promise.resolve("unresolved");
+    return new Promise<PushSettlement>((resolve) => {
       const waiter = {
         resolve,
         timer: setTimeout(() => {
           this.pushSettleWaiters = this.pushSettleWaiters.filter(
             (w) => w !== waiter,
           );
-          resolve();
+          resolve("unresolved");
         }, timeoutMs),
       };
       this.pushSettleWaiters.push(waiter);
     });
   }
 
-  /// The in-flight push settled (answered, superseded, or its socket
-  /// died): release any fallback-settle waiters with it.
-  private clearPushInFlight(): void {
+  /// Recheck after the wait's microtask: an ack, redial or new push can
+  /// change ownership between the timer firing and the delegate resuming.
+  fallbackSettlement(): PushSettlement {
+    return this.pushOutcomeUnresolved || this.ownsSaves() ? "unresolved" : "settled";
+  }
+
+  /// Only an ack permits fallback. A lost socket or a new sync epoch
+  /// releases the bounded wait without claiming that old push settled.
+  private clearPushInFlight(outcome: PushSettlement): void {
     this.pushInFlight = false;
+    if (outcome === "settled") {
+      this.pushOutcomeUnresolved = false;
+      this.tab.unresolvedLivePush = false;
+    } else if (this.pushOutcomeUnresolved) {
+      withholdUnresolvedLiveSave(this.tab);
+    }
     for (const w of this.pushSettleWaiters.splice(0)) {
       clearTimeout(w.timer);
-      w.resolve();
+      w.resolve(outcome);
     }
   }
 
@@ -691,6 +704,7 @@ export class SceneSession {
     this.queued = null;
     if (q.elements.size === 0 && q.appState === null && q.files === null) return;
     this.pushInFlight = true;
+    this.pushOutcomeUnresolved = true;
     this.unacked = q;
     this.send({
       type: "push",
@@ -713,6 +727,7 @@ export class SceneSession {
 
   private dial(): void {
     this.clearReconnectTimer();
+    if (this.pushInFlight) this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.sawFrameOnSocket = false;
     let ws: WebSocket;
@@ -762,7 +777,7 @@ export class SceneSession {
     this.clearAttachTimer();
     this.ws = null;
     this.releaseUnaccepted();
-    this.clearPushInFlight();
+    this.clearPushInFlight("unresolved");
     this.queued = null;
     if (this.closedByUs || this.retryStopped) return;
     // Capability probe: the first scene-ws connect that closes before
@@ -825,7 +840,7 @@ export class SceneSession {
         this.drainQueued();
         // A push the ack drains from the queue is on the wire in its
         // turn, and a fallback save waits for it too.
-        if (!this.pushInFlight) this.clearPushInFlight();
+        if (!this.pushInFlight) this.clearPushInFlight("settled");
         this.confirmSaved();
         this.checkFlushWaiters();
         return;
@@ -871,6 +886,9 @@ export class SceneSession {
         // for good, classic behaviors resume.
         this.retryStopped = true;
         this.setStatus("off");
+        this.releaseUnaccepted();
+        this.clearPushInFlight("unresolved");
+        this.queued = null;
         this.closeSocket();
         return;
     }
@@ -913,7 +931,9 @@ export class SceneSession {
       // marks the elements and files the authority holds, so only those it
       // lacks are offered again.
       this.releaseUnaccepted();
-      this.clearPushInFlight();
+      this.clearPushInFlight("unresolved");
+      this.pushOutcomeUnresolved = false;
+      this.tab.unresolvedLivePush = false;
       this.queued = null;
     }
     this.serverDirty = f.dirty;
@@ -976,6 +996,10 @@ export class SceneSession {
     this.flushError = null;
     this.serverDirty = f.dirty;
     if (f.mtime_ns !== undefined) this.stampMtime(f.mtime_ns);
+    if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
+        this.tab.content === this.tab.saved) {
+      clearUnresolvedLiveSave(this.tab);
+    }
     this.checkFlushWaiters();
   }
 
@@ -1071,6 +1095,8 @@ export class SceneSession {
       clearTimeout(w.timer);
       w.resolve(false);
     }
+    this.releaseUnaccepted();
+    this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.binding = null;
     this.cursors.clear();
@@ -1157,12 +1183,10 @@ registerLiveSessionKind({
     if (!session || !session.ownsSaves()) return "classic";
     if (await session.flush()) return "saved";
     session.degrade();
-    // Single-writer handoff: the degrade gated the pump; wait out any
-    // push already on the wire before the classic PUT fires so the two
-    // writers never interleave and the freshest ack token is on the
-    // tab when the PUT stamps its CAS check.
+    // Degrade stops new pushes. Only an ack of every queued push permits
+    // a classic PUT; the finite wait can end with that fallback withheld.
     await session.awaitPushSettled();
-    return "degraded";
+    return session.fallbackSettlement() === "settled" ? "degraded" : "unresolved";
   },
   release(tabId: string, immediate: boolean) {
     releaseSceneSession(tabId, { immediate });

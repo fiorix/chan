@@ -94,6 +94,8 @@ function loadedFileTab(): FileTab {
     error: null,
     saveError: "the drawing does not parse (Unexpected token)",
     refusedUnwritten: true,
+    unresolvedLivePush: true,
+    unresolvedLiveSave: true,
     fileMissing: { path: "notes/loaded.md", fragment: null, suggestedPath: null },
     inspectorOpen: true,
     outlineOpen: true,
@@ -437,4 +439,3 @@ describe("the persisted session survives a reorder", () => {
     expect(serializedFile()).toEqual(before);
   });
 });
-
