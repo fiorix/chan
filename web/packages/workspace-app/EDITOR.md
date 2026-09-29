@@ -34,7 +34,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 
 ### Headings
 
-- WYSIWYG: large/bolded heading line, fold chevron on the left.
+- WYSIWYG: large/bolded heading line, fold chevron on the left when the heading has a section to fold (none when the next line is a heading of its level or higher, or on the last line).
 - Cursor on the line: `#`, `##`, ... prefix appears in a muted color at the start of the line. Chevron stays.
 - Cursor leaves: prefix hides again.
 - Typing/erasing `#` characters works as plain text edit; the heading level follows the marker count.
@@ -90,7 +90,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 
 ### Lists `- item`, `1. item`, `- [ ] task`
 
-- WYSIWYG: source markers (`-`, `*`, `+`, `1.`, `1)`) stay visible on every list line. Task items render the GFM checkbox via the `Task` widget; the `[ ]` / `[x]` source is replaced by a clickable box and reappears when the caret enters the line.
+- WYSIWYG: source markers (`-`, `*`, `+`, `1.`, `1)`) stay visible on every list line. Task items render the GFM checkbox via the `Task` widget; the `[ ]` / `[x]` source is replaced by a clickable box and reappears when the caret enters the line. The box toggles only on a pointer press and is out of the tab order, so it never shows a state its source does not have.
 - Enter at end of a list line: inserts a fresh marker on the next line. Bullets reuse the line's marker char; ordered lists increment the number and keep the original `.` / `)` separator; task items always start as `- [ ] ` regardless of the source line's checked state.
 - Enter on an empty list item (just the prefix, no content): strips the prefix entirely. This is how the user exits the list.
 - Enter mid-line on a non-empty item: falls through to a literal newline. Auto-continuing mid-sentence would split a paragraph with a stray bullet.
@@ -105,7 +105,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 
 ## Cross-cutting rules
 
-- **One bubble pattern.** Wiki, tag, mention, and image bubbles share the same keyboard model (Arrow Up/Down to navigate, Enter to commit, Esc to dismiss, click to commit). Each bubble owns its own results / preview content, but the interaction is uniform. Anchored under the caret; flips above when out of room.
+- **One bubble pattern.** Wiki, tag, mention, and image bubbles share the same keyboard model (Arrow Up/Down to navigate, Enter to commit, Esc to dismiss, click to commit); a dismissed bubble stays closed while the caret stays in the text that opened it. Each bubble owns its own results / preview content, but the interaction is uniform. Anchored under the caret; flips above when out of room.
 - **Broken markdown is preserved.** If the user deletes part of a marker, the source keeps what the user typed; the renderer just fails to recognize the construct and shows the text plainly. Never auto-repair.
 - **Last-line `---`.** When the file's last line is `---`, the user must still be able to land the caret on it (revealing `---` per the principle) and press Enter to create a new line below. The current renderer traps the caret above; this needs to be fixed.
 
