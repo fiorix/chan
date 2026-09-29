@@ -88,6 +88,13 @@ describe("renderSlideMarkdown", () => {
     expect(root.querySelectorAll(".chan-slide-blank-line")).toHaveLength(0);
     expect(root.querySelector("pre")?.textContent).toContain("a\n\n\nb");
   });
+
+  test("a shorter fence line inside a longer fence does not close it", () => {
+    const html = renderSlideMarkdown("````\n```\na\n\n\nb\n````\n");
+    const root = mount(html);
+    expect(root.querySelectorAll(".chan-slide-blank-line")).toHaveLength(0);
+    expect(root.querySelector("pre")?.textContent).toContain("```\na\n\n\nb");
+  });
 });
 
 describe("renderSlideDiagrams completion", () => {
