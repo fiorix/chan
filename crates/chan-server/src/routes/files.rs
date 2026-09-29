@@ -7923,18 +7923,22 @@ mod scene_divert_tests {
             Some(open.authority_version),
         )
         .await;
+        let retained = session.http_read_view();
+        assert_eq!(
+            retained.content, current.content,
+            "stale PUT replaced scene authority"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b.excalidraw")).unwrap(),
+            on_disk,
+            "stale PUT replaced disk content"
+        );
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp).await;
         assert_eq!(body["current_mtime_ns"], token.to_string());
         assert_eq!(body["current_authority_version"], current.authority_version);
-        let retained = session.http_read_view();
-        assert_eq!(retained.content, current.content);
         assert_eq!(retained.authority_version, current.authority_version);
         assert_eq!(retained.disk_mtime_ns, Some(token));
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("b.excalidraw")).unwrap(),
-            on_disk
-        );
     }
 
     #[cfg(unix)]
