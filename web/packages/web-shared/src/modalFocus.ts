@@ -1,6 +1,8 @@
 export function createModalFocus(options: {
   onClose: () => void;
   onKeydown?: (event: KeyboardEvent) => void;
+  // A stack of workspace shells owns restoration across overlapping lifetimes.
+  restoreFocus?: boolean;
 }): {
   mount: (panel: HTMLElement) => () => void;
   onKeydown: (event: KeyboardEvent) => void;
@@ -21,7 +23,7 @@ export function createModalFocus(options: {
     panel = node;
     panel.focus();
     return () => {
-      if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+      if (options.restoreFocus !== false && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     };
   }
 
@@ -58,8 +60,8 @@ export function createModalFocus(options: {
 
   // Tab and Shift+Tab wrap inside the panel, so focus cannot leave a
   // dialog marked modal: Tab past the last control goes to the first, and
-  // Shift+Tab before the first, or from the panel itself where focus lands
-  // on open, goes to the last. Between the ends the browser moves focus,
+  // Shift+Tab before the first goes to the last. From the panel or outside,
+  // either direction starts at its corresponding end. Between the ends the browser moves focus,
   // and a Tab a control inside has already taken (PathPromptModal's input
   // completes a path with it) stays that control's.
   function wrapTab(e: KeyboardEvent): void {
@@ -69,13 +71,15 @@ export function createModalFocus(options: {
     const last = stops.at(-1);
     if (!first || !last) {
       e.preventDefault();
+      panel.focus();
       return;
     }
     const at = document.activeElement;
-    if (e.shiftKey && (at === first || at === panel)) {
+    const fromOutside = at === panel || !panel.contains(at);
+    if (e.shiftKey && (at === first || fromOutside)) {
       e.preventDefault();
       last.focus();
-    } else if (!e.shiftKey && at === last) {
+    } else if (!e.shiftKey && (at === last || fromOutside)) {
       e.preventDefault();
       first.focus();
     }
