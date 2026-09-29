@@ -138,7 +138,7 @@ describe("a cut replay on the real parser", () => {
 
   test("a reset keeps the missed-byte notice above the retained ring", async () => {
     const { socket } = await cut();
-    await attach(socket, { id: SESSION, generation: 3, seq: 80, replay_bytes: 13, missed_bytes: 4096 });
+    await attach(socket, { id: SESSION, generation: 3, seq: 4109, replay_bytes: 13, missed_bytes: 4096 });
     await output(socket, "retained ring");
     await output(socket, MODES);
     await receive(socket, READY);
