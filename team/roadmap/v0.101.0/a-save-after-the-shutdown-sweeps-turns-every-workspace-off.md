@@ -1,6 +1,6 @@
 # A save after the shutdown sweeps turns every other workspace off
 
-Status: raised during v0.101.0 on 2026-09-26 while the fix for [a-late-http-mount-escapes-the-shutdown-sweep](a-late-http-mount-escapes-the-shutdown-sweep.md) was built, and reproduced by a probe before the fix; fixed with that item and landed with it.
+Status: ratified for v0.101.0 by the owner on 2026-09-29, after it had landed; raised during v0.101.0 on 2026-09-26 while the fix for [a-late-http-mount-escapes-the-shutdown-sweep](a-late-http-mount-escapes-the-shutdown-sweep.md) was built, and reproduced by a probe before the fix; fixed with that item and landed with it. It was not put to the owner when it was raised, since it landed with its fix.
 
 ## What was seen
 

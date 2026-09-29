@@ -1,0 +1,37 @@
+# The surfaces that take a typed or dropped name disagree on a backslash
+
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the report of the order that built the web app's half of [a-backslash-in-a-name-reads-two-ways-on-the-wire](../v0.101.0/a-backslash-in-a-name-reads-two-ways-on-the-wire.md) (`dev/v0101-team/reports/report-Clients-32.md` in the development tree, "Found beside the order", its first and third bullets), whose plan found the first of them (`dev/v0101-team/followups/followup-Clients-Lead-12.md`, leaning 4). The lead ruled that the editor's inline Name field and a drop are not changed in that order, and that the surfaces are raised as one item (`dev/v0101-team/followups/followup-Lead-Clients-21.md`, rulings 4 and 5). Read at `a6834b1ee`; not run. What a Windows server does with a `\` that the inline field sends is the report's inference from the standard library's path rules. The excluded-directories control is in this item and not a row of its own, because the rule this item asks for decides it too: whether its suggestions leave out a directory whose name holds `\`, or its check takes one.
+
+## Owner ruling
+
+Accepted on 2026-09-29 for a later version. The owner accepted in one answer every recommendation the lead had put to them that day, and with that answer closed v0.101.0's intake under one rule: a raised item enters v0.101.0 only when it loses a user's data or weakens security and its fix is small and local, a test-only or infrastructure item only when it makes the release gate or a release job unreliable, and an item whose fix changes a contract or reopens excluded scope, or whose fault is a wrong state with a rare trigger, goes to v0.102.0. Under that rule this item goes to v0.102.0 with [an-upload-cuts-a-name-at-its-backslash](an-upload-cuts-a-name-at-its-backslash.md) and [the-desktop-cuts-a-download-name-at-its-backslash](the-desktop-cuts-a-download-name-at-its-backslash.md): the three wait on one rule for a backslash in a name, which is not ruled and is chosen with them. Two rules were put forward: a name may keep a `\` that it already holds and may not gain one, on every surface that takes a typed or dropped name; or a name holds `\` on Unix on every surface that takes or gives a name, with what a Windows client may send decided with the upload. When it was raised the lead recommended accepting it for v0.101.0 as a small order, plan first: one rule at every surface that sends a typed or dropped name, under which a file whose name already holds a `\` can still be renamed. It is not part of v0.101.0.
+
+## What was seen
+
+Under `web/packages/workspace-app/src/`:
+
+- **The path prompt refuses a `\` anywhere in a typed path** with "\ is not allowed in a name", beside the other characters it refuses so that a workspace still opens on Windows (`validatePath`, `state/pathValidate.ts:72-77`). It checks every path typed into the prompt, for a create, a move and a rename (`components/PathPromptModal.svelte:179-190`), and a refused path disables the prompt's OK (`:386`, `:484-489`, `:730`). A rename from the Files menu seeds the prompt with the file's path (`fileOps.rename`, `state/store.svelte.ts:5958-5965`), so a rename of `a\b.md` opens refused, and its OK stays disabled while the name holds the `\`.
+- **The editor's inline Name field sends a typed `\` unchecked.** Its commit hands the typed path to `fileOps.renameInPlace` (`commitTabName`, `components/FileEditorTab.svelte:664-671`), which checks nothing before the move (`state/store.svelte.ts:5988-5993`; `performMove`, `:5354`, its request at `:5380`).
+- **A drop in the Files tree builds its target from the raw name** (`dropTargetPath`, `components/FileTree.svelte:253-256`) and moves it through `fileOps.moveTo`, which checks nothing either (`state/store.svelte.ts:5973-5975`).
+- **The excluded-directories control offers a directory that it then refuses.** Its suggestions list the name of every directory the tree has loaded (`components/settings/workspace/ExcludedDirsControl.svelte:45-57`), so a directory named `x\y` is offered; its check refuses a name that holds `/` or `\` (`normalizeName`, `:59-66`), and the add then returns with no word and leaves the text in the field (`addDraft`, `:68-71`). The server refuses such a name too (`normalize`, `crates/chan-server/src/routes/excluded_dirs.rs:66-86`). The frontend review remainder's ledger holds the silent return as a row of its own, whose fix waits on this item (`dev/v0101-team/followups/followup-Clients-Lead-14.md` in the development tree, its table).
+
+So on a Unix server the inline field and a drop make a name that holds `\`, which the path prompt would refuse. A Windows server builds a request's path from its components (`validate_rel`, `crates/chan-workspace/src/fs_ops.rs:1318-1336`), and Windows reads `\` as a separator, so by the report's inference a name typed as `a\c.md` in the inline field there moves the file into a directory `a`; not run.
+
+## Desired contract
+
+Every surface that sends a name that a user typed or dropped reads a `\` by one rule, a file whose name already holds a `\` can still be renamed, and a surface that offers a name offers none that it refuses.
+
+## What to do
+
+The owner rules on the rule first. Suggestions beyond the record: keep the refusal of a `\` that a name gains, since Windows reads it as a separator, and let a rename keep one the name already holds; or refuse a `\` only on a server whose platform reads it as a separator. Then put the inline Name field and a drop under the rule the prompt applies, have the excluded-directories control's suggestions follow it and its refusal say why, and say the rule in the workspace app's design document. Red first: a rename of `a\b.md` through the prompt goes on as the rule says, where today it opens refused, and an inline rename to a name that gains a `\` is answered as the prompt answers it, where today it is sent.
+
+## Boundaries
+
+`state/pathValidate.ts`, `components/PathPromptModal.svelte`, the inline rename of `components/FileEditorTab.svelte`, the drop of `components/FileTree.svelte`, `rename`, `renameInPlace` and `moveTo` in `state/store.svelte.ts`, `components/settings/workspace/ExcludedDirsControl.svelte`, and the server's `normalize` in `crates/chan-server/src/routes/excluded_dirs.rs` if the rule reaches it, with their tests and the workspace app's design document. An upload's name is [an-upload-cuts-a-name-at-its-backslash](an-upload-cuts-a-name-at-its-backslash.md)'s.
+
+## Acceptance
+
+1. The path prompt, the inline Name field and a drop answer a name that holds `\` by one rule, pinned for each.
+2. A file named `a\b.md` can be renamed, pinned through the prompt.
+3. The excluded-directories control offers no directory that it refuses, and a refusal says why, pinned.
+4. The workspace app's design document says the rule.

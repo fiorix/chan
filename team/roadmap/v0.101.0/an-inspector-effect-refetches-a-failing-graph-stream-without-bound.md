@@ -1,6 +1,6 @@
 # An inspector effect refetches a failing graph stream without bound
 
-Status: raised during v0.101.0 on 2026-09-26 by the independent review of the graph lens dedup order (`dev/v0101-team/reviews/review-Frontend-8.md`, finding 1, in the development tree), which corrected the lane's own reading; pre-existing at `main` `ef33cb0f3`, read in code and reproduced only as the OOM it caused in that order's test run.
+Status: ratified for v0.101.0 by the owner on 2026-09-29, after it had landed; raised during v0.101.0 on 2026-09-26 by the independent review of the graph lens dedup order (`dev/v0101-team/reviews/review-Frontend-8.md`, finding 1, in the development tree), which corrected the lane's own reading; pre-existing at `main` `ef33cb0f3`, read in code and reproduced only as the OOM it caused in that order's test run. It was not put to the owner when it was raised, since it landed with its fix.
 
 ## What was seen
 

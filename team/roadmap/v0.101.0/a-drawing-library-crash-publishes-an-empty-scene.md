@@ -1,6 +1,10 @@
 # A drawing library that throws unmounts its board, and a seeded board then publishes an empty scene
 
-Status: raised for a decision on 2026-09-28 by the independent review of the seeded board, which landed that day with [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/reviews/review-Frontend-13.md` in the development tree, its finding 6, with the lead's notes). The review found it older than that range and unchanged by it; it read the app at `0e6018fe9` and the drawing library `@excalidraw/excalidraw` 0.18.1 and React 18.3.1 that it installs, searched the library's source for an error boundary, and ran nothing. It is inferred throughout, and it needs a crash of the library that nobody has named, so it has no steps. The app's lines were read again at `30ffb8027`. Recommendation: a later version.
+Status: accepted for v0.101.0 by the owner on 2026-09-29; raised for a decision on 2026-09-28 by the independent review of the seeded board, which landed that day with [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/reviews/review-Frontend-13.md` in the development tree, its finding 6, with the lead's notes). The review found it older than that range and unchanged by it; it read the app at `0e6018fe9` and the drawing library `@excalidraw/excalidraw` 0.18.1 and React 18.3.1 that it installs, searched the library's source for an error boundary, and ran nothing. It is inferred throughout, and it needs a crash of the library that nobody has named, so it has no steps. The app's lines were read again at `30ffb8027`.
+
+## Owner ruling
+
+Accepted on 2026-09-29 for v0.101.0, as the guard only. The owner accepted in one answer every recommendation the lead had put to them that day, and with that answer closed v0.101.0's intake under one rule: a raised item enters v0.101.0 only when it loses a user's data or weakens security and its fix is small and local, a test-only or infrastructure item only when it makes the release gate or a release job unreliable, and an item whose fix changes a contract or reopens excluded scope, or whose fault is a wrong state with a rare trigger, goes to v0.102.0. This item enters: the fault writes an empty scene over a drawing and says nothing, and the guard is one component. The guard, as ruled: a boundary around the board that, when the drawing library fails, clears the API and `seeded`, cancels the pending flush, and says that the library failed. `web/packages/workspace-app/src/editor/ExcalidrawCanvas.svelte`, which the owner keeps closed in v0.101.0, is opened for this guard and for no other change. When it was raised the lead recommended a later version, since the fault needs a crash of the library that nobody has named; none has been named since.
 
 ## What was seen
 
@@ -11,6 +15,8 @@ The canvas does not see that unmount. It keeps the API, which only its own teard
 A later change of the theme or of the read-only state renders the board again (`ExcalidrawCanvas.svelte:488-492`) with no initial data, since the API is set (`:434-438`). As the review read it, a new App then comes up empty while `seeded` is still true: its API's handover does not seed (`:441-448`, returning at `:369`), and its first reported change schedules a flush (`:393-397`) that publishes the empty scene the same way.
 
 It falls under the owner's ruling of 2026-09-26 that no surface other than the Markdown editor writes a file without a user's edit, which [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) carries.
+
+**Read again at `4c4ada0a1` on 2026-09-29,** where the canvas is byte for byte what it is on `main`: no guard exists. `flushSerialize` publishes when the board is seeded and its tab loaded and the serialization differs (`web/packages/workspace-app/src/editor/ExcalidrawCanvas.svelte:467-495`), `renderExcalidraw` passes no initial data once the API is set (`:506-536`), and the API is cleared only in `onDestroy` (`:593-598`). Read, not run.
 
 ## Desired contract
 

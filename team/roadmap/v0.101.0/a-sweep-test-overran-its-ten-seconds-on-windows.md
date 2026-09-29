@@ -1,6 +1,10 @@
 # A test of chan-library ran out its own ten-second bound once on a hosted Windows runner
 
-Status: raised for a decision on 2026-09-28 by the lead, from main CI's run for landing 31, whose `make ci-windows` job failed on this test on its first attempt and passed on its second, on the same commit (`dev/v0101-team/evidence/int/ci-36443211816/README.md` in the development tree, with the log's excerpt beside it). Read in the job's log and in code at `ada0ecc4c`; not reproduced on the development box. Recommendation, the lead's: accept for v0.101.0 as a small order: the test's bound starts at the root check, or is larger, with what each costs.
+Status: accepted for v0.101.0 by the owner on 2026-09-29; raised for a decision on 2026-09-28 by the lead, from main CI's run for landing 31, whose `make ci-windows` job failed on this test on its first attempt and passed on its second, on the same commit (`dev/v0101-team/evidence/int/ci-36443211816/README.md` in the development tree, with the log's excerpt beside it). Read in the job's log and in code at `ada0ecc4c`; not reproduced on the development box.
+
+## Owner ruling
+
+Accepted on 2026-09-29 for v0.101.0. The owner accepted in one answer every recommendation the lead had put to them that day, and with that answer closed v0.101.0's intake under one rule: a raised item enters v0.101.0 only when it loses a user's data or weakens security and its fix is small and local, a test-only or infrastructure item only when it makes the release gate or a release job unreliable, and an item whose fix changes a contract or reopens excluded scope, or whose fault is a wrong state with a rare trigger, goes to v0.102.0. This item enters as a test-only item that makes a release job unreliable: the test was red once in main CI's Windows job on unchanged code, and a false red on a release's run costs more than the change. The shape is the one the lead recommended when the item was raised: the test's bound starts at the root check, or is larger, with what each costs.
 
 ## What was seen
 

@@ -1,6 +1,6 @@
 # A case-only rename leaves a phantom row on a case-insensitive volume
 
-Status: raised during v0.101.0 on 2026-09-24; not accepted. From the independent review of `v0101/workspace-search-index` (its low finding 1) and that lane's second-round report, which reproduced it on a Linux tmpfs mounted with casefold inside the build container (`dev/v0101-tasks/evidence/wsix/fix2-probe-casefold-graph-indexer-579fa7b-2.log` and `fix2-probe-casefold-served-fab8485.log` in the development tree). A two-step rename reaches the state APFS reaches in one.
+Status: ratified for v0.101.0 by the owner on 2026-09-29, after it had landed; raised during v0.101.0 on 2026-09-24. From the independent review of `v0101/workspace-search-index` (its low finding 1) and that lane's second-round report, which reproduced it on a Linux tmpfs mounted with casefold inside the build container (`dev/v0101-tasks/evidence/wsix/fix2-probe-casefold-graph-indexer-579fa7b-2.log` and `fix2-probe-casefold-served-fab8485.log` in the development tree). A two-step rename reaches the state APFS reaches in one. The fix landed on 2026-09-25 (`6fb761602`, `b3cc7edf6`, `ceb5aac04`, `88654b60d`, `8561a8b8d`, `e56c79d00`), with no acceptance recorded before it.
 
 ## What was seen
 

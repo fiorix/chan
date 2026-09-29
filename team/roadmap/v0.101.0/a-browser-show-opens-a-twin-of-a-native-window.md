@@ -1,6 +1,10 @@
 # A browser's Show opens a second window for a record that a desktop owns
 
-Status: raised for a decision on 2026-09-28 by the independent review of the rule of when a waiting window is on its page (`dev/v0101-team/reviews/review-Clients-11.md` in the development tree, finding 2, with the lead's notes): the code read, the two windows inferred, nothing run. The owner's ruling of 2026-09-27 that a Show from the launcher in a browser repairs a window before it un-hides it (recorded in [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md)) did not consider a record of native origin. Recommendation, as the lead's notes have it: accept the lead's ruling, which the rule's fix round builds (`dev/v0101-team/tasks/task-Lead-Clients-24.md`, ruling 2): a browser's Show acquires a window only for a record of a browser's origin, and for a record of native origin it changes the visibility and nothing else, as before the rule; Open and Focus are not changed.
+Status: landed on 2026-09-28 by the lead's ruling, which the owner confirmed on 2026-09-29 with no further build; raised for a decision on 2026-09-28 by the independent review of the rule of when a waiting window is on its page (`dev/v0101-team/reviews/review-Clients-11.md` in the development tree, finding 2, with the lead's notes): the code read, the two windows inferred, nothing run. The owner's ruling of 2026-09-27 that a Show from the launcher in a browser repairs a window before it un-hides it (recorded in [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md)) did not consider a record of native origin.
+
+## Owner ruling
+
+Confirmed on 2026-09-29, with no new decision to build. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to confirm the narrowing that had landed, with its cost noted. The narrowing is of the owner's own ruling of 2026-09-27 on Show, which made no exception: a browser's Show takes and repairs a window only for a record of a browser's origin, and for any other record it changes the visibility alone. Without it a browser opens a twin of a window that a desktop owns. What the narrowing leaves open is written as a cost under What shipped: Focus, Open and the workspace app's deck still take a window for any record.
 
 ## What was seen
 
@@ -31,3 +35,13 @@ The owner decides whether the lead's ruling stands, since it narrows the owner's
 1. A browser's Show on a record of native origin that does not read connected opens no window and un-hides the record, pinned red first.
 2. A browser's Show on a record of a browser's origin repairs as it does now.
 3. An Open of a record of native origin, a devserver's first terminal among them, still opens it from a browser.
+
+## What shipped
+
+Landed on 2026-09-28 with the fix round of the rule of when a browser window is on its page ([refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md)), as commit `84fed1e9a`, by the lead's ruling, which the owner confirmed on 2026-09-29. Lines at `4c4ada0a1`; read, not run. `setWindowShown` takes and repairs a window only when the record's origin is a browser's and the record does not read connected, and otherwise changes the visibility alone (`web/packages/launcher/src/state/computerActions.ts:138-150`, the rule at `:147`), pinned red first (`src/state/computerActions.test.ts:69-81`). The three acceptance points are met by that commit and its pins; that the desktop's window is then the only one is read in the review and not run.
+
+**The cost, left open:**
+
+- **The launcher's Focus and Open take a window for any record** (`focusComputerWindow`, `computerActions.ts:127-136`), and a Focus of a native record is pinned, on purpose, to take and repair its window (`computerActions.test.ts:83-92`). They are kept so that a devserver's first terminal, which is minted as a native record, can be opened where no desktop is attached. So a Focus from a browser on a window that is hidden on a desktop still opens a browser window beside the one the desktop opens (inferred, not run).
+- **The workspace app's deck takes a window for any record too,** which this item's boundary did not name. It offers Show on a hidden window and Focus on a shown one, both through `focusLibraryWindow`, which reads no origin (`web/packages/workspace-app/src/api/libraryWindows.ts:222-262`; `src/components/CommandLauncher.svelte:383-389`), and the record it is handed carries no origin (`ScopedLibraryWindow`, `crates/chan-server/src/routes/library.rs:544-555`, built for every record of the library at `:653-663`). That a twin opens there is inferred; not run.
+- **No item holds these as its scope.** Telling a desktop's window from a browser's needs a record that says who holds it, which is [a-connected-record-does-not-say-whose-socket](../v0.102.0/a-connected-record-does-not-say-whose-socket.md), accepted for v0.102.0, and the deck's record would need an origin.

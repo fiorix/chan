@@ -1,6 +1,6 @@
 # One close reason covers a PTY parked for restore and a PTY that was killed
 
-Status: raised during v0.101.0 on 2026-09-26 by the terminal tab order of team v0101 (`dev/v0101-team/reports/report-Clients-1.md`, section "What the items and the order got wrong or left out", in the development tree), while fixing [a-graceful-restarts-session-save-drops-the-terminals-session-id](a-graceful-restarts-session-save-drops-the-terminals-session-id.md). The independent review of that order (`dev/v0101-team/reviews/review-Clients-1.md`, finding 1) named the paths that deliver the frame, which the report had wrong. A source reading against `main` at `1566b06d0`; not observed in a browser.
+Status: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 by the terminal tab order of team v0101 (`dev/v0101-team/reports/report-Clients-1.md`, section "What the items and the order got wrong or left out", in the development tree), while fixing [a-graceful-restarts-session-save-drops-the-terminals-session-id](a-graceful-restarts-session-save-drops-the-terminals-session-id.md). The independent review of that order (`dev/v0101-team/reviews/review-Clients-1.md`, finding 1) named the paths that deliver the frame, which the report had wrong. A source reading against `main` at `1566b06d0`; not observed in a browser.
 
 ## Owner ruling
 

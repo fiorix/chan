@@ -1,6 +1,6 @@
 # A fresh session under an old tab id keeps the tab's key protocol
 
-Status: landed in the terminal tab lane of team v0101 with [a-graceful-restarts-session-save-drops-the-terminals-session-id](a-graceful-restarts-session-save-drops-the-terminals-session-id.md), from the independent review of that lane's first order (`dev/v0101-team/reviews/review-Clients-1.md`, finding 1, in the development tree); raised and fixed during v0.101.0 on 2026-09-26. A source reading against `main` at `1566b06d0`; not observed in a browser.
+Status: ratified for v0.101.0 by the owner on 2026-09-29, after it had landed; landed in the terminal tab lane of team v0101 with [a-graceful-restarts-session-save-drops-the-terminals-session-id](a-graceful-restarts-session-save-drops-the-terminals-session-id.md), from the independent review of that lane's first order (`dev/v0101-team/reviews/review-Clients-1.md`, finding 1, in the development tree); raised and fixed during v0.101.0 on 2026-09-26. A source reading against `main` at `1566b06d0`; not observed in a browser.
 
 ## What was seen
 

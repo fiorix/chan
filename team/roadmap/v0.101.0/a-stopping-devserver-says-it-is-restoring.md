@@ -29,3 +29,18 @@ Have the gate's refusal choose its answer by the coordinator's phase: in `Stoppi
 1. After the stop signal, a request to a mounted tenant's path answers 503 in the envelope with a sentence that says the devserver is stopping, pinned in the devserver's own stop order.
 2. While the devserver starts, the gate answers as it does now, `Retry-After: 1` included.
 3. `crates/chan-server/design.md` says what the gate answers in each phase.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, and the item stays accepted until what a real stop answers is measured (below). It came with [the-launchers-add-and-on-skip-the-stop-check](the-launchers-add-and-on-skip-the-stop-check.md) in one range and its fix round: `3c17a9dd2` and `d6efb8613`, with the words of `917ac5129`, `d3763cf86`, `386d822c1` and `90e915502` (`dev/v0101-team/reports/report-Services-40.md` and `report-Services-42.md` in the development tree; the independent reviews, `dev/v0101-team/reviews/review-Services-19.md` and `review-Services-20.md`). Lines at `4c4ada0a1`, in `crates/chan-server/src/devserver.rs` where no other file is named.
+
+- **The gate chooses its answer by the coordinator's phase.** It reads the phase once and refuses only a path that a mounted tenant still owns (`gate_tenant_during_startup`, `:2857-2871`; `tenant_routes_closed`, `:836-845`). While the devserver starts it answers as before, 503 with `devserver is restoring terminal sessions` and `Retry-After: 1`. From the stop signal on it answers 503 with `the devserver is stopping`, the code `devserver_stopping` and no `Retry-After` (`startup_refusal`, `:2878-2905`).
+- **After a sweep has removed a tenant the gate has nothing to refuse at its paths:** a workspace's health path falls through to the launcher's HTML where its bundle is present, and a shared terminal API path to 404, if a request can still reach the app; in `Stopped` no tenant is left (`CHANGELOG.md:67`).
+
+**The shape is the lead's ruling, which the owner confirmed as built on 2026-09-29:** the stop's answer carries a code and no invitation to retry, so a client can wait out a start and give up on a stop without reading words.
+
+**The acceptance at the tip.** All three points are met: a tenant request after the stop signal hears that the devserver stops, pinned in the devserver's own stop order (`:9165`); the start's answer is pinned as it was (`:5392`), and a stopped phase reads as stopping (`:4736`); and `crates/chan-server/design.md:64` says what the gate answers in each phase, with the changelog's entries (`CHANGELOG.md:67-71`).
+
+**Owed, and no acceptance point of this item: what a real stop answers.** A refusal reaches a client only when its request is dispatched after the coordinator has entered `Stopping` and before its connection shuts down, so most clients of a stopping devserver meet a closed or refused connection and not the 503; that is inferred from the framework's source and was never measured (`crates/chan-server/design.md:20`; `review-Services-19.md`, "What only a run on a real devserver can show", eight steps). On 2026-09-29 the owner ruled who measures it: the team runs the five steps that need no display on a throwaway devserver, under an order of its own, and the steps through a gateway and on the desktop's connecting page stay with the owner at rc0.
+
+**The cost:** no client reads the code `devserver_stopping` yet. A search of `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` finds no reader, so a window on its connecting page and a browser window in the shared wait still tell a stop from a start by nothing. No item holds it.
