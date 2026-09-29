@@ -4238,10 +4238,14 @@ fn close_devserver_window<R: tauri::Runtime>(
         // A window still on its connecting page is waiting for its devserver,
         // and its record there holds the window's terminal sessions. A close
         // there stops the wait and hides the window, as the live page's Hide
-        // does: the record and its sessions stay, and the window reopens from
-        // the Window menu. The destroy does not wait for the watcher's
-        // reconcile, which closes nothing when the devserver has no view
-        // registered.
+        // does: the record and its sessions stay. The destroy does not wait
+        // for the watcher's reconcile, which closes nothing when the
+        // devserver has no view registered. With a view, the window is
+        // listed with the hidden windows and reopens from the Window menu.
+        // With none, in the instant between a disconnect's stop of the
+        // watcher and its sweep, the destroy's handler takes the window out
+        // of that list, and the window is in no list until the next connect
+        // opens it again.
         serve::PageReading::Connecting => {
             serve::bury_window_now(app, &state, &label);
             return window.destroy().map_err(err);
@@ -6038,9 +6042,9 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
         .build(app)?;
     // Close Window on Linux/Windows rides Ctrl+Alt+W (plain
     // Ctrl+W stays a terminal readline chord, and Ctrl+Shift+W is
-    // tab close there). Same routed handler
-    // as macOS's Cmd+W item: tab-close in SPA windows,
-    // cancel-close on the connecting screen, native close
+    // tab close there). The same handler as macOS's Cmd+W item
+    // routes it: the SPA's window close in SPA windows, the close
+    // button's hide on the connecting screen, native close
     // elsewhere. On the launcher that means the launcher's own
     // hide-on-close. SPA windows claim the same chord inside
     // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
