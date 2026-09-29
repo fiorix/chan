@@ -4221,16 +4221,30 @@ fn close_devserver_window<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let state = Arc::clone(app.state::<Arc<AppState>>().inner());
     let label = window.label().to_string();
-    let page = page.unwrap_or_else(|| serve::read_page(app, &label));
-    // A window still on its connecting page is waiting for its devserver, and
-    // its record there holds the window's terminal sessions. A close there
-    // stops the wait and hides the window, as the live page's Hide does: the
-    // record and its sessions stay, and the window reopens from the Window
-    // menu. The destroy does not wait for the watcher's reconcile, which
-    // closes nothing when the devserver has no view registered.
-    if page == serve::PageReading::Connecting {
-        serve::bury_window_now(app, &state, &label);
-        return window.destroy().map_err(err);
+    match page.unwrap_or_else(|| serve::read_page(app, &label)) {
+        // A window still on its connecting page is waiting for its devserver,
+        // and its record there holds the window's terminal sessions. A close
+        // there stops the wait and hides the window, as the live page's Hide
+        // does: the record and its sessions stay, and the window reopens from
+        // the Window menu. The destroy does not wait for the watcher's
+        // reconcile, which closes nothing when the devserver has no view
+        // registered.
+        serve::PageReading::Connecting => {
+            serve::bury_window_now(app, &state, &label);
+            return window.destroy().map_err(err);
+        }
+        // No page was read: the window is gone, as it is for a second close
+        // that runs after the first one destroyed it, or its URL cannot be
+        // read. Nothing says it left the connecting page, so its record
+        // stays. A bury would store the label over the title that the first
+        // close kept, so the close changes no list either and destroys what
+        // is left of the native window.
+        serve::PageReading::Unread => {
+            tracing::info!(window = %label, "closed devserver window shows no page; its record stays");
+            return window.destroy().map_err(err);
+        }
+        // Another page: the close discards the window's record.
+        serve::PageReading::Other => {}
     }
     if let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(&label) {
         state.pending_window_deletes.queue(&devserver_id, &record);
