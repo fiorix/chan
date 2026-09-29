@@ -156,12 +156,11 @@ setGatewayCsrfTokenReader(isTauriDesktop() ? readGatewayCsrfToken : null);
 /// `read_clipboard_text` IPC, which goes straight to the OS clipboard
 /// and never shows the button. On web `navigator.clipboard.readText()`
 /// is fine -- it is gesture-permitted and shows no persistent button in
-/// Chrome. Returns "" when the clipboard holds no text or the read fails
-/// (the caller treats empty as "nothing to paste"). Note Cmd+V does NOT
-/// use this: it rides xterm's native paste event (the user's own paste
-/// gesture), which is buttonless everywhere -- this is only for the
-/// right-click menu's "Paste", where no paste gesture exists.
-export async function readClipboardText(): Promise<string> {
+/// Chrome. The menu treats a refused read as nothing to paste; `cs paste`
+/// requests throwing errors so its payload reader can try the web fallback
+/// and report a permission hint. Cmd+V rides xterm's native paste event
+/// instead of this reader.
+export async function readClipboardText(opts: { throwOnError?: boolean } = {}): Promise<string> {
   if (isTauriDesktop()) {
     try {
       return await tauriInvoke<string>("read_clipboard_text");
@@ -172,7 +171,8 @@ export async function readClipboardText(): Promise<string> {
   try {
     return (await navigator.clipboard?.readText()) ?? "";
   } catch (err) {
-    // A refused read (no permission, no user activation) is nothing to paste.
+    if (opts.throwOnError) throw err;
+    // The menu can give focus back even when clipboard access is refused.
     console.warn("readClipboardText: navigator.clipboard.readText failed", err);
     return "";
   }

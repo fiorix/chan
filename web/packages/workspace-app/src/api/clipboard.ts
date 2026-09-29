@@ -230,8 +230,8 @@ export async function readWebClipboardPayload(prefer: PastePrefer): Promise<Clip
 /// Native desktop read (the arboard IPCs, no permission UI). Returns `null`
 /// when no candidate representation is present; THROWS when an IPC fails
 /// (an ACL-denied gateway-served window) so the caller can degrade to the
-/// web path. The text kind rides `readClipboardText`, which never
-/// ACL-throws (it has its own internal web fallback).
+/// web path. The text reader tries its own web fallback first, then throws
+/// if that read is refused too.
 async function readNativeClipboardPayload(
   prefer: PastePrefer,
 ): Promise<ClipboardPayload | null> {
@@ -245,7 +245,7 @@ async function readNativeClipboardPayload(
       const html = await readClipboardHtml();
       if (html) return { mime: "text/html", bytes: new TextEncoder().encode(html) };
     } else {
-      const text = await readClipboardText();
+      const text = await readClipboardText({ throwOnError: true });
       if (text) return { mime: PLAIN_MIME, bytes: new TextEncoder().encode(text) };
     }
   }
