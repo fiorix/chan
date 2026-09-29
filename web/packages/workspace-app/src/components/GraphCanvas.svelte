@@ -276,7 +276,7 @@
   /// origin + transform snapshot at the moment the user started a
   /// background-pan gesture. hoverId: node under the cursor for
   /// the hover ring + cursor change.
-  let dragId: string | null = null;
+  let dragId = $state<string | null>(null);
   let panStart: { x: number; y: number; tx: number; ty: number } | null = null;
   let hoverId = $state<string | null>(null);
   /// Position of the mousedown that started the current gesture.
