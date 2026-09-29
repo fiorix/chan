@@ -13,6 +13,8 @@ import {
   fileOps,
   graphReloadSignal,
   onWatchEvent,
+  raiseUploadPicker,
+  raiseReplacePicker,
   openFsGraphForDirectory,
   openFsGraphForFile,
   persistStateToHash,
@@ -1792,3 +1794,43 @@ describe("per-instance expansion helpers", () => {
     expect(browserSelection.path).toBe("docs/api/spec.md");
   });
 });
+
+
+for (const standalone of [true, false]) {
+  test(`native upload callers keep their own lane in a ${standalone ? "standalone" : "workspace"} window`, async () => {
+    const meta = document.createElement("meta");
+    meta.name = "chan-files";
+    meta.content = "1";
+    document.head.append(meta);
+    window.history.replaceState(null, "", standalone ? "/?w=window-a&kind=terminal" : "/?w=window-a");
+    const urls: string[] = [];
+    const invoke = vi.fn(async (cmd: string, args?: unknown) => {
+      if (cmd === "native_transfer_status") return null;
+      if (cmd === "upload_files_native") {
+        urls.push((args as { url: string }).url);
+        return [];
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const nativeWindow = window as unknown as { __TAURI__?: unknown };
+    nativeWindow.__TAURI__ = { core: { invoke } };
+    try {
+      raiseUploadPicker("notes");
+      await vi.waitFor(() => expect(urls).toHaveLength(1));
+      raiseReplacePicker("notes/a.md");
+      await vi.waitFor(() => expect(urls).toHaveLength(2));
+      onWatchEvent({ type: "window_command", window_id: "window-a", command: "upload", path: "/tmp/in", root: "filesystem" });
+      await vi.waitFor(() => expect(urls).toHaveLength(3));
+      const params = urls.map((url) => new URL(url).searchParams);
+      expect(params.map((q) => [q.get("app"), q.get("root")]), "Files pickers opt in; cs upload keeps its transfer route").toEqual([
+        [standalone ? "files" : null, null],
+        [standalone ? "files" : null, null],
+        [null, "filesystem"],
+      ]);
+    } finally {
+      delete nativeWindow.__TAURI__;
+      meta.remove();
+      window.history.replaceState(null, "", "/");
+    }
+  });
+}
