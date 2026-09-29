@@ -3012,15 +3012,21 @@ impl WorkspaceHost {
     /// [`remove_workspace_for_root`](Self::remove_workspace_for_root)): OFF
     /// keeps the records and filters them from the live feed, and host shutdown
     /// drops runtimes without closing, so windows still restore across a
-    /// restart. `target` is the canonical key the removal already holds and
-    /// `root` the path it was asked to remove. Neither the match nor the
+    /// restart. `target` is the canonical key the removal already holds,
+    /// `root` the path it was asked to remove and `row_root` the root the
+    /// registry row it closed or found stores. Neither the match nor the
     /// discards touch the filesystem, so the purge runs on the caller's
     /// thread.
-    fn discard_workspace_windows(&self, target: &Path, root: &Path) -> usize {
+    fn discard_workspace_windows(
+        &self,
+        target: &Path,
+        root: &Path,
+        row_root: Option<&Path>,
+    ) -> usize {
         let Some(registry) = self.window_registry() else {
             return 0;
         };
-        let ids = workspace_window_ids(registry, target, root);
+        let ids = workspace_window_ids(registry, target, root, row_root);
         for id in &ids {
             let _ = self.discard_window(id);
         }
@@ -3628,7 +3634,7 @@ impl WorkspaceHost {
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
         // and leaves the records -- filtered from the live feed until ON restores
         // them.) A no-op when the workspace had no windows.
-        self.discard_workspace_windows(&target, root);
+        self.discard_workspace_windows(&target, root, stored);
         // The hop runs to its end even when the caller is dropped during it,
         // so it forgets the overlay rows again and clears the row itself: no
         // await separates the unregister from the last of its bookkeeping.
@@ -4859,12 +4865,19 @@ fn unregister_registered_row(
 /// Window records rooted at the workspace a removal holds, matched by the
 /// path each record stores. A record is minted with a canonical root (the
 /// tenant's, the registry's, or one its caller canonicalized), so its path,
-/// lexically normalized, is `target` (the removal's canonical key) or `root`
-/// (the path the removal was asked for). No record's path is resolved: that
-/// would make a removal wait on the filesystem of every workspace that has a
-/// window, and one of those may have stalled. A record minted with some
-/// other alias of the root is not matched and stays.
-fn workspace_window_ids(registry: &WindowRegistry, target: &Path, root: &Path) -> Vec<String> {
+/// lexically normalized, is `target` (the removal's canonical key), `root`
+/// (the path the removal was asked for) or `row_root` (the root the removed
+/// registry row stores, under which the launcher and the desktop store a
+/// workspace's windows). No record's path is resolved: that would make a
+/// removal wait on the filesystem of every workspace that has a window, and
+/// one of those may have stalled. A record minted with some other alias of
+/// the root is not matched and stays.
+fn workspace_window_ids(
+    registry: &WindowRegistry,
+    target: &Path,
+    root: &Path,
+    row_root: Option<&Path>,
+) -> Vec<String> {
     let stored = stored_window_key;
     let root = stored(root);
     registry
@@ -4873,7 +4886,7 @@ fn workspace_window_ids(registry: &WindowRegistry, target: &Path, root: &Path) -
         .filter(|row| {
             row.workspace_path.as_deref().is_some_and(|p| {
                 let path = stored(Path::new(p));
-                path == target || path == root
+                path == target || path == root || row_root == Some(path.as_path())
             })
         })
         .map(|row| row.window_id)
