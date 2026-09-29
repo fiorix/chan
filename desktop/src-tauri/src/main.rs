@@ -8307,6 +8307,34 @@ mod tests {
             self.requests_through("DELETE /api/library/windows/w-1")
                 .await;
         }
+
+        /// The close hid the window and kept its record: it queued and sent
+        /// no delete, buried the window in its watcher's view, listed it with
+        /// the hidden windows and sent its hidden visibility.
+        async fn assert_hidden(&self) {
+            assert!(
+                !self.state.pending_window_deletes.contains(CLOSED_LABEL),
+                "the close queued the window's delete"
+            );
+            assert!(
+                self.view.is_buried(CLOSED_LABEL),
+                "the close left the window shown in its watcher's view"
+            );
+            assert!(
+                self.state
+                    .buried_snapshot()
+                    .iter()
+                    .any(|(label, _)| label == CLOSED_LABEL),
+                "the close left the window out of the hidden windows"
+            );
+            let sent = self
+                .requests_through("POST /api/library/windows/w-1/visibility")
+                .await;
+            assert!(
+                !sent.iter().any(|request| request.starts_with("DELETE ")),
+                "the close sent the window's delete: {sent:?}"
+            );
+        }
     }
 
     impl Drop for ClosingDevserver {
@@ -8440,13 +8468,42 @@ mod tests {
         );
     }
 
-    /// The macOS menu's close of a window on its connecting page takes the
-    /// path of the window's close button, which hides it and keeps its
-    /// record. A bare destroy leaves the record shown, and the watcher opens
-    /// the window again. The menu handler reads the focused window, which a
-    /// mock window cannot be, so this reads the arm.
-    #[test]
-    fn the_menu_closes_a_connecting_window_through_request_close_window() {
+    /// A route that read the connecting page hands that reading to the
+    /// close it spawns, and the window reaches its live page before the
+    /// close runs: the close hides the window on the route's reading.
+    async fn close_on_a_connecting_reading_after_the_navigation() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        let page = serve::read_page(devserver.app.handle(), CLOSED_LABEL);
+        assert_eq!(
+            page,
+            serve::PageReading::Connecting,
+            "fixture: the route did not read the connecting page"
+        );
+        window
+            .navigate(LIVE_PAGE.parse().unwrap())
+            .expect("navigate to the live page");
+        assert_eq!(
+            serve::read_page(devserver.app.handle(), CLOSED_LABEL),
+            serve::PageReading::Other,
+            "fixture: the window does not show its live page"
+        );
+
+        close_devserver_window(devserver.app.handle(), &window, Some(page)).expect("the close");
+
+        devserver.assert_hidden().await;
+    }
+
+    /// The macOS menu's close of a window on its connecting page hides it on
+    /// the page that the menu read. The menu reads the page on the main
+    /// thread and hands that reading to the close it spawns: in the instant
+    /// of the page's navigation to its live page, a second reading would
+    /// discard the record. The menu handler reads the focused window, which
+    /// a mock window cannot be, so its arm is read as text and the close is
+    /// driven with the menu's reading.
+    #[tokio::test]
+    async fn the_menu_closes_a_connecting_window_on_the_page_it_read() {
+        close_on_a_connecting_reading_after_the_navigation().await;
         const MAIN_RS: &str = include_str!("main.rs");
         let close = source_region(
             MAIN_RS,
@@ -8454,19 +8511,51 @@ mod tests {
             "\nfn spawn_terminal_window(",
         );
         let connecting = close
-            .split("window_on_connecting_screen(")
+            .split("if serve::is_workspace_webview_label(window.label()) {")
             .nth(1)
-            .expect("the menu's close reads the connecting page")
+            .expect("the menu's close has an arm for workspace windows")
             .split("return;")
             .next()
             .expect("the connecting arm returns");
         assert!(
-            connecting.contains("request_close_window(app, window)"),
-            "the menu's close of a connecting window does not take its close button's path"
+            connecting.contains("close_window_with_page(app, window, Some(page))"),
+            "the menu's close of a connecting window does not hand its reading to the close"
+        );
+        assert!(
+            connecting.contains("let page = serve::read_page(app, window.label());"),
+            "the menu's close hands on a reading that is not its read of the page"
         );
         assert!(
             !connecting.contains("destroy()"),
             "the menu's close destroys a connecting window itself"
+        );
+    }
+
+    /// The close button of a devserver window on its connecting page hides
+    /// it on the page that its close handler read. The handler reads the
+    /// page on the main thread and hands that reading to the close it
+    /// spawns, so a navigation in between keeps the record. The handler
+    /// takes the Wry types, so its arm is read as text and the close is
+    /// driven with its reading.
+    #[tokio::test]
+    async fn the_close_button_closes_a_connecting_window_on_the_page_it_read() {
+        close_on_a_connecting_reading_after_the_navigation().await;
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let handler = source_region(SERVE_RS, "\nfn on_close_requested(", "\nfn on_destroyed(");
+        let connecting = handler
+            .split("if on_connecting && label.starts_with(\"lib-\") {")
+            .nth(1)
+            .expect("the close handler has an arm for a connecting devserver window")
+            .split("return;")
+            .next()
+            .expect("the connecting arm returns");
+        assert!(
+            connecting.contains("crate::close_window_with_page(app, window, Some(page))"),
+            "the close button of a connecting window does not hand its reading to the close"
+        );
+        assert!(
+            handler.contains("let page = read_page(app, label);"),
+            "the close button hands on a reading that is not its read of the page"
         );
     }
 

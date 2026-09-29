@@ -3737,9 +3737,9 @@ mod tests {
     #[test]
     fn connecting_screen_windows_close_through_request_close_window() {
         // A window still on connecting.html must be closable. A devserver
-        // window's red button routes through request_close_window, which reads
-        // the page the window shows and hides it with its record kept, while
-        // the page offers the same path from Cmd/Ctrl+W, Ctrl+D, and
+        // window's red button closes it as request_close_window does, on the
+        // page that its handler read (main.rs's tests hold that arm), and the
+        // page invokes request_close_window from Cmd/Ctrl+W, Ctrl+D, and
         // Disconnect.
         const SERVE_RS: &str = include_str!("serve.rs");
         let (_, rest) = SERVE_RS
@@ -3749,7 +3749,6 @@ mod tests {
             .split_once("\n}\n")
             .expect("on_close_requested ends at a column-0 brace");
         assert!(close_arm.contains("if on_connecting && label.starts_with(\"lib-\")"));
-        assert!(close_arm.contains("crate::request_close_window(app, window)"));
         // KEY_BRIDGE_JS claims the close chord (window capture +
         // stopImmediatePropagation) before BOTH the page's listener and
         // the File-menu accelerator, so the bridge itself must route
