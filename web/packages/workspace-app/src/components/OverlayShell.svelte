@@ -128,7 +128,6 @@
       style="width: {resolvedWidth};"
       onclick={(e) => e.stopPropagation()}
       role="dialog"
-      aria-modal="true"
       aria-label={label}
       tabindex="-1"
     >
