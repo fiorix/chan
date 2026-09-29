@@ -8574,6 +8574,41 @@ mod tests {
         );
     }
 
+    /// The page's chords, the key bridge's chords and the page's Disconnect
+    /// close a devserver window through `request_close_window`, whose close
+    /// reaches the one function that decides between hiding the window and
+    /// discarding its record. The command takes the Wry types, so the seam is
+    /// read as text; the tests above drive the decision.
+    #[test]
+    fn request_close_window_closes_a_devserver_window_through_its_decision() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let command = source_region(
+            MAIN_RS,
+            "\nasync fn request_close_window(",
+            "\nasync fn close_window_with_page(",
+        );
+        assert!(
+            command.contains("close_window_with_page(app, window, None).await"),
+            "request_close_window does not close the window as its routes that read the page do"
+        );
+        let close = source_region(
+            MAIN_RS,
+            "\nasync fn close_window_with_page(",
+            "\nfn close_devserver_window<",
+        );
+        let devserver_arm = close
+            .split("if closing.starts_with(\"lib-\") {")
+            .nth(1)
+            .expect("the close has an arm for a devserver window")
+            .split('}')
+            .next()
+            .expect("the devserver arm ends");
+        assert!(
+            devserver_arm.contains("return close_devserver_window(&app, &window, page);"),
+            "the close of a devserver window does not reach close_devserver_window"
+        );
+    }
+
     #[test]
     fn devserver_window_close_records_pending_delete_before_destroy() {
         const MAIN_RS: &str = include_str!("main.rs");
