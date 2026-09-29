@@ -1919,9 +1919,8 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "upload" && typeof frame.path === "string") {
-    // `cs upload`: raise the SAME upload UI the Inspector pill uses -- open a
-    // file picker, then hand the picked files to fileOps.uploadFilesTo (which
-    // drives the shared transfer-progress indicator). Reuse, not a parallel path.
+    // Share the picker and transfer-progress flow with Files uploads while
+    // keeping the native command on the terminal transfer route.
     raiseUploadPicker(frame.path, frame.root, false);
     setTransientStatus(`upload to ${frame.path || "/"}`);
     return;

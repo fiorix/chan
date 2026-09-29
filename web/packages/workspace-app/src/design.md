@@ -92,6 +92,22 @@ flowchart TB
     SEAM --> MOCK
 ```
 
+## Terminal replay recovery
+
+A terminal session frame names the byte cursor at the end of the attach replay. If the socket closes before `ready`, the client marks the replay cut and the next dial asks for the whole retained ring, ignoring both its live cursor and its cached snapshot. A numeric `replay_bytes` above zero arms a screen reset immediately before the first replay byte. Zero preserves the screen and normal scrollback while an alternate-screen prelude and private-mode reassert pass through. The mouse filter and OSC 52 observer discard their partial sequence tails on either kind of redial. The reset write's completion restores the saved keyboard protocol in place after xterm's RIS handler has cleared it and before the replay's queued bytes are parsed.
+
+A reset can repaint only what the ring retains: if the ring has dropped bytes, history older than its first byte is lost from the client, and a line above the replay reports the missed byte count. With an older server that omits `replay_bytes`, the client keeps its screen and still asks for the whole ring, so history may repeat rather than be erased. The snapshot guard covers replay frame arrival through `ready`; it does not wait for every queued renderer write to finish parsing.
+
+## Transfer teardown and native upload routing
+
+Page teardown saves transfer records as they stood before cancellation and then suspends all storage writes until `pageshow`. Transport cancellation still settles the in-memory rows; its promise callbacks, pending progress timers and bubble changes cannot replace the teardown record. Reload turns a saved active row into an interrupted one, with Retry for a download. A page restored without reloading retains its cancelled in-memory rows and resumes persistence on its next transfer change.
+
+In a standalone window, the native Upload and Replace pickers opt into the standalone Files upload contract with `app=files` and the window id. A native `cs upload` command omits the app marker and uses the terminal transfer contract, which follows linked destination directories. Workspace windows do not emit the Files marker. Browser upload routing uses its existing Files contract.
+
+## Backlinks after a rename
+
+The note status bar queries a path after 600 ms. On a path change it keeps the displayed count until a second query, scheduled 2.6 seconds after the change, answers. The filesystem watch notification and graph-cache invalidation precede indexing, so neither proves completion; the second query allows the longest configured debounce of two seconds and the 200 ms worker tick to pass. Replies and timers from an abandoned path are discarded. A busy indexer can still finish later than this delay; the bar does not poll indexing completion.
+
 ## Paths
 
 A workspace path is what the server sends for an entry under the workspace root: its components joined by `/`, with no leading or trailing `/`. `/` is its only separator. On a Unix server `\` is an ordinary character of a name, so a file named `a\b.md` is listed, opened and titled as `a\b.md`; a Windows server spells every path with `/`, so none of them holds a `\`. `basename` and `parentDir` in `state/format.ts` name a workspace path's last component and its parent by that rule. The demo transport's in-memory server names an entry with a cut of its own, as the server does, but takes an entry's parent from `parentDir`, so a test over the demo follows a change to `parentDir`. The path classifier in `state/fileTypes.ts` also cuts a name of its own, at `/` alone, because the file-classes check compiles that module by itself and it imports nothing.

@@ -230,7 +230,7 @@
         /// generation no longer matches is discarded and the server full-replays.
         generation: number;
         missed_bytes?: number;
-        /// Ring bytes sent before the attach prelude. Absent on older servers.
+        /// Ring bytes before the alternate-screen and mode preludes; absent on older servers.
         replay_bytes?: number;
         bytes_since_focus?: number;
         /// MESSAGE depth of the shared write queue at attach time, so every
@@ -357,7 +357,7 @@
   // next `ready` clears the cut.
   let replayCut = false;
   // The keyboard protocol as it stood when the current replay began, which
-  // reset write restores after its parser handlers have run and before
+  // the reset write restores after its parser handlers have run and before
   // the first ring byte is parsed.
   let keyboardProtocolBeforeReplay: TerminalKeyboardProtocolState | null = null;
   let pendingPromptSeed = "";
@@ -1974,8 +1974,8 @@
       () => masker?.captureWrite() ?? null,
       (snapshot) => masker?.scanWrite(snapshot),
     );
-    // Keep the existing writer + origin ordering. Replay callbacks only drain
-    // the batch; live callbacks still run their captured per-write scan.
+    // Restore the reset's keyboard state before draining the mask batch or
+    // running a live write's captured scan.
     ptyWrites.write(termWriter, bytes, origin, () => {
       onComplete?.();
       completeMaskScan();
