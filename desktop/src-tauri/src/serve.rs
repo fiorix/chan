@@ -708,16 +708,6 @@ fn window_title_or_label(app: &AppHandle<impl Runtime>, label: &str) -> String {
         .unwrap_or_else(|| label.to_string())
 }
 
-/// True when the webview is still showing the bundled connecting/retry
-/// screen (`connecting.html`, the remote pre-navigation page). Such a
-/// window is a devserver window waiting for its devserver, whose record
-/// there holds the window's terminal sessions, so its close hides it
-/// (`close_devserver_window`) instead of discarding the record. Guard the URL read because a dead webview's `url()` can panic on a
-/// nil URL; any failure reads as "not the connecting screen".
-pub fn window_on_connecting_screen(app: &AppHandle<impl Runtime>, label: &str) -> bool {
-    read_page(app, label) == PageReading::Connecting
-}
-
 /// What the webview of a window shows, as a close of that window reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PageReading {
@@ -1025,7 +1015,7 @@ fn build_workspace_window_with_completion(
 /// until the SPA decides. With no live SPA to ask, a control
 /// terminal still connecting REAL-closes with no prompt, and a
 /// devserver window still on the pre-SPA connecting screen is
-/// hidden through `request_close_window` with no prompt.
+/// hidden with no prompt, as `request_close_window` hides it.
 /// Programmatic closes (the SPA's empty-window cascade,
 /// workspace-off teardown) call `destroy()`
 /// and never reach this handler.
@@ -1086,17 +1076,20 @@ fn on_close_requested(
         return;
     }
     // A devserver window still on the connecting page has no
-    // SPA command handler to answer a prompt. Route its OS
-    // close through `request_close_window`, as the page's
-    // close chords and Disconnect button do, which hides it
-    // and keeps its record.
-    let on_connecting = window_on_connecting_screen(app, label);
+    // SPA command handler to answer a prompt. Close it as the
+    // page's chords and Disconnect button close it through
+    // `request_close_window`, which hides it and keeps its
+    // record. The close is handed the page read here and does
+    // not read it again, so a navigation to the live page
+    // before the close runs does not discard the record.
+    let page = read_page(app, label);
+    let on_connecting = page == PageReading::Connecting;
     if on_connecting && label.starts_with("lib-") {
         api.prevent_close();
         if let Some(window) = app.get_webview_window(label) {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = crate::request_close_window(app, window).await {
+                if let Err(e) = crate::close_window_with_page(app, window, Some(page)).await {
                     tracing::warn!(error = %e, "closing connecting devserver window failed");
                 }
             });
@@ -3475,7 +3468,7 @@ mod tests {
         // connecting screen) return WITHOUT prevent_close.
         assert!(arm.contains("if !ask {"));
         assert!(arm.contains("strip_prefix(\"control-terminal-\")"));
-        assert!(arm.contains("window_on_connecting_screen"));
+        assert!(arm.contains("read_page(app, label)"));
         // A kept-dead control terminal's red button routes through the same
         // explicit-close cleanup as Cmd+W / the SPA Close, clearing the
         // reconnect block instead of stranding it on a destroyed window.
