@@ -2720,7 +2720,9 @@
                   ? "symlink"
                   : kind === "mention"
                     ? "hardlink"
-                    : "directory"}
+                    : kind === "folder"
+                      ? "directory"
+                      : kind}
               {:else}
                 {kind === "mention" ? "contact" : kind === "img" ? "media" : kind}
               {/if}
