@@ -92,6 +92,16 @@ flowchart TB
     SEAM --> MOCK
 ```
 
+## Modal instances and focus
+
+`ModalShell` owns the workspace app's modal ordering through `components/modalStack.ts`, whose only production caller is the shell. Mounted instances receive increasing layers starting at 26000, independently of their positions in App's markup. Registration order resolves simultaneous mounts; a false/true state change that never unmounts keeps the same instance. The shell stack is separate from the overlay stack.
+
+The top shell captures Escape and asks its caller to close. A caller that refuses remains the owner. Tab inside the panel reaches the control and caller before the shared wrapper handles its ends, preserving path completion and native interior movement. Tab from outside or an invalid focused control first returns to the top panel. Other keys remain panel-local. Caller-owned initial focus is retained while valid; document focus events and a mutation observer on only the top panel recover focus after controls disappear, become disabled or hidden, or focus escapes the shell.
+
+Closing a lower shell preserves the top's focus. Closing the top restores its valid opener in the surviving shell, then falls back to that shell's last valid control or panel. The final close restores a usable external opener, including one inherited from a lower shell that closed first, while preserving focus deliberately moved by a closing caller. Deferred repair and restoration are invalidated by subsequent mount/unmount changes. Listeners and observation end when no shell remains. Workspace shells opt out of `createModalFocus` restoration; the launcher's existing caller keeps its default restoration.
+
+Mounted jsdom tests establish assigned layer values, focus targets, consumed keys, re-entrant lifecycle behavior and cleanup. They do not establish painted or hit-tested order, browser-native Tab traversal, browser control-removal timing, assistive-technology behavior or WKWebView behavior.
+
 ## Terminal replay recovery
 
 A terminal session frame names the byte cursor at the end of the attach replay. If the socket closes before `ready`, the client marks the replay cut and the next dial asks for the whole retained ring, ignoring both its live cursor and its cached snapshot. A numeric `replay_bytes` above zero arms a screen reset immediately before the first replay byte. Zero preserves the screen and normal scrollback while an alternate-screen prelude and private-mode reassert pass through. The mouse filter and OSC 52 observer discard their partial sequence tails on either kind of redial. The reset write's completion restores the saved keyboard protocol in place after xterm's RIS handler has cleared it and before the replay's queued bytes are parsed.
