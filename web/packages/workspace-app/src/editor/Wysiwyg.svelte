@@ -192,6 +192,16 @@
   /// remounts instead.
   let activeTriggerStart: number | null = null;
   let activeTemplateMode: BubbleSpec["templateMode"];
+  /// The trigger whose bubble the bubble itself closed (Escape, a click
+  /// away, a pick). It stays closed while the caret stays in that trigger,
+  /// or the next keystroke there, which only changes the query, would open
+  /// it again at once. A caret that leaves the trigger, or another trigger,
+  /// clears it.
+  let dismissedTrigger: { kind: BubbleSpec["kind"]; triggerStart: number } | null = null;
+  /// Set while the editor closes the open bubble for a reason of its own
+  /// (another trigger, no trigger, a read-only flip), which is not a
+  /// dismissal to remember.
+  let closingActiveBubble = false;
 
   function clearActiveBubble(): void {
     activeBubble = null;
@@ -214,14 +224,32 @@
     onImageClick(args);
   }
 
+  function closeActiveBubble(): void {
+    if (!activeBubble) return;
+    closingActiveBubble = true;
+    try {
+      activeBubble.dismiss();
+    } finally {
+      closingActiveBubble = false;
+    }
+    clearActiveBubble();
+  }
+
   function handleSpec(spec: BubbleSpec | null): void {
     if (!view) return;
     if (spec === null) {
-      if (activeBubble) {
-        activeBubble.dismiss();
-        clearActiveBubble();
-      }
+      dismissedTrigger = null;
+      closeActiveBubble();
       return;
+    }
+    if (dismissedTrigger) {
+      if (
+        dismissedTrigger.kind === spec.kind &&
+        dismissedTrigger.triggerStart === spec.triggerStart
+      ) {
+        return;
+      }
+      dismissedTrigger = null;
     }
     // Same bubble kind AT THE SAME anchor + mode already open: update its
     // query / trigger end in place. A different kind, anchor, or mode (a
@@ -245,11 +273,11 @@
       activeBubble.setQuery(spec.query);
       return;
     }
-    if (activeBubble) {
-      activeBubble.dismiss();
-      clearActiveBubble();
-    }
+    closeActiveBubble();
     const onDismiss = () => {
+      if (!closingActiveBubble) {
+        dismissedTrigger = { kind: spec.kind, triggerStart: spec.triggerStart };
+      }
       clearActiveBubble();
     };
     if (spec.kind === "wiki") {
@@ -873,10 +901,7 @@
     // Also dismiss any open bubble at the moment of the flip; a
     // stale handle held across a reconfigure can't be dismissed
     // through the keymap anymore.
-    if (activeBubble) {
-      activeBubble.dismiss();
-      clearActiveBubble();
-    }
+    closeActiveBubble();
     view.dispatch({
       effects: writeSideCompartment.reconfigure(writeSideExtensions(readonly)),
     });
