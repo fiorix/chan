@@ -112,8 +112,12 @@ interface PersistedTransfer {
   source: TransferSource | null;
 }
 
+// A hidden page's cancellation callbacks and progress timers can still run.
+// Keep its teardown record authoritative until the same page is shown again.
+let persistenceSuspended = false;
+
 function persist(payload = persistedTransfers()): void {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || persistenceSuspended) return;
   try {
     window.sessionStorage.setItem(storeKey(), JSON.stringify(payload));
   } catch {
@@ -207,14 +211,14 @@ function emitSignal(): void {
   signalSink?.(activeTransferCount());
 }
 
-/// Start tracking a transfer; returns its id. It starts active because the
-/// window has started it; whether the server runs it immediately or holds it is
-/// the server's call and arrives later in `queue`. `source` lets an interrupted
-/// download retry.
 /// A download's source: its path, whether it is a directory, and the root
 /// it was started under when that is not the workspace.
 export type TransferSource = { path: string; isDir: boolean; root?: TransferRoot };
 
+/// Start tracking a transfer; returns its id. It starts active because the
+/// window has started it; whether the server runs it immediately or holds it is
+/// the server's call and arrives later in `queue`. `source` lets an interrupted
+/// download retry.
 export function beginTransfer(opts: {
   kind: TransferKind;
   filename: string;
@@ -493,8 +497,10 @@ export function cancelAllTransfers(): void {
     if (occupiesWindow(transfer)) transfer.cancel?.();
   }
   persist(standing);
+  persistenceSuspended = true;
 }
 
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", cancelAllTransfers);
+  window.addEventListener("pageshow", () => { persistenceSuspended = false; });
 }
