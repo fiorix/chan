@@ -7711,7 +7711,7 @@ mod scene_divert_tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use super::doc_divert_tests::{api_write_file, body_json, divert_app};
+    use super::doc_divert_tests::{api_write_file, body_json, divert_app, raw_put};
     use super::{api_read_file, ReadFileQuery, WriteBody};
 
     fn scene_body(elements: Value) -> String {
@@ -7805,6 +7805,7 @@ mod scene_divert_tests {
         let mut frames = handle.take_frames();
         let session = handle.session().clone();
         let token0 = session.token().expect("seeded token");
+        let authority_version0 = session.http_write_view().authority_version;
         while frames.try_recv().is_ok() {}
 
         // Wrong ns token: 409 carrying the SESSION token, nothing
@@ -7860,9 +7861,16 @@ mod scene_divert_tests {
         let v = body_json(resp).await;
         let token1 = session.token().expect("post-flush token");
         assert_eq!(v["mtime_ns"], token1.to_string());
-        assert_ne!(token0, token1);
+        assert_eq!(
+            workspace.stat("b.excalidraw").unwrap().mtime_ns,
+            Some(token1)
+        );
+        let authority_version1 = session.http_write_view().authority_version;
+        assert!(authority_version1 > authority_version0);
+        assert_eq!(v["authority_version"], authority_version1);
         let fanned: Value = serde_json::from_str(&frames.try_recv().unwrap()).unwrap();
         assert_eq!(fanned["type"], "update");
+        assert_eq!(fanned["version"], authority_version1);
         assert_eq!(
             fanned["elements"][0]["version"], 6,
             "replace bumps past the stored version"
@@ -7874,6 +7882,59 @@ mod scene_divert_tests {
         )
         .unwrap();
         assert_eq!(on_disk["elements"][0]["angle"], 30);
+    }
+
+    #[tokio::test]
+    async fn put_divert_rejects_stale_scene_authority_with_matching_disk_token() {
+        let (_cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        let baseline = scene_body(json!([elem("x", 1, 1, "a1")]));
+        workspace.write_text("b.excalidraw", &baseline).unwrap();
+        let handle = state
+            .scene_sessions
+            .attach(&workspace, "b.excalidraw", "win-1")
+            .await
+            .unwrap();
+        let session = handle.session().clone();
+        let open = session.http_read_view();
+        let token = open.disk_mtime_ns.expect("open-time disk token");
+        let on_disk = std::fs::read_to_string(root.path().join("b.excalidraw")).unwrap();
+
+        session
+            .apply_replace(&scene_body(json!([
+                elem("x", 1, 1, "a1"),
+                elem("y", 1, 2, "a2")
+            ])))
+            .unwrap();
+        let current = session.http_read_view();
+        assert!(current.authority_version > open.authority_version);
+        assert_eq!(current.disk_mtime_ns, Some(token));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b.excalidraw")).unwrap(),
+            on_disk
+        );
+
+        let resp = raw_put(
+            State(state),
+            AxumPath("b.excalidraw".into()),
+            scene_body(json!([elem("z", 1, 3, "a3")])),
+            None,
+            Some(token.to_string()),
+            Some(open.authority_version),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["current_mtime_ns"], token.to_string());
+        assert_eq!(body["current_authority_version"], current.authority_version);
+        let retained = session.http_read_view();
+        assert_eq!(retained.content, current.content);
+        assert_eq!(retained.authority_version, current.authority_version);
+        assert_eq!(retained.disk_mtime_ns, Some(token));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b.excalidraw")).unwrap(),
+            on_disk
+        );
     }
 
     #[cfg(unix)]
