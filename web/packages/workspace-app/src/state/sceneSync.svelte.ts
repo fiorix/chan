@@ -543,6 +543,11 @@ export class SceneSession {
   bufferMirrored(): void {
     if (this.status !== "attached") return;
     this.confirmSaved();
+    // A clean fresh snapshot can settle an old push without a later flush.
+    if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
+        this.tab.content === this.tab.saved) {
+      clearUnresolvedLiveSave(this.tab);
+    }
   }
 
   /// Outbound presence: trailing-edge throttle on pointer moves.

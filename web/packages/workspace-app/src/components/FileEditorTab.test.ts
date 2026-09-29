@@ -1549,6 +1549,14 @@ describe("a drawing whose save is refused", () => {
       board: false,
       body: `This drawing does not parse, so the board cannot show it. Use Show source code (${chordFor("app.editor.toggleMode")}) to fix it.`,
     });
+    setTabContent(tab, SAVED);
+    await settle();
+    expect({
+      line: toolbarLine(target),
+      placeholder: target.querySelector(".refused-placeholder") !== null,
+      board: island.props !== null,
+      held: tab.refusedUnwritten,
+    }).toEqual({ line: undefined, placeholder: false, board: true, held: false });
   });
 
   test("a missing file's state comes before the line", async () => {
@@ -1648,18 +1656,31 @@ describe("a drawing whose save is refused", () => {
 
     test("on the board a fixed text is written by the classic save, and the session comes after it lands", async () => {
       const realWrite = api.write.bind(api);
-      const { tab, write } = await refused();
+      const { tab, target, write } = await refused();
       const gate = heldWrites(write, realWrite);
       setTabContent(tab, FIXED);
       setMode(tab, "canvas");
       await settle();
+      const pending = {
+        held: tab.refusedUnwritten,
+        placeholder: target.querySelector(".refused-placeholder") !== null,
+        board: island.props !== null,
+      };
       await autosaveFires(tab.id);
       const inFlight = dialled("scene");
       gate.land?.();
       await settle();
 
-      expect({ inFlight, scene: dialled("scene"), disk: disk.get(PATH)?.content }).toEqual({
-        inFlight: 0, scene: 1, disk: FIXED,
+      expect({
+        pending,
+        inFlight,
+        scene: dialled("scene"),
+        disk: disk.get(PATH)?.content,
+        placeholder: target.querySelector(".refused-placeholder") !== null,
+        board: island.props !== null,
+      }).toEqual({
+        pending: { held: true, placeholder: true, board: false },
+        inFlight: 0, scene: 1, disk: FIXED, placeholder: false, board: true,
       });
     });
 

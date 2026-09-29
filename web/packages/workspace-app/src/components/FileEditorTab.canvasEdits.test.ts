@@ -1009,6 +1009,33 @@ describe("a live drawing", () => {
     expect({ beforeAck, afterAck: isDirty(tab) }).toEqual({ beforeAck: true, afterAck: false });
   });
 
+  test("a timed-out live push keeps the mounted drawing and its unsaved reason", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    board.stroke(STROKE);
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(6001);
+    await saving;
+    await tick();
+    vi.useRealTimers();
+
+    expect({
+      mounted: document.querySelector(".excalidraw-host") !== null,
+      buffer: tab.content.includes('"stroke"'),
+      reason: document.querySelector(".editor-toolbar .error")?.textContent?.trim(),
+      fatal: tab.error,
+      dirty: isDirty(tab),
+      pushes: socket.pushes().length,
+    }).toEqual({
+      mounted: true,
+      buffer: true,
+      reason: "Not saved: the previous live push has not been confirmed",
+      fatal: null,
+      dirty: true,
+      pushes: 1,
+    });
+  });
+
   test("an unforced close_tab reports a pending stroke unsaved and pushes it, and the same op closes it after its ack", async () => {
     const { pane, tab, board, socket } = await attachedDrawing();
     vi.useFakeTimers();
@@ -1296,6 +1323,30 @@ describe("a live drawing", () => {
     vi.useRealTimers();
 
     expect({ afterFan, pushedAgain: idsPushed(next) }).toEqual({ afterFan: [["x"]], pushedAgain: [["y"]] });
+  });
+
+  test("a stroke on the wire survives an unbound fresh snapshot and canvas remount", async () => {
+    const X = { id: "x", type: "rectangle", version: 1, versionNonce: 3, isDeleted: false };
+    const { tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    board.stroke(X);
+    await vi.advanceTimersByTimeAsync(250);
+    await unmount(mounted.pop()!);
+    const { board: rebound } = await mountBoard(tab);
+    socket.drop();
+    const next = await nextSocket();
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    await rebound.start();
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      first: idsPushed(socket),
+      replayedStroke: idsPushed(next).some((ids) => ids.includes("x")),
+      board: shownIds(rebound),
+      buffer: tab.content.includes('"x"'),
+      dirty: isDirty(tab),
+    }).toEqual({ first: [["x"]], replayedStroke: true, board: ["on-disk", "x"], buffer: true, dirty: true });
   });
 
   test("a snapshot fanned on the socket over a background on the wire leaves the pick on the board and in the buffer", async () => {

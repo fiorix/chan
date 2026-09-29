@@ -1327,7 +1327,7 @@
     </div>
   {:else if tab.error}
     <div class="placeholder error-placeholder">{tab.error}</div>
-  {:else if notSaved && tab.mode === "canvas"}
+  {:else if tab.refusedUnwritten && tab.mode === "canvas"}
     <!-- The board opens a text that does not parse as an empty scene, and
          its first change would replace the text the user is fixing. -->
     <div class="placeholder refused-placeholder">
