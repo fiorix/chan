@@ -2824,9 +2824,8 @@ fn build_devserver_app(
     // (unfilled on a tunnel-only devserver, where `require_mutable` answers
     // 503).
     //
-    // The launcher's add and on ask the startup coordinator first, as the
-    // devserver's own open and on do, so from the stop signal on they are
-    // refused before they register or mount a root.
+    // The launcher's add and on ask the startup coordinator before they
+    // register or mount a root.
     let serve_addr: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
     let admission: crate::routes::MountAdmission = {
         let startup = state.startup.clone();
@@ -2874,8 +2873,8 @@ async fn gate_tenant_during_startup(
 
 /// The gate's answer to a request while the tenants' routes are `closed`,
 /// or `None` for a path no mounted tenant owns. A start asks the client to
-/// retry, since the routes open soon; a stop does not, and carries a code so
-/// a client that waits out a start can give up on it.
+/// retry, since the routes open soon; a stop does not, and carries a code
+/// that identifies this process's closed tenant routes.
 fn startup_refusal(closed: TenantRoutesClosed, ownership: Result<bool, Error>) -> Option<Response> {
     match ownership {
         Ok(true) => Some(match closed {
@@ -4731,6 +4730,18 @@ mod tests {
             .advance(StartupPhase::Ready)
             .expect("fdstore -> ready");
         assert_eq!(startup.tenant_routes_closed(), None);
+    }
+
+    #[test]
+    fn stopped_phase_reads_as_stopping_for_mount_admission() {
+        let startup = StartupCoordinator::new();
+        startup.stop();
+        startup.stopped();
+        assert_eq!(startup.phase(), StartupPhase::Stopped);
+        assert_eq!(
+            startup.tenant_routes_closed(),
+            Some(TenantRoutesClosed::Stopping)
+        );
     }
 
     #[tokio::test]
@@ -9148,8 +9159,8 @@ mod tests {
         }
 
         /// A request to a mounted tenant after the stop signal is told that
-        /// the devserver is stopping, with the code a client that waits out
-        /// a start gives up on, and is not asked to retry.
+        /// this process is stopping, with a code identifying its closed tenant
+        /// routes and no retry instruction.
         #[tokio::test]
         async fn a_tenant_request_after_the_stop_signal_hears_that_the_devserver_stops() {
             let _env = chan_home_env_read();
@@ -9278,6 +9289,51 @@ mod tests {
                 );
                 assert_eq!(retry_after, None, "fully_stopped={fully_stopped}");
             }
+        }
+
+        #[tokio::test]
+        async fn a_launcher_on_after_the_stop_signal_leaves_a_mounted_workspace_as_it_was() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let key = canonical_root(root.path());
+            let state = devserver_with_windows(home.path()).await;
+            let prefix = state.register_workspace(root.path()).await.expect("mount");
+            assert!(state.host.is_root_mounted(root.path()));
+            let before = overlay_intents(&state);
+            assert_eq!(before, [(key.clone(), true)]);
+            let before_rows = state.host.workspace_overlay().unwrap().entries();
+            let (app, serve_addr) = build_devserver_app(state.clone(), state.host.clone());
+            serve_addr.set("127.0.0.1:0".parse().unwrap()).unwrap();
+            signal_stop(&state, false).await;
+
+            let response = app
+                .oneshot(mount_request(
+                    &format!("/api/library/workspaces{prefix}/on"),
+                    serde_json::json!({}),
+                ))
+                .await
+                .unwrap();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+            assert_eq!(
+                refusal_body(response).await,
+                serde_json::json!({
+                    "error": format!(
+                        "the devserver is stopping; {} was not mounted",
+                        key.display()
+                    )
+                })
+                .to_string()
+            );
+            assert_eq!(retry_after, None);
+            assert!(state.host.is_root_mounted(root.path()));
+            assert_eq!(state.host.mounted_prefixes().unwrap(), [prefix]);
+            assert_eq!(overlay_intents(&state), before);
+            assert_eq!(
+                state.host.workspace_overlay().unwrap().entries(),
+                before_rows
+            );
+            state.host.shutdown_all().await.unwrap();
         }
 
         /// A mount admitted before the signal can finish registering after it.
