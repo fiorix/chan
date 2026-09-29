@@ -132,9 +132,12 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 ```mermaid
 flowchart TB
-    INST["install_launcher_root_fallback (desktop)<br/>admitting_launcher_router (devserver)<br/>sets the policy per surface"]
-    RTR["launcher_router(host, bearer, serve_addr)<br/>auth-agnostic handlers"]
-    INST --> RTR
+    DESKTOP["install_launcher_root_fallback (desktop)"]
+    ROUTER["launcher_router(host, bearer, serve_addr)"]
+    DEVSERVER["build_devserver_app (devserver)"]
+    ADMIT["admitting_launcher_router(host, bearer, serve_addr, admission)<br/>shared handlers"]
+    DESKTOP --> ROUTER --> ADMIT
+    DEVSERVER --> ADMIT
 
     subgraph authx["bearer: who may call /api/library/*"]
         BTOK["Some(token): require Authorization: Bearer<br/>watch WS also accepts ?t= (constant-time)"]

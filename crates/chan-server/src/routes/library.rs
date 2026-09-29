@@ -136,8 +136,9 @@ pub fn launcher_router(
     admitting_launcher_router(host, bearer, serve_addr, None)
 }
 
-/// [`launcher_router`] whose add and on ask `admission` first. The devserver
-/// installs its launcher through here, with an admission its stop refuses by.
+/// [`launcher_router`] whose add and on ask `admission` before registration or
+/// mounting. The devserver installs its launcher through here, with an
+/// admission its stop refuses by.
 pub(crate) fn admitting_launcher_router(
     host: Arc<WorkspaceHost>,
     bearer: Option<LauncherBearer>,
