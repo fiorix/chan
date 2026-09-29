@@ -140,4 +140,3 @@ describe("the Settings panel", () => {
     expect([panel.getAttribute("aria-modal"), panel.getAttribute("aria-label")]).toEqual([null, "Settings"]);
   });
 });
-

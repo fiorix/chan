@@ -809,4 +809,3 @@ describe("a selected path with no entry yet", () => {
     expect(target.querySelector(".empty-hint")?.textContent).toBe("cannot list notes: permission denied");
   });
 });
-

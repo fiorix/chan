@@ -102,4 +102,3 @@ test("an invalidate during a load leaves nothing loading and publishes nothing s
 
   expect(graphData.view, "the dropped load publishes nothing").toBeNull();
 });
-

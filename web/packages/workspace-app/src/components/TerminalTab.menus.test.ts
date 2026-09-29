@@ -191,4 +191,3 @@ describe("the menus' roles", () => {
     expect(buttons.filter((b) => b.getAttribute("role") !== "menuitem").map((b) => b.textContent?.trim())).toEqual([]);
   });
 });
-
