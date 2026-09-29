@@ -6881,6 +6881,129 @@ mod tests {
         );
     }
 
+    /// A [`relinked_host`] whose root was pointed at another registered
+    /// workspace's folder, as the launcher, the devserver and a restore
+    /// meet it.
+    #[cfg(unix)]
+    struct RelinkedOnto {
+        host: Arc<WorkspaceHost>,
+        overlay: Arc<WorkspaceOverlay>,
+        windows: Arc<WindowRegistry>,
+        /// The root the relinked row stores.
+        stored: PathBuf,
+        /// The folder that root resolved to before it was pointed elsewhere.
+        canonical: PathBuf,
+        /// The root the other workspace's row stores.
+        other: PathBuf,
+        /// The folder the other workspace is mounted from.
+        other_folder: PathBuf,
+        _dirs: ([tempfile::TempDir; 2], tempfile::TempDir),
+    }
+
+    #[cfg(unix)]
+    impl RelinkedOnto {
+        /// Mount the relinked root when `mounted`, register another
+        /// workspace, mounted when `other_mounted`, with its row on and one
+        /// window, and point the relinked root's parent link at it. With
+        /// `other_relinked`, the other workspace's own root moved under a
+        /// symlink before it was mounted, so its row goes by a root that is
+        /// not its folder, and only its runtime goes by that folder.
+        async fn new(mounted: bool, other_mounted: bool, other_relinked: bool) -> Self {
+            let (host, overlay, stored, canonical, dirs) = relinked_host();
+            let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+            host.install_window_registry(Arc::clone(&windows), "local".into());
+            let other_holder = tempfile::tempdir().unwrap();
+            let (other, onto) = if other_relinked {
+                let parent = other_holder.path().join("parent");
+                std::fs::create_dir_all(parent.join("ws")).unwrap();
+                let other = host
+                    .library
+                    .register_workspace(&parent.join("ws"))
+                    .unwrap()
+                    .root_path;
+                let moved = other_holder.path().join("moved");
+                let link = other.parent().expect("the other root's parent");
+                std::fs::rename(link, &moved).expect("move the other root's parent");
+                std::os::unix::fs::symlink(&moved, link).expect("link the other root's parent");
+                (other, moved)
+            } else {
+                std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
+                let other = host
+                    .library
+                    .register_workspace(&other_holder.path().join("ws"))
+                    .unwrap()
+                    .root_path;
+                (other, other_holder.path().to_path_buf())
+            };
+            let other_folder = chan_workspace::paths::canonicalize_normalized(&other);
+            if mounted {
+                host.open_registered_workspace(&stored, serve_config("/ws"))
+                    .await
+                    .expect("mount the relinked root");
+            }
+            if other_mounted {
+                host.open_registered_workspace(&other, serve_config("/other"))
+                    .await
+                    .expect("mount the other workspace");
+            }
+            overlay.set(&other.to_string_lossy(), true);
+            windows.create(
+                WindowKind::Workspace,
+                Some(other.to_string_lossy().into_owned()),
+            );
+            relink(&stored, &onto);
+            assert_eq!(
+                chan_workspace::paths::canonicalize_normalized(&stored),
+                other_folder,
+                "fixture: the stored root does not resolve to the other workspace"
+            );
+            Self {
+                host,
+                overlay,
+                windows,
+                stored,
+                canonical,
+                other,
+                other_folder,
+                _dirs: (dirs, other_holder),
+            }
+        }
+
+        /// Assert that a removal answered `outcome` removed the relinked
+        /// workspace and left the other one whole, mounted when `mounted`.
+        fn assert_removed_it_alone(
+            &self,
+            other_mounted: bool,
+            outcome: &Result<WorkspaceLifecycleOutcome, Error>,
+        ) {
+            if other_mounted {
+                assert!(
+                    self.host.mounted_root(&self.other_folder).is_some(),
+                    "the removal closed another workspace: {outcome:?}"
+                );
+            }
+            assert_left_whole(
+                &self.host,
+                &self.overlay,
+                &self.windows,
+                &self.other,
+                outcome,
+            );
+            assert!(
+                self.host.mounted_root(&self.canonical).is_none(),
+                "the removal left the workspace it names mounted: {outcome:?}"
+            );
+            assert!(
+                !registered(&self.host, &self.stored),
+                "the removal left the workspace it names registered: {outcome:?}"
+            );
+            assert!(
+                matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+                "the removal did not answer that it removed the workspace: {outcome:?}"
+            );
+        }
+    }
+
     /// A user's off of a relinked root that is not mounted, called with the
     /// stored root as the launcher's off route calls it, leaves no on-row
     /// under either spelling, so no reader of the on rows brings it back.
@@ -7024,6 +7147,107 @@ mod tests {
         assert!(
             !registered(&host, &stored),
             "the removal left the workspace it closed registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
+    }
+
+    /// A removal by the root a workspace's row stores, as the launcher's
+    /// delete and the devserver's forget name it, after that root was pointed
+    /// at another registered workspace's folder while the workspace was
+    /// mounted, removes that workspace and leaves the other one whole.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_mounted_root_relinked_onto_another_workspace_leaves_that_workspace(
+    ) {
+        let fixture = RelinkedOnto::new(true, true, false).await;
+        let outcome = fixture
+            .host
+            .remove_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_removed_it_alone(true, &outcome);
+    }
+
+    /// The same for a workspace that is not mounted, beside another that is
+    /// not mounted either: the other workspace's row goes by the folder the
+    /// stored root resolves to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_root_relinked_onto_another_row_leaves_that_row() {
+        let fixture = RelinkedOnto::new(false, false, false).await;
+        let outcome = fixture
+            .host
+            .remove_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_removed_it_alone(false, &outcome);
+    }
+
+    /// The same for a workspace that is not mounted, beside another whose
+    /// own root moved under a symlink and which is mounted: only its runtime
+    /// goes by the folder the stored root resolves to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_root_relinked_onto_another_runtime_leaves_that_runtime(
+    ) {
+        let fixture = RelinkedOnto::new(false, true, true).await;
+        let outcome = fixture
+            .host
+            .remove_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_removed_it_alone(true, &outcome);
+    }
+
+    /// A removal by the root a mounted workspace's row stores, after that
+    /// root stopped resolving, closes and unregisters the workspace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_mounted_root_that_resolves_nowhere_removes_it() {
+        let (host, _overlay, stored, canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        std::fs::remove_file(stored.parent().expect("the linked parent"))
+            .expect("unlink the parent");
+        assert!(
+            std::fs::canonicalize(&stored).is_err(),
+            "fixture: the stored root still resolves"
+        );
+
+        let outcome = host.remove_workspace_for_root(&stored, false).await;
+
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the removal left the workspace it names mounted: {outcome:?}"
+        );
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it names registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
+    }
+
+    /// The same for a workspace that is not mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_root_that_resolves_nowhere_removes_it() {
+        let (host, _overlay, stored, _canonical, _dirs) = relinked_host();
+        std::fs::remove_file(stored.parent().expect("the linked parent"))
+            .expect("unlink the parent");
+        assert!(
+            std::fs::canonicalize(&stored).is_err(),
+            "fixture: the stored root still resolves"
+        );
+
+        let outcome = host.remove_workspace_for_root(&stored, false).await;
+
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it names registered: {outcome:?}"
         );
         assert!(
             matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),

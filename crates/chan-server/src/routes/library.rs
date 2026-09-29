@@ -6446,6 +6446,85 @@ mod refusal_envelopes {
         .await;
     }
 
+    /// A delete of a workspace whose stored root was pointed at another
+    /// registered workspace's folder while it was mounted removes that
+    /// workspace and leaves the other one registered and mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_remove_of_a_row_relinked_onto_another_workspace_leaves_that_workspace() {
+        let (_dir, host) = host();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let prefix = registered_root(&host, &parent.join("ws"));
+        let stored = host
+            .library()
+            .list_workspaces()
+            .into_iter()
+            .map(|row| row.root_path)
+            .find(|root| registered_workspace_prefix(root).ok().as_deref() == Some(prefix.as_str()))
+            .expect("the relinked row");
+        let link = stored.parent().expect("the linked parent").to_path_buf();
+        let moved = holder.path().join("moved");
+        std::fs::rename(&link, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &link).unwrap();
+        let other_holder = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
+        let other = host
+            .library()
+            .register_workspace(&other_holder.path().join("ws"))
+            .unwrap()
+            .root_path;
+        for (root, at) in [(&stored, "/ws"), (&other, "/other")] {
+            host.open_registered_workspace(
+                root,
+                chan_library::ServeConfig {
+                    addr: "127.0.0.1:0".parse().unwrap(),
+                    no_token: true,
+                    prefix: at.into(),
+                    idle_timeout: None,
+                    open_browser: false,
+                    search_aggression: None,
+                    settings_disabled: false,
+                    verbose: false,
+                },
+            )
+            .await
+            .expect("mount a workspace");
+        }
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(other_holder.path(), &link).unwrap();
+
+        let status = send(
+            &mutable_app(host.clone()),
+            "DELETE",
+            &format!("/api/library/workspaces{prefix}"),
+            None,
+        )
+        .await
+        .status();
+
+        let registered = |root: &Path| {
+            host.library()
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == root)
+        };
+        assert!(
+            host.mounted_root(&other).is_some(),
+            "the delete closed another workspace: {status}"
+        );
+        assert!(
+            registered(&other),
+            "the delete unregistered another workspace: {status}"
+        );
+        assert!(
+            !registered(&stored),
+            "the delete left the workspace it names registered: {status}"
+        );
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
     #[test]
     fn workspace_remove_unregistered() {
         let runtime = tokio::runtime::Builder::new_current_thread()
