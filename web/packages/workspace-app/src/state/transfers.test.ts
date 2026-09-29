@@ -4,6 +4,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   beginTransfer,
+  hideTransfers,
+  showTransfers,
   cancelAllTransfers,
   failTransfer,
   finishTransfer,
@@ -14,6 +16,7 @@ import {
 } from "./transfers.svelte";
 
 function resetTransfers(): void {
+  window.dispatchEvent(new Event("pageshow"));
   transfers.items = [];
   transfers.shown = false;
   window.sessionStorage.clear();
@@ -188,4 +191,21 @@ describe("transfer records", () => {
     expect(transfers.items[0]?.state).toBe("failed");
     expect(retry).toHaveBeenCalledOnce();
   });
+});
+
+
+test("pagehide freezes a pending progress write until pageshow permits persistence", async () => {
+  vi.useFakeTimers();
+  resetTransfers();
+  const id = beginTransfer({ kind: "download", filename: "a", cancel: null });
+  setTransferProgress(id, 0.5);
+  window.dispatchEvent(new Event("pagehide"));
+  const persist = vi.spyOn(Storage.prototype, "setItem");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(persist, "a queued progress timer writes nothing after teardown").not.toHaveBeenCalled();
+  hideTransfers();
+  expect(persist, "bubble changes write nothing after teardown").not.toHaveBeenCalled();
+  window.dispatchEvent(new Event("pageshow"));
+  showTransfers();
+  expect(persist, "a shown page can persist again").toHaveBeenCalledOnce();
 });
