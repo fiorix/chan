@@ -715,7 +715,27 @@ fn window_title_or_label(app: &AppHandle<impl Runtime>, label: &str) -> String {
 /// (`close_devserver_window`) instead of discarding the record. Guard the URL read because a dead webview's `url()` can panic on a
 /// nil URL; any failure reads as "not the connecting screen".
 pub fn window_on_connecting_screen(app: &AppHandle<impl Runtime>, label: &str) -> bool {
-    webview_url(app, label).is_some_and(|url| on_connecting_page(&url))
+    read_page(app, label) == PageReading::Connecting
+}
+
+/// What the webview of a window shows, as a close of that window reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageReading {
+    /// The bundled connecting page, `connecting.html`.
+    Connecting,
+    /// A page that was read and is not the connecting page.
+    Other,
+    /// No page was read: no window has the label, or its URL cannot be read.
+    Unread,
+}
+
+/// Read the page that the webview of the window under `label` shows.
+pub(crate) fn read_page(app: &AppHandle<impl Runtime>, label: &str) -> PageReading {
+    match webview_url(app, label) {
+        Some(url) if on_connecting_page(&url) => PageReading::Connecting,
+        Some(_) => PageReading::Other,
+        None => PageReading::Unread,
+    }
 }
 
 /// What a window's webview reports as its own URL, or `None` when there is

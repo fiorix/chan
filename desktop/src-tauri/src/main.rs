@@ -4195,7 +4195,7 @@ async fn request_close_window(
         }
     }
     if closing.starts_with("lib-") {
-        return close_devserver_window(&app, &window);
+        return close_devserver_window(&app, &window, None);
     }
     // `destroy()`, not `close()`: this is the SPA's DELIBERATE close-cascade
     // (last tab, then last pane, just closed -- the window is empty). `close()`
@@ -4211,20 +4211,24 @@ async fn request_close_window(
 /// Record the close intent before destroying the native surface. A stale feed
 /// snapshot must keep treating this label as suppressed when the DELETE cannot
 /// reach the server; reconnect retries the same intent without reopening it.
+/// `page` is the page that the close's route read from the window's webview
+/// before it spawned the close; with `None`, the close reads the page itself.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 fn close_devserver_window<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     window: &tauri::WebviewWindow<R>,
+    page: Option<serve::PageReading>,
 ) -> Result<(), String> {
     let state = Arc::clone(app.state::<Arc<AppState>>().inner());
     let label = window.label().to_string();
+    let page = page.unwrap_or_else(|| serve::read_page(app, &label));
     // A window still on its connecting page is waiting for its devserver, and
     // its record there holds the window's terminal sessions. A close there
     // stops the wait and hides the window, as the live page's Hide does: the
     // record and its sessions stay, and the window reopens from the Window
     // menu. The destroy does not wait for the watcher's reconcile, which
     // closes nothing when the devserver has no view registered.
-    if serve::window_on_connecting_screen(app, &label) {
+    if page == serve::PageReading::Connecting {
         serve::bury_window_now(app, &state, &label);
         return window.destroy().map_err(err);
     }
@@ -8305,11 +8309,12 @@ mod tests {
         let devserver = ClosingDevserver::start().await;
         let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
         assert!(
-            serve::window_on_connecting_screen(devserver.app.handle(), CLOSED_LABEL),
+            serve::read_page(devserver.app.handle(), CLOSED_LABEL)
+                == serve::PageReading::Connecting,
             "fixture: the window is not on the connecting page"
         );
 
-        close_devserver_window(devserver.app.handle(), &window).expect("the close");
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the close");
 
         assert!(
             !devserver
@@ -8346,7 +8351,7 @@ mod tests {
         let devserver = ClosingDevserver::start().await;
         let window = devserver.window_at(WebviewUrl::External(LIVE_PAGE.parse().unwrap()));
 
-        close_devserver_window(devserver.app.handle(), &window).expect("the close");
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the close");
 
         devserver.assert_discarded().await;
     }
@@ -8361,11 +8366,11 @@ mod tests {
             .navigate(LIVE_PAGE.parse().unwrap())
             .expect("navigate to the live page");
         assert!(
-            !serve::window_on_connecting_screen(devserver.app.handle(), CLOSED_LABEL),
-            "fixture: the window is still on the connecting page"
+            serve::read_page(devserver.app.handle(), CLOSED_LABEL) == serve::PageReading::Other,
+            "fixture: the window does not show its live page"
         );
 
-        close_devserver_window(devserver.app.handle(), &window).expect("the close");
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the close");
 
         devserver.assert_discarded().await;
     }
