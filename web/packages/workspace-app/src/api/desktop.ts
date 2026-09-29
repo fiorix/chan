@@ -592,6 +592,7 @@ export async function runDesktopUpload(
   target: { dir?: string; path?: string; multiple: boolean },
   label: string,
   root?: TransferRoot,
+  filesApp = true,
 ): Promise<NativeUploadedFile[]> {
   if (!isTauriDesktop()) {
     throw new Error("runDesktopUpload called outside chan-desktop");
@@ -605,11 +606,10 @@ export async function runDesktopUpload(
   try {
     if (!(await waitForTransferSlot(xferId))) return [];
     stopProgress = pollNativeProgress(nativeId, xferId);
-    // The query the browser's upload sends: in a standalone Files window it
-    // names the app and this window, or the route writes through the lane
-    // that has no replace.
+    // Files pickers need the route that supports Replace and rejects links.
+    // Terminal uploads retain the transfer route's linked-directory support.
     const url = new URL(
-      withTokenQuery(`/api/fs/upload${transferSuffix(root, true)}`),
+      withTokenQuery(`/api/fs/upload${transferSuffix(root, filesApp)}`),
       window.location.href,
     ).toString();
     const uploaded = await tauriInvoke<NativeUploadedFile[]>("upload_files_native", {

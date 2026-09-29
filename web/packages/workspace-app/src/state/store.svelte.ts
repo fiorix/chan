@@ -1696,9 +1696,9 @@ function isSurveyCloseReason(value: unknown): value is SurveyCloseReason {
 /// programmatic file-input `.click()` made outside a user gesture. Rust opens
 /// the native picker and streams the chosen paths directly to the upload API;
 /// paths and bytes never cross webview IPC.
-export function raiseUploadPicker(destDir: string, root?: TransferRoot): void {
+export function raiseUploadPicker(destDir: string, root?: TransferRoot, filesApp = true): void {
   if (isTauriDesktop()) {
-    void raiseDesktopUploadPicker(destDir, root);
+    void raiseDesktopUploadPicker(destDir, root, filesApp);
     return;
   }
   const input = document.createElement("input");
@@ -1743,12 +1743,13 @@ export function raiseReplacePicker(targetPath: string): void {
   input.click();
 }
 
-async function raiseDesktopUploadPicker(destDir: string, root?: TransferRoot): Promise<void> {
+async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | undefined, filesApp: boolean): Promise<void> {
   try {
     const uploaded = await runDesktopUpload(
       { dir: destDir, multiple: true },
       destDir ? `Upload to ${destDir}` : "Upload files",
       root,
+      filesApp,
     );
     if (uploaded.length === 0) return;
     if (root !== "filesystem" || usesStandaloneFiles()) {
@@ -1921,7 +1922,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // `cs upload`: raise the SAME upload UI the Inspector pill uses -- open a
     // file picker, then hand the picked files to fileOps.uploadFilesTo (which
     // drives the shared transfer-progress indicator). Reuse, not a parallel path.
-    raiseUploadPicker(frame.path, frame.root);
+    raiseUploadPicker(frame.path, frame.root, false);
     setTransientStatus(`upload to ${frame.path || "/"}`);
     return;
   }
