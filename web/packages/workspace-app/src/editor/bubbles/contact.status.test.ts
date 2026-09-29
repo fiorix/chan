@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 //
-// What the contact bubble shows when a lookup fails: the failure, with no
-// rows left from an earlier query.
+// What the contact bubble says under its rows: loading while its lookup is
+// out, that the workspace has none once it answers empty, and the failure,
+// with no rows left from an earlier query, when a lookup fails.
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -78,6 +79,18 @@ function status(): string {
 }
 
 describe("the contact bubble's status", () => {
+  test("says it is loading while the lookup is out", async () => {
+    lookups.contacts = new Promise<Contact[]>(() => {});
+    await openOn("@@");
+    expect(status()).toBe("Loading contacts...");
+  });
+
+  test("says there are no contacts once the lookup answers empty", async () => {
+    lookups.contacts = [];
+    await openOn("@@");
+    expect(status()).toBe("No contacts");
+  });
+
   test("a lookup that fails takes the earlier rows off the list and says so", async () => {
     const { handle } = await openOn("@@am");
     expect(rows()).toEqual(["Amy Adams"]);
