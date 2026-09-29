@@ -28,6 +28,9 @@ vi.mock("@xterm/xterm", async () => {
         this.written.push(typeof data === "string" ? data : new TextDecoder().decode(data));
         this.model.write(data, done);
       }
+      writeln(data: string): void {
+        this.write(`${data}\r\n`);
+      }
       dispose(): void {
         this.model.dispose();
         super.dispose();
@@ -131,6 +134,17 @@ describe("a cut replay on the real parser", () => {
     await drain();
     expect(term.written.slice(start).join(""), "one reset before ring bytes, then modes").toBe(`\x1bcretained ring${MODES}`);
     expect(lines().filter(Boolean), "only the retained ring remains").toEqual(["retained ring"]);
+  });
+
+  test("a reset keeps the missed-byte notice above the retained ring", async () => {
+    const { socket } = await cut();
+    await attach(socket, { id: SESSION, generation: 3, seq: 80, replay_bytes: 13, missed_bytes: 4096 });
+    await output(socket, "retained ring");
+    await output(socket, MODES);
+    await receive(socket, READY);
+    await drain();
+    expect(lines().join("\n"), "missed-byte notice survives the replay reset").toContain("terminal replay missed 4096 bytes");
+    expect(lines().at(-1)).toBe("retained ring");
   });
 
   test("the reset parser restores negotiated keyboard modes before replay bytes", async () => {
