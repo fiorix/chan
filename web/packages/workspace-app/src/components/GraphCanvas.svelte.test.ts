@@ -703,3 +703,28 @@ describe("pausing", () => {
     expect(circle(api, "notes/a.md"), "no restart, no re-fit").toEqual(before);
   });
 });
+
+describe("the cursor", () => {
+  test("a node being dragged shows the grabbing hand", () => {
+    const { api, canvas } = render(props());
+    const a0 = circle(api, "notes/a.md");
+    mouse(canvas, "mousedown", a0.x, a0.y);
+    mouse(canvas, "mousemove", a0.x + 40, a0.y);
+    flushSync();
+    const dragging = canvas.style.cursor;
+    mouse(canvas, "mouseup", a0.x + 40, a0.y);
+    expect(dragging).toBe("grabbing");
+  });
+
+  test("the pointer leaving the canvas from a node drops the hover", () => {
+    const p = props();
+    const { api, canvas } = render(p);
+    const at = outside(api, p.nodes.map((x) => x.id), "src/c.rs", 8);
+    mouse(canvas, "mousemove", at.x, at.y);
+    flushSync();
+    const hovering = canvas.style.cursor;
+    mouse(canvas, "mouseleave", at.x, at.y);
+    flushSync();
+    expect({ hovering, left: canvas.style.cursor }).toEqual({ hovering: "pointer", left: "grab" });
+  });
+});
