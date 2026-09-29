@@ -336,6 +336,10 @@ export class SceneSession {
   /// frames so `flush()` can resolve immediately when there is nothing
   /// unflushed.
   private serverDirty = false;
+  /// The save error this session wrote for a flush the server could not
+  /// make. A flush that lands clears it, and only it: an error the classic
+  /// save wrote stays until a save of that path clears it.
+  private flushError: string | null = null;
 
   private pushInFlight = false;
   /// The push currently on the wire, in the same three parts the queued one
@@ -909,15 +913,21 @@ export class SceneSession {
   private onFlush(f: Extract<ServerFrame, { type: "flush" }>): void {
     if (f.error !== undefined) {
       // Repeated flush failure server-side; the session stays alive
-      // (content safe in memory and on every client). Surface it and let
-      // any pending save fall back through the degrade path.
-      this.tab.error = `save failed: ${f.error}`;
+      // (content safe in memory and on every client), so the board stays
+      // and the save line says the file lacks it. Any pending save falls
+      // back through the degrade path.
+      this.flushError = `the server could not write it (${f.error})`;
+      this.tab.saveError = this.flushError;
       for (const w of this.flushWaiters.splice(0)) {
         clearTimeout(w.timer);
         w.resolve(false);
       }
       return;
     }
+    if (this.flushError !== null && this.tab.saveError === this.flushError) {
+      this.tab.saveError = null;
+    }
+    this.flushError = null;
     this.serverDirty = f.dirty;
     if (f.mtime_ns !== undefined) this.stampMtime(f.mtime_ns);
     this.checkFlushWaiters();

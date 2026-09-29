@@ -102,6 +102,7 @@
   } from "../state/store.svelte";
   import {
     openInActivePane,
+    isDocUnflushed,
     registerPendingEditFlush,
     openLinkTarget,
     saveDraftTabToWorkspace,
@@ -358,8 +359,12 @@
       ? `loading ${formatBytes(tab.loadProgress.loadedBytes)} / ${formatBytes(tab.loadProgress.totalBytes)}`
       : "loading...",
   );
-  /// Why the buffer was not saved, while it differs from the file.
-  const notSaved = $derived(tab.saveError && isDirty(tab) ? tab.saveError : null);
+  /// Why the buffer was not saved, while the file lacks it: the tab differs
+  /// from what it last saved, or a live session holds what it could not
+  /// write (its confirmed text counts as saved, so the tab is clean).
+  const notSaved = $derived(
+    tab.saveError && (isDirty(tab) || isDocUnflushed(tab.id)) ? tab.saveError : null,
+  );
 
   /// 0-indexed source line under the caret. Workspaces the outline's
   /// active-heading marker (Google-Docs-style "you are here" bar
