@@ -33,7 +33,8 @@ const MENTION_MARK = Decoration.mark({ class: "cm-md-mention" });
 const MENTION_RE = /(?:^|[^A-Za-z0-9_])(@@[A-Za-z0-9_-]+)/g;
 
 /// Same skip-set as `tagDecorations`: code spans / fenced code /
-/// URLs / inside wiki bodies. `@@` is literal source in those.
+/// URLs / inside wiki bodies / link and image labels. `@@` is literal
+/// source in those.
 const SKIP_INSIDE = new Set<string>([
   "InlineCode",
   "FencedCode",
@@ -43,6 +44,8 @@ const SKIP_INSIDE = new Set<string>([
   "CodeInfo",
   "URL",
   "WikiLinkBody",
+  "Link", // the link owns the click on its label
+  "Image",
 ]);
 
 export interface MentionClickArgs {
