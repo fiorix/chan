@@ -18,8 +18,8 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")
 import { api } from "./api/client";
 import type { WorkspaceWarning } from "./api/types";
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
-import { settle as settleDialog } from "./__tests__/dialog";
-import { refreshWorkspace, ui } from "./state/store.svelte";
+import { settle as settleDialog, press as pressDialog } from "./__tests__/dialog";
+import { refreshWorkspace, ui, openSettings, settingsPanel, workspaceWarningsDialog } from "./state/store.svelte";
 
 stubAppEnvironment();
 
@@ -100,6 +100,25 @@ describe("warnings at boot", () => {
 });
 
 describe("the warnings dialog", () => {
+  test("a refused warning close preserves the underlying App overlay", async () => {
+    warnings = [broken("busy-overlay")];
+    await mountApp();
+    openSettings(); await settle();
+    expect(settingsPanel.open).toBe(true);
+    const open = await openDialog();
+    workspaceWarningsDialog.busyKey = "busy"; await settleDialog();
+    try {
+      pressDialog(document.body, "Escape"); await settleDialog();
+      expect(dialog(), "busy warning remains mounted").toBe(open);
+      expect(settingsPanel.open, "refused close preserves Settings").toBe(true);
+    } finally { workspaceWarningsDialog.busyKey = null; }
+    pressDialog(open, "Escape"); await settleDialog();
+    expect(dialog()).toBeNull();
+    expect(settingsPanel.open).toBe(true);
+    pressDialog(document.body, "Escape"); await settleDialog();
+    expect(settingsPanel.open, "App receives Escape after the shell closes").toBe(false);
+  });
+
   test("recovers focus after dismissing a warning row while other rows remain", async () => {
     // Dismissals belong to the session and survive an App fixture unmount.
     const sequence = ++warningRowSequence;

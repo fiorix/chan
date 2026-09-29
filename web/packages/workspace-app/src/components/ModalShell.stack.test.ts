@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { flushSync, mount, unmount, type ComponentProps } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
+import { registerModalShell } from "./modalStack";
 import Harness from "../__tests__/ModalStackHarness.svelte";
 import { focusOrigin, press, recordDocumentKeys, settle } from "../__tests__/dialog";
 import { pathPromptState, promptState, tree } from "../state/store.svelte";
@@ -273,4 +274,22 @@ test("queued focus from actual lower callers cannot steal from a newer shell", a
   await settle();
   for (const focus of queued) expect(focus, "actual caller queued its focus").toHaveBeenCalled();
   expect(document.activeElement, "queued caller focus stays under the new top").toBe(top);
+});
+
+
+test("disposing a registration twice restores once and leaves later shells usable", async () => {
+  const origin = focusOrigin();
+  const layer = document.createElement("div");
+  const node = document.createElement("div"); node.tabIndex = -1;
+  layer.append(node); document.body.append(layer);
+  const close = vi.fn();
+  const registration = registerModalShell({ layer, panel: node, opener: origin, onKeydown: close });
+  node.focus();
+  const restore = vi.spyOn(origin, "focus");
+  registration.destroy(); registration.destroy(); layer.remove(); await settle();
+  expect(document.activeElement, "idempotent final restore").toBe(origin);
+  expect(restore, "one restoration per lifetime").toHaveBeenCalledTimes(1);
+  press(document.body, "Escape"); expect(close).not.toHaveBeenCalled();
+  render(); await open("a");
+  expect(document.activeElement).toBe(panel("a"));
 });
