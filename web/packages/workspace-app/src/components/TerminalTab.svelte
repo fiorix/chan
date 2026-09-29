@@ -1481,6 +1481,9 @@
               copyTerminalKeyboardProtocolState(beforeReplay, protocol);
             }
           });
+          if (missedBytes > 0) {
+            writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
+          }
         }
         writePtyOutput(bytes, attachPtyWriteOrigin());
         // Advance the server byte cursor only for LIVE output: replay chunks
@@ -1608,7 +1611,7 @@
         missedBytes = Math.max(0, Math.floor(frame.missed_bytes ?? 0));
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
-        if (missedBytes > 0) {
+        if (missedBytes > 0 && !resetBeforeReplay) {
           term?.writeln(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
       } else if (frame.type === "renamed") {
