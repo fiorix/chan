@@ -315,10 +315,9 @@ export class TerminalSecretMasker {
     }
   }
 
-  /// Rescan the rows on screen. A width change reflows every wrapped line,
-  /// and while a resize is dragged the terminal rescans only what the user
-  /// can see, so no secret shows, and leaves the rest to one `scanAll` once
-  /// the width stops changing.
+  /// Rescan the visible wrapped groups after a width change. Off-screen
+  /// decorations can remain at old cells until the trailing full scan;
+  /// scrolling during continuous resize can reveal stale coverage.
   scanViewport(): void {
     if (this.#disposed || !this.#enabled) return;
     try {

@@ -102,6 +102,22 @@ Closing a lower shell preserves the top's focus. Closing the top restores its va
 
 Mounted jsdom tests establish assigned layer values, focus targets, consumed keys, re-entrant lifecycle behavior and cleanup. They do not establish painted or hit-tested order, browser-native Tab traversal, browser control-removal timing, assistive-technology behavior or WKWebView behavior.
 
+`OverlayShell` retains its dialog role, accessible name and focus-return behavior without `aria-modal`. Overlay Tab containment remains outside the shell modal contract.
+
+## Poll, pick and status ownership
+
+A preflight decision cancels its pending poll timer and suppresses already-runnable polls until the decision ends. Snapshot sequencing rejects older replies; teardown invalidates outstanding work. After deciding clears, an unsettled answer or request failure resumes polling. Settled answers leave no timer. Poll error backoff and its fail-open limit remain separate from decision retry.
+
+A missing-file pick belongs to its armed tab. Only that editor's teardown clears the request and, if still displayed, its instruction. The instruction remains part of pick validity: dismissal, replacement by an automatic status or a refused pick ends replacement, so a subsequent file opens beside the missing tab. Successful consumption can leave the instruction visible.
+
+The status kind is writer metadata, not proof of transient ownership. A private reactive owner identifies the live timer and its message; only matching text with transient kind auto-clears. Bare replacement text offers Dismiss, while workspace warnings retain their dialog action. Expiry retires its owner even if the text changed; stale callbacks cannot clear a newer owner. Explicit dismissal retires the owner and clears text, kind and action.
+
+## Animation speed and resize masking
+
+Mutual Force Starburst, Polar Drift, Sixfold Vortex, Chaotic Halo and Exponential Echo scale their elapsed-time caps with the shared speed multiplier. The shared runner already scales virtual time; components do not multiply its delta again. Numeric tests establish phase and stall limits, not rendered appearance.
+
+Terminal width changes rescan visible wrapped groups immediately and debounce a full-buffer masking scan for 150 ms. Off-screen decorations can stay at old cells until that scan; scrolling during continuous resize can reveal stale coverage. With xterm's default cursor-line policy, a wrapped group reflows only after the cursor has left it. The real-xterm fixture proves changed buffer text and wrap flags before asserting rebuilt decoration coordinates. It does not establish renderer paint, exposure timing or resize performance.
+
 ## Terminal replay recovery
 
 A terminal session frame names the byte cursor at the end of the attach replay. If the socket closes before `ready`, the client marks the replay cut and the next dial asks for the whole retained ring, ignoring both its live cursor and its cached snapshot. A numeric `replay_bytes` above zero arms a screen reset immediately before the first replay byte. Zero preserves the screen and normal scrollback while an alternate-screen prelude and private-mode reassert pass through. The mouse filter and OSC 52 observer discard their partial sequence tails on either kind of redial. The reset write's completion restores the saved keyboard protocol in place after xterm's RIS handler has cleared it and before the replay's queued bytes are parsed.
