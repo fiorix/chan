@@ -6728,6 +6728,68 @@ mod tests {
         (host, overlay, stored, canonical, [cfg, holder])
     }
 
+    /// Register a second workspace with `host`, at a folder named as
+    /// [`relinked_host`]'s root is, so pointing that root's parent link at
+    /// the returned holder makes the root the relinked row stores resolve to
+    /// this workspace's folder. Returns the root this row stores.
+    #[cfg(unix)]
+    fn another_workspace(host: &WorkspaceHost) -> (PathBuf, tempfile::TempDir) {
+        let holder = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(holder.path().join("ws")).unwrap();
+        let root = host
+            .library
+            .register_workspace(&holder.path().join("ws"))
+            .unwrap()
+            .root_path;
+        (root, holder)
+    }
+
+    /// Point the link that is `stored`'s parent at `onto`, so `stored`
+    /// resolves to the folder of its name under `onto`.
+    #[cfg(unix)]
+    fn relink(stored: &Path, onto: &Path) {
+        let link = stored.parent().expect("the linked parent");
+        std::fs::remove_file(link).expect("unlink the parent");
+        std::os::unix::fs::symlink(onto, link).expect("point the parent elsewhere");
+    }
+
+    /// Whether a registry row of `host` stores `root`.
+    #[cfg(unix)]
+    fn registered(host: &WorkspaceHost, root: &Path) -> bool {
+        host.library
+            .list_workspaces()
+            .iter()
+            .any(|row| row.root_path == root)
+    }
+
+    /// Assert that a removal left the workspace at `other` registered, on
+    /// and with its window.
+    #[cfg(unix)]
+    fn assert_left_whole(
+        host: &WorkspaceHost,
+        overlay: &WorkspaceOverlay,
+        windows: &WindowRegistry,
+        other: &Path,
+        outcome: &impl std::fmt::Debug,
+    ) {
+        let path = other.to_string_lossy().into_owned();
+        assert!(
+            registered(host, other),
+            "the removal unregistered another workspace: {outcome:?}"
+        );
+        assert!(
+            windows
+                .snapshot()
+                .iter()
+                .any(|row| row.workspace_path.as_deref() == Some(path.as_str())),
+            "the removal removed another workspace's window: {outcome:?}"
+        );
+        assert!(
+            overlay.on_paths().contains(&path),
+            "the removal turned another workspace off: {outcome:?}"
+        );
+    }
+
     /// A user's off of a relinked root that is not mounted, called with the
     /// stored root as the launcher's off route calls it, leaves no on-row
     /// under either spelling, so no reader of the on rows brings it back.
@@ -6793,6 +6855,89 @@ mod tests {
             .unwrap()
             .completed());
         assert_eq!(overlay.entries(), Vec::new(), "a row survived the forget");
+    }
+
+    /// A removal by the folder a workspace was mounted from, after the root
+    /// its row stores was pointed at another registered workspace's folder,
+    /// as the desktop's forget names it, unregisters the workspace it closed
+    /// and leaves the other one whole.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_folder_of_a_root_relinked_onto_another_workspace_unregisters_its_row()
+    {
+        let (host, overlay, stored, canonical, dirs) = relinked_host();
+        let (other, other_holder) = another_workspace(&host);
+        let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+        host.install_window_registry(Arc::clone(&windows), "local".into());
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        host.open_registered_workspace(&other, serve_config("/other"))
+            .await
+            .expect("mount the other workspace");
+        overlay.set(&other.to_string_lossy(), true);
+        windows.create(
+            WindowKind::Workspace,
+            Some(other.to_string_lossy().into_owned()),
+        );
+        relink(&stored, other_holder.path());
+        assert_eq!(
+            chan_workspace::paths::canonicalize_normalized(&stored),
+            other,
+            "fixture: the stored root does not resolve to the other workspace"
+        );
+
+        let outcome = host.remove_workspace_for_root(&canonical, false).await;
+
+        assert!(
+            host.mounted_root(&other).is_some(),
+            "the removal closed another workspace: {outcome:?}"
+        );
+        assert_left_whole(&host, &overlay, &windows, &other, &outcome);
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the removal left the workspace it names mounted: {outcome:?}"
+        );
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it closed registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
+    }
+
+    /// A removal by the folder a workspace was mounted from, after the root
+    /// its row stores stopped resolving, unregisters the workspace it closed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_folder_of_a_mounted_root_that_resolves_nowhere_unregisters_it() {
+        let (host, _overlay, stored, canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        std::fs::remove_file(stored.parent().expect("the linked parent"))
+            .expect("unlink the parent");
+        assert!(
+            std::fs::canonicalize(&stored).is_err(),
+            "fixture: the stored root still resolves"
+        );
+
+        let outcome = host.remove_workspace_for_root(&canonical, false).await;
+
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the removal left the workspace it names mounted: {outcome:?}"
+        );
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it closed registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
     }
 
     /// Asked by the path it resolves to now, which `chan close` and the
