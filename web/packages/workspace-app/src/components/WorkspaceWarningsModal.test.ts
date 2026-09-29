@@ -39,7 +39,10 @@ describe("the workspace warnings dialog", () => {
   test("hands focus back to where it was when it closes", async () => {
     const origin = focusOrigin();
     const target = await openWarnings();
-    buttons(dialogIn(target)!).find((b) => b.textContent?.trim() === "OK")!.click();
+    // The user is on the dialog's OK when it closes.
+    const ok = buttons(dialogIn(target)!).find((b) => b.textContent?.trim() === "OK")!;
+    ok.focus();
+    ok.click();
     await settle();
     expect(dialogIn(target), "OK closes it").toBeNull();
     expect(document.activeElement).toBe(origin);
