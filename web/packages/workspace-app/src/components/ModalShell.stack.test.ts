@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { flushSync, mount, unmount } from "svelte";
+import { flushSync, mount, unmount, type ComponentProps } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 import Harness from "../__tests__/ModalStackHarness.svelte";
 import { focusOrigin, press, recordDocumentKeys, settle } from "../__tests__/dialog";
@@ -7,7 +7,7 @@ import { pathPromptState, promptState, tree } from "../state/store.svelte";
 import { confirmState } from "../state/confirm.svelte";
 import { draftCloseState } from "../state/tabs.svelte";
 
-let harness: ReturnType<typeof mount<typeof Harness>> | undefined;
+let harness: ReturnType<typeof render> | undefined;
 afterEach(async () => {
   if (harness) await unmount(harness);
   harness = undefined;
@@ -17,12 +17,13 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function render(props: Parameters<typeof mount<typeof Harness>>[1]["props"] = {}) {
+function render(props: ComponentProps<typeof Harness> = {}) {
   const target = document.createElement("div");
   document.body.append(target);
-  harness = mount(Harness, { target, props });
+  const instance = mount(Harness, { target, props });
+  harness = instance;
   flushSync();
-  return harness;
+  return instance;
 }
 function panel(name: string): HTMLElement {
   const node = document.querySelector<HTMLElement>(`[aria-labelledby="${name}-title"]`);
@@ -167,6 +168,18 @@ test("closing all shells in one flush restores the external opener once", async 
   expect(restore, "one final restore").toHaveBeenCalledTimes(1);
 });
 
+test("all-close discards a stale upper restoration before the final shell restores", async () => {
+  const origin = focusOrigin();
+  render(); await open("b");
+  // An external caller opens the next shell before deferred containment.
+  const other = focusOrigin();
+  flushSync(() => harness!.show("a")); await settle();
+  const stale = vi.spyOn(other, "focus");
+  harness!.show("a", false); harness!.show("b", false); await settle();
+  expect(document.activeElement, "final shell owns restoration").toBe(origin);
+  expect(stale, "stale upper restore invalidated").not.toHaveBeenCalled();
+});
+
 test("skips disconnected and disabled external openers", async () => {
   const origin = focusOrigin();
   render(); await open("a"); origin.remove();
@@ -250,8 +263,11 @@ test("queued focus from actual lower callers cannot steal from a newer shell", a
   confirmState.open = true;
   draftCloseState.open = true;
   flushSync();
+  const queued = [control("prompt"), control("path-prompt"), control("confirm", ".ok"), control("draft-close")]
+    .map((node) => vi.spyOn(node, "focus"));
   harness!.show("a"); flushSync();
   const top = panel("a");
   await settle();
+  for (const focus of queued) expect(focus, "actual caller queued its focus").toHaveBeenCalled();
   expect(document.activeElement, "queued caller focus stays under the new top").toBe(top);
 });
