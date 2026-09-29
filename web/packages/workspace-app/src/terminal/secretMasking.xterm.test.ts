@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { Terminal as XtermTerminal } from "@xterm/xterm";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { TerminalSecretMasker } from "./secretMasking";
 
 test("real xterm masks wrapped ANSI assignments across buffer switches", async () => {
@@ -72,26 +72,51 @@ test("real xterm masks wrapped ANSI assignments across buffer switches", async (
   term.dispose();
 });
 
-test("real xterm's on-screen rescan finds the masks of the rows on screen", async () => {
+test("real xterm reflows a departed wrapped group before viewport masks are rebuilt", async () => {
   HTMLCanvasElement.prototype.getContext = (() => ({
     createLinearGradient: () => ({ addColorStop() {} }),
   })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
   const { Terminal } = await import("@xterm/xterm");
-  const term = new Terminal({ allowProposedApi: true, cols: 12, rows: 2 });
+  const term = new Terminal({ allowProposedApi: true, cols: 12, rows: 5 });
+  const decorations = vi.spyOn(term, "registerDecoration");
   const masker = new TerminalSecretMasker(term as XtermTerminal, ["TOKEN"], "#6c6c70", true);
-  const snapshot = masker.captureWrite();
-  await new Promise<void>((resolve) => {
-    term.write("NAME_TOKEN=abcdef", () => {
-      masker.scanWrite(snapshot);
-      resolve();
+  try {
+    const snapshot = masker.captureWrite();
+    await new Promise<void>((resolve) => {
+      term.write("NAME_TOKEN=abcdef\r\nnext", () => {
+        masker.scanWrite(snapshot);
+        resolve();
+      });
     });
-  });
-  expect(masker.maskCount, "the value wraps over the two rows on screen").toBe(2);
-
-  masker.clear();
-  const scanViewport = (masker as unknown as { scanViewport?: () => void }).scanViewport;
-  expect(scanViewport, "the masker can rescan the rows on screen").toBeTypeOf("function");
-  scanViewport!.call(masker);
-
-  expect(masker.maskCount, "both rows are masked again").toBe(2);
+    const lines = () => [0, 1, 2].map((row) => {
+      const line = term.buffer.active.getLine(row)!;
+      return { text: line.translateToString(true), wrapped: line.isWrapped };
+    });
+    expect(term.options.reflowCursorLine, "use the application's default reflow policy").toBe(false);
+    expect(term.buffer.active.cursorY, "cursor has left the wrapped group").toBe(2);
+    expect(lines()).toEqual([
+      { text: "NAME_TOKEN=a", wrapped: false },
+      { text: "bcdef", wrapped: true },
+      { text: "next", wrapped: false },
+    ]);
+    expect(masker.maskCount).toBe(2);
+    decorations.mockClear();
+    term.resize(20, 5);
+    expect(lines(), "the buffer really reflowed before scanning").toEqual([
+      { text: "NAME_TOKEN=abcdef", wrapped: false },
+      { text: "next", wrapped: false },
+      { text: "", wrapped: false },
+    ]);
+    masker.scanViewport();
+    expect(decorations.mock.calls.map(([options]) => ({
+      row: options.marker.line, x: options.x, width: options.width,
+    })), "viewport rescan creates the mask at its reflowed coordinates").toEqual([
+      { row: 0, x: 11, width: 6 },
+    ]);
+    expect(masker.maskCount, "one decoration covers the reflowed value").toBe(1);
+  } finally {
+    masker.dispose();
+    term.dispose();
+    decorations.mockRestore();
+  }
 });
