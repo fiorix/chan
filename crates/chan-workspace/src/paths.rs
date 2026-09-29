@@ -526,7 +526,9 @@ pub mod root_stall {
     /// [`Library::register_workspace_with_name`](crate::Library::register_workspace_with_name),
     /// which every registration runs.
     pub const REGISTER_WORKSPACE: Step = Step::new("Library::register_workspace_with_name");
-    /// [`Library::unregister_workspace`](crate::Library::unregister_workspace).
+    /// [`Library::unregister_workspace`](crate::Library::unregister_workspace)
+    /// and [`Library::unregister_workspace_row`](crate::Library::unregister_workspace_row),
+    /// which every unregister runs.
     pub const UNREGISTER_WORKSPACE: Step = Step::new("Library::unregister_workspace");
     /// [`Workspace::revalidate_root`](crate::Workspace::revalidate_root).
     pub const REVALIDATE_ROOT: Step = Step::new("Workspace::revalidate_root");

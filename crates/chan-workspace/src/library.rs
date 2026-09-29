@@ -301,6 +301,52 @@ impl Library {
         Ok(true)
     }
 
+    /// Unregister the registry row that stores `stored`, compared as the
+    /// registry stores it, and wipe its chan-managed state as
+    /// [`unregister_workspace`](Self::unregister_workspace) does, without
+    /// resolving any path to find the row. A caller that holds the row
+    /// reaches it so even when its root resolves elsewhere since the
+    /// registry was loaded, where a lookup of that root finds another row
+    /// or none.
+    ///
+    /// `holder` names the writer lock's holder: the lock records its
+    /// canonical form and compares that with its record at a contention, so
+    /// it is the canonical root the caller holds the workspace by. It picks
+    /// no row.
+    ///
+    /// Refuses with `ChanError::WorkspaceAlreadyOpen` while this process
+    /// holds a live `Arc<Workspace>` of the row. Returns `Ok(false)`, having
+    /// wiped nothing, when no row stores `stored`.
+    pub fn unregister_workspace_row(&self, stored: &Path, holder: &Path) -> Result<bool> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _step = crate::paths::root_stall::UNREGISTER_WORKSPACE.open();
+        // Asked before the lock is taken, so a holder whose filesystem does
+        // not answer stops this call here, before it holds the lock.
+        let holder = paths::canonicalize_normalized(holder);
+        let Some(metadata_key) = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .workspaces
+            .iter()
+            .find(|row| row.root_path == stored)
+            .map(|row| row.metadata_key.clone())
+        else {
+            return Ok(false);
+        };
+        self.refuse_if_row_live(&metadata_key)?;
+        let (_lock, _removed) =
+            self.wipe_row_state(&metadata_key, &holder, &crate::progress::NoProgress)?;
+        // The writer lock is held across the registry update, as
+        // `reset_workspace_with` holds it.
+        let mut reg = self.inner.registry.lock().unwrap();
+        if reg.remove_stored(stored, &metadata_key) {
+            reg.save_to(&self.inner.config_path)?;
+        }
+        Ok(true)
+    }
+
     /// Open a workspace handle. The workspace must already be registered;
     /// callers do `register_workspace` first if needed (CLI does both
     /// in one shot for the "point at a directory and go" path).
@@ -366,6 +412,24 @@ impl Library {
             if weak.upgrade().is_some() {
                 return Err(ChanError::WorkspaceAlreadyOpen);
             }
+        }
+        Ok(())
+    }
+
+    /// [`refuse_if_live`](Self::refuse_if_live) for a caller that holds a
+    /// registry row: finds this process's live handle of the row by its
+    /// metadata key and resolves nothing. By a root's canonical form, a root
+    /// that resolves elsewhere since its handle opened finds another
+    /// workspace's handle, or none.
+    fn refuse_if_row_live(&self, metadata_key: &str) -> Result<()> {
+        let mut map = self.inner.live_workspaces.lock().unwrap();
+        gc_dead_entries(&mut map);
+        if map
+            .values()
+            .filter_map(Weak::upgrade)
+            .any(|workspace| workspace.metadata_key() == metadata_key)
+        {
+            return Err(ChanError::WorkspaceAlreadyOpen);
         }
         Ok(())
     }
@@ -883,6 +947,99 @@ mod tests {
     fn unregister_returns_false_when_absent() {
         let (lib, _cfg, workspace) = lib();
         assert!(!lib.unregister_workspace(workspace.path()).unwrap());
+    }
+
+    /// An unregister by row removes the row that stores the root it is
+    /// given, and wipes that row's state, although the root now resolves to
+    /// another registered workspace's folder, whose row and state it leaves.
+    #[cfg(unix)]
+    #[test]
+    fn unregister_workspace_row_removes_the_row_that_stores_the_root() {
+        use std::os::unix::fs::symlink;
+        let (lib, _cfg, holder) = lib();
+        std::fs::create_dir_all(holder.path().join("parent").join("ws")).unwrap();
+        let first = lib
+            .register_workspace(&holder.path().join("parent").join("ws"))
+            .unwrap();
+        let other_holder = TempDir::new().unwrap();
+        std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
+        let other = lib
+            .register_workspace(&other_holder.path().join("ws"))
+            .unwrap();
+        populate_state(&lib, &first.root_path);
+        populate_state(&lib, &other.root_path);
+        let link = first.root_path.parent().unwrap();
+        std::fs::rename(link, holder.path().join("moved")).unwrap();
+        symlink(other_holder.path(), link).unwrap();
+        assert_eq!(
+            paths::canonicalize_normalized(&first.root_path),
+            other.root_path,
+            "fixture: the stored root does not resolve to the other workspace"
+        );
+
+        assert!(
+            !lib.unregister_workspace_row(&other_holder.path().join("none"), &first.root_path)
+                .unwrap(),
+            "a root no row stores was unregistered"
+        );
+        assert!(lib
+            .unregister_workspace_row(&first.root_path, &first.root_path)
+            .unwrap());
+
+        let keys: Vec<String> = lib
+            .list_workspaces()
+            .into_iter()
+            .map(|row| row.metadata_key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![other.metadata_key.clone()],
+            "the unregister removed another row or kept its own"
+        );
+        assert!(
+            lib.workspace_paths_for_row(&other)
+                .tokens
+                .join("server.token")
+                .exists(),
+            "the unregister wiped another row's state"
+        );
+        assert!(
+            !lib.workspace_paths_for_row(&first)
+                .tokens
+                .join("server.token")
+                .exists(),
+            "the unregister left its row's state"
+        );
+    }
+
+    /// A live handle of a row refuses its unregister by row as already open,
+    /// although the root the row stores resolves elsewhere now than where
+    /// the handle opened it, which is the place its lock's record names.
+    #[cfg(unix)]
+    #[test]
+    fn unregister_workspace_row_refuses_a_live_handle_of_its_row_as_already_open() {
+        use std::os::unix::fs::symlink;
+        let (lib, _cfg, holder) = lib();
+        std::fs::create_dir_all(holder.path().join("parent").join("ws")).unwrap();
+        let row = lib
+            .register_workspace(&holder.path().join("parent").join("ws"))
+            .unwrap();
+        let _open = lib.open_workspace(&row.root_path).unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        std::fs::create_dir_all(elsewhere.path().join("ws")).unwrap();
+        let link = row.root_path.parent().unwrap();
+        std::fs::rename(link, holder.path().join("moved")).unwrap();
+        symlink(elsewhere.path(), link).unwrap();
+
+        let err = lib
+            .unregister_workspace_row(&row.root_path, &row.root_path)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ChanError::WorkspaceAlreadyOpen),
+            "a live handle of the row did not refuse as already open: {err:?}"
+        );
+        assert_eq!(lib.list_workspaces().len(), 1, "the refused row went");
     }
 
     #[test]
