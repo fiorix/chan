@@ -25,6 +25,7 @@ stubAppEnvironment();
 
 let warnings: WorkspaceWarning[];
 let writeText: ReturnType<typeof vi.fn>;
+let warningRowSequence = 0;
 
 beforeEach(() => {
   warnings = [];
@@ -100,14 +101,18 @@ describe("warnings at boot", () => {
 
 describe("the warnings dialog", () => {
   test("recovers focus after dismissing a warning row while other rows remain", async () => {
-    warnings = [broken("row-one"), broken("row-two")];
+    // Dismissals belong to the session and survive an App fixture unmount.
+    const sequence = ++warningRowSequence;
+    warnings = [broken(`row-${sequence}-one`), broken(`row-${sequence}-two`)];
     await mountApp();
     const open = await openDialog();
+    expect(open.querySelectorAll(".warning-item"), "two undismissed warnings").toHaveLength(2);
     const dismiss = button(open, "Dismiss")!;
     dismiss.focus(); await settleDialog();
     dismiss.click(); await settleDialog();
     expect(dismiss.isConnected, "dismiss removes its row").toBe(false);
     expect(open.querySelectorAll(".warning-item")).toHaveLength(1);
+    expect(open.isConnected, "the remaining row keeps the dialog open").toBe(true);
     expect(document.activeElement, "warning row focus repair").toBe(open);
   });
 
