@@ -14,6 +14,7 @@ import {
   acquireSceneSession,
   isSceneSyncEligible,
   resetSceneSyncForTests,
+  SCENE_FLUSH_TIMEOUT_MS,
   sceneSessionFor,
   sceneWsPath,
   type SceneCanvasBinding,
@@ -574,6 +575,31 @@ describe("save funnel", () => {
     await flushMicro();
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0]![4]).toBe(0);
+  });
+
+  test("a save whose flush fails sends its PUT after the push on the wire, with the version it stamps", async () => {
+    vi.useFakeTimers();
+    try {
+      const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+      const [tab] = installTabs([sceneTab()]);
+      const { session, sock } = attached(tab);
+      session.pushScene([elem("a", 2)]);
+      tab.content = tab.content + "\n";
+      const saving = saveTab(tab);
+      // The flush never answers, so the save degrades once its bound passes.
+      await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + 1);
+      const beforeAck = write.mock.calls.length;
+      sock.frame({ type: "push-ok", version: 7 });
+      await vi.advanceTimersByTimeAsync(0);
+      await saving;
+      expect({ beforeAck, calls: write.mock.calls.length, version: write.mock.calls[0]?.[4] }).toEqual({
+        beforeAck: 0,
+        calls: 1,
+        version: 7,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
