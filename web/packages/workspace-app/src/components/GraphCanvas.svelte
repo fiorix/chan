@@ -1504,6 +1504,15 @@
     }
   }
 
+  /// The pointer left the canvas: end a press as a mouseup would, and drop
+  /// the hover, which a move over empty canvas is otherwise the one thing
+  /// to clear.
+  function onMouseLeave(e: MouseEvent): void {
+    onMouseUp(e);
+    hoverId = null;
+    markDirty();
+  }
+
   function onMouseUp(e: MouseEvent): void {
     const p = localCoords(e);
     const moved =
@@ -2014,7 +2023,7 @@
     onmousedown={onMouseDown}
     onmousemove={onMouseMove}
     onmouseup={onMouseUp}
-    onmouseleave={onMouseUp}
+    onmouseleave={onMouseLeave}
     ondblclick={onDoubleClick}
     onwheel={onWheel}
   ></canvas>
