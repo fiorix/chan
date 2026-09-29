@@ -8375,6 +8375,57 @@ mod tests {
         devserver.assert_discarded().await;
     }
 
+    /// A close that reads no page of the window keeps its record. A second
+    /// close sent while the first is in flight reads none once the first
+    /// close's destroy is handled: the native window is gone from the
+    /// manager, and its webview answers no URL. The close queues and sends no
+    /// delete, and the hidden windows keep the entry and the title that the
+    /// first close stored.
+    #[tokio::test]
+    async fn a_close_that_reads_no_page_keeps_the_record_and_the_hidden_windows() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the first close");
+        let hidden = devserver.state.buried_snapshot();
+        assert!(
+            hidden.iter().any(|(label, _)| label == CLOSED_LABEL),
+            "fixture: the first close did not list the window with the hidden windows"
+        );
+        devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        // The mock keeps a destroyed window under its label, so the second
+        // close reads through an app whose manager holds no window there,
+        // with the same desktop state.
+        let gone = tauri::test::mock_app();
+        gone.manage(Arc::clone(&devserver.state));
+        assert_eq!(
+            serve::read_page(gone.handle(), CLOSED_LABEL),
+            serve::PageReading::Unread,
+            "fixture: the second close reads a page"
+        );
+
+        close_devserver_window(gone.handle(), &window, None).expect("the second close");
+
+        assert!(
+            !devserver
+                .state
+                .pending_window_deletes
+                .contains(CLOSED_LABEL),
+            "a close that read no page queued the window's delete"
+        );
+        assert_eq!(
+            devserver.state.buried_snapshot(),
+            hidden,
+            "a close that read no page changed the hidden windows"
+        );
+        let sent = devserver.requests.lock().unwrap().clone();
+        assert!(
+            !sent.iter().any(|request| request.starts_with("DELETE ")),
+            "a close that read no page sent the window's delete: {sent:?}"
+        );
+    }
+
     /// The macOS menu's close of a window on its connecting page takes the
     /// path of the window's close button, which hides it and keeps its
     /// record. A bare destroy leaves the record shown, and the watcher opens
