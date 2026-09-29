@@ -146,10 +146,12 @@ export function copyActionButton(
         }, 1200);
       },
       () => {
-        const prev = btn.title;
+        // Back to the button's own title, not the one on it now: a second
+        // failure inside the window would read "copy failed" and put that
+        // back for good.
         btn.title = "copy failed";
         setTimeout(() => {
-          btn.title = prev;
+          btn.title = title;
         }, 1200);
       },
     );
