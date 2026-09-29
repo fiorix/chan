@@ -43,6 +43,7 @@ import {
   layout,
   markTabFileMissing,
   openFind,
+  registerLiveSessionKind,
   rekeyTabsForRename,
   reloadTabFromDisk,
   saveTab,
@@ -1396,6 +1397,53 @@ describe("a right-click in the JSON tree and the table", () => {
     } finally {
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
     }
+  });
+});
+
+describe("the not-saved line", () => {
+  // A live session reports what the file on disk lacks through the hook its
+  // kind registers; this kind answers for the tab ids a test names and
+  // defers on every other question. The real document sessions are off, so
+  // it is the only one that answers.
+  const unflushedIds = new Set<string>();
+  registerLiveSessionKind({
+    save: async () => "classic",
+    release: () => {},
+    savePaused: () => false,
+    unflushed: (tabId) => unflushedIds.has(tabId),
+    fallbackSaved: () => {},
+  });
+
+  beforeEach(() => {
+    // No session of an earlier test may answer for this tab.
+    resetDocSyncForTests();
+    resetSceneSyncForTests();
+    localStorage.setItem("chan.docsync", "0");
+  });
+
+  afterEach(() => {
+    unflushedIds.clear();
+    localStorage.removeItem("chan.docsync");
+  });
+
+  function line(target: HTMLElement): string | null {
+    return target.querySelector(".editor-toolbar .error")?.textContent?.trim() ?? null;
+  }
+
+  test("shows a save error while a live session holds what the file lacks, the tab being clean", async () => {
+    const tab = seat(fileTab({ id: "not-saved-1", saveError: "the server could not write it (disk full)" }));
+    unflushedIds.add(tab.id);
+    const { target } = await render(tab);
+    expect({ line: line(target), editor: target.querySelector(".cm-content") !== null }).toEqual({
+      line: "Not saved: the server could not write it (disk full)",
+      editor: true,
+    });
+  });
+
+  test("shows none once the file holds the buffer", async () => {
+    const tab = seat(fileTab({ id: "not-saved-2", saveError: "the server could not write it (disk full)" }));
+    const { target } = await render(tab);
+    expect(line(target)).toBeNull();
   });
 });
 

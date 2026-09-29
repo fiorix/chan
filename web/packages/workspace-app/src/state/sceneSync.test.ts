@@ -540,6 +540,19 @@ describe("save funnel", () => {
     expect(tab.error).toContain("disk full");
   });
 
+  test("a flush error keeps the board and says the file is not saved until a flush lands", () => {
+    const tab = sceneTab();
+    const { sock } = attached(tab);
+    sock.frame({ type: "update", version: 1, elements: [elem("y", 2)] });
+    sock.frame({ type: "flush", dirty: true, error: "disk full" });
+    const failed = { error: tab.error, saveError: tab.saveError ?? null };
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    expect({ failed, landed: tab.saveError ?? null }).toEqual({
+      failed: { error: null, saveError: "the server could not write it (disk full)" },
+      landed: null,
+    });
+  });
+
   test("attached scene tabs save through the delegate arrays, never a PUT", async () => {
     const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
     const [tab] = installTabs([sceneTab()]);

@@ -955,6 +955,38 @@ describe("save funnel", () => {
     cleanup();
   });
 
+  test("a flush error keeps the editor and says the file is not saved until a flush lands", async () => {
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const { sock, view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    await ackLastPush(sock, 0);
+    sock.frame({ type: "flush", dirty: true, error: "disk full" });
+    await flushMicro();
+    const failed = { error: t.error, saveError: t.saveError ?? null };
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    await flushMicro();
+    expect({ failed, landed: t.saveError ?? null }).toEqual({
+      failed: { error: null, saveError: "the server could not write it (disk full)" },
+      landed: null,
+    });
+    cleanup();
+  });
+
+  test("a flush that lands leaves a save error the classic save wrote", async () => {
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const { sock, cleanup } = await attached(t, "hello");
+    t.saveError = "the classic save's reason";
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    await flushMicro();
+    expect(t.saveError).toBe("the classic save's reason");
+    cleanup();
+  });
+
   test("scheduleAutosave's timer re-checks attachment before firing", async () => {
     vi.useFakeTimers();
     const tab = fileTab({ doc: { state: "attached", peers: 0 } });
