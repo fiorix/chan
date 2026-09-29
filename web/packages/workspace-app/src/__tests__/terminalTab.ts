@@ -170,7 +170,7 @@ export async function receive(socket: TerminalSocket, frame: Record<string, unkn
 /// Open the socket and deliver the session prelude a fresh attach gets.
 export async function attach(
   socket: TerminalSocket,
-  prelude: Partial<{ id: string; seq: number; generation: number; missed_bytes: number }> = {},
+  prelude: Partial<{ id: string; seq: number; generation: number; missed_bytes: number; replay_bytes: number }> = {},
 ): Promise<void> {
   socket.onopen?.();
   await receive(socket, {
