@@ -22,7 +22,10 @@ function resetTransfers(): void {
   window.sessionStorage.clear();
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // Drain the persist callback too, so its module-held timer handle cannot
+  // outlive the fake clock that owns it.
+  if (vi.isFakeTimers()) await vi.runOnlyPendingTimersAsync();
   vi.useRealTimers();
   vi.restoreAllMocks();
   resetTransfers();
