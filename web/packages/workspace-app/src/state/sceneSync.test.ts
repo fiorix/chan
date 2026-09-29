@@ -532,12 +532,12 @@ describe("save funnel", () => {
     await expect(pending).resolves.toBe(true);
     expect(tab.savedMtimeNs).toBe("2000000000");
 
-    // Flush error: resolves false and surfaces on the tab.
+    // Flush error: resolves false and says so on the save line.
     sock.frame({ type: "update", version: 2, elements: [elem("z", 2)] });
     const failing = session.flush();
     sock.frame({ type: "flush", dirty: true, error: "disk full" });
     await expect(failing).resolves.toBe(false);
-    expect(tab.error).toContain("disk full");
+    expect(tab.saveError).toContain("disk full");
   });
 
   test("a flush error keeps the board and says the file is not saved until a flush lands", () => {
