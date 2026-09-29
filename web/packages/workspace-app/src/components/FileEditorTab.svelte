@@ -911,8 +911,8 @@
     searchPanel.open = true;
   }
 
-  // Only the armed tab owns the pick instruction. An unrelated host can
-  // unmount while the user is still choosing the moved file.
+  // Among editor teardowns, only the armed editor may clear the pick request
+  // and displayed instruction, so unrelated hosts can unmount during a pick.
   onDestroy(() => {
     slidePreviewHandle?.close({ notify: false });
     if (endMissingFileReopen(tab.id) && missingFileReopenInstructionShows()) {

@@ -108,7 +108,7 @@ Mounted jsdom tests establish assigned layer values, focus targets, consumed key
 
 A preflight decision cancels its pending poll timer and suppresses already-runnable polls until the decision ends. Snapshot sequencing rejects older replies; teardown invalidates outstanding work. After deciding clears, an unsettled answer or request failure resumes polling. Settled answers leave no timer. Poll error backoff and its fail-open limit remain separate from decision retry.
 
-A missing-file pick belongs to its armed tab. Only that editor's teardown clears the request and, if still displayed, its instruction. The instruction remains part of pick validity: dismissal, replacement by an automatic status or a refused pick ends replacement, so a subsequent file opens beside the missing tab. Successful consumption can leave the instruction visible.
+A missing-file pick belongs to its armed tab. Among editor teardowns, only the armed editor clears the request and, if still displayed, its instruction. The instruction remains part of pick validity: dismissal, replacement by an automatic status or a refused pick ends replacement, so a subsequent file opens beside the missing tab. Successful consumption also disarms the request and can leave the instruction visible.
 
 The status kind is writer metadata, not proof of transient ownership. A private reactive owner identifies the live timer and its message; only matching text with transient kind auto-clears. Bare replacement text offers Dismiss, while workspace warnings retain their dialog action. Expiry retires its owner even if the text changed; stale callbacks cannot clear a newer owner. Explicit dismissal retires the owner and clears text, kind and action.
 
