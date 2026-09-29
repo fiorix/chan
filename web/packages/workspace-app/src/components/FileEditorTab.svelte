@@ -1328,10 +1328,10 @@
   {:else if tab.error}
     <div class="placeholder error-placeholder">{tab.error}</div>
   {:else if tab.refusedUnwritten && tab.mode === "canvas"}
-    <!-- The board opens a text that does not parse as an empty scene, and
-         its first change would replace the text the user is fixing. -->
+    <!-- Keep the board away from a refused buffer until it is written or
+         undone; its first change could replace that buffer. -->
     <div class="placeholder refused-placeholder">
-      This drawing does not parse, so the board cannot show it. Use Show source code ({sourceChord}) to fix it.
+      This drawing has not been saved. Use Show source code ({sourceChord}) to review it.
     </div>
   {:else}
     <div class="editor-inspector-row">

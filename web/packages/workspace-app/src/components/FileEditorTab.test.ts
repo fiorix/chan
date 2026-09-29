@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import FileEditorTab from "./FileEditorTab.svelte";
 import Pane from "./Pane.svelte";
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import { setSocketFactory } from "../api/transport";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { demoSocketFactory } from "../demo/socket";
@@ -39,6 +40,8 @@ import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import {
   bumpTabFocusPulse,
   closeFind,
+  conflictDialog,
+  dismissConflict,
   ensureTabSlidePreview,
   layout,
   markTabFileMissing,
@@ -1535,7 +1538,7 @@ describe("a drawing whose save is refused", () => {
     }).toEqual({ line: undefined, editor: SAVED });
   });
 
-  test("on the board keeps the board unmounted and says to fix it in source", async () => {
+  test("on the board keeps the board unmounted and points to source", async () => {
     const { tab, target } = await refused();
     setMode(tab, "canvas");
     await settle();
@@ -1547,7 +1550,7 @@ describe("a drawing whose save is refused", () => {
     }).toEqual({
       line: `Not saved: the drawing does not parse (${reason()})`,
       board: false,
-      body: `This drawing does not parse, so the board cannot show it. Use Show source code (${chordFor("app.editor.toggleMode")}) to fix it.`,
+      body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
     });
     setTabContent(tab, SAVED);
     await settle();
@@ -1664,6 +1667,7 @@ describe("a drawing whose save is refused", () => {
       const pending = {
         held: tab.refusedUnwritten,
         placeholder: target.querySelector(".refused-placeholder") !== null,
+        body: target.querySelector(".refused-placeholder")?.textContent?.trim(),
         board: island.props !== null,
       };
       await autosaveFires(tab.id);
@@ -1679,7 +1683,12 @@ describe("a drawing whose save is refused", () => {
         placeholder: target.querySelector(".refused-placeholder") !== null,
         board: island.props !== null,
       }).toEqual({
-        pending: { held: true, placeholder: true, board: false },
+        pending: {
+          held: true,
+          placeholder: true,
+          body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
+          board: false,
+        },
         inFlight: 0, scene: 1, disk: FIXED, placeholder: false, board: true,
       });
     });
@@ -1700,6 +1709,35 @@ describe("a drawing whose save is refused", () => {
       await saveTab(tab);
 
       expect(write.mock.calls.map((call) => call.slice(2))).toEqual([[null, 1, null]]);
+    });
+
+    test("a fixed drawing held by a conflict says it has not been saved", async () => {
+      const { tab, target, write } = await refused();
+      write.mockRejectedValue(new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }));
+      setTabContent(tab, FIXED);
+      setMode(tab, "canvas");
+      await saveTab(tab);
+      await settle();
+
+      try {
+        expect({
+          conflict: conflictDialog.open,
+          held: tab.refusedUnwritten,
+          reason: toolbarLine(target),
+          body: target.querySelector(".refused-placeholder")?.textContent?.trim(),
+          board: island.props !== null,
+          disk: disk.get(PATH)?.content,
+        }).toEqual({
+          conflict: true,
+          held: true,
+          reason: undefined,
+          body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
+          board: false,
+          disk: SAVED,
+        });
+      } finally {
+        dismissConflict();
+      }
     });
 
     test("a rename out of the check takes the line away and no document session until the write lands", async () => {
