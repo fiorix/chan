@@ -276,7 +276,7 @@ describe("a replay the socket cuts short", () => {
       const second = await redial();
       const before = term.written.length;
 
-      await attach(second, { id: SESSION, generation: 3, seq: 60 });
+      await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
       await output(second, "the whole ring");
 
       expect(term.written.slice(before).join(""), "a reset, then the replay alone").toBe("\x1bcthe whole ring");
@@ -298,7 +298,8 @@ describe("a replay the socket cuts short", () => {
     first.close();
     const second = await redial();
 
-    await attach(second, { id: SESSION, generation: 3, seq: 60 });
+    await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
+    await output(second, "the whole ring");
 
     expect(tab!.keyboardProtocol, "the handlers' own object").toBe(protocol);
     expect(JSON.parse(JSON.stringify(protocol)), "as it stood before the cut replay").toEqual(before);
@@ -331,7 +332,8 @@ describe("a replay the socket cuts short", () => {
     window.dispatchEvent(new Event("pagehide"));
     expect(readTerminalSnapshot(SESSION), "before the redial's session frame").toBeNull();
 
-    await attach(second, { id: SESSION, generation: 3, seq: 60 });
+    await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
+    await output(second, "the whole ring");
     window.dispatchEvent(new Event("pagehide"));
     expect(readTerminalSnapshot(SESSION), "during the redial's replay").toBeNull();
   });
@@ -340,7 +342,8 @@ describe("a replay the socket cuts short", () => {
     ui.terminalControl = false;
     await cutReplay();
     const second = await redial();
-    await attach(second, { id: SESSION, generation: 3, seq: 60 });
+    await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
+    await output(second, "the whole ring");
     await receive(second, { type: "ready", cols: 80, rows: 24 });
 
     window.dispatchEvent(new Event("pagehide"));
