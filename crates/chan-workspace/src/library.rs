@@ -417,7 +417,6 @@ impl Library {
         mode: ResetMode,
         progress: &dyn crate::progress::ProgressCallback,
     ) -> Result<ResetReport> {
-        use crate::progress::{ProgressEvent, ProgressStage};
         // A buggy caller might hold a Workspace and call reset_workspace
         // from another thread, expecting the flock to serialize.
         self.refuse_if_live(root)?;
@@ -436,9 +435,43 @@ impl Library {
         else {
             return Ok(ResetReport { removed_entries: 0 });
         };
+        let (_lock, removed) = self.wipe_row_state(&metadata_key, root, progress)?;
+        // Hold the writer lock across the registry update so a
+        // concurrent open_workspace cannot lazily recreate the state we
+        // just wiped, lazily commit a half-formed index/graph dir,
+        // and then notice its registry entry has been dropped. The
+        // registry mutex composes cleanly here: it's a lock we own,
+        // the flock is process-wide, and no path acquires them in
+        // the opposite order. _lock is dropped at the end of the
+        // function after the registry write completes.
+        if matches!(mode, ResetMode::Everything) {
+            let found = self.match_root(root);
+            let mut reg = self.inner.registry.lock().unwrap();
+            if reg.remove_matched(&found) {
+                reg.save_to(&self.inner.config_path)?;
+            }
+        }
+        Ok(ResetReport {
+            removed_entries: removed,
+        })
+    }
+
+    /// Wipe the chan-managed state stored under `metadata_key` (the index,
+    /// the graph, the session blobs, the app tokens and the report), firing
+    /// one `ProgressStage::Reset` event per subsystem as it goes. Takes the
+    /// workspace's writer lock first, with `holder` as the root its record
+    /// names, and returns it with the count of entries removed, so the
+    /// caller holds it across its registry update.
+    fn wipe_row_state(
+        &self,
+        metadata_key: &str,
+        holder: &Path,
+        progress: &dyn crate::progress::ProgressCallback,
+    ) -> Result<(WorkspaceLock, usize)> {
+        use crate::progress::{ProgressEvent, ProgressStage};
         let workspace_paths =
-            paths::workspace_paths_for_metadata_key_in(&self.inner.chan_home, &metadata_key);
-        let _lock = WorkspaceLock::acquire(&workspace_paths.lock, root)?;
+            paths::workspace_paths_for_metadata_key_in(&self.inner.chan_home, metadata_key);
+        let lock = WorkspaceLock::acquire(&workspace_paths.lock, holder)?;
         let mut removed = 0;
         let report_dir = workspace_paths
             .report
@@ -462,24 +495,7 @@ impl Library {
             });
             removed += wipe_dir(dir)?;
         }
-        // Hold the writer lock across the registry update so a
-        // concurrent open_workspace cannot lazily recreate the state we
-        // just wiped, lazily commit a half-formed index/graph dir,
-        // and then notice its registry entry has been dropped. The
-        // registry mutex composes cleanly here: it's a lock we own,
-        // the flock is process-wide, and no path acquires them in
-        // the opposite order. _lock is dropped at the end of the
-        // function after the registry write completes.
-        if matches!(mode, ResetMode::Everything) {
-            let found = self.match_root(root);
-            let mut reg = self.inner.registry.lock().unwrap();
-            if reg.remove_matched(&found) {
-                reg.save_to(&self.inner.config_path)?;
-            }
-        }
-        Ok(ResetReport {
-            removed_entries: removed,
-        })
+        Ok((lock, removed))
     }
 
     /// Record an `mv` of a registered workspace's directory. Preserves
