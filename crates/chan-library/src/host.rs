@@ -3601,12 +3601,11 @@ impl WorkspaceHost {
     /// removal goes by. A close that found no row leaves nothing to
     /// unregister, and the removal answers `NotFound`.
     ///
-    /// The removal goes by the key [`workspace_key`](Self::workspace_key)
-    /// answers: a path that a registry row stores names that row, as the
-    /// launcher's delete and the devserver's forget send it, so a root
-    /// pointed at another registered workspace's folder since it was mounted
-    /// or registered, or at nothing, still removes its own workspace and
-    /// never the other one.
+    /// The removal goes by the key `workspace_key` answers: a path that a
+    /// registry row stores names that row, as the launcher's delete and the
+    /// devserver's forget send it, so a root pointed at another registered
+    /// workspace's folder since it was mounted or registered, or at nothing,
+    /// still removes its own workspace and never the other one.
     ///
     /// Holds the root's lock in the host's `root_locks` from the unmount
     /// through the unregister, keyed by that key, which a path that no row
