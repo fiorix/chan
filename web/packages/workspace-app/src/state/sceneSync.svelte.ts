@@ -79,6 +79,12 @@ export const SCENE_ATTACH_TIMEOUT_MS = 5000;
 /// flush debounce plus the write with margin.
 export const SCENE_FLUSH_TIMEOUT_MS = 4000;
 
+/// Bound on the degraded-fallback wait for an in-flight push to settle
+/// before the classic PUT fires. Keeps the two writers serialized: the
+/// push already on the wire lands (and its push-ok restamps the CAS
+/// token) before the PUT reads that token.
+export const SCENE_FALLBACK_SETTLE_MS = 2000;
+
 /// Outbound pointer cadence: trailing-edge throttle on pointer moves,
 /// applied inside the session so every binding inherits it.
 export const SCENE_CURSOR_THROTTLE_MS = 100;
@@ -342,6 +348,12 @@ export class SceneSession {
   private flushError: string | null = null;
 
   private pushInFlight = false;
+  /// Fallback-settle waiters: resolved the moment no push is in flight
+  /// (or on their own bound). See awaitPushSettled.
+  private pushSettleWaiters: {
+    resolve: () => void;
+    timer: ReturnType<typeof setTimeout>;
+  }[] = [];
   /// The push currently on the wire, in the same three parts the queued one
   /// has, so a drop, or the next socket's first snapshot, can hand all of it
   /// back to the canvas: whether the authority read it is not known. Cleared
@@ -571,6 +583,37 @@ export class SceneSession {
     this.setStatus("degraded");
   }
 
+  /// Fallback settle: resolves once no push is in flight, bounded by
+  /// `timeoutMs`. The degrade gate in pushScene stops NEW pushes; this
+  /// waits out the one already on the wire so the classic fallback PUT
+  /// never interleaves with it, and so the push's own push-ok gets its
+  /// chance to restamp the tab's CAS token before the PUT reads it.
+  awaitPushSettled(timeoutMs: number = SCENE_FALLBACK_SETTLE_MS): Promise<void> {
+    if (!this.pushInFlight) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const waiter = {
+        resolve,
+        timer: setTimeout(() => {
+          this.pushSettleWaiters = this.pushSettleWaiters.filter(
+            (w) => w !== waiter,
+          );
+          resolve();
+        }, timeoutMs),
+      };
+      this.pushSettleWaiters.push(waiter);
+    });
+  }
+
+  /// The in-flight push settled (answered, superseded, or its socket
+  /// died): release any fallback-settle waiters with it.
+  private clearPushInFlight(): void {
+    this.pushInFlight = false;
+    for (const w of this.pushSettleWaiters.splice(0)) {
+      clearTimeout(w.timer);
+      w.resolve();
+    }
+  }
+
   /// Re-apply the mirror onto whatever tab the layout holds now.
   ///
   /// A Hybrid Nav commit replaces every tab object with a clone taken when
@@ -719,7 +762,7 @@ export class SceneSession {
     this.clearAttachTimer();
     this.ws = null;
     this.releaseUnaccepted();
-    this.pushInFlight = false;
+    this.clearPushInFlight();
     this.queued = null;
     if (this.closedByUs || this.retryStopped) return;
     // Capability probe: the first scene-ws connect that closes before
@@ -780,6 +823,9 @@ export class SceneSession {
         this.pushInFlight = false;
         this.unacked = null;
         this.drainQueued();
+        // A push the ack drains from the queue is on the wire in its
+        // turn, and a fallback save waits for it too.
+        if (!this.pushInFlight) this.clearPushInFlight();
         this.confirmSaved();
         this.checkFlushWaiters();
         return;
@@ -867,7 +913,7 @@ export class SceneSession {
       // marks the elements and files the authority holds, so only those it
       // lacks are offered again.
       this.releaseUnaccepted();
-      this.pushInFlight = false;
+      this.clearPushInFlight();
       this.queued = null;
     }
     this.serverDirty = f.dirty;
@@ -1111,6 +1157,11 @@ registerLiveSessionKind({
     if (!session || !session.ownsSaves()) return "classic";
     if (await session.flush()) return "saved";
     session.degrade();
+    // Single-writer handoff: the degrade gated the pump; wait out any
+    // push already on the wire before the classic PUT fires so the two
+    // writers never interleave and the freshest ack token is on the
+    // tab when the PUT stamps its CAS check.
+    await session.awaitPushSettled();
     return "degraded";
   },
   release(tabId: string, immediate: boolean) {
