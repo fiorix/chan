@@ -230,6 +230,8 @@
         /// generation no longer matches is discarded and the server full-replays.
         generation: number;
         missed_bytes?: number;
+        /// Ring bytes sent before the attach prelude. Absent on older servers.
+        replay_bytes?: number;
         bytes_since_focus?: number;
         /// MESSAGE depth of the shared write queue at attach time, so every
         /// (re)attach re-syncs the badge (the tab field is never persisted).
@@ -350,11 +352,13 @@
   // (closeSocket, which every redial's connect runs first, marks it): the
   // screen holds part of a replay and `receivedSeq` names the end of it, so
   // neither the live cursor nor a snapshot is a place to resume from. The
-  // redial asks for the whole ring and paints it over a reset screen; the
-  // next `ready` clears it.
+  // redial asks for the whole ring. A nonempty replay with a byte count
+  // starts on a reset screen; an empty or unmarked replay keeps it. The
+  // next `ready` clears the cut.
   let replayCut = false;
   // The keyboard protocol as it stood when the current replay began, which
-  // a whole-ring replay over a cut one starts from again.
+  // reset write restores after its parser handlers have run and before
+  // the first ring byte is parsed.
   let keyboardProtocolBeforeReplay: TerminalKeyboardProtocolState | null = null;
   let pendingPromptSeed = "";
   let promptSeedSent = false;
@@ -1382,6 +1386,7 @@
     // Whether this dial's socket has delivered a session frame yet: its first
     // one on a reattach carries a replay of history the PTY already had.
     let dialSawSession = false;
+    let resetBeforeReplay = false;
     pendingPromptSeed = reattaching ? "" : (tab.seedInput ?? "");
     promptSeedSent = false;
     // Try to resume from either this live xterm or a cached scrollback
@@ -1463,6 +1468,20 @@
       armDeadline();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
+        if (resetBeforeReplay && bytes.length > 0) {
+          resetBeforeReplay = false;
+          const terminal = term;
+          const sessionId = tab.terminalSessionId;
+          const protocol = tab.keyboardProtocol;
+          const beforeReplay = keyboardProtocolBeforeReplay;
+          // RIS resets the registered keyboard state too. Its write callback
+          // runs after those handlers and before the queued replay bytes.
+          writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay", () => {
+            if (term === terminal && tab.terminalSessionId === sessionId && protocol && beforeReplay) {
+              copyTerminalKeyboardProtocolState(beforeReplay, protocol);
+            }
+          });
+        }
         writePtyOutput(bytes, attachPtyWriteOrigin());
         // Advance the server byte cursor only for LIVE output: replay chunks
         // (between the `session` and `ready` frames) reconstruct history up to
@@ -1479,6 +1498,7 @@
         return;
       }
       if (frame.type === "ready") {
+        resetBeforeReplay = false;
         attachReplayActive = false;
         replayCut = false;
         replayMaskScans.ready();
@@ -1496,17 +1516,12 @@
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
+        resetBeforeReplay = replayCut && typeof frame.replay_bytes === "number" && frame.replay_bytes > 0;
         if (replayCut) {
-          // The cut may have left xterm's parser, the mouse filter's held tail
-          // and the OSC 52 observer inside a sequence, and the keyboard
-          // protocol holding what the cut replay pushed, which this replay
-          // pushes again.
+          // These observers can hold a partial sequence even when the server
+          // sends only its alternate-screen prelude and mode reassert.
           mouseFilter?.reset();
           osc52Bridge?.reset();
-          if (tab.keyboardProtocol && keyboardProtocolBeforeReplay) {
-            copyTerminalKeyboardProtocolState(keyboardProtocolBeforeReplay, tab.keyboardProtocol);
-          }
-          writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay");
         } else if (tab.keyboardProtocol) {
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol);
         }
@@ -1535,6 +1550,7 @@
         // modes untouched, as the start does for a reattach.
         if (frame.id !== priorId) {
           ensureTerminalKeyboardProtocol(tab, true);
+          keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol!);
           writeParsedPtyOutput(
             new TextEncoder().encode(
               "\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l",
@@ -1844,7 +1860,7 @@
     if (status === "exited") return;
     // A replay that has not reached its `ready` has painted part of the
     // session under a cursor that names the end of it.
-    if (attachReplayActive || replayCut) return;
+    if (attachReplayActive) return;
     const sessionId = tab.terminalSessionId;
     if (!term || !serialize || !sessionId || serverGeneration === null) return;
     // Never throw out of a pagehide/beforeunload handler: this fires globally
@@ -1943,6 +1959,7 @@
   function writeParsedPtyOutput(
     bytes: Uint8Array,
     origin: PtyWriteOrigin,
+    onComplete?: () => void,
   ): void {
     if (!term || !termWriter) return;
     // Ghostty backend only: observe (never alter) the stream for OSC 52
@@ -1956,7 +1973,10 @@
     );
     // Keep the existing writer + origin ordering. Replay callbacks only drain
     // the batch; live callbacks still run their captured per-write scan.
-    ptyWrites.write(termWriter, bytes, origin, completeMaskScan);
+    ptyWrites.write(termWriter, bytes, origin, () => {
+      onComplete?.();
+      completeMaskScan();
+    });
   }
 
   /// OS file dropped on this terminal: type the dropped files' absolute
