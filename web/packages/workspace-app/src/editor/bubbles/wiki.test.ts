@@ -254,3 +254,19 @@ describe("inside an existing link's URL", () => {
     expect(view.state.doc.toString()).toBe(slot);
   });
 });
+
+describe("a search that fails", () => {
+  test("takes the earlier rows off the list and says so", async () => {
+    vi.mocked(api.linkTargets).mockResolvedValueOnce([target("notes/other.md", { title: "Other" })]);
+    const { handle } = open("see [[oth", 4);
+    await vi.waitFor(() => expect(rows()).toEqual(["Other - notes/other.md"]));
+    vi.mocked(api.linkTargets).mockRejectedValueOnce(new Error("offline"));
+    handle.setQuery("othe");
+    await vi.waitFor(() =>
+      expect(document.querySelector(".md-wiki-bubble .md-bubble-status")?.textContent).toBe(
+        "Search failed: offline",
+      ),
+    );
+    expect(rows()).toEqual([]);
+  });
+});
