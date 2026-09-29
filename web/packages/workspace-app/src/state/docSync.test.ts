@@ -882,6 +882,49 @@ describe("save funnel", () => {
     cleanup();
   });
 
+  test("an ack after the settle timer fires but before its continuation permits fallback", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "999" });
+    const { sock, view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    const saving = saveTab(t);
+    await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS);
+    vi.advanceTimersByTime(DOC_FALLBACK_SETTLE_MS);
+    const updates = sock.frames("push").at(-1)!.updates as unknown[];
+    sock.frame({ type: "updates", version: 0, updates });
+    sock.frame({ type: "push-ok", version: updates.length });
+    await saving;
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0]?.[4]).toBe(updates.length);
+    cleanup();
+  });
+
+  test("a deliberate closed frame leaves an unanswered document push unsaved", async () => {
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write");
+    const { sock, view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(1);
+    sock.frame({ type: "closed", reason: "reset" });
+    await saveTab(t);
+
+    expect(write, "retirement cannot settle an unanswered push").not.toHaveBeenCalled();
+    expect(t.doc?.state).toBe("off");
+    expect(t.content).toBe("hello!");
+    expect(t.saveError).toContain("push");
+    expect(t.error).toBeNull();
+    expect(isDirty(t)).toBe(true);
+    cleanup();
+  });
+
   test("an unresolved document save marks the replacement tab after a reorder", async () => {
     vi.useFakeTimers();
     const tab = fileTab();

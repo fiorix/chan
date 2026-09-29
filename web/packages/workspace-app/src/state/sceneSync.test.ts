@@ -651,6 +651,62 @@ describe("save funnel", () => {
     expect(write).toHaveBeenCalledTimes(1);
   });
 
+  test("an ack after the settle timer fires but before its continuation permits fallback", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("boundary", 2)]);
+    tab.content = sceneBufferWith("boundary");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS);
+    vi.advanceTimersByTime(SCENE_FALLBACK_SETTLE_MS);
+    sock.frame({ type: "push-ok", version: 7 });
+    await saving;
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0]?.[4]).toBe(7);
+  });
+
+  test("a deliberate closed frame leaves an unanswered scene push unsaved", async () => {
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("retired", 2)]);
+    tab.content = sceneBufferWith("retired");
+    sock.frame({ type: "closed", reason: "reset" });
+    await saveTab(tab);
+
+    expect(write, "retirement cannot settle an unanswered push").not.toHaveBeenCalled();
+    expect(tab.doc?.state).toBe("off");
+    expect(tab.content).toContain("retired");
+    expect(tab.saveError).toContain("push");
+    expect(tab.error).toBeNull();
+    expect(isDirty(tab)).toBe(true);
+  });
+
+  test("a save timeout marks the tab committed by pane mode", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session } = attached(tab);
+    session.pushScene([elem("moved", 2)]);
+    tab.content = sceneBufferWith("moved");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS);
+    enterPaneMode();
+    commitPaneMode();
+    const moved = readTab(tab.id)!;
+    expect(moved).not.toBe(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FALLBACK_SETTLE_MS);
+    await saving;
+
+    expect(write).not.toHaveBeenCalled();
+    expect(moved.content).toContain("moved");
+    expect(moved.saveError).toContain("push");
+    expect(isDirty(moved)).toBe(true);
+  });
+
   test("a lost scene socket retains its claim until a fresh snapshot and live flush", async () => {
     vi.useFakeTimers();
     const write = vi.spyOn(api, "write");
@@ -1270,6 +1326,47 @@ describe("a socket's snapshot comes before anything else on it", () => {
       beforeSnapshot: 0,
       replays: [["authority"]],
     });
+  });
+
+  test("an unbound canvas keeps its unacknowledged scene through a fresh socket snapshot", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    const local = elem("local", 2);
+    const appState = { viewBackgroundColor: "#123456" };
+    const files = { "local-file": { dataURL: "data:image/png;base64,AAA" } };
+    session.pushScene([local], appState, files);
+    tab!.content = sceneBufferWith("local");
+    session.unbindCanvas(binding);
+    sock.drop();
+
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([elem("peer", 3)]));
+    const saving = saveTab(tab!);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + 1);
+    await saving;
+    expect(write, "an unbound claim cannot fall back to PUT").not.toHaveBeenCalled();
+    expect(tab!.saveError).toContain("push");
+    const next = new FakeBinding();
+    next.session = session;
+    session.bindCanvas(next);
+
+    expect(next.snapshots[0]?.elements.map((el) => el.id)).toEqual(["peer", "local"]);
+    expect(next.snapshots[0]?.appState).toEqual(appState);
+    expect(next.snapshots[0]?.files).toHaveProperty("local-file");
+    expect(back.frames("push")).toEqual([
+      expect.objectContaining({ elements: [local], appState, files }),
+    ]);
+    expect(tab!.content).toContain("local");
+    back.frame({ type: "push-ok", version: 1 });
+    back.frame({ type: "flush", dirty: false, mtime_ns: "9000000000" });
+    await saveTab(tab!);
+    expect(tab!.saveError).toBeNull();
+    vi.useRealTimers();
   });
 });
 

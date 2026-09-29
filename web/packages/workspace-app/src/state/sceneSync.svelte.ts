@@ -328,7 +328,8 @@ export class SceneSession {
   /// is an adopt, so a part this left out would be adopted over the push:
   /// the older value would go on the board and never be offered again. A
   /// discarded push leaves its parts here until the next snapshot replaces
-  /// them, and no replay comes before that snapshot.
+  /// them. Claims released without a bound canvas are retained separately
+  /// so a later bind can offer them after that snapshot.
   private shadowElements = new Map<string, WireElement>();
   private shadowAppState: WireAppState = {};
   private shadowFiles: WireFiles = {};
@@ -364,6 +365,9 @@ export class SceneSession {
   /// by the ack.
   private unacked: QueuedPush | null = null;
   private queued: QueuedPush | null = null;
+  /// Claims released without a canvas survive until a new canvas can
+  /// replay and offer them after the next socket's snapshot.
+  private unboundClaims: QueuedPush | null = null;
 
   private cursors = new Map<number, ScenePeerCursor>();
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -418,7 +422,7 @@ export class SceneSession {
   /// prompt that guards a discard, and the alternative reads the save path
   /// from here to learn which of the two wrote last.
   hasUnflushedState(): boolean {
-    if (this.serverDirty || this.pushOutcomeUnresolved || this.queued !== null) return true;
+    if (this.serverDirty || this.pushOutcomeUnresolved || this.queued !== null || this.unboundClaims !== null) return true;
     return this.binding?.hasPendingLocal() ?? false;
   }
 
@@ -460,13 +464,14 @@ export class SceneSession {
     if (this.releaseTimer !== null) this.retain();
     this.binding = binding;
     if (this.haveSnapshot) {
-      binding.applySnapshot(
-        [...this.shadowElements.values()],
-        this.shadowAppState,
-        this.shadowFiles,
-      );
-      binding.collaboratorsChanged();
+      const recoveringClaims = this.unboundClaims !== null;
+      this.replayToBinding(binding, [...this.shadowElements.values()], this.shadowAppState, this.shadowFiles);
+      // A save may have degraded the session while no canvas existed. The
+      // current socket's snapshot is already authoritative, so the rebound
+      // canvas can resume its push after the replay.
+      if (recoveringClaims) this.promoteIfChannelUp();
       binding.flushPendingLocal();
+      this.finishDeferredReplay();
     }
   }
 
@@ -669,11 +674,10 @@ export class SceneSession {
     return this.tab.readMode || !this.tab.fsWritable;
   }
 
-  /// Tell the canvas that everything `pushScene` claimed and the authority
-  /// has not acknowledged is local again: the payload on the wire, which the
-  /// authority may or may not have read, and the one coalesced behind it, in
-  /// all three of their parts. Called wherever those are discarded: at the
-  /// socket's close and at the next socket's first snapshot.
+  /// Return unacknowledged claims to the canvas, or retain them until one
+  /// binds. The authority may have read the wire payload; socket closure
+  /// does not establish its outcome. Called at close and at the next
+  /// socket's first snapshot.
   private releaseUnaccepted(): void {
     const wire = this.unacked;
     const queued = this.queued;
@@ -690,7 +694,71 @@ export class SceneSession {
     // goes back.
     const appState = queued?.appState ?? wire?.appState ?? undefined;
     if (elements.length === 0 && files === undefined && appState === undefined) return;
-    this.binding?.forgetBroadcast(elements, appState, files);
+    if (this.binding) {
+      this.binding.forgetBroadcast(elements, appState, files);
+    } else {
+      const claims = this.unboundClaims ?? claimedPush([], undefined, undefined);
+      for (const el of elements) {
+        if (typeof el.id === "string") claims.elements.set(el.id, el);
+      }
+      if (appState !== undefined) claims.appState = appState;
+      if (files !== undefined) claims.files = { ...(claims.files ?? {}), ...files };
+      this.unboundClaims = claims;
+    }
+  }
+
+  private replayToBinding(
+    binding: SceneCanvasBinding,
+    elements: WireElement[],
+    appState: WireAppState | undefined,
+    files: WireFiles,
+  ): void {
+    const claims = this.unboundClaims;
+    if (claims === null) {
+      binding.applySnapshot(elements, appState, files);
+      binding.collaboratorsChanged();
+      return;
+    }
+    const replayElements = new Map(elements.map((el) => [el.id as string, el]));
+    const replayFiles = { ...files };
+    const pendingElements: WireElement[] = [];
+    const pendingFiles: WireFiles = {};
+    let pendingAppState: WireAppState | undefined;
+    for (const el of claims.elements.values()) {
+      const stored = replayElements.get(el.id as string);
+      if (stored && (storedElementWins(stored, el) ||
+          (stored.version === el.version && stored.versionNonce === el.versionNonce))) continue;
+      replayElements.set(el.id as string, el);
+      this.foldIntoShadow(el);
+      pendingElements.push(el);
+    }
+    for (const [id, file] of Object.entries(claims.files ?? {})) {
+      if (id in replayFiles) continue;
+      replayFiles[id] = file;
+      this.shadowFiles[id] = file;
+      pendingFiles[id] = file;
+    }
+    if (claims.appState !== null && JSON.stringify(claims.appState) !== JSON.stringify(this.shadowAppState)) {
+      pendingAppState = claims.appState;
+      this.shadowAppState = pendingAppState;
+      appState = pendingAppState;
+    }
+    binding.applySnapshot([...replayElements.values()], appState, replayFiles);
+    binding.collaboratorsChanged();
+    binding.forgetBroadcast(
+      pendingElements,
+      pendingAppState,
+      Object.keys(pendingFiles).length > 0 ? pendingFiles : undefined,
+    );
+    if (pendingElements.length === 0 && pendingAppState === undefined && Object.keys(pendingFiles).length === 0) {
+      this.unboundClaims = null;
+      this.pushOutcomeUnresolved = false;
+      this.tab.unresolvedLivePush = false;
+    }
+  }
+
+  private finishDeferredReplay(): void {
+    if (this.unboundClaims !== null && this.pushInFlight) this.unboundClaims = null;
   }
 
   private foldIntoShadow(el: WireElement): void {
@@ -932,8 +1000,8 @@ export class SceneSession {
       // lacks are offered again.
       this.releaseUnaccepted();
       this.clearPushInFlight("unresolved");
-      this.pushOutcomeUnresolved = false;
-      this.tab.unresolvedLivePush = false;
+      this.pushOutcomeUnresolved = this.unboundClaims !== null;
+      this.tab.unresolvedLivePush = this.pushOutcomeUnresolved;
       this.queued = null;
     }
     this.serverDirty = f.dirty;
@@ -944,8 +1012,7 @@ export class SceneSession {
     }
     this.mirror();
     if (this.binding) {
-      this.binding.applySnapshot(f.elements, claim !== null ? undefined : f.appState, f.files);
-      this.binding.collaboratorsChanged();
+      this.replayToBinding(this.binding, f.elements, claim !== null ? undefined : f.appState, f.files);
     }
     this.promoteIfChannelUp();
     // Locally-newer elements survive the canvas reconciliation and must
@@ -954,6 +1021,7 @@ export class SceneSession {
     // session is degraded, and a snapshot landing on a degraded session is
     // exactly the reattach this rescue exists for.
     this.binding?.flushPendingLocal();
+    this.finishDeferredReplay();
     this.checkFlushWaiters();
   }
 
@@ -1044,13 +1112,13 @@ export class SceneSession {
   /// the authority has not acknowledged. It can still lag the authority, by
   /// a peer's edit the canvas's flush has not mirrored yet.
   private confirmSaved(): void {
-    if (this.pushInFlight || this.queued !== null) return;
+    if (this.pushInFlight || this.queued !== null || this.unboundClaims !== null) return;
     if (this.binding?.hasPendingLocal() ?? false) return;
     this.tab.saved = this.tab.content;
   }
 
   private allLocalConfirmed(): boolean {
-    if (this.pushInFlight || this.queued !== null) return false;
+    if (this.pushInFlight || this.queued !== null || this.unboundClaims !== null) return false;
     return !(this.binding?.hasPendingLocal() ?? false);
   }
 
