@@ -10,6 +10,7 @@ import { closeWorkspaceWarningsDialog, openWorkspaceWarningsDialog, workspaceWar
 import { dialogIn, focusOrigin, mountDialog, press, settle, unmountDialogs } from "../__tests__/dialog";
 
 afterEach(() => {
+  workspaceWarningsDialog.busyKey = null;
   closeWorkspaceWarningsDialog();
   unmountDialogs();
 });
@@ -27,6 +28,14 @@ function buttons(dialog: HTMLElement): HTMLButtonElement[] {
 }
 
 describe("the workspace warnings dialog", () => {
+  test("a busy warning refuses Escape without passing it to the underlying overlay", async () => {
+    const target = await openWarnings();
+    workspaceWarningsDialog.busyKey = "busy"; await settle();
+    const event = press(document.body, "Escape"); await settle();
+    expect(dialogIn(target)).not.toBeNull();
+    expect(event.defaultPrevented, "refused close still owns Escape").toBe(true);
+  });
+
   test("keeps Tab inside: past the last control it wraps to the first", async () => {
     const dialog = dialogIn(await openWarnings())!;
     const [first, ...rest] = buttons(dialog);

@@ -98,6 +98,33 @@ describe("warnings at boot", () => {
 });
 
 describe("the warnings dialog", () => {
+  test("recovers focus after dismissing a warning row while other rows remain", async () => {
+    warnings = [broken("row-one"), broken("row-two")];
+    await mountApp();
+    const open = await openDialog();
+    const dismiss = button(open, "Dismiss")!;
+    dismiss.focus(); dismiss.click(); await settle();
+    expect(dismiss.isConnected, "dismiss removes its row").toBe(false);
+    expect(open.querySelectorAll(".warning-item")).toHaveLength(1);
+    expect(document.activeElement, "warning row focus repair").toBe(open);
+  });
+
+  test("opens discard confirmation above warnings and returns focus after cancellation", async () => {
+    warnings = [broken("stack")];
+    await mountApp();
+    const open = await openDialog();
+    const discard = button(open, "Discard metadata")!;
+    discard.focus(); discard.click(); await settle();
+    const confirm = document.querySelector<HTMLElement>('[aria-labelledby="confirm-title"]')!;
+    expect(confirm).not.toBeNull();
+    expect(Number(confirm.parentElement!.style.zIndex), "discard confirm layer")
+      .toBeGreaterThan(Number(open.parentElement!.style.zIndex));
+    expect(document.activeElement).toBe(button(confirm, "Discard"));
+    button(confirm, "Cancel")!.click(); await settle();
+    expect(confirm.isConnected).toBe(false);
+    expect(document.activeElement, "discard opener restoration").toBe(discard);
+  });
+
   test("Copy path copies the warning's path and says so", async () => {
     warnings = [broken("untitled-5")];
     await mountApp();

@@ -3,15 +3,17 @@
 // The contacts import wizard is a modal dialog over the window: named by its
 // title, keeping Tab inside, and handing focus back when it closes.
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ImportContactsModal from "./ImportContactsModal.svelte";
+import { api } from "../api/client";
 import { importContactsPanel } from "../state/store.svelte";
 import { dialogIn, dialogName, focusOrigin, mountDialog, press, settle, unmountDialogs } from "../__tests__/dialog";
 
 afterEach(() => {
   importContactsPanel.open = false;
   unmountDialogs();
+  vi.restoreAllMocks();
 });
 
 async function openWizard(): Promise<HTMLElement> {
@@ -37,6 +39,28 @@ function tabStops(dialog: HTMLElement): HTMLElement[] {
 }
 
 describe("the contacts import wizard", () => {
+  test("recovers focus when Next disables itself and when a completed import removes its button", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    vi.spyOn(api, "importContacts").mockResolvedValue({ wrote: [], overwrote: [], skipped: [], failed: [], warnings: [] });
+    const target = await openWizard();
+    const dialog = dialogIn(target)!;
+    const next = dialog.querySelector<HTMLButtonElement>(".ok")!;
+    next.focus(); next.click(); await settle();
+    expect(next.disabled, "file step disables Next").toBe(true);
+    expect(document.activeElement, "wizard disabled focus repair").toBe(dialog);
+    const file = dialog.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(file, "files", { value: [new File(["Name\nA"], "contacts.csv", { type: "text/csv" })] });
+    file.dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    next.click(); await settle(); next.click(); await settle();
+    const run = dialog.querySelector<HTMLButtonElement>(".ok")!;
+    expect(run.textContent?.trim()).toBe("Import");
+    run.focus(); run.click(); await settle();
+    expect(run.isConnected, "done step removes Import").toBe(false);
+    expect(document.activeElement, "wizard removed focus repair").toBe(dialog);
+    press(document.activeElement!, "Escape"); await settle();
+    expect(dialogIn(target)).toBeNull();
+  });
+
   test("is a modal dialog named by its title", async () => {
     const dialog = dialogIn(await openWizard())!;
     expect(dialog.getAttribute("aria-modal")).toBe("true");
