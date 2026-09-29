@@ -115,7 +115,9 @@ export function headingFoldRange(
       return false; // a heading node never has a foldable heading child
     },
   });
-  if (foldTo !== null) return { from: line.to, to: foldTo };
+  // A heading followed at once by one of its level or higher owns no
+  // section: its range would be empty.
+  if (foldTo !== null) return foldTo > line.to ? { from: line.to, to: foldTo } : null;
   if (forced === null && !syntaxTreeAvailable(state, state.doc.length)) {
     return "incomplete";
   }
@@ -167,6 +169,16 @@ function findHeadingFold(
   return hit;
 }
 
+/// Whether the heading on line `number` has a section to fold: it is not
+/// the last line, and the next line is not a heading of its level or
+/// higher. It reads two lines, not the whole tree, since the gutter asks it
+/// of every heading it paints; `headingFoldRange` has no range for either.
+function hasSection(state: EditorState, number: number, level: number): boolean {
+  if (number >= state.doc.lines) return false;
+  const next = headingLevelAt(state, state.doc.line(number + 1).from);
+  return next === 0 || next > level;
+}
+
 const headingFoldGutter = gutter({
   class: "cm-md-fold-gutter",
   lineMarker(view, blockInfo) {
@@ -174,10 +186,10 @@ const headingFoldGutter = gutter({
     // ranges that follow this heading, so its range spans past the heading
     // line, but `findHeadingFold` needs the exact line.to the foldService emits.
     const line = view.state.doc.lineAt(blockInfo.from);
-    if (headingLevelAt(view.state, line.from) === 0) return null;
-    return findHeadingFold(view, { from: line.from, to: line.to })
-      ? CHEVRON_FOLDED
-      : CHEVRON_UNFOLDED;
+    const level = headingLevelAt(view.state, line.from);
+    if (level === 0) return null;
+    if (findHeadingFold(view, { from: line.from, to: line.to })) return CHEVRON_FOLDED;
+    return hasSection(view.state, line.number, level) ? CHEVRON_UNFOLDED : null;
   },
   // Re-render gutter markers whenever the fold state changes; without this the
   // chevron stays on `▾` after a click even though the fold applied (lineMarker
