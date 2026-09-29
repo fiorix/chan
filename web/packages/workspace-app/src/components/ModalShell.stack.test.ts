@@ -101,7 +101,8 @@ test("normalizes a still-active disabled control before backward Tab", async () 
 
 test("repairs removed focused content without waiting for a key", async () => {
   render(); await open("a");
-  control("a").focus(); control("a").remove();
+  control("a").focus(); await settle();
+  control("a").remove();
   await settle();
   expect(document.activeElement, "child removal repair").toBe(panel("a"));
 });
@@ -109,11 +110,13 @@ test("repairs removed focused content without waiting for a key", async () => {
 test("repairs disabled and hidden focus without waiting for a key", async () => {
   render(); await open("a");
   const input = control("a") as HTMLInputElement;
-  input.focus(); input.disabled = true;
+  input.focus(); await settle();
+  input.disabled = true;
   await settle();
   expect(document.activeElement, "attribute repair").toBe(panel("a"));
   const first = control("a", ".first");
-  first.focus(); first.hidden = true;
+  first.focus(); await settle();
+  first.hidden = true;
   await settle();
   expect(document.activeElement).toBe(panel("a"));
 });
