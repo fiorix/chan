@@ -144,7 +144,7 @@ stateDiagram-v2
 
 ## Bubbles
 
-Each transaction recomputes the bubble spec; the host mounts or reuses one popover and commits a range replace through a high-precedence keymap, never stealing focus from the document.
+Each transaction recomputes the bubble spec; the host mounts or reuses one popover and commits a range replace through a high-precedence keymap, never stealing focus from the document. A bubble that closes itself (Escape, a click away, a pick) is not opened again while the caret stays in the trigger that opened it, since the next keystroke there only changes the query; a caret that leaves that trigger, or a new trigger, clears that memory. The closes the host makes for its own reasons (another trigger, no trigger, a read-only flip) are not remembered.
 
 ```mermaid
 sequenceDiagram
@@ -182,6 +182,8 @@ The editor relies on three server contracts: file reads/writes with optimistic C
 ## Autosave and conflicts
 
 This is the detached/fallback path; an attached doc session replaces the PUT with collab pushes and flush confirmations. A keystroke flows through the echo guard and debounced autosave to `PUT /api/fs/<path>`, carrying `expected_mtime_ns` + the last-read `authority_version`; a missing authority precondition returns 428, a version mismatch returns 409 and opens the conflict dialog, and a non-self `/ws` event only raises the changed-on-disk banner. A dirty/conflicted session is resolved explicitly through `POST /api/session-conflicts/resolve` (`reload` | `overwrite`).
+
+An attached document or scene session writes through its authority. A flush the server cannot make (a full disk, a permission) keeps the editor: the session writes the error as the tab's save error, which the toolbar shows as not saved while the tab is dirty or the session holds what the file lacks (a live tab's confirmed text counts as saved, so the tab stays clean), and a flush that lands clears it and no other save error. A save whose flush fails degrades the session and waits for the push already on the wire to settle, bounded by `DOC_FALLBACK_SETTLE_MS` or `SCENE_FALLBACK_SETTLE_MS`, before it takes this path, so the PUT carries the version that push's ack stamped.
 
 A drawing's save checks its text first. Text that does not parse is not written: the tab keeps its editor with the text as typed and says on its toolbar that the file was not saved and why, and in board mode it shows that the drawing does not parse in place of the board. The reason follows the text within one autosave debounce: the check clears it when the text parses, and a load, a rename out of the check and an edit back to the file's text clear it too. Until a write of the refused text lands, the tab takes no live document or scene session, so the write carries the tokens of its load and meets the conflict check; the cost is that the tab shows no peer's cursors and merges no live edits until then. A close of such a tab asks whether to keep editing or close without saving, and a close that also ends a running terminal asks "Close tabs?"; a draft, which has its own close flow, and a move to another window stay open instead and say that the file was not saved.
 
