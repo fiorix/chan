@@ -33,6 +33,12 @@ export class CheckboxWidget extends WidgetType {
     el.type = "checkbox";
     el.className = "cm-md-task-checkbox";
     el.checked = this.checked;
+    // The box mirrors the source and toggles only from the mousedown
+    // below. Out of the tab order, and any click cancelled, so Space on a
+    // focused box (a click the mousedown never sees) cannot flip the box
+    // while the source keeps its `[ ]`.
+    el.tabIndex = -1;
+    el.addEventListener("click", (e) => e.preventDefault());
     el.addEventListener("mousedown", (e) => {
       // Stop CM6 from moving the caret on the click; the change handler
       // owns the toggle. Without this the click first places the caret
