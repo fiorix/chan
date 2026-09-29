@@ -4160,6 +4160,19 @@ async fn request_close_window(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    close_window_with_page(app, window, None).await
+}
+
+/// Close `window` as `request_close_window` does. `page` is the page that a
+/// route read from the window's webview on the main thread before it spawned
+/// this close: the close button and the macOS menu, on the connecting page.
+/// The command reads none, and a devserver window's close then reads the page
+/// once, in `close_devserver_window`.
+async fn close_window_with_page(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    page: Option<serve::PageReading>,
+) -> Result<(), String> {
     let closing = window.label();
     // A control terminal WINDOW close is explicit teardown of that row. The
     // script/PTY-exit watcher is the path that keeps the row and emits launcher
@@ -4195,7 +4208,7 @@ async fn request_close_window(
         }
     }
     if closing.starts_with("lib-") {
-        return close_devserver_window(&app, &window, None);
+        return close_devserver_window(&app, &window, page);
     }
     // `destroy()`, not `close()`: this is the SPA's DELIBERATE close-cascade
     // (last tab, then last pane, just closed -- the window is empty). `close()`
@@ -6933,7 +6946,7 @@ fn handle_close_window(app: &tauri::AppHandle) {
 /// `request_close_window` (reap the control row/tenant, disconnect only
 /// if it still owns a live devserver connection); SPA webviews get the
 /// close command dispatched, except on the connecting screen, where the
-/// window closes through `request_close_window` as its close button does;
+/// window closes as its close button does, on the page read here;
 /// anything else (the launcher, the About window) closes natively -- the
 /// launcher's `CloseRequested` handler turns that into a hide.
 fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWindow) {
@@ -6946,14 +6959,16 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
     }
     if serve::is_workspace_webview_label(window.label()) {
         // A window still on its connecting page has no tabs to close. The
-        // chord closes the window as its close button does, through
-        // `request_close_window`, which hides it and keeps its record: a
-        // bare destroy leaves the record shown, and the watcher opens the
-        // window again.
-        if serve::window_on_connecting_screen(app, window.label()) {
+        // chord closes the window as its close button does, which hides it
+        // and keeps its record: a bare destroy leaves the record shown, and
+        // the watcher opens the window again. The close is handed the page
+        // read here and does not read it again, so a navigation to the live
+        // page before the close runs does not discard the record.
+        let page = serve::read_page(app, window.label());
+        if page == serve::PageReading::Connecting {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                let _ = request_close_window(app, window).await;
+                let _ = close_window_with_page(app, window, Some(page)).await;
             });
             return;
         }
