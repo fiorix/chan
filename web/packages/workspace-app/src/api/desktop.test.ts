@@ -13,6 +13,7 @@ import {
   tauriInvoke,
   writeClipboardText,
 } from "./desktop";
+import { readClipboardPayload } from "./clipboard";
 import { transfers } from "../state/transfers.svelte";
 
 type W = Window & typeof globalThis & {
@@ -444,5 +445,36 @@ describe("native streaming transfers", () => {
     await saveBytesToDownloads(new Uint8Array(128 * 1024 + 7), "report.pdf");
 
     expect(appendSizes).toEqual([64 * 1024, 64 * 1024, 7]);
+  });
+});
+
+
+describe("cs paste text through the real desktop reader", () => {
+  afterEach(() => {
+    clearTauriGlobals();
+    delete (navigator as { clipboard?: unknown }).clipboard;
+    vi.restoreAllMocks();
+  });
+
+  test("a refused text read retains the permission hint", async () => {
+    setTauriInternals(async () => { throw new Error("IPC not allowed"); });
+    const readText = vi.fn().mockRejectedValue(new DOMException("Read permission denied.", "NotAllowedError"));
+    Object.defineProperty(navigator, "clipboard", { value: { readText }, configurable: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(readClipboardPayload("text"), "the refusal keeps its explanation").rejects.toThrow(
+      "clipboard access denied; focus the window or grant clipboard permission",
+    );
+    expect(readText).toHaveBeenCalledTimes(2);
+  });
+
+  test("a refused native text fallback still reaches the web payload reader", async () => {
+    setTauriInternals(async () => { throw new Error("IPC not allowed"); });
+    const readText = vi.fn().mockRejectedValueOnce(new DOMException("Read permission denied.", "NotAllowedError"))
+      .mockResolvedValueOnce("permitted on retry");
+    Object.defineProperty(navigator, "clipboard", { value: { readText }, configurable: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await readClipboardPayload("text").catch((error: Error) => error.message);
+    expect(result, "the web payload fallback can succeed").toEqual({ mime: "text/plain;charset=utf-8", bytes: new TextEncoder().encode("permitted on retry") });
+    expect(readText).toHaveBeenCalledTimes(2);
   });
 });
