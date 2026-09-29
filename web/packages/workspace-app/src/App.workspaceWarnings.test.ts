@@ -18,6 +18,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")
 import { api } from "./api/client";
 import type { WorkspaceWarning } from "./api/types";
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { settle as settleDialog } from "./__tests__/dialog";
 import { refreshWorkspace, ui } from "./state/store.svelte";
 
 stubAppEnvironment();
@@ -103,7 +104,8 @@ describe("the warnings dialog", () => {
     await mountApp();
     const open = await openDialog();
     const dismiss = button(open, "Dismiss")!;
-    dismiss.focus(); dismiss.click(); await settle();
+    dismiss.focus(); await settleDialog();
+    dismiss.click(); await settleDialog();
     expect(dismiss.isConnected, "dismiss removes its row").toBe(false);
     expect(open.querySelectorAll(".warning-item")).toHaveLength(1);
     expect(document.activeElement, "warning row focus repair").toBe(open);
