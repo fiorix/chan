@@ -71,6 +71,9 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   let query = opts.initialQuery;
   let triggerEnd = opts.triggerEnd;
   let hits: Suggestion[] = [];
+  /// Whether a lookup has answered: an empty list says "Loading" only
+  /// before that, or a workspace with no contacts would load for ever.
+  let answered = false;
   let selectedIndex = 0;
   let reqSeq = 0;
   let debounceTimer: number | undefined;
@@ -106,6 +109,7 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
       Promise.all([contactsP, mentionsP])
         .then(([contactRows, mentionRows]) => {
           if (!alive || seq !== reqSeq) return;
+          answered = true;
           hits = mergeSuggestions(contactRows, mentionRows);
           if (selectedIndex >= hits.length) selectedIndex = 0;
           render();
@@ -162,9 +166,11 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   function render(): void {
     list.innerHTML = "";
     if (hits.length === 0) {
-      status.textContent = query.length === 0
+      status.textContent = !answered
         ? "Loading contacts..."
-        : "No matches";
+        : query.length === 0
+          ? "No contacts"
+          : "No matches";
       shell.reposition();
       return;
     }
