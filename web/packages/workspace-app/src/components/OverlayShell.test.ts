@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The overlay panel (search, Settings) is a named modal dialog. Closing it
+// The overlay panel (search, Settings) is a named non-modal dialog. Closing it
 // hands focus back to the element that held it when the panel opened, unless
 // something else took focus in the meantime, such as a file a search result
 // opened.
@@ -68,4 +68,11 @@ describe("the overlay panel", () => {
 
     expect(document.activeElement).toBe(opened);
   });
+});
+
+test("the overlay has a dialog role and name without claiming modality", async () => {
+  const target = await openSearchShell();
+  const panel = target.querySelector('[role="dialog"]')!;
+  expect(panel.getAttribute("aria-label")).toBe("Search");
+  expect(panel.hasAttribute("aria-modal"), "non-modal overlay omits aria-modal").toBe(false);
 });

@@ -134,10 +134,10 @@ describe("an open form in a window with no workspace", () => {
 });
 
 describe("the Settings panel", () => {
-  test("is a modal dialog named Settings", async () => {
+  test("is a non-modal dialog named Settings", async () => {
     const { target } = await openSettings("Terminal");
     const panel = target.querySelector<HTMLElement>('.panel[role="dialog"]')!;
-    expect([panel.getAttribute("aria-modal"), panel.getAttribute("aria-label")]).toEqual(["true", "Settings"]);
+    expect([panel.getAttribute("aria-modal"), panel.getAttribute("aria-label")]).toEqual([null, "Settings"]);
   });
 });
 
