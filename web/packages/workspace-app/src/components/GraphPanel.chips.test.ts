@@ -290,3 +290,15 @@ describe("the chip state a tab keeps", () => {
     expect(parsed?.filters.tag).toBe(true);
   });
 });
+
+describe("the filesystem graph's chips", () => {
+  test("are named for what each one filters", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem" }));
+    openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
+    await settle(2);
+    const labels = [...document.body.querySelectorAll(".tab-menu-bubble .filter-row .mbtn-label")].map(
+      (el) => el.textContent?.trim(),
+    );
+    expect(labels).toEqual(["symlink", "hardlink", "directory", "markdown", "source"]);
+  });
+});
