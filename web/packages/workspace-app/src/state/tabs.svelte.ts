@@ -5836,7 +5836,7 @@ export function withholdUnresolvedLiveSave(t: FileTab): void {
   live.saveError = UNRESOLVED_LIVE_PUSH_REASON;
 }
 
-/// A successful live flush has reached disk after the uncertain push.
+/// A live flush or clean fresh-snapshot reconciliation confirms the uncertain push and saved buffer.
 export function clearUnresolvedLiveSave(t: FileTab): void {
   const live = liveFileTabById(t.id) ?? t;
   live.unresolvedLivePush = false;
