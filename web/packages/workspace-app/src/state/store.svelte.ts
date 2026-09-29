@@ -263,15 +263,8 @@ function effectiveTheme(choice: ThemeChoice): "light" | "dark" {
 
 export const ui = $state<{
   status: string | null;
-  /// Notification kind workspaces the auto-dismiss policy. Transient
-  /// statuses (action confirmations: "Copied path", "Saved", short
-  /// notify() pings) clear themselves after a short window;
-  /// persistent statuses (in-flight ops: "Moving...", errors) stay
-  /// until overwritten or dismissed. A bare `ui.status = ...` write
-  /// leaves `statusKind` null, which the status bar treats as
-  /// persistent: the pill offers Dismiss and never auto-clears. Transient
-  /// writes go through `setTransientStatus` (or `notify()` which routes
-  /// through that helper).
+  /// Writer metadata. Bare status writes leave this unchanged; transient
+  /// ownership also requires the live timer's message to match the text.
   statusKind: "transient" | "persistent" | null;
   statusAction: { kind: "workspace-warnings"; label: string } | null;
   /// Used to nudge tabs to reload on external changes.
@@ -527,7 +520,16 @@ registerOverridePersist((shortcuts) => {
 });
 
 const TRANSIENT_STATUS_DEFAULT_MS = 3000;
-let transientStatusTimer: ReturnType<typeof setTimeout> | null = null;
+let transientStatusOwner = $state.raw<{
+  message: string;
+  timer: ReturnType<typeof setTimeout> | null;
+} | null>(null);
+
+/// Whether the displayed text belongs to the live transient timer.
+export function isTransientStatus(): boolean {
+  return transientStatusOwner !== null &&
+    ui.status === transientStatusOwner.message && ui.statusKind === "transient";
+}
 
 /// Set an auto-dismissing status pill. Used for action
 /// confirmations (Copied, Saved, etc.) - anything where the user
@@ -537,20 +539,19 @@ export function setTransientStatus(
   msg: string,
   ms: number = TRANSIENT_STATUS_DEFAULT_MS,
 ): void {
-  if (transientStatusTimer !== null) {
-    clearTimeout(transientStatusTimer);
-    transientStatusTimer = null;
+  if (transientStatusOwner && transientStatusOwner.timer !== null) {
+    clearTimeout(transientStatusOwner.timer);
   }
+  const owner = { message: msg, timer: null as ReturnType<typeof setTimeout> | null };
+  transientStatusOwner = owner;
   ui.status = msg;
   ui.statusKind = "transient";
   ui.statusAction = null;
-  transientStatusTimer = setTimeout(() => {
-    transientStatusTimer = null;
-    // Only clear if the message hasn't been overwritten by a newer
-    // status during the window. A direct `ui.status = ...`
-    // (persistent) write stomps our transient mid-flight and we
-    // leave it alone.
-    if (ui.status === msg && ui.statusKind === "transient") {
+  owner.timer = setTimeout(() => {
+    if (transientStatusOwner !== owner) return;
+    const ownsText = isTransientStatus();
+    transientStatusOwner = null;
+    if (ownsText) {
       ui.status = null;
       ui.statusKind = null;
       ui.statusAction = null;
@@ -566,10 +567,10 @@ export function setTransientStatus(
 /// kind: a "Moving..." progress status re-clears when the move settles, and
 /// a workspace-warnings status re-asserts itself on the next info pass.
 export function dismissStatus(): void {
-  if (transientStatusTimer !== null) {
-    clearTimeout(transientStatusTimer);
-    transientStatusTimer = null;
+  if (transientStatusOwner && transientStatusOwner.timer !== null) {
+    clearTimeout(transientStatusOwner.timer);
   }
+  transientStatusOwner = null;
   ui.status = null;
   ui.statusKind = null;
   ui.statusAction = null;
