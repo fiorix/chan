@@ -3517,6 +3517,71 @@ impl WorkspaceHost {
         )
     }
 
+    /// The canonical key the workspace `root` names goes by. A path that a
+    /// registry row stores, as given and lexically normalized, names that
+    /// row. With a workspace runtime opened at that root, the key is that
+    /// runtime's canonical root, read without asking any filesystem. With
+    /// none, it is the path's canonical key ([`root_key`](Self::root_key)),
+    /// unless another workspace goes by that key, and then the canonical
+    /// path the row last resolved to. Any other path goes by its canonical
+    /// key.
+    async fn workspace_key(&self, root: &Path) -> Result<PathBuf, Error> {
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        let Some(row) = self
+            .library
+            .list_workspaces()
+            .into_iter()
+            .find(|row| row.root_path == given)
+        else {
+            return self.root_key(root).await;
+        };
+        let opened = {
+            let workspaces = self
+                .workspaces
+                .read()
+                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            workspaces
+                .values()
+                .find(|runtime| runtime.holds_workspace && runtime.root == row.root_path)
+                .map(|runtime| runtime.canonical_root.clone())
+        };
+        if let Some(key) = opened {
+            return Ok(key);
+        }
+        let key = self.root_key(root).await?;
+        if self.goes_by_another_workspace(&key, &row.root_path)? {
+            Ok(row.cached_canonical_path().to_path_buf())
+        } else {
+            Ok(key)
+        }
+    }
+
+    /// Whether a workspace other than the one whose registry row stores
+    /// `stored` goes by `key`: another row by a key it stores
+    /// ([`registry_row_keys`]), or a workspace runtime opened at another
+    /// root by its canonical root, which is the only key of a runtime whose
+    /// own root resolves elsewhere since its row was loaded. Asks no
+    /// filesystem.
+    fn goes_by_another_workspace(&self, key: &Path, stored: &Path) -> Result<bool, Error> {
+        if self
+            .library
+            .list_workspaces()
+            .iter()
+            .any(|row| row.root_path != stored && registry_row_keys(row).contains(&key))
+        {
+            return Ok(true);
+        }
+        let workspaces = self
+            .workspaces
+            .read()
+            .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        Ok(workspaces.values().any(|runtime| {
+            runtime.holds_workspace && runtime.root != stored && runtime.canonical_root == key
+        }))
+    }
+
     /// Remove the workspace at `root`: unmount it if mounted, forget it from the
     /// on/off overlay and purge its window records, then UNREGISTER it from the
     /// host library. The
@@ -3536,10 +3601,18 @@ impl WorkspaceHost {
     /// removal goes by. A close that found no row leaves nothing to
     /// unregister, and the removal answers `NotFound`.
     ///
+    /// The removal goes by the key [`workspace_key`](Self::workspace_key)
+    /// answers: a path that a registry row stores names that row, as the
+    /// launcher's delete and the devserver's forget send it, so a root
+    /// pointed at another registered workspace's folder since it was mounted
+    /// or registered, or at nothing, still removes its own workspace and
+    /// never the other one.
+    ///
     /// Holds the root's lock in the host's `root_locks` from the unmount
-    /// through the unregister, keyed by the canonical root computed
-    /// on the blocking pool first, so a mount of the same root cannot slip in
-    /// between and a caller of another root never waits on this one. The
+    /// through the unregister, keyed by that key, which a path that no row
+    /// stores computes on the blocking pool first, so a mount of the same
+    /// root cannot slip in between and a caller of another root never waits
+    /// on this one. The
     /// shared stores it writes (the overlay, the window registry, the library
     /// registry) serialize their writes under locks of their own, which is
     /// what keeps removals of different roots safe beside each other.
@@ -3568,7 +3641,7 @@ impl WorkspaceHost {
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let target = self.root_key(root).await?;
+        let target = self.workspace_key(root).await?;
         let _root_lock = self.root_locks.lock(&target).await;
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
