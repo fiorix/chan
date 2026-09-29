@@ -4127,6 +4127,135 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_counts_only_the_replayed_ring_chunks() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id();
+        let prefix = b"__OLDER__\x1b[?1h";
+        assert!(state.terminal_sessions.inject_output(id, prefix));
+        let chunks: &[&[u8]] = &[b"__FIRST__", b"\xc3\xa9\n", b"__LAST__\n"];
+        for chunk in chunks {
+            assert!(state.terminal_sessions.inject_output(id, chunk));
+        }
+        let mut socket = dial_terminal(
+            address,
+            &format!(
+                "cols=80&rows=24&session={id}&since={}&generation={}",
+                prefix.len(),
+                terminal.generation
+            ),
+        )
+        .await;
+        let frames = read_prelude(&mut socket).await;
+        let WireFrame::Control(session) = &frames[0] else {
+            panic!("session frame comes first: {:?}", wire_shape(&frames));
+        };
+        assert_eq!(session["type"], "session");
+        let mut replay = Vec::new();
+        for frame in &frames[1..frames.len() - 2] {
+            let WireFrame::Bytes(bytes) = frame else {
+                panic!("only replay bytes follow the session frame");
+            };
+            replay.extend_from_slice(bytes);
+        }
+        assert_eq!(replay, chunks.concat());
+        assert_eq!(
+            wire_shape(&frames[frames.len() - 2..]),
+            wire_shape(&[
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        assert_eq!(
+            session["replay_bytes"].as_u64(),
+            Some(replay.len() as u64),
+            "replay_bytes counts the ring bytes on the socket, excluding the mode reassert"
+        );
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_is_zero_for_an_alternate_screen_prelude() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id();
+        assert!(state.terminal_sessions.inject_output(id, b"__HISTORY__\n"));
+        assert!(state
+            .terminal_sessions
+            .inject_output(id, b"\x1b[?1049h\x1b[?1000h"));
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(ALT_SCREEN_ATTACH_PRELUDE.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1000h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        let WireFrame::Control(session) = &frames[0] else {
+            unreachable!();
+        };
+        assert_eq!(
+            session["replay_bytes"].as_u64(),
+            Some(0),
+            "replay_bytes excludes the alternate-screen prelude and mode reassert"
+        );
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_is_zero_at_the_ring_end() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id();
+        let history = b"__HISTORY__\n\x1b[?1h";
+        assert!(state.terminal_sessions.inject_output(id, history));
+        let mut socket = dial_terminal(
+            address,
+            &format!(
+                "cols=80&rows=24&session={id}&since={}&generation={}",
+                history.len(),
+                terminal.generation
+            ),
+        )
+        .await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        let WireFrame::Control(session) = &frames[0] else {
+            unreachable!();
+        };
+        assert_eq!(session["seq"].as_u64(), Some(history.len() as u64));
+        assert_eq!(
+            session["replay_bytes"].as_u64(),
+            Some(0),
+            "replay_bytes is zero when the cursor already names the ring end"
+        );
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+    }
+
     // A Resize frame resizes the PTY: the session echoes the new size and the
     // foreground program reads it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
