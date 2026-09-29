@@ -173,6 +173,12 @@ describe("fold gutter: heading detection from the syntax tree", () => {
     expect(rangeOf(s2, "## OnLastLine")).toBeNull();
   });
 
+  test("11. a heading followed at once by a heading of its level has nothing to fold", () => {
+    const s = mkState(["## A", "## B", "body"].join("\n"));
+    expect(rangeOf(s, "## A")).toBeNull();
+    expect(realRange(rangeOf(s, "## B")).to).toBe(s.doc.length);
+  });
+
   // The 4000-line filler puts `## Bottom` far past the initial in-budget
   // parse (which never covers more than the first 3000 characters at state
   // creation), so both cases below genuinely exercise the helper against an
@@ -274,6 +280,27 @@ describe("the fold gutter", () => {
       folded.push({ from, to });
     });
     expect(folded).toEqual([headingFoldRange(view.state, 0)]);
+    view.destroy();
+    parent.remove();
+  });
+
+  test("paints a chevron only on a heading with a section to fold", () => {
+    const parent = document.body.appendChild(document.createElement("div"));
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        // `## A` is followed at once by `## B`, and `## C` is the last line:
+        // neither has anything to fold.
+        doc: "## A\n## B\nbody\n## C",
+        extensions: [chanMarkdown(), headingFold()],
+      }),
+    });
+    ensureSyntaxTree(view.state, view.state.doc.length, 5000);
+    // The gutter's hidden spacer carries a chevron of its own for width.
+    const painted = [...parent.querySelectorAll<HTMLElement>(".cm-md-fold-chevron")].filter(
+      (el) => el.closest<HTMLElement>(".cm-gutterElement")?.style.visibility !== "hidden",
+    );
+    expect(painted).toHaveLength(1);
     view.destroy();
     parent.remove();
   });
