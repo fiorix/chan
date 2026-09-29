@@ -3522,6 +3522,14 @@ impl WorkspaceHost {
     /// stay consistent (a CLI-side `config.toml` edit alone would leave them
     /// stale, so the workspace lingers in the launcher and survives a restart).
     ///
+    /// The unregister removes the registry row the close closed or found, by
+    /// the root that row stores, and resolves no path to find it: a root that
+    /// resolves elsewhere since the registry was loaded, onto another
+    /// registered workspace's folder or nowhere, finds another row or none
+    /// when it is resolved again. The writer lock's holder is the key the
+    /// removal goes by. A close that found no row leaves nothing to
+    /// unregister, and the removal answers `NotFound`.
+    ///
     /// Holds the root's lock in the host's `root_locks` from the unmount
     /// through the unregister, keyed by the canonical root computed
     /// on the blocking pool first, so a mount of the same root cannot slip in
@@ -3628,7 +3636,8 @@ impl WorkspaceHost {
         // each alone, after the registry's lock is released.
         let removed = {
             let library = self.library.clone();
-            let root = root.to_path_buf();
+            let stored = stored.map(Path::to_path_buf);
+            let holder = target.clone();
             let keys = row.lifecycle_keys(&target);
             let overlay = self.workspace_overlay().cloned();
             let mount_state = Arc::clone(&self.mount_state);
@@ -3643,7 +3652,13 @@ impl WorkspaceHost {
                     if let Some(probe) = probe {
                         probe(RemovalHop::Unregister);
                     }
-                    let removed = unregister_registered_workspace(&library, &root)?;
+                    // The row the close found, by the root it stores: named
+                    // again, a root that resolves elsewhere since the
+                    // registry was loaded finds another row or none.
+                    let removed = match &stored {
+                        Some(stored) => unregister_registered_row(&library, stored, &holder)?,
+                        None => false,
+                    };
                     // Found or not, the removal answers as if the workspace
                     // is gone, and an off recorded beside this call, by a
                     // removal refused at its permit or by a close, would name
@@ -4827,13 +4842,18 @@ fn registered_workspace_paths(
     library.workspace_paths_for(root)
 }
 
-/// [`Library::unregister_workspace`] for the removal, which must call it off
-/// the runtime thread: the registry canonicalizes `root` and resets its
-/// metadata on disk.
-fn unregister_registered_workspace(library: &Library, root: &Path) -> chan_workspace::Result<bool> {
+/// [`Library::unregister_workspace_row`] for the removal, which must call it
+/// off the runtime thread: it canonicalizes `holder`, the key the removal
+/// goes by, as the writer lock's holder, and resets the row's metadata on
+/// disk. `stored` is the root the row the removal's close found stores.
+fn unregister_registered_row(
+    library: &Library,
+    stored: &Path,
+    holder: &Path,
+) -> chan_workspace::Result<bool> {
     #[cfg(test)]
-    observe_canonicalization("unregister_workspace");
-    library.unregister_workspace(root)
+    observe_canonicalization("unregister_workspace_row");
+    library.unregister_workspace_row(stored, holder)
 }
 
 /// Window records rooted at the workspace a removal holds, matched by the
