@@ -113,7 +113,11 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
         })
         .catch((err) => {
           if (!alive || seq !== reqSeq) return;
+          // The rows on screen must be the ones Enter and the arrows
+          // index, so the list is drawn again without the old hits.
           hits = [];
+          selectedIndex = 0;
+          render();
           status.textContent = `Contact lookup failed: ${err.message ?? err}`;
         });
     }, FETCH_DEBOUNCE_MS);
