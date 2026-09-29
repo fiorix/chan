@@ -344,11 +344,13 @@ function pad2(n) {
 }
 
 // Close/cancel chords. The connecting window must be closable from the
-// keyboard: Cmd+W on macOS normally arrives via the File > Close Window
-// menu item, and this listener covers Ctrl+D everywhere plus Cmd/Ctrl+W
-// where no menu item claims the chord (Linux has no Close Window
-// accelerator). Every one of them reaches request_close_window, which
-// hides a window on this page rather than discarding it: the retry loop
+// keyboard. On macOS the key bridge, an init script whose capture
+// listener on the window runs before this one, takes Cmd+W and invokes
+// request_close_window itself; the webview hands the chord to the File >
+// Close Window item, which closes the window the same way, only when the
+// page leaves it unhandled. This listener covers Ctrl+D and Ctrl+W, which
+// the bridge leaves to the page. request_close_window hides a window on
+// this page rather than discarding it: the retry loop
 // ends with the page, and the window's record keeps the terminal
 // sessions it held before this page loaded. Capture phase so
 // a focused element cannot swallow the chord first; no-op in the

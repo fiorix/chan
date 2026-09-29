@@ -3404,15 +3404,16 @@ mod tests {
     #[test]
     fn close_requested_arm_prompts_a_buryable_window_and_real_closes_the_rest() {
         const SERVE_RS: &str = include_str!("serve.rs");
-        // bury_window_now is the one bury body the two callers (the silent-hide
-        // gesture, the SPA Hide callback) share. Its definition is searched in
+        // bury_window_now is the one bury body its three callers (the
+        // silent-hide gesture, the SPA Hide callback, the close of a devserver
+        // window on its connecting page) share. Its definition is searched in
         // the production half, since this test spells it.
         let (production, _) = SERVE_RS
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("the test module separates the production code");
         assert!(
             production.contains("pub(crate) fn bury_window_now("),
-            "bury_window_now must exist for the silent-hide + Hide-callback paths",
+            "bury_window_now must exist for the silent-hide, Hide-callback and connecting-page close paths",
         );
         // The host-to-webview confirm dispatch rides the chan:command bridge:
         // the script the arm evaluates names the confirm command.
