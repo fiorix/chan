@@ -11,15 +11,16 @@ import { afterEach, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import AppStatusBar from "./AppStatusBar.svelte";
 import FileInfoBody from "./FileInfoBody.svelte";
-import { setTransientStatus, tree, ui, workspace } from "../state/store.svelte";
+import { dismissStatus, setTransientStatus, tree, ui, workspace } from "../state/store.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
 afterEach(() => {
   for (const view of mounted.splice(0)) unmount(view);
   document.body.innerHTML = "";
-  ui.status = null;
-  ui.statusKind = null;
+  dismissStatus();
+  vi.clearAllTimers();
+  vi.useRealTimers();
   tree.entries = [];
   workspace.info = null;
   vi.restoreAllMocks();
@@ -64,4 +65,57 @@ test("a transient status offers no Dismiss", () => {
   const bar = statusBar();
   expect(bar.querySelector('[aria-label="status message"]')?.textContent).toContain("Copied path");
   expect(bar.querySelector('[aria-label="dismiss status"]')).toBeNull();
+});
+
+test("a bare replacement inside a transient window offers Dismiss", async () => {
+  vi.useFakeTimers();
+  setTransientStatus("Copied path");
+  const bar = statusBar();
+  ui.status = "copy failed: unavailable";
+  await tick();
+  const dismiss = bar.querySelector<HTMLButtonElement>('[aria-label="dismiss status"]');
+  expect(dismiss, "replacement text is not owned by the transient timer").not.toBeNull();
+  dismiss!.click();
+  await tick();
+  expect(ui.status, "Dismiss clears replacement text").toBeNull();
+  expect(vi.getTimerCount(), "Dismiss retires the timer").toBe(0);
+});
+
+test("a bare clear followed by ordinary text offers Dismiss", async () => {
+  vi.useFakeTimers();
+  setTransientStatus("Copied path");
+  const bar = statusBar();
+  ui.status = null;
+  await tick();
+  ui.status = "upload failed: unavailable";
+  await tick();
+  expect(bar.querySelector('[aria-label="dismiss status"]'), "ordinary text after clear is dismissable").not.toBeNull();
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(ui.status).toBe("upload failed: unavailable");
+  expect(bar.querySelector('[aria-label="dismiss status"]')).not.toBeNull();
+});
+
+test("an expired transient owner cannot claim the same text written later", async () => {
+  vi.useFakeTimers();
+  setTransientStatus("Copied path");
+  const bar = statusBar();
+  ui.status = "copy failed: unavailable";
+  await vi.advanceTimersByTimeAsync(3000);
+  ui.status = "Copied path";
+  await tick();
+  expect(bar.querySelector('[aria-label="dismiss status"]'), "expired owner is retired after replacement").not.toBeNull();
+});
+
+test("a warnings action keeps its own action after replacing a transient", async () => {
+  vi.useFakeTimers();
+  setTransientStatus("Copied path");
+  const bar = statusBar();
+  ui.status = "Workspace warnings";
+  ui.statusAction = { kind: "workspace-warnings", label: "Workspace warnings" };
+  await tick();
+  expect(bar.querySelector('[aria-label="dismiss status"]')).toBeNull();
+  expect(bar.querySelector('[aria-label="open workspace warnings"]')?.tagName).toBe("BUTTON");
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(ui.status).toBe("Workspace warnings");
+  expect(ui.statusAction?.kind).toBe("workspace-warnings");
 });
