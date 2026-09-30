@@ -2956,6 +2956,7 @@ function notSavedSentence(refused: FileTab[]): string {
 }
 
 const CLASSIC_SAVE_FAILURE_PREFIX = "the save request failed (";
+const DRAWING_PARSE_FAILURE_PREFIX = "the drawing does not parse (";
 
 function classicSaveFailure(error: unknown): string {
   return `${CLASSIC_SAVE_FAILURE_PREFIX}${(error as Error).message})`;
@@ -6044,7 +6045,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     // A pass clears the reason at once, since the text parses, so a save
     // that then meets a conflict keeps no reason the text no longer has.
     // The hold stays until the write below lands.
-    live.saveError = reason === null ? null : `the drawing does not parse (${reason})`;
+    live.saveError = reason === null ? null : `${DRAWING_PARSE_FAILURE_PREFIX}${reason})`;
     if (reason !== null) {
       live.refusedUnwritten = true;
       return;
@@ -8408,7 +8409,7 @@ export function rekeyTabsForRename(from: string, to: string): void {
       }
       // A drawing parse reason depends on the path's format; a failed write
       // still names an unwritten buffer after a rename. The hold stays.
-      if (!isExcalidraw(t.path) && t.saveError?.startsWith("the drawing does not parse (")) {
+      if (!isExcalidraw(t.path) && t.saveError?.startsWith(DRAWING_PARSE_FAILURE_PREFIX)) {
         t.saveError = null;
       }
     }
