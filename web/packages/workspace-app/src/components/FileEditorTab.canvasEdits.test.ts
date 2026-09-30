@@ -535,6 +535,86 @@ describe("the drawing library stand-in", () => {
   });
 });
 
+describe("a drawing library failure", () => {
+  const MESSAGE = "The drawing library failed. Changes drawn since the board last paused may be lost. Switch to Source and back, or close and reopen the tab to reload the drawing.";
+
+  test("a failure with a stroke waiting keeps the saved buffer and writes nothing", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    board.stroke({ id: "waiting", version: 1 });
+    board.fail();
+    await tick();
+    await vi.advanceTimersByTimeAsync(200);
+    const afterWait = { buffer: tab.content, dirty: isDirty(tab) };
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(afterWait, "failed library must not publish an empty scene").toEqual({ buffer: DRAWING, dirty: false });
+    expect({ writes: write.mock.calls.length, disk: disk.get(tab.path)?.content }).toEqual({ writes: 0, disk: DRAWING });
+  });
+
+  test("a failure prevents theme and read-only changes from rendering the library again", async () => {
+    const { tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    await board.start();
+    board.fail();
+    await tick();
+    const count = render.mock.calls.length;
+    applyLocalTheme(effectiveHybridSurfaceTheme("editor") === "dark" ? "light" : "dark");
+    await tick();
+    setTabReadMode(tab, true);
+    await tick();
+    setTabReadMode(tab, false);
+    await tick();
+
+    expect(render.mock.calls.length, "failed library must not render again").toBe(count);
+    expect({ buffer: tab.content, writes: write.mock.calls.length }).toEqual({ buffer: DRAWING, writes: 0 });
+  });
+
+  test("a failure after seeding shows the loss and recovery alert", async () => {
+    const { tab } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { target, board } = await mountBoard(tab);
+    await board.start();
+    board.fail();
+    await tick();
+
+    expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe(MESSAGE);
+  });
+
+  test("a failure before API handover shows the alert without publishing", async () => {
+    const { tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { target, board } = await mountBoard(tab);
+    board.fail();
+    await tick();
+
+    expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe(MESSAGE);
+    expect({ buffer: tab.content, writes: write.mock.calls.length }).toEqual({ buffer: DRAWING, writes: 0 });
+  });
+
+  test("a new mount after failure restores the buffer without writing", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const first = await mountBoard(tab);
+    vi.useFakeTimers();
+    await first.board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    first.board.fail();
+    await tick();
+    await unmount(first.component);
+    mounted.splice(mounted.indexOf(first.component), 1);
+    const second = await mountBoard(tab);
+    await second.board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ board: second.board.elements, buffer: tab.content, writes: write.mock.calls.length })
+      .toEqual({ board: [ON_DISK], buffer: DRAWING, writes: 0 });
+  });
+});
+
 describe("a drawing nobody drew on", () => {
   test("a load that lands before the library's init shows the drawing and writes nothing", async () => {
     const { pane, tab, write, reads } = await loadedTab("notes/late.excalidraw", DRAWING);
@@ -1068,6 +1148,21 @@ describe("a live drawing", () => {
     expect(tab.doc?.state).toBe("attached");
     return { pane, tab, board, socket, reads };
   }
+
+  test("a failed live board pushes no scene part after a late change callback", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    const rendered = () => boardPropsFromRender(render.mock.calls.at(-1)![0]);
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(200);
+    board.pickBackground("#b2f2bb");
+    board.fail();
+    await tick();
+    rendered().onChange();
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(socket.pushes(), "failed library must not push elements, files or appState").toEqual([]);
+    expect(tab.content).toBe(DRAWING);
+  });
 
   test("Reload from disk sends a waiting live stroke before asking", async () => {
     const { tab, board, socket } = await attachedDrawing();

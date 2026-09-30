@@ -147,6 +147,43 @@ describe("ExcalidrawCanvas island", () => {
   });
 });
 
+describe("the installed React error boundary", () => {
+  test("unmounts the failing child before notifying the boundary once", async () => {
+    const React = await vi.importActual<typeof import("react")>("react");
+    const ReactDOM = await vi.importActual<typeof import("react-dom/client")>("react-dom/client");
+    const { act } = await vi.importActual<{ act: (run: () => void) => Promise<void> }>("react-dom/test-utils");
+    const events: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    class Child extends React.Component<{ fail: boolean }> {
+      componentWillUnmount(): void { events.push("unmount"); }
+      render(): unknown {
+        if (this.props.fail) throw new Error("render failed");
+        return React.createElement("span", null, "drawing");
+      }
+    }
+    class Boundary extends React.Component<{ children: unknown }, { failed: boolean }> {
+      state = { failed: false };
+      static getDerivedStateFromError(): { failed: boolean } { return { failed: true }; }
+      componentDidCatch(): void { events.push("catch"); }
+      render(): unknown { return this.state.failed ? null : this.props.children; }
+    }
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = ReactDOM.createRoot(host);
+    try {
+      await act(() => { root.render(React.createElement(Boundary, null, React.createElement(Child, { fail: false }))); });
+      expect(host.textContent).toBe("drawing");
+      await act(() => { root.render(React.createElement(Boundary, null, React.createElement(Child, { fail: true }))); });
+      expect(events).toEqual(["unmount", "catch"]);
+      expect(host.textContent).toBe("");
+    } finally {
+      await act(() => { root.unmount(); });
+      errors.mockRestore();
+      host.remove();
+    }
+  });
+});
+
 describe("inactive canvas tab hides via display:none (WKWebView island leak)", () => {
   // A GPU-composited Excalidraw island (the zoom/undo footer) leaks through
   // an ancestor's visibility:hidden in WKWebView; hiding the shell with
@@ -856,4 +893,3 @@ describe("the buffer the classic PUT would carry", () => {
     vi.useRealTimers();
   });
 });
-
