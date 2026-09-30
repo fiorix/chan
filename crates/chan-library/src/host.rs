@@ -6901,21 +6901,23 @@ mod tests {
     /// runtime down before it reports the refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mount_built_before_the_last_sweep_shuts_its_runtime_down() {
+        let (host, builder, workspace, _dirs) = sweep_host();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let mounting = host.clone();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_workspace(workspace, serve_config("/late"))
+                .await
+        });
+        // Tenant setup can be delayed by the executor; the bound covers the
+        // shutdown sweep and refusal once the root check holds publication.
+        entered_rx.await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let (host, builder, workspace, _dirs) = sweep_host();
-            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
-                entered: entered_tx,
-                release: release_rx,
-            });
-            let mounting = host.clone();
-            let mount = tokio::spawn(async move {
-                mounting
-                    .open_workspace(workspace, serve_config("/late"))
-                    .await
-            });
-            entered_rx.await.unwrap();
             assert_eq!(builder.built(), 1, "fixture: the mount did not build");
             host.shutdown_all().await.unwrap();
             release_tx.send(()).unwrap();
