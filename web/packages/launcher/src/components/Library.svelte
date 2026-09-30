@@ -99,7 +99,7 @@
     return node.kind === "local" ? "This machine" : devserverName(node.devserver!);
   }
 
-  // Per-workspace card expand state, keyed by the stable workspace_id so it
+  // Per-workspace card expand state, keyed by the machine and workspace so it
   // survives the live watch-push re-renders (never reset on a poll). Default
   // collapsed; the count badge shows how many windows are nested.
   const expanded = $state<Record<string, boolean>>({});
@@ -223,6 +223,7 @@
 
 {#snippet workspaceCard(node: WorkspaceNode, kind: "workspace" | "served", devserverId: string | null)}
   {@const ws = node.ws}
+  {@const key = rowKey(ws)}
   {@const hasWindows = node.count > 0}
   {@const checked =
     kind === "workspace"
@@ -244,11 +245,11 @@
       {#if hasWindows}
         <button
           class="chevron"
-          class:expanded={isExpanded(ws.workspace_id)}
+          class:expanded={isExpanded(key)}
           type="button"
-          aria-label={`${isExpanded(ws.workspace_id) ? "Collapse" : "Expand"} ${displayName(ws)}`}
-          aria-expanded={isExpanded(ws.workspace_id)}
-          onclick={() => toggleExpand(ws.workspace_id)}>
+          aria-label={`${isExpanded(key) ? "Collapse" : "Expand"} ${displayName(ws)}`}
+          aria-expanded={isExpanded(key)}
+          onclick={() => toggleExpand(key)}>
           <ChevronRight size={15} />
         </button>
       {:else}
@@ -270,9 +271,9 @@
           class="count-badge"
           type="button"
           title={`${node.count} window${node.count === 1 ? "" : "s"}`}
-          aria-label={`${isExpanded(ws.workspace_id) ? "Collapse" : "Expand"} ${displayName(ws)} windows`}
-          aria-expanded={isExpanded(ws.workspace_id)}
-          onclick={() => toggleExpand(ws.workspace_id)}>
+          aria-label={`${isExpanded(key) ? "Collapse" : "Expand"} ${displayName(ws)} windows`}
+          aria-expanded={isExpanded(key)}
+          onclick={() => toggleExpand(key)}>
           <AppWindow size={12} />
           {node.count}
         </button>
@@ -340,7 +341,7 @@
         </button>
       {/if}
     </div>
-    {#if hasWindows && isExpanded(ws.workspace_id)}
+    {#if hasWindows && isExpanded(key)}
       <div class="ws-windows">
         {#each node.windows as w (w.window_id)}
           <WindowRow {w} icon />
