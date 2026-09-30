@@ -80,6 +80,78 @@ function escape(): void {
 }
 
 describe("CommandDeck lazy confirmation", () => {
+  it("accepts the first Enter to cancel a pointer-opened confirmation", async () => {
+    const onChoose = vi.fn();
+    mountDeck(item(confirmation("Pointer confirmation")), onChoose);
+    await flush();
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-decisions button.chosen")?.textContent).toBe("Cancel");
+
+    target.querySelector(".deck-input")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    await flush();
+
+    expect(target.querySelector(".deck-operation"), "the first Enter chooses Cancel").toBeNull();
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
+  it("accepts the first Enter after a pointer starts lazy confirmation", async () => {
+    const preparing = deferred<DeckConfirm>();
+    const onChoose = vi.fn();
+    mountDeck({ ...item(() => preparing.promise), awaitResult: false }, onChoose);
+    await flush();
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Checking...");
+    preparing.resolve(confirmation("Pointer confirmation"));
+    await flush();
+
+    const input = target.querySelector(".deck-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+
+    expect(onChoose, "the first Enter chooses the selected action").toHaveBeenCalledOnce();
+  });
+
+  it("requires an Enter release before a keyboard-opened confirmation can act", async () => {
+    const onChoose = vi.fn();
+    mountDeck({ ...item(confirmation("Keyboard confirmation")), awaitResult: false }, onChoose);
+    await flush();
+    const input = target.querySelector(".deck-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(onChoose, "a held opening Enter cannot execute the action").not.toHaveBeenCalled();
+
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(onChoose).toHaveBeenCalledOnce();
+  });
+
+  it("retains an Enter release that arrives during confirmation preparation", async () => {
+    const preparing = deferred<DeckConfirm>();
+    mountDeck(item(() => preparing.promise));
+    await flush();
+    const input = target.querySelector(".deck-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    preparing.resolve(confirmation("Keyboard confirmation"));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(target.querySelector(".deck-operation")).toBeNull();
+  });
+
   it("re-prepares a confirmation when preparation failed and Retry is chosen", async () => {
     const confirm = vi
       .fn<() => Promise<DeckConfirm>>()
