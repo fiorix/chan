@@ -262,13 +262,14 @@ export type FileTab = {
   mode: Mode;
   loading: boolean;
   loadProgress?: { loadedBytes: number; totalBytes: number | null };
-  /// What the file tab shows in place of its editor: a load, a save or a
-  /// draft's close that failed.
+  /// A failed load leaves no complete buffer to edit, so the file tab shows
+  /// this in place of its editor.
   error: string | null;
-  /// Why a save was refused while its buffer stays in the editor. A
-  /// drawing parse error follows the buffer; an unresolved live push
-  /// remains until an authority answer or fresh reconciliation permits a
-  /// writer to save. Kept apart from `error`, which replaces the editor.
+  /// Why a save wrote nothing while its buffer stays in the editor. A
+  /// drawing parse error follows the buffer; a failed classic request stays
+  /// until a later request settles; an unresolved live push remains until an
+  /// authority answer or fresh reconciliation permits a writer to save.
+  /// Kept apart from `error`, which replaces the editor.
   saveError?: string | null;
   /// A live push whose outcome is unknown must not race a classic PUT.
   /// Kept on the tab across a session release until an ack or a fresh
@@ -2956,6 +2957,10 @@ function notSavedSentence(refused: FileTab[]): string {
 
 const CLASSIC_SAVE_FAILURE_PREFIX = "the save request failed (";
 
+function classicSaveFailure(error: unknown): string {
+  return `${CLASSIC_SAVE_FAILURE_PREFIX}${(error as Error).message})`;
+}
+
 async function confirmCloseTabs(
   tabs: Tab[],
   opts?: CloseTabsOptions,
@@ -2979,8 +2984,7 @@ async function confirmCloseTabs(
       await performSave(tab);
     } catch (e) {
       const live = liveFileTabById(tab.id) ?? tab;
-      live.error = `save failed: ${(e as Error).message}`;
-      return false;
+      live.saveError = classicSaveFailure(e);
     }
     const live = liveFileTabById(tab.id) ?? tab;
     if (!isDirty(live)) continue;
@@ -3036,8 +3040,8 @@ async function confirmCloseTabs(
 const tabLoadVersions = new Map<string, number>();
 const tabLoadControllers = new Map<string, AbortController>();
 /// Tabs whose last read failed for a reason other than a missing file. Such a
-/// tab's buffer holds at most the bytes that had arrived, and nothing on the
-/// tab itself says so: its `error` is also written by failed saves and closes.
+/// tab's buffer holds at most the bytes that had arrived; its `error` replaces
+/// the editor until a complete load gives it a buffer to show.
 const tabLoadFailures = new Set<string>();
 
 /// End the load running for `tabId`, because its tab has left the layout.
@@ -3806,14 +3810,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       !isDirty(tab) &&
       (tab.content === NEW_DRAFT_SEED || tab.content === NEW_DIAGRAM_SEED);
     if (!contentIsEmpty && isDirty(tab)) {
-      await performSave(tab);
-      if (isDirty(tab)) {
-        // A draft has its own close flow, so a refused buffer is not asked
-        // about here: the close is refused, and says why.
-        const live = liveFileTabById(tab.id) ?? tab;
-        if (live.saveError) notify(`${tabLabel(live)} was not saved.`);
-        return false;
-      }
+      if (!(await saveDraftEdits(tab))) return false;
     }
     const info = await api.inspectDraft(tab.path);
     if ((contentIsEmpty || isPristineSeed) && !info.has_attachments) {
@@ -3835,17 +3832,31 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       return true;
     }
     if (isDirty(tab)) {
-      await performSave(tab);
-      if (isDirty(tab)) return false;
+      if (!(await saveDraftEdits(tab))) return false;
     }
     const promoted = await api.promoteDraft(tab.path, decision.target);
     notifyDraftPromoted(promoted.path);
     notify(`Draft saved to ${promoted.path}`);
     return true;
   } catch (e) {
-    tab.error = `draft close failed: ${(e as Error).message}`;
+    notify(`Draft close failed: ${(e as Error).message}`);
     return false;
   }
+}
+
+/// A draft has its own close and promotion flows, so an unsaved buffer stays
+/// open with one notice instead of joining the ordinary close dialog.
+async function saveDraftEdits(tab: FileTab): Promise<boolean> {
+  try {
+    await performSave(tab);
+  } catch (e) {
+    const live = liveFileTabById(tab.id) ?? tab;
+    live.saveError = classicSaveFailure(e);
+  }
+  const live = liveFileTabById(tab.id) ?? tab;
+  if (!isDirty(live)) return true;
+  if (live.saveError) notify(`${tabLabel(live)} was not saved because ${live.saveError}.`);
+  return false;
 }
 
 /// Whether closing `tab` should auto-discard it as an empty editable file: it
@@ -3897,8 +3908,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     // module). Resolved at user-action time, never at module-eval.
     const { uiPathPrompt } = await import("./store.svelte");
     if (isDirty(tab)) {
-      await performSave(tab);
-      if (isDirty(tab)) return false;
+      if (!(await saveDraftEdits(tab))) return false;
     }
     const info = await api.inspectDraft(tab.path);
     // The draft Save reuses PathPromptModal (autocomplete, live status
@@ -3941,8 +3951,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     // takes it verbatim; the trailing slash on a directory target is
     // harmless.
     if (isDirty(tab)) {
-      await performSave(tab);
-      if (isDirty(tab)) return false;
+      if (!(await saveDraftEdits(tab))) return false;
     }
     const promoted = await api.promoteDraft(tab.path, target);
     notifyDraftPromoted(promoted.path);
@@ -3950,7 +3959,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     notify(`Draft saved to ${promoted.path}`);
     return true;
   } catch (e) {
-    tab.error = `draft save failed: ${(e as Error).message}`;
+    notify(`Draft save failed: ${(e as Error).message}`);
     return false;
   }
 }
@@ -5869,9 +5878,8 @@ export type LiveSessionKind = {
   /// now, which also asks the server for a prompt flush.
   release: (tabId: string, immediate: boolean) => void;
   /// Is `tabId`'s session degraded by a still-retrying CONNECTION outage
-  /// (dead server)? When true the classic autosave PUT is doomed and its
-  /// `tab.error` would unmount the editor, so the save path stays quiet
-  /// and leaves the buffer for the reattach diff-push.
+  /// (dead server)? When true the classic autosave PUT is doomed, so the
+  /// save path stays quiet and leaves the buffer for the reattach diff-push.
   savePaused: (tabId: string) => boolean;
   /// Does `tabId`'s session hold state the DISK does not (unconfirmed
   /// edits, an in-flight push, or a confirmed-but-unflushed authority)?
@@ -5927,7 +5935,7 @@ export function isDocAttached(t: FileTab): boolean {
 /// True when the classic autosave/PUT path must stay quiet: either the
 /// authority owns saves (`isDocAttached`), a previous push is unresolved,
 /// or the session is degraded by a still-retrying connection outage where
-/// a doomed PUT would replace the editor with an error placeholder. The
+/// another PUT would fail. The
 /// tab carries the unresolved claim across session release and object
 /// replacement; the degraded outage query handles the remaining case.
 export function isDocSavePaused(t: FileTab): boolean {
@@ -5952,7 +5960,7 @@ export function setTabDocState(t: FileTab, doc: DocTabState | null): void {
 /// Single source of truth for "send this tab's content to the
 /// server". Both autosave and explicit saveTab funnel through here.
 /// On 409, opens the conflict dialog and returns; the dialog's
-/// Reload / Overwrite buttons workspace the recovery.
+/// Reload / Overwrite buttons resolve the recovery.
 ///
 /// Format-specific pre-checks live here so the gate is uniform across
 /// every save. Only a drawing is checked, since a scene that does not
@@ -6020,8 +6028,8 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   const live = liveFileTabById(t.id) ?? t;
   // Connection-outage suppression: the session is degraded by a still-
   // retrying dead-server drop, so a classic PUT would hit the same
-  // unreachable server and its `tab.error` would swap the editor for the
-  // error placeholder, unmounting the collab view and losing the buffer.
+  // unreachable server and repeat the failed request. A failed request keeps
+  // the editor, but retrying on every quiet period cannot make progress.
   // Stay quiet; the edits live in the buffer (and editorBuffer) for the
   // reattach diff-push. A reachable degraded session may PUT only after
   // its prior push has a known outcome.
@@ -6080,7 +6088,9 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   } catch (e) {
     if (e instanceof ApiError && (e.status === 409 || e.status === 428)) {
       const current = liveFileTabById(t.id) ?? live;
-      if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) current.saveError = null;
+      if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) {
+        current.saveError = null;
+      }
       const data = e.data as {
         current_mtime?: number | null;
         current_mtime_ns?: string | null;
@@ -6140,7 +6150,7 @@ export function scheduleAutosave(paneId: string, tabId: string): void {
       // the one the layout holds any more; a message written on the old one
       // is never shown.
       const live = liveFileTabById(tabId) ?? t;
-      live.error = `autosave failed: ${(e as Error).message}`;
+      live.saveError = classicSaveFailure(e);
     }
   }, AUTOSAVE_DEBOUNCE_MS);
   autosaveTimers.set(tabId, timer);
@@ -7140,11 +7150,13 @@ export async function closeFileTabAfterMove(
     try {
       await performSave(tab);
     } catch (e) {
-      tab.error = `save failed: ${(e as Error).message}`;
+      const live = liveFileTabById(tab.id) ?? tab;
+      live.saveError = classicSaveFailure(e);
+      notify(`${tabLabel(live)} was not saved and stays in this window.`);
       return;
     }
-    if (isDirty(tab)) {
-      const live = liveFileTabById(tab.id) ?? tab;
+    const live = liveFileTabById(tab.id) ?? tab;
+    if (isDirty(live)) {
       if (live.saveError) notify(`${tabLabel(live)} was not saved and stays in this window.`);
       return;
     }
@@ -8371,8 +8383,8 @@ export function tabsForPath(path: string): { paneId: string; tabId: string }[] {
 ///
 /// Tabs that were dirty stay dirty after the rename: the user's
 /// unsaved buffer follows the file. If the new path doesn't accept
-/// it (kind change, etc.) the next save surfaces the failure via
-/// the existing error channel; we don't need to special-case here.
+/// it (kind change, etc.) the next save surfaces the failure beside
+/// the editor.
 export function rekeyTabsForRename(from: string, to: string): void {
   // Move the persisted caret(s) with the file/dir so a renamed file keeps its
   // remembered caret and does not orphan a stale entry.
@@ -8394,9 +8406,11 @@ export function rekeyTabsForRename(from: string, to: string): void {
       } else {
         continue;
       }
-      // A refusal's reason names a drawing, and the check reads no other
-      // path. The text is still unwritten, so the hold stays.
-      if (!isExcalidraw(t.path)) t.saveError = null;
+      // A drawing parse reason depends on the path's format; a failed write
+      // still names an unwritten buffer after a rename. The hold stays.
+      if (!isExcalidraw(t.path) && t.saveError?.startsWith("the drawing does not parse (")) {
+        t.saveError = null;
+      }
     }
   }
 }

@@ -186,7 +186,7 @@ describe("tab close confirmation", () => {
     const closing = closeTab(pane.id, tab.id);
     await vi.waitFor(() => expect(confirmState.open).toBe(true));
     expect(confirmState.title).toBe("Close without saving?");
-    expect(confirmState.message).toContain("notes/a.md was not saved because the save request failed (disk full)");
+    expect(confirmState.message).toContain("a.md was not saved because the save request failed (disk full)");
     expect(confirmState.cancelLabel).toBe("Keep editing");
     resolveConfirm(false);
     await closing;
@@ -363,7 +363,7 @@ describe("tab close confirmation", () => {
     const live = activePane().tabs[0] as FileTab;
     expect(live.error).toBeNull();
     expect(live.saveError).toBe("the save request failed (disk full)");
-    expect(notice).toHaveBeenCalledExactlyOnceWith("notes/a.md was not saved and stays in this window.");
+    expect(notice).toHaveBeenCalledExactlyOnceWith("a.md was not saved and stays in this window.");
   });
 
   test("saving a draft notifies promotion sinks with the workspace path", async () => {
@@ -3914,10 +3914,8 @@ describe("autosave", () => {
   });
 
   test("a close whose save fails mid-move reports on the tab in the layout", async () => {
-    // Same shape as the autosave message one call up: `confirmCloseTabs`
-    // awaits the save, and a move in that window replaces the tab object, so
-    // the message lands on something nothing renders. The close refuses and
-    // the user is told nothing about why.
+    // A move while the save is pending replaces the tab object. The close
+    // must ask about the buffer held by the replacement.
     vi.useFakeTimers();
     let fail: (e: Error) => void = () => {};
     vi.spyOn(api, "write").mockReturnValue(
@@ -3936,7 +3934,7 @@ describe("autosave", () => {
     fail(new Error("disk full"));
     await vi.advanceTimersByTimeAsync(10);
     expect(confirmState.open).toBe(true);
-    expect(confirmState.message).toContain("notes/a.md was not saved because the save request failed (disk full)");
+    expect(confirmState.message).toContain("a.md was not saved because the save request failed (disk full)");
     resolveConfirm(false);
     await closing;
 
