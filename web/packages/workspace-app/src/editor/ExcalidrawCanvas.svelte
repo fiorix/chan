@@ -106,6 +106,8 @@
   let react: typeof import("react") | null = null;
   let ex: typeof import("@excalidraw/excalidraw") | null = null;
   let api: ExcalidrawImperativeAPI | null = null;
+  let failureBoundary: unknown = null;
+  let libraryFailed = $state(false);
   /// Set by the board's first seed and never cleared. The library is past
   /// its init then, whose apply replaces every element put on the board
   /// before it, so the session binds from here on and its replay stays on
@@ -503,10 +505,18 @@
   // whichever render it mounts with; a render after it passes none, which
   // the App would ignore. The buffer is read untracked, so the render effect
   // below does not re-render when it changes.
+  function onLibraryFailure(): void {
+    api = null;
+    seeded = false;
+    if (serializeTimer !== null) clearTimeout(serializeTimer);
+    serializeTimer = null;
+    libraryFailed = true;
+  }
+
   function renderExcalidraw(): void {
-    if (!root || !react || !ex) return;
+    if (!root || !react || !ex || !failureBoundary || libraryFailed) return;
     root.render(
-      react.createElement(ex.Excalidraw, {
+      react.createElement(failureBoundary, null, react.createElement(ex.Excalidraw, {
         ...(api ? {} : { initialData: parseScene(untrack(() => content)) }),
         theme: dark ? "dark" : "light",
         viewModeEnabled: readonly,
@@ -531,7 +541,7 @@
             ids.length > 0 ? ids : undefined,
           );
         },
-      }),
+      })),
     );
   }
 
@@ -547,6 +557,21 @@
     if (!host) return; // tab closed while the chunk loaded
     react = r;
     ex = e;
+    // Keep one boundary type for the root's lifetime, so a theme change
+    // updates the existing board instead of remounting it.
+    const DrawingBoundary = class extends r.Component<{ children: unknown }, { failed: boolean }> {
+      state = { failed: false };
+      static getDerivedStateFromError(): { failed: boolean } {
+        return { failed: true };
+      }
+      componentDidCatch(): void {
+        onLibraryFailure();
+      }
+      render(): unknown {
+        return this.state.failed ? null : this.props.children;
+      }
+    };
+    failureBoundary = DrawingBoundary;
     root = reactDom.createRoot(host);
     renderExcalidraw();
   });
@@ -600,6 +625,9 @@
 
 <div class="excalidraw-shell" class:offscreen={!active}>
   <div class="excalidraw-host" bind:this={host} tabindex="-1"></div>
+  {#if libraryFailed}
+    <div class="excalidraw-failure" role="alert">The drawing library failed. Changes drawn since the board last paused may be lost. Switch to Source and back, or close and reopen the tab to reload the drawing.</div>
+  {/if}
 </div>
 
 <style>
@@ -632,5 +660,16 @@
     background: var(--bg);
     outline: none;
     overflow: hidden;
+  }
+  .excalidraw-failure {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    padding: 2rem;
+    text-align: center;
+    background: var(--bg);
+    color: var(--text);
   }
 </style>
