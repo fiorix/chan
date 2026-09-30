@@ -13,12 +13,13 @@ import { launchServer, seedWorkspace, teardownServer } from "./lib/server.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const required = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart"];
-const implemented = ["alternate-screen", "normal-screen"];
+const implemented = ["alternate-screen", "normal-screen", "keyboard-modes"];
+const requiredSubcases = { "keyboard-modes": ["normal-screen", "alternate-screen", "replayed-change"] };
 const selected = process.env.REPLAY_CASES?.split(",").filter(Boolean) ?? required;
 const out = resolve(process.env.REPLAY_OUT ?? "terminal-replay-results");
 mkdirSync(out, { recursive: false });
 const save = (name, value) => writeFileSync(join(out, name), JSON.stringify(value, null, 2) + "\n", { flag: "wx" });
-const results = { required, selected, accepted: false, cases: [], limitations: ["painted pixels", "ghostty input", "native webview", "fd-store restoration"] };
+const results = { required, requiredSubcases, selected, accepted: false, cases: [], limitations: ["painted pixels", "ghostty input", "native webview", "fd-store restoration"] };
 const bin = resolve(process.env.CHAN_BIN ?? join(repo, "target/debug/chan"));
 let activeStop;
 for (const signal of ["SIGTERM", "SIGINT"]) {
@@ -96,6 +97,11 @@ async function runCase(name) {
         else if (op === "ack") { proxy.acknowledge(args); result = true; }
         else if (op === "cut") result = await proxy.waitForCut();
         else if (op === "records") result = proxy.records;
+        else if (op === "keys") {
+          const received = () => Buffer.concat(fixture.records.filter((entry) => entry.type === "keys").map((entry) => Buffer.from(entry.base64, "base64")));
+          await fixture.waitFor(() => received().length >= args.length);
+          result = received().toString("base64");
+        }
         else if (op === "upstream-marker") result = await proxy.waitForRecord((entry) =>
           entry.event === "frame" && entry.direction === "received" && entry.connection === args.connection
           && Buffer.concat(proxy.records.filter((frame) => frame.event === "frame" && frame.direction === "received"
@@ -132,6 +138,10 @@ async function runCase(name) {
       assert.equal(result.name, name, "case result identity");
       delete outcome.reason;
       Object.assign(outcome, result);
+      for (const subcase of result.status === "passed" ? requiredSubcases[name] ?? [] : []) {
+        const entries = result.subcases?.filter((entry) => entry.name === subcase) ?? [];
+        assert(entries.length === 1 && entries[0].status === "passed", `missing or failed subcase: ${subcase}`);
+      }
     }
   } catch (error) {
     outcome.error = redact(error.stack ?? error.message);
