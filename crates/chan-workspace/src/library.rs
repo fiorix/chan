@@ -1214,7 +1214,12 @@ mod tests {
     /// the workspace so the test can verify reset doesn't touch the
     /// user's notes.
     fn populate_state(lib: &Library, root: &Path) {
+        populate_state_with(lib, root, |_| {});
+    }
+
+    fn populate_state_with(lib: &Library, root: &Path, opened: impl FnOnce(&Arc<Workspace>)) {
         let workspace = lib.open_workspace(root).unwrap();
+        opened(&workspace);
         workspace
             .write_text("notes/keep.md", "kept across reset")
             .unwrap();
@@ -1223,6 +1228,49 @@ mod tests {
         let p = workspace.paths();
         std::fs::create_dir_all(&p.tokens).unwrap();
         std::fs::write(p.tokens.join("server.token"), b"deadbeef").unwrap();
+    }
+
+    #[test]
+    fn populate_state_joins_startup_recovery_before_returning() {
+        let (lib, _cfg, root) = lib();
+        lib.register_workspace(root.path()).unwrap();
+        let paths = paths_of(&lib, root.path());
+        std::fs::create_dir_all(&paths.graph_dir).unwrap();
+        std::fs::write(paths.graph_dir.join("rebuild.inprogress"), b"").unwrap();
+        let (reached, _release) =
+            crate::workspace::arm_open_recovery_pause_for_test(root.path().canonicalize().unwrap());
+        let mut weak = None;
+        populate_state_with(&lib, root.path(), |workspace| {
+            reached
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("startup recovery did not reach the preclaim pause");
+            assert_eq!(
+                workspace.recovery_status().pending.unwrap().action,
+                crate::workspace::RecoveryAction::FullRebuild
+            );
+            assert!(workspace.recovery_worker_running_for_test());
+            weak = Some(Arc::downgrade(workspace));
+        });
+
+        let retained = weak.unwrap().upgrade();
+        let worker_owns_handle = retained.is_some();
+        if let Some(workspace) = retained {
+            workspace.stop_open_recovery();
+        }
+        assert!(
+            !worker_owns_handle,
+            "populate_state returned while startup recovery still owned the handle"
+        );
+
+        let reopened = lib.open_workspace(root.path()).unwrap();
+        reopened.stop_open_recovery();
+        reopened.reindex(None).unwrap();
+        assert!(reopened.recovery_status().is_ready());
+        assert!(reopened
+            .list_tree()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.path == "notes/keep.md"));
     }
 
     fn paths_of(lib: &Library, root: &Path) -> paths::WorkspacePaths {
