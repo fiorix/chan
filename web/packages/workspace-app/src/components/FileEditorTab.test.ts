@@ -1453,8 +1453,11 @@ describe("the not-saved line", () => {
   });
 
   test("a failed text load still replaces the editor", async () => {
-    const tab = seat(fileTab({ id: "failed-load", mode: "source", error: "read interrupted" }));
+    const tab = seat(fileTab({ id: "failed-load", mode: "source" }));
     const { target } = await render(tab);
+    vi.spyOn(api, "readStream").mockRejectedValue(new Error("read interrupted"));
+    await reloadTabFromDisk(tab.id);
+    await settle(2);
     expect(target.querySelector(".error-placeholder")?.textContent).toBe("read interrupted");
     expect(target.querySelector(".cm-content")).toBeNull();
   });
