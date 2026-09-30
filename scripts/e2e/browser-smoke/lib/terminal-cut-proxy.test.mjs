@@ -360,6 +360,42 @@ for (const empty of [false, true]) {
   });
 }
 
+test("a counted post-replay cut acknowledges its frame and withholds the next", { timeout: 10000 }, async (t) => {
+  for (const empty of [false, true]) {
+    for (const count of [1, 2]) {
+      const prelude = text({ type: "session", replay_bytes: empty ? 0 : replay.length });
+      const history = empty ? [] : [[replay.subarray(0, 3), true], [replay.subarray(3), true]];
+      const tail = [[Buffer.from("first"), true], text({ type: "opaque" }), [Buffer.from("third"), true]];
+      const messages = [prelude, ...history, ...tail, ready];
+      const { proxy, dial } = await rig(t, { messages });
+      for (const frames of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        assert.throws(() => proxy.arm({ boundary: "after-replay-frame", frames }), { code: "INVALID_BOUNDARY" });
+      }
+      assert.doesNotThrow(() => proxy.arm({ boundary: "after-replay-frame", frames: count }),
+        "a positive post-replay frame count is supported");
+      const peer = dial("session=wanted", "/terminal/ws", true);
+      const receipt = await proxy.waitForCut();
+      await peer.closed;
+      const forwarded = 1 + history.length + count;
+      assert.deepEqual(peer.delivered, messages.slice(0, forwarded), "only frames through the counted boundary are delivered");
+      assert.equal(receipt.upstreamFrame, forwarded, "the receipt names the counted frame, not ready");
+      assert.deepEqual(receipt.lastAcknowledged, { frame: forwarded, drained: true });
+      assert.equal(receipt.replayForwarded, empty ? 0 : replay.length);
+      assert.equal(proxy.records.some((r) => r.direction === "forwarded" && r.type === "ready"), false);
+      assert.deepEqual(receipt.disconnect, { client: "closed", upstream: "closed" });
+      t.diagnostic(JSON.stringify({ empty, count, receipt }));
+    }
+  }
+});
+
+test("a counted post-replay cut refuses a boundary beyond ready", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t);
+  assert.doesNotThrow(() => proxy.arm({ boundary: "after-replay-frame", frames: 1 }));
+  dial();
+  await assert.rejects(proxy.waitForCut(), { code: "INVALID_POST_REPLAY_BOUNDARY" });
+  assert.equal(proxy.records.some((r) => r.direction === "forwarded" && r.type === "ready"), false);
+});
+
 for (const boundary of ["before-session", "after-session"]) {
   test(`${boundary} selects a later session on one socket`, { timeout: 10000 }, async (t) => {
     const reset = [Buffer.from("\x1bc"), true];
