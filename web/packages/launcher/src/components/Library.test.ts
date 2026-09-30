@@ -737,6 +737,37 @@ describe("Library: turning on a workspace whose root is not usable", () => {
 });
 
 describe("Library: nested machine tree", () => {
+  it("keeps namesake workspace cards independently expanded across feed updates", () => {
+    const remote = library.workspaces.find((ws) => ws.devserver_id !== null)!;
+    const local = library.workspaces.find((ws) => ws.devserver_id === null)!;
+    const window = library.windows.find((w) => w.workspace_path === remote.path)!;
+    library.workspaces = [local, { ...remote, workspace_id: local.workspace_id, prefix: local.prefix }];
+    library.windows = [
+      { ...window, window_id: "local-card-window", library_id: local.library_id!, workspace_path: local.path },
+      window,
+    ];
+    mountList();
+    const cards = [...target!.querySelectorAll(".ws-card")];
+    expect(cards).toHaveLength(2);
+    const chevron = (card: Element) => card.querySelector<HTMLButtonElement>(".chevron")!;
+    const badge = (card: Element) => card.querySelector<HTMLButtonElement>(".count-badge")!;
+    chevron(cards[0]).click();
+    flushSync();
+    expect(chevron(cards[0]).getAttribute("aria-expanded")).toBe("true");
+    expect(chevron(cards[1]).getAttribute("aria-expanded"), "the other machine stays collapsed").toBe("false");
+    expect(cards[1].querySelector(".ws-windows")).toBeNull();
+    badge(cards[1]).click();
+    flushSync();
+    chevron(cards[0]).click();
+    flushSync();
+    library.workspaces = library.workspaces.map((ws) => ({ ...ws }));
+    flushSync();
+    expect(badge(cards[0]).getAttribute("aria-expanded")).toBe("false");
+    expect(cards[0].querySelector(".ws-windows")).toBeNull();
+    expect(badge(cards[1]).getAttribute("aria-expanded")).toBe("true");
+    expect(cards[1].querySelector(".ws-windows")).not.toBeNull();
+  });
+
   it("renders the LOCAL machine block with Terminals + Workspaces sections", () => {
     mountList();
     expect(target!.textContent).toContain("This machine");
