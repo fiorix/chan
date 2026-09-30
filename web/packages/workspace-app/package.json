@@ -37,7 +37,7 @@
     "@codemirror/view": "^6.34.0",
     "@excalidraw/excalidraw": "^0.18.1",
     "@excalidraw/mermaid-to-excalidraw": "^2.2.2",
-    "@lezer/markdown": "1.6.4",
+    "@lezer/markdown": "1.7.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-serialize": "^0.14.0",
