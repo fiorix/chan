@@ -185,7 +185,7 @@ test("an earlier client close with a delivery in flight leaves the armed pair us
   proxy.arm({ boundary: "after-session" });
   const earlier = dial();
   await proxy.waitForRecord((r) => r.connection === 1 && r.direction === "received" && r.frame === frames.length);
-  await once(earlier.socket, "message");
+  if (earlier.delivered.length === 0) await once(earlier.socket, "message");
   earlier.socket.close();
   await earlier.closed;
   release();
