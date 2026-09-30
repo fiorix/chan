@@ -4262,6 +4262,54 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_after_restart_excludes_reset_and_modes() {
+        use chan_library::terminal_sessions::{arm_attach_seam, AttachSeam};
+
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id().to_owned();
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
+        let initial = read_prelude(&mut socket).await;
+        let WireFrame::Control(initial_session) = &initial[0] else {
+            panic!("initial attach starts with session");
+        };
+        let replay = b"__RESTARTED__\xc3\xa9\x1b[?1h";
+        let registry = state.terminal_sessions.clone();
+        let inject_id = id.clone();
+        arm_attach_seam(&id, AttachSeam::AttachBeforeRingLock, move || {
+            assert!(registry.inject_output(&inject_id, replay));
+        });
+        assert!(state
+            .terminal_sessions
+            .restart(&id, Default::default())
+            .expect("restart quiet terminal"));
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Bytes(RESET_TERMINAL.to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(replay.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ]),
+            "reset bytes precede the new session and its replay on the same socket"
+        );
+        let WireFrame::Control(session) = &frames[1] else {
+            unreachable!();
+        };
+        assert_eq!(session["id"], initial_session["id"]);
+        assert_ne!(session["generation"], initial_session["generation"]);
+        assert_eq!(session["replay_bytes"].as_u64(), Some(replay.len() as u64));
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
     // A Resize frame resizes the PTY: the session echoes the new size and the
     // foreground program reads it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
