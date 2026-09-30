@@ -106,6 +106,7 @@ export async function startTerminalCutProxy({
   }
   async function disconnect(pair, boundaryFrame) {
     if (pair.cutting || failure || closed) return;
+    if (!pair.client) { pairFailure(pair, "CLIENT_CLOSED_BEFORE_CUT"); return; }
     pair.cutting = true;
     armed = null;
     clearTimeout(timer);
