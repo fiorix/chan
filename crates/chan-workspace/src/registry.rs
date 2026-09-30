@@ -428,6 +428,25 @@ impl Registry {
         });
         self.workspaces.len() != before
     }
+
+    /// Remove the one row that stores `stored`, compared as the registry
+    /// stores it, under `metadata_key`: the row whose state the caller wiped
+    /// under that key. Resolves nothing. Answers whether a row was removed.
+    ///
+    /// Two rows can store one root when the registry file was written
+    /// outside the Library, since a load keeps every row the file lists;
+    /// the key keeps this to the one the caller means.
+    pub(crate) fn remove_stored(&mut self, stored: &Path, metadata_key: &str) -> bool {
+        let Some(i) = self
+            .workspaces
+            .iter()
+            .position(|d| d.root_path == stored && d.metadata_key == metadata_key)
+        else {
+            return false;
+        };
+        self.workspaces.remove(i);
+        true
+    }
 }
 
 /// Canonicalize-or-fall-back-to-input, normalized (any Windows `\\?\` verbatim
@@ -657,6 +676,38 @@ mod tests {
         assert!(reg.remove(tmp.path()));
         assert!(reg.workspaces.is_empty());
         assert!(!reg.remove(tmp.path()));
+    }
+
+    /// A registry file written outside the Library can list two rows that
+    /// store one root, and a load keeps both; a removal by the stored root
+    /// takes the row with the metadata key it is given and leaves the other.
+    #[test]
+    fn remove_stored_drops_only_the_row_with_the_key_given() {
+        let tmp = TempDir::new().unwrap();
+        let mut written = Registry::default();
+        written.touch(tmp.path());
+        let mut twin = written.workspaces[0].clone();
+        twin.metadata_key = "written-by-hand".into();
+        written.workspaces.push(twin);
+        let file = tmp.path().join("config.toml");
+        written.save_to(&file).unwrap();
+        let mut reg = Registry::load_from(&file).unwrap();
+        assert_eq!(reg.workspaces.len(), 2, "fixture: a load dropped a row");
+        let stored = reg.workspaces[0].root_path.clone();
+        let first = reg.workspaces[0].metadata_key.clone();
+
+        assert!(!reg.remove_stored(&stored, "no-such-key"));
+        assert!(reg.remove_stored(&stored, "written-by-hand"));
+        let keys: Vec<&str> = reg
+            .workspaces
+            .iter()
+            .map(|d| d.metadata_key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![first.as_str()],
+            "the removal took a row other than the one with the key given"
+        );
     }
 
     #[test]
