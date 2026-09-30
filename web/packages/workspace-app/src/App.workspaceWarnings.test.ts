@@ -145,7 +145,7 @@ describe("the warnings dialog", () => {
     expect(confirm).not.toBeNull();
     expect(Number(confirm.parentElement!.style.zIndex), "discard confirm layer")
       .toBeGreaterThan(Number(open.parentElement!.style.zIndex));
-    expect(document.activeElement).toBe(button(confirm, "Discard"));
+    expect(document.activeElement).toBe(button(confirm, "Cancel"));
     button(confirm, "Cancel")!.click(); await settle();
     expect(confirm.isConnected).toBe(false);
     expect(document.activeElement, "discard opener restoration").toBe(discard);
