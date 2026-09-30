@@ -204,6 +204,66 @@ test("a replay cut spans source messages without changing byte order", { timeout
   assert.deepEqual(Buffer.concat(peer.delivered.filter(([, binary]) => binary).map(([data]) => data)), replay.subarray(0, 7));
 });
 
+for (const afterReceipt of [false, true]) {
+  test(`an unarmed send error stays local with a prior receipt=${afterReceipt}`, { timeout: 10000 }, async (t) => {
+    const { proxy, dial } = await rig(t);
+    if (afterReceipt) {
+      proxy.arm({ boundary: "before-session" });
+      dial();
+      await proxy.waitForCut();
+    }
+    const connection = afterReceipt ? 2 : 1;
+    const send = WebSocket.prototype.send;
+    const port = Number(new URL(proxy.url).port);
+    let release;
+    t.mock.method(WebSocket.prototype, "send", function (bytes, options, callback) {
+      if (this._socket?.localPort === port && !release) {
+        return send.call(this, bytes, options, () => { release = callback; });
+      }
+      return send.call(this, bytes, options, callback);
+    });
+    proxy.arm({ boundary: "before-session", ordinal: connection + 1 });
+    const peer = dial();
+    await once(peer.socket, "open");
+    while (peer.delivered.length === 0) await once(peer.socket, "message");
+    assert.equal(typeof release, "function", "one forwarding callback is held");
+    peer.socket.terminate();
+    release(new Error("send failed during client disconnection"));
+    const outcome = await proxy.waitForRecord((r) => r.event === "failure" || (r.event === "end" && r.connection === connection));
+    assert.equal(outcome.event, "end", "an unarmed send error ends only its pair");
+    assert.equal(outcome.code, "FORWARD_FAILED");
+    await peer.closed;
+    dial();
+    const receipt = await proxy.waitForCut();
+    assert.equal(receipt.connection, connection + 1);
+    assert.equal(proxy.records.filter((r) => r.event === "cut").length, afterReceipt ? 2 : 1);
+    assert.equal(proxy.records.some((r) => r.event === "failure"), false);
+  });
+}
+
+test("a lost frame on the armed pair fails the cut", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t);
+  const send = WebSocket.prototype.send;
+  const port = Number(new URL(proxy.url).port);
+  let release;
+  t.mock.method(WebSocket.prototype, "send", function (bytes, options, callback) {
+    if (this._socket?.localPort === port && !release) {
+      return send.call(this, bytes, options, () => { release = callback; });
+    }
+    return send.call(this, bytes, options, callback);
+  });
+  proxy.arm({ boundary: "after-session" });
+  const peer = dial();
+  await once(peer.socket, "open");
+  while (peer.delivered.length === 0) await once(peer.socket, "message");
+  assert.equal(typeof release, "function", "the armed send callback is held");
+  peer.socket.terminate();
+  release(new Error("armed send failed"));
+  await assert.rejects(proxy.waitForCut(), { code: "FORWARD_FAILED" });
+  assert.deepEqual(proxy.records.filter((r) => r.event === "failure").map((r) => r.code), ["FORWARD_FAILED"]);
+  assert.equal(proxy.records.some((r) => r.event === "cut"), false);
+});
+
 test("one proxy cuts twice with an unarmed redial between receipts", { timeout: 10000 }, async (t) => {
   const { proxy, dial } = await rig(t);
   proxy.arm({ boundary: "after-session" });
