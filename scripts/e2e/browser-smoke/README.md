@@ -64,21 +64,115 @@ Add a new check by dropping a numbered file into `checks/`; nothing else needs e
 
 ## Terminal socket and PTY tools
 
-`lib/terminal-cut-proxy.mjs` and `lib/terminal-fixture.mjs` support owner-run replay checks without a browser. Run their deterministic peer tests with `node --test scripts/e2e/browser-smoke/lib/terminal-cut-proxy.test.mjs` from the repository root after `npm ci --prefix scripts/e2e/browser-smoke`. These tests establish tool behavior; they do not mount the terminal page or prove what a renderer paints.
+`lib/terminal-cut-proxy.mjs` and `lib/terminal-fixture.mjs` support owner-run replay checks without a browser. Install with `npm ci --prefix scripts/e2e/browser-smoke`, then run `node --test scripts/e2e/browser-smoke/lib/terminal-cut-proxy.test.mjs` from the repository root. These tests establish tool behavior; they do not mount the terminal page or prove what a renderer paints. Both modules are named ESM exports. The proxy requires `ws`; the fixture process uses Node built-ins only.
 
-`await startTerminalCutProxy({ targetUrl, path, session, ordinal: 1 })` listens on an ephemeral loopback port and returns `url`, `records`, `arm`, `acknowledge`, `waitForRecord`, `waitForCut` and async `close`. The target must be a bare `http://127.0.0.1:PORT` origin. Selection uses an exact socket pathname, the `session` query value, and an ordinal counted only among matching connections. Other HTTP requests and sockets pass through. Credentials travel upstream in memory; records retain only the selected path, session and `since`, `generation`, `cols` and `rows` query fields.
+### Proxy lifetime and calls
 
-Call `arm({ boundary, bytes })` before the selected connection opens. One proxy permits one arm and one cut; recovery connections cannot inherit it. The boundaries are:
+`await startTerminalCutProxy({ targetUrl, path, session, ordinal = 1, deadlineMs = 5000, maxQueueBytes = 8388608, maxQueueMessages = 4096, maxTraceBytes = 67108864 })` starts an ephemeral loopback listener and returns `{ url, records, arm, acknowledge, waitForCut, waitForRecord, close }`. `targetUrl` must be a bare `http://127.0.0.1:PORT` origin without user information, query or fragment. `path` starts with `/` and contains no `?`; `session` is a nonempty string. The ordinal and all limits are positive safe integers. `url` is the listening HTTP origin; replace its scheme with `ws:` for WebSockets. Selection matches the exact pathname and `session` query value. Only matching upgrades increment the connection ordinal. HTTP and other sockets pass through without trace records. Credentials travel upstream in memory; do not log caller URLs or headers.
 
-- `before-session`: withhold the upstream session message and disconnect.
-- `after-session`: forward session, hold subsequent messages, then disconnect when that delivery is acknowledged.
-- `inside-replay`: forward exactly `bytes` replay payload bytes, with `0 < bytes < session.replay_bytes`, then await acknowledgement of the last delivered fragment. A source binary message is split when necessary; its withheld suffix stays in byte order.
-- `after-ready`: forward ready, hold later messages, then disconnect when ready is acknowledged.
+`arm({ boundary, bytes, ordinal, sessionOrdinal = 1 })` returns undefined and arms one cut. On the first arm, omitted `ordinal` uses the start option. On subsequent arms it selects the next matching connection after all connections already seen. An explicit ordinal can select a future connection or a live connection whose selected session has not yet been dequeued. Session ordinals are positive, one-based counts of `session` messages on that socket, including messages before any arm. For example, `{ boundary: "after-session", ordinal: 1, sessionOrdinal: 2 }` selects a restart's session on the first socket. Only one arm may be pending; another is permitted after its receipt completes. Each successful arm gets a one-based `arm` identifier. A recovery connection stays unarmed unless explicitly selected by a later call.
 
-Call `acknowledge({ connection, frame, drained })` only after the client's message handler returns. `frame` is the one-based downstream message number on that connection, including split deliveries. Set `drained` only after the parser's write callbacks finish; the proxy records this assertion and does not infer it. Receipt of a TCP write is insufficient. Unarmed forwarding does not wait for acknowledgements. `waitForRecord(predicate)` observes existing or future records; `waitForCut()` resolves only after both selected sockets close. The cut receipt gives upstream frame number, total received and forwarded payload bytes, replay count and delivered offset, last acknowledgement, held messages with base64 payloads and offsets, and disconnect completion. Frame records retain exact upstream and downstream payloads, types and ordinals. Save `records` and the receipt in the caller's run directory; the proxy writes no files itself.
+- `before-session`: Holds the selected session. With no preceding delivery, cuts immediately. Otherwise waits for acknowledgement of the last preceding delivery, including any reset bytes.
+- `after-session`: Delivers the selected session, holds subsequent messages, and waits for its acknowledgement.
+- `inside-replay`: Delivers exactly `bytes` binary replay bytes, where `0 < bytes < session.replay_bytes`, then waits for the last fragment's acknowledgement. Splits a source message if necessary and holds its suffix in byte order.
+- `before-ready`: Delivers every message before the selected session's ready, including all replay, alternate-screen and mode bytes. Holds ready and waits for the last preceding delivery's acknowledgement. Works when `replay_bytes` is zero.
+- `after-ready`: Delivers ready, holds subsequent messages, and waits for ready's acknowledgement.
 
-Missing selection, missing frame and missing acknowledgement fail with distinct `NO_SELECTED_SOCKET`, `FRAME_TIMEOUT` and `ACK_TIMEOUT` codes. Deadlines bound failures and never select a cut. An invalid replay offset, stale acknowledgement, reused controller, overflowing queue or trace also refuses. Defaults are a 5-second deadline, 8 MiB/4096 held messages and 64 MiB of traced payload; callers can set `deadlineMs`, `maxQueueBytes`, `maxQueueMessages` and `maxTraceBytes`. Always await `close()` to close the listener and all owned sockets, including on failure.
+The proxy forwards upstream payloads and types; it never fabricates a control frame. An inside-replay offset equal to the replay length is invalid; use `before-ready` for a complete replay. That boundary also includes mode bytes between replay and ready.
 
-`await startTerminalFixture({ logPath, deadlineMs: 5000 })` opens a private loopback control endpoint. Start a test terminal with `stty -opost -echo && ${fixture.command}` and its returned `env`, then await `ready()` and assert its raw PTY identity and geometry. The fixture program needs Node's built-in modules only; the POSIX launch wrapper requires `stty`. Node's raw input setting does not disable the PTY's output newline translation, so the wrapper's successful `stty` is a required precondition for byte equality. Its command is shell-quoted; the environment belongs solely to the terminal it starts. `logPath` must be a new absolute path in the caller's run directory: the fixture refuses to overwrite it and appends every emitted byte. Save the controller's `records` separately for command replies, barrier hashes and raw key receipts.
+`acknowledge({ connection, frame, drained = false })` returns undefined. `connection` is the matching connection ordinal and `frame` is its one-based forwarded message number, including split fragments. Acknowledgements must increase and cannot exceed the forwarded count. Call only after the client's message handler returns; set `drained` only after the parser's write callbacks finish. The proxy records `Boolean(drained)` as the controller's assertion; it cannot establish parser completion itself. An acknowledgement equal to the awaited boundary frame starts the cut. Unarmed forwarding needs no acknowledgement.
 
-Use `send(op, args)` for `rows` (`prefix`, `count`, monotonically numbered), `marker` (`name`), `bytes` (`base64`, including ANSI modes), `alternate` (`enabled`), `redraw` (`name`, alternate screen only), `barrier` (`name`), `resume` (the same `name`) and `stop`. Replies include emitted byte offset, SHA-256, next row number, alternate-screen state and held barrier. A barrier follows stdout completion and fsync of the byte log; further output refuses until resumed. It does not prove that a server or page consumed those bytes: independently observe the marker, attach cursor and parser completion. `waitFor(predicate)` observes records, including `{ type: "keys", base64 }`. Names and prefixes accept ASCII letters, digits, underscores and hyphens, up to 80 characters. Invalid commands, mismatched barriers, missing peers and missing replies refuse. `send("stop")` ends the fixture; always await controller `close()` and reap the run-owned terminal/process during teardown.
+`await waitForCut()` returns the current arm's receipt after both selected sockets close. Each call captures the current arm's promise; retain it if another arm will follow. Before the first arm it rejects `NOT_ARMED`. After a failure, a new call rejects that failure even when an earlier receipt exists. An already resolved promise cannot report a later failure; inspect records or make a new call before accepting a run.
+
+`await waitForRecord(predicate, timeoutMs = deadlineMs)` returns the first existing matching record, or waits for a new matching record. Use a nonthrowing predicate and a positive timeout. Existing records remain searchable after failure or closure. Without an existing match, a failure rejects the wait, closure rejects `PROXY_CLOSED`, and its own deadline rejects `RECORD_TIMEOUT`. Filter by `arm` or connection to avoid matching an earlier cut.
+
+`await close()` is idempotent and closes the listener, WebSocket server, matching peers and all tracked HTTP/pass-through sockets. Always call it in `finally`, including after failure. Closing an unfinished arm rejects its cut promise with `PROXY_CLOSED_BEFORE_CUT`; pending record waits reject `PROXY_CLOSED`. Startup, shutdown and calls return promises where shown; validation in `arm` and `acknowledge` throws synchronously.
+
+The arm's `deadlineMs` begins at `arm()`, spans earlier connections and redials, and does not restart on progress. Expiry is `NO_SELECTED_SOCKET` if the selected connection never arrived, `ACK_TIMEOUT` if a delivery is awaiting acknowledgement, or `FRAME_TIMEOUT` otherwise. Each upstream handshake has its own `deadlineMs`. When a cut begins, the arm timer is cleared and a new `deadlineMs` bounds closure of both sockets. `waitForRecord` starts its separate timeout at that call. Timers fail a missing event; elapsed time never places a cut.
+
+A cut calls `terminate()` on both WebSockets without sending close frames. The client sees an abnormal closure, not a server close code. A first-session before-session cut completes the client's handshake and delivers no application message. Matching connections terminate the other half on an ordinary close, so server close codes are not propagated. An upstream handshake refusal destroys the downstream socket rather than forwarding its HTTP status. The two `ws` endpoints handle ping/pong independently. HTTP errors before response headers produce 502; errors after headers destroy only that response.
+
+### Proxy records, receipts and failures
+
+`records` is a live array owned by the proxy. Treat it as read-only and save it in the caller's run directory; the proxy writes no files. Every record has `event`. Only `since`, `generation`, `cols` and `rows` query values are retained, as strings; headers and other query fields are omitted. Terminal payloads are still recorded and can contain application data.
+
+- `connection`: `{ connection, path, session, query }`, recorded at each matching upgrade. `query` includes only the allowed keys actually present.
+- `frame`: `{ connection, direction, frame, binary, length, bytes, type, source, offset }`.
+- `ack`: `{ connection, frame, drained }`.
+- `end`: `{ connection, code }`, a locally ended unselected pair.
+- `cut`: Every receipt field below, alongside `event: "cut"`.
+- `failure`: `{ code }`, at most one per proxy, including failures after a completed cut.
+
+A frame's `direction` is `received` from upstream or `forwarded` to the client. Client-to-upstream messages are forwarded but not traced. `frame` increases independently per connection and direction. `binary` preserves the message type; `length` is payload bytes and `bytes` is base64. `type` is the parsed text JSON's `type` member or null, and null for binary. `source` is null for received frames and the originating received frame number for forwarded frames. `offset` is the byte offset inside that source, zero except for a split suffix. A forwarded record precedes the send attempt: it does not prove receipt or parser completion.
+
+Every receipt contains:
+
+- `arm`, `boundary`, `connection`, `sessionOrdinal`: the arm identifier, boundary name, matching connection ordinal and session ordinal.
+- `upstreamFrame`: the received frame number at the boundary: session for before/after-session, the last source binary message for inside-replay, or ready for before/after-ready.
+- `receivedBytes`, `forwardedBytes`: payload totals on that connection when the cut begins, counted as frames are recorded, including earlier sessions on the socket.
+- `replayBytes`: the selected session's `replay_bytes`; null before a session is observed, and undefined if that message omits the member, so JSON serialization omits it.
+- `replayForwarded`: binary bytes delivered while the selected session is armed, capped at `replayBytes`; mode/prelude bytes beyond that count are excluded.
+- `lastAcknowledged`: null or `{ frame, drained }` for the last accepted acknowledgement on that connection.
+- `held`: queued messages in order, each `{ source, binary, offset, length, bytes }`, with base64 payload. Before-session starts with session; before-ready starts with ready; an inside-replay split starts with the withheld suffix and its source offset.
+- `disconnect`: `{ client: "closed", upstream: "closed" }`; no receipt is published before both close.
+
+`receivedBytes` and `held` depend on how far upstream intake ran before the acknowledgement and must not be compared across runs for equality. The other fields follow the selected arm and delivered message sequence, but frame numbers and byte totals can also differ if the upstream changes message segmentation or payloads. `drained` reflects the controller's supplied assertion.
+
+The held queue checks its byte/message bounds before insertion; one in-flight send is outside that queue. `maxTraceBytes` counts received and forwarded payload bytes across all matching connections, so a fully forwarded byte counts twice. `maxQueueBytes` also bounds client-to-upstream buffered input. A resource failure records its code, discards held queues, stops matching peers and prevents further matching output. Receipts remain in records. A normally closing unselected pair ends locally. Before any completed cut, other errors on an unselected pair also end locally; transport errors after a receipt fail the run. Replace a failed proxy rather than rearming it.
+
+Tool-coded errors are `Error` objects whose `message` and `code` equal the listed code. Native URL, socket and filesystem errors may also propagate.
+
+- `LOOPBACK_ORIGIN_REQUIRED`: Target is not the required loopback HTTP origin.
+- `INVALID_SELECTION_OR_LIMIT`: Invalid start path, session, ordinal or limits.
+- `CONTROLLER_DISARMED`: Closed/failed proxy, pending arm, absent past connection, or selected session already dequeued.
+- `INVALID_BOUNDARY`: Unknown boundary or nonpositive/noninteger inside-replay offset.
+- `INVALID_ARM_SELECTION`: Arm connection/session ordinal is not a positive safe integer.
+- `INVALID_ACK`: No live matching peer, cutting/closed/failed proxy, or nonpositive, stale, noninteger or over-range frame number.
+- `NOT_ARMED`: Cut wait before any successful arm.
+- `PROXY_CLOSED_BEFORE_CUT`, `PROXY_CLOSED`: Closure interrupts a cut or a record wait respectively.
+- `RECORD_TIMEOUT`: Record predicate did not match within its timeout.
+- `NO_SELECTED_SOCKET`, `FRAME_TIMEOUT`, `ACK_TIMEOUT`: Arm deadline expires in the states described above.
+- `INVALID_REPLAY_BOUNDARY`: Selected session has an invalid replay count or the offset is at/past its end.
+- `QUEUE_LIMIT`, `TRACE_LIMIT`, `INPUT_QUEUE_LIMIT`: Held output, traced payload or buffered input exceeds its bound.
+- `FORWARD_FAILED`, `CLIENT_ERROR`, `UPSTREAM_ERROR`: A send, downstream socket or upstream socket fails.
+- `CLIENT_CLOSED_BEFORE_CUT`, `UPSTREAM_CLOSED_BEFORE_CUT`: Selected armed pair closes before its cut; an unselected pair records a local end instead.
+- `DISCONNECT_TIMEOUT`: Both selected sockets did not close before the cut's closure deadline.
+
+### Fixture lifetime, records and commands
+
+`await startTerminalFixture({ logPath, deadlineMs = 5000 })` opens a private ephemeral loopback control listener and returns `{ command, env, records, ready, send, waitFor, close }`. `logPath` is a new absolute path in the caller's run directory and `deadlineMs` a positive safe integer. The fixture opens the byte log exclusively with mode 0600 and refuses to overwrite it. `command` is shell-quoted `exec '<node>' '<fixture path>'`. `env` contains `TERMINAL_FIXTURE_PORT`, `TERMINAL_FIXTURE_TOKEN` and `TERMINAL_FIXTURE_LOG`; supply these only to the run-owned terminal, never the hosting devserver. Do not persist the token.
+
+`await ready()` returns the recorded hello identity. `await waitFor(predicate)` returns the first existing or future matching record; supply a nonthrowing predicate. Each unmatched wait starts its own `deadlineMs` and rejects `FIXTURE_EVENT_TIMEOUT`. Existing records remain searchable after failure/stop. `await send(op, args = {})` first waits for hello, then sends `{ ...args, op, id }` with an increasing id and starts a separate command deadline. It resolves with the reply's `value`, or rejects with the reply's code. A slow first command can therefore span a hello deadline and a command deadline. No clock causes fixture output.
+
+`await close()` is idempotent, stops the controller listener and control sockets, and rejects pending commands and unmatched waits with `FIXTURE_STOPPED`. The first control failure is retained and rejects pending/later sends and unmatched waits. A command deadline rejects `FIXTURE_COMMAND_TIMEOUT`; a later reply to that expired id fails the controller with `UNEXPECTED_REPLY`. Size deadlines for the requested row count. Closing the controller disconnects the fixture; `send("stop")` asks it to fsync, reply and end its socket. After that reply, close the controller and reap the run-owned process; do not wait for further records, because socket closure can set `FIXTURE_DISCONNECTED`.
+
+The live `records` array contains `{ type: "hello", pid, tty, raw, cols, rows }` without the token, `{ type: "keys", base64 }` for raw input bytes, and `{ type: "reply", id, ok: true, value }` or `{ type: "reply", id, ok: false, code }`. Save it separately from the emitted-byte log. Every successful command returns `{ offset, sha256, row, alternate, barrier }`: total emitted bytes, lowercase hex SHA-256 of all those bytes, next row number, alternate-screen boolean, and held barrier name or null. Commands execute serially. Each emission writes the log first and stdout second, then advances the hash and offset.
+
+Names and prefixes match `^[A-Za-z0-9_-]{1,80}$`. In the byte descriptions below, `\r`, `\n` and `\x1b` denote CR, LF and ESC bytes; other characters are literal UTF-8.
+
+- `rows`, `{ prefix, count }`: `PREFIX:NNNNNNNN\r\n` per row, counter starts at zero and is padded to at least eight digits. Integer count 1..100000; counter is shared across prefixes.
+- `marker`, `{ name }`: `MARKER:NAME\r\n`.
+- `bytes`, `{ base64 }`: Decoded bytes unchanged. Padded standard base64 without whitespace; empty string is allowed.
+- `alternate`, `{ enabled }`: Boolean true emits `\x1b[?1049h`, false emits `\x1b[?1049l`; updates `alternate`.
+- `redraw`, `{ name }`: `\x1b[2J\x1b[HSCREEN:NAME\r\n`; requires alternate screen.
+- `barrier`, `{ name }`: No bytes; fsyncs log and holds the named barrier.
+- `resume`, `{ name }`: No bytes; releases the matching held barrier.
+- `stop`: No bytes; fsyncs log, replies with snapshot and ends the fixture.
+
+A held barrier refuses every valid emitting command with `BARRIER_HELD`. Validation occurs first, so an invalid command can report its own error while held. A barrier proves stdout completion and fsync, not consumption by the server or renderer; independently observe a marker, attach cursor and parser completion.
+
+Control messages are newline-delimited JSON. Before splitting lines, either endpoint refuses when its pending decoded string exceeds 1048576 JavaScript characters. This is a buffered-input cap, so one chunk containing many lines can also exceed it. Keep individual base64 commands comfortably below the cap.
+
+Command refusal codes are `INVALID_ROWS`, `INVALID_NAME`, `INVALID_BYTES`, `INVALID_ALTERNATE`, `INVALID_REDRAW`, `INVALID_BARRIER`, `BARRIER_MISMATCH`, `BARRIER_HELD` and `UNKNOWN_COMMAND`, with the constraints described above. Command I/O errors retain a native `code` when present, otherwise use `FIXTURE_IO_FAILED`.
+
+Controller errors are `INVALID_FIXTURE_OPTIONS`; `FIXTURE_IDENTITY_REFUSED` for a second peer, wrong token or non-hello first message; `UNEXPECTED_REPLY`; `FIXTURE_DISCONNECTED`; `FIXTURE_STOPPED`; `FIXTURE_EVENT_TIMEOUT`; `FIXTURE_COMMAND_TIMEOUT`; `CONTROL_LIMIT`; `INVALID_CONTROL` for invalid JSON or a failing receive callback; and `CONTROL_SOCKET_ERROR`.
+
+`runTerminalFixture({ port, token, logPath, input = process.stdin, output = process.stdout })` is the exported process entry and resolves when its control connection ends. Both streams must be TTYs and input must support `setRawMode`; otherwise it rejects `PTY_REQUIRED`. Port is an integer 1..65535, token nonempty, and log path absolute, otherwise `INVALID_FIXTURE_OPTIONS`. The exclusive log open can reject native `EEXIST`. It restores the original raw-input setting and closes the log on normal control teardown. Direct CLI invocation reads the three environment variables; a rejected run writes `terminal fixture: CODE\n` to stderr and exits 1 (`FAILED` when no code exists). That diagnostic reaches the PTY but is outside the emitted-byte log.
+
+### Creating a terminal for a run
+
+Use a run-owned `chan` server with a throwaway home/workspace. `seedWorkspace()`, `launchServer(bin, workspace, log)` and `teardownServer(bin, server.child, workspace, server.chanHome, log)` are exported by `lib/server.mjs`. Obtain the origin and the bearer token from `new URL(await server.url)`; its token query key is `t`. Redact credentials before saving server output. Always tear down only the server/processes that the run created.
+
+Create the fixture controller, then POST to `{origin}/api/terminals` with `authorization: Bearer TOKEN`, `content-type: application/json`, and body `{ name, command: "stty -opost -echo && " + fixture.command, env: fixture.env }`. Require HTTP 201; the JSON member `session` is the terminal id. The POSIX wrapper requires `stty`: raw input alone does not disable output newline translation, so successful `stty -opost -echo` is required for byte equality. Await `fixture.ready()` and verify `tty`, `raw` and geometry.
+
+Attach `/api/terminal/ws` with query keys `t`, `session`, `since`, `cols`, `rows`, and `generation` when redialing a known generation. Start the proxy with `path: "/api/terminal/ws"` and that session id, then connect to its origin. Use the cursor for bytes actually consumed, rather than adopting the advertised end cursor for a replay that was cut before delivery. Persist sanitized proxy records, cut receipts, fixture records and the emitted-byte log. Finally stop the fixture, close its controller and the proxy, close owned client sockets, and reap the terminal and throwaway server even when an assertion fails.
