@@ -11,6 +11,7 @@ import { demoSocketFactory } from "../demo/socket";
 import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { applySessionRoster } from "../state/session.svelte";
 import { ApiError } from "../api/errors";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -21,7 +22,7 @@ import {
   closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane, detachTabToPaneEdge,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
-  layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
+  forceReloadFromDisk, refreshTabFromDisk, layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
 const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
@@ -75,6 +76,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  resolveConfirm(false);
   resolveDraftClose("cancel");
   for (const component of mounted.splice(0)) await unmount(component);
   vi.useRealTimers();
@@ -289,6 +291,43 @@ async function paneExec(op: Record<string, unknown>) {
 }
 
 describe("pending drawing edits", () => {
+  test("a refresh leaves a stroke waiting in a drawing's buffer", async () => {
+    const { tab, strokeAt } = await draw();
+    const read = vi.spyOn(api, "readStream");
+
+    await refreshTabFromDisk(tab.id);
+
+    expect({
+      inDebounce: Date.now() - strokeAt < 200,
+      reads: read.mock.calls.length,
+      loading: tab.loading,
+      stroke: tab.content.includes("last-stroke"),
+      dirty: isDirty(tab),
+    }).toEqual({ inDebounce: true, reads: 0, loading: false, stroke: true, dirty: true });
+  });
+
+  test("Reload from disk asks before discarding a waiting stroke", async () => {
+    const { tab, strokeAt } = await draw();
+    const read = vi.spyOn(api, "readStream");
+
+    const reload = forceReloadFromDisk(tab.id);
+    await Promise.resolve();
+    const asked = { open: confirmState.open, title: confirmState.title };
+    resolveConfirm(false);
+    await reload;
+
+    expect({
+      inDebounce: Date.now() - strokeAt < 200,
+      asked,
+      reads: read.mock.calls.length,
+      stroke: tab.content.includes("last-stroke"),
+      dirty: isDirty(tab),
+    }).toEqual({
+      inDebounce: true, asked: { open: true, title: "Reload from disk?" },
+      reads: 0, stroke: true, dirty: true,
+    });
+  });
+
   test("a mode switch carries the pending stroke into Source", async () => {
     const { tab, target } = await draw();
     setMode(tab, "source");
