@@ -71,6 +71,7 @@ import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 import {
+  activeLayout,
   layout,
   moveActiveTabToSide,
   reorderTab,
@@ -250,7 +251,7 @@ describe("a pane keeps a board's first stroke across a copy of its tab", () => {
   /// Open a drawing beside a text tab, draw its first stroke, copy the tab
   /// with `copy` while the stroke's serialize waits, let the wait run out,
   /// and return the drawing's tab as the pane holds it.
-  async function strokeThenCopy(copy: () => void): Promise<FileTab | undefined> {
+  async function strokeThenCopy(copy: () => void, beforeStroke?: () => Promise<void>) {
     await standInForBoards();
     drawableBoards();
     await mountWith([
@@ -265,20 +266,27 @@ describe("a pane keeps a board's first stroke across a copy of its tab", () => {
     await tick();
     vi.useFakeTimers();
     try {
+      await beforeStroke?.();
       board.stroke({ id: "last-stroke", version: 1 });
       copy();
       await tick();
       await tick();
       await vi.advanceTimersByTimeAsync(200);
-      const pane = layout.nodes[PANE] as LeafNode;
-      return [...pane.tabs, ...(pane.bTabs ?? [])].find((tab) => tab.id === BOARD) as FileTab | undefined;
+      const live = layout.nodes[PANE] as LeafNode;
+      const shown = activeLayout().nodes[PANE] as LeafNode;
+      const findBoard = (pane: LeafNode) =>
+        [...pane.tabs, ...(pane.bTabs ?? [])].find((tab) => tab.id === BOARD) as FileTab | undefined;
+      return {
+        held: findBoard(live), shown: findBoard(shown),
+        boardHasStroke: board.elements.some((element) => (element as { id?: string }).id === "last-stroke"),
+      };
     } finally {
       vi.useRealTimers();
     }
   }
 
   test("a first stroke waiting at a reorder lands on the tab the pane holds", async () => {
-    const held = await strokeThenCopy(() => reorderTab(PANE, BOARD, 1));
+    const { held } = await strokeThenCopy(() => reorderTab(PANE, BOARD, 1));
     const pane = layout.nodes[PANE] as LeafNode;
 
     expect({ order: pane.tabs.map((tab) => tab.id), stroke: held?.content.includes("last-stroke") })
@@ -286,7 +294,7 @@ describe("a pane keeps a board's first stroke across a copy of its tab", () => {
   });
 
   test("a first stroke waiting at a send to the other side lands on the tab the pane holds", async () => {
-    const held = await strokeThenCopy(() => moveActiveTabToSide("b"));
+    const { held } = await strokeThenCopy(() => moveActiveTabToSide("b"));
     const pane = layout.nodes[PANE] as LeafNode;
 
     expect({ side: pane.side, onB: pane.bTabs?.map((tab) => tab.id), stroke: held?.content.includes("last-stroke") })
