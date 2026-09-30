@@ -4296,8 +4296,15 @@ function cloneLayoutState(src: LayoutState): LayoutState {
   } as LayoutState;
 }
 
+function flushLayoutEdits(src: LayoutState): void {
+  for (const node of Object.values(src.nodes)) {
+    if (node.kind === "leaf") flushTabEdits(allPaneTabs(node));
+  }
+}
+
 export function enterPaneMode(): void {
   if (paneMode.active) return;
+  flushLayoutEdits(layout);
   paneMode.draft = cloneLayoutState(layout);
   notePaneModeEntryBuffers();
   paneMode.active = true;
@@ -4320,6 +4327,7 @@ export function enterPaneMode(): void {
 export function enterPaneModeTransaction(grabPaneId: string | null): void {
   if (paneMode.stale) return;
   if (!paneMode.active) {
+    flushLayoutEdits(layout);
     paneMode.draft = cloneLayoutState(layout);
     notePaneModeEntryBuffers();
     paneMode.active = true;
@@ -4518,6 +4526,7 @@ export function commitPaneMode(): void {
     else if (kind === "graph") paneModeOpenGraph(ctx);
     else if (kind === "dashboard") paneModeOpenDashboard();
   }
+  flushLayoutEdits(paneMode.draft);
   const next = cloneLayoutState(paneMode.draft);
   carryLiveAuthorityState(next);
   paneModeEntryBuffers.clear();
