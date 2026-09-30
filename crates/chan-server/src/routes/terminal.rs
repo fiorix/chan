@@ -4310,6 +4310,111 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_after_import_counts_the_usable_ring() {
+        use chan_library::terminal_sessions::{FdStorePark, FdStoreParker, FdStoreSessionImport};
+        use std::os::fd::{BorrowedFd, OwnedFd};
+
+        #[derive(Clone, Default)]
+        struct Store(Arc<std::sync::Mutex<BTreeMap<String, OwnedFd>>>);
+        impl FdStorePark for Store {
+            fn park(&self, fds: &[(&str, BorrowedFd<'_>)]) -> bool {
+                let mut stored = self.0.lock().expect("stored descriptors");
+                for (name, fd) in fds {
+                    stored.insert(
+                        (*name).into(),
+                        fd.try_clone_to_owned().expect("duplicate fd"),
+                    );
+                }
+                true
+            }
+            fn unpark(&self, names: &[&str]) {
+                let mut stored = self.0.lock().expect("stored descriptors");
+                for name in names {
+                    stored.remove(*name);
+                }
+            }
+            fn adopt(&self, _name: &str) -> bool {
+                true
+            }
+            fn changed(&self) {}
+        }
+
+        let _gate = pty_test_lock();
+        let original = crate::state::test_support::make_test_state(false);
+        let store = Store::default();
+        original
+            .terminal_sessions
+            .install_fd_parker(FdStoreParker::new(store.clone()));
+        let terminal = original
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: Some("ring-import-window".into()),
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn parked terminal");
+        let id = terminal.id().to_owned();
+        let replay = b"__IMPORTED__\xc3\xa9\x1b[?1h";
+        assert!(original.terminal_sessions.inject_output(&id, replay));
+        let mut entries = original.terminal_sessions.fdstore_manifest_sessions("test");
+        assert_eq!(entries.len(), 1);
+        original
+            .terminal_sessions
+            .fdstore_manifest_committed("test", &entries);
+        assert_eq!(original.terminal_sessions.detach_parked_sessions(), 1);
+        let entry = entries.pop().expect("parked manifest entry");
+        let import = {
+            let mut fds = store.0.lock().expect("stored descriptors");
+            FdStoreSessionImport {
+                master_fd: fds.remove(&entry.fd_name).expect("parked PTY"),
+                ring_fd: Some(
+                    fds.remove(entry.ring_fd_name.as_ref().expect("ring name"))
+                        .expect("parked ring"),
+                ),
+                meta: entry.meta,
+                // A usable ring supplies replay independently of the manifest tail.
+                replay: Vec::new(),
+                sealed_manifest: true,
+            }
+        };
+        let state = crate::state::test_support::make_test_state(false);
+        let restored = state
+            .terminal_sessions
+            .restore_fdstore_sessions(vec![import]);
+        assert_eq!(restored.restored, 1, "skipped: {:?}", restored.skipped);
+        assert!(restored.abandoned_ring_fds.is_empty());
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(replay.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        let WireFrame::Control(session) = &frames[0] else {
+            unreachable!();
+        };
+        assert_eq!(session["generation"].as_u64(), Some(terminal.generation));
+        assert_eq!(session["seq"].as_u64(), Some(replay.len() as u64));
+        assert_eq!(session["missed_bytes"].as_u64(), Some(0));
+        assert_eq!(session["replay_bytes"].as_u64(), Some(replay.len() as u64));
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
     // A Resize frame resizes the PTY: the session echoes the new size and the
     // foreground program reads it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
