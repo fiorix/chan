@@ -228,17 +228,17 @@ async function refreshWorkspaces(): Promise<void> {
     return workspaceRefresh;
   }
   workspaceRefresh = (async () => {
-    do {
-      workspaceRefreshPending = false;
-      library.workspaces = await backend.listWorkspaces();
-    } while (workspaceRefreshPending);
-    reconcilePending();
+    try {
+      do {
+        workspaceRefreshPending = false;
+        library.workspaces = await backend.listWorkspaces();
+      } while (workspaceRefreshPending);
+      reconcilePending();
+    } finally {
+      workspaceRefresh = null;
+    }
   })();
-  try {
-    await workspaceRefresh;
-  } finally {
-    workspaceRefresh = null;
-  }
+  return workspaceRefresh;
 }
 
 async function refreshWorkspacesLive(): Promise<void> {
