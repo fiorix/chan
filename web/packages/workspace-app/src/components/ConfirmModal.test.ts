@@ -44,6 +44,74 @@ afterEach(() => {
   unmountDialogs();
 });
 
+async function openDestructive(): Promise<{ answer: Promise<boolean> }> {
+  const answer = uiConfirm({ title: "Discard changes?", confirmLabel: "Discard", destructive: true });
+  await settle();
+  return { answer };
+}
+
+describe("destructive confirm", () => {
+  test("opens with Cancel focused", async () => {
+    const target = mountDialog(ConfirmModal);
+    await openDestructive();
+    expect(document.activeElement, "the destructive default is Cancel").toBe(button(target, "Cancel"));
+  });
+
+  test("Enter on its initial focus cancels and prevents the key default", async () => {
+    mountDialog(ConfirmModal);
+    const { answer } = await openDestructive();
+    const enter = press(document.activeElement!, "Enter");
+    await expect(answer, "Enter on the destructive default cancels").resolves.toBe(false);
+    expect(enter.defaultPrevented).toBe(true);
+  });
+
+  test("Enter on its panel cancels", async () => {
+    const target = mountDialog(ConfirmModal);
+    const { answer } = await openDestructive();
+    const enter = press(dialogIn(target)!, "Enter");
+    await expect(answer, "Enter without a button cancels a destructive confirm").resolves.toBe(false);
+    expect(enter.defaultPrevented).toBe(true);
+  });
+
+  test("replacing an open confirm selects the destructive default", async () => {
+    const target = mountDialog(ConfirmModal);
+    const first = await open(target);
+    const second = await openDestructive();
+    await expect(first.answer).resolves.toBe(false);
+    expect(document.activeElement, "the replacement takes its own Cancel default").toBe(button(target, "Cancel"));
+    press(document.activeElement!, "Enter");
+    await expect(second.answer).resolves.toBe(false);
+  });
+
+  test("Escape cancels and goes no further than the dialog", async () => {
+    mountDialog(ConfirmModal);
+    const { answer } = await openDestructive();
+    const reached = recordDocumentKeys();
+    const escape = press(document.activeElement!, "Escape");
+    reached.stop();
+    await expect(answer).resolves.toBe(false);
+    expect(escape.defaultPrevented).toBe(true);
+    expect(reached.keys).toEqual([]);
+  });
+
+  test("a click on the backdrop cancels", async () => {
+    const target = mountDialog(ConfirmModal);
+    const { answer } = await openDestructive();
+    clickBackdrop(target);
+    await expect(answer).resolves.toBe(false);
+  });
+
+  test("closing returns focus to the origin", async () => {
+    const target = mountDialog(ConfirmModal);
+    const origin = focusOrigin();
+    const { answer } = await openDestructive();
+    button(target, "Cancel").click();
+    await answer;
+    await settle();
+    expect(document.activeElement).toBe(origin);
+  });
+});
+
 describe("ConfirmModal", () => {
   test("renders nothing until a confirm is asked", () => {
     const target = mountDialog(ConfirmModal);
