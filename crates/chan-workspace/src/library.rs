@@ -1220,6 +1220,7 @@ mod tests {
     fn populate_state_with(lib: &Library, root: &Path, opened: impl FnOnce(&Arc<Workspace>)) {
         let workspace = lib.open_workspace(root).unwrap();
         opened(&workspace);
+        workspace.stop_open_recovery();
         workspace
             .write_text("notes/keep.md", "kept across reset")
             .unwrap();
@@ -1564,27 +1565,29 @@ mod tests {
 
         let p = paths_of(&lib, workspace.path());
         assert!(p.graph_db.exists(), "graph DB should exist after populate");
-        // Sanity: the graph actually has the file we wrote.
+        // The fixture owns recovery because it has no retry driver.
         {
             let d = lib.open_workspace(workspace.path()).unwrap();
+            d.stop_open_recovery();
+            d.reindex(None).unwrap();
             let entries = d.list_tree().unwrap();
             assert!(entries.iter().any(|e| e.path == "notes/keep.md"));
-            let started = std::time::Instant::now();
-            let deadline = started + std::time::Duration::from_secs(20);
-            while !d.recovery_status().is_ready() && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
             assert!(
                 d.recovery_status().is_ready(),
-                "startup recovery not ready: root={} elapsed={:?} status={:?} worker_running={} unowned={} observation={:?}; state samples are separate",
+                "fixture recovery not ready: root={} status={:?} worker_running={} unowned={} observation={:?}; state samples are separate",
                 d.root().display(),
-                started.elapsed(),
                 d.recovery_status(),
                 d.recovery_worker_running_for_test(),
                 d.recovery_is_unowned(),
                 d.recovery_observation_for_test()
             );
-            d.join_open_recovery();
+            let opts = crate::workspace::SearchOpts {
+                mode: crate::SearchMode::Bm25,
+                limit: 10,
+                scope: None,
+            };
+            let hits = d.search("kept", &opts).unwrap();
+            assert!(hits.hits.iter().any(|hit| hit.path == "notes/keep.md"));
         }
 
         assert!(lib.unregister_workspace(workspace.path()).unwrap());
