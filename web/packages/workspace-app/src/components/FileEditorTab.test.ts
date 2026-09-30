@@ -1433,6 +1433,32 @@ describe("the not-saved line", () => {
     return target.querySelector(".editor-toolbar .error")?.textContent?.trim() ?? null;
   }
 
+  test("a rejected text autosave keeps the typed editor and its reason", async () => {
+    const tab = seat(fileTab({ id: "rejected-text", mode: "source", content: "typed text", saved: "old text" }));
+    const { target } = await render(tab);
+    vi.spyOn(api, "write").mockRejectedValue(new Error("disk full"));
+    vi.useFakeTimers();
+    try {
+      scheduleAutosave(PANE, tab.id);
+      await vi.advanceTimersByTimeAsync(900);
+      await tick();
+      expect(target.querySelector(".cm-content"), "typed editor stays mounted").not.toBeNull();
+      expect(target.querySelector(".cm-content")?.textContent).toContain("typed text");
+      expect(target.querySelector(".error-placeholder")).toBeNull();
+      expect(line(target)).toBe("Not saved: the save request failed (disk full)");
+      expect(tab.refusedUnwritten).toBeFalsy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a failed text load still replaces the editor", async () => {
+    const tab = seat(fileTab({ id: "failed-load", mode: "source", error: "read interrupted" }));
+    const { target } = await render(tab);
+    expect(target.querySelector(".error-placeholder")?.textContent).toBe("read interrupted");
+    expect(target.querySelector(".cm-content")).toBeNull();
+  });
+
   test("shows a save error while a live session holds what the file lacks, the tab being clean", async () => {
     const tab = seat(fileTab({ id: "not-saved-1", saveError: "the server could not write it (disk full)" }));
     unflushedIds.add(tab.id);

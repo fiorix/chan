@@ -192,6 +192,20 @@ async function mountDuringLoad(exists = true) {
 }
 
 describe("drawing loads", () => {
+  test("a rejected drawing autosave keeps the board and reports the failure", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING, { content: FOREIGN, saved: DRAWING });
+    const { target, board } = await mountBoard(tab);
+    await board.start();
+    write.mockRejectedValue(new Error("disk full"));
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(900);
+    await tick();
+    expect(target.querySelector(".excalidraw-host")).not.toBeNull();
+    expect(target.querySelector(".error-placeholder")).toBeNull();
+    expect(target.querySelector(".editor-toolbar .error")?.textContent).toContain("Not saved: the save request failed (disk full)");
+    expect(tab.refusedUnwritten).toBeFalsy();
+  });
   test("a failed load under a mounted canvas leaves the drawing clean and unwritten", async () => {
     const { pane, tab, target, loading, write, rejectRead, chunk } = await mountDuringLoad();
     await chunk();
