@@ -12205,6 +12205,10 @@ mod tests {
             let report = host.restore_fdstore_terminal_sessions(vec![
                 crate::terminal_sessions::FdStoreSessionImport {
                     meta,
+                    child_identity: crate::terminal_sessions::RecordedChildIdentity {
+                        boot_id: crate::terminal_sessions::current_boot_id(),
+                        start_time: crate::terminal_sessions::process_start_time(pid),
+                    },
                     master_fd,
                     ring_fd: None,
                     replay: b"replay".to_vec(),
@@ -12330,6 +12334,7 @@ mod tests {
             };
             let import = crate::terminal_sessions::FdStoreSessionImport {
                 meta,
+                child_identity: crate::terminal_sessions::RecordedChildIdentity::default(),
                 master_fd,
                 ring_fd: None,
                 replay: Vec::new(),

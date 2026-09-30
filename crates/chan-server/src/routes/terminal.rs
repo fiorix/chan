@@ -4374,6 +4374,10 @@ mod tests {
         let import = {
             let mut fds = store.0.lock().expect("stored descriptors");
             FdStoreSessionImport {
+                child_identity: chan_library::terminal_sessions::RecordedChildIdentity {
+                    boot_id: chan_library::terminal_sessions::current_boot_id(),
+                    start_time: entry.child_start_time,
+                },
                 master_fd: fds.remove(&entry.fd_name).expect("parked PTY"),
                 ring_fd: Some(
                     fds.remove(entry.ring_fd_name.as_ref().expect("ring name"))

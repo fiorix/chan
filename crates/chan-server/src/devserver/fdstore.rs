@@ -53,9 +53,9 @@ mod linux {
     use anyhow::Context;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use chan_library::terminal_sessions::{
-        fdstore_fd_name, fdstore_ring_fd_name, FdStoreManifestEntry, FdStorePark, FdStoreParker,
-        FdStoreSessionImport, FdStoreSessionMeta, FdStoreSkippedSession, FDSTORE_FD_PREFIX,
-        FDSTORE_RING_FD_PREFIX,
+        current_boot_id, fdstore_fd_name, fdstore_ring_fd_name, process_start_time,
+        FdStoreManifestEntry, FdStorePark, FdStoreParker, FdStoreSessionImport, FdStoreSessionMeta,
+        FdStoreSkippedSession, RecordedChildIdentity, FDSTORE_FD_PREFIX, FDSTORE_RING_FD_PREFIX,
     };
     use serde::{Deserialize, Serialize};
 
@@ -129,26 +129,6 @@ mod linux {
                     .collect(),
             }
         }
-    }
-
-    fn current_boot_id() -> Option<String> {
-        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
-        let boot_id = boot_id.trim();
-        (!boot_id.is_empty()).then(|| boot_id.to_owned())
-    }
-
-    fn process_start_time(pid: u32) -> Option<u64> {
-        parse_process_start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
-    }
-
-    fn parse_process_start_time(stat: &str) -> Option<u64> {
-        // comm is parenthesized and can itself contain spaces and parentheses.
-        stat.rsplit_once(')')?
-            .1
-            .split_ascii_whitespace()
-            .nth(19)?
-            .parse()
-            .ok()
     }
 
     /// Parking lifecycle. Transitions are one-way:
@@ -626,8 +606,8 @@ mod linux {
                     fd_name,
                     ring_fd_name,
                     meta,
+                    child_start_time,
                     replay_b64,
-                    ..
                 } = session;
                 // Claimed before any skip, so a skipped session's ring file
                 // is closed with it rather than reported as an orphan. Only
@@ -698,6 +678,10 @@ mod linux {
                 let replay = decode_replay(&replay_b64, &meta, &mut skipped);
                 imports.push(FdStoreSessionImport {
                     meta,
+                    child_identity: RecordedChildIdentity {
+                        boot_id: manifest.boot_id.clone(),
+                        start_time: child_start_time,
+                    },
                     master_fd,
                     ring_fd,
                     replay,
@@ -932,21 +916,11 @@ mod linux {
         current_boot: Option<&str>,
         recorded_start: Option<u64>,
     ) -> Result<(), String> {
-        let recorded_boot = recorded_boot.ok_or("manifest boot id is missing")?;
-        if current_boot != Some(recorded_boot) {
-            return Err("manifest boot id does not match the current boot".into());
+        let pidfd = RecordedChildIdentity {
+            boot_id: recorded_boot.map(str::to_owned),
+            start_time: recorded_start,
         }
-        let recorded_start = recorded_start.ok_or("no recorded start time for this fd name")?;
-        let raw_pid = i32::try_from(pid).map_err(|_| "invalid child pid")?;
-        let process = rustix::process::Pid::from_raw(raw_pid).ok_or("invalid child pid")?;
-        // Pin the process before reading /proc so pid reuse between validation
-        // and either signal cannot redirect cleanup to a different process.
-        let pidfd = rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty())
-            .map_err(|error| format!("cannot pin child identity: {error}"))?;
-        let current_start = process_start_time(pid).ok_or("cannot read child start time")?;
-        if current_start != recorded_start {
-            return Err("child start time does not match the manifest".into());
-        }
+        .pin(pid, current_boot)?;
         let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::HUP);
         let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::TERM);
         Ok(())
@@ -1123,24 +1097,6 @@ mod linux {
                 child.try_wait().unwrap().is_none(),
                 "an invalid fd name killed an unverified child"
             );
-        }
-
-        #[test]
-        fn process_start_time_parser_handles_parentheses_and_spaces() {
-            let mut fields = vec!["0"; 20];
-            fields[0] = "S";
-            fields[19] = "424242";
-            let stat = format!(
-                "123 (a ) name (with parentheses)) {} 99 88",
-                fields.join(" ")
-            );
-            assert_eq!(parse_process_start_time(&stat), Some(424242));
-            assert_eq!(parse_process_start_time("123 (truncated) S 0"), None);
-            assert_eq!(
-                parse_process_start_time(&stat.replace("424242", "invalid")),
-                None
-            );
-            assert_eq!(parse_process_start_time("malformed"), None);
         }
 
         #[tokio::test]
@@ -1664,6 +1620,7 @@ mod linux {
                 fd_name: fdstore_fd_name(session_id, Some(7)),
                 ring_fd_name: with_ring.then(|| fdstore_ring_fd_name(session_id, Some(7))),
                 meta,
+                child_start_time: None,
                 replay: Vec::new(),
             }
         }

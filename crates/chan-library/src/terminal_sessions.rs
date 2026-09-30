@@ -34,12 +34,16 @@ use crate::config::{TerminalConfig, TerminalProfile};
 use crate::time::{now_unix_millis, now_unix_secs};
 
 mod bytes;
+#[cfg(target_os = "linux")]
+mod child_identity;
 mod platform;
 mod redraw;
 mod ring;
 pub mod shell_profiles;
 
 use bytes::{contains_subslice, VisibleScan};
+#[cfg(target_os = "linux")]
+pub use child_identity::{current_boot_id, process_start_time, RecordedChildIdentity};
 #[cfg(windows)]
 pub use platform::prime_windows_shell;
 #[cfg(unix)]
@@ -1034,6 +1038,8 @@ pub struct FdStoreManifestEntry {
     /// session has one.
     pub ring_fd_name: Option<String>,
     pub meta: FdStoreSessionMeta,
+    /// Retained child start time, independent of the current holder of its PID.
+    pub child_start_time: Option<u64>,
     /// Bounded tail of the server replay ring, carried through the restart
     /// manifest for an import that has no ring file beside the PTY.
     pub replay: Vec<u8>,
@@ -1043,6 +1049,8 @@ pub struct FdStoreManifestEntry {
 #[derive(Debug)]
 pub struct FdStoreSessionImport {
     pub meta: FdStoreSessionMeta,
+    /// Child evidence recorded alongside the metadata in the restart manifest.
+    pub child_identity: RecordedChildIdentity,
     pub master_fd: OwnedFd,
     /// The ring file the previous process parked beside the PTY. It wins
     /// over `meta.seq` and `replay` when it reads back intact and ends at or
@@ -3890,6 +3898,8 @@ struct Session {
     spawn_opts: CreateOptions,
     child_pid: Option<u32>,
     #[cfg(target_os = "linux")]
+    child_start_time: Option<u64>,
+    #[cfg(target_os = "linux")]
     master_fd: Option<OwnedFd>,
     command_tx: std::sync::mpsc::Sender<PtyCommand>,
     output_tx: broadcast::Sender<SessionEvent>,
@@ -4231,6 +4241,8 @@ impl Session {
                 profile: opts.profile,
             },
             child_pid,
+            #[cfg(target_os = "linux")]
+            child_start_time: None,
             command_tx,
             output_tx,
             ring: Mutex::new(RingBuffer::new(config.terminal.ring_bytes)),
@@ -4514,6 +4526,7 @@ impl Session {
             fd_name,
             ring_fd_name,
             meta,
+            child_start_time: self.child_start_time,
             replay,
         })
     }
@@ -4530,6 +4543,7 @@ impl Session {
     ) -> anyhow::Result<Arc<Self>> {
         let FdStoreSessionImport {
             meta,
+            child_identity,
             master_fd,
             ring_fd,
             replay,
@@ -4617,6 +4631,7 @@ impl Session {
                 profile: meta.profile.clone(),
             },
             child_pid: meta.child_pid,
+            child_start_time: child_identity.start_time,
             master_fd: Some(master_fd),
             command_tx,
             output_tx,
@@ -6529,6 +6544,8 @@ mod tests {
                     .collect(),
             },
             child_pid: None,
+            #[cfg(target_os = "linux")]
+            child_start_time: None,
             #[cfg(target_os = "linux")]
             master_fd: None,
             command_tx,
@@ -8912,6 +8929,7 @@ mod tests {
             test_config(1024, 4, 10),
             FdStoreSessionImport {
                 meta,
+                child_identity: RecordedChildIdentity::default(),
                 master_fd,
                 ring_fd: None,
                 replay: Vec::new(),
@@ -11638,6 +11656,10 @@ mod tests {
             };
             let report = registry.restore_fdstore_sessions(vec![FdStoreSessionImport {
                 meta,
+                child_identity: RecordedChildIdentity {
+                    boot_id: current_boot_id(),
+                    start_time: process_start_time(pid),
+                },
                 master_fd,
                 ring_fd: None,
                 replay: b"tail".to_vec(),
@@ -11716,6 +11738,10 @@ mod tests {
                 std::mem::take(&mut *self.0.published.lock().unwrap())
                     .into_iter()
                     .map(|entry| FdStoreSessionImport {
+                        child_identity: RecordedChildIdentity {
+                            boot_id: current_boot_id(),
+                            start_time: entry.child_start_time,
+                        },
                         master_fd: fds
                             .remove(&entry.fd_name)
                             .expect("the store retains every manifested PTY"),
@@ -11760,6 +11786,10 @@ mod tests {
                     .unwrap()
                     .iter()
                     .map(|entry| FdStoreSessionImport {
+                        child_identity: RecordedChildIdentity {
+                            boot_id: current_boot_id(),
+                            start_time: entry.child_start_time,
+                        },
                         master_fd: duplicate(&entry.fd_name),
                         ring_fd: entry.ring_fd_name.as_deref().map(duplicate),
                         meta: entry.meta.clone(),
@@ -12060,6 +12090,7 @@ mod tests {
             };
             let import = FdStoreSessionImport {
                 meta,
+                child_identity: RecordedChildIdentity::default(),
                 master_fd,
                 ring_fd: None,
                 replay: tail.to_vec(),
