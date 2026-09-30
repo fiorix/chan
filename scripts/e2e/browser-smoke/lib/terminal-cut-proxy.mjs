@@ -38,6 +38,7 @@ export async function startTerminalCutProxy({
   let connections = 0, traceBytes = 0, armed, selected, timer, failure, receipt, closed = false;
 
   function watch(socket) {
+    if (sockets.has(socket)) return socket;
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
@@ -197,10 +198,14 @@ export async function startTerminalCutProxy({
   const server = http.createServer((req, res) => {
     const up = http.request(target, { method: req.method, path: req.url, headers: req.headers }, (response) => {
       res.writeHead(response.statusCode, response.headers);
+      response.on("error", () => res.destroy());
       response.pipe(res);
     });
     up.on("socket", watch);
-    up.on("error", () => { res.writeHead(502); res.end(); });
+    up.on("error", () => {
+      if (res.headersSent) res.destroy();
+      else { res.writeHead(502); res.end(); }
+    });
     req.on("aborted", () => up.destroy());
     req.pipe(up);
   });

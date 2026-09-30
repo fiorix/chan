@@ -19,12 +19,12 @@ const ready = text({ type: "ready" });
 const frames = [session, [replay, true], ready, [Buffer.from("live"), true]];
 const digest = (items) => createHash("sha256").update(Buffer.concat(items.map(([bytes]) => bytes))).digest("hex");
 
-async function rig(t, { messages = frames, ordinal = 1, deadlineMs = 5000, ...limits } = {}) {
+async function rig(t, { messages = frames, ordinal = 1, deadlineMs = 5000, httpHandler, ...limits } = {}) {
   const sockets = new Set(), clients = new Set(), upstream = [];
-  const httpServer = http.createServer((req, res) => {
+  const httpServer = http.createServer(httpHandler ?? ((req, res) => {
     res.writeHead(201, { "x-echo": req.headers["x-echo"] ?? "absent" });
     req.pipe(res);
-  });
+  }));
   httpServer.on("connection", (socket) => {
     sockets.add(socket); socket.on("close", () => sockets.delete(socket));
   });
@@ -131,6 +131,27 @@ test("uncut streams preserve types, split UTF-8 and ANSI, HTTP and input", { tim
   assert.equal(response.headers.get("x-echo"), "kept");
   assert.equal(await response.text(), "body");
   await assert.rejects(proxy.waitForCut(), { code: "NOT_ARMED" });
+});
+
+test("an HTTP upstream error after headers destroys only its response", { timeout: 10000 }, async (t) => {
+  const request = http.request;
+  let upstreamRequest;
+  t.mock.method(http, "request", function (...args) {
+    upstreamRequest = request.apply(this, args);
+    return upstreamRequest;
+  });
+  const { proxy } = await rig(t, { httpHandler(req, res) {
+    res.writeHead(200);
+    if (req.url === "/partial") res.write("prefix");
+    else res.end("complete");
+  } });
+  const response = await fetch(`${proxy.url}/partial`);
+  assert.equal(response.status, 200);
+  assert.doesNotThrow(() => upstreamRequest.emit("error", new Error("upstream failed after headers")),
+    "a sent response must be destroyed without writing headers again");
+  await assert.rejects(response.text());
+  assert.equal(await (await fetch(`${proxy.url}/complete`)).text(), "complete");
+  assert.equal(proxy.records.some((r) => r.event === "failure"), false);
 });
 
 test("selection counts only the named path and session", { timeout: 10000 }, async (t) => {
