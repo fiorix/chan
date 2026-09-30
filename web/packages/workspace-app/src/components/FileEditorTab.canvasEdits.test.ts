@@ -270,7 +270,7 @@ async function draw(over: Partial<FileTab> = {}) {
   board.stroke({ id: "last-stroke", version: 1 });
   vi.advanceTimersByTime(50);
   expect(tab.content).toBe(tab.saved);
-  return { pane, tab, target, strokeAt: Date.now() - 50 };
+  return { pane, tab, target, board, strokeAt: Date.now() - 50 };
 }
 
 /// What the control client prints for a `cs pane` operation: the window
@@ -326,6 +326,41 @@ describe("pending drawing edits", () => {
       inDebounce: true, asked: { open: true, title: "Reload from disk?" },
       reads: 0, stroke: true, dirty: true,
     });
+  });
+
+  test("accepting Reload from disk replaces the pending stroke", async () => {
+    const { tab, board } = await draw();
+    const read = vi.spyOn(api, "readStream");
+
+    const reload = forceReloadFromDisk(tab.id);
+    expect(confirmState.title).toBe("Reload from disk?");
+    expect(read).not.toHaveBeenCalled();
+    resolveConfirm(true);
+    await reload;
+    await tick();
+
+    expect({ reads: read.mock.calls.length, buffer: tab.content, elements: board.elements })
+      .toEqual({ reads: 1, buffer: INITIAL, elements: [] });
+  });
+
+  test("a clean drawing refreshes and reloads without a question", async () => {
+    const initial = fileTab({
+      path: "notes/clean.excalidraw", fileKind: "text", mode: "canvas", content: INITIAL, saved: INITIAL,
+    });
+    initial.savedMtime = disk.write(initial.path, INITIAL).mtime;
+    resetLayout([initial]);
+    const tab = readTab(initial.id)!;
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    vi.advanceTimersByTime(50);
+    const read = vi.spyOn(api, "readStream");
+
+    await refreshTabFromDisk(tab.id);
+    await forceReloadFromDisk(tab.id);
+
+    expect({ reads: read.mock.calls.length, asked: confirmState.open, dirty: isDirty(tab) })
+      .toEqual({ reads: 2, asked: false, dirty: false });
   });
 
   test("a mode switch carries the pending stroke into Source", async () => {
@@ -1006,6 +1041,26 @@ describe("a live drawing", () => {
     expect(tab.doc?.state).toBe("attached");
     return { pane, tab, board, socket, reads };
   }
+
+  test("Reload from disk sends a waiting live stroke before asking", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    const resolved = vi.spyOn(api, "resolveSessionConflict").mockResolvedValue({
+      path: tab.path, content: DRAWING, mtime: 2, mtime_ns: "2000000000",
+      authority_version: 2, disk_conflicted: false, repo_root: null, writable: true,
+    });
+    vi.useFakeTimers();
+    board.stroke(STROKE);
+    vi.advanceTimersByTime(50);
+    const reload = forceReloadFromDisk(tab.id);
+
+    expect({ asked: confirmState.title, pushes: socket.pushes().length, resolved: resolved.mock.calls.length })
+      .toEqual({ asked: "Reload from disk?", pushes: 1, resolved: 0 });
+    resolveConfirm(true);
+    await reload;
+    await tick();
+    expect(resolved).toHaveBeenCalledWith(tab.path, "reload");
+    expect(tab.content).toBe(DRAWING);
+  });
 
   test("a peer's edit leaves the drawing saved, and its close closes it", async () => {
     const { pane, tab, socket } = await attachedDrawing();

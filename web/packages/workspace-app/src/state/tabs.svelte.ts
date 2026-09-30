@@ -8196,6 +8196,9 @@ export function endMissingFileReopen(tabId: string): boolean {
 /// If the buffer is dirty, it is left alone. Not used for watcher events;
 /// watcher events must not silently reload an open doc (see `flagExternalChange`).
 export async function refreshTabFromDisk(tabId: string): Promise<void> {
+  const before = findFileTabById(tabId);
+  if (!before) return;
+  flushTabEdits([before.tab]);
   const found = findFileTabById(tabId);
   if (!found) return;
   if (found.tab.content !== found.tab.saved) return;
@@ -8248,6 +8251,9 @@ export async function reloadTabFromDisk(tabId: string): Promise<void> {
 /// Prompts before discarding unsaved edits or a conflict's authority
 /// side.
 export async function forceReloadFromDisk(tabId: string): Promise<void> {
+  const before = findFileTabById(tabId);
+  if (!before) return;
+  flushTabEdits([before.tab]);
   const found = findFileTabById(tabId);
   if (!found) return;
   const t = found.tab;
