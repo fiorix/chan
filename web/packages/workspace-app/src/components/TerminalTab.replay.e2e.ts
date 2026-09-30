@@ -16,12 +16,14 @@ async function assertWireProvenance() {
     deliveries: peer.deliveries.map(({ bytes, binary }) => ({ bytes, binary })) }));
   const records = await rpc("records");
   expect(records.filter((entry: any) => entry.event === "failure")).toEqual([]);
+  const upstreamFrames = new Map<string, any>(records.filter((entry: any) => entry.event === "frame" && entry.direction === "received")
+    .map((entry: any) => [`${entry.connection}:${entry.frame}`, entry]));
   for (const peer of received) {
     const forwarded = records.filter((entry: any) => entry.event === "frame" && entry.direction === "forwarded" && entry.connection === peer.connection).slice(0, peer.deliveries.length);
     expect(peer.deliveries, "every received frame equals its causally preceding forwarded frame")
       .toEqual(forwarded.map(({ bytes, binary }: any) => ({ bytes, binary })));
     for (const frame of forwarded) {
-      const upstream = records.find((entry: any) => entry.event === "frame" && entry.direction === "received" && entry.connection === peer.connection && entry.frame === frame.source);
+      const upstream = upstreamFrames.get(`${peer.connection}:${frame.source}`);
       expect(frame.binary).toBe(upstream.binary);
       // Encoded-byte equality avoids a deep assertion over millions of numeric properties on the page's event loop.
       expect(frame.bytes, "forwarded bytes match their independently recorded upstream source")
@@ -34,7 +36,8 @@ async function assertWireProvenance() {
 
 if (caseName === "attach-windows") test("attach cuts preserve complete history and the appropriate resume cursor", async () => {
   let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
-  const subcases: Array<Record<string, unknown>> = requiredSubcases.map((name) => ({ name, status: "not-run", reason: "not implemented" }));
+  const subcases: Array<Record<string, unknown>> = requiredSubcases.map((name) => ({ name, status: "not-run",
+    reason: name === "alternate-after-prelude" ? "proxy cannot cut between alternate prelude and mode reassert" : "not implemented" }));
   const result: Record<string, unknown> = { name: "attach-windows", status: "failed", subcases };
   const passed = (name: string, detail: Record<string, unknown>) => {
     const entry = subcases.find((entry) => entry.name === name);
@@ -138,22 +141,23 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       { name: "normal-utf8-prefix", boundary: "inside-replay", bytes: utf8Start + 1 },
       { name: "normal-escape-prefix", boundary: "inside-replay", bytes: escapeStart + 2 },
       { name: "normal-before-ready", boundary: "before-ready", bytes: splitBytes.length },
+      { name: "normal-repeated-failed-dial", boundary: "inside-replay", bytes: 21 },
     ];
     let current = afterReadyRecovery;
     for (const variant of variants) {
       const first = current.connection + 1;
       const second = first + 1;
+      const failedDials = variant.name === "normal-repeated-failed-dial" ? [second + 1, second + 2] : [];
       let ackTail = Promise.resolve();
+      let delivered = 0;
       ReplaySocket.acknowledge = (message) => {
         if (message.connection !== first && message.connection !== second) return Promise.resolve();
         ackTail = ackTail.then(async () => {
           if (message.connection === first && message.type === "session") {
             await rpc("ack", { connection: first, frame: message.frame, drained: false });
           } else if (message.connection === second) {
-            const socket = await ReplaySocket.dial(second);
-            const delivered = socket.deliveries.filter((frame) => frame.frame <= message.frame && frame.binary)
-              .reduce((total, frame) => total + Buffer.from(frame.bytes, "base64").length, 0);
-            if (variant.boundary === "before-ready" || (message.binary && delivered === variant.bytes)) {
+            if (message.binary) delivered += Buffer.from(message.bytes, "base64").length;
+            if (message.binary && delivered === variant.bytes) {
               await drainParser(`${variant.name} boundary`);
               await rpc("ack", { connection: second, frame: message.frame, drained: true });
             }
@@ -164,10 +168,11 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       await rpc("arm-sequence", { arms: [
         { boundary: "after-session", ordinal: first },
         { boundary: variant.boundary, ordinal: second, ...(variant.boundary === "inside-replay" ? { bytes: variant.bytes } : {}) },
+        ...failedDials.map((ordinal) => ({ boundary: "before-session", ordinal })),
       ] });
       current.disconnect();
       const cuts = await rpc("cuts");
-      expect(cuts).toHaveLength(2);
+      expect(cuts).toHaveLength(2 + failedDials.length);
       expect(cuts[0].boundary).toBe("after-session");
       expect(cuts[0].replayForwarded).toBe(0);
       expect(cuts[1].boundary).toBe(variant.boundary);
@@ -187,7 +192,12 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
         expect(Buffer.from(splitBytes.subarray(variant.bytes - 2, variant.bytes)).toString()).toBe("\x1b[");
         expect(splitBytes[variant.bytes]).toBe(0x33);
       }
-      current = await ReplaySocket.dial(second + 1);
+      for (const ordinal of failedDials) {
+        expect((await ReplaySocket.dial(ordinal)).deliveries).toEqual([]);
+        expect(cuts.find((cut: any) => cut.connection === ordinal).forwardedBytes).toBe(0);
+      }
+      const recoveryOrdinal = second + failedDials.length + 1;
+      current = await ReplaySocket.dial(recoveryOrdinal);
       await current.ready();
       const session = sessionOf(current);
       expect({ seq: session.seq, replay: session.replay_bytes, missed: session.missed_bytes, generation: session.generation })
@@ -197,7 +207,7 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       expect(parsed.active).toBe("normal");
       expect(parsed.normal, "a second cut reconstructs each row and the original cursor exactly once").toEqual(splitBaseline.normal);
       records = await assertWireProvenance();
-      for (const ordinal of [second, second + 1]) {
+      for (const ordinal of [second, ...failedDials, recoveryOrdinal]) {
         const dial = records.find((entry: any) => entry.event === "connection" && entry.connection === ordinal);
         expect(dial.query.since).toBe("0");
         expect(dial.query.generation).toBeUndefined();
@@ -205,9 +215,110 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       passed(variant.name, { cuts, session, prefixBytes: variant.bytes, fixtureSha256: splitSource.sha256 });
     }
     passed("normal-second-cut", { variants: variants.map((variant) => variant.name) });
+
+    await emit("alternate", { enabled: true });
+    await emit("bytes", { base64: Buffer.from("\x1b[?1h\x1b[?2004h\x1b[>4;2m\x1b[>8u").toString("base64") });
+    await emit("redraw", { name: "ATTACH_ALT_BASE" });
+    await current.bytesInclude("SCREEN:ATTACH_ALT_BASE\r\n");
+    const alternateBaseline = await snapshot("alternate attach baseline");
+    expect(alternateBaseline.active).toBe("alternate");
+    expect(alternateBaseline.normal).toEqual(splitBaseline.normal);
+    const protocol = mounted.tab.keyboardProtocol;
+    const protocolValue = JSON.parse(JSON.stringify(protocol));
+    let expectedKeys = "";
+    const alternatePrelude = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?1h\x1b[?2004h";
+    async function alternateKeys(label: string) {
+      for (const modifier of [{ ctrlKey: true }, { shiftKey: true }]) {
+        expect(pressInTerminal(parsers.at(-1)!, { key: "Enter", code: "Enter", ...modifier }).handled).toBe(false);
+      }
+      expectedKeys += "\x1b[27;5;13~\x1b[27;2;13~";
+      expect(Buffer.from(await rpc("keys", { length: Buffer.from(expectedKeys).length }), "base64").toString(), label).toBe(expectedKeys);
+    }
+    await alternateKeys("alternate keys before cuts");
+    const alternateVariants = [
+      { name: "alternate-before-session", boundary: "before-session", failures: 0 },
+      { name: "alternate-before-ready", boundary: "before-ready", failures: 0 },
+      { name: "alternate-after-ready", boundary: "after-ready", failures: 0 },
+      { name: "alternate-second-cut", boundary: "after-session", failures: 1 },
+      { name: "alternate-repeated-failed-dial", boundary: "after-session", failures: 2 },
+    ];
+    for (const variant of alternateVariants) {
+      const first = current.connection + 1;
+      const recoveryOrdinal = first + variant.failures + 1;
+      const source = await rpc("fixture-log");
+      const seq = Buffer.from(source.bytes, "base64").length;
+      let ackTail = Promise.resolve();
+      ReplaySocket.acknowledge = (message) => {
+        if (message.connection !== first) return Promise.resolve();
+        ackTail = ackTail.then(async () => {
+          const atBoundary = variant.boundary === "before-ready"
+            || (variant.boundary === "after-ready" && message.type === "ready")
+            || (variant.boundary === "after-session" && message.type === "session");
+          if (atBoundary) {
+            await drainParser(`${variant.name} boundary`);
+            await rpc("ack", { connection: first, frame: message.frame, drained: true });
+          }
+        });
+        return ackTail;
+      };
+      await rpc("arm-sequence", { arms: [{ boundary: variant.boundary, ordinal: first },
+        ...Array.from({ length: variant.failures }, (_, index) => ({ boundary: "before-session", ordinal: first + index + 1 }))] });
+      current.disconnect();
+      const cuts = await rpc("cuts");
+      expect(cuts).toHaveLength(variant.failures + 1);
+      for (const cut of cuts) {
+        expect(cut.replayBytes, "alternate prelude and modes are excluded from ring replay").toBe(0);
+        expect(cut.replayForwarded).toBe(0);
+        expect(cut.disconnect).toEqual({ client: "closed", upstream: "closed" });
+        if (cut.boundary === "before-session") expect((await ReplaySocket.dial(cut.connection)).deliveries).toEqual([]);
+      }
+      const interrupted = await ReplaySocket.dial(first);
+      if (variant.boundary === "before-ready" || variant.boundary === "after-ready") {
+        expect(binaryOf(interrupted).toString(), "alternate prelude precedes the negotiated private-mode reassert").toBe(alternatePrelude);
+        expect(cuts[0].lastAcknowledged.drained).toBe(true);
+        expect(interrupted.deliveries.some((frame) => frame.type === "ready")).toBe(variant.boundary === "after-ready");
+      }
+      current = await ReplaySocket.dial(recoveryOrdinal);
+      await current.ready();
+      const session = sessionOf(current);
+      expect({ seq: session.seq, replay: session.replay_bytes, missed: session.missed_bytes, generation: session.generation })
+        .toEqual({ seq, replay: 0, missed: 0, generation });
+      expect(binaryOf(current).toString()).toBe(alternatePrelude);
+      const parsed = await snapshot(`${variant.name} recovery`);
+      expect(parsed.active).toBe("alternate");
+      expect(parsed.normal, "empty replay and prelude preserve the normal history and cursor").toEqual(splitBaseline.normal);
+      expect(mounted.tab.keyboardProtocol).toBe(protocol);
+      expect(JSON.parse(JSON.stringify(mounted.tab.keyboardProtocol))).toEqual(protocolValue);
+      expect(parsers.at(-1)!.model.modes.applicationCursorKeysMode).toBe(true);
+      expect(parsers.at(-1)!.model.modes.bracketedPasteMode).toBe(true);
+      await alternateKeys(`${variant.name} keys`);
+      records = await assertWireProvenance();
+      const dials = records.filter((entry: any) => entry.event === "connection" && entry.connection >= first && entry.connection <= recoveryOrdinal);
+      expect(dials).toHaveLength(variant.failures + 2);
+      for (const dial of dials) {
+        const cutReplay = dial.connection !== first && (variant.boundary === "before-ready" || variant.boundary === "after-session");
+        expect(dial.query.since).toBe(cutReplay ? "0" : String(seq));
+        expect(dial.query.generation).toBe(cutReplay ? undefined : String(generation));
+      }
+      await emit("redraw", { name: variant.name });
+      await current.bytesInclude(`SCREEN:${variant.name}\r\n`);
+      const redrawn = await snapshot(`${variant.name} redraw`);
+      expect(redrawn.alternate.rows.filter(Boolean)).toEqual([`SCREEN:${variant.name}`]);
+      expect(redrawn.normal).toEqual(splitBaseline.normal);
+      passed(variant.name, { cuts, session, protocol: protocolValue });
+    }
+    await emit("alternate", { enabled: false });
+    await emit("bytes", { base64: Buffer.from("\x1b[?1l\x1b[?2004l").toString("base64") });
+    await emit("marker", { name: "ATTACH_NORMAL_RETURN" });
+    await current.bytesInclude("MARKER:ATTACH_NORMAL_RETURN\r\n");
+    const returned = await snapshot("normal prompt after all alternate cuts");
+    expect(returned.active).toBe("normal");
+    expect(returned.normal.rows.filter(Boolean)).toEqual([...splitRows, "MARKER:ATTACH_NORMAL_RETURN"]);
+    await assertWireProvenance();
+    const finalSource = await rpc("fixture-log");
     const missing = subcases.filter((entry) => entry.status !== "passed").map((entry) => entry.name);
     Object.assign(result, { status: missing.length ? "not-run" : "passed", reason: missing.length ? "required subcases are not implemented" : undefined,
-      fixtureSha256: splitSource.sha256, receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin"] });
+      fixtureSha256: finalSource.sha256, receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin"] });
   } catch (error) {
     result.error = String(error);
     throw error;

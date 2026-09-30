@@ -45,7 +45,7 @@ export function until<T>(label: string, read: () => T | undefined): Promise<T> {
 
 export async function rpc(op: string, args: Record<string, unknown> = {}): Promise<any> {
   const response = await networkFetch(env.CHAN_REPLAY_CONTROL!, {
-    method: "POST", headers: { authorization: `Bearer ${env.CHAN_REPLAY_CONTROL_TOKEN}` },
+    method: "POST", headers: { authorization: `Bearer ${env.CHAN_REPLAY_CONTROL_TOKEN}`, connection: "close" },
     body: JSON.stringify({ op, args }), signal: AbortSignal.timeout(deadline + 1000),
   });
   const result = await response.json();
