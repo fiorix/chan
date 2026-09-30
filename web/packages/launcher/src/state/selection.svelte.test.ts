@@ -5,7 +5,8 @@
 // its own rows so it is robust to the shared module-level mock state.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { WorkspaceStatus } from "../api/library";
+import { ApiError, type WorkspaceStatus } from "../api/library";
+import { cancelConfirm, confirm, resolveConfirm } from "./confirm.svelte";
 import {
   selection,
   isSelected,
@@ -455,5 +456,89 @@ describe("ordered cross-kind bulk remove", () => {
     expect(selectedCount()).toBe(0);
     expect(selection.confirmingDelete).toBe(false);
     expect(selection.note).toBeNull();
+  });
+});
+
+describe("bulk removal with live terminals", () => {
+  afterEach(() => {
+    cancelConfirm();
+    vi.restoreAllMocks();
+  });
+
+  async function prepare(retryFails = false): Promise<string[]> {
+    const { backend } = await import("../api/backend");
+    const calls: string[] = [];
+    const refused = () => new ApiError(409, "live_terminals", {
+      error: "live_terminals", active_terminals: 3,
+    });
+    vi.spyOn(backend, "listWorkspaces").mockImplementation(async () => library.workspaces);
+    vi.spyOn(backend, "removeWorkspace").mockImplementation(async (id, force?: boolean) => {
+      calls.push(`local:${id}:${!!force}`);
+      if (id === "failed") throw new ApiError(403, "permission denied");
+      if (id === "live" && !force) throw refused();
+    });
+    vi.spyOn(backend, "forgetDevserverWorkspace").mockImplementation(async (id, prefix, force) => {
+      calls.push(`remote:${id}:${prefix}:${!!force}`);
+      if (!force) throw refused();
+      if (retryFails) throw new ApiError(503, "server unavailable");
+    });
+    vi.spyOn(backend, "removeDevserver").mockImplementation(async () => { calls.push("devserver"); });
+    vi.spyOn(backend, "removeGateway").mockImplementation(async () => { calls.push("gateway"); });
+    for (const id of ["ok", "failed", "live"]) toggleSelected("workspace", id);
+    toggleSelected("served", "w/live", "remote");
+    toggleSelected("devserver", "remote");
+    toggleSelected("gateway", "parent");
+    requestBulkDelete();
+    await confirmBulkDelete();
+    return calls;
+  }
+
+  it("confirms a forced retry for refused workspaces alone before removing their servers", async () => {
+    const calls = await prepare();
+    expect(confirm.open, "live-terminal refusals offer the launcher confirm").toBe(true);
+    expect(confirm.message).toContain("2 workspaces");
+    expect(confirm.message).toContain("live terminal");
+    expect(confirm.confirmLabel).toBe("Remove");
+    expect(selection.busy).toBe(false);
+    expect(calls).toEqual(["local:ok:false", "local:failed:false", "local:live:false", "remote:remote:w/live:false"]);
+    await resolveConfirm();
+    expect(calls).toEqual([
+      "local:ok:false", "local:failed:false", "local:live:false", "remote:remote:w/live:false",
+      "local:live:true", "remote:remote:w/live:true", "devserver", "gateway",
+    ]);
+    expect(selection.selected).toEqual([{ kind: "workspace", id: "failed" }]);
+    expect(selection.note).toBe("1 of 6 failed to remove");
+    expect(confirm.open).toBe(false);
+    expect(selection.busy).toBe(false);
+  });
+
+  it("keeps refused workspaces and pending servers selected when the forced retry is cancelled", async () => {
+    const calls = await prepare();
+    expect(confirm.open, "cancellation has a live-terminal confirm to dismiss").toBe(true);
+    cancelConfirm();
+    expect(calls).toHaveLength(4);
+    expect(isSelected("workspace", "ok")).toBe(false);
+    expect(isSelected("workspace", "live")).toBe(true);
+    expect(isSelected("served", "w/live", "remote")).toBe(true);
+    expect(isSelected("devserver", "remote")).toBe(true);
+    expect(isSelected("gateway", "parent")).toBe(true);
+    expect(selection.note).toContain("2 workspaces with live terminals");
+    expect(selection.note).toContain("server removals deferred");
+    expect(selection.busy).toBe(false);
+  });
+
+  it("keeps a failed forced removal selected and preserves its server connection", async () => {
+    const calls = await prepare(true);
+    expect(confirm.open, "retry failure starts with a live-terminal confirm").toBe(true);
+    await resolveConfirm();
+    expect(calls.slice(4)).toEqual(["local:live:true", "remote:remote:w/live:true"]);
+    expect(isSelected("workspace", "live")).toBe(false);
+    expect(isSelected("workspace", "failed")).toBe(true);
+    expect(isSelected("served", "w/live", "remote")).toBe(true);
+    expect(isSelected("devserver", "remote")).toBe(true);
+    expect(selection.note).toContain("2 of 6 failed to remove");
+    expect(selection.note).toContain("server removals deferred");
+    expect(selection.busy).toBe(false);
+    expect(confirm.open).toBe(false);
   });
 });

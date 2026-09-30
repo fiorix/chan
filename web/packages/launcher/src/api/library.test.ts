@@ -39,6 +39,30 @@ describe("liveApi.liveTerminalCount", () => {
   });
 });
 
+describe("liveApi.removeWorkspace", () => {
+  const remove: (id: string, force?: boolean) => Promise<void> = liveApi.removeWorkspace;
+
+  it("keeps ordinary workspace removal requests unchanged", async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 204 });
+    vi.stubGlobal("fetch", fetch);
+    await remove("w/one");
+    await remove("w/one", false);
+    expect(fetch.mock.calls).toEqual(Array(2).fill([
+      "/api/library/workspaces/w%2Fone",
+      { method: "DELETE", headers: {}, body: undefined },
+    ]));
+  });
+
+  it("sends the force query for confirmed workspace removal", async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 204 });
+    vi.stubGlobal("fetch", fetch);
+    await remove("w/one", true);
+    expect(fetch).toHaveBeenCalledWith("/api/library/workspaces/w%2Fone?force=true", {
+      method: "DELETE", headers: {}, body: undefined,
+    });
+  });
+});
+
 describe("liveApi.setWorkspaceOn", () => {
   it("accepts the row the on route answers with", async () => {
     // `on` answers 200 carrying the workspace's row. The launcher re-lists
