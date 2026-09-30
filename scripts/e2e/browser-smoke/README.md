@@ -80,7 +80,7 @@ Add a new check by dropping a numbered file into `checks/`; nothing else needs e
 
 The proxy forwards upstream payloads and types; it never fabricates a control frame. An inside-replay offset equal to the replay length is invalid; use `before-ready` for a complete replay. That boundary also includes mode bytes between replay and ready.
 
-`acknowledge({ connection, frame, drained = false })` returns undefined. `connection` is the matching connection ordinal and `frame` is its one-based forwarded message number, including split fragments. Acknowledgements must increase and cannot exceed the forwarded count. Call only after the client's message handler returns; set `drained` only after the parser's write callbacks finish. The proxy records `Boolean(drained)` as the controller's assertion; it cannot establish parser completion itself. An acknowledgement equal to the awaited boundary frame starts the cut. Unarmed forwarding needs no acknowledgement.
+`acknowledge({ connection, frame, drained = false })` returns undefined. `connection` is the matching connection ordinal and `frame` is its one-based forwarded message number, including split fragments. Acknowledgements must increase and cannot exceed the forwarded count. Call only after the client's message handler returns; set `drained` only after the parser's write callbacks finish. The proxy records `Boolean(drained)` as the controller's assertion; it cannot establish parser completion itself. An acknowledgement equal to the awaited boundary frame starts the cut. Unarmed forwarding needs no acknowledgement until a later `before-session` arm requires the last preceding delivery to be acknowledged, even if that delivery preceded the arm.
 
 `await waitForCut()` returns the current arm's receipt after both selected sockets close. Each call captures the current arm's promise; retain it if another arm will follow. Before the first arm it rejects `NOT_ARMED`. After a failure, a new call rejects that failure even when an earlier receipt exists. An already resolved promise cannot report a later failure; inspect records or make a new call before accepting a run.
 
@@ -99,7 +99,7 @@ A cut calls `terminate()` on both WebSockets without sending close frames. The c
 - `connection`: `{ connection, path, session, query }`, recorded at each matching upgrade. `query` includes only the allowed keys actually present.
 - `frame`: `{ connection, direction, frame, binary, length, bytes, type, source, offset }`.
 - `ack`: `{ connection, frame, drained }`.
-- `end`: `{ connection, code }`, a locally ended unselected pair.
+- `end`: `{ connection, code }`, a locally ended unarmed pair. Codes are `CLIENT_CLOSED_BEFORE_CUT`, `UPSTREAM_CLOSED_BEFORE_CUT`, `FORWARD_FAILED`, `CLIENT_ERROR` and `UPSTREAM_ERROR`; the close codes also describe recovery connections after a cut. Other pairs can emit these records after a run-wide `failure` as their sockets close.
 - `cut`: Every receipt field below, alongside `event: "cut"`.
 - `failure`: `{ code }`, at most one per proxy, including failures after a completed cut.
 
@@ -110,7 +110,7 @@ Every receipt contains:
 - `arm`, `boundary`, `connection`, `sessionOrdinal`: the arm identifier, boundary name, matching connection ordinal and session ordinal.
 - `upstreamFrame`: the received frame number at the boundary: session for before/after-session, the last source binary message for inside-replay, or ready for before/after-ready.
 - `receivedBytes`, `forwardedBytes`: payload totals on that connection when the cut begins, counted as frames are recorded, including earlier sessions on the socket.
-- `replayBytes`: the selected session's `replay_bytes`; null before a session is observed, and undefined if that message omits the member, so JSON serialization omits it.
+- `replayBytes`: the selected session's `replay_bytes`, undefined if that message omits the member, so JSON serialization omits it. Every receipt follows observation of the selected session.
 - `replayForwarded`: binary bytes delivered while the selected session is armed, capped at `replayBytes`; mode/prelude bytes beyond that count are excluded.
 - `lastAcknowledged`: null or `{ frame, drained }` for the last accepted acknowledgement on that connection.
 - `held`: queued messages in order, each `{ source, binary, offset, length, bytes }`, with base64 payload. Before-session starts with session; before-ready starts with ready; an inside-replay split starts with the withheld suffix and its source offset.
@@ -118,7 +118,7 @@ Every receipt contains:
 
 `receivedBytes` and `held` depend on how far upstream intake ran before the acknowledgement and must not be compared across runs for equality. The other fields follow the selected arm and delivered message sequence, but frame numbers and byte totals can also differ if the upstream changes message segmentation or payloads. `drained` reflects the controller's supplied assertion.
 
-The held queue checks its byte/message bounds before insertion; one in-flight send is outside that queue. `maxTraceBytes` counts received and forwarded payload bytes across all matching connections, so a fully forwarded byte counts twice. `maxQueueBytes` also bounds client-to-upstream buffered input. A resource failure records its code, discards held queues, stops matching peers and prevents further matching output. Receipts remain in records. A normally closing unselected pair ends locally. Before any completed cut, other errors on an unselected pair also end locally; transport errors after a receipt fail the run. Replace a failed proxy rather than rearming it.
+The held queue checks its byte/message bounds before insertion; one in-flight send is outside that queue. `maxTraceBytes` counts received and forwarded payload bytes across all matching connections, so a fully forwarded byte counts twice. `maxQueueBytes` also bounds client-to-upstream buffered input. A resource failure records its code, discards held queues, stops matching peers and prevents further matching output. Receipts remain in records. A close or transport error on an unarmed pair ends that pair locally, before or after a receipt; a failure on the selected armed pair fails the run. An unarmed upstream close discards frames still queued for its client. A selected client that vanishes before its WebSocket upgrade refuses the cut with `CLIENT_CLOSED_BEFORE_CUT`, without a receipt. Replace a failed proxy rather than rearming it.
 
 Tool-coded errors are `Error` objects whose `message` and `code` equal the listed code. Native URL, socket and filesystem errors may also propagate.
 
@@ -155,8 +155,8 @@ Names and prefixes match `^[A-Za-z0-9_-]{1,80}$`. In the byte descriptions below
 - `bytes`, `{ base64 }`: Decoded bytes unchanged. Padded standard base64 without whitespace; empty string is allowed.
 - `alternate`, `{ enabled }`: Boolean true emits `\x1b[?1049h`, false emits `\x1b[?1049l`; updates `alternate`.
 - `redraw`, `{ name }`: `\x1b[2J\x1b[HSCREEN:NAME\r\n`; requires alternate screen.
-- `barrier`, `{ name }`: No bytes; fsyncs log and holds the named barrier.
-- `resume`, `{ name }`: No bytes; releases the matching held barrier.
+- `barrier`, `{ name }`: No bytes; fsyncs log and holds the named barrier. A second barrier while one is held refuses `INVALID_BARRIER`.
+- `resume`, `{ name }`: No bytes; releases the matching held barrier. With no barrier held it refuses `BARRIER_MISMATCH`.
 - `stop`: No bytes; fsyncs log, replies with snapshot and ends the fixture.
 
 A held barrier refuses every valid emitting command with `BARRIER_HELD`. Validation occurs first, so an invalid command can report its own error while held. A barrier proves stdout completion and fsync, not consumption by the server or renderer; independently observe a marker, attach cursor and parser completion.
@@ -171,7 +171,7 @@ Controller errors are `INVALID_FIXTURE_OPTIONS`; `FIXTURE_IDENTITY_REFUSED` for 
 
 ### Creating a terminal for a run
 
-Use a run-owned `chan` server with a throwaway home/workspace. `seedWorkspace()`, `launchServer(bin, workspace, log)` and `teardownServer(bin, server.child, workspace, server.chanHome, log)` are exported by `lib/server.mjs`. Obtain the origin and the bearer token from `new URL(await server.url)`; its token query key is `t`. Redact credentials before saving server output. Always tear down only the server/processes that the run created.
+Use a run-owned `chan` server with a throwaway home/workspace. `seedWorkspace()`, `launchServer(bin, workspace, log)` and `teardownServer(bin, server.child, workspace, server.chanHome, log)` are exported by `lib/server.mjs`. `log` is a function called with one line of text; `launchServer` returns `{ child, url, stderrLines, chanHome }`, with `url` a promise. Obtain the origin and the bearer token from `new URL(await server.url)`; its token query key is `t`. Redact credentials before saving server output. Always tear down only the server/processes that the run created.
 
 Create the fixture controller, then POST to `{origin}/api/terminals` with `authorization: Bearer TOKEN`, `content-type: application/json`, and body `{ name, command: "stty -opost -echo && " + fixture.command, env: fixture.env }`. Require HTTP 201; the JSON member `session` is the terminal id. The POSIX wrapper requires `stty`: raw input alone does not disable output newline translation, so successful `stty -opost -echo` is required for byte equality. Await `fixture.ready()` and verify `tty`, `raw` and geometry.
 
