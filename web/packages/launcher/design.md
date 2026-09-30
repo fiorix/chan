@@ -116,6 +116,8 @@ and windows for New terminal/window, Focus, Hide, Show, Close, Connect,
 Disconnect, Turn on/off, Quit, and New devserver. Window completion search
 includes the optional caption.
 
+Workspace cards keep their expansion state per local or served row, including the serving devserver's identity. Expanding one card leaves a namesake on another machine unchanged; feed updates preserve each card's state.
+
 While visible, a live launcher re-lists workspaces every two seconds to refresh foreign writer-lock status, which the host probes on list without a window-feed signal; host-owned lifecycle changes refresh through the feed, and the demo installs no poll.
 
 The SPA reads its bearer from `?t=` in its own URL and presents it as `Authorization: Bearer` on fetch and as `?t=` on the watch WebSocket (a browser WebSocket cannot set headers).
@@ -177,6 +179,8 @@ flowchart TB
 On the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and forwards a signed gateway assertion, and the devserver refuses a tunnel request without a verifiable one (401). A grant is all-or-nothing on the devserver: a grantee's assertion mutates `/api/library/*` over the tunnel exactly as the owner's does, windows and workspaces included, and gets the owner's surface meta; the reverse-tunnel legs are the one launcher route a grantee does not share. Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. Owners also manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
 
 An unforced off answers `409 {error:"live_terminals", active_terminals:N}` on this surface; the launcher confirms and retries the same route with `force: true`.
+
+Bulk removal names workspace refusals for live terminals and opens the launcher confirm with their workspace count. Confirmation retries only those refused local and served workspaces, using the local DELETE route's existing `?force=true` query or the served forget route's `force` field. Ordinary local removal sends the bare DELETE. Successful rows leave the selection; other failures and locked or unknown rows stay selected. Selected devserver and gateway removals wait until the terminal refusals are confirmed and their retries succeed, so the retry retains its connections. Cancel leaves the refused workspaces and those deferred servers selected, with the reason in the bulk bar; a failed forced retry keeps its failed rows and the deferred servers selected. The confirm retains its Cancel focus default.
 
 Launcher gates and handler refusals use the server's JSON envelope: a display sentence in `error`, without a code. This covers bearer and capability gates, desktop and session-leader gates, window operations, workspace lifecycle, registry mutations, folder picking, and the local-color, local-theme and collapsed-machine stores. The locked-workspace 409 keeps the sentence "workspace is open in another Chan process". Missing workspace, window, devserver and gateway rows have a sentence naming what was not found; an absent registry or store says that the service is unavailable on the serving surface.
 
