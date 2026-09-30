@@ -3029,9 +3029,7 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
 /// by the root its registry row stores, which the host reads from its
 /// runtime before the close takes it away. It is forgotten by that root
 /// while the root still resolves to the canonical root the runtime was
-/// mounted at, and by that canonical root otherwise: the host resolves the
-/// root it is named again, and a stored root that resolves to another
-/// workspace's folder would forget that workspace.
+/// mounted at, and by that canonical root otherwise.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 async fn close_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -3049,10 +3047,11 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
         .mounted_root(Path::new(&key))
         .unwrap_or_else(|| PathBuf::from(&key));
     let outcome = if remove {
-        // Named by the row's root, the host's purge matches the windows stored
-        // under it, where the desktop stores them, and under the canonical
-        // path that root resolves to. Named by the canonical root, it matches
-        // the windows stored under that root alone.
+        // With the root and registry unchanged during removal, the host's
+        // purge matches each window's stored path, lexically normalized,
+        // against the name sent here, its removal key and the stored root of
+        // any row its close finds. It resolves no window path, so the match
+        // does not wait on another workspace's filesystem.
         let named = match embedded.mounted_canonical_root(Path::new(&key)) {
             Some(canonical) if Path::new(&canonical_key(&stored)) != canonical => canonical,
             _ => stored.clone(),
