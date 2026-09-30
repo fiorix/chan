@@ -4201,6 +4201,10 @@ mod tests {
             let persisted = WorkspaceOverlay::open(overlay_path).entries();
             assert_eq!(persisted.len(), 1);
             assert!(!persisted[0].desired_on, "cancelled off left the restart overlay desired-on");
+            // The row probes a lock whose record is cleared before it unlocks.
+            while released.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
+                tokio::task::yield_now().await;
+            }
             let row = state.entry_for(&prefix).unwrap();
             assert!(!row.on);
             assert_eq!(row.status, WorkspaceStatus::Stopped);
@@ -4211,10 +4215,6 @@ mod tests {
                 assert_eq!(record.desired, DesiredMount::Off);
                 assert_eq!(record.phase, MountPhase::Stopped);
                 assert!(record.token.is_empty());
-            }
-            // A cancelled close aborts tasks without joining their handle release.
-            while released.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
-                tokio::task::yield_now().await;
             }
             let result = state.set_workspace_on(&prefix, true, false).await.unwrap();
             assert!(matches!(result, SetWorkspaceOnResult::Updated(Some(row)) if row.on && row.status == WorkspaceStatus::Running));
