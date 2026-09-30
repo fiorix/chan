@@ -12000,6 +12000,24 @@ mod tests {
         }
 
         #[test]
+        fn child_identity_snapshot_does_not_refresh_recorded_time() {
+            let child = IdentityChild::start(false);
+            let recorded = child.identity.start_time.unwrap() + 1;
+            let (mut session, _commands) =
+                test_agent_session(1024, "identity-recorded", None, None, None, &[]);
+            let state = Arc::get_mut(&mut session).unwrap();
+            state.child_pid = Some(child.pid());
+            state.child_start_time = Some(recorded);
+            session.adopt_fdstore(&RecordingPark::default().parker());
+            let entry = session.fdstore_manifest_entry("t").unwrap();
+            assert_eq!(
+                entry.child_start_time,
+                Some(recorded),
+                "snapshot export must copy its recorded time without refreshing the numeric PID"
+            );
+        }
+
+        #[test]
         fn child_identity_close_keeps_the_selected_handle() {
             #[derive(Clone, Copy)]
             struct Handle(&'static str);
