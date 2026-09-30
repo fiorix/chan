@@ -36,8 +36,7 @@ async function assertWireProvenance() {
 
 if (caseName === "attach-windows") test("attach cuts preserve complete history and the appropriate resume cursor", async () => {
   let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
-  const subcases: Array<Record<string, unknown>> = requiredSubcases.map((name) => ({ name, status: "not-run",
-    reason: name === "alternate-after-prelude" ? "proxy cannot cut between alternate prelude and mode reassert" : "not implemented" }));
+  const subcases: Array<Record<string, unknown>> = requiredSubcases.map((name) => ({ name, status: "not-run", reason: "not implemented" }));
   const result: Record<string, unknown> = { name: "attach-windows", status: "failed", subcases };
   const passed = (name: string, detail: Record<string, unknown>) => {
     const entry = subcases.find((entry) => entry.name === name);
@@ -237,6 +236,8 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
     await alternateKeys("alternate keys before cuts");
     const alternateVariants = [
       { name: "alternate-before-session", boundary: "before-session", failures: 0 },
+      { name: "alternate-after-prelude", boundary: "after-replay-frame", frames: 1, failures: 0 },
+      { name: "alternate-after-modes", boundary: "after-replay-frame", frames: 2, failures: 0 },
       { name: "alternate-before-ready", boundary: "before-ready", failures: 0 },
       { name: "alternate-after-ready", boundary: "after-ready", failures: 0 },
       { name: "alternate-second-cut", boundary: "after-session", failures: 1 },
@@ -252,6 +253,7 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
         if (message.connection !== first) return Promise.resolve();
         ackTail = ackTail.then(async () => {
           const atBoundary = variant.boundary === "before-ready"
+            || (variant.boundary === "after-replay-frame" && message.frame === 1 + variant.frames!)
             || (variant.boundary === "after-ready" && message.type === "ready")
             || (variant.boundary === "after-session" && message.type === "session");
           if (atBoundary) {
@@ -261,7 +263,7 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
         });
         return ackTail;
       };
-      await rpc("arm-sequence", { arms: [{ boundary: variant.boundary, ordinal: first },
+      await rpc("arm-sequence", { arms: [{ boundary: variant.boundary, ordinal: first, frames: variant.frames },
         ...Array.from({ length: variant.failures }, (_, index) => ({ boundary: "before-session", ordinal: first + index + 1 }))] });
       current.disconnect();
       const cuts = await rpc("cuts");
@@ -273,6 +275,13 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
         if (cut.boundary === "before-session") expect((await ReplaySocket.dial(cut.connection)).deliveries).toEqual([]);
       }
       const interrupted = await ReplaySocket.dial(first);
+      if (variant.boundary === "after-replay-frame") {
+        const expected = variant.frames === 1 ? "\x1b[?1049h\x1b[2J\x1b[H" : alternatePrelude;
+        expect(binaryOf(interrupted).toString(), "the counted cut delivers exactly the selected prelude or mode prefix").toBe(expected);
+        expect(interrupted.deliveries.map((frame) => frame.type)).toEqual(["session", ...Array(variant.frames).fill(null)]);
+        expect(cuts[0].upstreamFrame, "the cut is at the counted frame, before ready").toBe(1 + variant.frames!);
+        expect(cuts[0].lastAcknowledged).toEqual({ frame: 1 + variant.frames!, drained: true });
+      }
       if (variant.boundary === "before-ready" || variant.boundary === "after-ready") {
         expect(binaryOf(interrupted).toString(), "alternate prelude precedes the negotiated private-mode reassert").toBe(alternatePrelude);
         expect(cuts[0].lastAcknowledged.drained).toBe(true);
@@ -296,7 +305,7 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       const dials = records.filter((entry: any) => entry.event === "connection" && entry.connection >= first && entry.connection <= recoveryOrdinal);
       expect(dials).toHaveLength(variant.failures + 2);
       for (const dial of dials) {
-        const cutReplay = dial.connection !== first && (variant.boundary === "before-ready" || variant.boundary === "after-session");
+        const cutReplay = dial.connection !== first && ["before-ready", "after-session", "after-replay-frame"].includes(variant.boundary);
         expect(dial.query.since).toBe(cutReplay ? "0" : String(seq));
         expect(dial.query.generation).toBe(cutReplay ? undefined : String(generation));
       }

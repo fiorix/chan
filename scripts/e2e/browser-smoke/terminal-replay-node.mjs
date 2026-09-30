@@ -18,7 +18,7 @@ const requiredSubcases = {
   "keyboard-modes": ["normal-screen", "alternate-screen", "replayed-change"],
   "attach-windows": ["normal-before-session", "normal-interior-prefix", "normal-utf8-prefix", "normal-escape-prefix",
     "normal-before-ready", "normal-after-ready", "normal-second-cut", "normal-repeated-failed-dial",
-    "alternate-before-session", "alternate-after-prelude", "alternate-before-ready", "alternate-after-ready",
+    "alternate-before-session", "alternate-after-prelude", "alternate-after-modes", "alternate-before-ready", "alternate-after-ready",
     "alternate-second-cut", "alternate-repeated-failed-dial"],
 };
 const selected = process.env.REPLAY_CASES?.split(",").filter(Boolean) ?? required;
