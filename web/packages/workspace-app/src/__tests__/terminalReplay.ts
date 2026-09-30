@@ -7,6 +7,7 @@ type ByteBuffer = Uint8Array & { toString(encoding?: string): string };
 type Network = { readyState: number; on(event: string, handler: (...args: any[]) => void): void; send(data: string): void; close(): void; terminate(): void };
 // Keep the Node-only surface local; the web workspace has no Node type dependency.
 const { env } = await vi.importActual<{ env: Record<string, string | undefined> }>("node:process");
+export const caseName = env.CHAN_REPLAY_CASE;
 const { createRequire } = await vi.importActual<{ createRequire(path: string): (name: string) => new (url: string) => Network }>("node:module");
 const { writeFileSync } = await vi.importActual<{ writeFileSync(path: string, data: string, options: { flag: string }): void }>("node:fs");
 export const { Buffer: bytes } = await vi.importActual<{ Buffer: {
