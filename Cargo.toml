@@ -68,7 +68,7 @@ anyhow = "1"
 # the desktop member opts into `image-data` for the image clipboard.
 arboard = { version = "3", default-features = false }
 async-trait = "0.1"
-axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

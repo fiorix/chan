@@ -92,7 +92,7 @@ devserver-control-proto = { path = "crates/devserver-control-proto" }
 
 anyhow = "1"
 async-trait = "0.1"
-axum = { version = "0.8", features = ["macros", "ws"] }
+axum = { version = "0.8", features = ["ws"] }
 # yamux Streams from chan-tunnel-server expose futures-io traits;
 # devserver-proxy needs the Compat shim and TokioAsyncReadCompatExt to
 # bridge them onto tokio io.
