@@ -73,6 +73,7 @@ for (const boundary of ["before-session", "after-session", "inside-replay", "aft
   test(`cut ${boundary} carries its wire receipt`, { timeout: 10000 }, async (t) => {
     const { proxy, dial } = await rig(t);
     proxy.arm({ boundary, bytes: 7 });
+    assert.throws(() => proxy.arm({ boundary }), { code: "CONTROLLER_DISARMED" });
     const client = dial("session=wanted&token=DO_NOT_RECORD&since=0", "/terminal/ws", true);
     const receipt = await proxy.waitForCut();
     await client.closed;
@@ -102,7 +103,6 @@ for (const boundary of ["before-session", "after-session", "inside-replay", "aft
         assert.equal(receipt.replayForwarded, replay.length);
       }
     }
-    assert.throws(() => proxy.arm({ boundary }), { code: "CONTROLLER_DISARMED" });
     const recovery = dial("session=wanted&since=0");
     await proxy.waitForRecord((r) => r.connection === 2 && r.direction === "forwarded" && r.frame === frames.length);
     await new Promise((resolve) => recovery.delivered.length === frames.length ? resolve() :
@@ -181,6 +181,72 @@ test("a replay cut spans source messages without changing byte order", { timeout
   const receipt = await proxy.waitForCut();
   assert.equal(receipt.upstreamFrame, 3);
   assert.deepEqual(Buffer.concat(peer.delivered.filter(([, binary]) => binary).map(([data]) => data)), replay.subarray(0, 7));
+});
+
+test("one proxy cuts twice with an unarmed redial between receipts", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t);
+  proxy.arm({ boundary: "after-session" });
+  dial("session=wanted", "/terminal/ws", true);
+  const first = await proxy.waitForCut();
+  const recovery = dial();
+  await proxy.waitForRecord((r) => r.connection === 2 && r.direction === "forwarded" && r.frame === frames.length);
+  while (recovery.delivered.length < frames.length) await once(recovery.socket, "message");
+  assert.deepEqual(recovery.delivered, frames);
+  assert.doesNotThrow(() => proxy.arm({ boundary: "before-session" }), "a completed cut permits another arm");
+  dial();
+  const second = await proxy.waitForCut();
+  assert.equal(second.connection, 3);
+  assert.equal(first.arm, 1);
+  assert.equal(second.arm, 2);
+  assert.equal(proxy.records.filter((r) => r.event === "cut").length, 2);
+  t.diagnostic(JSON.stringify({ first, second }));
+});
+
+for (const empty of [false, true]) {
+  test(`before-ready holds ready after all binary frames with empty=${empty}`, { timeout: 10000 }, async (t) => {
+    const prelude = text({ type: "session", replay_bytes: empty ? 0 : replay.length });
+    const output = empty ? [[Buffer.from("\x1b[?1049hSCREEN"), true]] : [[replay, true]];
+    const messages = [prelude, ...output, [Buffer.from("\x1b[?1h"), true], ready, [Buffer.from("live"), true]];
+    const { proxy, dial } = await rig(t, { messages });
+    assert.doesNotThrow(() => proxy.arm({ boundary: "before-ready" }), "before-ready is a supported boundary");
+    const peer = dial("session=wanted", "/terminal/ws", true);
+    const receipt = await proxy.waitForCut();
+    assert.deepEqual(peer.delivered, messages.slice(0, 3));
+    assert.equal(receipt.upstreamFrame, 4);
+    assert.equal(receipt.replayForwarded, empty ? 0 : replay.length);
+    assert.equal(receipt.held[0].bytes, ready[0].toString("base64"));
+    assert.deepEqual(receipt.lastAcknowledged, { frame: 3, drained: true });
+    t.diagnostic(JSON.stringify(receipt));
+  });
+}
+
+for (const boundary of ["before-session", "after-session"]) {
+  test(`${boundary} selects a later session on one socket`, { timeout: 10000 }, async (t) => {
+    const reset = [Buffer.from("\x1bc"), true];
+    const messages = [...frames, reset, session, [replay, true], ready];
+    const { proxy, dial } = await rig(t, { messages });
+    proxy.arm({ boundary, sessionOrdinal: 2 });
+    const peer = dial("session=wanted", "/terminal/ws", true);
+    const receipt = await proxy.waitForCut();
+    assert.equal(receipt.upstreamFrame, 6, "the second session is the selected boundary");
+    assert.equal(receipt.sessionOrdinal, 2);
+    await peer.closed;
+    assert.deepEqual(peer.delivered, messages.slice(0, boundary === "before-session" ? 5 : 6));
+    t.diagnostic(JSON.stringify(receipt));
+  });
+}
+
+test("a future session can be armed on an open connection", { timeout: 10000 }, async (t) => {
+  const { proxy, dial, upstream } = await rig(t);
+  const peer = dial("session=wanted", "/terminal/ws", true);
+  while (peer.delivered.length < frames.length) await once(peer.socket, "message");
+  assert.doesNotThrow(() => proxy.arm({ boundary: "after-session", ordinal: 1, sessionOrdinal: 2 }));
+  upstream[0].socket.send(session[0], { binary: false });
+  const receipt = await proxy.waitForCut();
+  assert.equal(receipt.upstreamFrame, 5);
+  assert.equal(receipt.sessionOrdinal, 2);
+  assert.deepEqual(peer.delivered, [...frames, session]);
+  t.diagnostic(JSON.stringify(receipt));
 });
 
 for (const [name, setup, expected] of [

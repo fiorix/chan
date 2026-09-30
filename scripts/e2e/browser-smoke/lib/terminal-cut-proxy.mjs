@@ -3,7 +3,7 @@ import net from "node:net";
 import { EventEmitter, once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 
-const boundaries = new Set(["before-session", "after-session", "inside-replay", "after-ready"]);
+const boundaries = new Set(["before-session", "after-session", "inside-replay", "before-ready", "after-ready"]);
 const fault = (code) => Object.assign(new Error(code), { code });
 const deferred = () => {
   let resolve, reject;
@@ -13,7 +13,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-/** Loopback relay with one explicitly armed terminal-message cut. */
+/** Loopback relay with explicitly armed terminal-message cuts. */
 export async function startTerminalCutProxy({
   targetUrl, path, session, ordinal = 1, deadlineMs = 5000,
   maxQueueBytes = 8 * 1024 * 1024, maxQueueMessages = 4096,
@@ -34,9 +34,8 @@ export async function startTerminalCutProxy({
   const sockets = new Set();
   const peers = new Set();
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
-  const cut = deferred();
+  let cut, armNumber = 0, pendingCut = false;
   let connections = 0, traceBytes = 0, armed, selected, timer, failure, receipt, closed = false;
-  let armUsed = false;
 
   function watch(socket) {
     sockets.add(socket);
@@ -70,7 +69,7 @@ export async function startTerminalCutProxy({
     failure = fault(code);
     clearTimeout(timer);
     record({ event: "failure", code });
-    cut.reject(failure);
+    cut?.reject(failure);
     events.emit("failure", failure);
     for (const pair of peers) {
       pair.queue.length = 0;
@@ -110,7 +109,7 @@ export async function startTerminalCutProxy({
     armed = null;
     clearTimeout(timer);
     const snapshot = {
-      boundary: pair.boundary, connection: pair.ordinal,
+      arm: armNumber, boundary: pair.boundary, connection: pair.ordinal, sessionOrdinal: pair.sessions,
       upstreamFrame: boundaryFrame,
       receivedBytes: pair.receivedBytes, forwardedBytes: pair.forwardedBytes,
       replayBytes: pair.replayBytes, replayForwarded: pair.replayForwarded,
@@ -127,6 +126,7 @@ export async function startTerminalCutProxy({
     clearTimeout(deadline);
     if (failure || closed) return;
     receipt = { ...snapshot, disconnect: { client: "closed", upstream: "closed" } };
+    pendingCut = false;
     record({ event: "cut", ...receipt });
     cut.resolve(receipt);
   }
@@ -148,18 +148,29 @@ export async function startTerminalCutProxy({
       while (pair.queue.length && !pair.awaiting && !pair.cutting && !pair.ended && !failure && !closed) {
         const item = pair.queue.shift();
         pair.queuedBytes -= item.bytes.length;
-        const active = armed && pair === selected;
-        if (active && item.type === "session") {
+        if (item.type === "session") {
+          pair.sessions++;
           pair.replayBytes = item.control.replay_bytes;
           pair.replayForwarded = 0;
+        }
+        const active = armed && pair === selected && pair.sessions === armed.sessionOrdinal;
+        if (active && item.type === "session") {
           if (armed.boundary === "before-session") {
             pair.queue.unshift(item); pair.queuedBytes += item.bytes.length;
-            void disconnect(pair, item.source); break;
+            pair.awaiting = { frame: pair.forwarded, source: item.source };
+            if (pair.forwarded === 0 || pair.lastAcknowledged?.frame === pair.forwarded) void disconnect(pair, item.source);
+            break;
           }
           if (armed.boundary === "inside-replay" &&
               (!Number.isSafeInteger(pair.replayBytes) || armed.bytes >= pair.replayBytes)) {
             fail("INVALID_REPLAY_BOUNDARY"); break;
           }
+        }
+        if (active && armed.boundary === "before-ready" && item.type === "ready") {
+          pair.queue.unshift(item); pair.queuedBytes += item.bytes.length;
+          pair.awaiting = { frame: pair.forwarded, source: item.source };
+          if (pair.lastAcknowledged?.frame === pair.forwarded) void disconnect(pair, item.source);
+          break;
         }
         if (active && item.binary && armed.boundary === "inside-replay" && pair.replayBytes !== null) {
           const remaining = armed.bytes - pair.replayForwarded;
@@ -220,10 +231,10 @@ export async function startTerminalCutProxy({
     });
     const pair = { up, client: null, ordinal: n, queue: [], queuedBytes: 0,
       received: 0, forwarded: 0, receivedBytes: 0, forwardedBytes: 0,
-      replayBytes: null, replayForwarded: 0, lastAcknowledged: null,
+      replayBytes: null, replayForwarded: 0, lastAcknowledged: null, sessions: 0,
     };
     peers.add(pair);
-    if (n === ordinal && armed) { selected = pair; pair.boundary = armed.boundary; }
+    if (n === armed?.ordinal) { selected = pair; pair.boundary = armed.boundary; }
     record({ event: "connection", connection: n, path, session,
       query: Object.fromEntries(["since", "generation", "cols", "rows"].filter((k) => url.searchParams.has(k))
         .map((k) => [k, url.searchParams.get(k)])),
@@ -266,13 +277,20 @@ export async function startTerminalCutProxy({
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     records,
-    arm({ boundary, bytes } = {}) {
-      if (closed || failure || armUsed || connections >= ordinal) throw fault("CONTROLLER_DISARMED");
+    arm({ boundary, bytes, ordinal: nextOrdinal = armNumber ? connections + 1 : ordinal, sessionOrdinal = 1 } = {}) {
+      if (closed || failure || pendingCut) throw fault("CONTROLLER_DISARMED");
       if (!boundaries.has(boundary) || (boundary === "inside-replay" && (!Number.isSafeInteger(bytes) || bytes <= 0))) {
         throw fault("INVALID_BOUNDARY");
       }
-      armUsed = true;
-      armed = { boundary, bytes };
+      if (![nextOrdinal, sessionOrdinal].every((n) => Number.isSafeInteger(n) && n > 0)) throw fault("INVALID_ARM_SELECTION");
+      const pair = [...peers].find((p) => p.ordinal === nextOrdinal && !p.ended && !p.cutting);
+      if (nextOrdinal <= connections && (!pair || sessionOrdinal <= pair.sessions)) throw fault("CONTROLLER_DISARMED");
+      selected = pair;
+      if (pair) pair.boundary = boundary;
+      cut = deferred();
+      armNumber++;
+      pendingCut = true;
+      armed = { boundary, bytes, ordinal: nextOrdinal, sessionOrdinal };
       timer = setTimeout(() => fail(!selected ? "NO_SELECTED_SOCKET" : selected.awaiting ? "ACK_TIMEOUT" : "FRAME_TIMEOUT"), deadlineMs);
     },
     acknowledge({ connection, frame, drained = false }) {
@@ -285,7 +303,7 @@ export async function startTerminalCutProxy({
     },
     waitForCut() {
       if (failure) return Promise.reject(failure);
-      if (!armUsed) return Promise.reject(fault("NOT_ARMED"));
+      if (!cut) return Promise.reject(fault("NOT_ARMED"));
       return cut.promise;
     },
     waitForRecord(predicate, timeoutMs = deadlineMs) {
@@ -307,7 +325,7 @@ export async function startTerminalCutProxy({
       if (closed) return;
       closed = true;
       clearTimeout(timer);
-      if (armUsed && !receipt && !failure) cut.reject(fault("PROXY_CLOSED_BEFORE_CUT"));
+      if (pendingCut && !failure) cut.reject(fault("PROXY_CLOSED_BEFORE_CUT"));
       events.emit("failure", fault("PROXY_CLOSED"));
       const ended = [...peers].flatMap((p) => [p.client, p.up]).filter(Boolean).map((socket) =>
         socket.readyState === WebSocket.CLOSED ? Promise.resolve() : new Promise((resolve) => socket.once("close", resolve)));
