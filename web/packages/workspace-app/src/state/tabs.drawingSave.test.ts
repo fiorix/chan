@@ -244,7 +244,7 @@ describe("a refused drawing that does not close says why", () => {
       inspected: inspect.mock.calls.length,
       draftDialog: draftCloseState.open,
     }).toEqual({
-      notices: [["untitled.excalidraw was not saved."]],
+      notices: [[`untitled.excalidraw was not saved because the drawing does not parse (${parseReason(BROKEN)}).`]],
       content: BROKEN,
       written: [],
       inspected: 0,
