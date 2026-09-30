@@ -116,6 +116,44 @@ describe("window live-terminal count", () => {
 });
 
 describe("workspace registry", () => {
+  it("starts a refresh after the last fetch settles before its caller resumes", async () => {
+    const { backend } = await import("../api/backend");
+    const oldRows = [{ ...library.workspaces[0]!, label: "settled snapshot" }];
+    const newRows = [{ ...oldRows[0]!, label: "following snapshot" }];
+    let resolveOld!: (rows: WorkspaceEntry[]) => void;
+    const response = new Promise<WorkspaceEntry[]>((resolve) => { resolveOld = resolve; });
+    const list = vi.spyOn(backend, "listWorkspaces")
+      .mockReturnValueOnce(response)
+      .mockResolvedValueOnce(newRows);
+    const remove = vi.spyOn(backend, "removeWorkspace").mockResolvedValue(undefined);
+    let callerResumed = false;
+    const mutation = removeWorkspace(oldRows[0]!.workspace_id);
+    const completion = mutation.then(() => { callerResumed = true; });
+    try {
+      await Promise.resolve();
+      expect(list).toHaveBeenCalledOnce();
+      const arrival = (async () => {
+        // Svelte wraps awaits; observe application without a macrotask hop.
+        for (let turn = 0; turn < 20 && library.workspaces[0]?.label !== "settled snapshot"; turn++) {
+          await Promise.resolve();
+        }
+        expect(library.workspaces[0]?.label).toBe("settled snapshot");
+        expect(callerResumed).toBe(false);
+        resync();
+        expect(list, "a request after the completed fetch starts another fetch").toHaveBeenCalledTimes(2);
+      })();
+      resolveOld(oldRows);
+      await arrival;
+      await completion;
+      expect(library.workspaces[0]?.label).toBe("following snapshot");
+    } finally {
+      resolveOld(oldRows);
+      await completion;
+      list.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
   it.each(["live", "mutation"])(
     "keeps the newest workspace list when the older %s refresh resolves last",
     async (first) => {
