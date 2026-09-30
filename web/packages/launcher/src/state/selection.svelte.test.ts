@@ -468,9 +468,9 @@ describe("bulk removal with live terminals", () => {
   async function prepare(retryFails = false): Promise<string[]> {
     const { backend } = await import("../api/backend");
     const calls: string[] = [];
-    const refused = () => new ApiError(409, "live_terminals", {
+    const refused = () => new ApiError(409, JSON.stringify({
       error: "live_terminals", active_terminals: 3,
-    });
+    }));
     vi.spyOn(backend, "listWorkspaces").mockImplementation(async () => library.workspaces);
     vi.spyOn(backend, "removeWorkspace").mockImplementation(async (id, force?: boolean) => {
       calls.push(`local:${id}:${!!force}`);
