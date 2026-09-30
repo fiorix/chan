@@ -40,7 +40,7 @@ async function runCase(name) {
   mkdirSync(caseOut);
   const save = (file, value) => writeFileSync(join(caseOut, file), JSON.stringify(value, null, 2) + "\n", { flag: "wx" });
   const outcome = { name, status: "not-run", reason: "no case result" };
-  let server, fixture, proxy, control, runner, session, bearer, workspace;
+  let server, fixture, proxy, control, runner, session, bearer, workspace, cutSequence;
   const serverLog = [];
   const redact = (line) => String(line).replace(/([?&]t=)[^\s&]+/g, "$1[redacted]").replaceAll(bearer ?? "\0", "[redacted]");
   let stopping = false;
@@ -100,6 +100,21 @@ async function runCase(name) {
         let result;
         if (op === "fixture") result = await fixture.send(args.op, args.args);
         else if (op === "arm") { proxy.arm(args); result = true; }
+        else if (op === "arm-sequence") {
+          assert(Array.isArray(args.arms) && args.arms.length > 0, "nonempty cut sequence required");
+          proxy.arm(args.arms[0]);
+          cutSequence = (async () => {
+            const receipts = [await proxy.waitForCut()];
+            for (const arm of args.arms.slice(1)) {
+              proxy.arm(arm);
+              receipts.push(await proxy.waitForCut());
+            }
+            return receipts;
+          })();
+          cutSequence.catch(() => {});
+          result = true;
+        }
+        else if (op === "cuts") { assert(cutSequence, "no cut sequence armed"); result = await cutSequence; }
         else if (op === "ack") { proxy.acknowledge(args); result = true; }
         else if (op === "cut") result = await proxy.waitForCut();
         else if (op === "records") result = proxy.records;

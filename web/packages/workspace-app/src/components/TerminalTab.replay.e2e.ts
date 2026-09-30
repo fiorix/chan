@@ -32,7 +32,7 @@ async function assertWireProvenance() {
   return records;
 }
 
-if (caseName === "attach-windows") test("ordinary attach cuts keep their cursor and resume only the missing suffix", async () => {
+if (caseName === "attach-windows") test("attach cuts preserve complete history and the appropriate resume cursor", async () => {
   let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
   const subcases: Array<Record<string, unknown>> = requiredSubcases.map((name) => ({ name, status: "not-run", reason: "not implemented" }));
   const result: Record<string, unknown> = { name: "attach-windows", status: "failed", subcases };
@@ -121,9 +121,93 @@ if (caseName === "attach-windows") test("ordinary attach cuts keep their cursor 
     expect(dial.query.generation).toBe(String(generation));
     expect(records.filter((entry: any) => entry.event === "connection").map((entry: any) => entry.connection)).toEqual([1, 2, 3, 4, 5]);
     passed("normal-after-ready", { cut: afterReadyCut, session: afterReady, suffixBytes: suffix.length });
+
+    await emit("bytes", { base64: Buffer.from("ATTACH_UTF8:\u03bb\r\n\x1b[31mATTACH_ESCAPE\x1b[0m\r\n").toString("base64") });
+    await emit("marker", { name: "SPLIT_END" });
+    await afterReadyRecovery.bytesInclude("MARKER:SPLIT_END\r\n");
+    const splitSource = await rpc("fixture-log");
+    const splitBytes = Buffer.from(splitSource.bytes, "base64");
+    const splitText = splitBytes.toString();
+    const splitRows = splitText.replace(/\x1b\[(?:31|0)m/g, "").split("\r\n").filter(Boolean);
+    const splitBaseline = await snapshot("history before replay-prefix cuts");
+    expect(splitBaseline.normal.rows.filter(Boolean)).toEqual(splitRows);
+    const utf8Start = Buffer.from(splitText.slice(0, splitText.indexOf("\u03bb"))).length;
+    const escapeStart = Buffer.from(splitText.slice(0, splitText.indexOf("\x1b[31m"))).length;
+    const variants = [
+      { name: "normal-interior-prefix", boundary: "inside-replay", bytes: 21 },
+      { name: "normal-utf8-prefix", boundary: "inside-replay", bytes: utf8Start + 1 },
+      { name: "normal-escape-prefix", boundary: "inside-replay", bytes: escapeStart + 2 },
+      { name: "normal-before-ready", boundary: "before-ready", bytes: splitBytes.length },
+    ];
+    let current = afterReadyRecovery;
+    for (const variant of variants) {
+      const first = current.connection + 1;
+      const second = first + 1;
+      let ackTail = Promise.resolve();
+      ReplaySocket.acknowledge = (message) => {
+        if (message.connection !== first && message.connection !== second) return Promise.resolve();
+        ackTail = ackTail.then(async () => {
+          if (message.connection === first && message.type === "session") {
+            await rpc("ack", { connection: first, frame: message.frame, drained: false });
+          } else if (message.connection === second) {
+            const socket = await ReplaySocket.dial(second);
+            const delivered = socket.deliveries.filter((frame) => frame.frame <= message.frame && frame.binary)
+              .reduce((total, frame) => total + Buffer.from(frame.bytes, "base64").length, 0);
+            if (variant.boundary === "before-ready" || (message.binary && delivered === variant.bytes)) {
+              await drainParser(`${variant.name} boundary`);
+              await rpc("ack", { connection: second, frame: message.frame, drained: true });
+            }
+          }
+        });
+        return ackTail;
+      };
+      await rpc("arm-sequence", { arms: [
+        { boundary: "after-session", ordinal: first },
+        { boundary: variant.boundary, ordinal: second, ...(variant.boundary === "inside-replay" ? { bytes: variant.bytes } : {}) },
+      ] });
+      current.disconnect();
+      const cuts = await rpc("cuts");
+      expect(cuts).toHaveLength(2);
+      expect(cuts[0].boundary).toBe("after-session");
+      expect(cuts[0].replayForwarded).toBe(0);
+      expect(cuts[1].boundary).toBe(variant.boundary);
+      expect(cuts[1].replayBytes).toBe(splitBytes.length);
+      expect(cuts[1].replayForwarded).toBe(variant.bytes);
+      expect(cuts[1].lastAcknowledged.drained).toBe(true);
+      for (const cut of cuts) expect(cut.disconnect).toEqual({ client: "closed", upstream: "closed" });
+      expect((await ReplaySocket.dial(first)).deliveries.map((frame) => frame.type)).toEqual(["session"]);
+      const interrupted = await ReplaySocket.dial(second);
+      expect(interrupted.deliveries.some((frame) => frame.type === "ready")).toBe(false);
+      expect(binaryOf(interrupted).toString("base64"), "the interrupted page receives the exact requested prefix")
+        .toBe(Buffer.from(splitBytes.subarray(0, variant.bytes)).toString("base64"));
+      if (variant.name === "normal-utf8-prefix") {
+        expect(splitBytes[variant.bytes - 1]).toBe(0xce);
+        expect(splitBytes[variant.bytes]).toBe(0xbb);
+      } else if (variant.name === "normal-escape-prefix") {
+        expect(Buffer.from(splitBytes.subarray(variant.bytes - 2, variant.bytes)).toString()).toBe("\x1b[");
+        expect(splitBytes[variant.bytes]).toBe(0x33);
+      }
+      current = await ReplaySocket.dial(second + 1);
+      await current.ready();
+      const session = sessionOf(current);
+      expect({ seq: session.seq, replay: session.replay_bytes, missed: session.missed_bytes, generation: session.generation })
+        .toEqual({ seq: splitBytes.length, replay: splitBytes.length, missed: 0, generation });
+      expect(binaryOf(current).toString("base64"), "recovery delivers the full independent fixture log").toBe(splitBytes.toString("base64"));
+      const parsed = await snapshot(`${variant.name} recovery`);
+      expect(parsed.active).toBe("normal");
+      expect(parsed.normal, "a second cut reconstructs each row and the original cursor exactly once").toEqual(splitBaseline.normal);
+      records = await assertWireProvenance();
+      for (const ordinal of [second, second + 1]) {
+        const dial = records.find((entry: any) => entry.event === "connection" && entry.connection === ordinal);
+        expect(dial.query.since).toBe("0");
+        expect(dial.query.generation).toBeUndefined();
+      }
+      passed(variant.name, { cuts, session, prefixBytes: variant.bytes, fixtureSha256: splitSource.sha256 });
+    }
+    passed("normal-second-cut", { variants: variants.map((variant) => variant.name) });
     const missing = subcases.filter((entry) => entry.status !== "passed").map((entry) => entry.name);
     Object.assign(result, { status: missing.length ? "not-run" : "passed", reason: missing.length ? "required subcases are not implemented" : undefined,
-      fixtureSha256: allSource.sha256, receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin"] });
+      fixtureSha256: splitSource.sha256, receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin"] });
   } catch (error) {
     result.error = String(error);
     throw error;
