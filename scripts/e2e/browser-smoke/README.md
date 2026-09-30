@@ -70,11 +70,12 @@ Add a new check by dropping a numbered file into `checks/`; nothing else needs e
 
 `await startTerminalCutProxy({ targetUrl, path, session, ordinal = 1, deadlineMs = 5000, maxQueueBytes = 8388608, maxQueueMessages = 4096, maxTraceBytes = 67108864 })` starts an ephemeral loopback listener and returns `{ url, records, arm, acknowledge, waitForCut, waitForRecord, close }`. `targetUrl` must be a bare `http://127.0.0.1:PORT` origin without user information, query or fragment. `path` starts with `/` and contains no `?`; `session` is a nonempty string. The ordinal and all limits are positive safe integers. `url` is the listening HTTP origin; replace its scheme with `ws:` for WebSockets. Selection matches the exact pathname and `session` query value. Only matching upgrades increment the connection ordinal. HTTP and other sockets pass through without trace records. Credentials travel upstream in memory; do not log caller URLs or headers.
 
-`arm({ boundary, bytes, ordinal, sessionOrdinal = 1 })` returns undefined and arms one cut. On the first arm, omitted `ordinal` uses the start option. On subsequent arms it selects the next matching connection after all connections already seen. An explicit ordinal can select a future connection or a live connection whose selected session has not yet been dequeued. Session ordinals are positive, one-based counts of `session` messages on that socket, including messages before any arm. For example, `{ boundary: "after-session", ordinal: 1, sessionOrdinal: 2 }` selects a restart's session on the first socket. Only one arm may be pending; another is permitted after its receipt completes. Each successful arm gets a one-based `arm` identifier. A recovery connection stays unarmed unless explicitly selected by a later call.
+`arm({ boundary, bytes, frames, ordinal, sessionOrdinal = 1 })` returns undefined and arms one cut. On the first arm, omitted `ordinal` uses the start option. On subsequent arms it selects the next matching connection after all connections already seen. An explicit ordinal can select a future connection or a live connection whose selected session has not yet been dequeued. Session ordinals are positive, one-based counts of `session` messages on that socket, including messages before any arm. For example, `{ boundary: "after-session", ordinal: 1, sessionOrdinal: 2 }` selects a restart's session on the first socket. Only one arm may be pending; another is permitted after its receipt completes. Each successful arm gets a one-based `arm` identifier. A recovery connection stays unarmed unless explicitly selected by a later call.
 
 - `before-session`: Holds the selected session. With no preceding delivery, cuts immediately. Otherwise waits for acknowledgement of the last preceding delivery, including any reset bytes.
 - `after-session`: Delivers the selected session, holds subsequent messages, and waits for its acknowledgement.
 - `inside-replay`: Delivers exactly `bytes` binary replay bytes, where `0 < bytes < session.replay_bytes`, then waits for the last fragment's acknowledgement. Splits a source message if necessary and holds its suffix in byte order.
+- `after-replay-frame`: Delivers the advertised replay, then counts whole messages before ready, regardless of their payload or type. `frames` is a positive safe integer. The selected counted message is delivered and acknowledged before cutting; its successors stay withheld. Session and messages carrying replay bytes are excluded from the count. With zero replay, counting starts immediately after session. Ready is never counted or forwarded; reaching it before the requested count refuses the cut. This arm does not split a source message at the replay's end.
 - `before-ready`: Delivers every message before the selected session's ready, including all replay, alternate-screen and mode bytes. Holds ready and waits for the last preceding delivery's acknowledgement. Works when `replay_bytes` is zero.
 - `after-ready`: Delivers ready, holds subsequent messages, and waits for ready's acknowledgement.
 
@@ -108,7 +109,7 @@ A frame's `direction` is `received` from upstream or `forwarded` to the client. 
 Every receipt contains:
 
 - `arm`, `boundary`, `connection`, `sessionOrdinal`: the arm identifier, boundary name, matching connection ordinal and session ordinal.
-- `upstreamFrame`: the received frame number at the boundary: session for before/after-session, the last source binary message for inside-replay, or ready for before/after-ready.
+- `upstreamFrame`: the received frame number at the boundary: session for before/after-session, the last source binary message for inside-replay, the counted message for after-replay-frame, or ready for before/after-ready.
 - `receivedBytes`, `forwardedBytes`: payload totals on that connection when the cut begins, counted as frames are recorded, including earlier sessions on the socket.
 - `replayBytes`: the selected session's `replay_bytes`, undefined if that message omits the member, so JSON serialization omits it. Every receipt follows observation of the selected session.
 - `replayForwarded`: binary bytes delivered while the selected session is armed, capped at `replayBytes`; mode/prelude bytes beyond that count are excluded.
@@ -125,14 +126,15 @@ Tool-coded errors are `Error` objects whose `message` and `code` equal the liste
 - `LOOPBACK_ORIGIN_REQUIRED`: Target is not the required loopback HTTP origin.
 - `INVALID_SELECTION_OR_LIMIT`: Invalid start path, session, ordinal or limits.
 - `CONTROLLER_DISARMED`: Closed/failed proxy, pending arm, absent past connection, or selected session already dequeued.
-- `INVALID_BOUNDARY`: Unknown boundary or nonpositive/noninteger inside-replay offset.
+- `INVALID_BOUNDARY`: Unknown boundary, invalid inside-replay offset, or invalid after-replay-frame count. Both arguments require positive safe integers.
 - `INVALID_ARM_SELECTION`: Arm connection/session ordinal is not a positive safe integer.
 - `INVALID_ACK`: No live matching peer, cutting/closed/failed proxy, or nonpositive, stale, noninteger or over-range frame number.
 - `NOT_ARMED`: Cut wait before any successful arm.
 - `PROXY_CLOSED_BEFORE_CUT`, `PROXY_CLOSED`: Closure interrupts a cut or a record wait respectively.
 - `RECORD_TIMEOUT`: Record predicate did not match within its timeout.
 - `NO_SELECTED_SOCKET`, `FRAME_TIMEOUT`, `ACK_TIMEOUT`: Arm deadline expires in the states described above.
-- `INVALID_REPLAY_BOUNDARY`: Selected session has an invalid replay count or the offset is at/past its end.
+- `INVALID_REPLAY_BOUNDARY`: Selected session has an invalid replay count or the inside-replay offset is at/past its end. The after-replay-frame arm requires a nonnegative safe integer replay count.
+- `INVALID_POST_REPLAY_BOUNDARY`: Ready arrived before the requested post-replay frame count; it is not forwarded.
 - `QUEUE_LIMIT`, `TRACE_LIMIT`, `INPUT_QUEUE_LIMIT`: Held output, traced payload or buffered input exceeds its bound.
 - `FORWARD_FAILED`, `CLIENT_ERROR`, `UPSTREAM_ERROR`: A send, downstream socket or upstream socket fails.
 - `CLIENT_CLOSED_BEFORE_CUT`, `UPSTREAM_CLOSED_BEFORE_CUT`: Selected armed pair closes before its cut; an unselected pair records a local end instead.
