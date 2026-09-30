@@ -6,9 +6,12 @@
 # Usage: build-in-ci.sh <image>
 #
 # Reads RELEASE_TAG (GA vX.Y.Z), AUR_PKGREL, PKGBASE, and optionally
-# AUR_LOCAL_SOURCE from the environment. The latter must live under the repo
-# so its read-only /src bind reaches the current commit instead of a published
-# GitHub tag.
+# AUR_LOCAL_SOURCE and AUR_CARGO_JOBS from the environment. The source must
+# live under the repo so its read-only /src bind reaches the current commit.
+# AUR_CARGO_JOBS defaults to 2 for every cargo call of the CI recipe, including
+# build() and check(). Their commands and tests are unchanged; fewer jobs can
+# lengthen the hosted run, by an amount not yet measured. A user's own makepkg
+# uses cargo's default because the published recipe does not set the variable.
 
 set -euo pipefail
 
@@ -16,6 +19,7 @@ image="${1:?usage: build-in-ci.sh <image>}"
 release_tag="${RELEASE_TAG:?RELEASE_TAG must name the GA tag}"
 pkgrel="${AUR_PKGREL:-1}"
 pkgbase="${PKGBASE:?PKGBASE must be set}"
+cargo_jobs="${AUR_CARGO_JOBS-2}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 local_source="${AUR_LOCAL_SOURCE:-}"
 
@@ -29,6 +33,10 @@ if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 if [[ ! "$pkgrel" =~ ^[1-9][0-9]*$ ]]; then
     echo "::error::aur_pkgrel must be a positive integer, got $pkgrel"
+    exit 1
+fi
+if [[ ! "$cargo_jobs" =~ ^[1-9][0-9]*$ ]]; then
+    echo "::error::AUR_CARGO_JOBS must be a positive integer, got $cargo_jobs" >&2
     exit 1
 fi
 
@@ -57,6 +65,7 @@ docker run --rm \
     -e PKGREL="$pkgrel" -e PKGBASE="$pkgbase" \
     -e AUR_LOCAL_SOURCE="$guest_source" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    -e CARGO_BUILD_JOBS="$cargo_jobs" \
     -v "$repo:/src:ro" \
     -v "$out:/out" \
     "$image" bash /src/packaging/distros/arch/build-in-container.sh
