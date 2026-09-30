@@ -336,8 +336,8 @@ export async function toggleWorkspace(id: string, on: boolean, force?: boolean):
   await refreshWorkspaces(); // reconcile clears the marker once on/off has landed
 }
 
-export async function removeWorkspace(id: string): Promise<void> {
-  await backend.removeWorkspace(id);
+export async function removeWorkspace(id: string, force?: boolean): Promise<void> {
+  await backend.removeWorkspace(id, force);
   await refreshWorkspaces();
 }
 

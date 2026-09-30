@@ -12,7 +12,8 @@
 // surfaced; the per-row quick actions stay the single-item path; remove is
 // bulk-only (behind selection + a confirm).
 
-import { unactionable, workspaceCondition, type WorkspaceEntry } from "../api/library";
+import { liveTerminalsCount, unactionable, workspaceCondition, type WorkspaceEntry } from "../api/library";
+import { requestConfirm } from "./confirm.svelte";
 import {
   connectDevserver,
   connectGateway,
@@ -274,24 +275,53 @@ export async function confirmBulkDelete(): Promise<void> {
   selection.note = null;
   const skipped = selection.selected.filter(lockedWorkspace);
   const skippedUnknown = skipped.filter(lockUnknownWorkspace).length;
-  const failures: SelItem[] = [];
-  failures.push(...(await runBulk(locals.filter((s) => !lockedWorkspace(s)), (s) => removeWorkspace(s.id))));
-  failures.push(
-    ...(await runBulk(served.filter((s) => !lockedWorkspace(s)), (s) =>
-      forgetDevserverWorkspace(s.devserverId!, s.id),
-    )),
-  );
-  failures.push(...(await runBulk(devservers, (s) => removeDevserver(s.id))));
-  failures.push(...(await runBulk(gateways, (s) => removeGateway(s.id))));
-  selection.busy = false;
-  selection.confirmingDelete = false;
-  // Keep only the failures/skips selected (succeeded rows drop); surface the count.
-  selection.selected = [...failures, ...skipped];
-  selection.note = bulkNote(
-    "remove",
-    total,
-    failures,
-    skipped.length - skippedUnknown,
-    skippedUnknown,
-  );
+  let failures: SelItem[] = [];
+  const live: SelItem[] = [];
+  const servers = [...devservers, ...gateways];
+  async function remove(item: SelItem, force = false): Promise<void> {
+    try {
+      if (item.kind === "workspace") await removeWorkspace(item.id, force);
+      else await forgetDevserverWorkspace(item.devserverId!, item.id, force);
+    } catch (error) {
+      if (!force && liveTerminalsCount(error) !== null) live.push(item);
+      throw error;
+    }
+  }
+  async function removeServers(): Promise<void> {
+    failures.push(...(await runBulk(devservers, (s) => removeDevserver(s.id))));
+    failures.push(...(await runBulk(gateways, (s) => removeGateway(s.id))));
+  }
+  function finish(deferred: SelItem[] = [], liveCount = 0): void {
+    selection.busy = false;
+    selection.confirmingDelete = false;
+    selection.selected = [...failures, ...skipped, ...deferred];
+    selection.note = [
+      bulkNote("remove", total, failures, skipped.length - skippedUnknown, skippedUnknown),
+      liveCount ? `${liveCount} workspace${liveCount === 1 ? "" : "s"} with live terminals not removed` : null,
+      deferred.length ? `${deferred.length} server removals deferred` : null,
+    ].filter(Boolean).join("; ") || null;
+  }
+  failures.push(...(await runBulk(locals.filter((s) => !lockedWorkspace(s)), (s) => remove(s))));
+  failures.push(...(await runBulk(served.filter((s) => !lockedWorkspace(s)), (s) => remove(s))));
+  if (live.length > 0) {
+    // The retry still needs its devserver connections. Cancellation or a
+    // failed retry keeps those servers selected without disconnecting them.
+    finish(servers, live.length);
+    requestConfirm({
+      title: "Remove workspaces?",
+      message: `${live.length} workspace${live.length === 1 ? " has" : "s have"} live terminals. Remove anyway and stop their terminal sessions?`,
+      confirmLabel: "Remove",
+      onConfirm: async () => {
+        if (selection.busy) return;
+        selection.busy = true;
+        const retryFailures = await runBulk(live, (s) => remove(s, true));
+        failures = [...failures.filter((s) => !live.includes(s)), ...retryFailures];
+        if (retryFailures.length === 0) await removeServers();
+        finish(retryFailures.length > 0 ? servers : []);
+      },
+    });
+    return;
+  }
+  await removeServers();
+  finish();
 }

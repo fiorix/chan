@@ -418,7 +418,7 @@ export interface LibraryApi {
    * `live_terminals` (parse with `liveTerminalsCount`); retry with
    * `force: true` to off it anyway. */
   setWorkspaceOn(id: string, on: boolean, force?: boolean): Promise<void>;
-  removeWorkspace(id: string): Promise<void>;
+  removeWorkspace(id: string, force?: boolean): Promise<void>;
   listDevservers(): Promise<DevserverEntry[]>;
   addDevserver(input: DevserverInput): Promise<DevserverEntry>;
   updateDevserver(id: string, input: DevserverInput): Promise<DevserverEntry>;
@@ -631,7 +631,8 @@ export const liveApi: LibraryApi = {
       // takes no body.
       on ? undefined : { force },
     ),
-  removeWorkspace: (id) => req("DELETE", `/api/library/workspaces/${encodeURIComponent(id)}`),
+  removeWorkspace: (id, force) =>
+    req("DELETE", `/api/library/workspaces/${encodeURIComponent(id)}${force ? "?force=true" : ""}`),
   listDevservers: () => req("GET", "/api/library/devservers"),
   addDevserver: (input) => req("POST", "/api/library/devservers", input),
   updateDevserver: (id, input) =>
