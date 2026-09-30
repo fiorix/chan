@@ -62,7 +62,7 @@ export async function startTerminalCutProxy({
     stopPair(pair);
   }
   function pairFailure(pair, code) {
-    if ((pair === selected && armed) || (receipt && !code.endsWith("_CLOSED_BEFORE_CUT"))) fail(code);
+    if (pair === selected && armed) fail(code);
     else endPair(pair, code);
   }
   function fail(code) {
