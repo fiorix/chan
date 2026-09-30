@@ -1157,6 +1157,8 @@ describe("a live drawing", () => {
     board.pickBackground("#b2f2bb");
     board.fail();
     await tick();
+    socket.frame({ type: "update", version: 2, elements: [PEER] });
+    expect(board.elements, "failed board must drop later live frames").toEqual([]);
     rendered().onChange();
     await vi.advanceTimersByTimeAsync(200);
 
