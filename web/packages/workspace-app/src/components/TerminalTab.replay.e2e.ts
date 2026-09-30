@@ -8,7 +8,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import { bytes as Buffer, caseName, emit, mountRealTerminal, observations, parsers, ReplaySocket, rpc, save, snapshot } from "../__tests__/terminalReplay";
+import { bytes as Buffer, caseName, drainParser, emit, mountRealTerminal, observations, parsers, ReplaySocket, requiredSubcases, rpc, save, snapshot } from "../__tests__/terminalReplay";
 import { pressInTerminal } from "../__tests__/terminalTab";
 
 async function assertWireProvenance() {
@@ -31,6 +31,106 @@ async function assertWireProvenance() {
   observations.push({ event: "provenance", prefixes: received.map(({ connection, deliveries }) => ({ connection, count: deliveries.length })) });
   return records;
 }
+
+if (caseName === "attach-windows") test("ordinary attach cuts keep their cursor and resume only the missing suffix", async () => {
+  let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
+  const subcases: Array<Record<string, unknown>> = requiredSubcases.map((name) => ({ name, status: "not-run", reason: "not implemented" }));
+  const result: Record<string, unknown> = { name: "attach-windows", status: "failed", subcases };
+  const passed = (name: string, detail: Record<string, unknown>) => {
+    const entry = subcases.find((entry) => entry.name === name);
+    expect(entry, "executed subcase must be required").toBeDefined();
+    delete entry!.reason;
+    Object.assign(entry!, { status: "passed", ...detail });
+  };
+  const sessionOf = (socket: ReplaySocket) => JSON.parse(Buffer.from(socket.deliveries.find((frame) => frame.type === "session")!.bytes, "base64").toString());
+  const binaryOf = (socket: ReplaySocket) => Buffer.concat(socket.deliveries.filter((frame) => frame.binary).map((frame) => Buffer.from(frame.bytes, "base64")));
+  try {
+    mounted = await mountRealTerminal(TerminalTab);
+    await mounted.socket.ready();
+    await emit("rows", { prefix: "ATTACH", count: 5000 });
+    await emit("marker", { name: "ATTACH_BASELINE" });
+    await mounted.socket.bytesInclude("MARKER:ATTACH_BASELINE\r\n");
+    const source = await rpc("fixture-log");
+    const emitted = Buffer.from(source.bytes, "base64");
+    const rows = emitted.toString().split("\r\n").filter(Boolean);
+    const baseline = await snapshot("ordinary attach baseline");
+    expect(baseline.normal.rows.filter(Boolean)).toEqual(rows);
+    const generation = sessionOf(mounted.socket).generation;
+
+    await rpc("arm", { boundary: "before-session", ordinal: 2 });
+    mounted.socket.disconnect();
+    const beforeSessionCut = await rpc("cut");
+    expect(beforeSessionCut.disconnect).toEqual({ client: "closed", upstream: "closed" });
+    expect(beforeSessionCut.forwardedBytes).toBe(0);
+    expect((await ReplaySocket.dial(2)).deliveries).toEqual([]);
+    const beforeSessionRecovery = await ReplaySocket.dial(3);
+    await beforeSessionRecovery.ready();
+    const beforeSession = sessionOf(beforeSessionRecovery);
+    expect({ seq: beforeSession.seq, replay: beforeSession.replay_bytes, missed: beforeSession.missed_bytes, generation: beforeSession.generation })
+      .toEqual({ seq: emitted.length, replay: 0, missed: 0, generation });
+    expect(binaryOf(beforeSessionRecovery).length).toBe(0);
+    const recovered = await snapshot("ordinary before-session recovery");
+    expect(recovered.active).toBe("normal");
+    expect(recovered.normal, "a failed dial before session preserves all rows and cursor").toEqual(baseline.normal);
+    let records = await assertWireProvenance();
+    for (const ordinal of [2, 3]) {
+      const dial = records.find((entry: any) => entry.event === "connection" && entry.connection === ordinal);
+      expect(dial.query.since).toBe(String(emitted.length));
+      expect(dial.query.generation).toBe(String(generation));
+    }
+    passed("normal-before-session", { cut: beforeSessionCut, session: beforeSession });
+
+    ReplaySocket.acknowledge = async (message) => {
+      if (message.connection === 4 && message.type === "ready") {
+        await drainParser("after-ready boundary");
+        await emit("rows", { prefix: "SUFFIX", count: 7 });
+        await emit("marker", { name: "SUFFIX_END" });
+        await rpc("upstream-marker", { connection: 4, marker: "MARKER:SUFFIX_END\r\n" });
+        await rpc("ack", { connection: 4, frame: message.frame, drained: true });
+      }
+    };
+    await rpc("arm", { boundary: "after-ready", ordinal: 4 });
+    beforeSessionRecovery.disconnect();
+    const afterReadyCut = await rpc("cut");
+    expect(afterReadyCut.disconnect).toEqual({ client: "closed", upstream: "closed" });
+    expect(afterReadyCut.lastAcknowledged.drained).toBe(true);
+    const cutSocket = await ReplaySocket.dial(4);
+    expect(cutSocket.deliveries.some((frame) => frame.type === "ready" && frame.processed)).toBe(true);
+    expect(binaryOf(cutSocket).length, "the new output is withheld after ready").toBe(0);
+    const afterReadyRecovery = await ReplaySocket.dial(5);
+    await afterReadyRecovery.ready();
+    const afterReady = sessionOf(afterReadyRecovery);
+    const allSource = await rpc("fixture-log");
+    const allEmitted = Buffer.from(allSource.bytes, "base64");
+    const suffix = Buffer.from(allEmitted.subarray(emitted.length));
+    expect(afterReady.seq).toBe(allEmitted.length);
+    expect(afterReady.generation).toBe(generation);
+    expect(afterReady.missed_bytes).toBe(0);
+    expect(afterReady.replay_bytes, "ordinary recovery advertises only the withheld suffix").toBe(suffix.length);
+    expect(binaryOf(afterReadyRecovery).toString("base64"), "ordinary recovery delivers only the withheld suffix").toBe(suffix.toString("base64"));
+    const final = await snapshot("ordinary after-ready recovery");
+    const expected = allEmitted.toString().split("\r\n").filter(Boolean);
+    expect(expected).toHaveLength(5009);
+    expect(final.active).toBe("normal");
+    expect(final.normal.rows.filter(Boolean), "suffix replay keeps the original history exactly once without a loss notice").toEqual(expected);
+    expect({ x: final.normal.cursorX, y: final.normal.cursorY, base: final.normal.baseY })
+      .toEqual({ x: 0, y: 23, base: expected.length - 23 });
+    records = await assertWireProvenance();
+    const dial = records.find((entry: any) => entry.event === "connection" && entry.connection === 5);
+    expect(dial.query.since, "ready preserves the consumed cursor for an ordinary resume").toBe(String(emitted.length));
+    expect(dial.query.generation).toBe(String(generation));
+    expect(records.filter((entry: any) => entry.event === "connection").map((entry: any) => entry.connection)).toEqual([1, 2, 3, 4, 5]);
+    passed("normal-after-ready", { cut: afterReadyCut, session: afterReady, suffixBytes: suffix.length });
+    const missing = subcases.filter((entry) => entry.status !== "passed").map((entry) => entry.name);
+    Object.assign(result, { status: missing.length ? "not-run" : "passed", reason: missing.length ? "required subcases are not implemented" : undefined,
+      fixtureSha256: allSource.sha256, receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin"] });
+  } catch (error) {
+    result.error = String(error);
+    throw error;
+  } finally {
+    try { await mounted?.close(); } finally { save("client-records.json", observations); save("attach-windows.json", result); }
+  }
+});
 
 if (caseName === "overflow") test("an overflow replay retains one exact loss notice and removes evicted history", async () => {
   let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;

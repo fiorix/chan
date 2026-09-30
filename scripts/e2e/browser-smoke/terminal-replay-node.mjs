@@ -13,8 +13,14 @@ import { launchServer, seedWorkspace, teardownServer } from "./lib/server.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const required = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart"];
-const implemented = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow"];
-const requiredSubcases = { "keyboard-modes": ["normal-screen", "alternate-screen", "replayed-change"] };
+const implemented = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows"];
+const requiredSubcases = {
+  "keyboard-modes": ["normal-screen", "alternate-screen", "replayed-change"],
+  "attach-windows": ["normal-before-session", "normal-interior-prefix", "normal-utf8-prefix", "normal-escape-prefix",
+    "normal-before-ready", "normal-after-ready", "normal-second-cut", "normal-repeated-failed-dial",
+    "alternate-before-session", "alternate-after-prelude", "alternate-before-ready", "alternate-after-ready",
+    "alternate-second-cut", "alternate-repeated-failed-dial"],
+};
 const selected = process.env.REPLAY_CASES?.split(",").filter(Boolean) ?? required;
 const out = resolve(process.env.REPLAY_OUT ?? "terminal-replay-results");
 mkdirSync(out, { recursive: false });
@@ -123,6 +129,7 @@ async function runCase(name) {
     runner = spawn(process.execPath, [join(repo, "web/node_modules/vitest/vitest.mjs"), "run", "--config", "vitest.replay.config.ts"], {
       cwd: join(repo, "web/packages/workspace-app"), stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, CHAN_REPLAY_URL: pageUrl.href, CHAN_REPLAY_SESSION: session, CHAN_REPLAY_OUT: caseOut, CHAN_REPLAY_CASE: name,
+        CHAN_REPLAY_REQUIRED_SUBCASES: JSON.stringify(requiredSubcases[name] ?? []),
         CHAN_REPLAY_WS_PACKAGE: join(repo, "scripts/e2e/browser-smoke/package.json"),
         CHAN_REPLAY_CONTROL: `http://127.0.0.1:${control.address().port}`, CHAN_REPLAY_CONTROL_TOKEN: controlToken },
     });

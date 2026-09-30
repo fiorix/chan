@@ -8,6 +8,7 @@ type Network = { readyState: number; on(event: string, handler: (...args: any[])
 // Keep the Node-only surface local; the web workspace has no Node type dependency.
 const { env } = await vi.importActual<{ env: Record<string, string | undefined> }>("node:process");
 export const caseName = env.CHAN_REPLAY_CASE;
+export const requiredSubcases: string[] = JSON.parse(env.CHAN_REPLAY_REQUIRED_SUBCASES ?? "[]");
 const { createRequire } = await vi.importActual<{ createRequire(path: string): (name: string) => new (url: string) => Network }>("node:module");
 const { writeFileSync } = await vi.importActual<{ writeFileSync(path: string, data: string, options: { flag: string }): void }>("node:fs");
 export const { Buffer: bytes } = await vi.importActual<{ Buffer: {
@@ -175,14 +176,19 @@ export async function parserTerminalModule() {
   };
 }
 
-export async function snapshot(label: string) {
-  for (const socket of ReplaySocket.all) await socket.handled();
+export async function drainParser(label: string) {
   const terminal = parsers.at(-1);
   if (!terminal) throw new Error("no terminal parser");
   let drained = false;
   terminal.model.write("", () => { drained = true; changed(); });
   await until(`parser drain ${label}`, () => drained ? true : undefined);
   if (terminal.queued !== terminal.completed) throw new Error("buffer read before writes completed");
+  return terminal;
+}
+
+export async function snapshot(label: string) {
+  for (const socket of ReplaySocket.all) await socket.handled();
+  const terminal = await drainParser(label);
   const read = (buffer: Terminal["buffer"]["normal"]) => ({
     rows: Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)!.translateToString(true)),
     cursorX: buffer.cursorX, cursorY: buffer.cursorY, baseY: buffer.baseY,
