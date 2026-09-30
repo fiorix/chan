@@ -11,7 +11,9 @@ publish = false
 [dependencies]
 chan-tunnel-proto = { workspace = true }
 
-axum = { workspace = true }
+# Router, Extension, and Body need no optional axum features. This crate is
+# also built by the gateway, whose feature set must stay independent.
+axum = { version = "0.8", default-features = false }
 base64 = { workspace = true }
 futures = { workspace = true }
 h2 = { workspace = true }
