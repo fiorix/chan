@@ -3,9 +3,14 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import http from "node:http";
 import net from "node:net";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 import { startTerminalCutProxy } from "./terminal-cut-proxy.mjs";
+import { startTerminalFixture, runTerminalFixture } from "./terminal-fixture.mjs";
 
 const text = (value) => [Buffer.from(JSON.stringify(value)), false];
 const replay = Buffer.from("row-0:\u00e9\x1b[31mRED\x1b[0m\r\n");
@@ -178,4 +183,54 @@ test("invalid replay offset and invalid acknowledgements refuse", { timeout: 100
   proxy.arm({ boundary: "inside-replay", bytes: replay.length });
   dial();
   await assert.rejects(proxy.waitForCut(), { code: "INVALID_REPLAY_BOUNDARY" });
+});
+
+test("fixture commands, raw keys and barriers agree with its append-only log", { timeout: 10000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "chan-terminal-fixture-test-"));
+  const logPath = join(dir, "emitted.bin");
+  const controller = await startTerminalFixture({ logPath });
+  const input = new PassThrough(), output = new PassThrough(), emitted = [];
+  input.isTTY = output.isTTY = true;
+  input.setRawMode = (raw) => { input.isRaw = raw; };
+  output.columns = 80; output.rows = 24;
+  output.on("data", (bytes) => emitted.push(Buffer.from(bytes)));
+  const run = runTerminalFixture({ port: Number(controller.env.TERMINAL_FIXTURE_PORT),
+    token: controller.env.TERMINAL_FIXTURE_TOKEN, logPath, input, output });
+  run.catch(() => {});
+  t.after(async () => { await controller.close(); await run; await rm(dir, { recursive: true }); });
+  const identity = await controller.ready();
+  assert.equal(identity.raw, true);
+  assert.equal(identity.cols, 80);
+  await controller.send("rows", { prefix: "unique", count: 2 });
+  await controller.send("marker", { name: "main" });
+  await controller.send("alternate", { enabled: true });
+  await controller.send("redraw", { name: "alt" });
+  await controller.send("bytes", { base64: Buffer.from("\x1b[?1h").toString("base64") });
+  input.write(Buffer.from([27, 79, 65]));
+  assert.equal((await controller.waitFor((r) => r.type === "keys")).base64, Buffer.from([27, 79, 65]).toString("base64"));
+  await controller.send("alternate", { enabled: false });
+  const barrier = await controller.send("barrier", { name: "finite" });
+  const expected = Buffer.from("unique:00000000\r\nunique:00000001\r\nMARKER:main\r\n\x1b[?1049h\x1b[2J\x1b[HSCREEN:alt\r\n\x1b[?1h\x1b[?1049l");
+  assert.deepEqual(Buffer.concat(emitted), expected);
+  assert.deepEqual(await readFile(logPath), expected);
+  assert.equal(barrier.offset, expected.length);
+  assert.equal(barrier.sha256, createHash("sha256").update(expected).digest("hex"));
+  await assert.rejects(controller.send("marker", { name: "blocked" }), { code: "BARRIER_HELD" });
+  await assert.rejects(controller.send("resume", { name: "wrong" }), { code: "BARRIER_MISMATCH" });
+  await assert.rejects(controller.send("bytes", { base64: "!" }), { code: "INVALID_BYTES" });
+  assert.deepEqual(await readFile(logPath), expected);
+  await controller.send("resume", { name: "finite" });
+  await controller.send("rows", { prefix: "unique", count: 1 });
+  assert.deepEqual(await readFile(logPath), Buffer.concat([expected, Buffer.from("unique:00000002\r\n")]));
+  await controller.send("stop");
+  await run;
+  assert.equal(input.isRaw, false);
+});
+
+test("fixture refuses a missing peer and a non-PTY", { timeout: 10000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "chan-terminal-fixture-test-"));
+  const controller = await startTerminalFixture({ logPath: join(dir, "unused.bin"), deadlineMs: 100 });
+  t.after(async () => { await controller.close(); await rm(dir, { recursive: true }); });
+  await assert.rejects(controller.ready(), { code: "FIXTURE_EVENT_TIMEOUT" });
+  await assert.rejects(runTerminalFixture({ input: new PassThrough(), output: new PassThrough() }), { code: "PTY_REQUIRED" });
 });
