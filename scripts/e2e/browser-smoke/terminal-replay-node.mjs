@@ -13,7 +13,7 @@ import { launchServer, seedWorkspace, teardownServer } from "./lib/server.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const required = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart"];
-const implemented = ["alternate-screen", "normal-screen", "keyboard-modes"];
+const implemented = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow"];
 const requiredSubcases = { "keyboard-modes": ["normal-screen", "alternate-screen", "replayed-change"] };
 const selected = process.env.REPLAY_CASES?.split(",").filter(Boolean) ?? required;
 const out = resolve(process.env.REPLAY_OUT ?? "terminal-replay-results");

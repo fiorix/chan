@@ -32,6 +32,78 @@ async function assertWireProvenance() {
   return records;
 }
 
+if (caseName === "overflow") test("an overflow replay retains one exact loss notice and removes evicted history", async () => {
+  let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
+  const result: Record<string, unknown> = { name: "overflow", status: "failed" };
+  try {
+    mounted = await mountRealTerminal(TerminalTab);
+    await mounted.socket.ready();
+    await emit("rows", { prefix: "EVICTED", count: 8 });
+    await emit("marker", { name: "OLD_PROMPT" });
+    await mounted.socket.bytesInclude("MARKER:OLD_PROMPT\r\n");
+    const old = await snapshot("old rows before ring overflow");
+    expect(old.normal.rows.filter(Boolean)).toHaveLength(9);
+    // Carriage returns fill the byte ring without exhausting the parser's row history.
+    for (let index = 0; index < 12; index++) {
+      await emit("bytes", { base64: Buffer.from("\r".repeat(262144)).toString("base64") });
+    }
+    await emit("rows", { prefix: "SURVIVES", count: 64 });
+    await emit("marker", { name: "OVERFLOW_END" });
+    await mounted.socket.bytesInclude("MARKER:OVERFLOW_END\r\n");
+    const before = await snapshot("overflow before cut");
+    expect(before.normal.rows.filter(Boolean).slice(0, 9), "evicted rows are still in the page before recovery").toEqual(old.normal.rows.filter(Boolean));
+    const source = await rpc("fixture-log");
+    const emitted = Buffer.from(source.bytes, "base64");
+    ReplaySocket.acknowledge = async (message) => {
+      if (message.connection === 2 && message.type === "session") {
+        await rpc("ack", { connection: 2, frame: message.frame, drained: false });
+      }
+    };
+    await rpc("arm", { boundary: "after-session", ordinal: 2 });
+    mounted.socket.disconnect();
+    const cut = await rpc("cut");
+    expect(cut.disconnect).toEqual({ client: "closed", upstream: "closed" });
+    expect(cut.replayForwarded).toBe(0);
+    expect((await ReplaySocket.dial(2)).deliveries.map((frame) => frame.type)).toEqual(["session"]);
+    const recovery = await ReplaySocket.dial(3);
+    await recovery.ready();
+    const session = JSON.parse(Buffer.from(recovery.deliveries.find((frame) => frame.type === "session")!.bytes, "base64").toString());
+    const replay = Buffer.concat(recovery.deliveries.filter((frame) => frame.binary).map((frame) => Buffer.from(frame.bytes, "base64")));
+    expect(replay.length).toBeGreaterThan(0);
+    expect(replay.length).toBeLessThan(emitted.length);
+    expect(session.seq).toBe(emitted.length);
+    expect(session.replay_bytes, "advertised replay count equals the bytes actually delivered").toBe(replay.length);
+    const missed = emitted.length - replay.length;
+    expect(session.missed_bytes, "loss count is independently derived from emitted and delivered bytes").toBe(missed);
+    const retained = Buffer.from(emitted.subarray(missed));
+    expect(replay.toString("base64"), "the delivered replay is the exact retained fixture suffix").toBe(retained.toString("base64"));
+    expect(retained[0], "ring eviction ends within the padding, before the retained rows").toBe(13);
+    const rows = retained.toString().replace(/\r(?!\n)/g, "").split("\r\n").filter(Boolean);
+    expect(rows).toHaveLength(65);
+    const notice = `terminal replay missed ${missed} bytes`;
+    const recovered = await snapshot("overflow after cut");
+    expect(recovered.active).toBe("normal");
+    expect(recovered.normal.rows.filter(Boolean), "one correctly counted notice survives above every retained row").toEqual([notice, ...rows]);
+    expect(recovered.normal.rows.some((row) => row.includes("EVICTED") || row.includes("OLD_PROMPT")), "old markers do not survive the reset").toBe(false);
+    await emit("marker", { name: "OVERFLOW_LIVE" });
+    await recovery.bytesInclude("MARKER:OVERFLOW_LIVE\r\n");
+    const final = await snapshot("overflow live suffix");
+    expect(final.normal.rows.filter(Boolean)).toEqual([notice, ...rows, "MARKER:OVERFLOW_LIVE"]);
+    const records = await assertWireProvenance();
+    const dial = records.find((entry: any) => entry.event === "connection" && entry.connection === 3);
+    expect(dial.query.since).toBe("0");
+    expect(dial.query.generation).toBeUndefined();
+    Object.assign(result, { status: "passed", cut, session, emittedBytes: emitted.length, replayBytes: replay.length,
+      missedBytes: missed, retainedRows: rows.length, fixtureSha256: source.sha256,
+      receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin"] });
+  } catch (error) {
+    result.error = String(error);
+    throw error;
+  } finally {
+    try { await mounted?.close(); } finally { save("client-records.json", observations); save("overflow.json", result); }
+  }
+});
+
 if (caseName === "keyboard-modes") test("negotiated key bytes survive cut replays and later replayed modes win", async () => {
   let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
   const subcases: Array<Record<string, unknown>> = [];
