@@ -97,7 +97,10 @@ for (const boundary of ["before-session", "after-session", "inside-replay", "aft
         assert.equal(receipt.held[0].offset, 7);
         assert.equal(receipt.held[0].bytes, replay.subarray(7).toString("base64"));
       }
-      if (boundary === "after-ready") assert.deepEqual(client.delivered, frames.slice(0, 3));
+      if (boundary === "after-ready") {
+        assert.deepEqual(client.delivered, frames.slice(0, 3));
+        assert.equal(receipt.replayForwarded, replay.length);
+      }
     }
     assert.throws(() => proxy.arm({ boundary }), { code: "CONTROLLER_DISARMED" });
     const recovery = dial("session=wanted&since=0");

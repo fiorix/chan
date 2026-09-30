@@ -148,6 +148,9 @@ export async function startTerminalCutProxy({
           }
           await deliver(pair, { ...item, bytes: item.bytes.subarray(0, length) }, length === remaining);
         } else {
+          if (active && item.binary && Number.isSafeInteger(pair.replayBytes)) {
+            pair.replayForwarded += Math.min(item.bytes.length, Math.max(0, pair.replayBytes - pair.replayForwarded));
+          }
           const atBoundary = active && ((armed.boundary === "after-session" && item.type === "session") ||
             (armed.boundary === "after-ready" && item.type === "ready"));
           await deliver(pair, item, atBoundary);
