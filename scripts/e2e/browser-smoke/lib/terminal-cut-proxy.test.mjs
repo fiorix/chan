@@ -204,6 +204,25 @@ test("held queue has a byte bound", { timeout: 10000 }, async (t) => {
   await assert.rejects(proxy.waitForCut(), { code: "QUEUE_LIMIT" });
 });
 
+for (const code of ["TRACE_LIMIT", "QUEUE_LIMIT"]) {
+  test(`recovery refuses ${code} after preserving the cut receipt`, { timeout: 10000 }, async (t) => {
+    const limits = code === "TRACE_LIMIT" ? { maxTraceBytes: session[0].length * 3 + 1 } : { maxQueueBytes: 150 };
+    const { proxy, dial, upstream } = await rig(t, { messages: [session], ...limits });
+    proxy.arm({ boundary: "after-session" });
+    dial("session=wanted", "/terminal/ws", true);
+    const receipt = await proxy.waitForCut();
+    const recovery = dial();
+    await once(recovery.socket, "open");
+    if (code === "QUEUE_LIMIT") upstream[1].socket.send(Buffer.alloc(151));
+    await assert.doesNotReject(proxy.waitForRecord((r) => r.event === "failure" && r.code === code, 500),
+      "a recovery limit must produce its failure record");
+    await recovery.closed;
+    await assert.rejects(proxy.waitForCut(), { code });
+    assert.deepEqual(proxy.records.find((r) => r.event === "cut"), { event: "cut", ...receipt });
+    assert.equal(proxy.records.filter((r) => r.event === "failure").length, 1);
+  });
+}
+
 test("invalid replay offset and invalid acknowledgements refuse", { timeout: 10000 }, async (t) => {
   const { proxy, dial } = await rig(t);
   assert.throws(() => proxy.arm({ boundary: "inside-replay", bytes: 0 }), { code: "INVALID_BOUNDARY" });

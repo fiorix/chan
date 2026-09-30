@@ -62,17 +62,21 @@ export async function startTerminalCutProxy({
     stopPair(pair);
   }
   function pairFailure(pair, code) {
-    if (pair === selected && armed) fail(code);
+    if ((pair === selected && armed) || (receipt && !code.endsWith("_CLOSED_BEFORE_CUT"))) fail(code);
     else endPair(pair, code);
   }
   function fail(code) {
-    if (failure || receipt || closed) return;
+    if (failure || closed) return;
     failure = fault(code);
     clearTimeout(timer);
     record({ event: "failure", code });
     cut.reject(failure);
     events.emit("failure", failure);
-    if (selected) stopPair(selected);
+    for (const pair of peers) {
+      pair.queue.length = 0;
+      pair.queuedBytes = 0;
+      stopPair(pair);
+    }
   }
   function frameRecord(pair, direction, bytes, binary, source = null, offset = 0) {
     traceBytes += bytes.length;
@@ -93,9 +97,12 @@ export async function startTerminalCutProxy({
     return { ...value, control };
   }
   function hold(pair, item) {
+    if (pair.queuedBytes + item.bytes.length > maxQueueBytes || pair.queue.length >= maxQueueMessages) {
+      fail("QUEUE_LIMIT");
+      return;
+    }
     pair.queue.push(item);
     pair.queuedBytes += item.bytes.length;
-    if (pair.queuedBytes > maxQueueBytes || pair.queue.length > maxQueueMessages) fail("QUEUE_LIMIT");
   }
   async function disconnect(pair, boundaryFrame) {
     if (pair.cutting || failure || closed) return;
@@ -277,6 +284,7 @@ export async function startTerminalCutProxy({
       if (pair.awaiting?.frame === frame) void disconnect(pair, pair.awaiting.source);
     },
     waitForCut() {
+      if (failure) return Promise.reject(failure);
       if (!armUsed) return Promise.reject(fault("NOT_ARMED"));
       return cut.promise;
     },
