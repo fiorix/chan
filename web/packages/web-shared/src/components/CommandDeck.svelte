@@ -168,10 +168,10 @@
     onScope(scope.id);
   }
 
-  async function openConfirm(item: DeckItem): Promise<void> {
+  async function openConfirm(item: DeckItem, enterHeld = false): Promise<void> {
     const request = item.confirm;
     if (!request) return;
-    confirmKeyReleased = false;
+    confirmKeyReleased = !enterHeld;
     const executionDraft = draft;
     const token = {};
     preparationToken = token;
@@ -321,10 +321,10 @@
     }
   }
 
-  function choose(item: DeckItem | undefined): void {
+  function choose(item: DeckItem | undefined, enterHeld = false): void {
     if (!item || item.disabled) return;
     if (item.confirm && draft.operation?.itemId !== item.id) {
-      void openConfirm(item);
+      void openConfirm(item, enterHeld);
       return;
     }
     void execute(item);
@@ -341,8 +341,8 @@
     void tick().then(() => input?.focus());
   }
 
-  function retry(item: DeckItem): void {
-    if (typeof item.confirm === "function") void openConfirm(item);
+  function retry(item: DeckItem, enterHeld = false): void {
+    if (typeof item.confirm === "function") void openConfirm(item, enterHeld);
     else void execute(item);
   }
 
@@ -371,7 +371,7 @@
         return;
       }
       const item = operationItem();
-      if (item) retry(item);
+      if (item) retry(item, true);
     }
   }
 
@@ -448,7 +448,7 @@
         else setKeyboardIndex(keyboardIndex - 1);
       } else if (event.key === "Enter" || event.key === "ArrowRight") {
         event.preventDefault();
-        choose(selectedItem);
+        choose(selectedItem, event.key === "Enter");
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
         onBack();
@@ -467,7 +467,7 @@
       enterScopes();
     } else if (event.key === "Enter" && items.length) {
       event.preventDefault();
-      choose(selectedItem);
+      choose(selectedItem, true);
     } else if ((event.key === "Backspace" && draft.query === "") || event.key === "ArrowLeft" && draft.query === "") {
       event.preventDefault();
       onBack();
