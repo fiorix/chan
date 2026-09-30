@@ -53,6 +53,18 @@ export async function startTerminalCutProxy({
     pair.client?.terminate();
     pair.up.terminate();
   }
+  function endPair(pair, code) {
+    if (pair.ended || pair.cutting) return;
+    pair.ended = true;
+    pair.queue.length = 0;
+    pair.queuedBytes = 0;
+    record({ event: "end", connection: pair.ordinal, code });
+    stopPair(pair);
+  }
+  function pairFailure(pair, code) {
+    if (pair === selected && armed) fail(code);
+    else endPair(pair, code);
+  }
   function fail(code) {
     if (failure || receipt || closed) return;
     failure = fault(code);
@@ -112,6 +124,10 @@ export async function startTerminalCutProxy({
     cut.resolve(receipt);
   }
   async function deliver(pair, item, awaitAck = false) {
+    if (pair.client.readyState !== WebSocket.OPEN) {
+      pairFailure(pair, "CLIENT_CLOSED_BEFORE_CUT");
+      return;
+    }
     const sent = frameRecord(pair, "forwarded", item.bytes, item.binary, item.source, item.offset);
     if (!sent) return;
     if (awaitAck) pair.awaiting = { frame: sent.frame, source: item.source };
@@ -119,10 +135,10 @@ export async function startTerminalCutProxy({
       (error) => error ? reject(error) : resolve()));
   }
   async function pump(pair) {
-    if (pair.pumping || pair.awaiting || pair.cutting || failure || closed) return;
+    if (pair.pumping || pair.awaiting || pair.cutting || pair.ended || failure || closed) return;
     pair.pumping = true;
     try {
-      while (pair.queue.length && !pair.awaiting && !pair.cutting && !failure && !closed) {
+      while (pair.queue.length && !pair.awaiting && !pair.cutting && !pair.ended && !failure && !closed) {
         const item = pair.queue.shift();
         pair.queuedBytes -= item.bytes.length;
         const active = armed && pair === selected;
@@ -156,7 +172,7 @@ export async function startTerminalCutProxy({
           await deliver(pair, item, atBoundary);
         }
       }
-    } catch { if (!pair.cutting && !closed) fail("FORWARD_FAILED"); }
+    } catch { if (!pair.cutting && !pair.ended && !closed) pairFailure(pair, "FORWARD_FAILED"); }
     finally { pair.pumping = false; }
   }
 
@@ -210,28 +226,28 @@ export async function startTerminalCutProxy({
       wss.options.handleProtocols = () => up.protocol || false;
       wss.handleUpgrade(req, socket, head, (client) => {
         pair.client = client;
-        client.on("error", () => { if (!pair.cutting && !closed) fail("CLIENT_ERROR"); });
+        client.on("error", () => { if (!pair.cutting && !closed) pairFailure(pair, "CLIENT_ERROR"); });
         client.on("message", (bytes, binary) => {
           if (up.bufferedAmount + bytes.length > maxQueueBytes) { fail("INPUT_QUEUE_LIMIT"); return; }
           if (up.readyState === WebSocket.OPEN) up.send(bytes, { binary });
         });
         client.on("close", () => {
-          if (pair === selected && armed && !pair.cutting && !closed) fail("CLIENT_CLOSED_BEFORE_CUT");
+          if (!pair.cutting && !closed) pairFailure(pair, "CLIENT_CLOSED_BEFORE_CUT");
           up.terminate();
         });
       });
     });
     up.on("message", (data, binary) => {
-      if (pair.cutting || failure || closed) return;
+      if (pair.cutting || pair.ended || failure || closed) return;
       const bytes = Buffer.from(data);
       const frame = frameRecord(pair, "received", bytes, binary);
       if (!frame) return;
       hold(pair, { bytes, binary, source: frame.frame, type: frame.type, control: frame.control, offset: 0 });
       void pump(pair);
     });
-    up.on("error", () => { socket.destroy(); if (pair === selected) fail("UPSTREAM_ERROR"); });
+    up.on("error", () => { socket.destroy(); if (!pair.cutting && !closed) pairFailure(pair, "UPSTREAM_ERROR"); });
     up.on("close", () => {
-      if (pair === selected && armed && !pair.cutting && !closed) fail("UPSTREAM_CLOSED_BEFORE_CUT");
+      if (!pair.cutting && !closed) pairFailure(pair, "UPSTREAM_CLOSED_BEFORE_CUT");
       pair.client?.terminate();
       peers.delete(pair);
     });

@@ -149,6 +149,31 @@ test("selection counts only the named path and session", { timeout: 10000 }, asy
   assert.equal(proxy.records.filter((r) => r.event === "connection").length, 2);
 });
 
+test("an earlier client close with a delivery in flight leaves the armed pair usable", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t, { ordinal: 2 });
+  const send = WebSocket.prototype.send;
+  let release;
+  const port = Number(new URL(proxy.url).port);
+  t.mock.method(WebSocket.prototype, "send", function (bytes, options, callback) {
+    if (this._socket?.localPort === port && !release) {
+      return send.call(this, bytes, options, (error) => { release = () => callback(error); });
+    }
+    return send.call(this, bytes, options, callback);
+  });
+  t.after(() => release?.());
+  proxy.arm({ boundary: "after-session" });
+  const earlier = dial();
+  await proxy.waitForRecord((r) => r.connection === 1 && r.direction === "received" && r.frame === frames.length);
+  await once(earlier.socket, "message");
+  earlier.socket.close();
+  await earlier.closed;
+  release();
+  dial("session=wanted", "/terminal/ws", true);
+  await assert.doesNotReject(proxy.waitForCut(), "an ordinary earlier close must not fail the selected cut");
+  assert.equal(proxy.records.filter((r) => r.event === "cut")[0].connection, 2);
+  assert.equal(proxy.records.some((r) => r.event === "failure"), false);
+});
+
 test("a replay cut spans source messages without changing byte order", { timeout: 10000 }, async (t) => {
   const { proxy, dial } = await rig(t, { messages: [session, [replay.subarray(0, 3), true], [replay.subarray(3), true], ready] });
   proxy.arm({ boundary: "inside-replay", bytes: 7 });
