@@ -10375,7 +10375,7 @@ mod tests {
         /// A forget handed to the desktop by the folder a restored workspace
         /// is mounted from, after the path its registry row stores was pointed
         /// at another registered workspace, leaves that other workspace as it
-        /// was and closes the one whose folder it names.
+        /// was and removes the one whose folder it names.
         #[cfg(unix)]
         #[test]
         fn a_forget_of_a_restored_root_relinked_to_another_workspace_leaves_that_workspace() {
@@ -10409,23 +10409,22 @@ mod tests {
                 !desktop.embedded().is_workspace_mounted_by_key(&root.now),
                 "the forget left the workspace it names mounted: {outcome:?}"
             );
-            // The host's removal unregisters by the name it is given, and a
-            // name matches a row by the canonical path the row last resolved
-            // to or by resolving the root the row stores again. This row last
-            // resolved to the root it stores, when the registry was loaded or
-            // the root registered, and that root now resolves to the other
-            // workspace's folder, so no name matches the row: it stays
-            // registered, and off, and the removal finds nothing to remove.
+            // The mounted folder identifies the runtime whose stored root
+            // selects the row to unregister without resolving that root.
             assert!(
-                desktop.row(&root.stored).is_some()
+                desktop.row(&root.stored).is_none()
                     && !desktop
                         .on_paths()
                         .contains(&root.stored.to_string_lossy().into_owned()),
-                "the forget did not leave the workspace it names registered and off: {outcome:?}"
+                "the forget left the workspace it names registered or on: {outcome:?}"
+            );
+            assert!(
+                !desktop.window_paths().contains(&root.stored),
+                "the forget left a window under the workspace's stored root: {outcome:?}"
             );
             assert_eq!(
                 outcome,
-                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound)
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
         }
 
@@ -10469,14 +10468,12 @@ mod tests {
         }
 
         /// A forget handed to the desktop of a restored workspace whose stored
-        /// root no longer resolves, named by the folder it is mounted from,
-        /// closes the workspace and leaves its registry row.
+        /// root resolves nowhere, named by the folder it is mounted from,
+        /// closes the workspace and removes its registry row.
         #[cfg(unix)]
         #[test]
-        fn a_forget_of_a_restored_root_that_resolves_nowhere_closes_it_and_keeps_its_row() {
-            if !own_home(
-                "a_forget_of_a_restored_root_that_resolves_nowhere_closes_it_and_keeps_its_row",
-            ) {
+        fn a_forget_of_a_restored_root_that_resolves_nowhere_removes_it() {
+            if !own_home("a_forget_of_a_restored_root_that_resolves_nowhere_removes_it") {
                 return;
             }
             let desktop = Desktop::new();
@@ -10512,23 +10509,15 @@ mod tests {
                 !desktop.embedded().is_workspace_mounted_by_key(&root.now),
                 "the forget left the workspace it names mounted: {outcome:?}"
             );
-            // The forget names the canonical root: the root the row stores
-            // resolves nowhere, so its key is that root itself, which is not
-            // the canonical root the runtime was mounted at. The host's removal
-            // unregisters by the name it is given, and a name matches a row by
-            // the canonical path the row last resolved to or by resolving the
-            // root the row stores again. This row last resolved to the root it
-            // stores, which resolves nowhere now, so no name matches it: it
-            // stays registered, and the removal finds nothing to remove. Named
-            // by the root the row stores, the removal fails and leaves the
-            // workspace mounted.
+            // The runtime's stored root selects the row even when that root
+            // resolves nowhere; finding the row asks no filesystem.
             assert!(
-                desktop.row(&root.stored).is_some(),
-                "the forget did not leave the workspace it names registered: {outcome:?}"
+                desktop.row(&root.stored).is_none(),
+                "the forget left the workspace it names registered: {outcome:?}"
             );
             assert_eq!(
                 outcome,
-                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound)
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
         }
 
