@@ -6495,6 +6495,64 @@ mod tests {
         );
     }
 
+    /// Remove a relinked root by the folder it resolves to, as the desktop's
+    /// forget names it, beside one window stored under the root its registry
+    /// row stores, where the launcher and the desktop store its windows.
+    /// Answers the removal and the windows left.
+    #[cfg(unix)]
+    async fn remove_a_relinked_root_with_a_window(
+        mounted: bool,
+    ) -> (
+        Result<WorkspaceLifecycleOutcome, Error>,
+        Vec<PersistedWindow>,
+    ) {
+        let (host, _overlay, stored, canonical, dirs) = relinked_host();
+        let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+        host.install_window_registry(Arc::clone(&windows), "local".into());
+        if mounted {
+            host.open_registered_workspace(&stored, serve_config("/ws"))
+                .await
+                .expect("mount the relinked root");
+        }
+        windows.create(
+            WindowKind::Workspace,
+            Some(stored.to_string_lossy().into_owned()),
+        );
+        let outcome = host.remove_workspace_for_root(&canonical, false).await;
+        (outcome, windows.snapshot())
+    }
+
+    /// A removal of a mounted relinked root by the folder it resolves to
+    /// purges the windows stored under the root its row stores.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_of_a_mounted_relinked_root_purges_the_windows_under_its_rows_root() {
+        let (outcome, left) = remove_a_relinked_root_with_a_window(true).await;
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "fixture: the removal did not remove the workspace: {outcome:?}"
+        );
+        assert!(
+            left.is_empty(),
+            "the removal left a window stored under the row's root: {left:?}"
+        );
+    }
+
+    /// The same for a relinked root that is not mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_of_a_relinked_root_not_mounted_purges_the_windows_under_its_rows_root() {
+        let (outcome, left) = remove_a_relinked_root_with_a_window(false).await;
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "fixture: the removal did not remove the workspace: {outcome:?}"
+        );
+        assert!(
+            left.is_empty(),
+            "the removal left a window stored under the row's root: {left:?}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mount_root_check_leaves_routing_unlocked() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
