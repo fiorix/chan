@@ -91,6 +91,8 @@ In this bundle the deck's Computers scope rides the same `/api/library/*` feed t
 - macOS Desktop: `Cmd+K` contextual, `Cmd+Shift+K` Computers.
 - Web and non-macOS: `Ctrl+Alt+K` contextual; Desktop also exposes `Ctrl+Alt+Shift+K` for Computers.
 - `Up`/`Down` move through results and into the scope rail; `Left`/`Right` move between scopes or back/forward through levels; `Enter` enters or executes; empty-query `Backspace` goes back; `Escape` hides.
+- A confirmation opened by pointer accepts the first Enter, with Cancel selected by default. A confirmation opened by Enter waits for that key's release, including a release during asynchronous preparation.
+- The open deck handles keys from its own controls and from page focus, before the app's handlers. It leaves other focused controls alone and yields to visible modal dialogs. Hidden dialogs claim no keys, and a closed deck takes none.
 - Each window keeps separate contextual and Computers drafts in its own session storage, holding visibility, query, path, selection, and recoverable operation state. Reload and hide preserve the draft; successful execution, window close, and app exit clear it.
 - Theme is a live input: an open deck follows the page's light/dark theme immediately.
 
@@ -118,7 +120,7 @@ includes the optional caption.
 
 Workspace cards keep their expansion state per local or served row, including the serving devserver's identity. Expanding one card leaves a namesake on another machine unchanged; feed updates preserve each card's state.
 
-While visible, a live launcher re-lists workspaces every two seconds to refresh foreign writer-lock status, which the host probes on list without a window-feed signal; host-owned lifecycle changes refresh through the feed, and the demo installs no poll.
+While visible, a live launcher re-lists workspaces every two seconds to refresh foreign writer-lock status, which the host probes on list without a window-feed signal; host-owned lifecycle changes refresh through the feed, and the demo installs no poll. Refreshes after workspace mutations share the live refresh's ordered, coalesced request loop. A mutation waits for the queued snapshot and receives refresh errors; background refresh errors remain best effort. An older live or mutation response cannot overwrite a newer response from that loop.
 
 The SPA reads its bearer from `?t=` in its own URL and presents it as `Authorization: Bearer` on fetch and as `?t=` on the watch WebSocket (a browser WebSocket cannot set headers).
 

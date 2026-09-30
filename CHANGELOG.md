@@ -30,6 +30,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Workspace refreshes keep the newest list.** In v0.100.0, a refresh after a workspace mutation could race a live refresh and replace a newer list with its older response. Both refresh paths now share an ordered request loop, and mutations wait for the queued snapshot.
+
+- **Pointer-opened command confirmations accept the first Enter.** In v0.100.0, the first Enter after clicking a command's confirmation was ignored until the key was released. Enter now answers the selected choice immediately, with Cancel selected by default. A confirmation opened by Enter still waits for the opening key's release.
+
+- **The command deck responds after focus falls back to the page.** In v0.100.0, losing focus from the deck left its navigation and Escape keys inactive. An open deck now handles those page keys while leaving outside controls and visible modal dialogs in charge of their keys; a closed deck takes none.
+
 - **Workspace cards expand independently across machines.** In v0.100.0, expanding a workspace card also expanded a namesake with the same route prefix on another machine. Each local or served card now keeps its own expansion state across feed updates.
 
 - **Bulk workspace removal explains live-terminal refusals and offers a confirmed retry.** In v0.100.0, those refusals counted as generic failures with no force action. The launcher now names the reason and asks before retrying only the refused workspaces with force. Cancelling keeps them selected; selected devserver and gateway removals wait until the retries succeed so their connections remain available.
