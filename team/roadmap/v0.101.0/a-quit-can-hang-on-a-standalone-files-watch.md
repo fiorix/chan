@@ -6,6 +6,8 @@ Status: accepted for v0.101.0 by the owner on 2026-09-27; raised during v0.101.0
 
 Accepted on 2026-09-27 for v0.101.0 as the lead recommended. The services lane's.
 
+On 2026-09-29 the owner confirmed as built the ruling that the lead had made on this item's shape and had put to the owner with no answer: a quit waits at most two seconds on a standalone Files window's watch worker. The owner accepted in one answer every recommendation the lead had put to them that day.
+
 ## What was seen
 
 The quit drain now clears each workspace cell on a blocking thread and stops waiting for it at a deadline. What a hosted runtime drops on the runtime worker itself is outside that bound. `shutdown_with_budget` drops the keepalive on the worker (`crates/chan-library/src/host.rs:631-634`), and the runtime's remaining fields drop there when the function returns.

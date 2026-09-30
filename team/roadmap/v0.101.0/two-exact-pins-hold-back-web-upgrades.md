@@ -6,6 +6,8 @@ Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 on
 
 Accepted on 2026-09-25 as the lead recommended: one dependency lane takes this item and [tower-sessions-lags-and-axum-has-a-dead-feature](tower-sessions-lags-and-axum-has-a-dead-feature.md), and lands with its Nix hashes re-harvested.
 
+On 2026-09-29 the owner ruled on the findings that `npm install` prints and that no item held. Every `npm install` in the integration branch's gate run prints 16 vulnerabilities, 12 moderate and 4 high; no record holds an advisory's detail, so which packages they name, whether they are in what ships or in the tooling, whether each can be reached and whether each has a fix are not established. The owner accepted in one answer every recommendation the lead had put to them that day. For these it was a bounded triage inside this item's lock change, with the fixes that break nothing made in that same change, no item of their own, and what is left written in the release report.
+
 ## What was seen
 
 `web/package.json` pins `vitest` to exactly `4.1.6`, the only exact pin among caret ranges there, and nothing beside it says why. The backlog records the reason: from 4.1.7 the runner fails a run on an unhandled rejection, and a fire-and-forget `deleteSession` cleanup fetch rejected from a timer in a tabs test. That call now reads `void api.deleteSession().catch(() => {})` in `web/packages/workspace-app/src/state/store.svelte.ts`, so the recorded cause may already be gone and the pin may be holding nothing.

@@ -6,6 +6,8 @@ Status: accepted for v0.101.0 by the owner on 2026-09-25; raised for v0.101.0 fr
 
 Accepted on 2026-09-25 as the lead recommended, as a docs lane of its own.
 
+On 2026-09-29 the owner ruled that the five comments added below on 2026-09-28, a sixth family, join this item: its boundary widens to the files that hold them, and the acceptance points cover the sixth family as they cover the five. The owner accepted in one answer every recommendation the lead had put to them that day. For these it was to take them here, under the same acceptance, and not as an item of their own.
+
 ## What was seen
 
 The embed phase. `build_all`'s doc in `crates/chan-workspace/src/index/facade.rs` says a cancelled build leaves the on-disk index as it was at the start, which stops being true once an in-loop flush has committed. `AppStatusBar.svelte` in `web/packages/workspace-app/src/components/` calls the status chip's done and total "real chunk counts"; they are file counts.
@@ -18,7 +20,7 @@ Which content holds which native command. `desktop/src-tauri/capabilities/launch
 
 The edge inventory. `.agents/gateway.md` tells a contributor to keep new plaintext PAT paths in `gateway/design.md`'s inventory, and the same file then states one such path, the TLS-terminating edge, which was deliberately left out of it. One sentence saying so removes the tension.
 
-**Added on 2026-09-28, at the landing of the desktop's mint and of `cs` in a moved terminal:** comments in files that those two ranges did not own, which the ranges made stale, read at `d440ab656`. They are a sixth family, and this item's boundary names the five above, so taking them widens it, which is the owner's to rule.
+**Added on 2026-09-28, at the landing of the desktop's mint and of `cs` in a moved terminal:** comments in files that those two ranges did not own, which the ranges made stale, read at `d440ab656`. They are a sixth family, and this item's boundary names the five above, so taking them widens it, which the owner ruled on 2026-09-29: they join this item.
 
 - `crates/chan-library/src/host.rs:2513-2514`, the doc of `WorkspaceHost::mint_window`, says that chan-desktop mints through it, its workspace windows included, with the key it computed. The desktop's handoff, `serve::start` and `cs window new` mint a workspace window through `mint_workspace_window` (`desktop/src-tauri/src/main.rs:2979`; `serve.rs:86`, `:109`, `:120`; `window_ops.rs:174`), and the command deck and the two menu commands mint through `mint_window` with a registry row's root or the path of a window they copy (`main.rs:4405-4408`, `:6474-6478`).
 - `desktop/src-tauri/src/embedded.rs:686-687`, the doc of `EmbeddedServer::mint_window`, says that a workspace window resolves its live tenant and that the workspace must be running; the host's mint creates the record with no such check (`mint_window_with_origin`, `host.rs:2536-2556`).

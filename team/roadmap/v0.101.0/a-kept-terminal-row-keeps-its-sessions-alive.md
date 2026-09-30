@@ -14,7 +14,7 @@ A browser terminal window that is gone does not keep its shell running unknown t
 
 ## What to do
 
-The owner chooses. Keep the ruling as it is, with the cost written where a user reads the row; the rule's fix round already writes the kept row's costs into the launcher's design document (`dev/v0101-team/tasks/task-Lead-Clients-24.md`, ruling 4). Or bound a kept terminal row, which brings back a discard for a window that may still be open in a tab this launcher cannot see.
+Nothing: the owner chose on 2026-09-29 to keep the ruling as it is written, with no build. The kept row's cost is stated in the launcher's design document, where the rule's fix round wrote it (`dev/v0101-team/tasks/task-Lead-Clients-24.md`, ruling 4); the row is not given words of its own, and it is not bounded, which would have brought back a discard for a window that may still be open in a tab this launcher cannot see.
 
 ## Boundaries
 

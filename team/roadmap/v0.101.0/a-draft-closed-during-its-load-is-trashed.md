@@ -6,6 +6,8 @@ Status: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision 
 
 Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with no shape of the fix named.
 
+On 2026-09-29 the owner confirmed as built the ruling of the lead's that had been put to the owner with no answer: a draft closed during its load, by a close that is not forced, is kept with no notice, and the reopen loads it again. The owner accepted in one answer every recommendation the lead had put to them that day.
+
 ## What was seen
 
 A draft's single close hands the tab to the draft close with no check of its load (`closeTabOnce`, `web/packages/workspace-app/src/state/tabs.svelte.ts:3529-3530`). The draft close reads the buffer as empty when it holds nothing but whitespace (`handleDraftTabClose`, `:3638`), and an empty draft with no attachments is discarded with no dialog and the notice "Draft discarded" (`:3646-3650`).
@@ -47,9 +49,9 @@ Landed on 2026-09-28; lines at `a6834b1ee`, under `web/packages/workspace-app/sr
 
 Pinned in `state/tabs.draftClose.test.ts` and `state/miniDraftLifecycle.test.ts`, each red first at its own assertion in the report: a close before the first chunk, which sends no discard and no inspect and ends the read (`tabs.draftClose.test.ts:166`); a close after a read that failed before any chunk (`:183`); one after a read that failed after some bytes, with no dialog (`:194`); the reopen after the first, which loads the draft by its path and mints and writes nothing (`:216`), and after the second, which loads it again (`:239`); and a close before the first chunk in a standalone window (`miniDraftLifecycle.test.ts:127`). Three controls, green before and after: typing in a draft whose earlier close failed is saved by the next close (`tabs.draftClose.test.ts:261`), so is typing over a buffer that a sibling's save replaced after a failed read (`:281`), and a draft whose reload succeeded after a failed read closes as its file (`:307`). In the report nine mutations, one for each term of the predicate, each line of the set and each change of the reopen, red exactly their expected pins; the eight cases of the new file and the standalone case passed 200 runs each as they are and 200 on one CPU; and the own gate ran `make web-check` green at the range's tip, 5,700 tests.
 
-**Rulings of the lead's, the owner's to overrule** (`followup-Lead-Clients-22.md`):
+**Rulings of the lead's, the owner's to overrule where no confirmation is written** (`followup-Lead-Clients-22.md`):
 
-- **A kept close shows no notice** (Q2), as a file that is not a draft closes in the same state with none (the plan, leaning 1).
+- **A kept close shows no notice** (Q2), as a file that is not a draft closes in the same state with none (the plan, leaning 1). Confirmed by the owner on 2026-09-29.
 - **A test whose state the fix made unreachable is removed** (Q3): "a refused single close leaves the load running" (`state/fileTabMoveDuringLoad.test.ts:325` at `f3006ec87`) reached its refusal through the inspect of a draft that loads, which the close no longer calls, so a single close of a tab whose load runs can no longer be refused; the bulk close's refusal still pins that a refused close cancels nothing.
 
 **The acceptance at the tip.** The first point is met (`tabs.draftClose.test.ts:166`, `:183`; `miniDraftLifecycle.test.ts:127`). The second is met in state: the reopen opens the draft's own path with a load of its own and ends holding the file's content (`tabs.draftClose.test.ts:216`, `:239`); the chord and the tab it shows are a display's. The third is met: the standalone window's close is the same function, its rule is stated above, and the standalone pin holds it. The fourth is a reading on a display, and is owed.
