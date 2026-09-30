@@ -3,7 +3,7 @@ import net from "node:net";
 import { EventEmitter, once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 
-const boundaries = new Set(["before-session", "after-session", "inside-replay", "before-ready", "after-ready"]);
+const boundaries = new Set(["before-session", "after-session", "inside-replay", "after-replay-frame", "before-ready", "after-ready"]);
 const fault = (code) => Object.assign(new Error(code), { code });
 const deferred = () => {
   let resolve, reject;
@@ -154,6 +154,7 @@ export async function startTerminalCutProxy({
           pair.sessions++;
           pair.replayBytes = item.control.replay_bytes;
           pair.replayForwarded = 0;
+          pair.framesAfterReplay = 0;
         }
         const active = armed && pair === selected && pair.sessions === armed.sessionOrdinal;
         if (active && item.type === "session") {
@@ -167,6 +168,13 @@ export async function startTerminalCutProxy({
               (!Number.isSafeInteger(pair.replayBytes) || armed.bytes >= pair.replayBytes)) {
             fail("INVALID_REPLAY_BOUNDARY"); break;
           }
+          if (armed.boundary === "after-replay-frame" &&
+              (!Number.isSafeInteger(pair.replayBytes) || pair.replayBytes < 0)) {
+            fail("INVALID_REPLAY_BOUNDARY"); break;
+          }
+        }
+        if (active && armed.boundary === "after-replay-frame" && item.type === "ready") {
+          fail("INVALID_POST_REPLAY_BOUNDARY"); break;
         }
         if (active && armed.boundary === "before-ready" && item.type === "ready") {
           pair.queue.unshift(item); pair.queuedBytes += item.bytes.length;
@@ -184,11 +192,15 @@ export async function startTerminalCutProxy({
           }
           await deliver(pair, { ...item, bytes: item.bytes.subarray(0, length) }, length === remaining);
         } else {
+          const afterReplay = active && armed.boundary === "after-replay-frame" && item.type !== "session"
+            && pair.replayForwarded === pair.replayBytes;
+          if (afterReplay) pair.framesAfterReplay++;
           if (active && item.binary && Number.isSafeInteger(pair.replayBytes)) {
             pair.replayForwarded += Math.min(item.bytes.length, Math.max(0, pair.replayBytes - pair.replayForwarded));
           }
           const atBoundary = active && ((armed.boundary === "after-session" && item.type === "session") ||
-            (armed.boundary === "after-ready" && item.type === "ready"));
+            (armed.boundary === "after-ready" && item.type === "ready") ||
+            (afterReplay && pair.framesAfterReplay === armed.frames));
           await deliver(pair, item, atBoundary);
         }
       }
@@ -283,9 +295,10 @@ export async function startTerminalCutProxy({
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     records,
-    arm({ boundary, bytes, ordinal: nextOrdinal = armNumber ? connections + 1 : ordinal, sessionOrdinal = 1 } = {}) {
+    arm({ boundary, bytes, frames, ordinal: nextOrdinal = armNumber ? connections + 1 : ordinal, sessionOrdinal = 1 } = {}) {
       if (closed || failure || pendingCut) throw fault("CONTROLLER_DISARMED");
-      if (!boundaries.has(boundary) || (boundary === "inside-replay" && (!Number.isSafeInteger(bytes) || bytes <= 0))) {
+      if (!boundaries.has(boundary) || (boundary === "inside-replay" && (!Number.isSafeInteger(bytes) || bytes <= 0)) ||
+          (boundary === "after-replay-frame" && (!Number.isSafeInteger(frames) || frames <= 0))) {
         throw fault("INVALID_BOUNDARY");
       }
       if (![nextOrdinal, sessionOrdinal].every((n) => Number.isSafeInteger(n) && n > 0)) throw fault("INVALID_ARM_SELECTION");
@@ -296,7 +309,7 @@ export async function startTerminalCutProxy({
       cut = deferred();
       armNumber++;
       pendingCut = true;
-      armed = { boundary, bytes, ordinal: nextOrdinal, sessionOrdinal };
+      armed = { boundary, bytes, frames, ordinal: nextOrdinal, sessionOrdinal };
       timer = setTimeout(() => fail(!selected ? "NO_SELECTED_SOCKET" : selected.awaiting ? "ACK_TIMEOUT" : "FRAME_TIMEOUT"), deadlineMs);
     },
     acknowledge({ connection, frame, drained = false }) {
