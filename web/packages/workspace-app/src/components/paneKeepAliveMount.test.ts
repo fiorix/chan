@@ -72,6 +72,10 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 import {
   activeLayout,
+  cancelPaneMode,
+  commitPaneMode,
+  enterPaneMode,
+  enterPaneModeTransaction,
   layout,
   moveActiveTabToSide,
   reorderTab,
@@ -299,5 +303,53 @@ describe("a pane keeps a board's first stroke across a copy of its tab", () => {
 
     expect({ side: pane.side, onB: pane.bTabs?.map((tab) => tab.id), stroke: held?.content.includes("last-stroke") })
       .toEqual({ side: "b", onB: [BOARD], stroke: true });
+  });
+
+  test("a first stroke waiting at Hybrid Nav entry survives in both trees", async () => {
+    try {
+      const { held, shown, boardHasStroke } = await strokeThenCopy(() => enterPaneMode());
+
+      expect({
+        boardHasStroke,
+        live: held?.content.includes("last-stroke"),
+        draft: shown?.content.includes("last-stroke"),
+        copied: held !== shown,
+      }).toEqual({ boardHasStroke: true, live: true, draft: true, copied: true });
+    } finally {
+      cancelPaneMode();
+    }
+  });
+
+  test("a first stroke waiting at transaction entry survives in both trees", async () => {
+    try {
+      const { held, shown, boardHasStroke } = await strokeThenCopy(() => enterPaneModeTransaction(PANE));
+
+      expect({
+        boardHasStroke,
+        live: held?.content.includes("last-stroke"),
+        draft: shown?.content.includes("last-stroke"),
+        copied: held !== shown,
+      }).toEqual({ boardHasStroke: true, live: true, draft: true, copied: true });
+    } finally {
+      cancelPaneMode();
+    }
+  });
+
+  test("a first stroke waiting at Hybrid Nav commit survives in the live tree", async () => {
+    try {
+      const { held, boardHasStroke } = await strokeThenCopy(
+        () => commitPaneMode(),
+        async () => {
+          enterPaneMode();
+          await tick();
+          await tick();
+        },
+      );
+
+      expect({ boardHasStroke, live: held?.content.includes("last-stroke") })
+        .toEqual({ boardHasStroke: true, live: true });
+    } finally {
+      cancelPaneMode();
+    }
   });
 });
