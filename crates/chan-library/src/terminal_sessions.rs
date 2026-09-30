@@ -6166,25 +6166,39 @@ fn terminate_imported_child(pid: u32) -> bool {
     let Some(pid) = rustix::process::Pid::from_raw(raw_pid) else {
         return false;
     };
-    let gone_within = |bound: Duration| {
-        let deadline = std::time::Instant::now() + bound;
-        loop {
-            if rustix::process::test_kill_process(pid).is_err() {
-                return true;
+    terminate_imported_child_with(
+        pid,
+        |pid, signal| {
+            let _ = rustix::process::kill_process(pid, signal);
+        },
+        |pid, bound| {
+            let deadline = std::time::Instant::now() + bound;
+            loop {
+                if rustix::process::test_kill_process(pid).is_err() {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            if std::time::Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    };
-    let _ = rustix::process::kill_process(pid, rustix::process::Signal::HUP);
-    let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
-    if gone_within(IMPORTED_CHILD_EXIT_GRACE) {
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_imported_child_with<T: Copy>(
+    target: T,
+    mut signal: impl FnMut(T, rustix::process::Signal),
+    mut gone_within: impl FnMut(T, Duration) -> bool,
+) -> bool {
+    signal(target, rustix::process::Signal::HUP);
+    signal(target, rustix::process::Signal::TERM);
+    if gone_within(target, IMPORTED_CHILD_EXIT_GRACE) {
         return true;
     }
-    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-    gone_within(Duration::from_millis(500))
+    signal(target, rustix::process::Signal::KILL);
+    gone_within(target, Duration::from_millis(500))
 }
 
 enum PtyCommand {
@@ -11694,6 +11708,332 @@ mod tests {
                 "the controller of the closed session never stopped"
             );
             child.wait().unwrap();
+        }
+
+        struct IdentityChild {
+            child: Option<std::process::Child>,
+            pin: OwnedFd,
+            identity: RecordedChildIdentity,
+            controllers: Vec<Arc<Session>>,
+        }
+
+        impl IdentityChild {
+            fn start(resistant: bool) -> Self {
+                use std::io::BufRead;
+                let script = if resistant {
+                    "trap '' HUP TERM; printf 'ready\\n'; exec sleep 60"
+                } else {
+                    "printf 'ready\\n'; exec sleep 60"
+                };
+                let child = Command::new("sh")
+                    .args(["-c", script])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let pid = child.id();
+                let pin = rustix::process::pidfd_open(
+                    rustix::process::Pid::from_raw(pid as i32).unwrap(),
+                    rustix::process::PidfdFlags::empty(),
+                )
+                .expect("owned-child pidfd_open must work");
+                let mut fixture = Self {
+                    child: Some(child),
+                    pin,
+                    identity: RecordedChildIdentity {
+                        boot_id: current_boot_id(),
+                        start_time: process_start_time(pid),
+                    },
+                    controllers: Vec::new(),
+                };
+                let stdout = fixture.child.as_mut().unwrap().stdout.take().unwrap();
+                let mut ready = [filedescriptor::pollfd {
+                    fd: stdout.as_raw_fd(),
+                    events: filedescriptor::POLLIN,
+                    revents: 0,
+                }];
+                assert_eq!(
+                    filedescriptor::poll(&mut ready, Some(Duration::from_secs(5))).unwrap(),
+                    1
+                );
+                let mut line = String::new();
+                std::io::BufReader::new(stdout)
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(line, "ready\n");
+                assert!(fixture.identity.start_time.is_some());
+                fixture
+            }
+
+            fn pid(&self) -> u32 {
+                self.child.as_ref().unwrap().id()
+            }
+
+            fn exited(&self, bound: Duration) -> bool {
+                let mut fds = [filedescriptor::pollfd {
+                    fd: self.pin.as_raw_fd(),
+                    events: filedescriptor::POLLIN,
+                    revents: 0,
+                }];
+                filedescriptor::poll(&mut fds, Some(bound))
+                    .expect("owned-child pidfd poll must work");
+                assert_eq!(
+                    fds[0].revents & !(filedescriptor::POLLIN | filedescriptor::POLLHUP),
+                    0
+                );
+                fds[0].revents != 0
+            }
+
+            fn import(&self, id: &str) -> (FdStoreSessionImport, portable_pty::PtyPair) {
+                let (mut import, pair) = ringless_import(id, 3, b"kept tail");
+                import.meta.child_pid = Some(self.pid());
+                import.child_identity = self.identity.clone();
+                import.sealed_manifest = true;
+                (import, pair)
+            }
+
+            fn track(&mut self, registry: &Registry, id: &str) -> Option<Arc<Session>> {
+                let session = registry.sessions.lock().unwrap().get(id).cloned();
+                if let Some(session) = &session {
+                    self.controllers.push(session.clone());
+                }
+                session
+            }
+        }
+
+        impl Drop for IdentityChild {
+            fn drop(&mut self) {
+                let mut stopped = true;
+                for session in &self.controllers {
+                    session.close(CloseReason::Shutdown);
+                    stopped &= session.ended.wait(Duration::from_secs(5)).is_some();
+                }
+                let _ =
+                    rustix::process::pidfd_send_signal(&self.pin, rustix::process::Signal::KILL);
+                if stopped {
+                    if let Some(mut child) = self.child.take() {
+                        let _ = child.wait();
+                    }
+                } else {
+                    // An unfinished numeric-PID controller must not outlive
+                    // the fixture's ownership of the process-table entry.
+                    std::mem::forget(self.child.take());
+                    eprintln!("controller did not stop; child left unreaped for process teardown");
+                }
+            }
+        }
+
+        #[test]
+        fn child_identity_import_mismatch_preserves_sentinel() {
+            let mut sentinel = IdentityChild::start(false);
+            let (mut import, _pair) = sentinel.import("identity-mismatch");
+            import.child_identity.start_time = sentinel.identity.start_time.map(|time| time + 1);
+            let registry = parked_registry(&RecordingPark::default());
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            if let Some(session) = sentinel.track(&registry, "identity-mismatch") {
+                registry.close("identity-mismatch", CloseReason::Explicit);
+                assert!(session.ended.wait(Duration::from_secs(5)).is_some());
+            }
+            assert!(
+                !sentinel.exited(Duration::ZERO),
+                "mismatching import authorized a close signal to the sentinel"
+            );
+            assert_eq!(report.restored, 0);
+            assert!(report
+                .skipped
+                .iter()
+                .any(|reason| reason.contains("child start time does not match")));
+        }
+
+        #[test]
+        fn child_identity_import_missing_evidence_is_not_descriptor_only() {
+            let mut child = IdentityChild::start(false);
+            let (mut import, _pair) = child.import("identity-missing");
+            import.child_identity = RecordedChildIdentity::default();
+            let registry = parked_registry(&RecordingPark::default());
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            child.track(&registry, "identity-missing");
+            assert_eq!(
+                report.restored, 0,
+                "a claimed PID with missing evidence must be refused"
+            );
+            assert_eq!(report.skipped_sessions[0].child_pid, Some(child.pid()));
+            assert!(report.skipped[0].contains("manifest boot id is missing"));
+        }
+
+        #[test]
+        fn child_identity_descriptor_only_import_has_no_signal_target() {
+            let (import, _pair) = ringless_import("identity-no-child", 3, b"tail");
+            let registry = parked_registry(&RecordingPark::default());
+            assert_eq!(registry.restore_fdstore_sessions(vec![import]).restored, 1);
+            let session = registry.sessions.lock().unwrap()["identity-no-child"].clone();
+            assert_eq!(session.child_pid, None);
+            registry.close("identity-no-child", CloseReason::Explicit);
+            assert_eq!(session.ended.wait(Duration::from_secs(5)), Some(false));
+        }
+
+        fn identity_close_control(resistant: bool) {
+            let mut child = IdentityChild::start(resistant);
+            let (import, _pair) = child.import("identity-close");
+            let registry = parked_registry(&RecordingPark::default());
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            let session = child.track(&registry, "identity-close");
+            assert_eq!(report.restored, 1, "{:?}", report.skipped);
+            let session = session.unwrap();
+            let attached = registry.attach("identity-close", Some(0)).unwrap();
+            assert_eq!(attached.replay.concat(), b"kept tail");
+            assert!(registry.close("identity-close", CloseReason::Explicit));
+            assert!(
+                child.exited(Duration::from_secs(5)),
+                "verified child did not exit after close"
+            );
+            let ended = session.ended.wait(Duration::from_secs(5));
+            assert_eq!(
+                ended,
+                Some(true),
+                "close must observe the pinned child's exit before fixture reap"
+            );
+            assert!(!registry.close("identity-close", CloseReason::Explicit));
+        }
+
+        #[test]
+        fn child_identity_close_observes_normal_child_exit() {
+            identity_close_control(false);
+        }
+
+        #[test]
+        fn child_identity_close_kills_resistant_child() {
+            identity_close_control(true);
+        }
+
+        #[test]
+        fn child_identity_close_after_exit_does_not_require_reaping() {
+            let mut child = IdentityChild::start(false);
+            let (import, _pair) = child.import("identity-exited");
+            let registry = parked_registry(&RecordingPark::default());
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            let session = child.track(&registry, "identity-exited");
+            assert_eq!(report.restored, 1, "{:?}", report.skipped);
+            rustix::process::pidfd_send_signal(&child.pin, rustix::process::Signal::KILL).unwrap();
+            assert!(child.exited(Duration::from_secs(5)));
+            registry.close("identity-exited", CloseReason::Explicit);
+            assert_eq!(
+                session.unwrap().ended.wait(Duration::from_secs(5)),
+                Some(true),
+                "an exited pinned child must be observed without reaping or a numeric PID probe"
+            );
+        }
+
+        #[test]
+        fn child_identity_import_retains_a_pidfd_until_close() {
+            let mut child = IdentityChild::start(false);
+            let count_handles = || {
+                let pid_line = format!("Pid:\t{}", child.pid());
+                std::fs::read_dir("/proc/self/fdinfo")
+                    .unwrap()
+                    .filter_map(|entry| {
+                        let path = entry.unwrap().path();
+                        match std::fs::read_to_string(path) {
+                            Ok(info) => Some(info.lines().any(|line| line == pid_line)),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(error) => panic!("reading a process handle: {error}"),
+                        }
+                    })
+                    .filter(|matches| *matches)
+                    .count()
+            };
+            let before = count_handles();
+            assert_eq!(before, 1, "the fixture owns exactly one cleanup pidfd");
+            let (import, _pair) = child.import("identity-retained");
+            let registry = parked_registry(&RecordingPark::default());
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            let during = count_handles();
+            let session = child.track(&registry, "identity-retained");
+            assert_eq!(report.restored, 1, "{:?}", report.skipped);
+            assert_eq!(
+                during,
+                before + 1,
+                "an imported controller must retain its own verified pidfd"
+            );
+            registry.close("identity-retained", CloseReason::Explicit);
+            assert!(session
+                .unwrap()
+                .ended
+                .wait(Duration::from_secs(5))
+                .is_some());
+        }
+
+        #[test]
+        fn child_identity_expired_pidfd_does_not_signal_a_later_child() {
+            let mut original = IdentityChild::start(false);
+            let sentinel = IdentityChild::start(false);
+            rustix::process::pidfd_send_signal(&original.pin, rustix::process::Signal::KILL)
+                .unwrap();
+            original.child.take().unwrap().wait().unwrap();
+            let mut signals = Vec::new();
+            assert!(terminate_imported_child_with(
+                &original.pin,
+                |pin, signal| {
+                    signals.push(rustix::process::pidfd_send_signal(pin, signal));
+                },
+                |_, bound| original.exited(bound)
+            ));
+            assert_eq!(signals, vec![Err(rustix::io::Errno::SRCH); 2]);
+            assert!(
+                !sentinel.exited(Duration::ZERO),
+                "an expired handle must not target the sentinel"
+            );
+        }
+
+        #[test]
+        fn child_identity_snapshot_retains_imported_time() {
+            let mut child = IdentityChild::start(false);
+            let (import, _pair) = child.import("identity-snapshot");
+            let registry = parked_registry(&RecordingPark::default());
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            child.track(&registry, "identity-snapshot");
+            assert_eq!(report.restored, 1, "{:?}", report.skipped);
+            let entries = registry.fdstore_manifest_sessions("t");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].child_start_time, child.identity.start_time);
+        }
+
+        #[test]
+        fn child_identity_close_keeps_the_selected_handle() {
+            #[derive(Clone, Copy)]
+            struct Handle(&'static str);
+            let current = std::cell::Cell::new("original");
+            let handle = Handle(current.get());
+            current.set("sentinel-before-close");
+            let trace = std::cell::RefCell::new(Vec::new());
+            let waits = std::cell::Cell::new(0);
+            let ended = terminate_imported_child_with(
+                handle,
+                |target, signal| {
+                    trace.borrow_mut().push((target.0, format!("{signal:?}")));
+                    if signal == rustix::process::Signal::TERM {
+                        current.set("sentinel-after-term");
+                    }
+                },
+                |target, bound| {
+                    trace
+                        .borrow_mut()
+                        .push((target.0, format!("wait:{bound:?}")));
+                    waits.set(waits.get() + 1);
+                    waits.get() == 2
+                },
+            );
+            assert!(ended);
+            let trace = trace.borrow();
+            assert_eq!(trace.len(), 5);
+            assert!(
+                trace.iter().all(|(target, _)| *target == "original"),
+                "close redirected a retained handle: {trace:?}"
+            );
+            assert_eq!(current.get(), "sentinel-after-term");
+            assert_eq!(trace[2].1, format!("wait:{IMPORTED_CHILD_EXIT_GRACE:?}"));
+            assert_eq!(trace[4].1, "wait:500ms");
         }
 
         /// A stand-in for the systemd fd store and the restart manifest file:
