@@ -13,7 +13,7 @@
 
 import { expect, vi } from "vitest";
 
-import { excalidrawBoard, excalidrawModule, type Board, type BoardProps } from "./excalidrawLibrary";
+import { excalidrawBoard, excalidrawModule, type Board } from "./excalidrawLibrary";
 
 export const excalidraw = {
   Excalidraw: () => null,
@@ -24,7 +24,13 @@ export const excalidraw = {
 };
 
 export const react = {
-  createElement: (type: unknown, props: unknown) => ({ type, props }),
+  Component: class {
+    props: unknown;
+    state: Record<string, unknown> = {};
+    constructor(props: unknown) { this.props = props; }
+  },
+  createElement: (type: unknown, props: Record<string, unknown>, child?: unknown) =>
+    ({ type, props: child === undefined ? props : { ...props, children: child } }),
 };
 
 export const reactDom = {
@@ -51,7 +57,7 @@ export async function boardLoaded(): Promise<void> {
 }
 
 /// The props of the latest render of a board opened since `drawableBoards`.
-let drawn: BoardProps | null = null;
+let drawn: unknown = null;
 
 /// Hand every board opened from now on in this file the drawing library's
 /// stand-in from `./excalidrawLibrary`, whose board a test draws on, in place
@@ -63,7 +69,7 @@ export function drawableBoards(): void {
   vi.doMock("@excalidraw/excalidraw", () => excalidrawModule);
   reactDom.createRoot.mockImplementation(() => ({
     render: (element: unknown) => {
-      drawn = (element as { props: BoardProps }).props;
+      drawn = element;
     },
     unmount: () => {},
   }));

@@ -4,6 +4,7 @@ import { mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ExcalidrawCanvas, { canonicalJson, noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
+import { boardPropsFromRender } from "../__tests__/excalidrawLibrary";
 // Build-time contract: the offscreen shell is display: none (WKWebView leaks the island through visibility: hidden), and the island imports Excalidraw's stylesheet so it rides the island's chunk; vitest drops CSS.
 import canvasSrc from "./ExcalidrawCanvas.svelte?raw";
 import type {
@@ -32,7 +33,15 @@ const { createRootMock, renderMock, unmountMock, modules, boardAppState } = vi.h
   const createRootMock = vi.fn(() => ({ render: renderMock, unmount: unmountMock }));
   const modules = {
     "react-dom/client": { createRoot: createRootMock },
-    react: { createElement: (type: unknown, props: unknown) => ({ type, props }) },
+    react: {
+      Component: class {
+        props: unknown;
+        state: Record<string, unknown> = {};
+        constructor(props: unknown) { this.props = props; }
+      },
+      createElement: (type: unknown, props: Record<string, unknown>, child?: unknown) =>
+        ({ type, props: child === undefined ? props : { ...props, children: child } }),
+    },
     "@excalidraw/excalidraw": {
       Excalidraw: () => null,
       // Mimics the real cleaner's shape: elements + the appState keys the
@@ -99,6 +108,7 @@ vi.mock("react", () => modules.react);
 vi.mock("@excalidraw/excalidraw", () => modules["@excalidraw/excalidraw"]);
 
 const mounted: Array<Record<string, unknown>> = [];
+const renderedBoard = () => boardPropsFromRender(renderMock.mock.calls.at(-1)![0]);
 
 afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
@@ -180,10 +190,7 @@ describe("a read-only canvas tab", () => {
   // could never be confirmed, which is what leaves a save waiting for a
   // quiescence that cannot arrive.
   function renderProps(): Record<string, unknown> {
-    const rendered = renderMock.mock.calls.at(-1)![0] as {
-      props: Record<string, unknown>;
-    };
-    return rendered.props;
+    return renderedBoard() as unknown as Record<string, unknown>;
   }
 
   test("renders the board in view mode", async () => {
@@ -345,11 +352,9 @@ async function mountBound(
     }),
   );
   await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
-  const rendered = renderMock.mock.calls.at(-1)![0] as {
-    props: { excalidrawAPI: (a: unknown) => void; onChange: () => void };
-  };
-  const api = fakeApi(initial, () => rendered.props.onChange());
-  rendered.props.excalidrawAPI(api);
+  const rendered = renderedBoard();
+  const api = fakeApi(initial, () => rendered.onChange());
+  rendered.excalidrawAPI(api);
   await vi.waitFor(() => expect(session.bindCanvas).toHaveBeenCalled());
   return { api, session, binding: bound! };
 }
@@ -360,7 +365,7 @@ const pushedAppStates = (session: SessionStub) =>
 
 /// The library reports a change, as it does after each render.
 function libraryChange(): void {
-  (renderMock.mock.calls.at(-1)![0] as { props: { onChange: () => void } }).props.onChange();
+  renderedBoard().onChange();
 }
 
 describe("a board that has not taken its first seed", () => {
@@ -392,12 +397,10 @@ describe("a board that has not taken its first seed", () => {
       }),
     );
     await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
-    const rendered = renderMock.mock.calls.at(-1)![0] as {
-      props: { excalidrawAPI: (a: unknown) => void; onChange: () => void };
-    };
-    rendered.props.excalidrawAPI(fakeApi([wireEl("handed-over", 1)], () => rendered.props.onChange()));
+    const rendered = renderedBoard();
+    rendered.excalidrawAPI(fakeApi([wireEl("handed-over", 1)], () => rendered.onChange()));
     vi.useFakeTimers();
-    rendered.props.onChange();
+    rendered.onChange();
     vi.advanceTimersByTime(300);
     vi.useRealTimers();
 
@@ -467,22 +470,20 @@ describe("scene session binding loop safety", () => {
   test("an adopted appState moves the baseline and never re-pushes", async () => {
     vi.useFakeTimers();
     const { api, session, binding } = await mountBound([]);
-    const rendered = renderMock.mock.calls.at(-1)![0] as {
-      props: { onChange: () => void };
-    };
+    const rendered = renderedBoard();
 
     // The authority fans an appState; adopting it must not echo back.
     binding.applyUpdate({ elements: [], appState: { ...boardAppState, gridSize: 5 } });
-    rendered.props.onChange();
+    rendered.onChange();
     vi.advanceTimersByTime(300);
     expect(session.pushScene).not.toHaveBeenCalled();
 
     // A genuine local appState change pushes exactly once.
     api.setAppState({ gridSize: 9 });
-    rendered.props.onChange();
+    rendered.onChange();
     vi.advanceTimersByTime(300);
     expect(session.pushScene).toHaveBeenCalledTimes(1);
-    rendered.props.onChange();
+    rendered.onChange();
     vi.advanceTimersByTime(300);
     expect(session.pushScene).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
@@ -815,9 +816,9 @@ describe("the buffer the classic PUT would carry", () => {
     try {
       const onSceneChange = vi.fn();
       const { api, session } = await mountBound([], onSceneChange);
-      const rendered = renderMock.mock.calls.at(-1)![0] as { props: { onChange: () => void } };
+      const rendered = renderedBoard();
       api.setElements([wireEl("last-stroke", 1)]);
-      rendered.props.onChange();
+      rendered.onChange();
       vi.advanceTimersByTime(50);
       expect(onSceneChange).not.toHaveBeenCalled();
       await unmount(mounted.pop()!);
@@ -841,12 +842,10 @@ describe("the buffer the classic PUT would carry", () => {
     const onSceneChange = vi.fn();
     const { api, session } = await mountBound([], onSceneChange);
     session.pushScene.mockReturnValue(false);
-    const rendered = renderMock.mock.calls.at(-1)![0] as {
-      props: { onChange: () => void };
-    };
+    const rendered = renderedBoard();
 
     api.setElements([wireEl("drawn-during-outage", 3)]);
-    rendered.props.onChange();
+    rendered.onChange();
     vi.advanceTimersByTime(300);
 
     expect(session.pushScene).toHaveBeenCalled();

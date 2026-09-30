@@ -20,10 +20,15 @@ declare module "node:fs" {
 // React is a runtime peer of @excalidraw/excalidraw, dynamic-imported
 // only by the one React island (editor/ExcalidrawCanvas.svelte).
 // @types/react is not a dev dep; excalidraw carries the React types it
-// needs internally, and the island only touches createElement plus the
-// createRoot handle, so declare just those two entry-point surfaces.
+// needs internally. Declare just the island's entry-point surfaces.
 declare module "react" {
-  export function createElement(type: unknown, props?: unknown): unknown;
+  export class Component<P = unknown, S = unknown> {
+    constructor(props: P);
+    readonly props: Readonly<P>;
+    state: S;
+    render(): unknown;
+  }
+  export function createElement(type: unknown, props?: unknown, ...children: unknown[]): unknown;
 }
 
 declare module "react-dom/client" {

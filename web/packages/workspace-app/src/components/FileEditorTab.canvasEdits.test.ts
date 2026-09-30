@@ -15,7 +15,7 @@ import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
-import { EXCALIDRAW_VERSION, excalidrawBoard, type BoardProps } from "../__tests__/excalidrawLibrary";
+import { EXCALIDRAW_VERSION, boardPropsFromRender, excalidrawBoard, type BoardProps } from "../__tests__/excalidrawLibrary";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { applyLocalTheme, effectiveHybridSurfaceTheme, onWatchEvent, refreshWorkspace } from "../state/store.svelte";
 import {
@@ -34,7 +34,15 @@ const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
   scene: { live: false },
 }));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render, unmount: unmountRoot }) }));
-vi.mock("react", () => ({ createElement: (_kind: unknown, props: unknown) => props }));
+vi.mock("react", () => ({
+  Component: class {
+    props: unknown;
+    state: Record<string, unknown> = {};
+    constructor(props: unknown) { this.props = props; }
+  },
+  createElement: (type: unknown, props: Record<string, unknown>, child?: unknown) =>
+    ({ type, props: child === undefined ? props : { ...props, children: child } }),
+}));
 vi.mock("@excalidraw/excalidraw", async () => (await import("../__tests__/excalidrawLibrary")).excalidrawModule);
 // The canvas configures the library's assets after it is created and before
 // it imports the library, so `beforeLibrary.run` is a step taken in that gap.
@@ -71,7 +79,9 @@ beforeEach(async () => {
   await refreshWorkspace();
   render.mockReset();
   beforeLibrary.run = null;
-  canvasReady = new Promise((resolve) => { render.mockImplementation(resolve); });
+  canvasReady = new Promise((resolve) => {
+    render.mockImplementation((element: unknown) => resolve(boardPropsFromRender(element)));
+  });
   unmountRoot.mockClear();
 });
 
@@ -137,14 +147,17 @@ async function loadedTab(path: string, content: string, over: Partial<FileTab> =
 
 /// Mount the tab's editor and hand its board to the library stand-in.
 async function mountBoard(tab: FileTab) {
-  canvasReady = new Promise((resolve) => { render.mockImplementation(resolve); });
+  canvasReady = new Promise((resolve) => {
+    render.mockImplementation((element: unknown) => resolve(boardPropsFromRender(element)));
+  });
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(FileEditorTab, { target, props: { tab, active: true, focused: true } });
   mounted.push(component);
   await canvasReady;
-  const lastRender = () => render.mock.calls.at(-1)![0] as BoardProps;
-  return { target, component, board: excalidrawBoard(lastRender), lastRender };
+  const lastElement = () => render.mock.calls.at(-1)![0] as unknown;
+  const lastRender = () => boardPropsFromRender(lastElement());
+  return { target, component, board: excalidrawBoard(lastElement), lastRender };
 }
 
 async function mountDuringLoad(exists = true) {
