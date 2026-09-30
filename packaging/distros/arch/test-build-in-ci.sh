@@ -76,6 +76,12 @@ for invalid in 0 -2 word ''; do
 done
 echo 'ok wrapper default, override, preserved args, and invalid values'
 
+# The root arm needs pacman and writes system configuration. Pin its explicit
+# environment handoff as source text; this does not execute that arm.
+assert_contains 'AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" "${cargo_jobs_env[@]}" bash "$0"' \
+    "$script_dir/build-in-container.sh" 'root arm CARGO_BUILD_JOBS carry'
+echo 'ok root arm source carries the cargo job count'
+
 cat > "$arch/make-aur-package.sh" <<'STUB'
 #!/usr/bin/env bash
 mkdir -p "$4/$1"
