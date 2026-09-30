@@ -775,7 +775,7 @@ describe("reconcileWindows", () => {
   });
 
   it("discards a browser-origin record whose local browser handle was closed", async () => {
-    const rec = record({ window_id: "w-local-closed", origin: "browser" });
+    const rec = record({ window_id: "w-local-closed", origin: "browser", connected: false });
     await openWindowRecord(rec);
     const handle = opened.at(-1)!.win;
     handle.closed = true;
@@ -785,6 +785,49 @@ describe("reconcileWindows", () => {
     expect(discardWindow).toHaveBeenCalledWith("w-local-closed");
     expect(hasWindowHandle("w-local-closed")).toBe(false);
     expect(hasWindowAttention("w-local-closed")).toBe(false);
+  });
+
+  it("keeps a connected record when its local browser handle closes", async () => {
+    const rec = record({ window_id: "w-connected-closed", origin: "browser", connected: true });
+    await openWindowRecord(rec);
+    opened.at(-1)!.win.closed = true;
+
+    reconcileWindows(set([rec]));
+
+    expect(discardWindow, "a connected record survives the local close").not.toHaveBeenCalled();
+    expect(hasWindowAttention(rec.window_id)).toBe(true);
+  });
+
+  it("discards a kept closed handle on the first disconnected push exactly once", async () => {
+    const rec = record({ window_id: "w-later-disconnected", origin: "browser", connected: true });
+    await openWindowRecord(rec);
+    opened.at(-1)!.win.closed = true;
+
+    reconcileWindows(set([rec]));
+    expect(discardWindow, "a connected record survives the local close").not.toHaveBeenCalled();
+
+    const disconnected = { ...rec, connected: false };
+    reconcileWindows(set([disconnected]));
+    expect(discardWindow, "the disconnected push discards the kept handle").toHaveBeenCalledExactlyOnceWith(rec.window_id);
+    expect(hasWindowHandle(rec.window_id)).toBe(false);
+    expect(hasWindowAttention(rec.window_id)).toBe(false);
+    reconcileWindows(set([disconnected]));
+    expect(discardWindow, "the discarded handle is forgotten").toHaveBeenCalledExactlyOnceWith(rec.window_id);
+  });
+
+  it("a live-handle query preserves a closed handle until the disconnected push", async () => {
+    const rec = record({ window_id: "w-queried-closed", origin: "browser", connected: true });
+    await openWindowRecord(rec);
+    opened.at(-1)!.win.closed = true;
+
+    reconcileWindows(set([rec]));
+    expect(discardWindow, "a connected record survives the local close").not.toHaveBeenCalled();
+    expect(hasWindowHandle(rec.window_id)).toBe(false);
+
+    reconcileWindows(set([{ ...rec, connected: false }]));
+    expect(discardWindow, "the query preserves the handle for the disconnected push").toHaveBeenCalledExactlyOnceWith(rec.window_id);
+    expect(hasWindowHandle(rec.window_id)).toBe(false);
+    expect(hasWindowAttention(rec.window_id)).toBe(false);
   });
 
   it("keeps a disconnected browser row without a handle available to open", async () => {
