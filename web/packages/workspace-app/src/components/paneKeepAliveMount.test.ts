@@ -9,9 +9,9 @@
 // each-block out of the source says which shape is written, not which
 // instances live.
 //
-// Graph tabs are absent here and covered by their own suite's negative pin
-// instead: GraphPanel paints a real canvas, jsdom has none, and the second
-// instance throws before it can be compared.
+// Graph tabs are covered by GraphPanel.keepAlive.test.ts, which mounts two
+// panels over a stand-in canvas and checks their identity across a switch and
+// reorder.
 
 import { mount, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
