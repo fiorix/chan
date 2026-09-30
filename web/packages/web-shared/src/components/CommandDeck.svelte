@@ -55,6 +55,7 @@
   const optionId = (index: number): string => `chan-command-deck-option-${index}`;
 
   let input: HTMLInputElement | undefined = $state();
+  let shell: HTMLElement | undefined = $state();
   let zone: "input" | "results" | "scopes" = $state("input");
   let keyboardIndex = $state(0);
   let pointerIndex: number | null = $state(null);
@@ -383,6 +384,31 @@
     zone = "input";
   }
 
+  function onPageKeydown(event: KeyboardEvent): void {
+    if (!open || !shell || event.defaultPrevented) return;
+    const target = event.target;
+    const inside = target instanceof Node && shell.contains(target);
+    const page = target === document.body || target === document.documentElement ||
+      target === document || target === window;
+    if (!inside && !page) return;
+
+    // This non-modal deck yields to a visible modal, including while the
+    // modal repairs focus after removing its active control.
+    const modals = document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"], dialog[open]');
+    for (const modal of modals) {
+      let visible = true;
+      for (let node: HTMLElement | null = modal; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (node.hidden || node.inert || style.display === "none" || style.visibility === "hidden") {
+          visible = false;
+          break;
+        }
+      }
+      if (visible) return;
+    }
+    onKeydown(event);
+  }
+
   function onKeydown(event: KeyboardEvent): void {
     // The deck owns keyboard input while open. A command can synchronously
     // activate an app-level key mode, so letting the execution key bubble
@@ -478,19 +504,21 @@
   }
 </script>
 
-<svelte:window onkeyup={(event) => { if (event.key === "Enter") confirmKeyReleased = true; }} />
+<svelte:window
+  onkeydowncapture={onPageKeydown}
+  onkeyup={(event) => { if (event.key === "Enter") confirmKeyReleased = true; }}
+/>
 
 {#if open}
   <div class="deck-overlay" data-direction={direction}>
     <button class="deck-backdrop" type="button" aria-label="Hide command launcher" onclick={onClose}></button>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
     <section
+      bind:this={shell}
       class="deck-shell"
       role="dialog"
       aria-modal="false"
       aria-label="Command launcher"
-      onkeydown={onKeydown}
     >
       <svg class="deck-filter" width="0" height="0" aria-hidden="true">
         <filter id="chan-command-orb-blob">
