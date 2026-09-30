@@ -2954,6 +2954,8 @@ function notSavedSentence(refused: FileTab[]): string {
   return `${refused.length} files were not saved: ${names.join(", ")} and ${last}. Their changes will be lost.`;
 }
 
+const CLASSIC_SAVE_FAILURE_PREFIX = "the save request failed (";
+
 async function confirmCloseTabs(
   tabs: Tab[],
   opts?: CloseTabsOptions,
@@ -6077,6 +6079,8 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     for (const hook of docFallbackSavedHooks) hook(done.id);
   } catch (e) {
     if (e instanceof ApiError && (e.status === 409 || e.status === 428)) {
+      const current = liveFileTabById(t.id) ?? live;
+      if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) current.saveError = null;
       const data = e.data as {
         current_mtime?: number | null;
         current_mtime_ns?: string | null;
