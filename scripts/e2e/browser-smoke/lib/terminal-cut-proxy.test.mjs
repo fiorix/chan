@@ -121,7 +121,7 @@ test("uncut streams preserve types, split UTF-8 and ANSI, HTTP and input", { tim
   const echoed = Buffer.from([0, 255, 27]);
   client.socket.send(echoed);
   await proxy.waitForRecord((r) => r.direction === "forwarded" && r.frame === messages.length + 1);
-  if (client.delivered.length < messages.length + 1) await once(client.socket, "message");
+  while (client.delivered.length < messages.length + 1) await once(client.socket, "message");
   assert.deepEqual(client.delivered, [...messages, [echoed, true]]);
   const before = proxy.records.filter((r) => r.direction === "received").map((r) => [Buffer.from(r.bytes, "base64"), r.binary]);
   assert.equal(digest(before), digest(client.delivered));
