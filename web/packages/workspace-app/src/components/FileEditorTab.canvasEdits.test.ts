@@ -1044,10 +1044,8 @@ describe("a live drawing", () => {
 
   test("Reload from disk sends a waiting live stroke before asking", async () => {
     const { tab, board, socket } = await attachedDrawing();
-    const resolved = vi.spyOn(api, "resolveSessionConflict").mockResolvedValue({
-      path: tab.path, content: DRAWING, mtime: 2, mtime_ns: "2000000000",
-      authority_version: 2, disk_conflicted: false, repo_root: null, writable: true,
-    });
+    const resolved = vi.spyOn(api, "resolveSessionConflict")
+      .mockRejectedValue(new ApiError(409, "scene session conflict could not be resolved"));
     vi.useFakeTimers();
     board.stroke(STROKE);
     vi.advanceTimersByTime(50);
@@ -1059,7 +1057,8 @@ describe("a live drawing", () => {
     await reload;
     await tick();
     expect(resolved).toHaveBeenCalledWith(tab.path, "reload");
-    expect(tab.content).toBe(DRAWING);
+    expect(tab.content).toContain('"stroke"');
+    expect(board.elements).toContainEqual(STROKE);
   });
 
   test("a peer's edit leaves the drawing saved, and its close closes it", async () => {
