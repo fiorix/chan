@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import http from "node:http";
@@ -7,6 +8,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { promisify } from "node:util";
 import test from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 import { startTerminalCutProxy } from "./terminal-cut-proxy.mjs";
@@ -262,6 +264,63 @@ test("a lost frame on the armed pair fails the cut", { timeout: 10000 }, async (
   await assert.rejects(proxy.waitForCut(), { code: "FORWARD_FAILED" });
   assert.deepEqual(proxy.records.filter((r) => r.event === "failure").map((r) => r.code), ["FORWARD_FAILED"]);
   assert.equal(proxy.records.some((r) => r.event === "cut"), false);
+});
+
+test("a vanished client before upgrade refuses and settles the cut", { timeout: 10000 }, async () => {
+  // Contain an unhandled disconnect rejection so the assertion names it.
+  const script = `
+    import http from "node:http";
+    import { once } from "node:events";
+    import WebSocket, { WebSocketServer } from "ws";
+    import { startTerminalCutProxy } from "./terminal-cut-proxy.mjs";
+    const server = http.createServer();
+    const upstream = new WebSocketServer({ server });
+    upstream.on("connection", (socket) => {
+      socket.on("error", () => {});
+      socket.send(JSON.stringify({ type: "session", replay_bytes: 0 }));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const proxy = await startTerminalCutProxy({
+      targetUrl: "http://127.0.0.1:" + server.address().port,
+      path: "/terminal/ws", session: "wanted", deadlineMs: 1000,
+    });
+    const upgrade = WebSocketServer.prototype.handleUpgrade;
+    let abandoned = false;
+    WebSocketServer.prototype.handleUpgrade = function (...args) {
+      if (this.options.noServer) {
+        args[1].destroy();
+        abandoned = true;
+      }
+      return upgrade.apply(this, args);
+    };
+    let finish;
+    const result = new Promise((resolve) => { finish = resolve; });
+    process.on("unhandledRejection", (error) => finish({ code: "UNHANDLED_REJECTION", name: error.name }));
+    const deadline = setTimeout(() => finish({ code: "UNSETTLED_CUT" }), 2000);
+    proxy.arm({ boundary: "before-session" });
+    const client = new WebSocket(proxy.url.replace("http:", "ws:") + "/terminal/ws?session=wanted");
+    client.on("error", () => {});
+    proxy.waitForCut().then(() => finish({ code: "CUT" }), (error) => finish({ code: error.code }));
+    try {
+      const outcome = await result;
+      console.log(JSON.stringify({ ...outcome, abandoned, records: proxy.records }));
+    } finally {
+      clearTimeout(deadline);
+      client.terminate();
+      await proxy.close();
+      for (const peer of upstream.clients) peer.terminate();
+      await Promise.all([new Promise((resolve) => upstream.close(resolve)), new Promise((resolve) => server.close(resolve))]);
+    }
+  `;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: new URL(".", import.meta.url), timeout: 5000,
+  });
+  const outcome = JSON.parse(stdout);
+  assert.equal(outcome.abandoned, true, "the raw downstream socket vanished before upgrade");
+  assert.equal(outcome.code, "CLIENT_CLOSED_BEFORE_CUT", "an absent client refuses the cut without an unhandled rejection");
+  assert.deepEqual(outcome.records.filter((r) => r.event === "failure").map((r) => r.code), ["CLIENT_CLOSED_BEFORE_CUT"]);
+  assert.equal(outcome.records.some((r) => r.event === "cut"), false);
 });
 
 test("one proxy cuts twice with an unarmed redial between receipts", { timeout: 10000 }, async (t) => {
