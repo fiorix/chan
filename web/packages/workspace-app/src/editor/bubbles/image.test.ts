@@ -98,3 +98,22 @@ describe("the image picker", () => {
     expect(view.state.doc.toString()).toBe("![](new.png#w=250)");
   });
 });
+
+describe("the image catalog", () => {
+  test("uses loaded file browser entries without a workspace", async () => {
+    caps.workspace = false;
+    tree.entries = [entry("one.png"), entry("two.webp"), entry("note.md")];
+    open("![", 0, 2);
+
+    expect(api.list).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(rows()).toEqual(["one.png", "two.webp"]));
+    expect(document.querySelector(".md-bubble-status")?.textContent).not.toMatch(/^Catalog failed/);
+  });
+
+  test("requests the workspace image listing once", async () => {
+    open("![", 0, 2);
+
+    await vi.waitFor(() => expect(rows()).toEqual(["new.png"]));
+    expect(api.list).toHaveBeenCalledTimes(1);
+  });
+});
