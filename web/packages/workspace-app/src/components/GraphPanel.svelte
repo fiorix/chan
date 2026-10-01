@@ -1487,48 +1487,6 @@
       selectedNode.kind === "file" &&
       selectedNode.missing === true,
   );
-  let ghostIndexerHint = $state<string | null>(null);
-
-  function indexerGhostHint(status: string | undefined, queueDepth: number | undefined): string | null {
-    if (status === "settling") {
-      const n = Math.max(0, Math.floor(queueDepth ?? 0));
-      return `indexer is catching up (${n} event(s) pending)`;
-    }
-    if (status === "rebuilding") return "indexer is rebuilding (full pass)";
-    return null;
-  }
-
-  $effect(() => {
-    if (
-      !visible ||
-      !isFileGhost ||
-      selectedNode?.kind !== "file" ||
-      selectedNode.missing
-    ) {
-      ghostIndexerHint = null;
-      return;
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    async function poll(): Promise<void> {
-      try {
-        const health = await api.health();
-        if (cancelled) return;
-        ghostIndexerHint = indexerGhostHint(
-          health.indexer?.status,
-          health.indexer?.queue_depth,
-        );
-      } catch {
-        if (!cancelled) ghostIndexerHint = null;
-      }
-    }
-    void poll();
-    timer = setInterval(() => void poll(), 1000);
-    return () => {
-      cancelled = true;
-      if (timer) clearInterval(timer);
-    };
-  });
 
   /// Documents that reference the currently-selected tag or mention
   /// node, restricted to nodes drawn in the current subgraph. Passed
@@ -2882,25 +2840,20 @@
           {/if}
         </div>
       {:else if selectedNode && selectedNode.kind === "file" && isFileGhost}
-        <!-- Ghost: either an explicit broken-link target, or the
-             graph claims the file exists but it's not in the current
-             tree listing (stale search index, common after a bulk
-             workspace change). FileInfoBody can't render either; surface
-             inline inside the shared Inspector header. -->
+        <!-- Ghost: a file node marked missing, a broken-link target.
+             FileInfoBody can't render it; surface inline inside the
+             shared Inspector header. -->
         {@const ghostKind = classifyFileKind(
           selectedNode.path,
           selectedNode.node_kind,
         ) as FileKind}
-        {@const hint = selectedNode.missing
-          ? "file does not exist (broken-link target)"
-          : ghostIndexerHint ?? "not in the current file listing (try Reload / chan index)"}
         <div class="ghost-body">
           <header class="head">
             <KindChip kind={ghostKind} path={selectedNode.path} block ghost />
           </header>
           <h3 class="title" title={selectedNode.path}>{selectedNode.label}</h3>
           <div class="path mono">{selectedNode.path}</div>
-          <div class="missing">{hint}</div>
+          <div class="missing">file does not exist (broken-link target)</div>
         </div>
       {:else}
         <!-- `onSetAsScope` wires "Graph from here" to always open a NEW
