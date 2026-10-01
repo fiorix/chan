@@ -39,8 +39,7 @@ export interface PreviewPopoverOpts {
   /// Workspace-rooted POSIX path of the file to preview.
   path: string;
   /// Path of the file the popover was opened FROM, when known. Used
-  /// to resolve relative image refs inside the preview (mirrors the
-  /// editor's wiki / image resolution).
+  /// to resolve a directly previewed image.
   fromPath?: string | null;
   /// Called when the user commits to fully opening the previewed
   /// file. `openInNewPane` is true when the user held Shift on
@@ -148,7 +147,13 @@ export function openPreviewPopover(
         body.innerHTML = "";
         const md = document.createElement("div");
         md.className = "md-preview-md";
-        md.innerHTML = renderMarkdown(resp.content ?? "");
+        const template = document.createElement("template");
+        template.innerHTML = renderMarkdown(resp.content ?? "");
+        for (const img of template.content.querySelectorAll("img")) {
+          const src = img.getAttribute("src");
+          if (src !== null) img.setAttribute("src", resolveImageSrc(src, opts.path));
+        }
+        md.appendChild(template.content);
         body.appendChild(md);
         positionUnderAnchor();
       },
