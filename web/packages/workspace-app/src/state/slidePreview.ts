@@ -411,14 +411,6 @@ function navButton(
   btn.className = `md-image-zoom-nav md-image-zoom-${kind} md-slide-preview-${kind}`;
   btn.setAttribute("aria-label", label);
   btn.textContent = glyph;
-  const side = kind === "prev" ? "left:12px;" : "right:12px;";
-  btn.style.cssText =
-    "position:fixed;top:50%;transform:translateY(-50%);" +
-    side +
-    "width:48px;height:64px;border:none;border-radius:8px;" +
-    "background:rgba(0,0,0,0.45);color:#fff;cursor:pointer;" +
-    "font-size:34px;line-height:1;display:flex;align-items:center;" +
-    "justify-content:center;";
   btn.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
