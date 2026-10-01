@@ -849,8 +849,6 @@
     if (trigger) return;
     closeTabMenu();
   }
-  /// Hard ceiling on `depthCap`, which the depth slider takes as its
-  /// `max`.
   const DEPTH_MAX = 10;
 
   /// File nodes reach the chips, the hidden-id sets and the inspector
