@@ -42,6 +42,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 ### Wiki links `[[...]]`
 
 - WYSIWYG: rendered as a styled pill with the target's display label.
+- A markdown link whose destination cannot be placed in the workspace renders as a broken pill with its label.
 - Cursor enters: `[[` and `]]` brackets become visible around the label; the label inside stays editable.
 - Typing inside the brackets reopens the SAME search popup that opens when the user originally types `[[` in a paragraph. Result list, preview, and `Type # / Type ^ / Type |` hint row are identical.
 - If the user breaks a marker (e.g. deletes one `]`), the editor serializes the literal text and renders it broken. No auto-repair.
