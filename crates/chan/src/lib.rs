@@ -2458,13 +2458,20 @@ enum UnserveOutcome {
 
 #[derive(Deserialize)]
 struct LiveTerminalsBody {
-    error: String,
     active_terminals: usize,
 }
 
+/// The live-terminal count of a host's close refusal: a JSON object with a
+/// non-negative integer `active_terminals`. The count alone is read, because
+/// the host may be another build that words the fields beside it differently,
+/// and a refusal that is not read is taken for a server that could not be
+/// reached and the workspace for closed.
 fn parse_live_terminals_refusal(message: &str) -> Option<usize> {
-    let body: LiveTerminalsBody = serde_json::from_str(message).ok()?;
-    (body.error == "live_terminals").then_some(body.active_terminals)
+    // serde reads a struct from a JSON array by position as well as from an
+    // object, and only an object is a refusal.
+    let object: serde_json::Map<String, serde_json::Value> = serde_json::from_str(message).ok()?;
+    let body: LiveTerminalsBody = serde_json::from_value(object.into()).ok()?;
+    Some(body.active_terminals)
 }
 
 /// Shared by `chan close` and `chan workspace forget`. Discovers the process
