@@ -850,6 +850,63 @@ fn index_commit_pause_for_test(workspace: &Workspace) {
     let _ = pause.release.recv_timeout(INDEX_COMMIT_PAUSE_BUDGET);
 }
 
+/// One armed barrier in front of a workspace's index teardown.
+#[cfg(test)]
+struct IndexTeardownPause {
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    /// Nothing is sent on it: its drop, when the tearing-down thread exits,
+    /// is what tells the test the whole workspace is gone.
+    exited: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(test)]
+static INDEX_TEARDOWN_PAUSES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, IndexTeardownPause>>,
+> = std::sync::OnceLock::new();
+
+/// How long a teardown waits at its barrier for a release before going on.
+#[cfg(test)]
+const INDEX_TEARDOWN_PAUSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(test)]
+thread_local! {
+    static INDEX_TEARDOWN_EXIT: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A field of `Workspace` declared immediately before `index`, so its drop is
+/// the last step of a workspace's teardown before the index goes.
+///
+/// A barrier armed for the workspace's root holds the teardown there: the last
+/// handle is gone, the index and everything declared after it still exist.
+/// The wait ends when the test releases the barrier, when the test's end of it
+/// is dropped (a failed assertion unwinding), or after
+/// `INDEX_TEARDOWN_PAUSE_BUDGET`, so no outcome of a test leaves the thread
+/// here. This runs inside a drop, possibly while unwinding, so it never
+/// panics.
+#[cfg(test)]
+struct IndexTeardownGate(std::path::PathBuf);
+
+#[cfg(test)]
+impl Drop for IndexTeardownGate {
+    fn drop(&mut self) {
+        let Some(pauses) = INDEX_TEARDOWN_PAUSES.get() else {
+            return;
+        };
+        let pause = pauses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+        let Some(pause) = pause else {
+            return;
+        };
+        let _ = pause.reached.send(());
+        let _ = pause.release.recv_timeout(INDEX_TEARDOWN_PAUSE_BUDGET);
+        let _ = INDEX_TEARDOWN_EXIT.try_with(|exit| *exit.borrow_mut() = Some(pause.exited));
+    }
+}
+
 struct RecoveryExecutionGuard<'a> {
     workspace: &'a Workspace,
     pass: Option<RecoveryPass>,
@@ -906,6 +963,8 @@ pub struct Workspace {
     /// This leaves room for editor reads, writes, PTYs, and watchers
     /// even when tests or callers try to open many workspaces at once.
     _fd_permit: crate::fd_budget::WorkspacePermit,
+    #[cfg(test)]
+    _index_teardown_gate: IndexTeardownGate,
     /// Opened from sidecar metadata during startup readiness probing.
     /// `OnceLock` so a sidecar that failed to open during that probe is
     /// retried on first use.
@@ -1273,6 +1332,8 @@ impl Workspace {
             }
             cell
         };
+        #[cfg(test)]
+        let index_teardown_gate = IndexTeardownGate(fs.root().to_path_buf());
         let workspace = Arc::new(Self {
             entry,
             fs,
@@ -1281,6 +1342,8 @@ impl Workspace {
             paths,
             _lock: lock,
             _fd_permit: fd_permit,
+            #[cfg(test)]
+            _index_teardown_gate: index_teardown_gate,
             index: index_cell,
             graph: graph_cell,
             rename_log: std::sync::Mutex::new(rename_log),
@@ -6535,6 +6598,230 @@ mod tests {
             .open_workspace(root)
             .expect("workspace should reopen immediately after recovery teardown");
         reopened.stop_open_recovery();
+    }
+
+    /// A test's end of one armed index-teardown barrier. Dropping it lets the
+    /// teardown go on and waits, within the barrier's budget, for the thread
+    /// that ran it to exit, so a failed assertion strands no thread and no
+    /// temporary directory is removed under a teardown still running.
+    struct IndexTeardownBarrier {
+        root: std::path::PathBuf,
+        reached: std::sync::mpsc::Receiver<()>,
+        release: Option<std::sync::mpsc::SyncSender<()>>,
+        exited: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl IndexTeardownBarrier {
+        fn arm(root: &std::path::Path) -> Self {
+            let (reached_tx, reached) = std::sync::mpsc::sync_channel(1);
+            let (release, release_rx) = std::sync::mpsc::sync_channel(1);
+            let (exited_tx, exited) = std::sync::mpsc::sync_channel(1);
+            let replaced = INDEX_TEARDOWN_PAUSES
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    root.to_path_buf(),
+                    IndexTeardownPause {
+                        reached: reached_tx,
+                        release: release_rx,
+                        exited: exited_tx,
+                    },
+                );
+            assert!(
+                replaced.is_none(),
+                "index teardown barrier already armed for {}",
+                root.display()
+            );
+            Self {
+                root: root.to_path_buf(),
+                reached,
+                release: Some(release),
+                exited,
+            }
+        }
+
+        fn wait_reached(&self) {
+            self.reached
+                .recv_timeout(INDEX_TEARDOWN_PAUSE_BUDGET)
+                .expect("no teardown reached the index barrier");
+        }
+
+        /// Let the teardown go on and wait for its thread to exit; true when
+        /// it exited within the budget. A barrier no teardown reached is
+        /// disarmed, which reads as an exit at once.
+        fn release_and_join(&mut self) -> bool {
+            self.release = None;
+            if let Some(pauses) = INDEX_TEARDOWN_PAUSES.get() {
+                pauses
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&self.root);
+            }
+            self.exited.recv_timeout(INDEX_TEARDOWN_PAUSE_BUDGET)
+                == Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        }
+    }
+
+    impl Drop for IndexTeardownBarrier {
+        fn drop(&mut self) {
+            self.release_and_join();
+        }
+    }
+
+    /// What the rest of the process sees of a workspace whose last handle is
+    /// gone and whose index is about to be torn down.
+    #[derive(Debug, PartialEq, Eq)]
+    struct AtIndexTeardown {
+        workspace_upgrades: bool,
+        index_writer_held: bool,
+        direct_admission: String,
+        library_open: String,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FinalOwner {
+        OrdinaryThread,
+        StartupRecoveryWorker,
+    }
+
+    const TEARDOWN_NOTE: &str = "# teardown\nadmission-teardown-token stays searchable\n";
+
+    /// A same-root open admitted while the previous handle's index writer is
+    /// still alive finds that writer's lock held and cannot recover its
+    /// index, so admission has to outlast the index. `owner` is the thread
+    /// that drops the last handle and so runs the teardown.
+    fn assert_admission_outlives_index_teardown(owner: FinalOwner) {
+        let cfg = TempDir::new().unwrap();
+        let root_dir = TempDir::new().unwrap();
+        let root = root_dir.path().canonicalize().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(&root).unwrap();
+        let paths = lib.workspace_paths_for(&root).unwrap();
+        let initial = lib.open_workspace(&root).unwrap();
+        initial.stop_open_recovery();
+        initial.write_text("note.md", TEARDOWN_NOTE).unwrap();
+        initial.reindex(None).unwrap();
+        assert!(initial.recovery_status().is_ready());
+
+        let (old, worker_release) = match owner {
+            FinalOwner::OrdinaryThread => (initial, None),
+            FinalOwner::StartupRecoveryWorker => {
+                drop(initial);
+                let (reached, release) = arm_open_recovery_pause_for_test(root.clone());
+                let old = lib.open_workspace(&root).unwrap();
+                reached
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .expect("the startup worker did not reach its claim");
+                // The worker's join handle stays in its slot, so the teardown
+                // it runs meets its own thread there.
+                assert!(old.recovery_worker.worker.lock().unwrap().is_some());
+                (old, Some(release))
+            }
+        };
+        let indexed_docs = old.index.get().map(|index| index.stats().indexed_docs);
+        assert!(
+            indexed_docs.is_some_and(|docs| docs > 0),
+            "the old index is not initialized and populated: {indexed_docs:?}"
+        );
+        let mut barrier = IndexTeardownBarrier::arm(old.root());
+        let weak = Arc::downgrade(&old);
+        let dropper = match worker_release {
+            Some(release) => {
+                drop(old);
+                assert_eq!(
+                    weak.strong_count(),
+                    1,
+                    "the startup worker does not hold the last handle"
+                );
+                release.send(()).unwrap();
+                None
+            }
+            None => {
+                assert_eq!(Arc::strong_count(&old), 1);
+                Some(std::thread::spawn(move || drop(old)))
+            }
+        };
+
+        barrier.wait_reached();
+        let observed = AtIndexTeardown {
+            workspace_upgrades: weak.upgrade().is_some(),
+            index_writer_held: Index::open(&root, &paths.index)
+                .err()
+                .is_some_and(|error| format!("{error:?}").contains("LockBusy")),
+            direct_admission: match WorkspaceLock::acquire(&paths.lock, &root) {
+                Ok(lock) => {
+                    drop(lock);
+                    "admitted".to_string()
+                }
+                Err(error) => format!("refused: {error:?}"),
+            },
+            library_open: match lib.open_workspace(&root) {
+                Ok(admitted) => {
+                    admitted.stop_open_recovery();
+                    "admitted".to_string()
+                }
+                Err(error) => format!("refused: {error:?}"),
+            },
+        };
+        assert_eq!(
+            observed,
+            AtIndexTeardown {
+                workspace_upgrades: false,
+                index_writer_held: true,
+                direct_admission: "refused: WorkspaceAlreadyOpen".to_string(),
+                library_open: "refused: WorkspaceAlreadyOpen".to_string(),
+            },
+            "admission was given up before the index teardown"
+        );
+
+        assert!(
+            barrier.release_and_join(),
+            "the thread running the teardown did not exit"
+        );
+        if let Some(dropper) = dropper {
+            dropper.join().unwrap();
+        }
+        assert!(
+            crate::lock::is_free(&paths.lock),
+            "a finished teardown kept admission"
+        );
+
+        let reopened = lib
+            .open_workspace(&root)
+            .expect("the root reopens once the teardown is over");
+        let indexed_docs = reopened.index.get().map(|index| index.stats().indexed_docs);
+        assert!(
+            indexed_docs.is_some_and(|docs| docs > 0),
+            "the reopen did not get the populated index: {indexed_docs:?}"
+        );
+        await_recovery_ready(&reopened);
+        let recovery = reopened.recovery_observation_for_test();
+        assert!(
+            recovery.events.front().is_some_and(|plan| {
+                plan.contains("readiness=Populated") && plan.contains("action=Some(Reconcile)")
+            }),
+            "the reopen did not plan an ordinary reconcile: {recovery:?}"
+        );
+        assert_eq!(recovery.last_error, None, "{recovery:?}");
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        let hits = reopened.search("admission-teardown-token", &opts).unwrap();
+        assert!(hits.hits.iter().any(|hit| hit.path == "note.md"));
+        assert_eq!(reopened.read_text("note.md").unwrap(), TEARDOWN_NOTE);
+    }
+
+    #[test]
+    fn admission_outlives_index_teardown_run_by_an_ordinary_thread() {
+        assert_admission_outlives_index_teardown(FinalOwner::OrdinaryThread);
+    }
+
+    #[test]
+    fn admission_outlives_index_teardown_run_by_the_startup_worker() {
+        assert_admission_outlives_index_teardown(FinalOwner::StartupRecoveryWorker);
     }
 
     /// Snapshot of the queryable end state of a workspace. Two workspaces
