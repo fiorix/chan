@@ -3,13 +3,13 @@
 //! devserver. Key computations share one in-flight answer per spelling.
 //!
 //! A lifecycle caller keeps its root lock through settlement. The open, its
-//! root check, mounted revalidation, a close's or removal's registry lookup
-//! and a removal's unregister own call permits, so cancelling a caller
-//! releases the root lock while its abandoned work still prevents another
-//! call of the same kind. A registered open and a removal wait for their
-//! permits at most the open's release budget, an open of a mounted root
-//! skips a revalidation already in flight, and a close or removal skips a
-//! lookup already in flight.
+//! root check, mounted revalidation, a close's or removal's registry lookup,
+//! registration and a removal's unregister own call permits, so cancelling
+//! a caller releases its root lock while its abandoned work still prevents
+//! another call of the same kind. A registered open, registration and a
+//! removal wait for their permits at most the open's release budget, an open
+//! of a mounted root skips a revalidation already in flight, and a close or
+//! removal skips a lookup already in flight.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -145,8 +145,9 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// Those are taken and released while the root lock is held and none is held
 /// while a root lock is awaited. A call permit is also taken after the root
 /// lock, but it is not bound to it: a permit whose caller left outlives that
-/// caller's root lock, and the public open of an already-open workspace takes
-/// one with no root lock. No permit is held while a root lock is awaited.
+/// caller's root lock. Registration and the public open of an already-open
+/// workspace take their permits with no root lock. No permit is held while
+/// a root lock is awaited.
 /// The maps of key computations ([`RootKeys`]) and health checks in flight
 /// are leaves, held across no await and no filesystem call.
 ///
@@ -175,7 +176,8 @@ pub(crate) enum RootCall {
 /// budget then dispatches its own call; the revalidation's and the lookup's
 /// permits have no waiter, since an open that finds the one held skips the
 /// check and a close or removal that finds the other held answers without
-/// the row.
+/// the row. Registration and a removal's unregister share the registry-write
+/// permit, which stays with either blocking call until that call returns.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 
 /// Canonical root keys computed on the blocking pool, with one computation
@@ -187,7 +189,8 @@ pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 /// Completed computations are removed, so later callers resolve afresh.
 /// This bound covers key resolution; the host uses separate call permits
 /// for its filesystem open, post-build root check, mounted revalidation, a
-/// close's or removal's registry lookup and a removal's unregister.
+/// close's or removal's registry lookup, registration and a removal's
+/// unregister.
 /// The entry-map mutex is held only for lookup, insertion and removal.
 #[derive(Default)]
 pub(crate) struct RootKeys {

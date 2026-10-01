@@ -3397,7 +3397,8 @@ impl WorkspaceHost {
     /// for it however many callers ask, and every caller of it waits without
     /// holding a runtime worker. This bound covers key resolution; separate
     /// call permits admit the open, its root check, mounted revalidation, a
-    /// close's or removal's registry lookup and a removal's unregister.
+    /// close's or removal's registry lookup, registration and a removal's
+    /// unregister.
     pub async fn root_key(&self, root: &Path) -> Result<PathBuf, Error> {
         #[cfg(test)]
         let probe = self.blocking_thread_probe.lock().unwrap().clone();
