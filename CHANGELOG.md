@@ -37,6 +37,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The image picker works in standalone Files windows.** In v0.100.0, the picker asked for a workspace-wide listing that those windows cannot serve and showed a catalog failure. It now offers the image paths already loaded in the File Browser, without asking for that listing.
 
+- **A previewed note loads its local images.** In v0.100.0, the preview requested relative image sources from the app page, so the images appeared broken. It now resolves them against the previewed note before inserting the rendered markup; absolute image URLs keep their source.
+
+- **An image's Copy button regains its title after repeated failures.** In v0.100.0, two clipboard refusals close together could leave its tooltip reading "copy failed" indefinitely. Each failure now restores "copy image to clipboard" after its feedback interval.
+
 - **Workspace refreshes keep the newest list.** In v0.100.0, a refresh after a workspace mutation could race a live refresh and replace a newer list with its older response. Both refresh paths now share an ordered request loop, and mutations wait for the queued snapshot.
 
 - **Pointer-opened command confirmations accept the first Enter.** In v0.100.0, the first Enter after clicking a command's confirmation was ignored until the key was released. Enter now answers the selected choice immediately, with Cancel selected by default. A confirmation opened by Enter still waits for the opening key's release.
