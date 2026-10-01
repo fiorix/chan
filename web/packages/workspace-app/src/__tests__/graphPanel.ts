@@ -36,6 +36,7 @@ import type { GraphTab, LeafNode } from "../state/tabs.svelte";
 export type CanvasProps = {
   open: boolean;
   paused: boolean;
+  scopeKey?: string;
   nodes: Array<{ id: string; kind: string; path?: string; label?: string }>;
   edges: Array<{ source: string; target: string; kind: string }>;
   visibleNodeIds: Set<string>;

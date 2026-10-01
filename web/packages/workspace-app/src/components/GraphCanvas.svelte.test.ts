@@ -78,6 +78,7 @@ const mounted: Array<Record<string, unknown>> = [];
 type Props = {
   open: boolean;
   paused?: boolean;
+  scopeKey?: string;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   visibleNodeIds: Set<string>;
@@ -425,6 +426,36 @@ describe("fitting the view", () => {
     const c = circle(api, id);
     return c.x > 0 && c.x < canvasHost.width && c.y > 0 && c.y < canvasHost.height;
   }
+
+  function rescopeAfterPan(scopeKey: string): { api: CanvasApi; ids: string[] } {
+    const p = props(tree(), { scopeKey: "semantic:workspace" });
+    const { api, canvas } = render(p);
+    mouse(canvas, "mousedown", 5, 5);
+    mouse(canvas, "mousemove", 605, 5);
+    mouse(canvas, "mouseup", 605, 5);
+    expect(inView(api, "notes/a.md"), "the pan moved the original graph away").toBe(false);
+
+    const subtree = tree();
+    const ids = ["directory:notes", "notes/a.md", "notes/b.md"];
+    p.nodes = subtree.nodes.filter((node) => ids.includes(node.id));
+    p.edges = subtree.edges.filter((edge) => ids.includes(edge.source) && ids.includes(edge.target));
+    p.visibleNodeIds = new Set(ids);
+    p.visibleEdges = p.edges;
+    p.scopeKey = scopeKey;
+    flushSync();
+    runFrames(60);
+    return { api, ids };
+  }
+
+  test("a new scope frames its nodes after a user pan", () => {
+    const { api, ids } = rescopeAfterPan("semantic:dir:notes");
+    for (const id of ids) expect(inView(api, id), id).toBe(true);
+  });
+
+  test("a node swap under the same scope preserves the user's pan", () => {
+    const { api, ids } = rescopeAfterPan("semantic:workspace");
+    for (const id of ids) expect(inView(api, id), id).toBe(false);
+  });
 
   test("a canvas mounted into a zero-size host fits once the host has a size", () => {
     canvasHost.width = 0;

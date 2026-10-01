@@ -250,6 +250,7 @@ describe("the scope breadcrumb", () => {
     await settle();
     expect(tab.scopeId).toBe("dir:notes");
     expect(tab.depth).toBe(1);
+    expect(canvas.props!.scopeKey).toBe("semantic:dir:notes");
     expect(newGraphTabs(tab.id), "no new tab").toEqual([]);
   });
 });
