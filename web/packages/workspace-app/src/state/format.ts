@@ -1,6 +1,6 @@
-// Small formatting helpers (a byte size, a file time) and path helpers
-// (`parentDir`, `basename`), each defined once for the callers that share
-// its rule.
+// Small formatting helpers (a byte size, a file time, a code report's
+// COCOMO months, developers and cost) and path helpers (`parentDir`,
+// `basename`), each defined once for the callers that share its rule.
 
 /** Human-friendly byte size (B / KB / MB / GB). One decimal at all
  *  scales above bytes; bytes are rendered as integers. */
@@ -22,6 +22,27 @@ export function formatMtime(seconds: number | null): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   if (diff < 7 * 86400) return `${Math.floor(diff / 86400)}d ago`;
   return new Date(seconds * 1000).toISOString().slice(0, 10);
+}
+
+/** A COCOMO estimate in months (effort in person-months, or schedule): a
+ *  whole number from ten up, one decimal below. " - " when the estimate is
+ *  not a finite number. */
+export function fmtMonths(n: number): string {
+  if (!Number.isFinite(n)) return " - ";
+  return n >= 10 ? `${Math.round(n)} mo` : `${n.toFixed(1)} mo`;
+}
+
+/** A COCOMO developer count, rounded as `fmtMonths` rounds. */
+export function fmtDevs(n: number): string {
+  if (!Number.isFinite(n)) return " - ";
+  return n >= 10 ? `${Math.round(n)}` : n.toFixed(1);
+}
+
+/** A COCOMO cost in US dollars: whole dollars, grouped as the reader's
+ *  locale groups digits. */
+export function fmtCost(n: number): string {
+  if (!Number.isFinite(n)) return " - ";
+  return `$${Math.round(n).toLocaleString()}`;
 }
 
 /** Last component of a workspace path. A workspace path is separated
