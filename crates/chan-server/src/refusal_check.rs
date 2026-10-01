@@ -25,11 +25,7 @@ pub(crate) fn check_devserver(app: Router) -> Router {
 async fn inspect(State(allow_navigation): State<bool>, request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    let matched = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|p| p.as_str().to_owned());
-    let is_fallback = matched.is_none();
+    let is_fallback = request.extensions().get::<MatchedPath>().is_none();
     let response = next.run(request).await;
     if response.extensions().get::<Inspected>().is_some()
         || response.extensions().get::<UpstreamResponse>().is_some()
@@ -55,17 +51,8 @@ async fn inspect(State(allow_navigation): State<bool>, request: Request, next: N
                         .get("code")
                         .is_none_or(|code| code.as_str().is_some_and(|s| !s.is_empty()))
             });
-    let framework = framework_exception(parts.status, &bytes);
-    if let Some(kind) = framework {
-        eprintln!(
-            "refusal-framework\t{kind}\t{}\t{method}\t{}",
-            parts.status.as_u16(),
-            matched.as_deref().unwrap_or(&path)
-        );
-    }
     assert!(
         envelope
-            || framework.is_some()
             // HEAD has no response body, including on a refusal.
             || (method == Method::HEAD && bytes.is_empty())
             || permanent_exception(&method, &path, parts.status, is_fallback && allow_navigation, &bytes)
@@ -102,64 +89,6 @@ fn range_refusal(
             .and_then(|v| v.strip_prefix("bytes */"))
             .is_some_and(|size| !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()))
 }
-
-fn framework_exception(status: StatusCode, body: &[u8]) -> Option<&'static str> {
-    let body = std::str::from_utf8(body).ok()?;
-    FRAMEWORK_PENDING
-        .iter()
-        .find_map(|&(kind, code, text, prefix)| {
-            (status.as_u16() == code
-                && if prefix {
-                    body.starts_with(text)
-                } else {
-                    body == text
-                })
-            .then_some(kind)
-        })
-}
-
-// Axum's extractor replies are identified by their own fixed text, never
-// just by a status shared with application refusals. The boolean selects
-// a fixed prefix for rejection types that append their underlying error.
-const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
-    (
-        "JsonSyntaxError",
-        400,
-        "Failed to parse the request body as JSON: ",
-        true,
-    ),
-    (
-        "JsonDataError",
-        422,
-        "Failed to deserialize the JSON body into the target type: ",
-        true,
-    ),
-    (
-        "MissingJsonContentType",
-        415,
-        "Expected request with `Content-Type: application/json`",
-        false,
-    ),
-    (
-        "FailedToDeserializeQueryString",
-        400,
-        "Failed to deserialize query string: ",
-        true,
-    ),
-    ("FailedToDeserializePathParams", 400, "Invalid URL: ", true),
-    (
-        "LengthLimitError",
-        413,
-        "Failed to buffer the request body: ",
-        true,
-    ),
-    (
-        "UnknownBodyError",
-        400,
-        "Failed to buffer the request body: ",
-        true,
-    ),
-];
 
 fn matches_path(pattern: &str, path: &str) -> bool {
     let mut actual = path.split('/');
@@ -699,22 +628,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_framework_text_is_admitted_under_its_own_status_alone() {
-        let body = b"Failed to deserialize the JSON body into the target type: unknown variant";
-        assert_eq!(
-            framework_exception(StatusCode::UNPROCESSABLE_ENTITY, body),
-            Some("JsonDataError")
-        );
-        for status in [StatusCode::BAD_REQUEST, StatusCode::CONFLICT] {
-            assert_eq!(framework_exception(status, body), None);
-        }
-        assert_eq!(
-            framework_exception(StatusCode::BAD_REQUEST, b"another refusal"),
-            None
-        );
-    }
-
     /// The host dispatch is a fallback, so its lock failure reaches the check
     /// on an unmatched path: the envelope passes there and the sentence as
     /// plain text does not, as on a matched handler.
@@ -932,8 +845,8 @@ mod tests {
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             (
-                "/probe-framework",
-                "Failed to deserialize query string: invalid query",
+                "/ws",
+                "Connection header did not include 'upgrade'",
                 "text/plain; charset=utf-8",
                 StatusCode::BAD_REQUEST,
             ),
