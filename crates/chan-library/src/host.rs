@@ -6195,6 +6195,66 @@ mod tests {
         assert_eq!(body_of("/").await, "launcher");
     }
 
+    /// A host that cannot read its map of mounted workspaces, because a
+    /// panic under the map's write guard poisoned it, answers the request in
+    /// the refusal envelope: a JSON object whose `error` is the sentence.
+    #[tokio::test]
+    async fn a_poisoned_workspace_map_answers_in_the_refusal_envelope() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
+        host.open_registered_workspace(root.path(), serve_config("/blog"))
+            .await
+            .expect("open");
+        host.install_root_fallback(
+            Router::new().fallback(|| async { (StatusCode::OK, "launcher") }),
+        );
+        let poisoner = Arc::clone(&host);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = poisoner.workspaces.write().unwrap();
+            panic!("fixture: poison the host's workspace map");
+        })
+        .join();
+        assert!(poisoned.is_err(), "fixture: the poisoning thread returned");
+        assert!(
+            host.workspaces.is_poisoned(),
+            "fixture: the map is not poisoned"
+        );
+
+        let response = host
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/blog/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .map(|value| value.to_str().expect("ascii content type").to_owned());
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        assert_eq!(
+            (
+                status,
+                content_type.as_deref(),
+                String::from_utf8_lossy(&body).as_ref()
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("application/json"),
+                r#"{"error":"config: workspace host lock poisoned"}"#
+            )
+        );
+    }
+
     #[tokio::test]
     async fn host_routes_requests_to_the_matching_workspace_prefix() {
         let cfg = tempfile::tempdir().expect("config dir");
