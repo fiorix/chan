@@ -33,6 +33,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A link outside the workspace keeps its label.** In v0.100.0, a markdown link whose relative destination escaped the workspace root showed its markers as bare text. It now renders as a broken, inert pill with the link's label.
 
+- **A failed rich-text paste inserts the clipboard's plain text.** Converter and chan-wrapper failures fall back to plain text with the editor's list dedenting, without a status notice.
+
+- **Concurrent Mermaid renders keep their own theme and label mode.** Each render waits for the previous one to settle before applying its settings, including when the previous render fails.
+
 - **Opening an untouched live drawing does not write its versionless elements.** The server sends a missing or zero element version at the value the drawing library restores, so the board has no change to push.
 
 - **Replacing an image keeps its size and alignment.** In v0.100.0, picking or uploading a new path into an existing image URL reset its width to 250 pixels and removed its alignment. The replacement now keeps both settings; a new image still starts at 250 pixels wide.
