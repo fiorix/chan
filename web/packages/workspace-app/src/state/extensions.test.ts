@@ -322,6 +322,55 @@ describe("catalog refresh across a devserver restart", () => {
     }
   });
 
+  test.each([
+    { title: "Reload checks an exited extension", running: false },
+    { title: "Reload keeps a running frame", running: true },
+  ])("$title", async ({ running }) => {
+    resetLayout([]);
+    const entry = {
+      id: "echo",
+      name: "Echo",
+      entry_path: `/_chan/extensions/echo/${capA}/`,
+      singleton: true,
+      running: true,
+    };
+    const extensions = vi.spyOn(api, "extensions").mockResolvedValue([entry]);
+    await refreshExtensions();
+    allCommands().find((item) => item.id === "extension.echo")?.run();
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "extension") throw new Error("expected extension tab");
+    const target = document.createElement("div");
+    document.body.append(target);
+    const view = mount(ExtensionTab, { target, props: { tab, paneId: activePane().id } });
+    try {
+      flushSync();
+      const frame = target.querySelector("iframe");
+      expect(frame?.getAttribute("src")).toBe(apiPath(entry.entry_path));
+      extensions.mockClear().mockResolvedValue([{ ...entry, running }]);
+      target.querySelector(".extension-tab")!.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }),
+      );
+      await settle();
+      const reload = [...document.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')]
+        .find((button) => button.textContent?.trim() === "Reload extension");
+      expect(reload).toBeDefined();
+      expect(reload?.disabled).toBe(false);
+      reload!.click();
+      await settle();
+      if (running) {
+        expect(target.querySelector("iframe")).toBe(frame);
+        expect(frame?.getAttribute("src")).toBe(apiPath(entry.entry_path));
+      } else {
+        expect(extensions).toHaveBeenCalledTimes(1);
+        expect(target.querySelector("iframe")).toBeNull();
+        expect(target.textContent).toContain("Its process exited.");
+      }
+    } finally {
+      unmount(view);
+      target.remove();
+    }
+  });
+
   test("an open extension tab's frame follows the live catalog, and says when the extension is gone", async () => {
     resetLayout([]);
     vi.spyOn(api, "extensions").mockResolvedValue([
