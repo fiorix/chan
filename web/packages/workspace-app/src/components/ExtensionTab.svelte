@@ -23,6 +23,7 @@
     extensionsReady,
     isExtensionCommandResult,
     markExtensionFrameReady,
+    refreshExtensions,
     registerExtensionFrame,
     resetExtensionFrame,
   } from "../state/extensions.svelte";
@@ -60,8 +61,9 @@
   // identity matches an advertised host key is dispatched locally.
   let advertisedKeys = new Set<string>();
 
-  function reload(): void {
+  async function reload(): Promise<void> {
     menu?.close();
+    await refreshExtensions();
     if (frame && frameSrc) frame.src = frameSrc;
   }
 
