@@ -93,7 +93,6 @@ import {
   resolveTabDestination,
   restoreLayout,
   serializeLayout,
-  selectTabInPane,
   splitPane,
   swapPanes,
   type BrowserTab,
@@ -4070,26 +4069,6 @@ export function openGraphFromLink(
 // open + inspector-open state lives here. One per window; the
 // inspector toggle is window-scoped now (was per-tab when the
 // browser was a tab kind) since there's only ever one instance.
-
-export function openBrowser(): BrowserTab {
-  const tab = focusExistingBrowserTab() ?? openBrowserInActivePane();
-  scheduleSessionSave();
-  return tab;
-}
-
-function focusExistingBrowserTab(): BrowserTab | null {
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    const tab = allPaneTabs(node).find(
-      (candidate): candidate is BrowserTab => candidate.kind === "browser",
-    );
-    if (!tab) continue;
-    selectTabInPane(node.id, tab.id);
-    layout.activePaneId = node.id;
-    return tab;
-  }
-  return null;
-}
 
 /// Reveal a path by OPENING a File Browser TAB: a tab in the active
 /// pane, with the path selected and its ancestor chain expanded;
