@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // How a terminal's session ends, as the window's saved session records it.
-// After a devserver shutdown the next process can restore the PTY, so the
+// After a devserver parks a PTY the next process can restore it, so the
 // blob keeps the session id and the reloaded window reattaches to it; every
 // other `closed` reason and a process exit drop it, and an explicit close
 // deletes the blob with its tab. A TerminalTab is mounted over the stand-in
@@ -89,10 +89,10 @@ async function attachedSession(): Promise<{ id: string; socket: TerminalSocket; 
   return { id, socket, tab: tab! };
 }
 
-describe("a devserver shutdown", () => {
+describe("a parked terminal", () => {
   test("keeps the session id in the window's blob, its reload snapshot and every later save", async () => {
     const { id, socket, tab } = await attachedSession();
-    await receive(socket, { type: "closed", reason: "shutdown" });
+    await receive(socket, { type: "closed", reason: "parked" });
     await vi.advanceTimersByTimeAsync(SETTLE_MS);
 
     expect(persisted(), "the blob a reload reads").toEqual([id]);
@@ -111,13 +111,14 @@ describe("a devserver shutdown", () => {
 });
 
 describe("every other end drops the session id", () => {
-  for (const reason of ["idle", "workspace", "capped", "error"]) {
+  for (const reason of ["shutdown", "unrecognized-reason", "idle", "workspace", "capped", "error"]) {
     test(`closed (${reason})`, async () => {
       const { socket } = await attachedSession();
       await receive(socket, { type: "closed", reason });
       await vi.advanceTimersByTimeAsync(SETTLE_MS);
 
-      expect(persisted()).toEqual([]);
+      expect(persisted(), "the blob a reload reads").toEqual([]);
+      expect(tsids(__testReadLayoutReloadSnapshot()), "the same-tab reload snapshot").toEqual([]);
     });
   }
 
