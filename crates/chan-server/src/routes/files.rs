@@ -15,7 +15,7 @@ use chan_workspace::{AtomicWriteKind, BoundedFileReader, FileStat};
 
 use crate::collab_sessions::{HttpReplaceOutcome, HttpWriteView};
 use crate::doc_sessions::{flush_session, DocSession};
-use crate::error::{err, err_from, err_state};
+use crate::error::{err, err_code, err_from, err_state};
 use crate::extract::{Json, Multipart, Path as AxumPath, Query};
 use crate::routes::run_blocking;
 use crate::scene_sessions::scene::SceneError;
@@ -1754,16 +1754,22 @@ pub(crate) fn write_precondition_response(
     current_authority_version: Option<u64>,
     disk_conflicted: bool,
 ) -> Response {
-    (
+    let message = if status == StatusCode::PRECONDITION_REQUIRED {
+        "a changed write must echo the authority version it last read"
+    } else {
+        "file changed on disk since it was read"
+    };
+    err_code(
         status,
-        Json(WriteConflictBody {
+        message.into(),
+        "write_conflict",
+        WriteConflictBody {
             current_mtime: current_mtime_ns.map(|ns| ns / 1_000_000_000),
             current_mtime_ns: current_mtime_ns.map(|ns| ns.to_string()),
             current_authority_version,
             disk_conflicted,
-        }),
+        },
     )
-        .into_response()
 }
 
 fn session_write_conflict_response(
