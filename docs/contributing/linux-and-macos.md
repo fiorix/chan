@@ -64,7 +64,9 @@ limactl shell default sudo sdme exec chan-build /bin/bash -c '
     util-linux libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
     librsvg2-dev libsoup-3.0-dev patchelf xdg-utils desktop-file-utils \
     gcc-mingw-w64-x86-64 file libssl-dev clang lld
-  useradd -m -u 1000 -U -s /bin/bash ubuntu
+  if ! id ubuntu >/dev/null 2>&1; then useradd -m -u 1000 -U -s /bin/bash ubuntu; fi
+  test "$(id -u ubuntu)" = 1000
+  test "$(getent passwd ubuntu | cut -d: -f6)" = /home/ubuntu
   chmod 644 /tmp/chan-src.bundle
   runuser -u ubuntu -- git clone /tmp/chan-src.bundle /home/ubuntu/chan
   arch=$(uname -m)
@@ -99,7 +101,7 @@ limactl shell default sudo sdme exec chan-build /usr/sbin/runuser -u ubuntu -- /
   make ci-linux'
 ```
 
-The bundle checks out the committed HEAD with its Git index, which the static linters need for `git ls-files`; create and copy a new bundle for each committed revision you gate. The `ubuntu` user owns `/home/ubuntu/chan`, so Cargo writes its target there and permission-sensitive tests run without root privileges. A cold `make ci-linux` also installs Tauri CLI under `target/tauri-cli`, then builds and boots the release devserver and produces an AppImage after the compile/test gates.
+The bundle checks out the committed HEAD with its Git index, which the static linters need for `git ls-files`. For a later commit, create and copy a new bundle, then run `git fetch /tmp/chan-src.bundle HEAD && git checkout --detach FETCH_HEAD` as `ubuntu` in `/home/ubuntu/chan` before repeating the gate. The `ubuntu` user owns that checkout, so Cargo writes its target there and permission-sensitive tests run without root privileges. A cold `make ci-linux` also installs Tauri CLI under `target/tauri-cli`, then builds and boots the release devserver and produces an AppImage after the compile/test gates.
 
 ## Desktop: build the chan-desktop AppImage and .deb
 
