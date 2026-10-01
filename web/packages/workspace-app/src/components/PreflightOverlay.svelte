@@ -14,6 +14,7 @@
 
   import { onMount, onDestroy } from "svelte";
   import { api } from "../api/client";
+  import { ApiError, apiErrorCode } from "../api/errors";
   import { setCoverBlocking, workspace } from "../state/store.svelte";
   import type { PreflightSnapshot } from "../api/types";
 
@@ -136,8 +137,11 @@
       const state = await api.semanticEnable();
       semanticOverride = state.semantic_enabled;
     } catch (e) {
-      // Model missing: surface the download affordance instead of failing.
-      semanticNeedsModel = true;
+      // Only a missing model is answered by a download, so only its refusal
+      // offers one; any other leaves the next toggle to enable again.
+      if (e instanceof ApiError && e.status === 409 && apiErrorCode(e) === "model_not_downloaded") {
+        semanticNeedsModel = true;
+      }
       semanticError = errText(e);
     } finally {
       semanticBusy = false;
