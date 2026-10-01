@@ -82,12 +82,14 @@ export function isTransientApiError(e: unknown): boolean {
 }
 
 /** A workspace tenant can remain alive long enough to report that its source
- * root was removed externally. Keep this classifier in the transport leaf so
- * File Browser and Graph error paths agree without importing app state. */
+ * root was removed externally. That report is classified by the refusal's
+ * code, never by the words of its sentence. Keep this classifier in the
+ * transport leaf so File Browser and Graph error paths agree without
+ * importing app state. */
 export function isWorkspaceRootMissingError(error: unknown): boolean {
   return (
     error instanceof ApiError &&
     error.status === 404 &&
-    error.message.toLowerCase().includes("workspace root does not exist")
+    apiErrorCode(error) === "workspace_root_missing"
   );
 }
