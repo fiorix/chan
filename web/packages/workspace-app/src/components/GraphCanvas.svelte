@@ -1,30 +1,23 @@
 <script lang="ts">
-  // Canvas + d3-force renderer for the chan graph.
-  //
-  // Why d3-force over cytoscape: cytoscape's per-frame pipeline (style-selector resolution,
-  // SVG-icon bitmap compositing, scenegraph hit-testing) sits above
-  // the d3-force simulation it wraps, and chews enough budget that
-  // a 90-node graph never matches the Observable d3-force example's
-  // smoothness. Rendering straight to a canvas - one fill + ring +
-  // icon blit per node per tick - closes that gap.
+  // Canvas 2D + d3-force renderer for the chan graph.
   //
   // What GraphCanvas owns:
   //   - HTML5 canvas + animation loop (requestAnimationFrame)
-  //   - d3-force simulation (charge / link / collide / x / y) with
-  //     "infinite: true"-style alphaTarget bookkeeping so dragging
-  //     a node re-heats the cluster and releasing settles it
+  //   - d3-force simulation (link / charge / collide / x / y /
+  //     parentX); a node drag raises alphaTarget so the cluster
+  //     re-heats, and releasing returns it to 0 so it settles
   //   - hover / click / drag / pan / zoom interaction
-  //   - focal pinning during the initial layout
-  //   - icon pre-rasterisation per kind (chan's existing
-  //     lucide-style glyphs decoded once to HTMLImageElement and
-  //     drawn via ctx.drawImage)
-  //   - label visibility: hidden by default; opt-in for the
-  //     selected node and every first-degree neighbour
+  //   - focal pinning (fx / fy) on every working-set rebuild
+  //   - icon rasterisation per kind (lucide-style glyphs decoded to
+  //     HTMLImageElement per theme and drawn via ctx.drawImage)
+  //   - label visibility: hidden by default; drawn for the selected
+  //     node, its first-degree neighbours and its containment spine
   //
-  // What stays in GraphPanel.svelte:
-  //   - scope picker + BFS to compute visibleNodeIds / visibleEdges
-  //   - filter chips (link / tag / mention / img)
-  //   - depth slider, inspector, scope history, hamburger menu
+  // What GraphPanel.svelte owns:
+  //   - the scope and BFS that compute visibleNodeIds / visibleEdges
+  //   - filter chips (tag / mention / language / img / folder /
+  //     markdown / source)
+  //   - depth slider, inspector, scope breadcrumb, tab menu
 
   import { onDestroy, onMount, tick, untrack } from "svelte";
   import {
@@ -180,8 +173,8 @@
 
   /// Node rendering radii. Doc nodes are slightly larger so the file
   /// chrome reads as the load-bearing kind at a glance; tag / mention
-  /// / image / contact sit a notch smaller. Backlink mapData scaling
-  /// is applied on top in `renderRadius`.
+  /// / image / contact sit a notch smaller. Backlink scaling is
+  /// applied on top in `renderRadius`.
   const RADIUS_BASE = 5;
   const RADIUS_DOC = 7;
   /// Directory nodes sit a notch above the leaf base (but below the
@@ -213,10 +206,10 @@
   const FOCUS_DIM_EDGE = 0.05;
   const FOCUS_LIT_EDGE = 0.9;
 
-  /// d3-force tuning lives in ../graph/force.ts (DEFAULT_FORCE), the
-  /// single source of truth shared with the graph-tuner playground.
-  /// Callers can override it via the `force` prop (below); every
-  /// production caller passes nothing and gets DEFAULT_force.
+  // d3-force tuning lives in ../graph/force.ts (DEFAULT_FORCE), the
+  // single source of truth shared with the graph-tuner playground.
+  // Callers can override it via the `force` prop; every production
+  // caller passes nothing and gets DEFAULT_FORCE.
 
   /// Stroke ring colour for non-missing nodes. Reads from the page
   /// background so touching nodes still separate visually.
@@ -580,10 +573,10 @@
   }
 
   function renderRadius(kind: DKind, id: string): number {
-    // Workspace root is the structural anchor of the whole graph - per
-    // It is 1.5x every other directory so the hub reads at a
-    // glance. Doc nodes stay at the prior RADIUS_DOC; folder
-    // (non-workspace) nodes stay at RADIUS_DIR.
+    // The workspace root is the structural anchor of the whole graph:
+    // RADIUS_WORKSPACE is 1.5x the largest radius a directory can
+    // reach, so the hub reads at a glance. Doc nodes take RADIUS_DOC;
+    // folder (non-workspace) nodes take RADIUS_DIR.
     const base =
       kind === "workspace"
         ? RADIUS_WORKSPACE
@@ -607,10 +600,6 @@
     return base * (1 + (RADIUS_HUB_SCALE - 1) * t);
   }
 
-  /// Build the d3 working set from the latest props. Reuses existing
-  /// DNodes when ids match (preserves position + velocity through a
-  /// scope/depth tick); creates fresh ones for newly-visible ids and
-  /// drops any whose id left the visible set.
   /// Derive a node's filesystem depth + parent-directory id from its
   /// kind + path. Workspace root (folder
   /// id "") sits at depth 0; top-level files / directories at
@@ -654,6 +643,10 @@
     return { depth, parentId };
   }
 
+  /// Build the d3 working set from the latest props. Reuses existing
+  /// DNodes when ids match (preserves position + velocity through a
+  /// scope/depth tick); creates fresh ones for newly-visible ids and
+  /// drops any whose id left the visible set.
   function rebuildWorkingSet(): { added: DNode[]; removed: DNode[] } {
     const newById = new Map<string, DNode>();
     const added: DNode[] = [];
@@ -840,7 +833,7 @@
       .velocityDecay(force.velocityDecay)
       .alpha(1)
       .alphaTarget(0)
-      // The animation loop workspaces painting independently; the sim
+      // The animation loop drives painting independently; the sim
       // just needs to mutate positions. No-op on tick keeps us from
       // doing per-tick work twice (rAF + tick callback).
       .on("tick", () => {});
@@ -1602,8 +1595,8 @@
   }
 
   function onContextMenuLocal(e: MouseEvent): void {
-    // Delegate to the parent so the existing hamburger-menu
-    // affordance still works on right-click.
+    // Delegate to the parent: GraphPanel opens its tab menu at the
+    // pointer.
     onContextMenu?.(e);
   }
 
@@ -1820,10 +1813,9 @@
 
   // ---- prop-reactive effects -------------------------------------------
 
-  /// Open/close: start the renderer when the overlay becomes
-  /// visible, tear it down when it closes. Matches the previous
-  /// cytoscape lifecycle and keeps idle overlays from burning rAF
-  /// budget.
+  /// Open/close: start the renderer when `open` turns true; when it
+  /// turns false, stop the rAF loop and the simulation and drop the
+  /// working set.
   $effect(() => {
     if (open) {
       if (!sim) start();
@@ -1849,11 +1841,11 @@
     rafId = requestAnimationFrame(loop);
   });
 
-  /// Selection / hover emphasis. The paint pass reads `selectedId` straight
+  /// Selection emphasis. The paint pass reads `selectedId` straight
   /// from props rather than through reactivity, so the repaint has to be
-  /// requested explicitly. Load-bearing now that idle frames are gated:
-  /// without it, selecting a node on a settled graph would change nothing
-  /// on screen until the next unrelated repaint.
+  /// requested explicitly: idle frames are gated on `dirty`, and without
+  /// this, selecting a node on a settled graph would change nothing on
+  /// screen until the next unrelated repaint.
   $effect(() => {
     void selectedId;
     markDirty();
