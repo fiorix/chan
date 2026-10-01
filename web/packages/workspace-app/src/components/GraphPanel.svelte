@@ -1440,6 +1440,16 @@
       else if (cls === "doc") c.markdown++;
       else if (cls === "source") c.source++;
     }
+    if (filesystemMode) {
+      c.tag = fsNodes.filter((n) => n.kind === "symlink").length;
+      const hardlinkedIds = new Set<string>();
+      for (const edge of fsEdgesRaw) {
+        if (edge.kind !== "hardlink") continue;
+        hardlinkedIds.add(edge.source);
+        hardlinkedIds.add(edge.target);
+      }
+      c.mention = hardlinkedIds.size;
+    }
     return c;
   });
 
