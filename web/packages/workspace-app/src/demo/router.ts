@@ -109,7 +109,11 @@ export function createDemoFetch(
         const body = parseBody(init) as ConfigPatchRequest | undefined;
         if (!body || body.expected_revision !== configRevision) {
           return json(
-            { error: "config_conflict", current: config() },
+            {
+              error: "configuration changed since the revision this write expected",
+              code: "config_conflict",
+              current: config(),
+            },
             409,
           );
         }

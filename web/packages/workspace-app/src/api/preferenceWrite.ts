@@ -19,7 +19,7 @@ function isConfigConflict(value: unknown): value is ConfigConflict {
   if (!value || typeof value !== "object") return false;
   const conflict = value as Partial<ConfigConflict>;
   return (
-    conflict.error === "config_conflict" &&
+    conflict.code === "config_conflict" &&
     typeof conflict.current?.revision === "number" &&
     !!conflict.current.preferences
   );

@@ -87,7 +87,8 @@ export type ConfigPatchRequest = {
 };
 
 export type ConfigConflict = {
-  error: "config_conflict";
+  error: string;
+  code: "config_conflict";
   current: GlobalConfig;
 };
 
