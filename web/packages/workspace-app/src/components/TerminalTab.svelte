@@ -280,7 +280,7 @@
     | { type: "exit"; code?: number }
     | { type: "error"; message?: string; reason?: string };
 
-  type CloseReason = "idle" | "workspace" | "shutdown" | "explicit" | "capped" | "error";
+  type CloseReason = "idle" | "workspace" | "parked" | "shutdown" | "explicit" | "capped" | "error";
 
   let host: HTMLDivElement | undefined = $state();
   let searchInput: HTMLInputElement | undefined = $state();
@@ -1661,15 +1661,15 @@
         setTerminalQueueDepth(tab, 0);
         failPendingPrompt(tab);
         // Drop the scrollback snapshot cached for this session id so a closed
-        // terminal holds no cache budget. A shutdown keeps the id below, and
+        // terminal holds no cache budget. A parked PTY keeps the id below, and
         // the reattach after the reload then asks for a full replay.
         if (tab.terminalSessionId) clearTerminalSnapshot(tab.terminalSessionId);
         clearTerminalMetadataSink();
-        // A devserver shutdown keeps the id, so every later save still names
+        // A parked PTY keeps the id, so every later save still names
         // the session and the reloaded window reattaches to the PTY the next
         // process restores; the server answers an id it no longer has with a
-        // fresh shell. Every other reason ended the session.
-        if (frame.reason !== "shutdown") clearTerminalSession(tab);
+        // fresh shell. Other reasons, including unknown ones, clear the id.
+        if (frame.reason !== "parked") clearTerminalSession(tab);
         if (frame.reason === "explicit") {
           // The user (or another window / `cs terminal close`) deleted this
           // terminal. Under Option A the dead tab vanishes automatically; if
@@ -1726,7 +1726,7 @@
       // A transient dial failure never strands a resumable session: the id
       // survives so an offline/sleep window can still reattach the persisted
       // remote session on reconnect. Only the server's `exit` frame and a
-      // `closed` frame for any reason but a shutdown clear the session id.
+      // `closed` frame for any reason but `parked` clear the session id.
       if (status !== "exited") status = "closed";
       // Heal: redial with capped backoff through the reattach path. An exited
       // session stays down (the server ended it; the tab shows its exit
