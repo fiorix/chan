@@ -159,8 +159,9 @@ pub struct MountedPrefix {
 /// remembered as off, so the row stays in `GET workspaces` and re-mounts at
 /// the **same** prefix on `on:true`. The handler answers `200` with the
 /// updated [`WorkspaceEntry`] (a fresh `token` when `on:true`; `token:""`
-/// when off), `409` with an [`ActiveTerminalsRejection`] when an `on:false`
-/// would kill live terminals and `force` is unset, or `404` when `{prefix}`
+/// when off), `409` when an `on:false` would kill live terminals and `force`
+/// is unset (a sentence in `error`, `code: "live_terminals"` and the
+/// `active_terminals` count the client confirms with), or `404` when `{prefix}`
 /// is not a registered workspace. The call is idempotent in both directions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetWorkspaceOnRequest {
@@ -173,18 +174,6 @@ pub struct SetWorkspaceOnRequest {
     /// confirms by re-issuing with `force:true`. Ignored when `on:true`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
-}
-
-/// Body of the `409 Conflict` answer to `POST .../{prefix}/on {on:false}`
-/// when the workspace still has live terminal sessions and the request did
-/// not set `force`. The client shows `active_terminals` in a confirm prompt,
-/// then re-issues the off with `force:true` to kill them and unmount.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ActiveTerminalsRejection {
-    /// Discriminator shared with launcher-local workspace off/remove.
-    pub error: String,
-    /// Live terminal sessions the off would kill.
-    pub active_terminals: usize,
 }
 
 #[cfg(test)]

@@ -50,8 +50,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::random_token;
 use crate::devserver_api::{
-    ActiveTerminalsRejection, DevserverInfo, MountedPrefix, OpenWorkspaceRequest, RotatedToken,
-    SetWorkspaceOnRequest, WorkspaceEntry, DEVSERVER_API_PROTOCOL,
+    DevserverInfo, MountedPrefix, OpenWorkspaceRequest, RotatedToken, SetWorkspaceOnRequest,
+    WorkspaceEntry, DEVSERVER_API_PROTOCOL,
 };
 use crate::extract::{Json, Path as AxumPath, Query};
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
@@ -3235,16 +3235,15 @@ async fn handle_forget(
 }
 
 /// The 409 an unforced off or forget answers while the workspace still has
-/// live terminal sessions, carrying the count a client confirms with.
+/// live terminal sessions: the code a client branches on, beside the count it
+/// confirms with.
 pub(crate) fn live_terminals_refusal(active_terminals: usize) -> Response {
-    (
+    crate::error::err_code(
         StatusCode::CONFLICT,
-        Json(ActiveTerminalsRejection {
-            error: "live_terminals".into(),
-            active_terminals,
-        }),
+        format!("workspace has {active_terminals} live terminal session(s); close them or force"),
+        "live_terminals",
+        serde_json::json!({ "active_terminals": active_terminals }),
     )
-        .into_response()
 }
 
 /// Set whether the registered workspace addressed by the route is mounted.
