@@ -3884,6 +3884,37 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         None
     };
 
+    // The server this command binds is what enforces --no-settings: neither
+    // handoff request carries the flag, so chan-desktop or a devserver would
+    // open the workspace with settings writes allowed. A route that would
+    // reach one is refused while nothing has been created, registered or
+    // sent. A route with nothing to hand to keeps its standalone fallback,
+    // and takes it here rather than in its arm, so a desktop that starts
+    // after the liveness probe is not sent the request either.
+    let desktop_known_live = desktop_live || parentage == Parentage::Desktop;
+    let target = if no_settings {
+        let receiver = match target {
+            OpenTarget::Standalone => None,
+            OpenTarget::Desktop => desktop_handoff_would_engage(forced_desktop, desktop_known_live)
+                .await
+                .then(|| "chan-desktop".to_string()),
+            OpenTarget::Devserver => selected_devserver
+                .map(|index| format!("the local devserver on port {}", candidates[index].port)),
+        };
+        if let Some(receiver) = receiver {
+            anyhow::bail!(
+                "--no-settings is enforced only by a server this command binds, and this \
+                 serve would hand {} to {receiver}, which would open it with settings writes \
+                 allowed. Serve it with --standalone to bind the restricted server here, or \
+                 drop --no-settings to hand the workspace off.",
+                root.display()
+            );
+        }
+        OpenTarget::Standalone
+    } else {
+        target
+    };
+
     // Create the workspace root only AFTER the route is settled, so a refused
     // route (nested devserver, conflicting flags) leaves no empty directory.
     if !root.exists() {
@@ -3901,7 +3932,6 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         // instead. Every fallback (no desktop, refused, skew, GUI-absent,
         // CHAN_NO_DESKTOP_HANDOFF) drops through to the standalone path below.
         OpenTarget::Desktop => {
-            let desktop_known_live = desktop_live || parentage == Parentage::Desktop;
             if let Some(outcome) =
                 maybe_handoff_to_desktop(&root, forced_desktop, desktop_known_live).await
             {
@@ -6619,6 +6649,23 @@ async fn recent_launchd_log() -> String {
         }
         Err(e) => format!("(could not read {}: {e})", path.display()),
     }
+}
+
+/// Whether the desktop arm of `chan serve` would send its handoff request or
+/// launch the GUI, decided from the inputs [`maybe_handoff_to_desktop`] acts
+/// on without sending anything. When no desktop is known to be live and none
+/// would be launched, a connect-only probe says whether one is listening.
+async fn desktop_handoff_would_engage(launch_if_absent: bool, desktop_known_live: bool) -> bool {
+    if chan_server::handoff::handoff_opt_out() {
+        return false;
+    }
+    if desktop_known_live {
+        return true;
+    }
+    // `maybe_launch_desktop` launches on unix alone; elsewhere an absent
+    // desktop leaves the standalone fallback.
+    chan_server::handoff::gui_session_present()
+        && ((launch_if_absent && cfg!(unix)) || chan_server::handoff::desktop_is_live().await)
 }
 
 /// Integrate a Desktop-personality `chan serve` with the desktop app.
