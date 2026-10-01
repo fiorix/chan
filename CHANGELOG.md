@@ -30,6 +30,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Opening an untouched live drawing does not write its versionless elements.** The server sends a missing or zero element version at the value the drawing library restores, so the board has no change to push.
+
 - **Workspace refreshes keep the newest list.** In v0.100.0, a refresh after a workspace mutation could race a live refresh and replace a newer list with its older response. Both refresh paths now share an ordered request loop, and mutations wait for the queued snapshot.
 
 - **Pointer-opened command confirmations accept the first Enter.** In v0.100.0, the first Enter after clicking a command's confirmation was ignored until the key was released. Enter now answers the selected choice immediately, with Cancel selected by default. A confirmation opened by Enter still waits for the opening key's release.
