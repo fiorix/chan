@@ -44,14 +44,22 @@ pub struct ServeConfig {
     /// (current file / labels); when false it stays a throttled
     /// one-liner. Off for tunnel/desktop-spawned runs.
     pub verbose: bool,
-    /// Tell the SPA shell to grey out the Settings entry point so a
-    /// non-owner viewer can't open the settings panel. Surfaced to
-    /// the frontend as `<meta name="chan-settings-disabled">`, and
-    /// mirrored on `AppState::settings_disabled` so the
-    /// `tunnel_guard::settings_guard` middleware can refuse the
-    /// matching write routes server-side. Set by `--no-settings` for
-    /// kiosk / shared-workstation deployments where the operator at the
-    /// keyboard is not the workspace owner. The default leaves it false.
+    /// Refuse the workspace tenant's settings-write routes.
+    /// `chan serve --no-settings` sets it, for kiosk and
+    /// shared-workstation deployments where the operator at the
+    /// keyboard is not the workspace owner. It is false everywhere
+    /// else: the devserver, the launcher's routes and the desktop build
+    /// their tenants with it false, and serving through a tunnel does
+    /// not set it. The tenant builder copies it to
+    /// `AppState::settings_disabled`, and `tunnel_guard::settings_guard`
+    /// answers 403 from that copy on the routes registered in the
+    /// workspace tenant's settings-write sub-router. The flag refuses
+    /// nothing outside that sub-router: reads of the same settings stay
+    /// open, and so does the terminal tenant's `PATCH /api/config`.
+    /// `serve_static` writes the flag into the workspace shell as
+    /// `<meta name="chan-settings-disabled" content="1">`. The tag
+    /// records the flag, and the frontend greys or hides no Settings
+    /// control on it.
     pub settings_disabled: bool,
 }
 

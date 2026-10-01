@@ -283,8 +283,12 @@ fn with_static_cache_headers(mut response: Response, spa_shell: bool, candidate:
 ///     is non-empty. The transport layer prepends it to fetch and
 ///     WebSocket URLs.
 ///   - `<meta name="chan-settings-disabled" content="1">` when
-///     `settings_disabled` is true. Greys out the Settings entry
-///     point in the SPA.
+///     `settings_disabled` is true. `serve_static` passes
+///     `AppState::settings_disabled`, which only a `--no-settings`
+///     serve sets. The tag records that flag; the frontend greys or
+///     hides no Settings control on it. The lockdown is
+///     `tunnel_guard::settings_guard` answering 403 on the routes of
+///     the workspace tenant's settings-write sub-router.
 ///   - `<meta name="chan-files" content="1">` when this tenant serves
 ///     the filesystem surface. A standalone terminal window then also
 ///     offers the file browser and the editor over the server's
