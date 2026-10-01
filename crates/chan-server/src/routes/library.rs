@@ -19,14 +19,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path as AxumPath, Query, State};
+use axum::extract::{Extension, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
-use axum::{Json, Router};
+use axum::Router;
 use chan_library::{registered_workspace_prefix, ServeConfig};
 use chan_workspace::KnownWorkspace;
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,7 @@ use tokio::sync::{oneshot, Notify};
 
 use crate::devserver::{bytes_eq, ForceQuery};
 use crate::error::workspace_still_releasing;
+use crate::extract::{Bytes, Json, Path as AxumPath, Query};
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,

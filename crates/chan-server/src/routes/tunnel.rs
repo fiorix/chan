@@ -21,7 +21,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use chan_revtunnel::server::{AttachError, ControlAttach, ReadyReport};
@@ -32,6 +32,7 @@ use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::extract::Query;
 use crate::WorkspaceHost;
 
 /// Called only after the leg has decided to end, this one-second grace gives
