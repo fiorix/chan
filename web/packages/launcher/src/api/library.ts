@@ -415,7 +415,7 @@ export interface LibraryApi {
    * comes back on and `unavailable` rather than as a refusal; the launcher
    * re-lists instead of reading that body, the way it does after an add. An
    * unforced off of a workspace with live terminal sessions answers 409
-   * `live_terminals` (parse with `liveTerminalsCount`); retry with
+   * with the code `live_terminals` (read with `liveTerminalsCount`); retry with
    * `force: true` to off it anyway. */
   setWorkspaceOn(id: string, on: boolean, force?: boolean): Promise<void>;
   removeWorkspace(id: string, force?: boolean): Promise<void>;
@@ -442,7 +442,7 @@ export interface LibraryApi {
   openDevserverWorkspace(id: string, path: string): Promise<void>;
   /** Turn a connected devserver's served workspace on/off by its mounted prefix
    * (desktop action, 409 with no bridge). An unforced off of a workspace that
-   * still has live terminal sessions answers 409 `{error:"live_terminals",
+   * still has live terminal sessions answers 409 `{error, code:"live_terminals",
    * active_terminals:N}`; pass `force` to tear them down and turn off anyway.
    *
    * An `on` answers 200 with the workspace's row, the same shape the list
@@ -459,7 +459,7 @@ export interface LibraryApi {
   ): Promise<WorkspaceEntry | undefined>;
   /** Forget (unmount + drop) a connected devserver's served workspace by its
    * mounted prefix (desktop action, 409 with no bridge). An unforced forget with
-   * live terminals answers the same live_terminals body as off. */
+   * live terminals answers the same `live_terminals` refusal as off. */
   forgetDevserverWorkspace(id: string, prefix: string, force?: boolean): Promise<void>;
   /** List the gateway registry. Empty on surfaces that hold none. */
   listGateways(): Promise<GatewayEntry[]>;
@@ -554,8 +554,8 @@ export class ApiError extends Error {
 /**
  * The live-terminal count carried by an unforced devserver-workspace off that
  * was refused because the workspace still has live terminal sessions. Returns
- * `active_terminals` when `e` is an `ApiError` whose 409 data contains
- * `{error:"live_terminals", active_terminals:N}`, else null, so the launcher
+ * `active_terminals` when `e` is an `ApiError` whose 409 data carries
+ * `code: "live_terminals"` and a numeric `active_terminals`, else null, so the launcher
  * can confirm-and-retry only that case and let other 409s, including
  * `NO_DESKTOP` and a locked workspace, reach the generic error banner.
  * The parsed data keeps the count beside the unwrapped message.
@@ -563,8 +563,8 @@ export class ApiError extends Error {
 export function liveTerminalsCount(e: unknown): number | null {
   if (!(e instanceof ApiError) || e.status !== 409) return null;
   if (e.data === null || typeof e.data !== "object") return null;
-  const body = e.data as { error?: unknown; active_terminals?: unknown };
-  if (body.error === "live_terminals" && typeof body.active_terminals === "number") {
+  const body = e.data as { code?: unknown; active_terminals?: unknown };
+  if (body.code === "live_terminals" && typeof body.active_terminals === "number") {
     return body.active_terminals;
   }
   return null;

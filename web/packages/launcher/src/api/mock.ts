@@ -22,6 +22,18 @@ interface MockDevserver extends DevserverEntry {
   token: string;
 }
 
+/** The server's 409 for an unforced operation over live terminal sessions. */
+function liveTerminalsRefusal(count: number): ApiError {
+  return new ApiError(
+    409,
+    JSON.stringify({
+      error: `workspace has ${count} live terminal session(s); close them or force`,
+      code: "live_terminals",
+      active_terminals: count,
+    }),
+  );
+}
+
 const DS_LIBRARY_ID = "lib-7f3a9c21b40d8e65";
 
 let nextWs = 3;
@@ -310,12 +322,7 @@ export const mockApi: LibraryApi = {
     // answers 409 live_terminals; a forced off (or no live terminals) proceeds.
     const liveKey = `local:${id}`;
     if (!on && !force && liveTerminals.has(liveKey)) {
-      return Promise.reject(
-        new ApiError(
-          409,
-          JSON.stringify({ error: "live_terminals", active_terminals: liveTerminals.get(liveKey) }),
-        ),
-      );
+      return Promise.reject(liveTerminalsRefusal(liveTerminals.get(liveKey) ?? 0));
     }
     if (ws) {
       ws.on = on;
@@ -517,12 +524,7 @@ export const mockApi: LibraryApi = {
     const ws = devserverWorkspaces.find((w) => w.devserver_id === id && w.prefix === prefix);
     const key = `${id}:${prefix}`;
     if (!on && !force && liveTerminals.has(key)) {
-      return Promise.reject(
-        new ApiError(
-          409,
-          JSON.stringify({ error: "live_terminals", active_terminals: liveTerminals.get(key) }),
-        ),
-      );
+      return Promise.reject(liveTerminalsRefusal(liveTerminals.get(key) ?? 0));
     }
     if (!on && force) liveTerminals.delete(key);
     if (ws) {
