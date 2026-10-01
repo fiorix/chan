@@ -35,7 +35,7 @@ use chan_workspace::index::embeddings::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err, err_from, err_state};
+use crate::error::{err, err_code, err_from, err_state};
 use crate::extract::Json;
 use crate::routes::{blocking_response, run_blocking};
 use crate::state::AppState;
@@ -234,17 +234,6 @@ pub async fn api_semantic_model_patch(
     .await
 }
 
-/// Structured error payload for the 409 returned by `enable` when
-/// the model isn't on disk. Mirrors `EmbedError::ModelNotDownloaded`
-/// fields so the SPA can render the same hint as the CLI.
-#[derive(Debug, Clone, Serialize)]
-struct ModelNotDownloadedBody {
-    error: &'static str,
-    model_id: String,
-    expected_dir: String,
-    download_endpoint: &'static str,
-}
-
 fn model_not_downloaded_response(model_name: String, error: &EmbedError) -> Response {
     let expected_dir = match error {
         EmbedError::ModelNotDownloaded { expected_dir, .. } => {
@@ -255,16 +244,16 @@ fn model_not_downloaded_response(model_name: String, error: &EmbedError) -> Resp
             .to_string_lossy()
             .into_owned(),
     };
-    (
+    err_code(
         StatusCode::CONFLICT,
-        Json(ModelNotDownloadedBody {
-            error: "model_not_downloaded",
-            model_id: model_name,
-            expected_dir,
-            download_endpoint: "/api/index/semantic/download",
+        error.to_string(),
+        "model_not_downloaded",
+        serde_json::json!({
+            "model_id": model_name,
+            "expected_dir": expected_dir,
+            "download_endpoint": "/api/index/semantic/download",
         }),
     )
-        .into_response()
 }
 
 /// `POST /api/index/semantic/enable`. Flip the workspace to Hybrid.
