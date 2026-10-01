@@ -800,6 +800,7 @@ export class SceneSession {
 
   private dial(): void {
     this.clearReconnectTimer();
+    this.clearAttachTimer();
     if (this.pushInFlight) this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.sawFrameOnSocket = false;

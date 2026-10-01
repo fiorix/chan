@@ -799,6 +799,7 @@ export class DocSession {
 
   private dial(fresh = false): void {
     this.clearReconnectTimer();
+    this.clearAttachTimer();
     if (this.pushInFlight) this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.sawFrameOnSocket = false;
