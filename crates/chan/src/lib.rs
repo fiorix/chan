@@ -856,10 +856,12 @@ struct ServeCliArgs {
     /// `server.search.aggression` for this run.
     #[arg(long, value_parser = parse_search_aggression, verbatim_doc_comment)]
     search_aggression: Option<SearchAggression>,
-    /// Lock down the Settings panel: the SPA greys the cog and
-    /// the server refuses every settings-write route with 403
-    /// (PATCH /api/config, POST /api/storage/reset,
-    /// POST /api/index/rebuild). For
+    /// Refuse settings writes: the server this command binds answers
+    /// 403 on its settings-write routes (PATCH /api/config, POST
+    /// /api/storage/reset and POST /api/index/rebuild among them).
+    /// Settings reads stay open. Only a server bound here enforces
+    /// this, so a serve that would hand the workspace to chan-desktop
+    /// or a devserver is refused: serve it with --standalone. For
     /// kiosk-style deployments (shared workstation, demo box) where
     /// the workspace owner is not the operator at the keyboard.
     #[arg(long, verbatim_doc_comment)]
@@ -4039,7 +4041,9 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
     }
 
     if no_settings {
-        eprintln!("chan: --no-settings is set; the SPA will grey the cog and all settings-write routes will refuse with 403.");
+        eprintln!(
+            "chan: --no-settings is set; this server answers 403 on its settings-write routes."
+        );
     }
     let config = ServeConfig {
         addr,
@@ -4054,8 +4058,9 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         search_aggression,
         verbose,
         // Local serve trusts the operator by default; --no-settings opts
-        // into the UI grey + server 403 for kiosk / shared-workstation
-        // deployments where the operator is not the workspace owner.
+        // into the server's 403 on settings writes for kiosk /
+        // shared-workstation deployments where the operator is not the
+        // workspace owner.
         settings_disabled: no_settings,
     };
     // A standalone `chan serve` and a devserver share DEFAULT_PORT. On collision,

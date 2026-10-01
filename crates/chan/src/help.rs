@@ -208,7 +208,8 @@ editor does not know renders as `iso`.
 
 SEE ALSO:
 `chan serve --search-aggression` to override the indexer profile for one
-run, `chan serve --no-settings` to lock the in-app Settings panel.
+run, `chan serve --no-settings` to make a standalone serve refuse
+settings writes.
 ";
 
 /// `chan devserver` long help (manpage head).
@@ -420,8 +421,10 @@ list. A valued --devserver refuses when that port is not live; a bare
 --devserver with no live candidate keeps the standalone fallback. The
 standalone default port 8787 is also `chan devserver`'s default: on a
 collision chan says whether a discovered devserver of yours reports that
-port. --no-token removes the only auth gate; --no-settings greys the
-Settings cog and makes every settings-write route answer 403.
+port. --no-token removes the only auth gate. --no-settings makes the
+server bound here answer 403 on its settings-write routes; a serve that
+would hand the workspace to chan-desktop or a devserver is refused with
+it, so add --standalone.
 
 CAVEATS:
 serve takes a PATH only; a devserver URL belongs to `chan devserver
