@@ -82,10 +82,10 @@ pub enum Request {
     OpenWorkspace {
         protocol: u32,
         cli_version: String,
-        /// The workspace root the CLI was asked to serve. The desktop
-        /// canonicalizes + registers it the same way its own
-        /// open-local-workspace path does. Sent as a string for stable
-        /// JSON across platforms.
+        /// The workspace root the CLI was asked to serve. The desktop first
+        /// looks up the path as sent; if no workspace is mounted by that key,
+        /// it registers the path through its local library before mounting.
+        /// Sent as a string for stable JSON across platforms.
         workspace_path: String,
     },
     /// Ask the running desktop to drive its `tauri-plugin-updater`. With

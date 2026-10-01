@@ -2560,12 +2560,12 @@ impl WorkspaceHost {
     /// [`WindowRecord`] (the same shape the feed serves, so a `POST` handler
     /// returns it directly). The registry's create fires the watch via the
     /// bridge; this also fires it directly so the push does not hinge on the
-    /// bridge task's scheduling. The tenant side ensures a serving tenant exists
-    /// for the new window. chan-desktop mints through here, its workspace
-    /// windows included, with the key it computed. The devserver's serve
-    /// handoff and the launcher's window route and command action mint a
-    /// workspace window through [`Self::mint_workspace_window`], which stores
-    /// the root the workspace's runtime was opened at; the launcher's other
+    /// bridge task's scheduling. Live tenant details attach when a serving
+    /// tenant exists; minting a workspace record does not require one.
+    /// Desktop command-deck and menu actions use this method with a path
+    /// resolved by their caller. Desktop serve and CLI handoffs, the
+    /// devserver's serve handoff, and the launcher's workspace mints use
+    /// [`Self::mint_workspace_window`] to resolve a stored root. Other
     /// browser mints use [`Self::mint_window_with_origin`].
     pub fn mint_window(
         &self,

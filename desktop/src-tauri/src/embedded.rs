@@ -683,8 +683,8 @@ impl EmbeddedServer {
     /// record. The minted record fires the aggregate change signal, so the
     /// window watcher's feed surfaces it and opens its native window -- the
     /// registry is the sole window-creation authority (a minted window can
-    /// never be double-opened). A workspace window resolves its live tenant
-    /// (the workspace must be running) for a prefix/token to attach to.
+    /// never be double-opened). A workspace record gets its live prefix and
+    /// token when a matching tenant is mounted; minting does not require one.
     pub fn mint_window(
         &self,
         kind: chan_server::WindowKind,

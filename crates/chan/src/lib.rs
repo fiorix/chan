@@ -3293,10 +3293,9 @@ async fn probe_parentage(socket: &Path, timeout: Duration) -> Parentage {
 ///
 /// The Windows `\\?\` verbatim prefix is stripped from whichever branch wins.
 /// `std::fs::canonicalize` emits it, and this root is user-visible: it is
-/// printed by `chan serve` and handed to chan-desktop, which titles the window
-/// with it -- so leaving it in surfaces `\\?\C:\notes` in the window title.
-/// `strip_verbatim_prefix` is the same normalization the registry keys on, so
-/// this also keeps the displayed path identical to the keyed one.
+/// printed by `chan serve` and handed to chan-desktop. The desktop titles a
+/// window from its stored record path, which may differ from this input.
+/// `strip_verbatim_prefix` is the same normalization the registry keys on.
 fn absolutize_serve_root(root: PathBuf) -> PathBuf {
     let absolute = std::fs::canonicalize(&root)
         .or_else(|_| std::path::absolute(&root))
@@ -11162,11 +11161,10 @@ mod tests {
         assert!(absolutize_serve_root(PathBuf::from("sub/dir")).starts_with(&cwd));
     }
 
-    /// This root is user-visible: `chan serve` prints it and chan-desktop
-    /// titles the window with it. `std::fs::canonicalize` emits the Windows
-    /// verbatim prefix, which leaked all the way to the window title as
-    /// `\\?\C:\notes`. Windows-only in effect, but the assertion is a pure
-    /// string property so it runs on every arm.
+    /// This root is user-visible: `chan serve` prints it and hands it to
+    /// chan-desktop. `std::fs::canonicalize` emits the Windows verbatim
+    /// prefix, which must be stripped from the printed and handed-off path.
+    /// This pure string assertion runs on every arm.
     #[test]
     fn absolutize_serve_root_strips_the_windows_verbatim_prefix() {
         let out = absolutize_serve_root(PathBuf::from("."));

@@ -388,9 +388,9 @@ pub fn stable_socket_path(identity: &str, prefix: &str) -> PathBuf {
 /// user-editable config file) never reaches the filename verbatim. The
 /// leading `s` (stable) marker keeps the name distinguishable from the
 /// pid-scoped `chan-control-<digits>-<rand>` family, even for an
-/// all-digits identity; discovery's stable-candidate classifier in the
-/// `chan` CLI matches this exact shape. The hash is FNV-1a 64 rather than
-/// `DefaultHasher` because the name must be stable across chan builds,
+/// all-digits identity; chan-shell's stable-candidate classifier matches
+/// this exact shape. The hash is FNV-1a 64 rather than `DefaultHasher`
+/// because the name must be stable across chan builds,
 /// not just within one process.
 fn stable_socket_name(identity: &str, prefix: &str) -> String {
     format!(
