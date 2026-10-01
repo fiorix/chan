@@ -138,11 +138,7 @@ export function parseInternalLink(
   label: string,
   fromPath: string | null,
 ): ParsedWikiLink | null {
-  if (!url) return null;
-  // Bail on scheme-prefixed URLs (http://, https://, mailto:, etc.)
-  // and intra-doc fragments (`#section` alone).
-  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return null;
-  if (url.startsWith("#")) return null;
+  if (!isInternalUrl(url)) return null;
   // Split anchor (everything after the first `#` in the URL portion).
   const hashIdx = url.indexOf("#");
   const rawPath = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
@@ -163,6 +159,13 @@ export function parseInternalLink(
   const displayLabel =
     label.trim() || (target.split("/").pop() ?? target).replace(/\.md$/, "");
   return { target, label: displayLabel, anchor, wasAbs };
+}
+
+function isInternalUrl(url: string): boolean {
+  if (!url) return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return false;
+  if (url.startsWith("#")) return false;
+  return true;
 }
 
 // ---- kind cache ----------------------------------------------------------
@@ -241,6 +244,7 @@ class WikiLinkWidget extends WidgetType {
     readonly kind: LinkKind | undefined,
     readonly sourceLen: number,
     readonly onClick: (args: WikiLinkClickArgs) => void,
+    readonly unresolvable = false,
   ) {
     super();
   }
@@ -251,6 +255,7 @@ class WikiLinkWidget extends WidgetType {
       this.parsed.label === other.parsed.label &&
       this.parsed.anchor === other.parsed.anchor &&
       this.kind === other.kind &&
+      this.unresolvable === other.unresolvable &&
       this.sourceLen === other.sourceLen
     );
   }
@@ -268,9 +273,11 @@ class WikiLinkWidget extends WidgetType {
     const tgt = this.parsed.anchor
       ? `${this.parsed.target}#${this.parsed.anchor}`
       : this.parsed.target;
-    el.title = view.state.facet(EditorView.editable)
-      ? `${tgt} - Cmd-click to open`
-      : `${tgt} - click to preview`;
+    el.title = this.unresolvable
+      ? `${tgt} - outside workspace`
+      : view.state.facet(EditorView.editable)
+        ? `${tgt} - Cmd-click to open`
+        : `${tgt} - click to preview`;
     if (this.kind === "image") {
       // Image-kind wikilinks render the actual file as an inline
       // thumbnail rather than a text pill - a `[[Recipes/photo.jpg]]`
@@ -299,6 +306,7 @@ class WikiLinkWidget extends WidgetType {
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
+      if (this.unresolvable) return;
       // Read-only mode (chat replies, user-toggled read mode, an
       // fs-locked file) replaces the source-reveal-and-edit path
       // with a non-destructive preview: click pops a popover with
@@ -480,17 +488,25 @@ function scanWikiLinks(
         const label = state.doc.sliceString(labelFrom, labelTo);
         const url = state.doc.sliceString(urlFrom, urlTo);
         const parsed = parseInternalLink(url, label, fromPath);
-        if (!parsed) return; // external - handled by decorations/marks.ts
-        const kind = getKind(parsed.target);
+        if (!parsed && !isInternalUrl(url)) return; // external link
+        const unresolvable = !parsed;
+        const pill = parsed ?? {
+          target: url,
+          label: label.trim() || url,
+          anchor: "",
+          wasAbs: url.startsWith("/"),
+        };
+        const kind = unresolvable ? "broken" : getKind(pill.target);
         decos.push({
           from: outerFrom,
           to: outerTo,
           deco: Decoration.replace({
             widget: new WikiLinkWidget(
-              parsed,
+              pill,
               kind,
               outerTo - outerFrom,
               opts.onWikiClick,
+              unresolvable,
             ),
           }),
         });
