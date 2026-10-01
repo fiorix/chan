@@ -74,7 +74,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 - Cursor navigation (arrow keys) onto an image: jumps directly to the "edit" state, not "zoom". The image is treated as a single cursor position; arrowing past it deselects.
 - "Edit": reveals the image's markdown inline (`![alt](src#w=N)`), places the caret at the start of the markdown, and selects the block. Moving the caret deselects. The markdown stays revealed while the caret is inside it; leaving collapses back to the image.
 - Editing the `alt` text is plain text editing.
-- Editing the `src` opens a search dropdown anchored to the markdown with image-result previews (same shape as the insert flow). When the path doesn't resolve, render an inline error row under the markdown: `"<path>" could not be found.`
+- Editing the `src` opens a search dropdown anchored to the markdown with image-result previews (same shape as the insert flow). Picking or uploading a replacement keeps the image's width and alignment. When the path doesn't resolve, render an inline error row under the markdown: `"<path>" could not be found.`
 
 ### Date macros `@today`, `@date`
 
