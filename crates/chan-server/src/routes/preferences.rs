@@ -1095,7 +1095,14 @@ mod tests {
             .await
             .expect("read conflict body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("conflict JSON");
-        assert_eq!(json["error"], "config_conflict");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "error": "configuration changed since the revision this write expected",
+                "code": "config_conflict",
+                "current": serde_json::to_value(&current).expect("serialize the current view"),
+            })
+        );
         assert_eq!(json["current"]["revision"], 2);
         assert_eq!(json["current"]["preferences"]["theme"], "dark");
 
