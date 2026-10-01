@@ -41,7 +41,7 @@ import {
 import { syntaxTree } from "@codemirror/language";
 import { type Extension, StateEffect } from "@codemirror/state";
 import { selectionInRange } from "../decorations/selection";
-import { decodePercent, normalizeHref } from "../links";
+import { decodePercent, isInternalHref, normalizeHref } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
 import { parentDir } from "../../state/format";
@@ -138,7 +138,7 @@ export function parseInternalLink(
   label: string,
   fromPath: string | null,
 ): ParsedWikiLink | null {
-  if (!isInternalUrl(url)) return null;
+  if (!isInternalHref(url)) return null;
   // Split anchor (everything after the first `#` in the URL portion).
   const hashIdx = url.indexOf("#");
   const rawPath = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
@@ -159,13 +159,6 @@ export function parseInternalLink(
   const displayLabel =
     label.trim() || (target.split("/").pop() ?? target).replace(/\.md$/, "");
   return { target, label: displayLabel, anchor, wasAbs };
-}
-
-function isInternalUrl(url: string): boolean {
-  if (!url) return false;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return false;
-  if (url.startsWith("#")) return false;
-  return true;
 }
 
 // ---- kind cache ----------------------------------------------------------
@@ -488,7 +481,7 @@ function scanWikiLinks(
         const label = state.doc.sliceString(labelFrom, labelTo);
         const url = state.doc.sliceString(urlFrom, urlTo);
         const parsed = parseInternalLink(url, label, fromPath);
-        if (!parsed && !isInternalUrl(url)) return; // external link
+        if (!parsed && !isInternalHref(url)) return; // external link
         const unresolvable = !parsed;
         const pill = parsed ?? {
           target: url,
