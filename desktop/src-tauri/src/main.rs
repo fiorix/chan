@@ -1877,8 +1877,8 @@ fn spawn_control_terminal_exit_watcher(
 ///
 /// Driven over the desktop bridge: the launcher's Connect button fires
 /// `POST /api/library/devservers/{id}/connect` → `DesktopWindowOp::ConnectDevserver`
-/// → `window_ops`, which calls this. There is no `#[tauri::command]` wrapper  --
-/// the launcher is pure HTTP, never a Tauri invoke.
+/// → `window_ops`, which calls this. This connect action has no
+/// `#[tauri::command]` wrapper; the launcher also invokes narrow app commands.
 async fn connect_devserver_impl(
     app: tauri::AppHandle,
     state: Arc<AppState>,
@@ -6671,9 +6671,9 @@ fn capture_launcher_geometry(app: &tauri::AppHandle) {
 /// workspace `KEY_BRIDGE_JS`, so without this it has no reload chord. Claims
 /// Cmd+R (macOS) / Ctrl+R (Linux/Windows) in the capture phase and reloads via
 /// the `reload_window` IPC, falling back to `location.reload()` when the Tauri
-/// bridge is absent. Plain Ctrl+R is safe to claim here: the launcher hosts no
-/// terminal whose shell reverse-search it would shadow (workspace windows move
-/// reload to Ctrl+Shift+R off macOS for exactly that reason).
+/// bridge is absent or the invoke fails. Plain Ctrl+R is safe to claim here:
+/// the launcher hosts no terminal whose shell reverse-search it would shadow
+/// (workspace windows move reload to Ctrl+Shift+R off macOS for that reason).
 const LAUNCHER_RELOAD_BRIDGE_JS: &str = include_str!("launcher_reload_bridge.js");
 
 enum ShutdownAction {

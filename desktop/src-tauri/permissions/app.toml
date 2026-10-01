@@ -176,8 +176,8 @@ commands.allow = ["open_reverse_tunnel"]
 # from the INVOKING window's own label, so a window can only ever reach its own
 # library, and every window class that runs the command deck needs them: a
 # loopback window gets them through capabilities/workspace.json, and an
-# authenticated exact-origin gateway lib-* window gets them through the
-# runtime-minted gateway-window set.
+# authenticated exact-origin gateway lib-* window gets the static
+# gateway-window set through a runtime-minted capability.
 [[permission]]
 identifier = "allow-create-library-window"
 description = "Enables the create_library_window command (the command deck's native library-window mint)."
