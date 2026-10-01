@@ -32,7 +32,7 @@
   } from "../api/types";
   import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
   import { isAudio, isImage, isPdf, isVideo } from "../state/fileTypes";
-  import { basename, formatMtime, formatSize, parentDir } from "../state/format";
+  import { basename, fmtDevs, fmtMonths, formatMtime, formatSize, parentDir } from "../state/format";
   import { windowCaps } from "../state/windowCaps";
   import {
     ensureGraphLoaded,
@@ -802,19 +802,6 @@
       ? Math.max(0, prefixReport.by_language.length - visibleLanguages.length)
       : 0,
   );
-
-  /// COCOMO formatting helpers. We deliberately drop estimated cost
-  /// from the inspector: the dollar number is a default-salary
-  /// extrapolation that's noisy for a personal notes app. Effort,
-  /// schedule, and developer-count carry the useful signal.
-  function fmtMonths(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)} mo` : `${n.toFixed(1)} mo`;
-  }
-  function fmtDevs(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)}` : n.toFixed(1);
-  }
 </script>
 
 <!-- Shared ACTIONS section. Rendered directly under the filename header
@@ -1017,6 +1004,9 @@
             >show fewer</button>
           {/if}
         {/if}
+        <!-- No estimated cost: the dollar number is a default-salary
+             extrapolation that's noisy for a personal notes app. Effort,
+             schedule, and developer-count carry the useful signal. -->
         <div class="cocomo">
           <div class="cocomo-title">COCOMO ({prefixReport.cocomo.model})</div>
           <div class="meta-grid">

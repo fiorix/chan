@@ -17,7 +17,7 @@
   import { ApiError, apiErrorCode } from "../api/errors";
   import { api } from "../api/client";
   import type { InspectorPayload, ReportPrefix } from "../api/types";
-  import { formatMtime, formatSize } from "../state/format";
+  import { fmtDevs, fmtMonths, formatMtime, formatSize } from "../state/format";
   import { windowCaps } from "../state/windowCaps";
   import {
     fileOps,
@@ -327,17 +327,6 @@
     out.sort((a, b) => a.label.localeCompare(b.label));
     return out;
   });
-
-  /// COCOMO formatting helpers; identical shape to FileInfoBody so the
-  /// dir-mode and workspace-root inspectors format the same way.
-  function fmtMonths(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)} mo` : `${n.toFixed(1)} mo`;
-  }
-  function fmtDevs(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)}` : n.toFixed(1);
-  }
 
 </script>
 
