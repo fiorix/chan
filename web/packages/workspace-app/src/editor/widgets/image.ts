@@ -799,8 +799,9 @@ class ImageWidget extends WidgetType {
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
     copyBtn.className = "cm-md-image-action cm-md-image-copy";
-    copyBtn.title = "copy image to clipboard";
-    copyBtn.setAttribute("aria-label", "copy image to clipboard");
+    const copyTitle = "copy image to clipboard";
+    copyBtn.title = copyTitle;
+    copyBtn.setAttribute("aria-label", copyTitle);
     copyBtn.innerHTML = COPY_ICON_SVG;
     copyBtn.addEventListener("mousedown", (e) => {
       e.preventDefault();
@@ -816,10 +817,9 @@ class ImageWidget extends WidgetType {
           // Surface failure briefly via the title attr. No toast
           // surface to land this in; the user will retry if they
           // care.
-          const prev = copyBtn.title;
           copyBtn.title = "copy failed";
           setTimeout(() => {
-            copyBtn.title = prev;
+            copyBtn.title = copyTitle;
           }, 1200);
         },
       );
