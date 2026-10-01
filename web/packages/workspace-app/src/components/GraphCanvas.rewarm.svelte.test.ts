@@ -99,3 +99,46 @@ describe("a graph published again", () => {
     expect(alphas.at(-1)).toBe(0.05);
   });
 });
+
+describe("a visibility change without a new graph payload", () => {
+  function renderWithVisible(ids: Set<string>): { graph: ReturnType<typeof graph>; props: {
+    visibleNodeIds: Set<string>;
+    visibleEdges: CanvasEdge[];
+  } } {
+    const g = graph();
+    const p = $state({
+      open: true,
+      nodes: g.nodes,
+      edges: g.edges,
+      visibleNodeIds: ids,
+      visibleEdges: g.edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
+      focalIds: [] as string[],
+      selectedId: null as string | null,
+      onSelect: vi.fn(),
+    });
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(GraphCanvas, { target, props: p }) as Record<string, unknown>);
+    flushSync();
+    runFrames(2);
+    alphas.length = 0;
+    return { graph: g, props: p };
+  }
+
+  test("revealing a filtered tag uses the incremental add strength", () => {
+    const ids = new Set(["", "directory:notes", "notes/a.md", "notes/b.md"]);
+    const { graph: g, props: p } = renderWithVisible(ids);
+    p.visibleNodeIds = new Set(g.nodes.map((node) => node.id));
+    p.visibleEdges = g.edges;
+    flushSync();
+    expect(alphas).toEqual([0.35]);
+  });
+
+  test("hiding three of five nodes uses the incremental remove strength", () => {
+    const { graph: g, props: p } = renderWithVisible(new Set(graph().nodes.map((node) => node.id)));
+    p.visibleNodeIds = new Set(["", "notes/a.md"]);
+    p.visibleEdges = g.edges.filter((edge) => p.visibleNodeIds.has(edge.source) && p.visibleNodeIds.has(edge.target));
+    flushSync();
+    expect(alphas).toEqual([0.2]);
+  });
+});
