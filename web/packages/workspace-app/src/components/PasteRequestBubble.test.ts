@@ -27,7 +27,9 @@ function focused(): HTMLTextAreaElement {
   app = mount(PasteRequestBubble, { target: document.body.appendChild(document.createElement("div")) });
   pasteRequestState.card = { requestId: "r1", prefer: "text" as never, busy: false };
   flushSync();
-  expect(document.activeElement, "the card takes the keyboard").toBe(document.querySelector(".pb-card"));
+  expect(document.activeElement, "the card takes the keyboard").toBe(
+    document.querySelector('[aria-label="Paste request"] [tabindex="-1"]'),
+  );
   return terminal;
 }
 

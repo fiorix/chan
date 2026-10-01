@@ -27,7 +27,9 @@ function focused(): HTMLTextAreaElement {
   app = mount(SessionHandoverBubble, { target: document.body.appendChild(document.createElement("div")) });
   sessionState.handover = { requestId: "h1", fromWindowId: "w-2", fromName: null, busy: false };
   flushSync();
-  expect(document.activeElement, "the card takes the keyboard").toBe(document.querySelector(".hb-card"));
+  expect(document.activeElement, "the card takes the keyboard").toBe(
+    document.querySelector('[aria-label="Handover request"] [tabindex="-1"]'),
+  );
   return terminal;
 }
 
