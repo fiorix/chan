@@ -157,8 +157,8 @@
                    background (preflight already unlocked). Passive chip:
                    the dot is static (no `working` pulse) so this reads as
                    quiet progress, not the active reindexing pill. The
-                   done/total here are real chunk counts, not the building
-                   phase's misleading EmbedBatch sentinel. -->
+                   done/total here count files from IndexFile ticks, while
+                   EmbedBatch counts pending chunks against a batch budget. -->
               embedding
               <span class="num">{s.embedding.done}/{s.embedding.total}</span>
             {/if}
