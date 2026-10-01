@@ -173,6 +173,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The graph settles, points and names its filters as it should.** A Graph tab with a chip turned off gave its settled layout a fresh kick, and before the first click a re-fit, every time the same graph was published again, at the end of each load and on each batch. A node being dragged shows the grabbing hand. Leaving the canvas from a node drops its hover ring and the pointer cursor. A filesystem graph's menu names its markdown and source rows, which read "directory".
 
+- **The style toolbar's tooltips name only the chords the editor binds.** In v0.100.0, the strikethrough tooltip named Cmd/Ctrl+Shift+S and the inline code tooltip named Cmd/Ctrl+E, the chords of Search on macOS and of Show Source. They now name none, since neither action has a chord. The bold and italic tooltips name the platform's chord: Ctrl+B and Ctrl+I, or Cmd+B and Cmd+I on macOS.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
