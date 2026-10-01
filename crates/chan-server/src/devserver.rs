@@ -5681,6 +5681,86 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_close_reason_from_drain_is_shutdown() {
+        use futures::StreamExt;
+        use tower::ServiceExt;
+
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        complete_test_startup(&state).await;
+        let host = state.host.clone();
+        let mut config = tenant_config(state.addr, "/drain-terminal");
+        config.no_token = true;
+        host.open_terminal_session_with_command(config, Some("sleep 600".into()), None)
+            .await
+            .expect("mount terminal tenant");
+        let (app, _) = build_devserver_app(state, host.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = app.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/drain-terminal/api/terminal/ws?cols=80&rows=24"
+        ))
+        .await
+        .expect("attach terminal socket");
+        let ready = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(message) = socket.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "ready" {
+                        return;
+                    }
+                }
+            }
+            panic!("socket ended before ready");
+        })
+        .await;
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/devserver/terminal-sessions/drain")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(message) = socket.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "closed" {
+                        return frame;
+                    }
+                }
+            }
+            panic!("socket ended without a closed frame");
+        })
+        .await;
+        host.shutdown_all().await.unwrap();
+        server.abort();
+        ready.expect("terminal reached ready before the drain");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let drained: crate::devserver_api::DrainedTerminals =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(drained.closed, 1);
+        assert_eq!(drained.dead, 1);
+        assert!(drained.lingering.is_empty());
+        assert_eq!(
+            closed.expect("drain sends a closed frame")["reason"],
+            "shutdown",
+            "a drain kills the attached PTY"
+        );
+    }
+
     #[tokio::test]
     async fn rotate_token_route_swaps_the_live_bearer() {
         use tower::ServiceExt;

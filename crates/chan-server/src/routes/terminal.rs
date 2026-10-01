@@ -4312,6 +4312,105 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_close_reason_from_detach_is_parked() {
+        use chan_library::terminal_sessions::{
+            current_boot_id, FdStorePark, FdStoreParker, RecordedChildIdentity,
+        };
+        use futures::StreamExt;
+        use std::os::fd::{BorrowedFd, OwnedFd};
+
+        #[derive(Clone, Default)]
+        struct Store(Arc<std::sync::Mutex<BTreeMap<String, OwnedFd>>>);
+        impl FdStorePark for Store {
+            fn park(&self, fds: &[(&str, BorrowedFd<'_>)]) -> bool {
+                let mut stored = self.0.lock().unwrap();
+                for (name, fd) in fds {
+                    stored.insert((*name).into(), fd.try_clone_to_owned().unwrap());
+                }
+                true
+            }
+            fn unpark(&self, names: &[&str]) {
+                let mut stored = self.0.lock().unwrap();
+                for name in names {
+                    stored.remove(*name);
+                }
+            }
+            fn adopt(&self, _name: &str) -> bool {
+                true
+            }
+            fn changed(&self) {}
+        }
+        struct ChildCleanup(OwnedFd);
+        impl Drop for ChildCleanup {
+            fn drop(&mut self) {
+                let _ = rustix::process::pidfd_send_signal(&self.0, rustix::process::Signal::KILL);
+            }
+        }
+
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let store = Store::default();
+        state
+            .terminal_sessions
+            .install_fd_parker(FdStoreParker::new(store.clone()));
+        let terminal = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: Some("parked-close-window".into()),
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn parked terminal");
+        let entries = state.terminal_sessions.fdstore_manifest_sessions("test");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        let _child = ChildCleanup(
+            RecordedChildIdentity {
+                boot_id: current_boot_id(),
+                start_time: entry.child_start_time,
+            }
+            .pin(
+                entry.meta.child_pid.expect("owned child"),
+                current_boot_id().as_deref(),
+            )
+            .unwrap(),
+        );
+        state
+            .terminal_sessions
+            .fdstore_manifest_committed("test", &entries);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let mut socket =
+            dial_terminal(address, &format!("session={}&since=0", terminal.id())).await;
+        read_prelude(&mut socket).await;
+        assert_eq!(state.terminal_sessions.detach_parked_sessions(), 1);
+        let closed = tokio::time::timeout(PROBE_BUDGET, async {
+            while let Some(message) = socket.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "closed" {
+                        return frame;
+                    }
+                }
+            }
+            panic!("socket ended without a closed frame");
+        })
+        .await;
+        server.abort();
+        assert_eq!(
+            closed.expect("detach sends a closed frame")["reason"],
+            "parked",
+            "a detach preserves the attached PTY for restore"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn session_replay_bytes_after_import_counts_the_usable_ring() {
         use chan_library::terminal_sessions::{FdStorePark, FdStoreParker, FdStoreSessionImport};
         use std::os::fd::{BorrowedFd, OwnedFd};
