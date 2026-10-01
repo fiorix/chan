@@ -1222,6 +1222,9 @@ pub enum CloseReason {
     Idle,
     Workspace,
     Shutdown,
+    /// The PTY remains in the fd store for the next process to restore.
+    #[serde(rename = "parked")]
+    Parked,
     Explicit,
     Capped,
 }
@@ -1232,6 +1235,7 @@ impl CloseReason {
             CloseReason::Idle => "idle",
             CloseReason::Workspace => "workspace",
             CloseReason::Shutdown => "shutdown",
+            CloseReason::Parked => "parked",
             CloseReason::Explicit => "explicit",
             CloseReason::Capped => "capped",
         }
@@ -5584,7 +5588,7 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
-        self.broadcast(SessionEvent::Closed(CloseReason::Shutdown));
+        self.broadcast(SessionEvent::Closed(CloseReason::Parked));
     }
 
     /// Like [`close`](Self::close) but signals an in-place RESTART instead of a
