@@ -124,6 +124,15 @@ export function resolveRelativePath(href: string, fromPath: string): string {
   return fromDir.join("/");
 }
 
+/// Whether a markdown link destination addresses a workspace path rather
+/// than an external scheme or an anchor in the current document.
+export function isInternalHref(url: string): boolean {
+  if (!url) return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return false;
+  if (url.startsWith("#")) return false;
+  return true;
+}
+
 /// Resolve a markdown link href to a clean workspace-relative POSIX path.
 ///
 /// Hand-port of `chan_workspace::markdown::normalize_href`; both must
