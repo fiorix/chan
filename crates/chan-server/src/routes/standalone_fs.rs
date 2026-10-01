@@ -1586,6 +1586,8 @@ mod tests {
         assert_eq!(
             body_json(response).await,
             json!({
+                "error": "file changed on disk since it was read",
+                "code": "write_conflict",
                 "current_mtime": current_ns / 1_000_000_000,
                 "current_mtime_ns": t2,
                 "disk_conflicted": false,

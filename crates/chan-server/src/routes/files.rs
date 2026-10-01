@@ -5965,6 +5965,34 @@ fn fs_transfer_batch_sync(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn write_precondition_refusals_have_code_and_fields() {
+        super::super::refusal_tests::assert_refusal(
+            write_precondition_response(StatusCode::CONFLICT, Some(1_234_567_890), Some(7), true),
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": "file changed on disk since it was read",
+                "code": "write_conflict",
+                "current_mtime": 1,
+                "current_mtime_ns": "1234567890",
+                "current_authority_version": 7,
+                "disk_conflicted": true,
+            }),
+        )
+        .await;
+        super::super::refusal_tests::assert_refusal(
+            write_precondition_response(StatusCode::PRECONDITION_REQUIRED, None, None, false),
+            StatusCode::PRECONDITION_REQUIRED,
+            serde_json::json!({
+                "error": "a changed write must echo the authority version it last read",
+                "code": "write_conflict",
+                "current_mtime": null,
+                "disk_conflicted": false,
+            }),
+        )
+        .await;
+    }
+
     /// Only Markdown (.md) is the `document` wire kind; .txt is editable +
     /// searchable but rides `text` alongside source/config files. Contacts
     /// and directories take their own branches ahead of the classifier.

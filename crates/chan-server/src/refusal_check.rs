@@ -70,7 +70,7 @@ async fn inspect(State(allow_navigation): State<bool>, request: Request, next: N
             || (method == Method::HEAD && bytes.is_empty())
             || permanent_exception(&method, &path, parts.status, is_fallback && allow_navigation, &bytes)
             || range_refusal(&method, &path, parts.status, &parts.headers, &bytes)
-            || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes, is_fallback),
+            || pending_refusal(parts.status, &bytes, is_fallback),
         "refusal envelope violated: {method} {path} returned {} with body {:?}",
         parts.status,
         String::from_utf8_lossy(&bytes),
@@ -79,27 +79,7 @@ async fn inspect(State(allow_navigation): State<bool>, request: Request, next: N
     Response::from_parts(parts, Body::from(bytes))
 }
 
-fn pending_refusal(
-    method: &Method,
-    path: &str,
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &[u8],
-    is_fallback: bool,
-) -> bool {
-    if *method == Method::PUT
-        && matches_path("/api/fs/{*path}", path)
-        && matches!(
-            status,
-            StatusCode::CONFLICT | StatusCode::PRECONDITION_REQUIRED
-        )
-        && headers
-            .get(header::CONTENT_TYPE)
-            .is_some_and(|v| v == "application/json")
-        && write_conflict_shape(body)
-    {
-        return true;
-    }
+fn pending_refusal(status: StatusCode, body: &[u8], is_fallback: bool) -> bool {
     // Host dispatch is a fallback; its lock error belongs to chan-library.
     is_fallback
         && status == StatusCode::INTERNAL_SERVER_ERROR
@@ -129,29 +109,6 @@ fn range_refusal(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("bytes */"))
             .is_some_and(|size| !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()))
-}
-
-fn write_conflict_shape(body: &[u8]) -> bool {
-    let Ok(serde_json::Value::Object(fields)) = serde_json::from_slice(body) else {
-        return false;
-    };
-    fields.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "current_mtime" | "current_mtime_ns" | "current_authority_version" | "disk_conflicted"
-        )
-    }) && fields
-        .get("current_mtime")
-        .is_some_and(|v| v.is_null() || v.as_i64().is_some())
-        && fields
-            .get("disk_conflicted")
-            .is_some_and(serde_json::Value::is_boolean)
-        && fields
-            .get("current_mtime_ns")
-            .is_none_or(serde_json::Value::is_string)
-        && fields
-            .get("current_authority_version")
-            .is_none_or(|v| v.as_u64().is_some())
 }
 
 fn framework_exception(
@@ -475,82 +432,6 @@ mod tests {
         "/api/fs/transfer",
         StatusCode::CONFLICT
     );
-
-    #[tokio::test]
-    async fn write_conflicts_require_their_complete_typed_shape() {
-        use axum::response::IntoResponse;
-        let full = serde_json::json!({"current_mtime":1,"current_mtime_ns":"1000000000",
-            "current_authority_version":3,"disk_conflicted":false});
-        let minimal = serde_json::json!({"current_mtime":null,"disk_conflicted":true});
-        for value in [full.clone(), minimal] {
-            for status in [StatusCode::CONFLICT, StatusCode::PRECONDITION_REQUIRED] {
-                assert!(
-                    accepts_response(
-                        "PUT",
-                        "/api/fs/probe.md",
-                        (status, axum::Json(value.clone())).into_response()
-                    )
-                    .await,
-                    "the existing write conflict shape remains pending"
-                );
-            }
-        }
-        for (field, value) in [
-            ("current_mtime", serde_json::json!("1")),
-            ("current_mtime_ns", serde_json::json!(1)),
-            ("current_authority_version", serde_json::json!(-1)),
-            ("disk_conflicted", serde_json::json!(null)),
-            ("extra", serde_json::json!(true)),
-        ] {
-            let mut invalid = full.clone();
-            invalid[field] = value;
-            assert!(
-                !accepts_response(
-                    "PUT",
-                    "/api/fs/probe.md",
-                    (StatusCode::CONFLICT, axum::Json(invalid)).into_response()
-                )
-                .await,
-                "write conflict must reject invalid field {field}"
-            );
-        }
-        for field in ["current_mtime", "disk_conflicted"] {
-            let mut invalid = full.clone();
-            invalid.as_object_mut().unwrap().remove(field);
-            assert!(
-                !accepts_response(
-                    "PUT",
-                    "/api/fs/probe.md",
-                    (StatusCode::CONFLICT, axum::Json(invalid)).into_response()
-                )
-                .await,
-                "write conflict requires {field}"
-            );
-        }
-        for (method, path, status) in [
-            ("POST", "/api/fs/probe.md", StatusCode::CONFLICT),
-            ("PUT", "/api/unrelated", StatusCode::CONFLICT),
-            ("PUT", "/api/fs/probe.md", StatusCode::BAD_REQUEST),
-        ] {
-            assert!(
-                !accepts_response(
-                    method,
-                    path,
-                    (status, axum::Json(full.clone())).into_response()
-                )
-                .await
-            );
-        }
-        assert!(
-            !accepts_response(
-                "PUT",
-                "/api/fs/probe.md",
-                (StatusCode::CONFLICT, full.to_string()).into_response()
-            )
-            .await,
-            "write conflict requires JSON content type"
-        );
-    }
 
     #[tokio::test]
     async fn extension_upgrade_rejections_require_framework_text() {
