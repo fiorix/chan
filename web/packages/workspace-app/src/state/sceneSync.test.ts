@@ -14,6 +14,7 @@ import {
   acquireSceneSession,
   isSceneSyncEligible,
   resetSceneSyncForTests,
+  SCENE_ATTACH_TIMEOUT_MS,
   SCENE_FLUSH_TIMEOUT_MS,
   SCENE_FALLBACK_SETTLE_MS,
   sceneSessionFor,
@@ -454,6 +455,32 @@ describe("presence", () => {
 // ---- capability probe + degrade ----------------------------------------------
 
 describe("probe and degrade", () => {
+  test("a fallback redial keeps its own attach window", async () => {
+    vi.useFakeTimers();
+    const tab = sceneTab();
+    const { session, sock } = attached(tab);
+    sock.drop();
+    await vi.advanceTimersByTimeAsync(500);
+    lastSocket().drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    lastSocket().drop();
+    expect(tab.doc?.state).toBe("degraded");
+
+    await vi.advanceTimersByTimeAsync(2000);
+    const retry = lastSocket();
+    retry.open();
+    await vi.advanceTimersByTimeAsync(1000);
+    session.healAfterFallbackSave();
+    const healed = lastSocket();
+    expect(healed).not.toBe(retry);
+    expect(retry.closedByClient).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(SCENE_ATTACH_TIMEOUT_MS - 1000 + 1);
+    expect(healed.closedByClient, "the previous dial must not close the new socket").toBe(false);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(healed.closedByClient, "the new dial must still time out on its own deadline").toBe(true);
+  });
+
   test("a close before any frame latches scene sync off module-wide", () => {
     const tab = sceneTab();
     const session = acquireSceneSession(tab)!;

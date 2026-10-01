@@ -515,6 +515,37 @@ describe("resync", () => {
 // ---- degradation ------------------------------------------------------------
 
 describe("degradation", () => {
+  test("a fallback redial keeps its own attach window", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    const { session, sock, view, cleanup } = await attached(tab, "hello");
+    type(view, "L");
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(1);
+    sock.drop();
+    await vi.advanceTimersByTimeAsync(500);
+    lastSocket().drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    lastSocket().drop();
+    expect(tab.doc?.state).toBe("degraded");
+
+    await vi.advanceTimersByTimeAsync(2000);
+    const retry = lastSocket();
+    retry.open();
+    expect(tab.doc?.state).toBe("degraded");
+    await vi.advanceTimersByTimeAsync(1000);
+    session.healAfterFallbackSave();
+    const healed = lastSocket();
+    expect(healed).not.toBe(retry);
+    expect(retry.closedByClient).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS - 1000 + 1);
+    expect(healed.closedByClient, "the previous dial must not close the new socket").toBe(false);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(healed.closedByClient, "the new dial must still time out on its own deadline").toBe(true);
+    cleanup();
+  });
+
   test("socket drop: reconnect grace suppresses autosave, then degrades, then heals", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
