@@ -1841,21 +1841,6 @@
   // `setSelected` on tap, and we re-emit `selectedId` so the
   // inspector + per-selection style updates fire as before.
 
-  /// Files under a directory or repo-root prefix. Used by
-  /// `focalIds` to seed the canvas with anchor nodes for dir /
-  /// git_repo scopes.
-  function filesUnder(prefix: string): string[] {
-    const root = prefix.replace(/\/+$/, "");
-    const withSlash = root + "/";
-    return nodes
-      .filter(
-        (n) =>
-          n.kind === "file" && (n.path === root || n.path.startsWith(withSlash)),
-      )
-      .map((n) => (n.kind === "file" ? n.path : ""))
-      .filter((p) => p);
-  }
-
   /// Node ids the canvas should pin at the world origin while the
   /// initial layout settles. Empty list = no anchor (workspace scope);
   /// the canvas falls back to a free force-directed layout.
@@ -1881,13 +1866,15 @@
     // bubble itself; its 1-hop neighbours (every file of that
     // language) splay around it.
     if (currentScope.kind === "language") return [`language:${currentScope.language}`];
-    let seedPaths: string[];
-    if (currentScope.kind === "file") seedPaths = [currentScope.path];
-    else if (currentScope.kind === "dir") seedPaths = filesUnder(currentScope.path);
-    else return [];
+    if (currentScope.kind !== "file" && currentScope.kind !== "dir") return [];
+    const directory = currentScope.kind === "dir";
+    const root = directory ? currentScope.path.replace(/\/+$/, "") : currentScope.path;
+    const withSlash = root + "/";
     const ids: string[] = [];
     for (const n of nodes) {
-      if (n.kind === "file" && seedPaths.includes(n.path)) ids.push(n.id);
+      if (n.kind === "file" && (n.path === root || (directory && n.path.startsWith(withSlash)))) {
+        ids.push(n.id);
+      }
     }
     return ids;
   });
