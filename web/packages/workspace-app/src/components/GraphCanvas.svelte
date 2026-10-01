@@ -26,7 +26,7 @@
   //   - filter chips (link / tag / mention / img)
   //   - depth slider, inspector, scope history, hamburger menu
 
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import {
     forceCollide,
     forceLink,
@@ -1881,54 +1881,56 @@
   $effect(() => {
     void nodes;
     void edges;
-    if (!sim) return;
-    // The Dashboard indexing slide polls /api/indexing/state every
-    // 3s, which produces a new (content-identical) `nodes`/`edges`
-    // array reference each tick. When the working set hasn't changed
-    // (only node fields like `indexState` colour have refreshed),
-    // this is a content-update tick, not a structural change: skip
-    // the refit so the user's view stays put rather than zooming
-    // back to fit-content. Scope / depth / first-load swaps still
-    // refit because the set actually differs. The working set holds
-    // only the visible nodes, so the delta is the one rebuilding it
-    // reports: comparing it with every node in `nodes` would read a
-    // graph with any node hidden as a new set on every publish.
-    const before = dNodes.length;
-    // Pick the simulation re-warm alpha by structural delta, not by
-    // a binary "same set vs not". The Dashboard indexing slide adds
-    // nodes one at a time as files appear on disk; alpha=1 (full-swap
-    // strength) would yank every node toward the layout origin and
-    // look more like a scope change than a fluid file-browser update.
-    // Treat anything with >=50% overlap as incremental (gentle alpha
-    // so existing nodes barely move and the new ones ease in);
-    // zero-or-low overlap reads as a real scope swap and warrants the
-    // strong re-warm.
-    //
-    // Capture emptiness BEFORE rebuildWorkingSet reassigns dNodes. An
-    // empty -> non-empty transition means the canvas opened before its
-    // data arrived (carousel flip-back, first load): start()'s fit ran
-    // on an empty set and left the viewport at the origin placeholder.
-    // We re-fit once the nodes have landed (below), independent of the
-    // userInteracted gate since there was nothing to interact with.
-    const wasEmpty = before === 0;
-    rebuildAdjacency();
-    const { added, removed } = rebuildWorkingSet();
-    const sameSet = before > 0 && added.length === 0 && removed.length === 0;
-    const incremental = !sameSet && before > 0 && (before - removed.length) * 2 >= before;
-    const alpha = sameSet ? 0.05 : incremental ? 0.2 : 1;
-    rewarmSim(alpha);
-    if (wasEmpty && dNodes.length > 0) {
-      fitToContent(24);
-    }
-    // scheduleRefit is itself gated on `userInteracted`, so calling
-    // it on a structural change is a no-op once the user has taken
-    // control of the view. First-load (userInteracted false) still
-    // gets the auto-fit. The interaction flag is never reset on set
-    // changes: the file-browser-style expectation is that new nodes
-    // appear in place while the user's chosen viewport stays put.
-    if (!sameSet) {
-      scheduleRefit(1200);
-    }
+    untrack(() => {
+      if (!sim) return;
+      // The Dashboard indexing slide polls /api/indexing/state every
+      // 3s, which produces a new (content-identical) `nodes`/`edges`
+      // array reference each tick. When the working set hasn't changed
+      // (only node fields like `indexState` colour have refreshed),
+      // this is a content-update tick, not a structural change: skip
+      // the refit so the user's view stays put rather than zooming
+      // back to fit-content. Scope / depth / first-load swaps still
+      // refit because the set actually differs. The working set holds
+      // only the visible nodes, so the delta is the one rebuilding it
+      // reports: comparing it with every node in `nodes` would read a
+      // graph with any node hidden as a new set on every publish.
+      const before = dNodes.length;
+      // Pick the simulation re-warm alpha by structural delta, not by
+      // a binary "same set vs not". The Dashboard indexing slide adds
+      // nodes one at a time as files appear on disk; alpha=1 (full-swap
+      // strength) would yank every node toward the layout origin and
+      // look more like a scope change than a fluid file-browser update.
+      // Treat anything with >=50% overlap as incremental (gentle alpha
+      // so existing nodes barely move and the new ones ease in);
+      // zero-or-low overlap reads as a real scope swap and warrants the
+      // strong re-warm.
+      //
+      // Capture emptiness BEFORE rebuildWorkingSet reassigns dNodes. An
+      // empty -> non-empty transition means the canvas opened before its
+      // data arrived (carousel flip-back, first load): start()'s fit ran
+      // on an empty set and left the viewport at the origin placeholder.
+      // We re-fit once the nodes have landed (below), independent of the
+      // userInteracted gate since there was nothing to interact with.
+      const wasEmpty = before === 0;
+      rebuildAdjacency();
+      const { added, removed } = rebuildWorkingSet();
+      const sameSet = before > 0 && added.length === 0 && removed.length === 0;
+      const incremental = !sameSet && before > 0 && (before - removed.length) * 2 >= before;
+      const alpha = sameSet ? 0.05 : incremental ? 0.2 : 1;
+      rewarmSim(alpha);
+      if (wasEmpty && dNodes.length > 0) {
+        fitToContent(24);
+      }
+      // scheduleRefit is itself gated on `userInteracted`, so calling
+      // it on a structural change is a no-op once the user has taken
+      // control of the view. First-load (userInteracted false) still
+      // gets the auto-fit. The interaction flag is never reset on set
+      // changes: the file-browser-style expectation is that new nodes
+      // appear in place while the user's chosen viewport stays put.
+      if (!sameSet) {
+        scheduleRefit(1200);
+      }
+    });
   });
 
   /// Visibility change without a full data swap: scope / depth /
