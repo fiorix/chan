@@ -31,7 +31,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chan_workspace::index::config::{self, EmbeddingModelInfo};
 use chan_workspace::index::embeddings::{
-    global_models_dir, model_downloaded, repo_dir_name, resolve_model, Embedder,
+    global_models_dir, model_downloaded, repo_dir_name, resolve_model, EmbedError, Embedder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -245,6 +245,28 @@ struct ModelNotDownloadedBody {
     download_endpoint: &'static str,
 }
 
+fn model_not_downloaded_response(model_name: String, error: &EmbedError) -> Response {
+    let expected_dir = match error {
+        EmbedError::ModelNotDownloaded { expected_dir, .. } => {
+            expected_dir.to_string_lossy().into_owned()
+        }
+        _ => global_models_dir()
+            .join(repo_dir_name(&model_name))
+            .to_string_lossy()
+            .into_owned(),
+    };
+    (
+        StatusCode::CONFLICT,
+        Json(ModelNotDownloadedBody {
+            error: "model_not_downloaded",
+            model_id: model_name,
+            expected_dir,
+            download_endpoint: "/api/index/semantic/download",
+        }),
+    )
+        .into_response()
+}
+
 /// `POST /api/index/semantic/enable`. Flip the workspace to Hybrid.
 /// Refuses with 409 if the model isn't on disk; payload carries
 /// the structured `ModelNotDownloaded` hint pointing the caller at
@@ -267,26 +289,7 @@ pub async fn api_semantic_enable(State(state): State<Arc<AppState>>) -> Response
             Err(e) => return err_from(&e),
         };
         if let Err(e) = resolve_model(&model_name) {
-            let expected_dir = match &e {
-                chan_workspace::index::embeddings::EmbedError::ModelNotDownloaded {
-                    expected_dir,
-                    ..
-                } => expected_dir.to_string_lossy().into_owned(),
-                _ => global_models_dir()
-                    .join(repo_dir_name(&model_name))
-                    .to_string_lossy()
-                    .into_owned(),
-            };
-            return (
-                StatusCode::CONFLICT,
-                Json(ModelNotDownloadedBody {
-                    error: "model_not_downloaded",
-                    model_id: model_name,
-                    expected_dir,
-                    download_endpoint: "/api/index/semantic/download",
-                }),
-            )
-                .into_response();
+            return model_not_downloaded_response(model_name, &e);
         }
         if let Err(e) = workspace.set_semantic_enabled(true) {
             return err_from(&e);
@@ -396,6 +399,26 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"error": format!("creating model cache {}: {error}", cache.display())}),
         ).await;
+    }
+
+    #[tokio::test]
+    async fn model_not_downloaded_refusal_has_code_and_fields() {
+        let error = EmbedError::ModelNotDownloaded {
+            model_id: "BAAI/bge-small-en-v1.5".into(),
+            expected_dir: "/tmp/model-cache/bge-small".into(),
+        };
+        super::super::refusal_tests::assert_refusal(
+            model_not_downloaded_response("BAAI/bge-small-en-v1.5".into(), &error),
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": error.to_string(),
+                "code": "model_not_downloaded",
+                "model_id": "BAAI/bge-small-en-v1.5",
+                "expected_dir": "/tmp/model-cache/bge-small",
+                "download_endpoint": "/api/index/semantic/download",
+            }),
+        )
+        .await;
     }
 
     struct RouteTestApp {
