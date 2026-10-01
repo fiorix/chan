@@ -32,7 +32,7 @@
   } from "../api/types";
   import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
   import { isAudio, isImage, isPdf, isVideo } from "../state/fileTypes";
-  import { basename, fmtDevs, fmtMonths, formatMtime, formatSize, parentDir } from "../state/format";
+  import { basename, formatMtime, formatSize, parentDir } from "../state/format";
   import { windowCaps } from "../state/windowCaps";
   import {
     ensureGraphLoaded,
@@ -67,6 +67,7 @@
     classifyFileActions,
     type FileActionId,
   } from "../state/fileActions";
+  import CodeReportSection from "./CodeReportSection.svelte";
   import KindChip from "./KindChip.svelte";
   import { ChevronDown, Copy } from "lucide-svelte";
 
@@ -714,19 +715,10 @@
   let reportError = $state<string | null>(null);
   let reportReq = 0;
 
-  /// "Top N + see more" toggle for the per-language list in directory
-  /// mode. Default of 5 matches the inspector's appetite for compact
-  /// sections; the full list is one click away. Resets to collapsed
-  /// whenever the selection changes so a new directory doesn't inherit
-  /// the previous one's expand state.
-  const LANG_PREVIEW = 5;
-  let langExpanded = $state(false);
-
   $effect(() => {
     fileReport = null;
     prefixReport = null;
     reportError = null;
-    langExpanded = false;
     if (entryPath === null) {
       reportLoading = false;
       return;
@@ -787,21 +779,6 @@
       controller.abort();
     };
   });
-
-  /// Per-language roll-up sliced for display: collapse to top N by
-  /// SLOC unless the user clicked "see more". The hidden count
-  /// workspaces the "+N more" affordance label.
-  const visibleLanguages = $derived.by(() => {
-    if (!prefixReport) return [];
-    const all = prefixReport.by_language;
-    if (langExpanded || all.length <= LANG_PREVIEW) return all;
-    return all.slice(0, LANG_PREVIEW);
-  });
-  const hiddenLanguageCount = $derived(
-    prefixReport
-      ? Math.max(0, prefixReport.by_language.length - visibleLanguages.length)
-      : 0,
-  );
 </script>
 
 <!-- Shared ACTIONS section. Rendered directly under the filename header
@@ -961,64 +938,7 @@
       </section>
     {/if}
     {#if prefixReport && prefixReport.totals.files > 0}
-      <section class="refs">
-        <h4>Code</h4>
-        <div class="meta-grid">
-          <span class="k">indexed</span>
-          <span class="v">{prefixReport.totals.files}</span>
-          <span class="k">SLOC</span>
-          <span class="v">{prefixReport.totals.code.toLocaleString()}</span>
-          <span class="k">comments</span>
-          <span class="v">{prefixReport.totals.comments.toLocaleString()}</span>
-          <span class="k">blanks</span>
-          <span class="v">{prefixReport.totals.blanks.toLocaleString()}</span>
-          <span class="k">complexity</span>
-          <span class="v">{prefixReport.totals.complexity.toLocaleString()}</span>
-        </div>
-        {#if prefixReport.by_language.length > 0}
-          <ul class="lang-list">
-            {#each visibleLanguages as lang (lang.name)}
-              <li class="lang-row">
-                <button
-                  type="button"
-                  class="lang-name"
-                  title="open in graph (scoped to this language)"
-                  onclick={() => openGraphForLanguage(lang.name)}
-                >{lang.name}</button>
-                <span class="lang-files">{lang.files} file{lang.files === 1 ? "" : "s"}</span>
-                <span class="lang-sloc">{lang.code.toLocaleString()} SLOC</span>
-              </li>
-            {/each}
-          </ul>
-          {#if hiddenLanguageCount > 0}
-            <button
-              type="button"
-              class="see-more"
-              onclick={() => (langExpanded = true)}
-            >+{hiddenLanguageCount} more</button>
-          {:else if langExpanded && prefixReport.by_language.length > LANG_PREVIEW}
-            <button
-              type="button"
-              class="see-more"
-              onclick={() => (langExpanded = false)}
-            >show fewer</button>
-          {/if}
-        {/if}
-        <!-- No estimated cost: the dollar number is a default-salary
-             extrapolation that's noisy for a personal notes app. Effort,
-             schedule, and developer-count carry the useful signal. -->
-        <div class="cocomo">
-          <div class="cocomo-title">COCOMO ({prefixReport.cocomo.model})</div>
-          <div class="meta-grid">
-            <span class="k">effort</span>
-            <span class="v">{fmtMonths(prefixReport.cocomo.effort_person_months)}</span>
-            <span class="k">schedule</span>
-            <span class="v">{fmtMonths(prefixReport.cocomo.schedule_months)}</span>
-            <span class="k">developers</span>
-            <span class="v">{fmtDevs(prefixReport.cocomo.developers)}</span>
-          </div>
-        </div>
-      </section>
+      <CodeReportSection report={prefixReport} onLanguageClick={openGraphForLanguage} />
     {:else if reportLoading}
       <div class="refs-loading">loading report...</div>
     {:else if reportError}
@@ -1302,6 +1222,7 @@
   .info > .actions-section,
   .info > .meta-grid,
   .info > .refs,
+  .info > :global(.code-report),
   .info > .refs-loading,
   .info > .refs-error {
     border-top: 1px solid var(--separator);
@@ -1741,45 +1662,6 @@
     font-style: italic;
   }
   .refs-error { color: var(--warn-text); font-style: normal; }
-  /* Per-language row in the Code section. Three columns: language
-     name on the left (allowed to grow), file count + SLOC on the
-     right (tabular-nums so the digit columns line up across rows). */
-  .lang-list {
-    list-style: none;
-    padding: 0;
-    margin: 0.4rem 0 0 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .lang-row {
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    gap: 0.5rem;
-    font-size: 13px;
-    align-items: baseline;
-  }
-  /* A <button> so the language name routes to the Graph (scoped to
-     this language). Strip default button chrome, left-align, and add
-     hover + focus affordance. Stays a grid cell at column 1. */
-  .lang-name {
-    color: var(--text);
-    word-break: break-word;
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    font-size: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-  .lang-name:hover { text-decoration: underline; }
-  .lang-name:focus-visible {
-    outline: 2px solid var(--link);
-    outline-offset: 1px;
-    border-radius: 2px;
-  }
   .lang-link {
     color: var(--text);
     background: none;
@@ -1796,39 +1678,5 @@
     outline: 2px solid var(--link);
     outline-offset: 1px;
     border-radius: 2px;
-  }
-  .lang-files,
-  .lang-sloc {
-    color: var(--text-secondary);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .see-more {
-    display: block;
-    margin: 0.3rem 0 0 0;
-    background: none;
-    border: none;
-    color: var(--link);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    padding: 0;
-  }
-  .see-more:hover { text-decoration: underline; }
-  .cocomo {
-    margin-top: 0.5rem;
-    padding-top: 0.4rem;
-    border-top: 1px dashed var(--border);
-  }
-  .cocomo-title {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-    margin-bottom: 0.2rem;
-  }
-  .cocomo .meta-grid {
-    margin: 0;
   }
 </style>
