@@ -4199,6 +4199,9 @@ impl Session {
 
         let mut child = pair.slave.spawn_command(cmd)?;
         let child_pid = child.process_id();
+        // The owning child has not reached a controller that can reap it.
+        #[cfg(target_os = "linux")]
+        let child_start_time = capture_child_start_time(child.as_ref(), process_start_time);
         #[cfg(target_os = "linux")]
         let master_fd = pair
             .master
@@ -4242,7 +4245,7 @@ impl Session {
             },
             child_pid,
             #[cfg(target_os = "linux")]
-            child_start_time: None,
+            child_start_time,
             command_tx,
             output_tx,
             ring: Mutex::new(RingBuffer::new(config.terminal.ring_bytes)),
@@ -4549,6 +4552,11 @@ impl Session {
             replay,
             sealed_manifest,
         } = import;
+        let child_pin = meta
+            .child_pid
+            .map(|pid| child_identity.pin(pid, current_boot_id().as_deref()))
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
         let manifest_state = TerminalState {
             alt_screen: meta.alt_screen,
             private_modes: meta
@@ -4768,7 +4776,8 @@ impl Session {
                                 }
                             }
                             PtyCommand::Kill => {
-                                let ended = session.child_pid.is_some_and(terminate_imported_child);
+                                let ended =
+                                    child_pin.as_ref().is_some_and(terminate_imported_child);
                                 session.ended.record(ended);
                                 return;
                             }
@@ -6154,36 +6163,59 @@ impl AsRawFd for RawMasterFd {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn capture_child_start_time(
+    child: &dyn Child,
+    read_start: impl FnOnce(u32) -> Option<u64>,
+) -> Option<u64> {
+    child.process_id().and_then(read_start)
+}
+
 /// End a child restored across a server restart and report whether it is
 /// gone. This process is not its parent, so it cannot `wait` on it: it hangs
 /// up and asks it to terminate, gives it [`IMPORTED_CHILD_EXIT_GRACE`], then
-/// kills it, and polls for the pid to disappear after each step.
+/// kills it, and observes exit through the retained process descriptor.
 #[cfg(target_os = "linux")]
-fn terminate_imported_child(pid: u32) -> bool {
-    let Ok(raw_pid) = i32::try_from(pid) else {
-        return false;
-    };
-    let Some(pid) = rustix::process::Pid::from_raw(raw_pid) else {
-        return false;
-    };
+fn terminate_imported_child(pin: &OwnedFd) -> bool {
     terminate_imported_child_with(
-        pid,
-        |pid, signal| {
-            let _ = rustix::process::kill_process(pid, signal);
+        pin,
+        |pin, signal| {
+            let _ = signal_imported_child(pin, signal);
         },
-        |pid, bound| {
-            let deadline = std::time::Instant::now() + bound;
-            loop {
-                if rustix::process::test_kill_process(pid).is_err() {
-                    return true;
-                }
-                if std::time::Instant::now() >= deadline {
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        },
+        imported_child_exited_within,
     )
+}
+
+#[cfg(target_os = "linux")]
+fn signal_imported_child(pin: &OwnedFd, signal: rustix::process::Signal) -> rustix::io::Result<()> {
+    rustix::process::pidfd_send_signal(pin, signal)
+}
+
+#[cfg(target_os = "linux")]
+fn imported_child_exited_within(pin: &OwnedFd, bound: Duration) -> bool {
+    let deadline = std::time::Instant::now() + bound;
+    let mut fds = [filedescriptor::pollfd {
+        fd: pin.as_raw_fd(),
+        events: filedescriptor::POLLIN,
+        revents: 0,
+    }];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match filedescriptor::poll(&mut fds, Some(remaining)) {
+            Ok(_) => {
+                let exited = filedescriptor::POLLIN | filedescriptor::POLLHUP;
+                if fds[0].revents != 0 {
+                    return fds[0].revents & exited != 0 && fds[0].revents & !exited == 0;
+                }
+            }
+            Err(filedescriptor::Error::Poll(error))
+                if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -11975,11 +12007,12 @@ mod tests {
             assert!(terminate_imported_child_with(
                 &original.pin,
                 |pin, signal| {
-                    signals.push(rustix::process::pidfd_send_signal(pin, signal));
+                    signals.push(signal_imported_child(pin, signal));
                 },
-                |_, bound| original.exited(bound)
+                imported_child_exited_within
             ));
             assert_eq!(signals, vec![Err(rustix::io::Errno::SRCH); 2]);
+            assert!(terminate_imported_child(&original.pin));
             assert!(
                 !sentinel.exited(Duration::ZERO),
                 "an expired handle must not target the sentinel"
@@ -11997,6 +12030,35 @@ mod tests {
             let entries = registry.fdstore_manifest_sessions("t");
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].child_start_time, child.identity.start_time);
+        }
+
+        #[test]
+        fn child_identity_failed_capture_stays_absent_in_snapshots() {
+            let child = IdentityChild::start(false);
+            let reads = std::cell::Cell::new(0);
+            let captured = capture_child_start_time(child.child.as_ref().unwrap(), |pid| {
+                assert_eq!(pid, child.pid());
+                reads.set(reads.get() + 1);
+                None
+            });
+            let (mut session, _commands) =
+                test_agent_session(1024, "identity-absent", None, None, None, &[]);
+            let state = Arc::get_mut(&mut session).unwrap();
+            state.child_pid = Some(child.pid());
+            state.child_start_time = captured;
+            session.adopt_fdstore(&RecordingPark::default().parker());
+            assert!(process_start_time(child.pid()).is_some());
+            for _ in 0..2 {
+                assert_eq!(
+                    session
+                        .fdstore_manifest_entry("t")
+                        .unwrap()
+                        .child_start_time,
+                    None,
+                    "a failed initial capture must stay absent when procfs is readable"
+                );
+            }
+            assert_eq!(reads.get(), 1);
         }
 
         #[test]

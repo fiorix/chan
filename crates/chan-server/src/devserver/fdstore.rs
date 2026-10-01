@@ -243,7 +243,7 @@ mod linux {
             &self,
             phase: &MutexGuard<'_, ParkerPhase>,
             entries: Vec<FdStoreManifestEntry>,
-            lookup: impl Fn(u32) -> Option<u64>,
+            _lookup: impl Fn(u32) -> Option<u64>,
         ) -> Result<(), String> {
             if entries.is_empty() {
                 let _ = std::fs::remove_file(&self.manifest_path);
@@ -259,7 +259,7 @@ mod linux {
                     .map(|entry| ManifestSession {
                         fd_name: entry.fd_name.clone(),
                         ring_fd_name: entry.ring_fd_name.clone(),
-                        child_start_time: entry.meta.child_pid.and_then(&lookup),
+                        child_start_time: entry.meta.child_pid.and(entry.child_start_time),
                         meta: entry.meta.clone(),
                         replay_b64: BASE64.encode(&entry.replay),
                     })
@@ -1746,9 +1746,10 @@ mod linux {
             let mut sentinel = IdentitySentinel::start();
             let mut bad = identity_manifest_session("identity-bad", Some(&sentinel));
             bad.child_start_time = sentinel.identity.start_time.map(|time| time + 1);
-            let good = identity_manifest_session("identity-good", None);
+            let mut good = identity_manifest_session("identity-good", None);
+            good.ring_fd_name = None;
             let bad_names = [bad.fd_name.clone(), bad.ring_fd_name.clone().unwrap()];
-            let good_names = [good.fd_name.clone(), good.ring_fd_name.clone().unwrap()];
+            let good_names = [good.fd_name.clone()];
             let (mut inherited_fds, _bad_pair) = identity_inherited(&bad);
             let (good_fds, _good_pair) = identity_inherited(&good);
             inherited_fds.extend(good_fds);
