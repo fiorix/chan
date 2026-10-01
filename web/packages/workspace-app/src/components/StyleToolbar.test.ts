@@ -129,12 +129,16 @@ describe("StyleToolbar", () => {
     }
   });
 
-  test("file editor variant exposes and wires every formatting control", async () => {
+  test("floats and exposes and wires every formatting control", async () => {
     const { target, toolbar, wysiwyg } = await renderToolbar();
 
     expect(toolbar.classList.contains("floating")).toBe(true);
-    expect(toolbar.classList.contains("inflow")).toBe(false);
     expect(target.querySelector(".fbtn-row")).not.toBeNull();
+    expect(button(target, "bold").classList.contains("fbtn")).toBe(true);
+    expect(button(target, "toggle link").classList.contains("fbtn")).toBe(true);
+    const boldClasses = Array.from(button(target, "bold").classList).sort();
+    const linkClasses = Array.from(button(target, "toggle link").classList).sort();
+    expect(linkClasses).toEqual(boldClasses);
 
     const select = target.querySelector<HTMLSelectElement>("select.block-kind");
     expect(select).not.toBeNull();
@@ -159,20 +163,6 @@ describe("StyleToolbar", () => {
       button(target, label).click();
       expect(action).toHaveBeenCalledTimes(1);
     }
-  });
-
-  test("prompt variant shares the control styling contract without image insertion", async () => {
-    const { target, toolbar } = await renderToolbar({ showImage: false });
-
-    expect(toolbar.classList.contains("floating")).toBe(true);
-    expect(target.querySelector(".fbtn-row")).not.toBeNull();
-    expect(button(target, "bold").classList.contains("fbtn")).toBe(true);
-    expect(button(target, "toggle link").classList.contains("fbtn")).toBe(true);
-    expect(target.querySelector("button[aria-label='insert image']")).toBeNull();
-
-    const fileControlClasses = Array.from(button(target, "bold").classList).sort();
-    const promptControlClasses = Array.from(button(target, "toggle link").classList).sort();
-    expect(promptControlClasses).toEqual(fileControlClasses);
   });
 
   test("disabled state gates formatting controls but leaves mode toggle available", async () => {

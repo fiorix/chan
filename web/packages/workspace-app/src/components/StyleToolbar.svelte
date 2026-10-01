@@ -47,8 +47,6 @@
     wysiwyg,
     selVer,
     disabled = false,
-    showImage = true,
-    floating = true,
     mode,
     onModeToggle,
   }: {
@@ -65,13 +63,6 @@
     /// needs to compute the gate once. The mode-toggle button, when
     /// present, ignores this so the user can always flip back.
     disabled?: boolean;
-    /// Show the image-insert button. Defaults on for the file
-    /// editor; opt out from contexts where pasting `![alt](url)`
-    /// into the buffer doesn't make sense.
-    showImage?: boolean;
-    /// Floating pill (position: absolute over the editor canvas)
-    /// vs in-flow row (block-level above the editor).
-    floating?: boolean;
     /// Optional current rendering mode. When set together with
     /// `onModeToggle`, the toolbar grows a trailing source/wysiwyg
     /// toggle button after a vertical separator. Both props must
@@ -257,12 +248,10 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="style-toolbar"
+  class="style-toolbar floating"
   class:expanded
   class:hidden={!visible}
   class:disabled
-  class:floating
-  class:inflow={!floating}
   role="toolbar"
   tabindex="-1"
   aria-label="Style toolbar"
@@ -397,17 +386,15 @@
       onmouseup={onMouseUpUnpin}
       onclick={() => wysiwyg?.insertHorizontalRule()}
     ><Minus size={15} strokeWidth={1.9} aria-hidden="true" /></button>
-    {#if showImage}
-      <button
-        class="fbtn"
-        title="insert image"
-        aria-label="insert image"
-        disabled={disabled}
-        onmousedown={onMouseDownPin}
-        onmouseup={onMouseUpUnpin}
-        onclick={() => wysiwyg?.insertImage()}
-      ><Image size={15} strokeWidth={1.9} aria-hidden="true" /></button>
-    {/if}
+    <button
+      class="fbtn"
+      title="insert image"
+      aria-label="insert image"
+      disabled={disabled}
+      onmousedown={onMouseDownPin}
+      onmouseup={onMouseUpUnpin}
+      onclick={() => wysiwyg?.insertImage()}
+    ><Image size={15} strokeWidth={1.9} aria-hidden="true" /></button>
     </div>
   {/if}
   </div>
@@ -471,12 +458,6 @@
     top: 8px;
     left: 8px;
     z-index: 30;
-  }
-  /* In-flow: rendered as a normal block above the editor (used by
-     hosts that reserve layout space for the toolbar). Caller-owned
-     spacing stays outside this component. */
-  .style-toolbar.inflow {
-    align-self: flex-start;
   }
   .style-toolbar:hover {
     transform: scale(1.02);
