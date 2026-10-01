@@ -5,8 +5,7 @@
 // a request is up and gives back when the request goes. A textarea stands in
 // for the terminal's.
 
-import { createRawSnippet, flushSync, type ComponentProps } from "svelte";
-import { createClassComponent } from "svelte/legacy";
+import { createRawSnippet, flushSync, mount, unmount, type ComponentProps } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import RequestCard from "./RequestCard.svelte";
@@ -15,35 +14,31 @@ type Props = ComponentProps<typeof RequestCard>;
 
 const body = createRawSnippet(() => ({ render: () => `<strong>someone</strong>` }));
 
-const mounted: Array<{ $destroy(): void }> = [];
+const mounted: Array<Record<string, unknown>> = [];
 
-function render(props: Partial<Props> = {}) {
+function render(overrides: Partial<Props> = {}) {
   const onConfirm = vi.fn();
   const onCancel = vi.fn();
-  const card = createClassComponent({
-    component: RequestCard,
-    target: document.body.appendChild(document.createElement("div")),
-    props: {
-      label: "Probe request",
-      title: "Probe",
-      closeLabel: "Cancel probe",
-      confirmLabel: "Yes",
-      cancelLabel: "No",
-      busy: false,
-      requestId: "r1",
-      onConfirm,
-      onCancel,
-      children: body,
-      ...props,
-    },
+  const props = $state<Props>({
+    label: "Probe request",
+    title: "Probe",
+    closeLabel: "Cancel probe",
+    confirmLabel: "Yes",
+    cancelLabel: "No",
+    busy: false,
+    requestId: "r1",
+    onConfirm,
+    onCancel,
+    children: body,
+    ...overrides,
   });
-  mounted.push(card);
+  mounted.push(mount(RequestCard, { target: document.body.appendChild(document.createElement("div")), props }));
   flushSync();
-  return { card, onConfirm, onCancel };
+  return { props, onConfirm, onCancel };
 }
 
 afterEach(() => {
-  for (const card of mounted.splice(0)) card.$destroy();
+  for (const card of mounted.splice(0)) unmount(card);
   document.body.replaceChildren();
 });
 
@@ -76,7 +71,7 @@ describe("RequestCard", () => {
     render();
     expect(dialog()!.querySelector("span")?.textContent).toBe("Probe");
     expect(dialog()!.querySelector("p > strong")?.textContent).toBe("someone");
-    expect(button("Cancel probe").textContent).toBe("×");
+    expect(button("Cancel probe").textContent).toBe("\u00d7");
     expect(button("Yes").disabled).toBe(false);
     expect(button("No").disabled).toBe(false);
   });
@@ -125,28 +120,28 @@ describe("RequestCard", () => {
   test("takes the keyboard when a request appears and gives it back when the request goes", () => {
     const terminal = document.body.appendChild(document.createElement("textarea"));
     terminal.focus();
-    const { card } = render({ requestId: null });
+    const { props } = render({ requestId: null });
     expect(dialog(), "no request, no card").toBeNull();
     expect(document.activeElement).toBe(terminal);
 
-    card.$set({ requestId: "r1" });
+    props.requestId = "r1";
     flushSync();
     expect(cardIn()).not.toBeNull();
     expect(document.activeElement, "the card takes the keyboard").toBe(cardIn());
 
-    card.$set({ requestId: null });
+    props.requestId = null;
     flushSync();
     expect(dialog()).toBeNull();
     expect(document.activeElement, "typing reaches the terminal again").toBe(terminal);
   });
 
   test("a request that replaces another takes the keyboard again", () => {
-    const { card } = render();
+    const { props } = render();
     const other = document.body.appendChild(document.createElement("input"));
     other.focus();
     expect(document.activeElement).toBe(other);
 
-    card.$set({ requestId: "r2" });
+    props.requestId = "r2";
     flushSync();
     expect(document.activeElement).toBe(cardIn());
   });

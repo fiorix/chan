@@ -4,8 +4,7 @@
 // COCOMO estimate it shows, the language rows it previews and expands, and
 // the language a row's button hands to its owner.
 
-import { flushSync, type ComponentProps } from "svelte";
-import { createClassComponent } from "svelte/legacy";
+import { flushSync, mount, unmount, type ComponentProps } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import CodeReportSection from "./CodeReportSection.svelte";
@@ -36,23 +35,19 @@ function reportOf(languages: number): ReportPrefix {
   };
 }
 
-const mounted: Array<{ $destroy(): void }> = [];
+const mounted: Array<Record<string, unknown>> = [];
 let target: HTMLElement;
 
-function render(props: Partial<Props> = {}) {
+function render(overrides: Partial<Props> = {}) {
   target = document.body.appendChild(document.createElement("div"));
-  const section = createClassComponent({
-    component: CodeReportSection,
-    target,
-    props: { report: reportOf(7), onLanguageClick: () => {}, ...props },
-  });
-  mounted.push(section);
+  const props = $state<Props>({ report: reportOf(7), onLanguageClick: () => {}, ...overrides });
+  mounted.push(mount(CodeReportSection, { target, props }));
   flushSync();
-  return section;
+  return props;
 }
 
 afterEach(() => {
-  for (const section of mounted.splice(0)) section.$destroy();
+  for (const section of mounted.splice(0)) unmount(section);
   document.body.replaceChildren();
 });
 
@@ -116,12 +111,12 @@ describe("CodeReportSection", () => {
   });
 
   test("a new report shows the preview again", () => {
-    const section = render();
+    const props = render();
     toggle()!.click();
     flushSync();
     expect(rows()).toHaveLength(7);
 
-    section.$set({ report: reportOf(8) });
+    props.report = reportOf(8);
     flushSync();
     expect(rows(), "a new report shows the preview again").toHaveLength(5);
     expect(toggle()?.textContent).toBe("+3 more");
