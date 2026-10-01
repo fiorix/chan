@@ -180,7 +180,7 @@ flowchart TB
 
 On the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and forwards a signed gateway assertion, and the devserver refuses a tunnel request without a verifiable one (401). A grant is all-or-nothing on the devserver: a grantee's assertion mutates `/api/library/*` over the tunnel exactly as the owner's does, windows and workspaces included, and gets the owner's surface meta; the reverse-tunnel legs are the one launcher route a grantee does not share. Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. Owners also manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
 
-An unforced off answers `409 {error:"live_terminals", active_terminals:N}` on this surface; the launcher confirms and retries the same route with `force: true`.
+An unforced off answers `409 {error, code:"live_terminals", active_terminals:N}` on this surface, with a sentence in `error`; the launcher branches on the code, confirms and retries the same route with `force: true`.
 
 Bulk removal names workspace refusals for live terminals and opens the launcher confirm with their workspace count. Confirmation retries only those refused local and served workspaces, using the local DELETE route's existing `?force=true` query or the served forget route's `force` field. Ordinary local removal sends the bare DELETE. Successful rows leave the selection; other failures and locked or unknown rows stay selected. Selected devserver and gateway removals wait until the terminal refusals are confirmed and their retries succeed, so the retry retains its connections. Cancel leaves the refused workspaces and those deferred servers selected, with the reason in the bulk bar; a failed forced retry keeps its failed rows and the deferred servers selected. The confirm retains its Cancel focus default.
 
@@ -188,7 +188,7 @@ Launcher gates and handler refusals use the server's JSON envelope: a display se
 
 The launcher's `ApiError` unwraps its API responses, including "window not found" for window actions and "workspace not found" for workspace lifecycle actions; `reportError` sends action errors to the corner notice. The workspace app alone calls the command capability routes, and its own transport and `ApiError` unwrap their missing-window and missing-workspace refusals. Both apps' terminal-count readers catch failures and retain the generic close warning. The workspace app checks a capability launch before navigating its popup, waits on a 503, and throws other launch refusals to the opener's command deck. The launcher's theme and collapsed-machine writes fetch directly and discard the response; those refusals do not reach an error bubble.
 
-No launcher route is exempt from the refusal checker. The typed `live_terminals` body still carries its discriminator in `error` and awaits the typed-body conversion. Framework extractor and method refusals and chan-library's host-lock 500 remain outside the envelope, as described in [HTTP refusals](../../../crates/chan-server/design.md#http-refusals).
+No launcher route is exempt from the refusal checker. The live-terminals 409 is the envelope with the code `live_terminals` and its count. Framework extractor and method refusals and chan-library's host-lock 500 remain outside the envelope, as described in [HTTP refusals](../../../crates/chan-server/design.md#http-refusals).
 
 ## A degraded workspace row
 
