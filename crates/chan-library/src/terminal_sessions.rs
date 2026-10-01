@@ -1038,7 +1038,8 @@ pub struct FdStoreManifestEntry {
     /// session has one.
     pub ring_fd_name: Option<String>,
     pub meta: FdStoreSessionMeta,
-    /// Retained child start time, independent of the current holder of its PID.
+    /// Start time captured before the fresh child can be reaped, or retained
+    /// from its verified import. Missing capture stays absent on every write.
     pub child_start_time: Option<u64>,
     /// Bounded tail of the server replay ring, carried through the restart
     /// manifest for an import that has no ring file beside the PTY.
@@ -1049,7 +1050,8 @@ pub struct FdStoreManifestEntry {
 #[derive(Debug)]
 pub struct FdStoreSessionImport {
     pub meta: FdStoreSessionMeta,
-    /// Child evidence recorded alongside the metadata in the restart manifest.
+    /// Recorded boot and start time, required to verify a present child PID
+    /// before the session is adopted. An absent PID needs no child evidence.
     pub child_identity: RecordedChildIdentity,
     pub master_fd: OwnedFd,
     /// The ring file the previous process parked beside the PTY. It wins
@@ -1384,8 +1386,8 @@ fn fire_attach_seam(session_id: &str, seam: AttachSeam) {
 pub struct ClosedSession {
     pub name: Option<String>,
     pub pid: Option<u32>,
-    /// The child was reaped (or, for a session restored across a server
-    /// restart, is gone) within the caller's bound.
+    /// The child was reaped, or its retained pidfd reported exit for a
+    /// restored session, within the caller's bound. Descendants may remain.
     pub ended: bool,
 }
 
@@ -3018,9 +3020,9 @@ impl Registry {
     }
 
     /// Close the matching sessions like [`close_matching`](Self::close_matching),
-    /// then wait up to `bound` in total for each one's child process to be
-    /// reaped. The report says which children are still running, so a caller
-    /// never acknowledges a close whose process outlived it.
+    /// then wait up to `bound` in total for each child's reap or, for a
+    /// restored session, exit observed through its retained pidfd. The report
+    /// says which children were observed to end; it does not cover descendants.
     pub fn close_matching_and_wait(
         &self,
         tab_name: Option<&str>,
