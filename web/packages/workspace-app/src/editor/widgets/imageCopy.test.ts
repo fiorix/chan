@@ -80,4 +80,27 @@ describe("editor image copy writes the underlying markdown", () => {
     expect(writeText).toHaveBeenCalledWith(IMG);
     cleanup();
   });
+
+  test("two failed button copies restore the image button title", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("clipboard denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const { view, cleanup } = mount(IMG, 0);
+    const button = view.dom.querySelector<HTMLButtonElement>(".cm-md-image-copy");
+    expect(button).not.toBeNull();
+    vi.useFakeTimers();
+    try {
+      button!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      await vi.advanceTimersByTimeAsync(300);
+      button!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(writeText).toHaveBeenCalledTimes(2);
+      expect(button!.title).toBe("copy image to clipboard");
+    } finally {
+      vi.useRealTimers();
+      cleanup();
+    }
+  });
 });
