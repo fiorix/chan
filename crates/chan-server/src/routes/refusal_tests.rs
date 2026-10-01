@@ -668,6 +668,147 @@ async fn terminal_tenant_drafts_query_is_json() {
     .await;
 }
 
+fn broken_body() -> Body {
+    Body::from_stream(futures::stream::iter([Err::<axum::body::Bytes, _>(
+        std::io::Error::other("the client went away"),
+    )]))
+}
+
+fn create_window(content_type: Option<&str>, body: impl Into<Body>) -> Request<Body> {
+    let request = Request::post("/api/library/windows");
+    match content_type {
+        Some(content_type) => request.header(header::CONTENT_TYPE, content_type),
+        None => request,
+    }
+    .body(body.into())
+    .unwrap()
+}
+
+/// A launcher route's JSON body, in each shape the JSON extractor refuses.
+#[tokio::test]
+async fn launcher_json_rejections_are_json() {
+    type Framework = axum::Json<crate::CreateWindow>;
+    let json = Some("application/json");
+    let cases: [(StatusCode, &dyn Fn() -> Request<Body>); 5] = [
+        (StatusCode::BAD_REQUEST, &|| create_window(json, "{")),
+        (StatusCode::UNPROCESSABLE_ENTITY, &|| {
+            create_window(json, "7")
+        }),
+        (StatusCode::UNSUPPORTED_MEDIA_TYPE, &|| {
+            create_window(None, "{}")
+        }),
+        (StatusCode::PAYLOAD_TOO_LARGE, &|| {
+            create_window(json, vec![b' '; OVER_DEFAULT_LIMIT])
+        }),
+        (StatusCode::BAD_REQUEST, &|| {
+            create_window(json, broken_body())
+        }),
+    ];
+    for (status, request) in cases {
+        let sentence = framework_sentence::<Framework>(request()).await;
+        assert_refusal(
+            launcher_answer(false, request()).await,
+            status,
+            json!({"error": sentence}),
+        )
+        .await;
+    }
+}
+
+/// The launcher's off route buffers its optional body itself.
+#[tokio::test]
+async fn launcher_bytes_rejections_are_json() {
+    let off = |body: Body| {
+        Request::post("/api/library/workspaces/probe/off")
+            .body(body)
+            .unwrap()
+    };
+    let cases: [(StatusCode, &dyn Fn() -> Body); 2] = [
+        (StatusCode::PAYLOAD_TOO_LARGE, &|| {
+            Body::from(vec![b'x'; OVER_DEFAULT_LIMIT])
+        }),
+        (StatusCode::BAD_REQUEST, &broken_body),
+    ];
+    for (status, body) in cases {
+        let sentence = framework_sentence::<axum::body::Bytes>(off(body())).await;
+        assert_refusal(
+            launcher_answer(false, off(body())).await,
+            status,
+            json!({"error": sentence}),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn launcher_path_not_utf8_is_json() {
+    let request = || bodiless("DELETE", "/api/library/windows/%FF");
+    let sentence = framework_path_sentence("/api/library/windows/{window_id}", request()).await;
+    assert_refusal(
+        launcher_answer(false, request()).await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": sentence}),
+    )
+    .await;
+}
+
+/// The path rejection on a capability route keeps the capability headers.
+#[tokio::test]
+async fn capability_path_not_utf8_is_json_with_its_headers() {
+    let request = || bodiless("GET", "/api/library/command-capabilities/%FF");
+    let sentence =
+        framework_path_sentence("/api/library/command-capabilities/{capability}", request()).await;
+    let response = launcher_answer(false, request()).await;
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "no-store, private"
+    );
+    assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+    assert_refusal(
+        response,
+        StatusCode::BAD_REQUEST,
+        json!({"error": sentence}),
+    )
+    .await;
+}
+
+/// The query of the launcher's window discard, as the route declares it.
+#[derive(serde::Deserialize)]
+struct ActingWindowQuery {
+    #[allow(dead_code)]
+    #[serde(default)]
+    acting_window_id: Option<String>,
+}
+
+fn query_sentence<T: serde::de::DeserializeOwned>(uri: &axum::http::Uri) -> String {
+    match axum::extract::Query::<T>::try_from_uri(uri) {
+        Ok(_) => panic!("the framework must refuse this query"),
+        Err(rejection) => rejection.body_text(),
+    }
+}
+
+#[tokio::test]
+async fn launcher_query_rejections_are_json() {
+    let repeated: axum::http::Uri = "/api/library/windows/x?acting_window_id=a&acting_window_id=b"
+        .parse()
+        .unwrap();
+    let not_a_bool: axum::http::Uri = "/api/library/workspaces/x?force=x".parse().unwrap();
+    for (uri, sentence) in [
+        (&repeated, query_sentence::<ActingWindowQuery>(&repeated)),
+        (
+            &not_a_bool,
+            query_sentence::<crate::devserver::ForceQuery>(&not_a_bool),
+        ),
+    ] {
+        assert_refusal(
+            launcher_answer(false, bodiless("DELETE", &uri.to_string())).await,
+            StatusCode::BAD_REQUEST,
+            json!({"error": sentence}),
+        )
+        .await;
+    }
+}
+
 async fn settings_write_with_wrong_method(settings_disabled: bool) -> Response {
     let state = crate::state::test_support::make_test_state(settings_disabled);
     crate::router(state)

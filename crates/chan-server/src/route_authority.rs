@@ -868,6 +868,144 @@ pub(crate) mod test_support {
         );
     }
 
+    /// The answer of a route that upgrades to a WebSocket before any other
+    /// extractor, to a request that is not an upgrade: the upgrade extractor's
+    /// fixed text, which the browser's WebSocket API never shows.
+    const NOT_AN_UPGRADE: (u16, &str) = (400, "Connection header did not include 'upgrade'");
+
+    /// One byte over the framework's default body limit.
+    const OVER_DEFAULT_LIMIT: usize = 2 * 1024 * 1024 + 1;
+
+    /// Send every row of `table` through `router` as a local caller with the
+    /// router's bearer, in each shape a framework extractor refuses: a JSON
+    /// body no route's body type takes, the same body with no content type, a
+    /// body over the default limit, and, for a row with a capture, a capture
+    /// that is not UTF-8 once decoded. Fail on any 4xx or 5xx answer outside
+    /// the refusal envelope.
+    ///
+    /// `upgrades` names the rows that answer [`NOT_AN_UPGRADE`] to each of the
+    /// three bodied shapes. They are counted apart, and exactly: that text
+    /// from any other row, or any other answer from these, fails.
+    ///
+    /// The statuses 400, 413, 415 and 422 must each be seen in the envelope,
+    /// so the walk cannot pass by provoking nothing. Captures are a
+    /// placeholder or undecodable and no body is one a route takes, so a
+    /// request that reaches a handler stops at its own validation.
+    pub(crate) async fn assert_framework_refusals_enveloped(
+        name: &str,
+        router: axum::Router,
+        table: RouteTable,
+        local_bearer: Option<crate::routes::LauncherBearer>,
+        upgrades: &[&str],
+    ) {
+        use axum::http::header;
+        use tower::ServiceExt;
+
+        let over_the_limit = axum::body::Bytes::from(vec![b' '; OVER_DEFAULT_LIMIT]);
+        let mut rows = 0;
+        let mut sent = 0;
+        let mut enveloped = std::collections::BTreeMap::<u16, usize>::new();
+        let mut not_an_upgrade = 0;
+        let mut contradictions = Vec::new();
+        for &(verb, path, _) in table {
+            if verb == Verb::Any {
+                continue;
+            }
+            rows += 1;
+            let undecodable = path
+                .contains('{')
+                .then(|| fill_captures(path).replace("probe", "%FF"));
+            let shapes = [
+                ("wrong JSON", fill_captures(path), true, "7".into()),
+                ("no content type", fill_captures(path), false, "7".into()),
+                (
+                    "over the limit",
+                    fill_captures(path),
+                    true,
+                    over_the_limit.clone(),
+                ),
+            ]
+            .into_iter()
+            .chain(undecodable.map(|uri| ("undecodable capture", uri, true, "7".into())));
+            for (shape, uri, json, body) in shapes {
+                let body: axum::body::Bytes = body;
+                let bearer = local_bearer
+                    .as_ref()
+                    .map(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
+                let mut builder = axum::http::Request::builder().method(method(verb)).uri(uri);
+                if json {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                }
+                let request = Caller::Local
+                    .stamp(builder, bearer.as_deref())
+                    .body(axum::body::Body::from(body))
+                    .expect("probe request");
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    router.clone().oneshot(request),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{verb:?} {path} did not answer ({shape})"))
+                .expect("infallible router");
+                sent += 1;
+                let status = response.status();
+                if !(status.is_client_error() || status.is_server_error()) {
+                    continue;
+                }
+                let content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
+                if upgrades.contains(&path)
+                    && shape != "undecodable capture"
+                    && (status.as_u16(), body.as_str()) == NOT_AN_UPGRADE
+                {
+                    not_an_upgrade += 1;
+                    continue;
+                }
+                let sentence = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .filter(|_| content_type == "application/json")
+                    .is_some_and(|value| value["error"].as_str().is_some_and(|s| !s.is_empty()));
+                if sentence {
+                    *enveloped.entry(status.as_u16()).or_default() += 1;
+                } else {
+                    contradictions.push(format!(
+                        "{verb:?} {path} ({shape}) answered {status} {content_type:?} {body:.120}"
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "framework-refusals\t{name}\t{rows} rows\t{sent} requests\tenveloped {enveloped:?}\tnot an upgrade {not_an_upgrade}"
+        );
+        assert!(
+            contradictions.is_empty(),
+            "the {name} router answers a refusal outside the envelope: {contradictions:#?}"
+        );
+        assert!(
+            rows > 0 && sent >= 3 * rows,
+            "the {name} walk sent {sent} requests over {rows} rows"
+        );
+        assert_eq!(
+            not_an_upgrade,
+            3 * upgrades.len(),
+            "each of {upgrades:?} answers the upgrade extractor's text to each bodied shape"
+        );
+        for status in [400, 413, 415, 422] {
+            assert!(
+                enveloped.contains_key(&status),
+                "the {name} walk provoked no {status} in the envelope: {enveloped:?}"
+            );
+        }
+    }
+
     fn method(verb: Verb) -> axum::http::Method {
         use axum::http::Method;
         match verb {
@@ -915,8 +1053,8 @@ mod tests {
     use axum::Router;
 
     use super::test_support::{
-        assert_callers_meet_table, assert_table_matches, assert_uncounted_verbs_refused,
-        mounted_routes,
+        assert_callers_meet_table, assert_framework_refusals_enveloped, assert_table_matches,
+        assert_uncounted_verbs_refused, mounted_routes,
     };
     use super::{Verb, FALLBACK, LAUNCHER, TERMINAL_TENANT, WORKSPACE_TENANT};
 
@@ -1125,6 +1263,28 @@ mod tests {
     async fn uncounted_verbs_are_refused_on_every_launcher_route() {
         for (surface, router, bearer) in launcher_surfaces() {
             assert_uncounted_verbs_refused(&format!("launcher ({surface})"), router, bearer).await;
+        }
+    }
+
+    /// The launcher's routes whose only extractor before the handler is the
+    /// WebSocket upgrade. The reverse-tunnel legs take their query first.
+    const LAUNCHER_UPGRADES: &[&str] = &[
+        "/api/library/windows/watch",
+        "/api/library/local-color/watch",
+        "/api/library/local-theme/watch",
+    ];
+
+    #[tokio::test]
+    async fn framework_refusals_are_enveloped_on_every_launcher_route() {
+        for (surface, router, bearer) in launcher_surfaces() {
+            assert_framework_refusals_enveloped(
+                &format!("launcher ({surface})"),
+                router,
+                LAUNCHER,
+                bearer,
+                LAUNCHER_UPGRADES,
+            )
+            .await;
         }
     }
 
