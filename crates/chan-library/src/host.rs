@@ -4735,7 +4735,7 @@ impl WorkspaceHost {
     async fn dispatch_to(&self, req: Request<Body>) -> Response {
         let Some(router) = (match self.router_for_path(req.uri().path()) {
             Ok(router) => router,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => return dispatch_refusal(StatusCode::INTERNAL_SERVER_ERROR, &e),
         }) else {
             // No tenant prefix owns this path. Serve the library root fallback
             // (the launcher SPA + `/api/library/*`) when one is installed;
@@ -4753,6 +4753,18 @@ impl WorkspaceHost {
             Err(e) => match e {},
         }
     }
+}
+
+/// A refusal the dispatch answers itself, in the envelope every refusal of
+/// the serving layer has: a JSON object whose `error` is a sentence a client
+/// may show. The serving crate depends on this one, so its builder of that
+/// envelope is out of reach here.
+fn dispatch_refusal(status: StatusCode, error: &Error) -> Response {
+    (
+        status,
+        axum::Json(serde_json::json!({ "error": error.to_string() })),
+    )
+        .into_response()
 }
 
 /// The control socket reaches the host through `Weak<dyn HostControl>` (the
