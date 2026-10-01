@@ -351,20 +351,30 @@ mod tests {
         assert_eq!(off, serde_json::from_value(json!({ "on": false })).unwrap());
     }
 
-    #[test]
-    fn active_terminals_rejection_wire() {
-        // The 409 body the off path returns when live terminals block an
-        // unforced unmount; the client reads `active_terminals` for its prompt.
-        let rejection = ActiveTerminalsRejection {
-            error: "live_terminals".into(),
-            active_terminals: 3,
-        };
-        let v = serde_json::to_value(&rejection).unwrap();
+    #[tokio::test]
+    async fn live_terminals_refusal_wire() {
+        // The 409 an unforced off or forget answers over live terminals: the
+        // client branches on `code` and reads `active_terminals` for its prompt.
+        let response = crate::devserver::live_terminals_refusal(3);
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
         assert_eq!(
-            v,
-            json!({ "error": "live_terminals", "active_terminals": 3 })
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .map(|value| value.as_bytes()),
+            Some(&b"application/json"[..])
         );
-        assert_eq!(rejection, serde_json::from_value(v).unwrap());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!({
+                "error": "workspace has 3 live terminal session(s); close them or force",
+                "code": "live_terminals",
+                "active_terminals": 3,
+            })
+        );
     }
 
     #[test]

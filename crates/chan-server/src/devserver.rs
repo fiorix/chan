@@ -3224,19 +3224,27 @@ async fn handle_forget(
         Ok(WorkspaceLifecycleOutcome::NotFound) => {
             crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
         }
-        Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => (
-            StatusCode::CONFLICT,
-            Json(ActiveTerminalsRejection {
-                error: "live_terminals".into(),
-                active_terminals,
-            }),
-        )
-            .into_response(),
+        Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
+            live_terminals_refusal(active_terminals)
+        }
         Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             crate::error::workspace_still_releasing()
         }
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+/// The 409 an unforced off or forget answers while the workspace still has
+/// live terminal sessions, carrying the count a client confirms with.
+pub(crate) fn live_terminals_refusal(active_terminals: usize) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ActiveTerminalsRejection {
+            error: "live_terminals".into(),
+            active_terminals,
+        }),
+    )
+        .into_response()
 }
 
 /// Set whether the registered workspace addressed by the route is mounted.
@@ -3264,14 +3272,7 @@ async fn handle_set_workspace_on(
     if !req.on && !req.force {
         let active = state.host.tenant_terminal_session_count(&prefix);
         if active > 0 {
-            return (
-                StatusCode::CONFLICT,
-                Json(ActiveTerminalsRejection {
-                    error: "live_terminals".into(),
-                    active_terminals: active,
-                }),
-            )
-                .into_response();
+            return live_terminals_refusal(active);
         }
     }
     match state.set_workspace_on(&prefix, req.on, req.force).await {
@@ -3279,14 +3280,9 @@ async fn handle_set_workspace_on(
         Ok(SetWorkspaceOnResult::Updated(None)) => {
             crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
         }
-        Ok(SetWorkspaceOnResult::Refused { active_terminals }) => (
-            StatusCode::CONFLICT,
-            Json(ActiveTerminalsRejection {
-                error: "live_terminals".into(),
-                active_terminals,
-            }),
-        )
-            .into_response(),
+        Ok(SetWorkspaceOnResult::Refused { active_terminals }) => {
+            live_terminals_refusal(active_terminals)
+        }
         Err(e @ Error::ShuttingDown(_)) => {
             crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
