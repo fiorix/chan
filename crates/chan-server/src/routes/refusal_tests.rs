@@ -260,6 +260,153 @@ async fn terminal_tenant_wrong_method_is_json() {
     assert_method_refused(response, "POST").await;
 }
 
+const LAUNCHER_BEARER: &str = "launcher-bearer";
+
+/// One request through the launcher's router over a throwaway library, with a
+/// bound serve address, and behind [`LAUNCHER_BEARER`] when `gated`.
+async fn launcher_answer(gated: bool, request: Request<Body>) -> Response {
+    let config = tempfile::tempdir().unwrap();
+    let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+    let host = Arc::new(crate::WorkspaceHost::new(library, crate::route_builder()));
+    let bearer = gated.then(|| Arc::new(std::sync::RwLock::new(LAUNCHER_BEARER.to_string())));
+    let serve_addr = std::sync::OnceLock::new();
+    let _ = serve_addr.set("127.0.0.1:8080".parse().unwrap());
+    crate::routes::launcher_router(host, bearer, Some(Arc::new(serve_addr)))
+        .oneshot(request)
+        .await
+        .unwrap()
+}
+
+fn bodiless(method: &str, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// One route of each launcher sub-router that takes the 405 answer: the
+/// management routes, a reverse-tunnel leg, the surface's configuration, the
+/// capability mint and a capability use.
+#[tokio::test]
+async fn launcher_wrong_method_is_json() {
+    for (method, uri, allow) in [
+        ("PATCH", "/api/library/workspaces", "GET,HEAD,POST"),
+        ("POST", "/api/library/tunnel/control", "GET,HEAD"),
+        ("DELETE", "/api/library/local-color", "GET,HEAD,PUT"),
+        ("GET", "/api/library/command-capabilities", "POST"),
+        (
+            "DELETE",
+            "/api/library/command-capabilities/probe/actions",
+            "POST",
+        ),
+    ] {
+        assert_method_refused(launcher_answer(false, bodiless(method, uri)).await, allow).await;
+    }
+}
+
+/// A launcher gate answers a wrong method before the 405 does, and its
+/// refusal keeps the route's Allow.
+async fn assert_gate_refuses_first(
+    response: Response,
+    allow: &str,
+    status: StatusCode,
+    sentence: &str,
+) {
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|value| value.to_str().ok()),
+        Some(allow),
+        "the gate's refusal carries the route's Allow"
+    );
+    assert_refusal(response, status, json!({"error": sentence})).await;
+}
+
+#[tokio::test]
+async fn launcher_bearer_refuses_a_wrong_method_first() {
+    assert_gate_refuses_first(
+        launcher_answer(true, bodiless("PATCH", "/api/library/workspaces")).await,
+        "GET,HEAD,POST",
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid launcher bearer token",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn surface_bearer_refuses_a_wrong_method_on_a_config_route_first() {
+    assert_gate_refuses_first(
+        launcher_answer(true, bodiless("DELETE", "/api/library/local-color")).await,
+        "GET,HEAD,PUT",
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid surface bearer token",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn surface_bearer_refuses_a_wrong_method_on_the_capability_mint_first() {
+    assert_gate_refuses_first(
+        launcher_answer(true, bodiless("GET", "/api/library/command-capabilities")).await,
+        "POST",
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid surface bearer token",
+    )
+    .await;
+}
+
+/// The owner's browser session passes the launcher bearer as a tunnel caller
+/// and is refused the legs, whatever the method.
+#[tokio::test]
+async fn owner_gate_refuses_a_wrong_method_on_a_tunnel_leg_first() {
+    let origin = crate::route_authority::test_support::Caller::BrowserOwner
+        .origin()
+        .expect("a tunnel caller");
+    let request = Request::post("/api/library/tunnel/control")
+        .extension(origin)
+        .body(Body::empty())
+        .unwrap();
+    assert_gate_refuses_first(
+        launcher_answer(true, request).await,
+        "GET,HEAD",
+        StatusCode::FORBIDDEN,
+        "reverse tunnels are not available for this gateway role",
+    )
+    .await;
+}
+
+/// A capability path is a credential, so the 405 on a capability route keeps
+/// the headers that hold it out of caches and referrers.
+#[tokio::test]
+async fn capability_routes_keep_their_headers_on_a_wrong_method() {
+    for (method, uri) in [
+        ("GET", "/api/library/command-capabilities"),
+        ("DELETE", "/api/library/command-capabilities/probe/actions"),
+    ] {
+        let response = launcher_answer(false, bodiless(method, uri)).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {uri}"
+        );
+        for (name, value) in [
+            (header::CACHE_CONTROL, "no-store, private"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ] {
+            assert_eq!(
+                response
+                    .headers()
+                    .get(&name)
+                    .and_then(|found| found.to_str().ok()),
+                Some(value),
+                "{method} {uri}: {name}"
+            );
+        }
+    }
+}
+
 /// One byte over the framework's default body limit, which the survey reply
 /// and the session routes keep.
 const OVER_DEFAULT_LIMIT: usize = 2 * 1024 * 1024 + 1;

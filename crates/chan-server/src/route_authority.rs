@@ -1122,6 +1122,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uncounted_verbs_are_refused_on_every_launcher_route() {
+        for (surface, router, bearer) in launcher_surfaces() {
+            assert_uncounted_verbs_refused(&format!("launcher ({surface})"), router, bearer).await;
+        }
+    }
+
+    #[tokio::test]
     async fn every_caller_meets_the_declared_authority_on_every_launcher_route() {
         for (surface, router, bearer) in launcher_surfaces() {
             assert_callers_meet_table(&format!("launcher ({surface})"), router, LAUNCHER, bearer)
