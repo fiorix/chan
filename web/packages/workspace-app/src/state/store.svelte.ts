@@ -4955,38 +4955,13 @@ export function revealAndSelect(path: string): void {
   // every live surface (the dock + the active tab) rather than only the
   // global singleton; the entry should appear wherever the user is
   // looking. Expand ancestors only (not the file itself).
-  expandAncestorsInAllInstances(path, false);
+  expandAncestorsInAllInstances(path);
   // Programmatic reveal is a single-select: reset the multi-set + anchor
   // so a later shift+click ranges from the revealed entry.
   fbSelectSingle(path);
   browserSelection.showWorkspace = false;
   // The expansion change counts as a user action - persist it so
   // the next launch keeps the new entry in view.
-  persistTreeExpanded();
-}
-
-/// Enter a directory from an external window command. This expands the
-/// target directory itself so lazy child loading reveals that directory's
-/// contents, not just the parent chain that makes the directory row visible.
-export function revealAndEnterDirectory(path: string): void {
-  const parts = path.split("/").filter(Boolean);
-  let acc = "";
-  treeExpanded.map[""] = true;
-  for (const part of parts) {
-    acc = acc ? `${acc}/${part}` : part;
-    treeExpanded.map[acc] = true;
-  }
-  // Reach every live surface (see revealAndSelect). Entering a directory
-  // expands the directory ITSELF plus its ancestors.
-  expandAncestorsInAllInstances(path, true);
-  fbSelectSingle(path || null);
-  browserSelection.showWorkspace = false;
-  // Nothing awaits this load, and `loadTreeDir` rethrows after recording the
-  // failure, so the rejection is swallowed here rather than left unhandled.
-  // The reader is `tree.dirErrors`, which the directory's own row renders; an
-  // unhandled rejection would raise a second, contextless report of a failure
-  // the tree is already showing.
-  if (path) void loadTreeDir(path).catch(() => {});
   persistTreeExpanded();
 }
 
@@ -5039,13 +5014,13 @@ export function isFullyExpandedForInstance(id: string): boolean {
 }
 
 /// Expand the ancestor chain of `path` across EVERY live File Browser
-/// instance. Programmatic reveals (after create / move / upload, or an
-/// external open-browser command) must surface the new entry in whatever
-/// surface is on screen; unlike a user toggle, a reveal is not scoped to
-/// one instance. Always keeps each instance's root expanded.
-function expandAncestorsInAllInstances(path: string, includeSelf: boolean): void {
-  const parts = (includeSelf ? path.split("/").filter(Boolean) : path.split("/"));
-  const upto = includeSelf ? parts.length : parts.length - 1;
+/// instance. Programmatic reveals (after create / move / upload) must
+/// surface the new entry in whatever surface is on screen; unlike a user
+/// toggle, a reveal is not scoped to one instance. Always keeps each
+/// instance's root expanded.
+function expandAncestorsInAllInstances(path: string): void {
+  const parts = path.split("/");
+  const upto = parts.length - 1;
   for (const inst of Object.values(fbTreeInstances.byId)) {
     inst.expanded[""] = true;
     let acc = "";
