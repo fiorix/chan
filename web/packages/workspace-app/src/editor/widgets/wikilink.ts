@@ -193,20 +193,21 @@ function broadcastKindResolved(): void {
   }
 }
 
-/// Whether a repaint is waiting for the next animation frame.
+/// Whether a repaint is waiting on its timer.
 let repaintScheduled = false;
 
-/// Repaint every registered view at the next animation frame. Resolves that
-/// settle before that frame share it, so a note whose links resolve in a
-/// burst costs each view one transaction, not one per link. A hidden page
-/// runs no frames and repaints its kinds when it is shown.
+/// Repaint every registered view from a zero-delay timer. Resolves that
+/// settle before the timer fires share it, so a note whose links resolve in
+/// a burst costs each view one transaction, not one per link. Timers of
+/// equal delay run as they were set, so a timer set after a resolve settles
+/// runs after that resolve's repaint.
 function scheduleKindRepaint(): void {
   if (repaintScheduled) return;
   repaintScheduled = true;
-  requestAnimationFrame(() => {
+  setTimeout(() => {
     repaintScheduled = false;
     broadcastKindResolved();
-  });
+  }, 0);
 }
 
 /// Look up a target's kind. Returns the cached kind synchronously, or
