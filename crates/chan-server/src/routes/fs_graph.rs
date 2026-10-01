@@ -35,7 +35,7 @@ use axum::Json;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err, err_state};
+use crate::error::{err, err_code, err_state};
 use crate::extract::Query;
 use crate::routes::run_blocking;
 use crate::state::AppState;
@@ -274,6 +274,7 @@ pub struct EdgeView {
 pub struct FsGraphError {
     status: StatusCode,
     message: String,
+    code: Option<&'static str>,
 }
 
 impl FsGraphError {
@@ -281,11 +282,15 @@ impl FsGraphError {
         Self {
             status,
             message: message.into(),
+            code: None,
         }
     }
 
     pub(crate) fn into_response(self) -> Response {
-        err(self.status, self.message)
+        match self.code {
+            Some(code) => err_code(self.status, self.message, code, serde_json::json!({})),
+            None => err(self.status, self.message),
+        }
     }
 }
 
@@ -319,7 +324,7 @@ pub async fn api_fs_graph(
     .await;
     match result {
         Ok(Ok(response)) => Json(response).into_response(),
-        Ok(Err(e)) => err(e.status, e.message),
+        Ok(Err(e)) => e.into_response(),
         Err(failed) => failed.into_response(),
     }
 }
@@ -343,12 +348,20 @@ fn resolve_scope(
     requested_depth: usize,
 ) -> Result<ResolvedScope, FsGraphError> {
     workspace.ensure_root_available().map_err(|error| {
-        let status = match &error {
-            chan_workspace::ChanError::WorkspaceRootMissing(_) => StatusCode::NOT_FOUND,
-            chan_workspace::ChanError::SpecialFile { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, code) = match &error {
+            chan_workspace::ChanError::WorkspaceRootMissing(_) => {
+                (StatusCode::NOT_FOUND, Some("workspace_root_missing"))
+            }
+            chan_workspace::ChanError::SpecialFile { .. } => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, None)
+            }
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
-        FsGraphError::new(status, error.to_string())
+        FsGraphError {
+            status,
+            message: error.to_string(),
+            code,
+        }
     })?;
     let root: PathBuf = workspace.root().to_path_buf();
     let rel = normalize_rel(path);

@@ -156,9 +156,15 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
             (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string())
         }
         C::SpecialFile { .. } => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()),
-        C::WorkspaceNotRegistered(_) | C::WorkspaceRootMissing(_) | C::NotFound(_) => {
-            (StatusCode::NOT_FOUND, e.to_string())
+        C::WorkspaceRootMissing(_) => {
+            return err_code(
+                StatusCode::NOT_FOUND,
+                e.to_string(),
+                "workspace_root_missing",
+                serde_json::json!({}),
+            );
         }
+        C::WorkspaceNotRegistered(_) | C::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
         C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
