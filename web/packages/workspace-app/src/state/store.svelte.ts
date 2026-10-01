@@ -3796,13 +3796,6 @@ export function closeSettings(): void {
   settingsPanel.open = false;
 }
 
-/// Toggle the settings surface, for a bound chord or the native host
-/// bridge; a second press closes it.
-export function toggleSettings(): void {
-  if (settingsPanel.open) closeSettings();
-  else openSettings();
-}
-
 // ---- graph overlay -----------------------------------------------------
 //
 // Open + scope picker state, plus a `depth` knob for how far the

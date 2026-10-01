@@ -1,4 +1,4 @@
-// The settings surface's overlay state: its open/close/toggle helpers
+// The settings surface's overlay state: its open/close helpers
 // and its participation in the shared overlay stack (z-order + the
 // single-Escape close). Pure state, no rendering.
 
@@ -14,7 +14,6 @@ import {
   searchPanel,
   settingsPanel,
   syncOverlayStack,
-  toggleSettings,
   topOverlay,
 } from "./store.svelte";
 
@@ -26,15 +25,11 @@ afterEach(() => {
 });
 
 describe("settings overlay state", () => {
-  test("open / close / toggle drive settingsPanel.open", () => {
+  test("open / close drive settingsPanel.open", () => {
     expect(settingsPanel.open).toBe(false);
     openSettings();
     expect(settingsPanel.open).toBe(true);
     closeSettings();
-    expect(settingsPanel.open).toBe(false);
-    toggleSettings();
-    expect(settingsPanel.open).toBe(true);
-    toggleSettings();
     expect(settingsPanel.open).toBe(false);
   });
 
