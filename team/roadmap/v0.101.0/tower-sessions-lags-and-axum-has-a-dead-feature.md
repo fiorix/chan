@@ -31,3 +31,13 @@ The gateway runs the newest tower-sessions a compatible Postgres store allows, a
 3. `macros` is gone from both axum specs, `axum-macros` is gone from both lockfiles, and both workspaces build and pass clippy.
 4. `cargo tree -e features` for a gateway binary no longer shows axum's `multipart`.
 5. `make nix-hash-check` is green on the landed commit.
+
+## What shipped
+
+Built and accepted on 2026-10-01, on the Services lane's branch and on no integration branch: three commits in `Cargo.toml`, `crates/chan-tunnel-client/Cargo.toml`, `gateway/Cargo.toml` and both lock files, nothing else. The root `Cargo.lock` moves, so the Nix `cargoHash` must be harvested and pinned before the range lands, by the owner, for the reason the two exact pins' item gives ([two-exact-pins-hold-back-web-upgrades](two-exact-pins-hold-back-web-upgrades.md)); until then the range stays out of every integration, and its own gate was green but for the Nix hash check, red as ordered.
+
+- **axum's `macros` feature is gone from both specs** and `axum-macros` from both locks; a search for `debug_handler` and the `FromRef`, `FromRequest` and `FromRequestParts` derives under the crates, the gateway and the desktop finds nothing, read by the lead.
+- **`chan-tunnel-client` names its own axum,** `0.8` with default features off and a comment that says why, so the gateway's binaries no longer inherit the root's `multipart`: `multer` leaves the gateway's lock, and the gateway binary's feature tree carries no `multipart`.
+- **The tower-sessions pair stays at 0.14 with the store at 0.15,** and the comment is dated 2026-10-01 with both newest releases' core requirements: tower-sessions 0.15.0 needs the core at exactly 0.15.0 while the SQLx store 0.15.0 needs it at 0.14, so no newer compatible pair exists.
+
+The identity's Postgres tests and the gateway's unit tests passed in a PostgreSQL the lane installed in the guest; no session dependency moved, so no changelog entry is owed and the acceptance's second point does not apply. The first, third and fourth points are met; the fifth waits on the hash. Residual: the tunnel client's `default-features = false` is proved by the gateway workspace's build and lint, which build the crate without chan-server, where the root workspace's feature unification could hide a missing default.

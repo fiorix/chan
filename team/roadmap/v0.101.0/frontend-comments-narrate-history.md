@@ -16,6 +16,8 @@ Beside them sits code nothing reaches: six dead exports in the store including a
 
 Both passes touch the same lines, and both are blocked by the same thing: tests that pin comment text and tests that hold dead code alive. See [source-text-tests-pin-spelling-not-behaviour](source-text-tests-pin-spelling-not-behaviour.md).
 
+**Added on 2026-10-01.** Two more pieces of dead code are this pass's. The graph panel's indexer hint can never show, since its effect bails on a missing index, which the hint requires (`web/packages/workspace-app/src/components/GraphPanel.svelte`); the frontend review's row for it had three dispositions on record, a bug, dead code and an open low, and by a ruling of the lead's it is dead code, deleted in this pass's comments-and-dead-code order with no changelog line ([the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) records the row). And the status bar's building-branch comment describes an `EmbedBatch` stage that sets its file to `"embedding"` with chunk counts (`src/components/AppStatusBar.svelte:133-143`), which no server path emits, so the guard under it is dead and only a test fabricates the status; the independent reading of the stale sentences found it, and the fix, the guard and the test removed with the comment, is a statement change that the lead's acceptance of that item names as a hygiene row ([stale-sentences-outlive-their-code](stale-sentences-outlive-their-code.md)).
+
 ## Desired contract
 
 Frontend comments follow the writing rules, and code with no caller is gone unless someone says why it stays. The design documents that have drifted are corrected in the same pass: the review names five load-bearing places, two describing features that do not exist.

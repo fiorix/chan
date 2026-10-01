@@ -15,3 +15,9 @@ Graph instance identity and keying are covered by source-pattern checks only: th
 ## What to do
 
 Establish a working graph mount in the test harness, then show its regression checks fail for a remount and for a missing key.
+
+## What shipped
+
+The build is on the integration branch and not on `main`: two test-only commits, accepted on 2026-10-01, in `web/packages/workspace-app/src/components`, with no production line. The graph suite gains the case the reading above found missing: two graph tabs mounted over the stand-in canvas, the second switched to, then reordered, with each panel asserted to have moved with its tab (`GraphPanel.keepAlive.test.ts:101-116`); the case lives in the graph suite because the stand-in canvas is already there. The suite of file and dashboard tabs keeps graph tabs out, and its header comment now says that the graph suite covers them across a switch and a reorder (`paneKeepAliveMount.test.ts:12-14`).
+
+The two reds that What to do asks for are on record, each with the saved and restored hash of `Pane.svelte`: with the key removed from the pane's block of graph tabs the case fails at "the second tab brings its panel forward", and with a body mounted only while its tab is active it finds one panel where it expects two. The web gate was green at the tip. Residual: a mounted jsdom check, no painted graph.
