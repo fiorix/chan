@@ -92,8 +92,8 @@ export const DOC_RELEASE_LINGER_MS = 250;
 /// any unresolved push to be answered or reconciled.
 /// Retries continue in the background at capped backoff; a later
 /// successful reattach hard-resyncs and returns to `attached`.
-export const DOC_RECONNECT_GRACE_ATTEMPTS = 2;
-export const DOC_RECONNECT_GRACE_MS = 3000;
+const DOC_RECONNECT_GRACE_ATTEMPTS = 2;
+const DOC_RECONNECT_GRACE_MS = 3000;
 
 /// A dial that produces no frame within this window counts as a failed
 /// attempt. Without it a hung upgrade would pin the tab in `connecting`
@@ -120,7 +120,7 @@ export const DOC_FALLBACK_SETTLE_MS = 2000;
 
 /// Outbound cursor cadence: trailing-edge throttle on selection moves.
 /// The presence field's freshness fade assumes roughly this rate.
-export const DOC_CURSOR_THROTTLE_MS = 100;
+const DOC_CURSOR_THROTTLE_MS = 100;
 
 /// Client-side mirror of the server's editable-text write limit
 /// (TEXT_WRITE_LIMIT, 2 MiB). Compared against UTF-16 length as a cheap
@@ -180,7 +180,7 @@ function freshClientId(): string {
 /// Build the doc-ws path. `version` rides only on reconnects that can
 /// take the incremental catch-up; a fresh attach omits it and gets a
 /// snapshot.
-export function docWsPath(path: string, windowId: string, version?: number): string {
+function docWsPath(path: string, windowId: string, version?: number): string {
   const params = new URLSearchParams({ path, w: windowId });
   if (version !== undefined) params.set("version", String(version));
   return `/api/doc/ws?${params.toString()}`;

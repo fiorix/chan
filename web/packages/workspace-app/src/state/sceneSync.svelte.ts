@@ -65,15 +65,15 @@ const SCENESYNC_DEFAULT_ON = true;
 /// Keep the socket + shadow alive briefly after the owning canvas
 /// releases; a cross-pane tab move is a full component remount and the
 /// linger carries the session across the swap.
-export const SCENE_RELEASE_LINGER_MS = 250;
+const SCENE_RELEASE_LINGER_MS = 250;
 
 /// Reconnect grace, mirroring docSync: a socket drop shows as
 /// `reconnecting` (classic autosave stays suppressed) for at most this
 /// many attempts / this long, then the session degrades. Classic saves
 /// resume only when no old push outcome remains unresolved; background
 /// retries continue at capped backoff.
-export const SCENE_RECONNECT_GRACE_ATTEMPTS = 2;
-export const SCENE_RECONNECT_GRACE_MS = 3000;
+const SCENE_RECONNECT_GRACE_ATTEMPTS = 2;
+const SCENE_RECONNECT_GRACE_MS = 3000;
 
 /// A dial that produces no frame within this window counts as a failed
 /// attempt.
@@ -90,7 +90,7 @@ export const SCENE_FALLBACK_SETTLE_MS = 2000;
 
 /// Outbound pointer cadence: trailing-edge throttle on pointer moves,
 /// applied inside the session so every binding inherits it.
-export const SCENE_CURSOR_THROTTLE_MS = 100;
+const SCENE_CURSOR_THROTTLE_MS = 100;
 
 /// Client-side mirror of the server's text write limit (TEXT_WRITE_LIMIT,
 /// 2 MiB), compared against the serialized buffer length as a cheap
