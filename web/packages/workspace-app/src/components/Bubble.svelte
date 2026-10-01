@@ -1,6 +1,5 @@
 <script lang="ts">
-  // Generic chat-style bubble. Used by read-only callers that want
-  // role/timestamp chrome around compact text.
+  // Generic chat-style bubble around compact text.
   //
   // The shell intentionally exposes no interaction: click handling,
   // keyboard focus, and the `active` highlight are owned by the
@@ -11,52 +10,23 @@
   import type { Snippet } from "svelte";
 
   let {
-    align = "left",
-    role,
-    timestampLabel,
     active = false,
     children,
-    header,
   }: {
-    /// Horizontal alignment. `right` mirrors the user-side bubble
-    /// (right-aligned, tinted body); `left` is the neutral bubble.
-    align?: "left" | "right";
-    /// Optional uppercase role label rendered above the body (e.g.
-    /// "You", "Group"). Omit to skip the role row
-    /// unless `timestampLabel` or `header` is supplied.
-    role?: string;
-    /// Pre-formatted relative-time string (e.g. "3m ago"). The
-    /// caller owns the ticker so this component stays stateless;
-    /// pass `undefined` to omit.
-    timestampLabel?: string;
     /// Visual highlight for keyboard / list-driven focus. The
     /// caller still owns scroll-into-view and `aria-selected`.
     active?: boolean;
     /// Body content. Required.
     children: Snippet;
-    /// Optional snippet appended to the right of the role/timestamp
-    /// row (e.g. small action buttons next to the timestamp).
-    header?: Snippet;
   } = $props();
-
-  const showHeaderRow = $derived(
-    role !== undefined || timestampLabel !== undefined || header !== undefined,
-  );
 </script>
 
-<div class="bubble {align}" class:active>
-  {#if showHeaderRow}
-    <div class="role-line">
-      {#if role}<span class="role">{role}</span>{/if}
-      {#if timestampLabel}<span class="ts">{timestampLabel}</span>{/if}
-      {#if header}{@render header()}{/if}
-    </div>
-  {/if}
+<div class="bubble left" class:active>
   <div class="body">{@render children()}</div>
 </div>
 
 <style>
-  /* Same max-width and role + timestamp typography across callers. */
+  /* Left-aligned in the caller's column, capped at 85% of its width. */
   .bubble {
     max-width: 85%;
     display: flex;
@@ -64,26 +34,6 @@
     gap: 2px;
   }
   .bubble.left { align-self: flex-start; align-items: flex-start; }
-  .bubble.right { align-self: flex-end; align-items: flex-end; }
-
-  .role-line {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-  }
-  .bubble.right .role-line { flex-direction: row-reverse; }
-  .role {
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-  }
-  .ts {
-    font-size: 12px;
-    color: var(--text-secondary);
-    opacity: 0.65;
-    font-variant-numeric: tabular-nums;
-  }
 
   .body {
     background: var(--bubble-bg);
@@ -93,7 +43,6 @@
     line-height: 1.5;
     word-break: break-word;
   }
-  .bubble.right .body { background: var(--bubble-right-bg); }
 
   /* Active highlight for list-driven keyboard navigation. Soft
      ring around the body so the row reads as "selected" without
