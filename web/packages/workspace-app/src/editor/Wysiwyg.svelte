@@ -454,6 +454,26 @@
     return true;
   }
 
+  // The editor's own Mod-Enter actions, listed as the chord tries them.
+  // Each returns false when it does not apply, so the next one gets the
+  // keypress. The keymap's Mod-Enter entries and `runOwnModEnter` are both
+  // made from this list.
+  const ownModEnterActions: ReadonlyArray<(view: EditorView) => boolean> = [
+    // Mod-Enter at a date pill opens the calendar / format
+    // popover (keyboard equivalent of clicking the pill).
+    // Returns false when the caret isn't on a date so the
+    // next entry below gets the keypress.
+    openDateAtCaret,
+    // Mod-Enter inside any fenced code block: append a fresh
+    // line just past the block end and place the caret
+    // there. Always-on escape, independent of the block's
+    // position in the doc - for cases the doc-end-only
+    // rule below can't catch (unclosed fence followed by
+    // content, opener inside a list, etc.).
+    fmt.exitFenceAnywhere,
+    fmt.escapeFenceAtDocEnd,
+  ];
+
   /// The editor's own Mod-Enter actions, in its keymap's order: open the
   /// calendar of a date under the caret, then leave a fenced code block.
   /// True when one of them acted. A host that claims the chord ahead of the
@@ -461,7 +481,8 @@
   /// as its keymap would never see the chord.
   export function runOwnModEnter(): boolean {
     if (!view || !view.state.facet(EditorView.editable)) return false;
-    return openDateAtCaret(view) || fmt.exitFenceAnywhere(view) || fmt.escapeFenceAtDocEnd(view);
+    const editor = view;
+    return ownModEnterActions.some((action) => action(editor));
   }
 
   /// Re-measure without focusing. Used by FileEditorTab's keep-alive
@@ -627,14 +648,7 @@
                 return true;
               },
             },
-            // Mod-Enter at a date pill opens the calendar / format
-            // popover (keyboard equivalent of clicking the pill).
-            // Returns false when the caret isn't on a date so the
-            // next entry below gets the keypress.
-            {
-              key: "Mod-Enter",
-              run: (view) => openDateAtCaret(view),
-            },
+            ...ownModEnterActions.map((run) => ({ key: "Mod-Enter", run })),
             // ArrowDown / Mod-Enter / Enter-on-closer escape a fenced
             // code block that sits at the end of the doc. Without
             // this, Enter inserts a literal newline inside the fence
@@ -643,14 +657,6 @@
             // apply so the keys keep their default behaviour
             // (cursorDown / caller submit / new line in code).
             { key: "ArrowDown", run: (view) => fmt.escapeFenceAtDocEnd(view) },
-            // Mod-Enter inside any fenced code block: append a fresh
-            // line just past the block end and place the caret
-            // there. Always-on escape, independent of the block's
-            // position in the doc - for cases the doc-end-only
-            // rule above can't catch (unclosed fence followed by
-            // content, opener inside a list, etc.).
-            { key: "Mod-Enter", run: (view) => fmt.exitFenceAnywhere(view) },
-            { key: "Mod-Enter", run: (view) => fmt.escapeFenceAtDocEnd(view) },
             // Submit when a host wires onSubmit; otherwise CONSUME the chord as
             // a no-op (return true) so it never falls through to CM6's default
             // Mod-Enter (insertBlankLine) in a plain file editor. RichPrompt
