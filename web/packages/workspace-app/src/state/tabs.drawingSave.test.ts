@@ -193,7 +193,12 @@ describe("the close of a drawing whose save is refused", () => {
     const typed = '{ "type": "excalidraw", "elements": [1] }';
     const pane = resetLayout([drawingTab("notes/board.excalidraw", typed)]);
     vi.spyOn(api, "write").mockRejectedValue(
-      new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }),
+      new ApiError(409, "file changed on disk since it was read", {
+        error: "file changed on disk since it was read",
+        code: "write_conflict",
+        current_mtime: 5,
+        current_mtime_ns: "5",
+      }),
     );
 
     const close = closeTab(pane.id, "board-1");
@@ -214,7 +219,12 @@ describe("the close of a drawing whose save is refused", () => {
     vi.useRealTimers();
     setTabContent(readTab("board-1")!, '{ "type": "excalidraw", "elements": [1] }');
     vi.spyOn(api, "write").mockRejectedValue(
-      new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }),
+      new ApiError(409, "file changed on disk since it was read", {
+        error: "file changed on disk since it was read",
+        code: "write_conflict",
+        current_mtime: 5,
+        current_mtime_ns: "5",
+      }),
     );
 
     const close = closeTab(pane.id, "board-1");

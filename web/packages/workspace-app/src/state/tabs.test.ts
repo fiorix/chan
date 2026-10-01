@@ -3658,7 +3658,9 @@ describe("autosave", () => {
     const tab = fileTab({ content: "changed", saved: "old" });
     const pane = resetLayout([tab]);
     vi.spyOn(api, "write").mockRejectedValueOnce(new Error("disk full"))
-      .mockRejectedValue(new ApiError(409, "changed on disk"));
+      .mockRejectedValue(
+        new ApiError(409, "file changed on disk since it was read", { error: "file changed on disk since it was read", code: "write_conflict" }),
+      );
     vi.useFakeTimers();
     scheduleAutosave(pane.id, tab.id);
     await vi.advanceTimersByTimeAsync(900);
@@ -3700,7 +3702,58 @@ describe("autosave", () => {
     expect(readTab(tab.id)?.saved).toBe(content);
   });
 
-  test("opens the conflict dialog with retry metadata when PUT requires preconditions", async () => {
+  test.each([
+    ["a sentence and no code", new ApiError(409, "the write was refused", { error: "the write was refused" })],
+    [
+      "another code",
+      new ApiError(409, "the write was refused", { error: "the write was refused", code: "other" }),
+    ],
+    [
+      "the conflict's fields and no code",
+      new ApiError(409, "conflict", {
+        error: "conflict",
+        current_mtime: 12,
+        current_mtime_ns: "12000000034",
+        current_authority_version: 9,
+        disk_conflicted: false,
+      }),
+    ],
+    [
+      "the conflict's code under another status",
+      new ApiError(500, "file changed on disk since it was read", { error: "file changed on disk since it was read", code: "write_conflict" }),
+    ],
+  ])("a write refused with %s is a failed save, not a conflict", async (_reason, refusal) => {
+    const tab = fileTab({ content: "changed", saved: "old" });
+    resetLayout([tab]);
+    vi.spyOn(api, "write").mockRejectedValue(refusal);
+
+    await expect(saveTab(tab)).rejects.toBe(refusal);
+    expect(conflictDialog.open).toBe(false);
+  });
+
+  test("an autosave refused without the write conflict's code reports a failed save", async () => {
+    const tab = fileTab({ content: "changed", saved: "old" });
+    const pane = resetLayout([tab]);
+    vi.spyOn(api, "write").mockRejectedValue(
+      new ApiError(409, "the write was refused", { error: "the write was refused" }),
+    );
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(900);
+    vi.useRealTimers();
+
+    await vi.waitFor(() =>
+      expect((activePane().tabs[0] as FileTab).saveError).toBe(
+        "the save request failed (the write was refused)",
+      ),
+    );
+    expect(conflictDialog.open).toBe(false);
+  });
+
+  test.each([
+    [409, "file changed on disk since it was read"],
+    [428, "a changed write must echo the authority version it last read"],
+  ])("opens the conflict dialog with retry metadata on the %i write conflict", async (status, sentence) => {
     const tab = fileTab({
       content: "changed",
       saved: "saved",
@@ -3710,7 +3763,9 @@ describe("autosave", () => {
     });
     resetLayout([tab]);
     vi.spyOn(api, "write").mockRejectedValue(
-      new ApiError(428, "write precondition required", {
+      new ApiError(status, sentence, {
+        error: sentence,
+        code: "write_conflict",
         current_mtime: 12,
         current_mtime_ns: "12000000034",
         current_authority_version: 9,

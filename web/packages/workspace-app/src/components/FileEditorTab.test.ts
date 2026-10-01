@@ -1742,7 +1742,14 @@ describe("a drawing whose save is refused", () => {
 
     test("a fixed drawing held by a conflict says it has not been saved", async () => {
       const { tab, target, write } = await refused();
-      write.mockRejectedValue(new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }));
+      write.mockRejectedValue(
+        new ApiError(409, "file changed on disk since it was read", {
+          error: "file changed on disk since it was read",
+          code: "write_conflict",
+          current_mtime: 5,
+          current_mtime_ns: "5",
+        }),
+      );
       setTabContent(tab, FIXED);
       setMode(tab, "canvas");
       await saveTab(tab);
