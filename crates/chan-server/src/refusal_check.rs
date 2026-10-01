@@ -69,21 +69,13 @@ async fn inspect(State(allow_navigation): State<bool>, request: Request, next: N
             // HEAD has no response body, including on a refusal.
             || (method == Method::HEAD && bytes.is_empty())
             || permanent_exception(&method, &path, parts.status, is_fallback && allow_navigation, &bytes)
-            || range_refusal(&method, &path, parts.status, &parts.headers, &bytes)
-            || pending_refusal(parts.status, &bytes, is_fallback),
+            || range_refusal(&method, &path, parts.status, &parts.headers, &bytes),
         "refusal envelope violated: {method} {path} returned {} with body {:?}",
         parts.status,
         String::from_utf8_lossy(&bytes),
     );
     parts.extensions.insert(Inspected);
     Response::from_parts(parts, Body::from(bytes))
-}
-
-fn pending_refusal(status: StatusCode, body: &[u8], is_fallback: bool) -> bool {
-    // Host dispatch is a fallback; its lock error belongs to chan-library.
-    is_fallback
-        && status == StatusCode::INTERNAL_SERVER_ERROR
-        && body == b"config: workspace host lock poisoned"
 }
 
 fn range_refusal(
