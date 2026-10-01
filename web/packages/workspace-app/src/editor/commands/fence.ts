@@ -68,20 +68,25 @@ export function fenceLineTracker(): (line: string) => FenceLine {
       fence = null;
     }
     if (fence) {
-      const run = fenceRun(line, fence.column);
-      if (run && run[0] === fence.run[0] && run.length >= fence.run.length) {
+      const marker = fenceRun(line, fence.column);
+      if (
+        marker &&
+        marker.run[0] === fence.run[0] &&
+        marker.run.length >= fence.run.length &&
+        /^ *$/.test(marker.rest)
+      ) {
         fence = null;
         return "fence";
       }
       return "code";
     }
-    const run = fenceRun(line, 0);
-    if (run) {
-      fence = { run, column: 0 };
+    const marker = fenceRun(line, 0);
+    if (marker && validOpener(marker.run, marker.rest)) {
+      fence = { run: marker.run, column: 0 };
       return "fence";
     }
     const item = LIST_ITEM_FENCE.exec(line);
-    if (item) {
+    if (item && validOpener(item[4]!, line.slice(item[0].length))) {
       fence = { run: item[4]!, column: item[1]!.length + item[2]!.length + item[3]!.length };
       return "fence";
     }
@@ -94,12 +99,17 @@ export function fenceLineTracker(): (line: string) => FenceLine {
 // spaces to the content column, where the run starts.
 const LIST_ITEM_FENCE = /^( {0,3})([-*+]|\d{1,9}[.)])( {1,4})(`{3,}|~{3,})/;
 
-/// The run of 3+ backticks or tildes that opens or closes a fence on
-/// `line`, or null. Only up to three spaces past `column` may precede it.
-function fenceRun(line: string, column: number): string | null {
+/// The run of 3+ backticks or tildes and the rest of its line, or null.
+/// Only up to three spaces past `column` may precede it.
+function fenceRun(line: string, column: number): { run: string; rest: string } | null {
   const spaces = /^ */.exec(line)![0].length;
   if (spaces < column || spaces > column + 3) return null;
-  return /^(`{3,}|~{3,})/.exec(line.slice(spaces))?.[1] ?? null;
+  const match = /^(`{3,}|~{3,})(.*)$/.exec(line.slice(spaces));
+  return match ? { run: match[1]!, rest: match[2]! } : null;
+}
+
+function validOpener(run: string, rest: string): boolean {
+  return run[0] !== "`" || !rest.includes("`");
 }
 
 /// The column where `line`'s content starts, a tab advancing to the next
