@@ -5689,8 +5689,8 @@ const saveAgainAfterCurrent = new Set<string>();
 /// that re-open ends (see `beginMissingFileReopen`).
 let pendingMissingFileReopen: { tabId: string; by: "pick" | "open" } | null = null;
 
-/// Conflict dialog state. Populated when a save returns 409 or 428
-/// (an external edit landed, or a live authority requires explicit
+/// Conflict dialog state. Populated when a save is refused as the write
+/// conflict (an external edit landed, or a live authority requires explicit
 /// preconditions). Mounted by
 /// ConflictModal.svelte; closed via reloadConflictedTab,
 /// overwriteConflictedTab, or dismissConflict.
@@ -5960,8 +5960,9 @@ export function setTabDocState(t: FileTab, doc: DocTabState | null): void {
 
 /// Single source of truth for "send this tab's content to the
 /// server". Both autosave and explicit saveTab funnel through here.
-/// On 409, opens the conflict dialog and returns; the dialog's
-/// Reload / Overwrite buttons resolve the recovery.
+/// On the write conflict, opens the conflict dialog and returns; the
+/// dialog's Reload / Overwrite buttons resolve the recovery. Any other
+/// refusal is thrown as a failed save.
 ///
 /// Format-specific pre-checks live here so the gate is uniform across
 /// every save. Only a drawing is checked, since a scene that does not
@@ -6087,7 +6088,11 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
   } catch (e) {
-    if (e instanceof ApiError && (e.status === 409 || e.status === 428)) {
+    if (
+      e instanceof ApiError &&
+      (e.status === 409 || e.status === 428) &&
+      apiErrorCode(e) === "write_conflict"
+    ) {
       const current = liveFileTabById(t.id) ?? live;
       if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) {
         current.saveError = null;
