@@ -5959,6 +5959,57 @@ mod tests {
         .await;
     }
 
+    /// The launcher is the devserver's root fallback, so its framework
+    /// refusals reach a devserver caller through the host's dispatch: a wrong
+    /// method and a malformed JSON body both answer in the envelope.
+    #[tokio::test]
+    async fn launcher_framework_refusals_cross_the_devserver_in_the_envelope() {
+        use axum::extract::FromRequest;
+        use tower::ServiceExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let host = state.host.clone();
+        let bearer = state.token.read().unwrap().clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        let request = |method: &str, body: &'static str| {
+            HttpRequest::builder()
+                .method(method)
+                .uri("/api/library/windows")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let envelope = |response: axum::response::Response| async move {
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).expect("a JSON refusal")
+        };
+
+        let wrong_method = app.clone().oneshot(request("PATCH", "")).await.unwrap();
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(wrong_method.headers()[header::ALLOW], "GET,HEAD,POST");
+        assert_eq!(
+            envelope(wrong_method).await,
+            serde_json::json!({"error": "method not allowed"})
+        );
+
+        let Err(rejection) =
+            axum::Json::<crate::CreateWindow>::from_request(request("POST", "{"), &()).await
+        else {
+            panic!("the framework must refuse this body");
+        };
+        let malformed = app.oneshot(request("POST", "{")).await.unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            envelope(malformed).await,
+            serde_json::json!({"error": rejection.body_text()})
+        );
+    }
+
     #[tokio::test]
     async fn every_caller_meets_the_declared_authority_on_every_devserver_route() {
         let home = tempfile::tempdir().expect("home");
