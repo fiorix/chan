@@ -10163,6 +10163,41 @@ mod tests {
         }
     }
 
+    /// A host's close refusal is read by its live-terminal count, whatever
+    /// the host puts beside it, so a host of another build is still read as
+    /// a refusal. A message that is not a JSON object with a count is some
+    /// other failure.
+    #[test]
+    fn a_close_refusal_is_read_by_its_count() {
+        let rows: [(&str, Option<usize>); 8] = [
+            (
+                r#"{"error":"live_terminals","active_terminals":2}"#,
+                Some(2),
+            ),
+            (
+                r#"{"error":"workspace has 2 live terminal session(s)","code":"live_terminals","active_terminals":2}"#,
+                Some(2),
+            ),
+            (r#"{"active_terminals":2}"#, Some(2)),
+            ("no workspace mounted for /srv/notes", None),
+            (r#"{"error":"live_terminals"}"#, None),
+            (r#"{"active_terminals":"2"}"#, None),
+            (r#"{"active_terminals":-1}"#, None),
+            ("[2]", None),
+        ];
+        let misread: Vec<_> = rows
+            .iter()
+            .filter_map(|&(message, want)| {
+                let read = parse_live_terminals_refusal(message);
+                (read != want).then_some((message, read))
+            })
+            .collect();
+        assert!(
+            misread.is_empty(),
+            "messages read as another count than the table's: {misread:#?}"
+        );
+    }
+
     #[test]
     fn close_and_forget_take_on_in_both_spellings() {
         let top = Cli::try_parse_from(["chan", "close", "/srv/notes", "--on", "lab"]).unwrap();
