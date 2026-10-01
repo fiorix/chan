@@ -56,37 +56,63 @@ if (-not (Test-Path -LiteralPath $env:CODE_SIGN_TOOL_PATH -PathType Container)) 
 $codeSignTool = (Resolve-Path -LiteralPath $env:CODESIGNTOOL).ProviderPath
 $toolRoot = (Resolve-Path -LiteralPath $env:CODE_SIGN_TOOL_PATH).ProviderPath
 $resolvedInput = (Resolve-Path -LiteralPath $InputPath).ProviderPath
+$extension = [System.IO.Path]::GetExtension($resolvedInput).ToLowerInvariant()
+$temporaryPe = $null
 
-Write-Host "Signing Windows artifact: $resolvedInput"
-Push-Location -LiteralPath $toolRoot
-try {
-  & $codeSignTool "sign" `
-    "-username=$env:ES_USERNAME" `
-    "-password=$env:ES_PASSWORD" `
-    "-credential_id=$env:CREDENTIAL_ID" `
-    "-totp_secret=$env:ES_TOTP_SECRET" `
-    "-input_file_path=$resolvedInput" `
-    "-override"
-  if ($LASTEXITCODE -ne 0) {
-    throw "CodeSignTool failed with exit code $LASTEXITCODE"
+if ($extension -notin @(".exe", ".dll", ".msi")) {
+  $stream = [System.IO.File]::OpenRead($resolvedInput)
+  try {
+    $isPe = $stream.ReadByte() -eq 0x4d -and $stream.ReadByte() -eq 0x5a
+  } finally {
+    $stream.Dispose()
   }
-} finally {
-  Pop-Location
+
+  if (-not $isPe) {
+    Write-Host "Authenticode check skipped for '$extension' input (not a PE file CodeSignTool signs): $resolvedInput"
+    exit 0
+  }
+
+  # CodeSignTool selects supported formats by extension, while NSIS gives its PE uninstaller stub a .tmp name.
+  $temporaryPe = Join-Path (Split-Path -Parent $resolvedInput) "$([System.IO.Path]::GetFileName($resolvedInput)).$([guid]::NewGuid().ToString('N')).exe"
 }
 
-# CodeSignTool logs a failed sign (a TLS handshake it cannot complete, for
-# one) and still exits 0, so its exit code does not say whether the file was
-# signed. Read the signature back for every PE input instead.
-$extension = [System.IO.Path]::GetExtension($resolvedInput).ToLowerInvariant()
-if ($extension -in @(".exe", ".dll", ".msi")) {
-  $signature = Get-AuthenticodeSignature -LiteralPath $resolvedInput
-  if ($signature.Status -ne "Valid") {
-    throw "CodeSignTool exited 0 but $resolvedInput is not signed: Authenticode status $($signature.Status)"
+try {
+  $signTarget = $resolvedInput
+  if ($temporaryPe) {
+    Copy-Item -LiteralPath $resolvedInput -Destination $temporaryPe
+    $signTarget = $temporaryPe
   }
-  Write-Host "Authenticode signature verified: $resolvedInput ($($signature.Status), $($signature.SignerCertificate.Subject))"
-} else {
-  # tauri's NSIS bundler also passes its nst*.tmp uninstaller stub through
-  # the signCommand; CodeSignTool refuses it as "Unsupported file format" and
-  # there is no Authenticode signature to read back.
-  Write-Host "Authenticode check skipped for '$extension' input (not a PE file CodeSignTool signs): $resolvedInput"
+
+  Write-Host "Signing Windows artifact: $signTarget"
+  Push-Location -LiteralPath $toolRoot
+  try {
+    & $codeSignTool "sign" `
+      "-username=$env:ES_USERNAME" `
+      "-password=$env:ES_PASSWORD" `
+      "-credential_id=$env:CREDENTIAL_ID" `
+      "-totp_secret=$env:ES_TOTP_SECRET" `
+      "-input_file_path=$signTarget" `
+      "-override"
+    if ($LASTEXITCODE -ne 0) {
+      throw "CodeSignTool failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Pop-Location
+  }
+
+  # CodeSignTool can log a failed sign and still exit 0, so read the signature back before copying signed bytes into the stub.
+  $signature = Get-AuthenticodeSignature -LiteralPath $signTarget
+  if ($signature.Status -ne "Valid") {
+    throw "CodeSignTool exited 0 but $signTarget is not signed: Authenticode status $($signature.Status)"
+  }
+  Write-Host "Authenticode signature verified: $signTarget ($($signature.Status), $($signature.SignerCertificate.Subject))"
+
+  if ($temporaryPe) {
+    Copy-Item -LiteralPath $signTarget -Destination $resolvedInput -Force
+    Write-Host "Signed Windows PE restored: $resolvedInput"
+  }
+} finally {
+  if ($temporaryPe -and (Test-Path -LiteralPath $temporaryPe)) {
+    Remove-Item -LiteralPath $temporaryPe -Force
+  }
 }
