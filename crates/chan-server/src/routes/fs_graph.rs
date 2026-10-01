@@ -1939,9 +1939,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_fs_graph_refuses_a_missing_workspace_root() {
-        let (_cfg, root, workspace) = open_workspace();
+    #[tokio::test]
+    async fn build_fs_graph_refuses_a_missing_workspace_root() {
+        use tower::ServiceExt;
+
+        let (_cfg, root, state) = super::super::tests::served_state();
+        let workspace = state.try_workspace().unwrap();
         fs::remove_dir_all(root.path()).unwrap();
 
         let err = build_fs_graph(&workspace, FsGraphScope::Directory, "", MAX_DEPTH).unwrap_err();
@@ -1952,6 +1955,26 @@ mod tests {
             "expected typed root-loss rejection, got: {}",
             err.message
         );
+        let expected = serde_json::json!({
+            "error": format!("workspace root does not exist: {}", root.path().display()),
+            "code": "workspace_root_missing",
+        });
+        super::super::refusal_tests::assert_refusal(
+            err.into_response(),
+            StatusCode::NOT_FOUND,
+            expected.clone(),
+        )
+        .await;
+        let response = crate::router(state)
+            .oneshot(
+                axum::http::Request::get("/api/fs-graph")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        super::super::refusal_tests::assert_refusal(response, StatusCode::NOT_FOUND, expected)
+            .await;
     }
 
     #[test]

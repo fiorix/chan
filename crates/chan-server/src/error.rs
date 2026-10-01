@@ -219,6 +219,33 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn missing_workspace_root_has_a_coded_404() {
+        let missing = chan_workspace::ChanError::WorkspaceRootMissing("/tmp/missing".into());
+        let response = err_from(&missing);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), 8192).await.unwrap(),
+            r#"{"error":"workspace root does not exist: /tmp/missing","code":"workspace_root_missing"}"#,
+        );
+        for error in [
+            chan_workspace::ChanError::WorkspaceNotRegistered("/tmp/missing".into()),
+            chan_workspace::ChanError::NotFound("missing file".into()),
+        ] {
+            let response = err_from(&error);
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let expected = serde_json::json!({"error": error.to_string()}).to_string();
+            assert_eq!(
+                to_bytes(response.into_body(), 8192).await.unwrap().as_ref(),
+                expected.as_bytes()
+            );
+        }
+    }
+
     async fn assert_invalid_refusal(response: Response) {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
