@@ -6,8 +6,8 @@
 //   - "Paste from clipboard" only enabled when the clipboard contains
 //     an image (we don't pre-check; user-initiated paste handler
 //     elsewhere in the editor is the better path for paste).
-//   - Filtered list of in-workspace images (api.list cached, in-memory
-//     filter by query substring on path).
+//   - Filtered list of image paths (workspace catalog or loaded file
+//     browser entries, filtered by query substring on path).
 //
 // On commit, replaces `![query` with `![](path)`. Alt text is left
 // empty for v1; the user can edit it via the source-reveal flow
@@ -21,7 +21,9 @@ import { openBubbleShell } from "../bubble";
 import { createCaretAnchor } from "./anchor";
 import type { BubbleHandle } from "./types";
 import { api } from "../../api/client";
-import { indexStatus } from "../../state/store.svelte";
+import type { TreeEntry } from "../../api/types";
+import { indexStatus, tree } from "../../state/store.svelte";
+import { windowCaps } from "../../state/windowCaps";
 import {
   isImagePath,
   parseImageSrc,
@@ -70,16 +72,21 @@ interface ImageBubbleHandle extends BubbleHandle {
 let catalogCache: string[] | null = null;
 let catalogInflight: Promise<string[]> | null = null;
 
+function imagePaths(entries: TreeEntry[]): string[] {
+  return entries
+    .filter((e) => !e.is_dir && isImagePath(e.path))
+    .map((e) => e.path)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 async function loadImageCatalog(): Promise<string[]> {
+  if (!windowCaps.workspace) return imagePaths(tree.entries);
   if (catalogCache !== null) return catalogCache;
   if (catalogInflight) return catalogInflight;
   catalogInflight = api
     .list()
     .then((entries) => {
-      const out = entries
-        .filter((e) => !e.is_dir && isImagePath(e.path))
-        .map((e) => e.path)
-        .sort((a, b) => a.localeCompare(b));
+      const out = imagePaths(entries);
       catalogCache = out;
       return out;
     })
