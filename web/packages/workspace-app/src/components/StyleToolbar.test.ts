@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import StyleToolbar from "./StyleToolbar.svelte";
 import type Wysiwyg from "../editor/Wysiwyg.svelte";
 import type { BlockKind } from "../editor/commands/format";
+import { chordFor } from "../state/shortcuts";
 
 type MockFn = ReturnType<typeof vi.fn>;
 
@@ -200,6 +201,18 @@ describe("StyleToolbar", () => {
     expect(button(target, "toggle link").classList.contains("on")).toBe(true);
     expect(button(target, "task list").classList.contains("on")).toBe(true);
     expect(target.querySelector<HTMLSelectElement>("select.block-kind")?.value).toBe("quote");
+  });
+
+  test("a tooltip names a chord only for an action the editor binds", async () => {
+    const { target } = await renderToolbar();
+    const names = ["bold", "italic", "strikethrough", "inline code"];
+
+    expect(Object.fromEntries(names.map((name) => [name, button(target, name).title]))).toEqual({
+      bold: `bold (${chordFor("app.editor.bold")})`,
+      italic: `italic (${chordFor("app.editor.italic")})`,
+      strikethrough: "strikethrough",
+      "inline code": "inline code",
+    });
   });
 
   test("the formatting pill opens the row by focus and preserves editor mouse focus", async () => {
