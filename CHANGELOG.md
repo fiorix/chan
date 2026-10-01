@@ -176,6 +176,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The style toolbar's tooltips name only the chords the editor binds.** In v0.100.0, the strikethrough tooltip named Cmd/Ctrl+Shift+S and the inline code tooltip named Cmd/Ctrl+E, the chords of Search on macOS and of Show Source. They now name none, since neither action has a chord. The bold and italic tooltips name the platform's chord: Ctrl+B and Ctrl+I, or Cmd+B and Cmd+I on macOS.
 
+- **Semantic search offers the model download only when the model is missing.** In v0.100.0, any failure to turn on semantic search from the workspace-ready card was taken as a missing model, so the card said "downloads ~63 MB" and the next click started a download, and the Enable semantic search command answered every failure with advice to download the model. A missing model read `model_not_downloaded` as its message, on the card and in Settings. The card now offers the download only when the server reports the model missing and shows the server's sentence for any failure; the command gives its advice only then, and otherwise says why the enable failed.
+
+- **A refused delete in a window without a workspace says why.** In v0.100.0, deleting a directory that still held files, or a protected path, from a window without a workspace reported `delete failed: directory_not_empty` or `delete failed: protected_path` in the status line. It now reads the server's sentence, such as `delete failed: directory is not empty: build`.
+
 ## [v0.100.0] - 2026-09-23
 
 v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
