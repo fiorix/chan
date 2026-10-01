@@ -70,6 +70,17 @@ describe("local extensions", () => {
     ).toBe(false);
   });
 
+  test("accepts a boolean running flag and rejects other values", () => {
+    const entry = {
+      id: "echo",
+      name: "Echo",
+      entry_path: `/_chan/extensions/echo/${capability}/`,
+    };
+    expect(isValidExtensionInfo({ ...entry, running: false })).toBe(true);
+    expect(isValidExtensionInfo({ ...entry, running: true })).toBe(true);
+    expect(isValidExtensionInfo({ ...entry, running: "yes" })).toBe(false);
+  });
+
   test("registers singleton commands and queues dispatch until frame readiness", async () => {
     const pane: LeafNode = {
       kind: "leaf",
@@ -272,6 +283,43 @@ describe("catalog refresh across a devserver restart", () => {
     expect(second).toBe(first);
     await first;
     expect(extensions).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    { title: "an exited extension shows its status without a frame", running: false },
+    { title: "a running extension loads its frame", running: true },
+  ])("$title", async ({ running }) => {
+    resetLayout([]);
+    const entry = {
+      id: "echo",
+      name: "Echo",
+      entry_path: `/_chan/extensions/echo/${capA}/`,
+      singleton: true,
+      running,
+    };
+    vi.spyOn(api, "extensions").mockResolvedValue([entry]);
+    await refreshExtensions();
+    const command = allCommands().find((item) => item.id === "extension.echo");
+    expect(command?.category).toBe("Apps");
+    command?.run();
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "extension") throw new Error("expected extension tab");
+    const target = document.createElement("div");
+    document.body.append(target);
+    const view = mount(ExtensionTab, { target, props: { tab, paneId: activePane().id } });
+    try {
+      flushSync();
+      if (running) {
+        expect(target.querySelector("iframe")?.getAttribute("src")).toBe(apiPath(entry.entry_path));
+      } else {
+        expect(target.querySelector("iframe")).toBeNull();
+        expect(target.textContent).toContain(`${tab.title} is unavailable.`);
+        expect(target.textContent).toContain("Its process exited. Check its output, then restart Chan.");
+      }
+    } finally {
+      unmount(view);
+      target.remove();
+    }
   });
 
   test("an open extension tab's frame follows the live catalog, and says when the extension is gone", async () => {
