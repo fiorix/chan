@@ -406,6 +406,42 @@ jobs:
             }
           }
 
+          $installDir = Join-Path $env:LOCALAPPDATA "Chan"
+          $uninstaller = Join-Path $installDir "uninstall.exe"
+          if (Test-Path -LiteralPath $installDir) {
+            throw "Chan is already installed at $installDir"
+          }
+          try {
+            $install = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
+            if ($install.ExitCode -ne 0) {
+              throw "Silent NSIS install failed with exit code $($install.ExitCode)"
+            }
+            if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
+              throw "Silent NSIS install did not create $uninstaller"
+            }
+
+            $signature = Get-AuthenticodeSignature -LiteralPath $uninstaller
+            $signature | Format-List Path,Status,StatusMessage,SignerCertificate,TimeStamperCertificate
+            if ($signature.Status -ne "Valid") {
+              throw "Authenticode signature is not valid for ${uninstaller}: $($signature.Status)"
+            }
+            & $signtool verify /pa /v $uninstaller
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool verify failed for $uninstaller with exit code $LASTEXITCODE"
+            }
+            Write-Output "Installed uninstaller Authenticode signature verified: $uninstaller ($($signature.Status))"
+          } finally {
+            if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+              $uninstall = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+              if ($uninstall.ExitCode -ne 0) {
+                throw "Silent NSIS uninstall failed with exit code $($uninstall.ExitCode)"
+              }
+              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+                throw "Silent NSIS uninstall left $uninstaller installed"
+              }
+            }
+          }
+
       - if: matrix.os == 'windows-latest'
         name: Headless boot + /api/health smoke
         working-directory: chan
