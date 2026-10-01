@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
 use crate::devserver::{bytes_eq, ForceQuery};
-use crate::error::workspace_still_releasing;
+use crate::error::{live_terminals_refusal, workspace_still_releasing};
 use crate::extract::{Bytes, Json, Path as AxumPath, Query};
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
@@ -1576,19 +1576,6 @@ struct WorkspaceOff {
     force: bool,
 }
 
-/// The `409 Conflict` the workspace off, forget and DELETE routes answer when
-/// an unforced operation would end live terminal sessions. The launcher
-/// branches on the code, shows the count in its confirmation, and retries
-/// with `force: true`.
-fn live_terminals_response(active_terminals: usize) -> Response {
-    crate::error::err_code(
-        StatusCode::CONFLICT,
-        format!("workspace has {active_terminals} live terminal session(s); close them or force"),
-        "live_terminals",
-        serde_json::json!({ "active_terminals": active_terminals }),
-    )
-}
-
 /// `POST /api/library/devservers/{id}/workspaces/on` `{prefix}`: turn a connected
 /// devserver's workspace (the remote mount `prefix`) on through the desktop
 /// bridge. 200 with the workspace's [`LauncherWorkspace`] row, the shape the
@@ -1607,7 +1594,7 @@ async fn handle_devserver_workspace_on(
 
 /// `POST /api/library/devservers/{id}/workspaces/off` `{prefix, force}`: turn it
 /// off through the desktop bridge. An unforced off of a workspace with live
-/// terminals answers [`live_terminals_response`] so the launcher can confirm
+/// terminals answers [`live_terminals_refusal`] so the launcher can confirm
 /// and retry with `force: true` (which force-offs → 204).
 async fn handle_devserver_workspace_off(
     State(host): State<Arc<WorkspaceHost>>,
@@ -1619,7 +1606,7 @@ async fn handle_devserver_workspace_off(
 
 /// Shared on/off dispatch for a connected devserver's workspace. Maps the bridge
 /// outcome: `Done` → 200 with the row for an on that carried one, 204 otherwise;
-/// `NeedsForce` → [`live_terminals_response`] (the distinguishable confirm
+/// `NeedsForce` → [`live_terminals_refusal`] (the distinguishable confirm
 /// signal); a bridge error → 409 with the message (no desktop attached /
 /// devserver not connected). Only the on verb answers with a row: an off reports
 /// no state the caller does not already hold, so it keeps its 204.
@@ -1646,7 +1633,7 @@ async fn set_devserver_workspace_on(
             _ => StatusCode::NO_CONTENT.into_response(),
         },
         Ok(SetWorkspaceOnOutcome::NeedsForce { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
     }
@@ -1673,7 +1660,7 @@ async fn handle_forget_devserver_workspace(
     {
         Ok(SetWorkspaceOnOutcome::Done { .. }) => StatusCode::NO_CONTENT.into_response(),
         Ok(SetWorkspaceOnOutcome::NeedsForce { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
     }
@@ -2044,7 +2031,7 @@ fn workspace_off_error(error: crate::Error) -> Response {
 }
 
 /// `POST /api/library/workspaces/{id}/off`: unmount (release the per-workspace
-/// flock), keep the registration, and persist off. Live terminal sessions return [`live_terminals_response`] unless the optional JSON body sets `force: true`. Requires a mutable launcher.
+/// flock), keep the registration, and persist off. Live terminal sessions return [`live_terminals_refusal`] unless the optional JSON body sets `force: true`. Requires a mutable launcher.
 async fn handle_workspace_off(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
@@ -2065,7 +2052,7 @@ async fn handle_workspace_off(
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(e) => workspace_off_error(e),
     }
@@ -2099,7 +2086,7 @@ async fn handle_remove_workspace(
             crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
         }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             workspace_still_releasing()

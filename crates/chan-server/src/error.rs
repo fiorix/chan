@@ -114,6 +114,20 @@ pub(crate) fn workspace_still_releasing() -> Response {
     response
 }
 
+/// The 409 an unforced off, forget or delete answers while the workspace
+/// still has live terminal sessions: the code a client branches on, beside
+/// the count it confirms with before it retries forced. The launcher's
+/// routes and the devserver's answer it, so the status, the sentence, the
+/// code and the count have one definition.
+pub(crate) fn live_terminals_refusal(active_terminals: usize) -> Response {
+    err_code(
+        StatusCode::CONFLICT,
+        format!("workspace has {active_terminals} live terminal session(s); close them or force"),
+        "live_terminals",
+        serde_json::json!({ "active_terminals": active_terminals }),
+    )
+}
+
 /// The refusal of a request to mount a workspace whose root did not answer
 /// within [`WORKSPACE_MOUNT_TIMEOUT`](crate::WORKSPACE_MOUNT_TIMEOUT) of the
 /// request's start, naming `root`. The launcher's add and on and the desktop's

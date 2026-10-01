@@ -344,7 +344,7 @@ mod tests {
     async fn live_terminals_refusal_wire() {
         // The 409 an unforced off or forget answers over live terminals: the
         // client branches on `code` and reads `active_terminals` for its prompt.
-        let response = crate::devserver::live_terminals_refusal(3);
+        let response = crate::error::live_terminals_refusal(3);
         assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
         assert_eq!(
             response
