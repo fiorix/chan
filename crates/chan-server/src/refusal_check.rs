@@ -1185,4 +1185,45 @@ mod tests {
             "launcher routes admitted plain refusals: {admitted:?}"
         );
     }
+
+    /// No route answers these: the JSON data and content-type sentences under
+    /// a 400, the texts of extractors no handler takes, and a 405 with `Allow`
+    /// and no body.
+    #[tokio::test]
+    async fn framework_texts_no_route_answers_require_the_envelope() {
+        let mut admitted = Vec::new();
+        for (status, body) in [
+            (
+                400,
+                "Failed to deserialize the JSON body into the target type: unknown variant",
+            ),
+            (
+                400,
+                "Expected request with `Content-Type: application/json`",
+            ),
+            (400, "Invalid `boundary` for `multipart/form-data` request"),
+            (
+                400,
+                "Request body didn't contain valid UTF-8: invalid utf-8 sequence",
+            ),
+            (413, "Request payload is too large"),
+        ] {
+            let status = StatusCode::from_u16(status).unwrap();
+            if accepts_refusal("POST", "/api/probe", status, body, None).await {
+                admitted.push(format!("{status}: {body}"));
+            }
+        }
+        let empty_405 = Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(header::ALLOW, "GET,HEAD")
+            .body(Body::empty())
+            .unwrap();
+        if accepts_response("POST", "/api/probe", empty_405).await {
+            admitted.push("405 with Allow and an empty body".to_string());
+        }
+        assert!(
+            admitted.is_empty(),
+            "framework refusals admitted without envelopes: {admitted:#?}"
+        );
+    }
 }
