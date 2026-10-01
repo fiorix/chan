@@ -119,10 +119,10 @@ export class ReplaySocket {
   close() { this.network.close(); }
   disconnect() { this.network.terminate(); }
   static dial(number: number): Promise<ReplaySocket> { return until(`dial ${number}`, () => ReplaySocket.all[number - 1]); }
-  async ready() {
-    return until(`ready ${this.connection}`, () => {
+  async ready(ordinal = 1) {
+    return until(`ready ${this.connection}/${ordinal}`, () => {
       if (this.error) throw this.error;
-      return this.deliveries.find((entry) => entry.type === "ready" && entry.processed);
+      return this.deliveries.filter((entry) => entry.type === "ready" && entry.processed)[ordinal - 1];
     });
   }
   async bytesInclude(text: string) {

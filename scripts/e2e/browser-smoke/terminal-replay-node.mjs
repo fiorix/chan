@@ -13,7 +13,7 @@ import { launchServer, seedWorkspace, teardownServer } from "./lib/server.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const required = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart"];
-const implemented = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows"];
+const implemented = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart"];
 const requiredSubcases = {
   "keyboard-modes": ["normal-screen", "alternate-screen", "replayed-change"],
   "attach-windows": ["normal-before-session", "normal-interior-prefix", "normal-utf8-prefix", "normal-escape-prefix",
@@ -41,6 +41,7 @@ async function runCase(name) {
   const save = (file, value) => writeFileSync(join(caseOut, file), JSON.stringify(value, null, 2) + "\n", { flag: "wx" });
   const outcome = { name, status: "not-run", reason: "no case result" };
   let server, fixture, proxy, control, runner, session, bearer, workspace, cutSequence;
+  let fixtureLog = "fixture.bin", fixtureRecords = "fixture-records.json";
   const serverLog = [];
   const redact = (line) => String(line).replace(/([?&]t=)[^\s&]+/g, "$1[redacted]").replaceAll(bearer ?? "\0", "[redacted]");
   let stopping = false;
@@ -58,7 +59,7 @@ async function runCase(name) {
     if (fixture) {
       try { await fixture.send("stop"); } catch (error) { outcome.fixtureStop = redact(error.message); }
       await fixture.close();
-      save("fixture-records.json", fixture.records);
+      save(fixtureRecords, fixture.records);
     }
     if (proxy) {
       await proxy.close();
@@ -87,7 +88,8 @@ async function runCase(name) {
     assert.equal(response.status, 201, "create the owned PTY");
     session = (await response.json()).session;
     assert.equal(typeof session, "string");
-    const hello = await fixture.ready();
+    let hello = await fixture.ready();
+    const initialHello = hello;
     assert(hello.tty && hello.raw, "fixture needs a raw PTY");
     proxy = await startTerminalCutProxy({ targetUrl: upstream.origin, path: "/api/terminal/ws", session, deadlineMs: 20_000 });
     const controlToken = randomBytes(24).toString("hex");
@@ -99,6 +101,29 @@ async function runCase(name) {
         const { op, args = {} } = JSON.parse(Buffer.concat(chunks).toString());
         let result;
         if (op === "fixture") result = await fixture.send(args.op, args.args);
+        else if (op === "restart") {
+          assert.equal(name, "restart", "restart belongs to its case");
+          assert.equal(fixtureLog, "fixture.bin", "only one restart per case");
+          const next = await startTerminalFixture({ logPath: join(caseOut, "fixture-restarted.bin"), deadlineMs: 20_000 });
+          let adopted = false;
+          try {
+            const restarted = await fetch(`${upstream.origin}/api/terminals/${encodeURIComponent(session)}/restart`, {
+              method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+              body: JSON.stringify({ command: "stty -opost -echo && " + next.command, env: next.env }),
+            });
+            assert.equal(restarted.status, 204, "restart the owned PTY in place");
+            const previous = fixture;
+            fixture = next;
+            adopted = true;
+            fixtureLog = "fixture-restarted.bin";
+            fixtureRecords = "fixture-restarted-records.json";
+            try { await previous.close(); } finally { save("fixture-records.json", previous.records); }
+            hello = await fixture.ready();
+            result = { status: restarted.status, session, previous: initialHello, current: hello };
+          } finally {
+            if (!adopted) await next.close();
+          }
+        }
         else if (op === "arm") { proxy.arm(args); result = true; }
         else if (op === "arm-sequence") {
           assert(Array.isArray(args.arms) && args.arms.length > 0, "nonempty cut sequence required");
@@ -129,8 +154,8 @@ async function runCase(name) {
             && frame.connection === args.connection && frame.binary).map((frame) => Buffer.from(frame.bytes, "base64")))
             .includes(Buffer.from(args.marker)));
         else if (op === "fixture-log") {
-          const bytes = readFileSync(join(caseOut, "fixture.bin"));
-          result = { bytes: bytes.toString("base64"), sha256: createHash("sha256").update(bytes).digest("hex"), hello };
+          const bytes = readFileSync(join(caseOut, args.initial ? "fixture.bin" : fixtureLog));
+          result = { bytes: bytes.toString("base64"), sha256: createHash("sha256").update(bytes).digest("hex"), hello: args.initial ? initialHello : hello };
         } else throw new Error("unknown controller operation");
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(result));
       } catch (error) {

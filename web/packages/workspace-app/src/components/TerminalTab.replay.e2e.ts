@@ -34,6 +34,83 @@ async function assertWireProvenance() {
   return records;
 }
 
+if (caseName === "restart") test("a terminal restarted in place resets before showing its new generation once", async () => {
+  let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
+  const result: Record<string, unknown> = { name: "restart", status: "failed" };
+  try {
+    mounted = await mountRealTerminal(TerminalTab);
+    const socket = mounted.socket;
+    await socket.ready();
+    const sessionOf = (ordinal: number) => JSON.parse(Buffer.from(socket.deliveries.filter((frame) => frame.type === "session")[ordinal - 1].bytes, "base64").toString());
+    const initialSession = sessionOf(1);
+    const terminal = parsers.at(-1)!;
+    await emit("rows", { prefix: "OLD_GENERATION", count: 80 });
+    await emit("marker", { name: "OLD_GENERATION_END" });
+    await socket.bytesInclude("MARKER:OLD_GENERATION_END\r\n");
+    await emit("barrier", { name: "OLD_GENERATION_DRAINED" });
+    const initialSource = await rpc("fixture-log");
+    const before = await snapshot("before in-place restart");
+    expect(before.normal.rows.filter(Boolean)).toEqual(Buffer.from(initialSource.bytes, "base64").toString().split("\r\n").filter(Boolean));
+    expect(before.normal.baseY, "the old generation includes scrollback").toBeGreaterThan(0);
+    const boundary = socket.deliveries.length;
+    const restart = await rpc("restart");
+    expect(restart.status).toBe(204);
+    expect(restart.session).toBe(initialSession.id);
+    expect(restart.current.pid).not.toBe(restart.previous.pid);
+    expect({ tty: restart.current.tty, raw: restart.current.raw }).toEqual({ tty: true, raw: true });
+    const ready = await socket.ready(2);
+    const nextSession = sessionOf(2);
+    expect(nextSession.id, "restart retains the terminal id").toBe(initialSession.id);
+    expect(nextSession.generation, "restart advances the generation").toBeGreaterThan(initialSession.generation);
+    expect({ seq: nextSession.seq, replay: nextSession.replay_bytes, missed: nextSession.missed_bytes }).toEqual({ seq: 0, replay: 0, missed: 0 });
+    const restartFrames = socket.deliveries.slice(boundary, ready.frame);
+    expect(restartFrames.map((frame) => frame.type), "reset precedes the second session and ready on the same socket").toEqual([null, "session", "ready"]);
+    expect(Buffer.from(restartFrames[0].bytes, "base64").toString(), "the server sends exactly one RIS before the new session").toBe("\x1bc");
+    expect(restartFrames.every((frame) => frame.processed)).toBe(true);
+    const reset = await snapshot("new generation before output");
+    expect(reset.active).toBe("normal");
+    expect(reset.normal.rows.filter(Boolean), "restart removes all old rows before the new fixture writes").toEqual([]);
+    expect({ x: reset.normal.cursorX, y: reset.normal.cursorY, base: reset.normal.baseY }).toEqual({ x: 0, y: 0, base: 0 });
+
+    await emit("rows", { prefix: "NEW_GENERATION", count: 64 });
+    await emit("marker", { name: "NEW_GENERATION_END" });
+    await socket.bytesInclude("MARKER:NEW_GENERATION_END\r\n");
+    const input = "restart-input\r";
+    terminal.type(input);
+    expect(Buffer.from(await rpc("keys", { length: Buffer.from(input).length }), "base64").toString(), "the new raw PTY receives input from the mounted page").toBe(input);
+    await emit("marker", { name: "RESTART_LIVE" });
+    await socket.bytesInclude("MARKER:RESTART_LIVE\r\n");
+    const source = await rpc("fixture-log");
+    const emitted = Buffer.from(source.bytes, "base64");
+    const expected = emitted.toString().split("\r\n").filter(Boolean);
+    expect(expected).toHaveLength(66);
+    const final = await snapshot("new generation with live input and output");
+    expect(final.active).toBe("normal");
+    expect(final.normal.rows.filter(Boolean), "only the new fixture's independently logged rows appear, exactly once").toEqual(expected);
+    expect({ x: final.normal.cursorX, y: final.normal.cursorY, base: final.normal.baseY }).toEqual({ x: 0, y: 23, base: expected.length - 23 });
+    const delivered = Buffer.concat(socket.deliveries.slice(boundary).filter((frame) => frame.binary).map((frame) => Buffer.from(frame.bytes, "base64")));
+    expect(delivered.toString("base64"), "restart delivers only RIS and the new generation's exact byte stream").toBe(Buffer.concat([Buffer.from("\x1bc"), emitted]).toString("base64"));
+    expect(await rpc("fixture-log", { initial: true }), "the old fixture's evidence remains unchanged").toEqual(initialSource);
+    expect(mounted.tab.terminalSessionId).toBe(initialSession.id);
+    expect(parsers).toHaveLength(1);
+    expect(parsers[0]).toBe(terminal);
+    expect(ReplaySocket.all).toHaveLength(1);
+    expect(ReplaySocket.all[0]).toBe(socket);
+    expect(socket.closed).toBe(false);
+    expect(socket.deliveries.filter((frame) => ["session", "ready"].includes(frame.type ?? "")).map((frame) => frame.type)).toEqual(["session", "ready", "session", "ready"]);
+    const records = await assertWireProvenance();
+    expect(records.filter((entry: any) => entry.event === "connection").map((entry: any) => entry.connection)).toEqual([1]);
+    Object.assign(result, { status: "passed", restart, initialSession, nextSession, initialFixtureSha256: initialSource.sha256,
+      fixtureSha256: source.sha256, newRows: expected.length, readyFrame: ready.frame,
+      receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin", "fixture-restarted-records.json", "fixture-restarted.bin"] });
+  } catch (error) {
+    result.error = String(error);
+    throw error;
+  } finally {
+    try { await mounted?.close(); } finally { save("client-records.json", observations); save("restart.json", result); }
+  }
+});
+
 if (caseName === "attach-windows") test("attach cuts preserve complete history and the appropriate resume cursor", async () => {
   let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
   const subcases: Array<Record<string, unknown>> = requiredSubcases.map((name) => ({ name, status: "not-run", reason: "not implemented" }));
