@@ -51,6 +51,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A drawing or document reconnect keeps its full attach window.** A fallback save during an unanswered reconnect could start another dial, then the earlier dial's deadline closed the new socket early and restarted reconnection. Each dial now gets its own five seconds to attach.
 
+- **Exited extensions show their status in the tab.** In v0.100.0 a tab whose extension process had exited loaded the proxy's refusal as its page; it now says the process exited, and Reload extension re-reads the catalog before navigating the frame.
+
 - **Workspace refreshes keep the newest list.** In v0.100.0, a refresh after a workspace mutation could race a live refresh and replace a newer list with its older response. Both refresh paths now share an ordered request loop, and mutations wait for the queued snapshot.
 
 - **Pointer-opened command confirmations accept the first Enter.** In v0.100.0, the first Enter after clicking a command's confirmation was ignored until the key was released. Enter now answers the selected choice immediately, with Cancel selected by default. A confirmation opened by Enter still waits for the opening key's release.
