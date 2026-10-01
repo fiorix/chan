@@ -22,7 +22,6 @@ import {
   resolveSpawnContext,
   revealPathInBrowser,
   scheduleSessionSave,
-  scopeFsGraphFromHere,
   searchPanel,
   tree,
   treeExpanded,
@@ -1379,24 +1378,6 @@ describe("filesystem graph entrypoints", () => {
     // graph too (workspace scope, all layers).
     expect(graph.mode).toBe("semantic");
     expect(graph.scopeId).toBe("workspace");
-  });
-
-  test("filesystem graph scope action pivots to files and directories", () => {
-    scopeFsGraphFromHere("notes", true);
-
-    let graph = activeGraphTab();
-    expect(graph.mode).toBe("filesystem");
-    expect(graph.scopeId).toBe("dir:notes");
-    expect(graph.depth).toBe(1);
-    expect(graph.pendingSelectId).toBe("notes");
-
-    scopeFsGraphFromHere("notes/a.md", false);
-
-    graph = activeGraphTab();
-    expect(graph.mode).toBe("filesystem");
-    expect(graph.scopeId).toBe("file:notes/a.md");
-    expect(graph.depth).toBe(1);
-    expect(graph.pendingSelectId).toBe("notes/a.md");
   });
 });
 

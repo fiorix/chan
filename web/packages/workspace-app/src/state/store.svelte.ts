@@ -3968,16 +3968,6 @@ export function openFsGraphForDirectory(path: string): void {
   scheduleSessionSave();
 }
 
-export function scopeFsGraphFromHere(path: string, isDir: boolean): void {
-  openGraphInActivePane({
-    mode: "filesystem",
-    scopeId: isDir ? `dir:${path}` : `file:${path}`,
-    depth: 1,
-    pendingSelectId: path,
-  });
-  scheduleSessionSave();
-}
-
 /** Open the graph overlay scoped to a tag, with the tag node itself
  *  pre-selected. The resulting subgraph is the tag's neighbourhood
  *  (every file referencing the tag, plus their depth-limited
