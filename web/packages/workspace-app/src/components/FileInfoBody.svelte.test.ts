@@ -44,6 +44,7 @@ vi.mock("../api/client", () => ({
     backlinksStream: vi.fn(async () => {}),
   },
   withTokenQuery: (u: string) => `${u}?token=inspector-test`,
+  fileUrl: (p: string) => `/api/fs/${encodeURIComponent(p).replace(/%2F/g, "/")}?token=inspector-test`,
 }));
 
 vi.mock("../state/store.svelte", () => ({

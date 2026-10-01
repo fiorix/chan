@@ -1,7 +1,7 @@
 // Fullscreen audio viewer. The browser supplies playback controls; chan only
 // provides a tokenized byte URL and lifecycle ownership for the media element.
 
-import { withTokenQuery } from "../api/transport";
+import { fileUrl } from "../api/client";
 import { consumeKey } from "./shortcuts";
 
 export const AUDIO_UNSUPPORTED_MESSAGE =
@@ -13,9 +13,7 @@ export const AUDIO_UNSUPPORTED_MESSAGE =
 /// closed viewer cannot keep downloading or playing in the background.
 export function openAudioViewer(path: string): void {
   if (!path) return;
-  const src = withTokenQuery(
-    `/api/fs/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
-  );
+  const src = fileUrl(path);
 
   const backdrop = document.createElement("div");
   backdrop.className = "md-audio-viewer";

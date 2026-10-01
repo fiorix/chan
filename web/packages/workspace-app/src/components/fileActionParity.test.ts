@@ -42,6 +42,7 @@ vi.mock("../api/client", () => ({
     downloadUrl: (p: string) => `/api/fs/${p}?download=1`,
   },
   withTokenQuery: (u: string) => u,
+  fileUrl: (p: string) => `/api/fs/${p}`,
 }));
 
 vi.mock("../api/desktop", () => ({

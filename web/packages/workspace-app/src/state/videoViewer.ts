@@ -9,7 +9,7 @@
 // (same rationale as `imageZoom.ts` / `pdfViewer.ts`): no dependency
 // on a :global() block that could disappear during a refactor.
 
-import { withTokenQuery } from "../api/transport";
+import { fileUrl } from "../api/client";
 import { consumeKey } from "./shortcuts";
 
 /// Open the fullscreen viewer.
@@ -23,9 +23,7 @@ import { consumeKey } from "./shortcuts";
 /// No-op on empty path.
 export function openVideoViewer(path: string): void {
   if (!path) return;
-  const src = withTokenQuery(
-    `/api/fs/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
-  );
+  const src = fileUrl(path);
 
   const backdrop = document.createElement("div");
   backdrop.className = "md-video-viewer";

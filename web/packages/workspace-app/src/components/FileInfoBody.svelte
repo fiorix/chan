@@ -21,7 +21,7 @@
 
   import { untrack } from "svelte";
   import { ApiError, apiErrorCode } from "../api/errors";
-  import { api, withTokenQuery } from "../api/client";
+  import { api, fileUrl } from "../api/client";
   import type {
     GraphEdge,
     InspectorPayload,
@@ -1069,7 +1069,7 @@
         onclick={() => openImageZoom(entry.path, null, dirImageSet(entry.path))}
       >
         <img
-          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={fileUrl(entry.path)}
           alt={basename(entry.path)}
           loading="lazy"
         />
@@ -1084,7 +1084,7 @@
       <div class="video-preview">
         <!-- svelte-ignore a11y_media_has_caption -->
         <video
-          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={fileUrl(entry.path)}
           controls
           preload="metadata"
         ></video>
@@ -1092,7 +1092,7 @@
     {:else if audio}
       <div class="audio-preview">
         <audio
-          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={fileUrl(entry.path)}
           controls
           preload="metadata"
           onerror={() => (audioError = true)}

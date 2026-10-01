@@ -25,7 +25,7 @@
   import {
     ApiError,
     api,
-    withTokenQuery,
+    fileUrl,
     workspaceIsRecovering,
   } from "../api/client";
   import type { ContentHit, ReportFileStats } from "../api/types";
@@ -838,7 +838,7 @@
                   <span class="path">{r.path}</span>
                   <span class="image-thumb">
                     <img
-                      src={withTokenQuery(`/api/fs/${encodeURIComponent(r.path).replace(/%2F/g, "/")}`)}
+                      src={fileUrl(r.path)}
                       alt={basename(r.path)}
                       loading="lazy"
                     />
