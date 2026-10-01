@@ -5602,6 +5602,27 @@ mod tests {
         assert!(matches!(resp, ControlResponse::Error { .. }));
     }
 
+    /// A host that would end live terminals refuses a close and a removal in
+    /// one message. A `chan` of another build may read the refusal by the
+    /// token in `error`, so the message is compared whole.
+    #[tokio::test]
+    async fn a_host_refusal_names_live_terminals_for_a_close_and_a_removal() {
+        let host: Arc<dyn chan_library::HostControl> = Arc::new(FakeHost {
+            teardown_refusal: Some(2),
+            ..FakeHost::new(0)
+        });
+        let scope = UnserveScope::Host(Arc::downgrade(&host));
+        for remove in [false, true] {
+            match handle_unserve(&scope, Path::new("/srv/notes"), remove).await {
+                ControlResponse::Error { message } => assert_eq!(
+                    message, r#"{"error":"live_terminals","active_terminals":2}"#,
+                    "remove: {remove}"
+                ),
+                other => panic!("a refused teardown (remove: {remove}) answered {other:?}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn identify_classifies_standalone_desktop_and_devserver() {
         async fn kind_of(ctx: &ControlSocketCtx) -> ServeKind {
@@ -7538,6 +7559,9 @@ mod tests {
         /// What `open_outside_workspace` answers: `None` stands for a host
         /// with no filesystem surface to route to.
         outside: Option<(String, String, bool, Option<String>)>,
+        /// The live-terminal count a close and a removal are refused for:
+        /// `None` stands for a host with nothing to refuse them over.
+        teardown_refusal: Option<usize>,
     }
 
     impl FakeHost {
@@ -7548,7 +7572,14 @@ mod tests {
                 control: std::sync::Mutex::new(None),
                 tunnels: chan_revtunnel::server::TunnelRegistry::new(),
                 outside: None,
+                teardown_refusal: None,
             }
+        }
+
+        fn refused_teardown(&self) -> Option<chan_library::WorkspaceLifecycleOutcome> {
+            self.teardown_refusal.map(|active_terminals| {
+                chan_library::WorkspaceLifecycleOutcome::Refused { active_terminals }
+            })
         }
     }
 
@@ -7559,6 +7590,9 @@ mod tests {
             _root: &std::path::Path,
             _force: bool,
         ) -> Result<chan_library::WorkspaceLifecycleOutcome, chan_library::Error> {
+            if let Some(refused) = self.refused_teardown() {
+                return Ok(refused);
+            }
             let handle = self.control.lock().unwrap().take();
             if let Some(handle) = handle {
                 drop(handle);
@@ -7575,7 +7609,9 @@ mod tests {
             _root: &std::path::Path,
             _force: bool,
         ) -> Result<chan_library::WorkspaceLifecycleOutcome, chan_library::Error> {
-            Ok(chan_library::WorkspaceLifecycleOutcome::NotFound)
+            Ok(self
+                .refused_teardown()
+                .unwrap_or(chan_library::WorkspaceLifecycleOutcome::NotFound))
         }
         fn assemble_window_records(&self) -> Vec<WindowRecord> {
             Vec::new()
