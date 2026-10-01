@@ -6,7 +6,7 @@
 // window saying why the CLI is blocked. So the read races a short threshold:
 // settle fast (native desktop IPC, an already-granted browser) and the reply
 // POSTs with no UI at all; still pending at the threshold and a corner card
-// (PasteRequestBubble, the SessionHandoverBubble shell) explains what is
+// (PasteRequestBubble, a RequestCard) explains what is
 // waiting, with a [Paste] button whose click carries the user activation a
 // browser read wants, and a [Cancel] that answers the CLI immediately.
 //

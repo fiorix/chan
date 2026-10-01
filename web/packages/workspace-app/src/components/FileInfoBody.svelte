@@ -1214,8 +1214,10 @@
   }
   /* Hairline dividers between the inspector's top-level sections
      (buttons / file size / code / references). Target DIRECT children of
-     `.info` so the nested COCOMO meta-grid (inside `.refs`) keeps its own
-     dashed sub-divider and doesn't pick up a section rule. Each top-level
+     `.info` so a grid nested in a section (the Code section's COCOMO
+     grid, with its own dashed sub-divider) doesn't pick up a section
+     rule. The Code section is a child component, so the rule reaches it
+     by its `.code-report` class and not by this body's scope. Each top-level
      block owns the line above it; the identity header (.head/.title/
      .badge-row/.image-preview/.drafts-notice) stays divider-free so the
      first rule sits above the actions section. */

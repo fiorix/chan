@@ -1,7 +1,7 @@
 <!-- Handover-request notification for `cs session handover`.
 
      The leader's window gets a `handover_prompt` window command when a follower
-     asks to take leadership; this corner card (the downloads-notification shell)
+     asks to take leadership; this corner card (a RequestCard)
      shows who is asking, with Accept / Reject. Like the survey overlay, EVERY
      exit (Accept, Reject, Escape, close) is a real reply that POSTs to
      /api/session/handover/reply and unblocks the requester's blocked CLI, so a

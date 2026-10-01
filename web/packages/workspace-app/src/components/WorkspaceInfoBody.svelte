@@ -543,9 +543,9 @@
     -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='5' r='3'/><path d='M2 14c0-3 3-5 6-5s6 2 6 5z'/></svg>") center / contain no-repeat;
     mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='5' r='3'/><path d='M2 14c0-3 3-5 6-5s6 2 6 5z'/></svg>") center / contain no-repeat;
   }
-  /* Folder-parity sections (file kinds + code report). Visual style
-     mirrors FileInfoBody so the workspace inspector and a regular
-     folder inspector read as one feature. */
+  /* The file kinds section. Visual style mirrors FileInfoBody so the
+     workspace inspector and a regular folder inspector read as one
+     feature. */
   .compact-section { margin-top: 0.35rem; }
   .kind-counts {
     display: flex;
