@@ -3965,56 +3965,6 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
   }
 }
 
-/// Drop every tab in every pane. Pane structure is preserved; only the
-/// tabs go. Used by mobile reset flows so the editor stops showing a
-/// now-deleted file after the user wipes the workspace.
-export async function closeAllTabs(opts?: CloseTabsOptions): Promise<void> {
-  const entries = Object.values(layout.nodes).flatMap((node) => {
-    if (node.kind !== "leaf") return [];
-    return [
-      ...paneTabs(node, "a").map((tab) => ({
-        paneId: node.id,
-        side: "a" as const,
-        tab,
-      })),
-      ...paneTabs(node, "b").map((tab) => ({
-        paneId: node.id,
-        side: "b" as const,
-        tab,
-      })),
-    ];
-  });
-  if (!(await confirmCloseTabs(entries.map((entry) => entry.tab), opts))) return;
-  dropTabsById(new Set(entries.map((entry) => entry.tab.id)));
-  // Only a leaf that really ended up empty goes back to its default side; one
-  // holding a tab that arrived during the prompt keeps what it is showing.
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    if (!paneHasAnyTabs(node)) node.side = "a";
-  }
-}
-
-export async function closeOtherTabsInPane(
-  paneId: string,
-  keepTabId: string,
-  opts?: CloseTabsOptions,
-): Promise<void> {
-  const p = pane(paneId);
-  const side = paneSide(p);
-  const tabs = mutablePaneTabs(p, side);
-  const closing = tabs.filter((t) => t.id !== keepTabId);
-  if (closing.length === 0) return;
-  if (!(await confirmCloseTabs(closing, opts))) return;
-  const closeIds = new Set<string>();
-  for (const tab of closing) {
-    if (tab.kind === "terminal" && !(await runTerminalCloseSink(tab))) continue;
-    closeIds.add(tab.id);
-  }
-  dropTabsById(closeIds);
-  const kept = locateTab(keepTabId);
-  if (kept) setPaneActiveTabId(kept.pane, keepTabId, kept.side);
-}
-
 export async function closeTabsInPane(
   paneId: string,
   opts?: CloseTabsOptions,

@@ -19,7 +19,7 @@ import { EXCALIDRAW_VERSION, boardPropsFromRender, excalidrawBoard, type BoardPr
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { applyLocalTheme, effectiveHybridSurfaceTheme, onWatchEvent, refreshWorkspace } from "../state/store.svelte";
 import {
-  closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane, detachTabToPaneEdge,
+  closeFileTabAfterMove, closePane, detachTabToPaneEdge,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
   forceReloadFromDisk, refreshTabFromDisk, layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
@@ -399,13 +399,11 @@ describe("pending drawing edits", () => {
     expect(view?.state.doc.toString()).toBe(tab.content);
   });
 
-  test.each(["single tab", "workspace tabs", "other tabs", "pane tabs", "pane", "moved tab"])(
+  test.each(["single tab", "pane tabs", "pane", "moved tab"])(
     "closing %s saves the pending stroke before removal", async (method) => {
       const { pane, tab } = await draw();
       pane.tabs.push(fileTab({ id: "keep", mode: "source" }));
       if (method === "single tab") await closeTab(pane.id, tab.id);
-      else if (method === "workspace tabs") await closeAllTabs();
-      else if (method === "other tabs") await closeOtherTabsInPane(pane.id, "keep");
       else if (method === "pane tabs") await closeTabsInPane(pane.id);
       else if (method === "pane") await closePane(pane.id);
       else await closeFileTabAfterMove(pane.id, tab.id);
@@ -959,8 +957,6 @@ describe("a seed the library has not shown yet", () => {
     const savedMtime = disk.write(path, TINTED_FILE).mtime;
     const shown = fileTab({ id: "shown", path, fileKind: "text", mode: "canvas", content: TINTED_FILE, saved: TINTED_FILE, savedMtime });
     const sibling = fileTab({ id: "sibling", path, fileKind: "text", mode: "source", content: TINTED_FILE, saved: TINTED_FILE, savedMtime });
-    // The sibling's pane comes first in the layout, so a close of every tab
-    // saves it before it reaches the shown board.
     layout.nodes = {
       root: { kind: "split", id: "root", direction: "row", ratio: 0.5, a: "pane-sibling", b: "pane-shown" },
       "pane-sibling": { kind: "leaf", id: "pane-sibling", tabs: [sibling], activeTabId: sibling.id },
@@ -986,7 +982,10 @@ describe("a seed the library has not shown yet", () => {
     await vi.advanceTimersByTimeAsync(200);
     board.zoomTo(1.25);
     setTabContent(other, GREEN_FILE);
-    await closeAllTabs();
+    // The sibling's pane closes first, so its save lands while the shown board
+    // is still mounted, and the shown pane's own close follows it.
+    await closeTabsInPane("pane-sibling");
+    await closeTabsInPane("pane-shown");
     const written = write.mock.calls.map((call) => (call[1] === BLUE_FILE ? "blue" : call[1] === GREEN_FILE ? "green" : call[1]));
 
     expect({ mirrored, written, open: [readTab(shown.id), readTab(sibling.id)] }).toEqual({
