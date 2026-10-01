@@ -469,7 +469,9 @@ describe("bulk removal with live terminals", () => {
     const { backend } = await import("../api/backend");
     const calls: string[] = [];
     const refused = () => new ApiError(409, JSON.stringify({
-      error: "live_terminals", active_terminals: 3,
+      error: "workspace has 3 live terminal session(s); close them or force",
+      code: "live_terminals",
+      active_terminals: 3,
     }));
     vi.spyOn(backend, "listWorkspaces").mockImplementation(async () => library.workspaces);
     vi.spyOn(backend, "removeWorkspace").mockImplementation(async (id, force?: boolean) => {

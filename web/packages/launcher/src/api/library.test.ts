@@ -112,12 +112,13 @@ describe("liveApi.setWorkspaceOn", () => {
 
 describe("ApiError", () => {
   it("parses the body once for its message and repeated live-terminal reads", () => {
-    const body = { error: "live_terminals", active_terminals: 3 };
+    const sentence = "workspace has 3 live terminal session(s); close them or force";
+    const body = { error: sentence, code: "live_terminals", active_terminals: 3 };
     const text = JSON.stringify(body);
     const parse = vi.spyOn(JSON, "parse");
     try {
       const error = new ApiError(409, text);
-      expect(error.message).toBe("live_terminals");
+      expect(error.message).toBe(sentence);
       expect(liveTerminalsCount(error)).toBe(3);
       expect(liveTerminalsCount(error)).toBe(3);
       expect(parse).toHaveBeenCalledExactlyOnceWith(text);
@@ -145,12 +146,22 @@ describe("ApiError", () => {
 
   it("reads the live-terminal count from an enveloped refusal", () => {
     // The envelope reader must not cost the confirm-and-retry flow its shape:
-    // that refusal carries a count beside its `error` tag.
+    // that refusal carries its token in `code` and a count beside it.
     const live = new ApiError(
       409,
-      JSON.stringify({ error: "live_terminals", active_terminals: 3 }),
+      JSON.stringify({
+        error: "workspace has 3 live terminal session(s); close them or force",
+        code: "live_terminals",
+        active_terminals: 3,
+      }),
     );
     expect(liveTerminalsCount(live)).toBe(3);
+    // The token in `error` is a sentence's place, not this refusal.
+    expect(
+      liveTerminalsCount(
+        new ApiError(409, JSON.stringify({ error: "live_terminals", active_terminals: 3 })),
+      ),
+    ).toBeNull();
     expect(
       liveTerminalsCount(new ApiError(409, JSON.stringify({ error: "some other reason" }))),
     ).toBeNull();
