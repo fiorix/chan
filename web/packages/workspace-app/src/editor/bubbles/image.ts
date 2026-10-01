@@ -27,6 +27,7 @@ import {
   parseImageSrc,
   resolveImageSrc,
   setImageAlign,
+  setImageWidth,
   type ImageAlign,
 } from "../extensions/image";
 import { convertHeicForUpload } from "./heic";
@@ -308,17 +309,20 @@ export function openImageBubble(opts: ImageBubbleOpts): ImageBubbleHandle {
       hashIdx >= 0
         ? encodeRelPath(pathArg.slice(0, hashIdx)) + pathArg.slice(hashIdx)
         : encodeRelPath(pathArg);
-    // Default to 250px wide whenever the picked / uploaded path
-    // doesn't already carry a `#w=N` fragment of its own. Covers
-    // wrap mode (fresh `![](path)` insert from `![query`), raw
-    // mode (URL-slot replacement, including the broken-image
-    // "click badge → upload → replace" flow), and catalog picks.
-    // If the user re-uses a path they had previously written with
-    // a specific width, that width round-trips; otherwise the
-    // small default keeps new inserts from going full-bleed.
-    const sized = /#w=\d+/.test(encArg)
-      ? encArg
-      : `${encArg}#w=${DEFAULT_INSERT_WIDTH_PX}`;
+    // Replacing a URL slot, including after a broken-image upload,
+    // keeps its width and alignment. A fresh insert uses the picked
+    // path's width or the small default.
+    let sized: string;
+    if (opts.templateMode === "raw") {
+      const previous = parseImageSrc(opts.view.state.doc.sliceString(opts.triggerStart, triggerEnd));
+      const picked = parseImageSrc(encArg);
+      sized = setImageAlign(
+        setImageWidth(encArg, previous.width ?? picked.width ?? DEFAULT_INSERT_WIDTH_PX),
+        previous.align,
+      );
+    } else {
+      sized = /#w=\d+/.test(encArg) ? encArg : `${encArg}#w=${DEFAULT_INSERT_WIDTH_PX}`;
+    }
     const insert = opts.templateMode === "raw" ? sized : `![](${sized})`;
     opts.view.dispatch({
       changes: { from: opts.triggerStart, to: triggerEnd, insert },
