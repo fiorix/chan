@@ -1086,20 +1086,19 @@ impl DevserverState {
         if let Some(prefix) = prefix {
             reject_reserved_prefix(prefix)?;
         }
-        let library = self.host.library().clone();
-        let registering = root.to_path_buf();
         let row = self
             .within_mount_bound(
                 started,
                 root,
-                tokio::task::spawn_blocking(move || library.register_workspace(&registering)),
+                self.host.register_workspace_keyed(root, key, None),
             )
             .await?
-            .map_err(|error| {
-                Error::from(std::io::Error::other(format!(
+            .map_err(|error| match error {
+                Error::Io(error) => Error::from(std::io::Error::other(format!(
                     "workspace registration task failed: {error}"
-                )))
-            })??;
+                ))),
+                error => error,
+            })?;
         let prefix = match prefix {
             Some(prefix) => prefix.to_string(),
             None => registered_workspace_prefix(&row.root_path)?,

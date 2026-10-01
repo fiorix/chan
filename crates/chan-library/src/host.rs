@@ -1292,6 +1292,44 @@ impl WorkspaceHost {
         &self.desktop
     }
 
+    /// Register `root` with an optional display name, using its canonical
+    /// `key` from [`root_key`](Self::root_key) to serialize registry writes.
+    ///
+    /// Wait at most the open's release budget for a registration or removal
+    /// already writing this root, then answer [`ChanError::WorkspaceAlreadyOpen`]
+    /// without changing its row. The blocking registration owns the permit
+    /// until it returns, including when its caller stops waiting. It holds
+    /// no lifecycle lock and releases the permit before any later open can
+    /// await one. Key resolution belongs inside the caller's request bound.
+    pub async fn register_workspace_keyed(
+        &self,
+        root: &Path,
+        key: &Path,
+        display_name: Option<String>,
+    ) -> Result<chan_workspace::KnownWorkspace, Error> {
+        #[cfg(test)]
+        let release_budget = self.open_release_budget;
+        #[cfg(not(test))]
+        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
+        let permit = tokio::time::timeout(
+            release_budget,
+            self.root_calls
+                .lock(&(key.to_path_buf(), RootCall::RegistryWrite)),
+        )
+        .await
+        .map_err(|_| Error::Core(ChanError::WorkspaceAlreadyOpen))?
+        .into_owned();
+        let library = self.library.clone();
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            library.register_workspace_with_name(&root, display_name)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(Error::from)
+    }
+
     /// Open a registered workspace path and mount it under
     /// `config.prefix`.
     ///

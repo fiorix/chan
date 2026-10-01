@@ -1845,7 +1845,7 @@ fn add_workspace_prefix_error(error: crate::Error) -> Response {
     crate::error::err(StatusCode::BAD_REQUEST, error.to_string())
 }
 
-fn workspace_registration_task_error(error: tokio::task::JoinError) -> Response {
+fn workspace_registration_task_error(error: impl std::fmt::Display) -> Response {
     crate::error::err(
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("workspace registration task failed: {error}"),
@@ -1912,15 +1912,22 @@ async fn add_workspace(
     // Registering and opening the root ask its filesystem, so both run off
     // the runtime: an add of a root that stopped answering waits on the
     // blocking pool, not on a worker every other request needs.
-    let registering = {
-        let library = state.host.library().clone();
-        let root = root.to_path_buf();
-        tokio::task::spawn_blocking(move || library.register_workspace_with_name(&root, label))
+    let key = match state.host.root_key(root).await {
+        Ok(key) => key,
+        Err(error) => {
+            return crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
     };
-    let registered = match registering.await {
-        Ok(Ok(ws)) => ws,
-        Ok(Err(e)) => return crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
-        Err(e) => return workspace_registration_task_error(e),
+    let registered = match state.host.register_workspace_keyed(root, &key, label).await {
+        Ok(ws) => ws,
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            return workspace_still_releasing();
+        }
+        Err(crate::Error::Core(error)) => {
+            return crate::error::err(StatusCode::BAD_REQUEST, error.to_string());
+        }
+        Err(crate::Error::Io(error)) => return workspace_registration_task_error(error),
+        Err(error) => return crate::error::err(StatusCode::BAD_REQUEST, error.to_string()),
     };
     let prefix = match registered_workspace_prefix(&registered.root_path) {
         Ok(prefix) => prefix,
