@@ -52,7 +52,11 @@ describe("a settings write", () => {
       const body = request.body as { expected_revision: number; preferences: Record<string, unknown> };
       if (body.expected_revision !== revision) {
         return json(
-          { error: "config_conflict", current: { revision, preferences: stored, workspaces: [] } },
+          {
+            error: "configuration changed since the revision this write expected",
+            code: "config_conflict",
+            current: { revision, preferences: stored, workspaces: [] },
+          },
           { status: 409 },
         );
       }

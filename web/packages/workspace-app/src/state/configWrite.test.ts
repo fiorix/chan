@@ -64,13 +64,13 @@ beforeEach(() => {
         preferences: { ...server.preferences, theme: "light" },
       };
       return jsonResponse(
-        { error: "config_conflict", current: server },
+        { error: "configuration changed since the revision this write expected", code: "config_conflict", current: server },
         409,
       );
     }
     if (body.expected_revision !== server.revision) {
       return jsonResponse(
-        { error: "config_conflict", current: server },
+        { error: "configuration changed since the revision this write expected", code: "config_conflict", current: server },
         409,
       );
     }
