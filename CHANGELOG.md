@@ -47,6 +47,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Graph scope and filters keep the intended view.** Following a scope breadcrumb re-frames the graph after a pan or zoom instead of leaving its nodes off screen. Changing a filter or depth uses the incremental layout strength instead of restarting the full graph layout.
 
+- **Filesystem graph link chips show loaded counts.** The symlink chip counts symlink nodes and the hardlink chip counts distinct files joined by hardlink edges, where both showed 0 in v0.100.0 even when their filters hid links.
+
 - **Workspace refreshes keep the newest list.** In v0.100.0, a refresh after a workspace mutation could race a live refresh and replace a newer list with its older response. Both refresh paths now share an ordered request loop, and mutations wait for the queued snapshot.
 
 - **Pointer-opened command confirmations accept the first Enter.** In v0.100.0, the first Enter after clicking a command's confirmation was ignored until the key was released. Enter now answers the selected choice immediately, with Cancel selected by default. A confirmation opened by Enter still waits for the opening key's release.
