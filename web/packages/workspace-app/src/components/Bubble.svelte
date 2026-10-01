@@ -26,7 +26,7 @@
 </div>
 
 <style>
-  /* Left-aligned in the caller's column, capped at 85% of its width. */
+  /* Component defaults; callers can override the width and alignment. */
   .bubble {
     max-width: 85%;
     display: flex;
