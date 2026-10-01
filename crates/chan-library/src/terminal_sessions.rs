@@ -6179,6 +6179,10 @@ fn capture_child_start_time(
 /// kills it, and observes exit through the retained process descriptor.
 #[cfg(target_os = "linux")]
 fn terminate_imported_child(pin: &OwnedFd) -> bool {
+    #[cfg(test)]
+    if let Some(ended) = imported_child_close_hook(pin) {
+        return ended;
+    }
     terminate_imported_child_with(
         pin,
         |pin, signal| {
@@ -6186,6 +6190,31 @@ fn terminate_imported_child(pin: &OwnedFd) -> bool {
         },
         imported_child_exited_within,
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+type ImportedChildCloseHook = Box<dyn FnOnce(&OwnedFd) -> bool + Send>;
+
+#[cfg(all(test, target_os = "linux"))]
+static IMPORTED_CHILD_CLOSE_HOOKS: Mutex<Vec<(u32, ImportedChildCloseHook)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(all(test, target_os = "linux"))]
+fn imported_child_close_hook(pin: &OwnedFd) -> Option<bool> {
+    // Match the fixture's owned child even when a controller passes a new
+    // descriptor for it. A hook keyed by descriptor would miss that mistake.
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pin.as_raw_fd())).ok()?;
+    let pid = info
+        .lines()
+        .find_map(|line| line.strip_prefix("Pid:\t")?.parse::<u32>().ok())?;
+    let hook = {
+        let mut hooks = IMPORTED_CHILD_CLOSE_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(child, _)| *child == pid)
+            .map(|index| hooks.remove(index).1)
+    };
+    hook.map(|hook| hook(pin))
 }
 
 #[cfg(target_os = "linux")]
@@ -12116,6 +12145,117 @@ mod tests {
             assert_eq!(current.get(), "sentinel-after-term");
             assert_eq!(trace[2].1, format!("wait:{IMPORTED_CHILD_EXIT_GRACE:?}"));
             assert_eq!(trace[4].1, "wait:500ms");
+        }
+
+        #[test]
+        fn child_identity_controller_uses_the_verified_handle_at_every_edge() {
+            fn handles_for(pid: u32) -> BTreeSet<RawFd> {
+                let pid_line = format!("Pid:\t{pid}");
+                std::fs::read_dir("/proc/self/fdinfo")
+                    .unwrap()
+                    .filter_map(|entry| {
+                        let entry = entry.unwrap();
+                        let info = match std::fs::read_to_string(entry.path()) {
+                            Ok(info) => info,
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+                            Err(error) => panic!("reading a process handle: {error}"),
+                        };
+                        info.lines()
+                            .any(|line| line == pid_line)
+                            .then(|| entry.file_name().to_str().unwrap().parse().unwrap())
+                    })
+                    .collect()
+            }
+
+            let mut original = IdentityChild::start(false);
+            let before_close = IdentityChild::start(false);
+            let after_term = IdentityChild::start(false);
+            let before = handles_for(original.pid());
+            let (import, _pair) = original.import("identity-controller-selection");
+            let registry = parked_registry(&RecordingPark::default());
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            let session = original.track(&registry, "identity-controller-selection");
+            assert_eq!(report.restored, 1, "{:?}", report.skipped);
+            let session = session.unwrap();
+            let during = handles_for(original.pid());
+            let verified: Vec<_> = during.difference(&before).copied().collect();
+            assert_eq!(verified.len(), 1);
+            let verified = verified[0];
+
+            // Only the numeric lookup is modeled. The controller and its
+            // selected descriptor are real, and all fixture children stay owned.
+            let numeric_lookup = Arc::new(std::sync::atomic::AtomicU32::new(before_close.pid()));
+            let trace = Arc::new(Mutex::new(Vec::new()));
+            let observed = trace.clone();
+            let lookup = numeric_lookup.clone();
+            let later_pid = after_term.pid();
+            IMPORTED_CHILD_CLOSE_HOOKS.lock().unwrap().push((
+                original.pid(),
+                Box::new(move |pin| {
+                    let mut waits = 0;
+                    terminate_imported_child_with(
+                        pin,
+                        |selected, signal| {
+                            observed.lock().unwrap().push((
+                                selected.as_raw_fd(),
+                                format!("{signal:?}"),
+                                lookup.load(Ordering::SeqCst),
+                            ));
+                            if signal == rustix::process::Signal::TERM {
+                                lookup.store(later_pid, Ordering::SeqCst);
+                            }
+                        },
+                        |selected, bound| {
+                            observed.lock().unwrap().push((
+                                selected.as_raw_fd(),
+                                format!("wait:{bound:?}"),
+                                lookup.load(Ordering::SeqCst),
+                            ));
+                            waits += 1;
+                            waits == 2
+                        },
+                    )
+                }),
+            ));
+            assert!(registry.close("identity-controller-selection", CloseReason::Explicit));
+            let ended = session.ended.wait(Duration::from_secs(5));
+            // Disarm even if the controller never reached the hook.
+            IMPORTED_CHILD_CLOSE_HOOKS
+                .lock()
+                .unwrap()
+                .retain(|(pid, _)| *pid != original.pid());
+            assert_eq!(ended, Some(true));
+            let trace = trace.lock().unwrap();
+            assert_eq!(
+                trace.len(),
+                5,
+                "the controller must drive the injected close"
+            );
+            assert!(
+                trace.iter().all(|(fd, _, _)| *fd == verified),
+                "the imported controller must use its verified handle at every close edge: {trace:?}"
+            );
+            assert_eq!(
+                trace
+                    .iter()
+                    .map(|(_, action, _)| action.clone())
+                    .collect::<Vec<_>>(),
+                [
+                    format!("{:?}", rustix::process::Signal::HUP),
+                    format!("{:?}", rustix::process::Signal::TERM),
+                    "wait:1s".to_string(),
+                    format!("{:?}", rustix::process::Signal::KILL),
+                    "wait:500ms".to_string(),
+                ]
+            );
+            assert_eq!(trace[0].2, before_close.pid());
+            assert_eq!(trace[1].2, before_close.pid());
+            assert!(trace[2..]
+                .iter()
+                .all(|(_, _, pid)| *pid == after_term.pid()));
+            assert!(!original.exited(Duration::ZERO));
+            assert!(!before_close.exited(Duration::ZERO));
+            assert!(!after_term.exited(Duration::ZERO));
         }
 
         /// A stand-in for the systemd fd store and the restart manifest file:
