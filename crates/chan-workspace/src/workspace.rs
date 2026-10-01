@@ -957,8 +957,6 @@ pub struct Workspace {
     /// the first `create_draft_dir`.
     drafts_root: std::path::PathBuf,
     paths: WorkspacePaths,
-    /// Held for the lifetime of the Workspace. Released on drop.
-    _lock: WorkspaceLock,
     /// Keeps live Workspace count bounded under descriptor pressure.
     /// This leaves room for editor reads, writes, PTYs, and watchers
     /// even when tests or callers try to open many workspaces at once.
@@ -1036,6 +1034,11 @@ pub struct Workspace {
     /// Replacements swap one Arc under a short lock; in-flight work keeps its
     /// generation while newer recovery remains pending.
     scope_policy: Arc<std::sync::RwLock<Arc<fs_ops::IndexScopePolicy>>>,
+    /// Admission to this root's sidecars, in this process and across
+    /// processes. Declared last because fields drop in declaration order: it
+    /// is released only after the index writer, the graph and the recovery
+    /// worker are gone, so no opener is admitted beside them.
+    _lock: WorkspaceLock,
 }
 
 fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, stop: &AtomicBool) {
@@ -1340,7 +1343,6 @@ impl Workspace {
             drafts_dir_name,
             drafts_root,
             paths,
-            _lock: lock,
             _fd_permit: fd_permit,
             #[cfg(test)]
             _index_teardown_gate: index_teardown_gate,
@@ -1366,6 +1368,7 @@ impl Workspace {
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
             scope_policy: Arc::new(std::sync::RwLock::new(scope_policy)),
+            _lock: lock,
         });
 
         Ok((workspace, recovery_plan))
