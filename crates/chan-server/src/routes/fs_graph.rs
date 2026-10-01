@@ -1969,7 +1969,7 @@ mod tests {
             err.message
         );
         let expected = serde_json::json!({
-            "error": format!("workspace root does not exist: {}", root.path().display()),
+            "error": format!("workspace root does not exist: {}", workspace.root().display()),
             "code": "workspace_root_missing",
         });
         super::super::refusal_tests::assert_refusal(
