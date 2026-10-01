@@ -80,7 +80,10 @@ afterEach(() => {
 
 describe("source-mode markdown extension", () => {
   test("with addKeymap=true (default), Enter after `1. ` auto-continues to `2. `", () => {
-    // Sanity check against the default lang-markdown behaviour -     // confirms the bug exists without our fix.
+    // Positive control: with the markdown keymap on, this harness's
+    // Enter continues the list, so the plain newline in the
+    // addKeymap=false cases below comes from the flag and not from a
+    // harness that cannot continue one.
     const seed = "1. item";
     const after = runEnterAt(seed, seed.length, true);
     // Default markdownKeymap should insert "\n2. " after the
