@@ -249,6 +249,28 @@ describe("the languages report", () => {
     second.querySelector<HTMLButtonElement>("button.lang-name")!.click();
     expect(onLanguageClick).toHaveBeenCalledWith("Rust");
   });
+
+  test("more than five languages show five, and the toggle shows all of them and five again", async () => {
+    h.report = {
+      ...prefix,
+      by_language: Array.from({ length: 7 }, (_, i) => ({ ...prefix.by_language[0]!, name: `Lang${i + 1}` })),
+    };
+    const target = await render();
+    const rows = (): number => target.querySelectorAll("button.lang-name").length;
+    const toggle = (): HTMLButtonElement => target.querySelector<HTMLButtonElement>("button.see-more")!;
+    expect(rows()).toBe(5);
+    expect(toggle().textContent).toBe("+2 more");
+
+    toggle().click();
+    flushSync();
+    expect(rows(), "the more button shows every language").toBe(7);
+    expect(toggle().textContent).toBe("show fewer");
+
+    toggle().click();
+    flushSync();
+    expect(rows()).toBe(5);
+    expect(toggle().textContent).toBe("+2 more");
+  });
 });
 
 describe("the contacts", () => {
