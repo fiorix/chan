@@ -188,7 +188,7 @@ Launcher gates and handler refusals use the server's JSON envelope: a display se
 
 The launcher's `ApiError` unwraps its API responses, including "window not found" for window actions and "workspace not found" for workspace lifecycle actions; `reportError` sends action errors to the corner notice. The workspace app alone calls the command capability routes, and its own transport and `ApiError` unwrap their missing-window and missing-workspace refusals. Both apps' terminal-count readers catch failures and retain the generic close warning. The workspace app checks a capability launch before navigating its popup, waits on a 503, and throws other launch refusals to the opener's command deck. The launcher's theme and collapsed-machine writes fetch directly and discard the response; those refusals do not reach an error bubble.
 
-No launcher route is exempt from the refusal checker. The live-terminals 409 is the envelope with the code `live_terminals` and its count. Framework extractor and method refusals remain outside the envelope, as described in [HTTP refusals](../../../crates/chan-server/design.md#http-refusals).
+No launcher route is exempt from the refusal checker. The live-terminals 409 is the envelope with the code `live_terminals` and its count. A request the framework's extractors reject and a method a route does not serve answer in the envelope too, with the framework's status and sentence, as described in [HTTP refusals](../../../crates/chan-server/design.md#http-refusals).
 
 ## A degraded workspace row
 
