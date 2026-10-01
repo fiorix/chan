@@ -409,16 +409,13 @@ const BULLET_GLYPH_CLASSES = [
 
 /// The `*` / `+` source marker is REPLACED by this widget, which renders
 /// the depth glyph as a REAL inline character (real width, real
-/// position). That is the load-bearing change behind the bullet
-/// cursor/click cleanup: the earlier rendering kept the source char but
-/// collapsed it to font-size:0 and drew the glyph in a CSS ::before, so
-/// the visible glyph was DECOUPLED from the source position - click and
-/// caret coordinates mapped into the marker prefix and needed a pile of
-/// snap logic to compensate. A replace-widget glyph behaves like the
-/// hyphen `-` and ordered `1.` markers (which are real text): default
-/// CodeMirror cursor / click / arrow motion just works, no snap. The
-/// DOCUMENT is untouched (the replace is render-only); round-trip still
-/// writes the literal `*` / `+`.
+/// position) in a span of its own, not as CSS-generated content. The
+/// visible glyph sits where the source marker is, and the widget leaves
+/// its events to CodeMirror (`ignoreEvent` is false), so cursor, click
+/// and arrow motion around it take no correction here, as with the
+/// hyphen `-` and ordered `1.` marker widgets. The DOCUMENT is untouched
+/// (the replace is render-only); round-trip still writes the literal
+/// `*` / `+`.
 class BulletGlyphWidget extends WidgetType {
   constructor(readonly depth: number) {
     super();
@@ -451,12 +448,12 @@ class BulletGlyphWidget extends WidgetType {
 ///
 /// This is load-bearing on chan-desktop's WKWebView: a `Decoration.mark` (a
 /// class added to existing text) does not force WKWebView to repaint the line
-/// when the list decoration first applies, so typing `- ` or `1. ` left the
-/// item un-flowed (no hanging indent) until an unrelated event (scroll, click,
-/// another keystroke) forced a repaint - the "sporadic list mode" the host hit.
+/// when the list decoration first applies, so a typed `- ` or `1. ` stays
+/// un-flowed (no hanging indent) until an unrelated event (scroll, click,
+/// another keystroke) forces a repaint.
 /// A replace widget swaps a real DOM node in, which forces the line to
 /// re-layout and applies the hanging-indent line decoration with it, exactly as
-/// the `*` / `+` glyph already does. Blink repaints either way, so this is
+/// the `*` / `+` glyph does. Blink repaints either way, so this is
 /// invisible in Chrome. The document is untouched (render-only; round-trip
 /// still writes the literal marker), and the widget carries the marker classes
 /// so the marker column geometry is unchanged.

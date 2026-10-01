@@ -1,13 +1,15 @@
 // Aggregator for all per-token handler registries.
 //
-// Each step contributes a registry from its module:
-//   - step 4: marks (Emphasis, StrongEmphasis, Strikethrough, InlineCode,
-//     Link, URL, Autolink) + headings (ATXHeading1..6)
-//   - step 5: blocks (lists, task lists, blockquote, hr, fenced code)
-//   - step 6: atoms (wikilink, image, date, tag pill, contact pill)
+// Three modules contribute a registry each, keyed by syntax node name:
+//   - marks: Emphasis, StrongEmphasis, Strikethrough, InlineCode,
+//     Link, URL, Autolink
+//   - headings: ATXHeading1..6
+//   - blocks: Blockquote, FencedCode, BulletList, OrderedList, Task,
+//     Frontmatter
 //
-// chanDecorations() returns the composed decoration ViewPlugin
-// extension; drop into the editor's extension array.
+// chanDecorations() hands the merged registry to decorationWalker and
+// returns its ViewPlugin extension; drop into the editor's extension
+// array.
 
 import type { Extension } from "@codemirror/state";
 import { decorationWalker, type HandlerRegistry } from "./walker";
