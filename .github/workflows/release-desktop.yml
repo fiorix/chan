@@ -432,13 +432,28 @@ jobs:
             Write-Output "Installed uninstaller Authenticode signature verified: $uninstaller ($($signature.Status))"
           } finally {
             if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
-              $uninstall = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+              # _?= keeps NSIS in this process so -Wait observes the complete uninstall.
+              $uninstall = Start-Process -FilePath $uninstaller -ArgumentList "/S", "_?=$installDir" -Wait -PassThru
               if ($uninstall.ExitCode -ne 0) {
                 throw "Silent NSIS uninstall failed with exit code $($uninstall.ExitCode)"
               }
-              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
-                throw "Silent NSIS uninstall left $uninstaller installed"
+              foreach ($name in @("chan-desktop.exe", "chan.exe")) {
+                $installedFile = Join-Path $installDir $name
+                if (Test-Path -LiteralPath $installedFile -PathType Leaf) {
+                  throw "Silent NSIS uninstall left $installedFile installed"
+                }
               }
+              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+                Remove-Item -LiteralPath $uninstaller -Force
+              }
+              if (Test-Path -LiteralPath $installDir -PathType Container) {
+                $remaining = @(Get-ChildItem -LiteralPath $installDir -Force)
+                if ($remaining.Count -gt 0) {
+                  throw "Silent NSIS uninstall left files in ${installDir}: $($remaining.Name -join ', ')"
+                }
+                Remove-Item -LiteralPath $installDir
+              }
+              Write-Output "Silent NSIS uninstall completed: $installDir"
             }
           }
 
