@@ -32,3 +32,9 @@ Comments, dead code and the documents that describe them, across the five `web/`
 2. Each deletion names what held the code alive and shows nothing reaches it.
 3. `make web-check` is green after each package's pass.
 4. The design documents agree with the code on the five named contracts.
+
+## Bounded hygiene accepted on 2026-10-01
+
+Open integration `0b3638dcb` carries the first bounded pass: the graph's unreachable indexer hint, unused group edge kind and tab guards are removed; unreachable editor code and unused exports are pruned; sync-only names remain private; the slide preview's navigation styling has one owner; Bubble keeps its live props and describes its component defaults; and the style toolbar drops unused options after its live assertions are moved. The positive list-keymap control now says what it establishes. Live missing-file behavior, graph scope group, ArrowDown and Enter escapes, contact fallback, wiki caller cleanup, folding state and helpers, gutter behavior and mounted tests remain. The EmptyPaneCarousel change is limited to the authorized edge union.
+
+The committed-tip own gate passed 6,242 web tests, four warning-free checks and the builds, with wrong-SHA and failing-status refusals. No browser presentation is claimed. The empty wikilink destroy hook is retained; the mixed blocks.ts header remains for the documented rewrite. The remaining hygiene rows and broad comment pass are still owed, and this item remains accepted for build. The combined gate at the final integration tip is pending.
