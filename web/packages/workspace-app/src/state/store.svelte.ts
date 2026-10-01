@@ -4909,32 +4909,6 @@ function seedTreeExpansionIfFresh(): void {
   treeExpanded.map[""] = true;
 }
 
-/// Expand every directory in the current tree. Wired to the file
-/// browser's expand-all header button. Mutates the existing map
-/// proxy in place so consumers that captured `treeExpanded.map` at
-/// mount time (FileTree.svelte) keep seeing the live state.
-export function expandAllFolders(): void {
-  treeExpanded.map[""] = true;
-  for (const e of tree.entries) {
-    if (e.is_dir) treeExpanded.map[e.path] = true;
-  }
-  treeExpansionSeeded = true;
-  persistTreeExpanded();
-}
-
-/// Collapse every directory (top-level rows still render; their
-/// children are hidden). Keeps the implicit root key alive so
-/// FileTree's pre-order walk stays consistent. Mutates in place
-/// for the same reason as `expandAllFolders`.
-export function collapseAllFolders(): void {
-  for (const k of Object.keys(treeExpanded.map)) {
-    if (k !== "") delete treeExpanded.map[k];
-  }
-  treeExpanded.map[""] = true;
-  treeExpansionSeeded = true;
-  persistTreeExpanded();
-}
-
 /// Reveal a path in the file browser tree: expand every ancestor
 /// directory so the row is visible, then set the browser selection to
 /// it. FileTree's selection-change effect scrolls the row into
@@ -4965,23 +4939,13 @@ export function revealAndSelect(path: string): void {
   persistTreeExpanded();
 }
 
-/// True when every directory in the current tree is expanded.
-/// Feeds the expand/collapse affordance's glyph and title.
-export function isFullyExpanded(): boolean {
-  for (const e of tree.entries) {
-    if (e.is_dir && !treeExpanded.map[e.path]) return false;
-  }
-  return true;
-}
-
 // ---- per-instance expansion helpers ------------------------------------------
 //
 // FileTree.svelte renders + toggles off the per-instance `expanded` map in
 // `fbTreeInstances` so two visible File Browser surfaces (a dock side + a
 // tab, or two split panes) keep independent expand/collapse state. These
-// mirror the global `expandAllFolders` / `collapseAllFolders` /
-// `isFullyExpanded` above but target one instance's map. The FB header
-// menu calls them with the surface's own instance id.
+// target one instance's map. The FB header menu calls them with the
+// surface's own instance id.
 
 /// Expand every directory in the current tree for one instance.
 export function expandAllFoldersForInstance(id: string): void {
