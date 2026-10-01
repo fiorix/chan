@@ -4852,8 +4852,14 @@ mod devserver_route_tests {
             let uri = format!("/api/library/workspaces{prefix}");
             let (status, body) = request(&launcher, "DELETE", &uri, None).await;
             assert_eq!(status, StatusCode::CONFLICT);
-            assert_eq!(body["error"], "live_terminals");
-            assert_eq!(body["active_terminals"], 1);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "error": "workspace has 1 live terminal session(s); close them or force",
+                    "code": "live_terminals",
+                    "active_terminals": 1,
+                })
+            );
             assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
 
             let (status, _) =
@@ -4921,16 +4927,28 @@ mod devserver_route_tests {
         // Unforced off → 409 + the shared live_terminals body with the count.
         let (status, body) = request(&launcher, "POST", &off_uri, None).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"], "live_terminals");
-        assert_eq!(body["active_terminals"], 1);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "workspace has 1 live terminal session(s); close them or force",
+                "code": "live_terminals",
+                "active_terminals": 1,
+            })
+        );
         assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
 
         // Unforced remove uses the same owner-side guard and body, and leaves
         // the running workspace intact.
         let (status, body) = request(&launcher, "DELETE", &remove_uri, None).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"], "live_terminals");
-        assert_eq!(body["active_terminals"], 1);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "workspace has 1 live terminal session(s); close them or force",
+                "code": "live_terminals",
+                "active_terminals": 1,
+            })
+        );
         assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
 
         // Retry with force → the off goes through (204).
@@ -6201,7 +6219,8 @@ mod window_op_route_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "unforced off");
         assert_eq!(
-            body, r#"{"error":"live_terminals","active_terminals":2}"#,
+            body,
+            r#"{"error":"workspace has 2 live terminal session(s); close them or force","code":"live_terminals","active_terminals":2}"#,
             "needs-force body"
         );
         // Retried with force:true → force-off → 204.
@@ -6232,7 +6251,8 @@ mod window_op_route_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "unforced forget");
         assert_eq!(
-            body, r#"{"error":"live_terminals","active_terminals":2}"#,
+            body,
+            r#"{"error":"workspace has 2 live terminal session(s); close them or force","code":"live_terminals","active_terminals":2}"#,
             "needs-force body"
         );
         let (status, _) = send(
