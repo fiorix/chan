@@ -7734,6 +7734,63 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_forget_beside_an_abandoned_registration_answers_still_releasing() {
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .unwrap()
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).unwrap();
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::REGISTER_WORKSPACE]);
+        let registering = Arc::clone(&state);
+        let requested = root.path().to_path_buf();
+        let first = tokio::spawn(async move { registering.register_workspace(&requested).await });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: registration was not held"
+        );
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let started = tokio::time::Instant::now();
+        let (status, retry_after, body) = completes_beside(
+            &stall,
+            "a forget beside an abandoned registration",
+            forget_over_the_router(app, prefix),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "forget skipped the release budget"
+        );
+        assert_eq!(retry_after.as_deref(), Some("1"));
+        assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "refused forget unregistered the root"
+        );
+        let closing = Arc::clone(&state.host);
+        let requested = root.path().to_path_buf();
+        let outcome = completes_beside(
+            &stall,
+            "a close beside an abandoned registration",
+            async move { closing.close_workspace_for_root(&requested, false).await },
+        )
+        .await
+        .expect("close the held root");
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::NotFound);
+        assert_eq!(stall.entered().len(), 1);
+    }
+
     /// A devserver whose workspace's record is starting, its attempt not yet
     /// run, beside a removal of that workspace whose caller left while its
     /// unregister was held: that unregister keeps the root's registry-write
@@ -8370,6 +8427,68 @@ mod tests {
                 .close_workspace_for_root(root.path(), false)
                 .await
                 .unwrap();
+        });
+    }
+
+    #[test]
+    fn registrations_of_a_hung_root_hold_one_blocking_thread() {
+        const RETRIES: usize = 3;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(RETRIES + 1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let hung = tempfile::tempdir().expect("hung root");
+            let other = tempfile::tempdir().expect("other root");
+            let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            Arc::get_mut(&mut state).unwrap().mount_timeout = Duration::from_millis(500);
+            state
+                .host
+                .library()
+                .register_workspace(other.path())
+                .unwrap();
+            let stall = root_stall::stall_matching(hung.path(), &[root_stall::REGISTER_WORKSPACE]);
+            let registering = Arc::clone(&state);
+            let root = hung.path().to_path_buf();
+            let first = tokio::spawn(async move { registering.register_workspace(&root).await });
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
+                while stall.entered().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("fixture: the first registration reached the held step");
+            assert!(stall.entered()[0].contains("register_workspace_with_name"));
+            let error = first
+                .await
+                .unwrap()
+                .expect_err("the registration must expire");
+            assert!(matches!(&error, Error::Config(message) if message.starts_with("mount timed out")), "{error}");
+            for _ in 1..RETRIES {
+                let error = state
+                    .register_workspace(hung.path())
+                    .await
+                    .expect_err("retry must expire");
+                assert!(matches!(&error, Error::Config(message) if message.starts_with("mount timed out")), "{error}");
+            }
+            // The spare blocking thread belongs to the healthy root's work;
+            // a blocking hang guard here would compete for that same thread.
+            let outcome = tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                state.host.close_workspace_for_root(other.path(), false),
+            )
+            .await
+            .expect("a close of another root answers beside abandoned registrations")
+            .expect("close another root");
+            assert_eq!(outcome, WorkspaceLifecycleOutcome::NotFound);
+            assert_eq!(
+                stall.entered().len(),
+                1,
+                "each expired registration held a thread"
+            );
         });
     }
 

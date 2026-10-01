@@ -3629,6 +3629,91 @@ mod devserver_route_tests {
             });
         }
 
+        #[test]
+        fn a_launcher_add_beside_a_held_registration_answers_still_releasing() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let body = serde_json::json!({ "path": root.path().to_string_lossy() }).to_string();
+            let stall = Arc::new(root_stall::stall_matching(
+                root.path(),
+                &[root_stall::REGISTER_WORKSPACE],
+            ));
+            let registration = Arc::clone(&stall);
+            on_a_paused_clock(stall, "an add beside a held registration", async move {
+                let (host, router) = mutable_router(lib);
+                let first = tokio::spawn(send(
+                    router.clone(),
+                    "POST",
+                    "/api/library/workspaces".into(),
+                    Some(body.clone()),
+                ));
+                held(&registration, "the first add's registration").await;
+                let started = tokio::time::Instant::now();
+                let second = tokio::spawn(send(
+                    router.clone(),
+                    "POST",
+                    "/api/library/workspaces".into(),
+                    Some(body.clone()),
+                ));
+                // Give the key's blocking task time to finish between clock
+                // ticks; it must precede the permit's release-budget timer.
+                for _ in 0..110 {
+                    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+                        .await
+                        .unwrap();
+                    settle().await;
+                    if second.is_finished() {
+                        break;
+                    }
+                    tokio::time::advance(Duration::from_millis(10)).await;
+                }
+                settle().await;
+                assert_eq!(
+                    registration.entered().len(),
+                    1,
+                    "the second add started another registration"
+                );
+                assert!(
+                    second.is_finished(),
+                    "the second add exceeded the one-second release budget"
+                );
+                let (status, retry_after, response) = second.await.unwrap();
+                assert!(started.elapsed() >= Duration::from_secs(1));
+                assert!(started.elapsed() <= Duration::from_millis(1100));
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "add: {response}");
+                assert_eq!(retry_after.as_deref(), Some("1"));
+                assert_eq!(response, serde_json::json!({ "error": STILL_RELEASING }));
+                assert!(
+                    !first.is_finished(),
+                    "the original registration did not remain held"
+                );
+                registration.release_held();
+                let (status, _, response) = first.await.unwrap();
+                assert_eq!(status, StatusCode::OK, "first add: {response}");
+                let third = tokio::spawn(send(
+                    router,
+                    "POST",
+                    "/api/library/workspaces".into(),
+                    Some(body),
+                ));
+                let deadline = Instant::now() + HEALTHY_ROOT_BOUND;
+                while registration.entered().len() < 2 {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the next add never reached registration"
+                    );
+                    tokio::task::yield_now().await;
+                }
+                registration.release_held();
+                let (status, _, response) = third.await.unwrap();
+                assert_eq!(status, StatusCode::OK, "third add: {response}");
+                host.close_workspace_for_root(root.path(), false)
+                    .await
+                    .unwrap();
+            });
+        }
+
         /// An on of a mounted root whose revalidation hangs is refused at the
         /// bound with the root's name, and gives the root's lock back: the off
         /// of that root answers after it, and so does its removal, whatever it
