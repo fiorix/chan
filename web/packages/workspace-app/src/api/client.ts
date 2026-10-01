@@ -99,6 +99,14 @@ export function withTokenQuery(path: string): string {
   return transportWithTokenQuery(path);
 }
 
+/// The URL that loads a workspace file's bytes into an element the browser
+/// fetches by itself (an image, a media element, an embedded viewer): the
+/// files route for `path`, each segment percent-encoded, with the token
+/// query, since such a fetch cannot carry an Authorization header.
+export function fileUrl(path: string): string {
+  return withTokenQuery(`/api/fs/${encPath(path)}`);
+}
+
 const BROWSER_SESSION_WINDOW_KEY = "chan.session.window";
 let sessionStorageWarningShown = false;
 
