@@ -41,6 +41,7 @@
   } from "lucide-svelte";
   import type Wysiwyg from "../editor/Wysiwyg.svelte";
   import type { BlockKind } from "../editor/commands/format";
+  import { chordFor } from "../state/shortcuts";
 
   let {
     wysiwyg,
@@ -230,6 +231,14 @@
     wysiwyg?.setBlockKind(v);
   }
 
+  // The tooltip of a button whose action the editor binds to a chord: its
+  // label and the chord the registry gives the command on this platform,
+  // or the label alone where the registry gives none.
+  function chordTitle(label: string, id: string): string {
+    const chord = chordFor(id);
+    return chord ? `${label} (${chord})` : label;
+  }
+
   // Pin/unpin around the editor's preventDefault dance: holding the
   // mouse down on a button keeps the toolbar from collapsing even if
   // the collapse timer is in flight.
@@ -302,7 +311,7 @@
     <button
       class="fbtn"
       class:on={isBold}
-      title="bold (Cmd/Ctrl+B)"
+      title={chordTitle("bold", "app.editor.bold")}
       aria-label="bold"
       disabled={disabled}
       onmousedown={onMouseDownPin}
@@ -312,7 +321,7 @@
     <button
       class="fbtn"
       class:on={isItalic}
-      title="italic (Cmd/Ctrl+I)"
+      title={chordTitle("italic", "app.editor.italic")}
       aria-label="italic"
       disabled={disabled}
       onmousedown={onMouseDownPin}
@@ -322,7 +331,7 @@
     <button
       class="fbtn"
       class:on={isStrike}
-      title="strikethrough (Cmd/Ctrl+Shift+S)"
+      title="strikethrough"
       aria-label="strikethrough"
       disabled={disabled}
       onmousedown={onMouseDownPin}
@@ -332,7 +341,7 @@
     <button
       class="fbtn"
       class:on={isInlineCode}
-      title="inline code (Cmd/Ctrl+E)"
+      title="inline code"
       aria-label="inline code"
       disabled={disabled}
       onmousedown={onMouseDownPin}
