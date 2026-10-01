@@ -53,9 +53,9 @@ mod linux {
     use anyhow::Context;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use chan_library::terminal_sessions::{
-        current_boot_id, fdstore_fd_name, fdstore_ring_fd_name, process_start_time,
-        FdStoreManifestEntry, FdStorePark, FdStoreParker, FdStoreSessionImport, FdStoreSessionMeta,
-        FdStoreSkippedSession, RecordedChildIdentity, FDSTORE_FD_PREFIX, FDSTORE_RING_FD_PREFIX,
+        current_boot_id, fdstore_fd_name, fdstore_ring_fd_name, FdStoreManifestEntry, FdStorePark,
+        FdStoreParker, FdStoreSessionImport, FdStoreSessionMeta, FdStoreSkippedSession,
+        RecordedChildIdentity, FDSTORE_FD_PREFIX, FDSTORE_RING_FD_PREFIX,
     };
     use serde::{Deserialize, Serialize};
 
@@ -234,16 +234,7 @@ mod linux {
         fn write_entries_locked(
             &self,
             phase: &MutexGuard<'_, ParkerPhase>,
-            entries: Vec<chan_library::terminal_sessions::FdStoreManifestEntry>,
-        ) -> Result<(), String> {
-            self.write_entries_with_start_time(phase, entries, process_start_time)
-        }
-
-        fn write_entries_with_start_time(
-            &self,
-            phase: &MutexGuard<'_, ParkerPhase>,
             entries: Vec<FdStoreManifestEntry>,
-            _lookup: impl Fn(u32) -> Option<u64>,
         ) -> Result<(), String> {
             if entries.is_empty() {
                 let _ = std::fs::remove_file(&self.manifest_path);
@@ -1652,7 +1643,7 @@ mod linux {
                     .unwrap();
                 let identity = RecordedChildIdentity {
                     boot_id: current_boot_id(),
-                    start_time: process_start_time(child.id()),
+                    start_time: chan_library::terminal_sessions::process_start_time(child.id()),
                 };
                 let pin = identity
                     .pin(child.id(), current_boot_id().as_deref())
@@ -1852,7 +1843,7 @@ mod linux {
                 let phase = parker.shared.phase.lock().unwrap();
                 parker
                     .shared
-                    .write_entries_with_start_time(&phase, vec![entry], |_| Some(888))
+                    .write_entries_locked(&phase, vec![entry])
                     .unwrap();
             }
             let written: RestartManifest =
@@ -1910,20 +1901,17 @@ mod linux {
             );
             let second_report = second.restore_fdstore_sessions(again.imports);
             assert_eq!(second_report.restored, 1, "{:?}", second_report.skipped);
-            rustix::process::pidfd_send_signal(&child.pin, rustix::process::Signal::KILL).unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while !child.exited() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            assert!(child.exited(), "owned child must exit before the rewrite");
             let changed = child.identity.start_time.unwrap() + 99;
+            assert!(
+                !child.exited(),
+                "the child must be live during the rewrites"
+            );
             let mut written_times = Vec::new();
             for _ in 0..2 {
+                let mut entries = exported();
+                entries[0].child_start_time = Some(changed);
                 let phase = parker.shared.phase.lock().unwrap();
-                parker
-                    .shared
-                    .write_entries_with_start_time(&phase, exported(), |_| Some(changed))
-                    .unwrap();
+                parker.shared.write_entries_locked(&phase, entries).unwrap();
                 let written: RestartManifest =
                     serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
                 written_times.push(written.sessions[0].child_start_time);
@@ -1937,8 +1925,8 @@ mod linux {
             parker.stop().await;
             assert_eq!(
                 written_times,
-                vec![child.identity.start_time; 2],
-                "manifest rewrites must retain the imported identity despite a later PID lookup"
+                vec![Some(changed); 2],
+                "manifest rewrites must copy the stored time instead of reading the live child's"
             );
         }
 
