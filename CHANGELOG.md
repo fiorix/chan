@@ -31,6 +31,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The outline reads fenced code blocks as the editor does.** In v0.100.0, a line that began with a fence's marker and carried text after it closed the block for the outline, and a run of backticks whose line held another backtick opened one, so a heading after such a line could be missing from the outline, or a line of code could appear in it as a heading. The outline now follows the rules the editor's parser applies: a closing fence is followed by spaces alone, and a backtick fence's info holds no backtick.
+
 - **A link outside the workspace keeps its label.** In v0.100.0, a markdown link whose relative destination escaped the workspace root showed its markers as bare text. It now renders as a broken, inert pill with the link's label.
 
 - **A failed rich-text paste inserts the clipboard's plain text.** Converter and chan-wrapper failures fall back to plain text with the editor's list dedenting, without a status notice.
