@@ -3,7 +3,7 @@
 // send. Which policy each transport applies is pinned beside that transport.
 
 import { describe, expect, test } from "vitest";
-import { ApiError, apiErrorFromText, readApiError } from "./errors";
+import { ApiError, apiErrorFromText, isWorkspaceRootMissingError, readApiError } from "./errors";
 
 /// A refusal whose body the network lost after the status line arrived.
 function unreadableBody(status: number, statusText: string): Response {
@@ -47,5 +47,26 @@ describe("readApiError", () => {
     const error = await readApiError(unreadableBody(502, statusText));
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 502, message, data: null });
+  });
+});
+
+describe("isWorkspaceRootMissingError", () => {
+  const words = "workspace root does not exist: /tmp/gone";
+
+  test("classifies the 404 that carries the code, whatever its sentence says", () => {
+    const refusal = new ApiError(404, "the folder is gone", {
+      error: "the folder is gone",
+      code: "workspace_root_missing",
+    });
+    expect(isWorkspaceRootMissingError(refusal)).toBe(true);
+  });
+
+  test.each([
+    ["no code", new ApiError(404, words, { error: words })],
+    ["another code", new ApiError(404, words, { error: words, code: "other" })],
+    ["another status", new ApiError(500, words, { error: words, code: "workspace_root_missing" })],
+    ["no refusal behind it", new Error(words)],
+  ])("does not classify a failure with %s", (_reason, failure) => {
+    expect(isWorkspaceRootMissingError(failure)).toBe(false);
   });
 });

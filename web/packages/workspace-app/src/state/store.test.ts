@@ -813,7 +813,10 @@ describe("workspace root loss", () => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes("/api/fs")) {
         return new Response(
-          JSON.stringify({ error: "workspace root does not exist: /tmp/gone" }),
+          JSON.stringify({
+            error: "workspace root does not exist: /tmp/gone",
+            code: "workspace_root_missing",
+          }),
           { status: 404, headers: { "content-type": "application/json" } },
         );
       }
