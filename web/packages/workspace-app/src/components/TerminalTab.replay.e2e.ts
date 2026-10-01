@@ -63,7 +63,11 @@ if (caseName === "restart") test("a terminal restarted in place resets before sh
     expect(nextSession.id, "restart retains the terminal id").toBe(initialSession.id);
     expect(nextSession.generation, "restart advances the generation").toBeGreaterThan(initialSession.generation);
     expect({ seq: nextSession.seq, replay: nextSession.replay_bytes, missed: nextSession.missed_bytes }).toEqual({ seq: 0, replay: 0, missed: 0 });
-    const restartFrames = socket.deliveries.slice(boundary, ready.frame);
+    const boundaryFrames = socket.deliveries.slice(boundary, ready.frame);
+    const resetIndex = boundaryFrames.findIndex((frame) => frame.binary && Buffer.from(frame.bytes, "base64").toString() === "\x1bc");
+    expect(resetIndex, "restart includes a reset before the new session").toBeGreaterThanOrEqual(0);
+    expect(boundaryFrames.slice(0, resetIndex).every((frame) => frame.type === "resize"), "only outstanding resize acknowledgements may precede the restart reset").toBe(true);
+    const restartFrames = boundaryFrames.slice(resetIndex);
     expect(restartFrames.map((frame) => frame.type), "reset precedes the second session and ready on the same socket").toEqual([null, "session", "ready"]);
     expect(Buffer.from(restartFrames[0].bytes, "base64").toString(), "the server sends exactly one RIS before the new session").toBe("\x1bc");
     expect(restartFrames.every((frame) => frame.processed)).toBe(true);
