@@ -62,10 +62,6 @@ export type DateFormatDef = {
   id: DateFormatId;
   /// Label for the picker dropdown.
   label: string;
-  /// Whether the formatted output carries a year. Year-less formats
-  /// reattach the current year on parse; the pill displays without
-  /// the year regardless.
-  hasYear: boolean;
   /// Format a Date as the canonical string for this id.
   format: (d: Date) => string;
   /// Pattern fragment (no anchors, no flags) used to detect
@@ -88,7 +84,6 @@ function ymdValid(d: Date, y: number, m0: number, da: number): boolean {
 const ISO: DateFormatDef = {
   id: "iso",
   label: "2026-05-05 (ISO)",
-  hasYear: true,
   format: (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`,
   pattern: "\\d{4}-\\d{2}-\\d{2}",
   parse: (s) => {
@@ -105,7 +100,6 @@ const MEDIUM_PARSE_RE = new RegExp(`^(\\d{2}) (${MONTH_SHORT_RE}) (\\d{4})$`);
 const MEDIUM: DateFormatDef = {
   id: "medium",
   label: "02 Jan 2029",
-  hasYear: true,
   format: (d) => `${pad2(d.getDate())} ${MONTH_SHORT[d.getMonth()]} ${d.getFullYear()}`,
   pattern: `\\d{2} (?:${MONTH_SHORT_RE}) \\d{4}`,
   parse: (s) => {
@@ -127,7 +121,6 @@ const BRITISH_LONG_PARSE_RE = new RegExp(`^(\\d{1,2}) (${MONTH_LONG_RE}) (\\d{4}
 const BRITISH_LONG: DateFormatDef = {
   id: "british-long",
   label: "13 April 2024 (British)",
-  hasYear: true,
   format: (d) => `${d.getDate()} ${MONTH_LONG[d.getMonth()]} ${d.getFullYear()}`,
   pattern: `\\d{1,2} (?:${MONTH_LONG_RE}) \\d{4}`,
   parse: (s) => {
@@ -149,7 +142,6 @@ const BRITISH_ORD_PARSE_RE = new RegExp(`^(\\d{1,2})(?:st|nd|rd|th) (${MONTH_LON
 const BRITISH_ORD: DateFormatDef = {
   id: "british-ord",
   label: "13th April 2024 (ordinal)",
-  hasYear: true,
   format: (d) => `${ordinal(d.getDate())} ${MONTH_LONG[d.getMonth()]} ${d.getFullYear()}`,
   pattern: `\\d{1,2}(?:st|nd|rd|th) (?:${MONTH_LONG_RE}) \\d{4}`,
   parse: (s) => {
@@ -171,7 +163,6 @@ const AMERICAN_LONG_PARSE_RE = new RegExp(`^(${MONTH_LONG_RE}) (\\d{1,2}), (\\d{
 const AMERICAN_LONG: DateFormatDef = {
   id: "american-long",
   label: "April 13, 2024 (American)",
-  hasYear: true,
   format: (d) => `${MONTH_LONG[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`,
   pattern: `(?:${MONTH_LONG_RE}) \\d{1,2}, \\d{4}`,
   parse: (s) => {
@@ -192,7 +183,6 @@ const AMERICAN_LONG: DateFormatDef = {
 const DMY_SLASH: DateFormatDef = {
   id: "dmy-slash",
   label: "13/04/2024 (DD/MM/YYYY)",
-  hasYear: true,
   format: (d) => `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`,
   pattern: "\\d{2}/\\d{2}/\\d{4}",
   parse: (s) => {
@@ -213,7 +203,6 @@ const DMY_SLASH: DateFormatDef = {
 const MDY_SLASH: DateFormatDef = {
   id: "mdy-slash",
   label: "04/13/2024 (MM/DD/YYYY)",
-  hasYear: true,
   format: (d) => `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}/${d.getFullYear()}`,
   pattern: "\\d{2}/\\d{2}/\\d{4}",
   parse: (s) => {
@@ -250,23 +239,6 @@ export function dateFormat(id: string): DateFormatDef {
 /// Format a date using the named format.
 export function formatDate(d: Date, id: string): string {
   return dateFormat(id).format(d);
-}
-
-/// Parse a previously-formatted string back into a Date.
-export function parseFormatted(s: string, id: string): Date | null {
-  return dateFormat(id).parse(s);
-}
-
-/// Convert an ISO YYYY-MM-DD string to a Date (local time, midnight).
-/// Returns null if the input doesn't match the ISO shape; this is the
-/// canonical attribute-storage format on the date node.
-export function dateFromIso(iso: string): Date | null {
-  return ISO.parse(iso);
-}
-
-/// Format a Date as the canonical ISO YYYY-MM-DD attribute value.
-export function isoOf(d: Date): string {
-  return ISO.format(d);
 }
 
 export type DateMatch = {

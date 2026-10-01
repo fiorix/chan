@@ -64,7 +64,7 @@ export type SetPeer = PeerCursor & { id: PeerId };
 /// Upsert one peer. Positions are post-transaction offsets, like any CM
 /// effect that carries positions; the map function keeps them valid if
 /// the effect itself gets mapped through changes.
-export const setPeerEffect = StateEffect.define<SetPeer>({
+const setPeerEffect = StateEffect.define<SetPeer>({
   map: (v, changes) => ({ ...v, ...mapPeerRange(v.anchor, v.head, changes) }),
 });
 

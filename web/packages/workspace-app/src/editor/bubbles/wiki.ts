@@ -49,9 +49,6 @@ export interface WikiBubbleOpts {
   triggerStart: number;
   triggerEnd: number;
   initialQuery: string;
-  /// Reserved path scope from the host. File mode currently uses
-  /// /api/link-targets globally so title/heading matches are visible.
-  prefix: string | null;
   /// "wrap" (default): commit inserts `[[path]]`. Used when the user
   /// typed `[[` from scratch.
   /// "raw": commit inserts just `path`. Used when the caret is inside

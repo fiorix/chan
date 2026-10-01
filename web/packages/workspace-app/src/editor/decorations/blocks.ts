@@ -11,9 +11,9 @@
 //     paint a left border + indent. Quote markers stay visible (per
 //     Obsidian convention - the `>` IS the visual cue that the line
 //     is quoted; hiding it removes meaning).
-//   - HorizontalRule: leave source text visible. Many notes use
-//     `---` as an authoring separator, and replacing it with a
-//     rendered rule makes the markdown harder to edit.
+//   - HorizontalRule: no handler, so the source text stays visible.
+//     Many notes use `---` as an authoring separator, and replacing
+//     it with a rendered rule makes the markdown harder to edit.
 //   - FencedCode: per-line decoration distinguishing opener row,
 //     content rows, closer row, plus a mark for the language info
 //     (CodeInfo). No hide - the fences stay visible (we want the
@@ -162,10 +162,6 @@ const handleBlockquote: TokenHandler = (ctx) => {
     const line = ctx.state.doc.line(n);
     ctx.push(LINE_QUOTE, line.from, line.from);
   }
-};
-
-const handleHorizontalRule: TokenHandler = (ctx) => {
-  void ctx;
 };
 
 const handleFencedCode: TokenHandler = (ctx) => {
@@ -636,7 +632,6 @@ const handleFrontmatter: TokenHandler = (ctx) => {
 
 export const blockHandlers = {
   Blockquote: handleBlockquote,
-  HorizontalRule: handleHorizontalRule,
   FencedCode: handleFencedCode,
   BulletList: handleBulletList,
   OrderedList: handleOrderedList,

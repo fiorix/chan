@@ -1,5 +1,5 @@
-// Heading-aware fold service + a custom gutter that ONLY shows chevrons on
-// heading lines.
+// Heading-aware folding: a custom gutter that ONLY shows chevrons on heading
+// lines and folds the section under one.
 //
 // Per design.md spec #9: a line is a heading iff the lezer syntax tree resolves
 // it to `ATXHeading1..6`, and such a heading folds end-of-line -> start of the
@@ -22,7 +22,6 @@ import {
   ensureSyntaxTree,
   foldEffect,
   foldedRanges,
-  foldService,
   syntaxTree,
   syntaxTreeAvailable,
   unfoldEffect,
@@ -126,15 +125,6 @@ export function headingFoldRange(
   return { from: line.to, to: docEnd };
 }
 
-// CodeMirror's foldService contract is `{from,to} | null`, so "incomplete"
-// maps to no fold here: better no fold offered on this pass than a doc-end
-// fold that lies. The service is re-consulted constantly (and the background
-// parse keeps advancing), so the fold appears as soon as the tree covers it.
-const headingFoldService = foldService.of((state, lineStart) => {
-  const range = headingFoldRange(state, lineStart);
-  return range === "incomplete" ? null : range;
-});
-
 /// Gutter marker classes. One DOM per fold state so CM6 can reuse.
 class ChevronMarker extends GutterMarker {
   constructor(readonly folded: boolean) {
@@ -184,7 +174,7 @@ const headingFoldGutter = gutter({
   lineMarker(view, blockInfo) {
     // Resolve to the actual document line: blockInfo can extend through folded
     // ranges that follow this heading, so its range spans past the heading
-    // line, but `findHeadingFold` needs the exact line.to the foldService emits.
+    // line, but `findHeadingFold` needs the exact line.to a fold starts at.
     const line = view.state.doc.lineAt(blockInfo.from);
     const level = headingLevelAt(view.state, line.from);
     if (level === 0) return null;
@@ -213,9 +203,8 @@ const headingFoldGutter = gutter({
         view.dispatch({ effects: unfoldEffect.of(existing) });
         return true;
       }
-      // Same range the foldService emits: both call headingFoldRange, so the
-      // click and the service can never disagree ("incomplete" folds nothing,
-      // matching the service adapter above).
+      // "incomplete" folds nothing: better no fold on this click than a
+      // doc-end fold that swallows sections the parse had not reached.
       const range = headingFoldRange(view.state, line.from);
       if (range === "incomplete" || !range || range.to <= line.to) return false;
       view.dispatch({ effects: foldEffect.of(range) });
@@ -229,5 +218,5 @@ export function headingFold(): Extension {
   // unfoldEffect mutate. Without it the chevron click dispatches an effect that
   // nothing listens to and the fold silently no-ops - gutter clicks logged the
   // right blockInfo and dispatched, but foldedRanges stayed empty.
-  return [codeFolding(), headingFoldService, headingFoldGutter];
+  return [codeFolding(), headingFoldGutter];
 }

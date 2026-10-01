@@ -2,11 +2,9 @@
 //
 // Heading detection for the WYSIWYG fold gutter comes from the lezer syntax
 // tree: a line is a heading iff the tree resolves it to ATXHeading1..6. The
-// gutter marker, the fold service, and the gutter click all read the same two
-// helpers (`headingLevelAt`, `headingFoldRange`), so these tests exercise the
-// real decision directly rather than through `foldable()`, which also reports
-// the markdown language's own foldNodeProp folding of fenced blocks and would
-// conflate the two sources. Fenced code, tilde fences, indented fences, inline
+// gutter marker and the gutter click read `headingLevelAt`, and the click
+// folds the range `headingFoldRange` returns, so these tests exercise both
+// helpers directly. Fenced code, tilde fences, indented fences, inline
 // code and frontmatter must never be a heading; a real heading must, and its
 // fold range must not be truncated by a fenced `#` comment.
 

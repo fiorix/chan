@@ -1382,7 +1382,6 @@
           initialCaret={tab.caret ?? null}
           onCaretChange={(from, to) => setTabCaret(tab, from, to)}
           onSelectionChange={() => (selVer = selVer + 1)}
-          wikiPickerPrefix={tab.repoRoot}
           currentPath={tab.path}
           onWikiClick={(args) => {
             // Navigation: click on a wikilink pill opens the

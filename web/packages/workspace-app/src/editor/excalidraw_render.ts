@@ -174,7 +174,7 @@ function parseExcalidrawFileResponse(text: string): ExcalidrawScene {
   return payload;
 }
 
-export async function renderExcalidrawScene(
+async function renderExcalidrawScene(
   scene: ExcalidrawScene,
   dark: boolean,
 ): Promise<DiagramResult> {

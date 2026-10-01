@@ -87,7 +87,6 @@
     value = $bindable(""),
     readonly = false,
     currentPath = null,
-    wikiPickerPrefix = null,
     highlightTrailingWhitespace = false,
     initialCaret = null,
     autoFocus = true,
@@ -105,7 +104,6 @@
     value: string;
     readonly?: boolean;
     currentPath?: string | null;
-    wikiPickerPrefix?: string | null;
     highlightTrailingWhitespace?: boolean;
     initialCaret?: { from: number; to: number } | null;
     /// When false, the editor skips the mount-time `view.focus()`.
@@ -286,7 +284,6 @@
         triggerStart: spec.triggerStart,
         triggerEnd: spec.triggerEnd,
         initialQuery: spec.query,
-        prefix: wikiPickerPrefix,
         templateMode: spec.templateMode ?? "wrap",
         fromPath: currentPath,
         onOpenLink: (target, anchor) =>
@@ -467,11 +464,8 @@
     // Mod-Enter inside any fenced code block: append a fresh
     // line just past the block end and place the caret
     // there. Always-on escape, independent of the block's
-    // position in the doc - for cases the doc-end-only
-    // rule below can't catch (unclosed fence followed by
-    // content, opener inside a list, etc.).
+    // position in the doc and of whether the fence is closed.
     fmt.exitFenceAnywhere,
-    fmt.escapeFenceAtDocEnd,
   ];
 
   /// The editor's own Mod-Enter actions, in its keymap's order: open the
@@ -649,13 +643,10 @@
               },
             },
             ...ownModEnterActions.map((run) => ({ key: "Mod-Enter", run })),
-            // ArrowDown / Mod-Enter / Enter-on-closer escape a fenced
-            // code block that sits at the end of the doc. Without
-            // this, Enter inserts a literal newline inside the fence
-            // and ArrowDown is a no-op - the user has no way out.
-            // Each returns false when the trap conditions don't
-            // apply so the keys keep their default behaviour
-            // (cursorDown / caller submit / new line in code).
+            // ArrowDown escapes a fenced code block that sits at the
+            // end of the doc, where it is otherwise a no-op. It returns
+            // false when the caret is not on the last line of such a
+            // block, so the key keeps its default behaviour (cursorDown).
             { key: "ArrowDown", run: (view) => fmt.escapeFenceAtDocEnd(view) },
             // Submit when a host wires onSubmit; otherwise CONSUME the chord as
             // a no-op (return true) so it never falls through to CM6's default

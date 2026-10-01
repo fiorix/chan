@@ -51,7 +51,6 @@ function open(doc: string, start: number, over: Partial<WikiBubbleOpts> = {}) {
     triggerStart: start,
     triggerEnd: doc.length,
     initialQuery: doc.slice(start).replace(/^\[\[/, ""),
-    prefix: null,
     fromPath: "notes/here.md",
     onDismiss: () => {},
     ...over,

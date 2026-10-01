@@ -1,8 +1,4 @@
-// Wiki-link serialization and relative-path helpers used by the
-// editor. The wikiLink TipTap extension serializes atoms back to
-// markdown via `wikiLinkToMarkdown`; Wysiwyg resolves clicks on
-// relative-path links via `resolveRelativePath` (legacy, ./../-only)
-// and `normalizeHref` (full mirror of chan-workspace's `normalize_href`).
+// Wiki-link serialization and link-path helpers used by the editor.
 
 /// Serialize a wikiLink atom's attrs back to markdown.
 ///
@@ -101,27 +97,6 @@ export function relativizePath(target: string, fromPath: string): string {
     return ["."].concat(down).join("/");
   }
   return Array(ups).fill("..").concat(down).join("/");
-}
-
-/// Resolve a relative href against `fromPath`'s directory, returning
-/// the canonical workspace-rooted target. Hrefs that don't start with
-/// `./` or `../` are treated as already-workspace-rooted (legacy /
-/// power-user form) and returned unchanged.
-export function resolveRelativePath(href: string, fromPath: string): string {
-  if (!href.startsWith("./") && !href.startsWith("../")) {
-    return href;
-  }
-  const fromDir = fromPath.split("/").slice(0, -1);
-  const parts = href.split("/");
-  for (const p of parts) {
-    if (p === "" || p === ".") continue;
-    if (p === "..") {
-      if (fromDir.length > 0) fromDir.pop();
-    } else {
-      fromDir.push(p);
-    }
-  }
-  return fromDir.join("/");
 }
 
 /// Whether a markdown link destination addresses a workspace path rather

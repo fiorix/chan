@@ -79,15 +79,6 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   let reqSeq = 0;
   let debounceTimer: number | undefined;
   let alive = true;
-  /// Mention-corpus completion is surfaced under BOTH triggers.
-  /// Both modes merge contact-file hits first, then mention-only
-  /// tokens from `api.mentions`. The insertion shape follows the
-  /// picked row's kind, not the trigger: a contact-file hit
-  /// commits a wiki-link under `@` (`commit`), a mention-only
-  /// hit commits `@@<Name>` under either trigger
-  /// (`commitMention`).
-  const includeMentions = true;
-
   const list = document.createElement("div");
   list.className = "md-bubble-list";
   shell.wrap.appendChild(list);
@@ -95,6 +86,13 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   status.className = "md-bubble-status";
   shell.wrap.appendChild(status);
 
+  /// Mention-corpus completion is surfaced under BOTH triggers.
+  /// Both modes merge contact-file hits first, then mention-only
+  /// tokens from `api.mentions`. The insertion shape follows the
+  /// picked row's kind, not the trigger: a contact-file hit
+  /// commits a wiki-link under `@` (`commit`), a mention-only
+  /// hit commits `@@<Name>` under either trigger
+  /// (`commitMention`).
   function fetchContacts(): void {
     if (debounceTimer !== undefined) clearTimeout(debounceTimer);
     const seq = ++reqSeq;
@@ -104,9 +102,9 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
       // 2*PAGE_LIMIT before the dedup pass; the dedup typically
       // collapses common-name overlap back under PAGE_LIMIT.
       const contactsP = api.contacts(query, PAGE_LIMIT);
-      const mentionsP = includeMentions
-        ? api.mentions(query, PAGE_LIMIT).catch(() => [] as MentionHit[])
-        : Promise.resolve<MentionHit[]>([]);
+      const mentionsP = api
+        .mentions(query, PAGE_LIMIT)
+        .catch(() => [] as MentionHit[]);
       Promise.all([contactsP, mentionsP])
         .then(([contactRows, mentionRows]) => {
           if (!alive || seq !== reqSeq) return;
@@ -144,7 +142,7 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
       kind: "contact",
       contact: c,
     }));
-    if (!includeMentions || mentionRows.length === 0) return out;
+    if (mentionRows.length === 0) return out;
     // Build the dedup set from each contact's basename stem +
     // their alias list (both lowercased, sans `@@`).
     const seen = new Set<string>();

@@ -179,10 +179,6 @@ function registerView(view: EditorView): void {
   watchedViews.add(view);
 }
 
-function unregisterView(view: EditorView): void {
-  watchedViews.delete(view);
-}
-
 function broadcastKindResolved(): void {
   for (const v of watchedViews) {
     if (!v.dom.isConnected) {
@@ -530,18 +526,6 @@ function scanWikiLinks(
     true,
   );
 }
-
-// Cleanup: prune disconnected views. Called periodically by the
-// broadcaster anyway, but exported for tests.
-export function _pruneWatchedViews(): void {
-  for (const v of watchedViews) {
-    if (!v.dom.isConnected) watchedViews.delete(v);
-  }
-}
-
-// Expose unregister for symmetry, though current call sites rely on
-// the prune-on-broadcast path.
-export const _internal = { unregisterView };
 
 // ---- inline-code local-file links ---------------------------------------
 
