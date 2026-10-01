@@ -13,9 +13,17 @@ import { expect, test, vi } from "vitest";
 import { serveMeta } from "../../__tests__/standalone";
 import type { TreeEntry } from "../../api/types";
 
+/// What the double answers for one path instead of deleting it.
+type Refusal = { status: number; error: string; code?: string };
+
 /// A window with no workspace over a disk that deletes the way the
 /// no-workspace route does: a file or an empty directory, never recursively.
-async function standaloneWindow(dirs: string[], files: string[]) {
+/// A path named in `refusals` is refused with that answer.
+async function standaloneWindow(
+  dirs: string[],
+  files: string[],
+  refusals: Record<string, Refusal> = {},
+) {
   vi.resetModules();
   window.history.replaceState({}, "", "/?kind=terminal&w=w-mini");
   serveMeta("chan-files", true);
@@ -35,10 +43,20 @@ async function standaloneWindow(dirs: string[], files: string[]) {
   ]);
   const listing = (): TreeEntry[] =>
     [...disk].map(([path, is_dir]) => ({ path, is_dir, mtime: null, size: 0 }));
+  // A refusal as the transport delivers it: the body's sentence as the
+  // message, and the parsed body beside it.
+  const refusal = (path: string, { status, error, code }: Refusal) =>
+    new ApiError(status, error, code === undefined ? { error } : { error, code, path });
   const remove = vi.spyOn(api, "remove").mockImplementation(async (path: string) => {
     if (!disk.has(path)) throw new ApiError(404, "not_found");
+    const planted = refusals[path];
+    if (planted) throw refusal(path, planted);
     if ([...disk.keys()].some((p) => p.startsWith(`${path}/`))) {
-      throw new ApiError(409, "directory_not_empty");
+      throw refusal(path, {
+        status: 409,
+        error: `directory is not empty: ${path}`,
+        code: "directory_not_empty",
+      });
     }
     disk.delete(path);
   });
@@ -121,8 +139,63 @@ test("a folder that still holds unselected files is refused and reported", async
   resolveConfirm(true);
 
   await vi.waitFor(() =>
-    expect(store.ui.status).toBe("deleted 2 of 3; build: directory_not_empty"),
+    expect(store.ui.status).toBe("deleted 2 of 3; directory is not empty: build"),
   );
   expect([...disk.keys()]).toEqual(["build", "build/b.o"]);
   expect(store.browserSelection.paths).toEqual(["build"]);
+});
+
+test("a protected path in a multi-selection is reported by the server's sentence", async () => {
+  const { store, disk, deleteSelection, resolveConfirm } = await standaloneWindow(
+    ["home", "home/user"],
+    ["notes.txt"],
+    { "home/user": { status: 409, error: "path is protected: home/user", code: "protected_path" } },
+  );
+
+  await deleteSelection(["home/user", "notes.txt"]);
+  resolveConfirm(true);
+
+  await vi.waitFor(() =>
+    expect(store.ui.status).toBe("deleted 1 of 2; path is protected: home/user"),
+  );
+  expect([...disk.keys()]).toEqual(["home", "home/user"]);
+  expect(store.browserSelection.paths).toEqual(["home/user"]);
+});
+
+test.each<[string, Refusal]>([
+  ["has no code", { status: 409, error: "directory_not_empty" }],
+  ["has another code", { status: 409, error: "file is in use", code: "other" }],
+  [
+    "has another status",
+    { status: 500, error: "directory is not empty: notes.txt", code: "directory_not_empty" },
+  ],
+])("a refusal in a multi-selection that %s is reported under its path", async (_reason, planted) => {
+  const { store, deleteSelection, resolveConfirm } = await standaloneWindow(
+    [],
+    ["a.md", "notes.txt"],
+    { "notes.txt": planted },
+  );
+
+  await deleteSelection(["a.md", "notes.txt"]);
+  resolveConfirm(true);
+
+  await vi.waitFor(() =>
+    expect(store.ui.status).toBe(`deleted 1 of 2; notes.txt: ${planted.error}`),
+  );
+});
+
+test("a single folder that still holds files is refused by the server's sentence", async () => {
+  const { store, disk, deleteSelection, resolveConfirm } = await standaloneWindow(
+    ["build"],
+    ["build/a.o"],
+  );
+
+  const shown = await deleteSelection(["build"]);
+  expect(shown.message).toBe('Permanently delete "build"? This cannot be undone.');
+  resolveConfirm(true);
+
+  await vi.waitFor(() =>
+    expect(store.ui.status).toBe("delete failed: directory is not empty: build"),
+  );
+  expect([...disk.keys()]).toEqual(["build", "build/a.o"]);
 });
