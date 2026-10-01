@@ -74,6 +74,9 @@
     /// transform or discards node arrays. Default false (always-on
     /// hosts like the Dashboard slide pass nothing).
     paused?: boolean;
+    /// A new scope owns a new view; content refreshes within one scope keep
+    /// the user's pan and zoom. Omitted by canvases without a scope.
+    scopeKey?: string;
     nodes: RenderedNode[];
     edges: RenderedEdge[];
     visibleNodeIds: Set<string>;
@@ -109,6 +112,7 @@
   let {
     open,
     paused = false,
+    scopeKey,
     nodes,
     edges,
     visibleNodeIds,
@@ -253,13 +257,11 @@
   let expansionRefit: { until: number; ids: Set<string> } | null = null;
   let seenExpansionFitNonce = 0;
   /// Once the user has manually panned, zoomed, or dragged a node,
-  /// the view belongs to them. Periodic re-renders of the same node
-  /// set (e.g., the Dashboard indexing slide polling
+  /// the view belongs to them. Periodic re-renders within the same scope
+  /// (e.g., the Dashboard indexing slide polling
   /// `/api/indexing/state` every 3s, which produces fresh array
   /// references with no structural change) must not snap the view
-  /// back to fit-content. The flag stays set until the node SET
-  /// genuinely differs from what's on screen, which is clearly a new
-  /// dataset where a refit IS the right thing.
+  /// back to fit-content. A new scope clears the flag so its nodes fit.
   let userInteracted = false;
   /// When `start()` runs before the host has been measured
   /// (carousel mounts GraphCanvas before slide 2 is visible, so
@@ -1735,9 +1737,8 @@
     // Skip auto-refit once the user has panned, zoomed, or dragged a
     // node. The view belongs to them; periodic data refreshes (e.g.,
     // Dashboard indexing polling) must not snap back to fit-content.
-    // The interaction flag resets when the node SET actually differs
-    // from the current dNodes (scope/depth change, first load), so
-    // genuine dataset swaps still re-frame the cluster.
+    // A scope change clears the interaction flag. Content refreshes
+    // within one scope preserve the user's view.
     if (userInteracted) return;
     refitUntil = performance.now() + ms;
   }
@@ -1858,6 +1859,20 @@
   $effect(() => {
     void selectedId;
     markDirty();
+  });
+
+  let prevScopeKey: string | undefined;
+  let seenScopeKey = false;
+  $effect(() => {
+    const key = scopeKey;
+    if (!seenScopeKey) {
+      prevScopeKey = key;
+      seenScopeKey = true;
+      return;
+    }
+    if (key === prevScopeKey) return;
+    prevScopeKey = key;
+    userInteracted = false;
   });
 
   /// Nodes / edges arrays changed (new graph payload from the

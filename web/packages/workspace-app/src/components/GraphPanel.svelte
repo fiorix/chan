@@ -2760,6 +2760,7 @@
       <GraphCanvas
         open={canvasEverShown}
         paused={!active}
+        scopeKey={`${graphState.mode}:${graphState.scopeId}`}
         {nodes}
         {edges}
         {visibleNodeIds}
