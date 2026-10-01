@@ -125,6 +125,7 @@
   // reconfigures when reactive deps re-fire without an actual change
   // (Svelte runs $effect on any prop touch).
   let lastLanguageKey: string | null = null;
+  let languageRequest = 0;
 
   /// Find-on-page adapter. FileEditorTab passes whichever editor is
   /// currently visible to FindBar; the bar workspaces matches + decorations
@@ -354,8 +355,9 @@
   /// the $effect without an actual prop change.
   async function applyLanguage(): Promise<void> {
     if (!view) return;
+    const request = ++languageRequest;
     const target = await resolveLanguage();
-    if (!view) return;
+    if (!view || request !== languageRequest) return;
     if (target.key === lastLanguageKey) return;
     lastLanguageKey = target.key;
     view.dispatch({ effects: language.reconfigure(target.extension) });
