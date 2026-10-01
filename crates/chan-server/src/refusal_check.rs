@@ -1138,22 +1138,39 @@ mod tests {
         );
     }
 
-    /// No route answers these: the JSON data and content-type sentences under
-    /// a 400, the texts of extractors no handler takes, and a 405 with `Allow`
-    /// and no body.
+    /// The framework's own refusals: each extractor's rejection text under the
+    /// status the framework or a handler re-emitting it could give it, and a
+    /// 405 with `Allow` and no body. Every router answers them through the
+    /// crate's extractors and its 405, so the check admits none of them.
     #[tokio::test]
-    async fn framework_texts_no_route_answers_require_the_envelope() {
+    async fn framework_texts_require_the_envelope() {
         let mut admitted = Vec::new();
         for (status, body) in [
+            (400, "Failed to parse the request body as JSON: EOF"),
+            (
+                422,
+                "Failed to deserialize the JSON body into the target type: unknown variant",
+            ),
             (
                 400,
                 "Failed to deserialize the JSON body into the target type: unknown variant",
             ),
             (
+                415,
+                "Expected request with `Content-Type: application/json`",
+            ),
+            (
                 400,
                 "Expected request with `Content-Type: application/json`",
             ),
+            (400, "Failed to deserialize query string: missing field"),
+            (400, "Invalid URL: Invalid UTF-8 in `id`"),
             (400, "Invalid `boundary` for `multipart/form-data` request"),
+            (
+                413,
+                "Failed to buffer the request body: length limit exceeded",
+            ),
+            (400, "Failed to buffer the request body: connection reset"),
             (
                 400,
                 "Request body didn't contain valid UTF-8: invalid utf-8 sequence",
