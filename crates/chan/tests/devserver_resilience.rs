@@ -1922,6 +1922,13 @@ async fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
 // sandbox's handoff socket, and read what each attempt left behind.
 // ---------------------------------------------------------------------------
 
+/// Extra environment for one serve attempt, as name and value pairs.
+type Env<'a> = &'a [(&'a str, &'a str)];
+
+/// One route that binds here under `--no-settings`: its label, its flags, its
+/// environment, and whether a desktop is live beside it.
+type FallbackCase<'a> = (&'a str, &'a [&'a str], Env<'a>, bool);
+
 /// The spellings of the serve command: the top-level verb, its alias, and the
 /// workspace family's verb.
 const SERVE_SPELLINGS: [&[&str]; 3] = [&["serve"], &["open"], &["workspace", "serve"]];
@@ -2439,7 +2446,7 @@ async fn standalone_serve_enforces_no_settings() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_settings_serves_standalone_where_nothing_is_handed_off() {
     let forced = ("CHAN_DESKTOP_HANDOFF", "1");
-    let cases: [(&str, &[&str], &[(&str, &str)], bool); 4] = [
+    let cases: [FallbackCase; 4] = [
         (
             "forced desktop, handoff opted out, desktop live",
             &["--no-settings"],
@@ -2498,7 +2505,8 @@ async fn no_settings_serves_standalone_where_nothing_is_handed_off() {
 async fn no_settings_keeps_the_devserver_selection_refusals() {
     let sandbox = Sandbox::new();
     let scratch = canonical_scratch(&sandbox);
-    let cases: [(&str, &[(&str, &str)], &str); 2] = [
+    // Each case: the selector, its environment, and the refusal's wording.
+    let cases: [(&str, Env, &str); 2] = [
         (
             "--devserver=65535",
             &[],
