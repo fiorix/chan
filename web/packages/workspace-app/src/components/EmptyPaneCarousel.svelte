@@ -80,8 +80,7 @@
     | "tag"
     | "mention"
     | "contains"
-    | "language"
-    | "group";
+    | "language";
   type CanvasEdge = GraphViewEdge & { kind: CanvasEdgeKind };
 
 

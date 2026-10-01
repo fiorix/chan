@@ -23,7 +23,7 @@ import { colorVarForBucket, type FileBucket } from "../state/kinds";
 import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
 
 type CanvasNode = Extract<GraphViewNode, { kind: "file" | "tag" | "mention" | "language" | "folder" }>;
-type CanvasEdge = GraphViewEdge & { kind: "link" | "tag" | "mention" | "contains" | "language" | "group" };
+type CanvasEdge = GraphViewEdge & { kind: "link" | "tag" | "mention" | "contains" | "language" };
 type Circle = { x: number; y: number; r: number };
 type CanvasApi = { nodeScreenCircle(id: string): Circle | null };
 

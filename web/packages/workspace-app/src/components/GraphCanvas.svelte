@@ -52,8 +52,7 @@
     | "tag"
     | "mention"
     | "contains"
-    | "language"
-    | "group";
+    | "language";
   type RenderedEdge = GraphViewEdge & { kind: RenderedEdgeKind };
   type RenderedNode = Extract<
     GraphViewNode,
@@ -991,7 +990,7 @@
   /// the next paint.
   function bucketEdges(edgeList: DEdge[]): EdgeBuckets {
     const edgesByKind: Record<RenderedEdgeKind, DEdge[]> = {
-      link: [], tag: [], mention: [], contains: [], language: [], group: [],
+      link: [], tag: [], mention: [], contains: [], language: [],
     };
     for (const e of edgeList) edgesByKind[e.kind].push(e);
     // Falls back to the doc colour when the source kind isn't a recognised
@@ -1129,13 +1128,12 @@
     // `link` edges are coloured per source document type, so they are
     // sub-grouped by the source node's kind and stroked in their own
     // pass below. The other kinds keep the single-stroke-per-kind fast
-    // path. `group` (synthetic scope-hub) keeps the accent colour.
-    const strokeForKind = (kind: RenderedEdgeKind): string =>
+    // path.
+    const strokeForKind = (kind: Exclude<RenderedEdgeKind, "link">): string =>
       kind === "tag" ? theme.tag
       : kind === "mention" ? theme.mention
       : kind === "contains" ? theme.folder
-      : kind === "language" ? theme.language
-      : theme.accent;
+      : theme.language;
 
     /// Both endpoints strictly off the same side of the viewport means the
     /// segment cannot cross it. Cheap conservative reject; a segment that
@@ -1192,7 +1190,7 @@
     // is memoised in `selectionPaint()`, so a frame only walks the
     // buckets it draws.
     const drawEdgeBuckets = (buckets: EdgeBuckets, alpha: number): void => {
-      for (const kind of ["tag", "mention", "contains", "language", "group"] as const) {
+      for (const kind of ["tag", "mention", "contains", "language"] as const) {
         strokePass(buckets.byKind[kind], strokeForKind(kind), alpha);
       }
       for (const [kind, list] of buckets.linkByKind) {

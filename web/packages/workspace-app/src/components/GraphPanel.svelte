@@ -560,13 +560,7 @@
   // mentions. Dates are still filtered out at load: chan-workspace's
   // graph index has stopped emitting date edges (issue #17), but
   // older indexes may still contain them.
-  /// `group` is a synthetic edge kind: cytoscape-only, never emitted
-  /// by chan-workspace's graph index. It exists to fan `group` edges
-  /// from a synthetic hub node to the files in a
-  /// multi-file `group` scope -- but no graph scope kind produces a
-  /// group scope, so that synthesis is unreachable; the edge-kind +
-  /// hub machinery is dead and awaits a follow-up cleanup.
-  type RenderedEdgeKind = "link" | "tag" | "mention" | "contains" | "language" | "group";
+  type RenderedEdgeKind = "link" | "tag" | "mention" | "contains" | "language";
   type RenderedEdge = GraphViewEdge & { kind: RenderedEdgeKind };
   type RenderedNode = Extract<
     GraphViewNode,
@@ -688,7 +682,7 @@
   // tearing the server watcher down. This shares the exact refcounted
   // mechanism File Browser workspaces via `fbWatch`; the actual redraw still
   // runs through the existing `graphReloadSignal` reload path.
-  const graphInstanceId = $derived(tab ? `graph-tab-${tab.id}` : "graph-overlay");
+  const graphInstanceId = $derived(`graph-tab-${tab.id}`);
 
   /// Directory scopes the currently-loaded graph displays. In
   /// filesystem mode this is the set of `directory` fs-graph nodes; in
@@ -845,7 +839,7 @@
   /// shared tab-menu state addresses THIS tab; positioned via the
   /// stored anchor through `clampMenu` so the bubble stays on-
   /// screen even when the tab sits near the viewport edge.
-  const tabMenuOpen = $derived(tab !== undefined && tabMenu.openForTabId === tab.id);
+  const tabMenuOpen = $derived(tabMenu.openForTabId === tab.id);
   const tabMenuPos = $derived.by(() => {
     const a = tabMenu.anchor;
     if (!a) return { x: 0, y: 0 };
@@ -1321,7 +1315,6 @@
     // non-spine directory bubbles out). Gating it on show.folder dropped the
     // whole spine when the folder chip was off and made files render loose.
     if (kind === "contains") return true;
-    if (kind === "group") return true;
     // Link edges always render -- a link filter doesn't make
     // sense because link visibility
     // is implicit (an edge renders iff both endpoints render under
@@ -1723,25 +1716,14 @@
 
   // ---- presentation ------------------------------------------------------
 
-  /// Cytoscape resolves --g-* via getComputedStyle at buildCytoscape
-  /// time, so theme changes propagate next reload.
-  const EDGE_COLORS: Record<RenderedEdgeKind, string> = {
-    link: "var(--text-secondary)",
+  /// Per-chip dot color. The tag, mention and language chips name the
+  /// tokens GraphCanvas strokes those edge kinds with, so a dot matches
+  /// its edges; img is a node filter so it points at the image node
+  /// color directly.
+  const FILTER_COLORS: Record<FilterKind, string> = {
     tag: "var(--g-tag)",
     mention: "var(--g-contact, var(--warn-text))",
-    contains: "var(--g-folder)",
     language: "var(--g-language)",
-    // Group-scope edges read as the accent so they pop against the
-    // document edges without looking like another link kind.
-    group: "var(--accent)",
-  };
-
-  /// Per-chip dot color. Edge-kind chips reuse EDGE_COLORS; img is a
-  /// node filter so it points at the image node color directly.
-  const FILTER_COLORS: Record<FilterKind, string> = {
-    tag: EDGE_COLORS.tag,
-    mention: EDGE_COLORS.mention,
-    language: EDGE_COLORS.language,
     img: "var(--g-img)",
     folder: "var(--g-folder)",
     // FileBucket chip swatch colours. Markdown
@@ -1787,7 +1769,7 @@
   /// ones). Standard mode yields an empty string: no attribute, no
   /// override, theme palette untouched.
   const paletteStyle = $derived(
-    tab ? graphPaletteStyleFor(effectiveHybridSurfaceTheme("graph")) : "",
+    graphPaletteStyleFor(effectiveHybridSurfaceTheme("graph")),
   );
 
   // ---- canvas glue -------------------------------------------------------
@@ -2493,10 +2475,8 @@
     // label. We cache the label too so the title renders before
     // the graph data finishes reloading (e.g. after a hard
     // reload that round-trips the selection via URL hash).
-    if (tab) {
-      tab.selectedNodeId = id;
-      tab.selectedNodeLabel = id === null ? null : graphSelectionLabel(id);
-    }
+    tab.selectedNodeId = id;
+    tab.selectedNodeLabel = id === null ? null : graphSelectionLabel(id);
   }
 
   function graphSelectionLabel(id: string): string | null {
@@ -2524,13 +2504,13 @@
   <div
     class="graph-tab"
     class:active
-    data-theme={tab ? surfaceThemeOverride("graph") : undefined}
+    data-theme={surfaceThemeOverride("graph")}
     style={paletteStyle || undefined}
     oncontextmenu={onGraphContextMenu}
     role="tabpanel"
     aria-hidden={!active}
   >
-  {#if tab && tabMenuOpen}
+  {#if tabMenuOpen}
     <!-- Graph-tab right-click bubble. Anchored to
          the tab-strip click position via clampMenu.
          Row shape follows the standard
