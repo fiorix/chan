@@ -55,7 +55,7 @@ async fn inspect(State(allow_navigation): State<bool>, request: Request, next: N
                         .get("code")
                         .is_none_or(|code| code.as_str().is_some_and(|s| !s.is_empty()))
             });
-    let framework = framework_exception(parts.status, &parts.headers, &bytes);
+    let framework = framework_exception(parts.status, &bytes);
     if let Some(kind) = framework {
         eprintln!(
             "refusal-framework\t{kind}\t{}\t{method}\t{}",
@@ -103,19 +103,7 @@ fn range_refusal(
             .is_some_and(|size| !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn framework_exception(
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Option<&'static str> {
-    if status == StatusCode::METHOD_NOT_ALLOWED
-        && body.is_empty()
-        && headers
-            .get(header::ALLOW)
-            .is_some_and(|value| !value.as_bytes().is_empty())
-    {
-        return Some("MethodNotAllowed");
-    }
+fn framework_exception(status: StatusCode, body: &[u8]) -> Option<&'static str> {
     let body = std::str::from_utf8(body).ok()?;
     FRAMEWORK_PENDING
         .iter()
@@ -146,14 +134,6 @@ const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
         "Failed to deserialize the JSON body into the target type: ",
         true,
     ),
-    // No route emits this plain-text 400: search answers JSON data errors
-    // in the envelope.
-    (
-        "JsonDataError",
-        400,
-        "Failed to deserialize the JSON body into the target type: ",
-        true,
-    ),
     (
         "MissingJsonContentType",
         415,
@@ -166,21 +146,7 @@ const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
         "Failed to deserialize query string: ",
         true,
     ),
-    // No route emits this plain-text 400: search answers content-type errors
-    // in the envelope.
-    (
-        "MissingJsonContentType",
-        400,
-        "Expected request with `Content-Type: application/json`",
-        false,
-    ),
     ("FailedToDeserializePathParams", 400, "Invalid URL: ", true),
-    (
-        "InvalidBoundary",
-        400,
-        "Invalid `boundary` for `multipart/form-data` request",
-        false,
-    ),
     (
         "LengthLimitError",
         413,
@@ -193,13 +159,6 @@ const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
         "Failed to buffer the request body: ",
         true,
     ),
-    (
-        "InvalidUtf8",
-        400,
-        "Request body didn't contain valid UTF-8: ",
-        true,
-    ),
-    ("MultipartError", 413, "Request payload is too large", false),
 ];
 
 fn matches_path(pattern: &str, path: &str) -> bool {
@@ -741,24 +700,17 @@ mod tests {
     }
 
     #[test]
-    fn re_emitted_framework_refusal_keeps_its_type() {
+    fn a_framework_text_is_admitted_under_its_own_status_alone() {
         let body = b"Failed to deserialize the JSON body into the target type: unknown variant";
-        for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
-            assert_eq!(
-                framework_exception(status, &HeaderMap::new(), body),
-                Some("JsonDataError")
-            );
+        assert_eq!(
+            framework_exception(StatusCode::UNPROCESSABLE_ENTITY, body),
+            Some("JsonDataError")
+        );
+        for status in [StatusCode::BAD_REQUEST, StatusCode::CONFLICT] {
+            assert_eq!(framework_exception(status, body), None);
         }
         assert_eq!(
-            framework_exception(StatusCode::CONFLICT, &HeaderMap::new(), body),
-            None
-        );
-        assert_eq!(
-            framework_exception(
-                StatusCode::BAD_REQUEST,
-                &HeaderMap::new(),
-                b"another refusal"
-            ),
+            framework_exception(StatusCode::BAD_REQUEST, b"another refusal"),
             None
         );
     }
