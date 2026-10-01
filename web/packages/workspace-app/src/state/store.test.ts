@@ -32,7 +32,6 @@ import {
   fbDirSubscriberCount,
   expandAllFoldersForInstance,
   collapseAllFoldersForInstance,
-  isFullyExpandedForInstance,
   revealAndSelect,
 } from "./store.svelte";
 import {
@@ -1722,9 +1721,9 @@ describe("per-instance file browser tree registry", () => {
 });
 
 // FileTree renders + toggles off the per-instance map, so the expand-all /
-// collapse-all / full-expansion helpers target one instance. A dock side
-// and a tab (two instances) must not toggle each other; a programmatic
-// reveal fans out to every live surface.
+// collapse-all helpers target one instance. A dock side and a tab (two
+// instances) must not toggle each other; a programmatic reveal fans out to
+// every live surface.
 describe("per-instance expansion helpers", () => {
   function seedTree(): void {
     const dirs = ["docs", "docs/api", "notes"];
@@ -1752,17 +1751,9 @@ describe("per-instance expansion helpers", () => {
     });
     // The sibling instance is untouched: per-instance independence.
     expect(tab.expanded).toEqual({ "": true });
-    expect(isFullyExpandedForInstance("fb-dock-left")).toBe(true);
-    expect(isFullyExpandedForInstance("fb-tab-1")).toBe(false);
 
     collapseAllFoldersForInstance("fb-dock-left");
     expect(dock.expanded).toEqual({ "": true });
-    expect(isFullyExpandedForInstance("fb-dock-left")).toBe(false);
-  });
-
-  test("isFullyExpandedForInstance is false for an unregistered instance", () => {
-    seedTree();
-    expect(isFullyExpandedForInstance("fb-overlay")).toBe(false);
   });
 
   test("revealAndSelect fans ancestor expansion across all live instances", () => {

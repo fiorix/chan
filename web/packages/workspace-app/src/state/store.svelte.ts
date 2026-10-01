@@ -4966,17 +4966,6 @@ export function collapseAllFoldersForInstance(id: string): void {
   inst.expanded[""] = true;
 }
 
-/// True when every directory in the current tree is expanded for one
-/// instance. Feeds the expand/collapse affordance for that surface.
-export function isFullyExpandedForInstance(id: string): boolean {
-  const inst = fbTreeInstance(id);
-  if (!inst) return false;
-  for (const e of tree.entries) {
-    if (e.is_dir && !inst.expanded[e.path]) return false;
-  }
-  return true;
-}
-
 /// Expand the ancestor chain of `path` across EVERY live File Browser
 /// instance. Programmatic reveals (after create / move / upload) must
 /// surface the new entry in whatever surface is on screen; unlike a user
