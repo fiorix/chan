@@ -38,7 +38,7 @@ use chan_workspace::{
 };
 
 use crate::bulk_transfer::{BulkCancel, BulkOutcome};
-use crate::error::{err, err_from};
+use crate::error::{err, err_code, err_from};
 use crate::extract::{Json, Multipart, Path as AxumPath, Query};
 use crate::routes::run_blocking;
 use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
@@ -78,22 +78,20 @@ fn files_not_served() -> Response {
 /// crate-wide mapping.
 fn standalone_err(e: &chan_workspace::ChanError) -> Response {
     match e {
-        chan_workspace::ChanError::DirectoryNotEmpty(path) => {
-            structured_conflict("directory_not_empty", path)
-        }
-        chan_workspace::ChanError::ProtectedPath(path) => {
-            structured_conflict("protected_path", path)
-        }
+        chan_workspace::ChanError::DirectoryNotEmpty(path) => err_code(
+            StatusCode::CONFLICT,
+            e.to_string(),
+            "directory_not_empty",
+            serde_json::json!({ "path": path }),
+        ),
+        chan_workspace::ChanError::ProtectedPath(path) => err_code(
+            StatusCode::CONFLICT,
+            e.to_string(),
+            "protected_path",
+            serde_json::json!({ "path": path }),
+        ),
         _ => err_from(e),
     }
-}
-
-fn structured_conflict(error: &'static str, path: &str) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({ "error": error, "path": path })),
-    )
-        .into_response()
 }
 
 /// Open a mutation ticket when the caller identified its window. An absent
