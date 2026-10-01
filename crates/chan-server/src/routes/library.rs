@@ -313,6 +313,8 @@ pub(crate) fn admitting_launcher_router(
             "/api/library/collapsed-machines",
             get(handle_get_collapsed_machines).put(handle_set_collapsed_machines),
         )
+        // Before the gate, so the bearer check answers a wrong method first.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .with_state(launcher_state.clone());
     // A workspace mints one short-lived, live-window-bound capability with its
     // own tenant token. Uses are authenticated by the opaque capability itself,
@@ -323,6 +325,9 @@ pub(crate) fn admitting_launcher_router(
             "/api/library/command-capabilities",
             post(handle_mint_library_command_capability),
         )
+        // Before the layers, so the 405 carries the capability headers and the
+        // bearer check answers a wrong method first.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .route_layer(middleware::from_fn(command_capability_response_headers))
         .with_state(command_state.clone());
     let command_mint = if let Some(surface_token) = bearer.clone() {
@@ -352,6 +357,8 @@ pub(crate) fn admitting_launcher_router(
             "/api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals",
             get(handle_library_command_live_terminals),
         )
+        // Before the layer, so the 405 carries the capability headers.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .route_layer(middleware::from_fn(command_capability_response_headers))
         .with_state(command_state);
     // Gateways: list on BOTH surfaces (a registry-less surface returns
@@ -386,7 +393,13 @@ pub(crate) fn admitting_launcher_router(
     // is open -- which carries a per-TENANT token, not the launcher token -- so
     // they get a relaxed SURFACE gate (launcher OR any valid tenant token): a
     // launcher-only gate would 401 every window's colour GET/PUT/watch.
-    let launcher_api = windows.merge(workspaces).merge(gateways).merge(devservers);
+    // The 405 goes on before the gate, so the bearer check answers a wrong
+    // method first. The tunnel legs took theirs inside their own gate.
+    let launcher_api = windows
+        .merge(workspaces)
+        .merge(gateways)
+        .merge(devservers)
+        .method_not_allowed_fallback(crate::error::method_not_allowed);
     let (launcher_api, config) = match bearer {
         Some(token) => {
             let launcher_token = token.clone();
@@ -1011,6 +1024,8 @@ fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
             chan_revtunnel::wire::CONN_PATH,
             get(super::tunnel::handle_tunnel_conn),
         )
+        // Before the gate, so the owner check answers a wrong method first.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .route_layer(middleware::from_fn(require_owner_desktop))
 }
 
