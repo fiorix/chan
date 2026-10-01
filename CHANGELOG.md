@@ -43,6 +43,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Closing a terminal restored across a Linux devserver restart cannot signal a reused process ID.** In v0.100.0, closing the terminal could signal another process after its shell exited and its PID was reused. A restore verifies the recorded child identity and close signals through its retained pidfd; later restart manifests keep that identity. A terminal whose recorded child cannot be verified is skipped, which releases its PTY and replay and removes a standalone terminal window. A fresh terminal whose shell exits can keep its attached session and replay, but is not carried across a restart; the skip follows that restart rule.
 
+- **Graph scope and filters keep the intended view.** Following a scope breadcrumb re-frames the graph after a pan or zoom instead of leaving its nodes off screen. Changing a filter or depth uses the incremental layout strength instead of restarting the full graph layout.
+
 - **Workspace refreshes keep the newest list.** In v0.100.0, a refresh after a workspace mutation could race a live refresh and replace a newer list with its older response. Both refresh paths now share an ordered request loop, and mutations wait for the queued snapshot.
 
 - **Pointer-opened command confirmations accept the first Enter.** In v0.100.0, the first Enter after clicking a command's confirmation was ignored until the key was released. Enter now answers the selected choice immediately, with Cancel selected by default. A confirmation opened by Enter still waits for the opening key's release.
