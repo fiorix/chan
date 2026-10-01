@@ -1,33 +1,39 @@
 // Block-level decoration handlers.
 //
-// Per design.md spec #4 (block prefixes use line-intersect): the
-// blockquote `>` and HR text both reveal/hide based on whether the
-// caret line touches them, not whether the selection intersects the
-// token range. Heading prefix uses the same rule (handled in
-// headings.ts).
+// A fenced block is the only one here that tests the selection, and it
+// tests by line: its fence markers and language text hide unless a
+// selection range's lines overlap the block's. Every other handler
+// decorates the same way wherever the selection is.
 //
-// What we cover here:
-//   - Blockquote: line decoration on every quoted line so CSS can
-//     paint a left border + indent. Quote markers stay visible (per
-//     Obsidian convention - the `>` IS the visual cue that the line
-//     is quoted; hiding it removes meaning).
+//   - Blockquote: a line decoration on every quoted line, which the
+//     stylesheet paints as a left border and padding. The `>` markers
+//     are never hidden: the marker is the cue that the line is quoted.
 //   - HorizontalRule: no handler, so the source text stays visible.
 //     Many notes use `---` as an authoring separator, and replacing
 //     it with a rendered rule makes the markdown harder to edit.
-//   - FencedCode: per-line decoration distinguishing opener row,
-//     content rows, closer row, plus a mark for the language info
-//     (CodeInfo). No hide - the fences stay visible (we want the
-//     user to see the block structure as they edit).
-//   - Task (GFM task-list item, bullet or ordered): TaskMarker `[ ]` /
-//     `[x]` is replaced by the CheckboxWidget from widgets/checkbox.ts.
-//     The replace is boundary-inclusive - clicking the box edits the
-//     source.
-//   - BulletList: `*` / `+` markers are replaced by depth glyphs; `-`
-//     markers stay literal but use the shared marker column. Nested
-//     list rows get an extra visual indent without changing source.
-//   - OrderedList: markers (`1.` / `2)` / etc.) stay literal but use
-//     the shared marker column; nested rows get the same visual indent
-//     as bullets.
+//   - FencedCode: a line decoration per row (opener, content, closer)
+//     and a badge widget at the end of the opener row with the
+//     language and a copy button. The fence markers and the language
+//     text beside the opener are hidden unless a selection range's
+//     lines overlap the block's; while they overlap, the language
+//     text carries a mark instead. An unclosed fence has no closing
+//     marker, so its block runs to the end of the parsed node, and a
+//     ghost closer widget sits at the end of its last line.
+//   - Task (GFM task-list item, bullet or ordered): the TaskMarker
+//     `[ ]` / `[x]` is replaced by the CheckboxWidget from
+//     widgets/checkbox.ts, whose mousedown toggles the source of a
+//     writable view, and the whitespace after it is hidden. A bullet
+//     item's indent, marker and gap are hidden too; an ordered item
+//     keeps its number, which the OrderedList handler renders.
+//   - BulletList: the marker of every item that is not a task is
+//     replaced by a widget, a depth glyph for `*` / `+` and the
+//     literal dash for `-`. The indent before the marker and the
+//     whitespace after it are hidden, and the line carries the item's
+//     nesting depth for the stylesheet's indent.
+//   - OrderedList: every marker (`1.` / `2)` / etc.) is replaced by a
+//     widget showing its literal text, with the same hidden whitespace
+//     and depth as a bullet.
+//   - Frontmatter: a line decoration on every line of the block.
 
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { TokenContext, TokenHandler } from "./walker";
