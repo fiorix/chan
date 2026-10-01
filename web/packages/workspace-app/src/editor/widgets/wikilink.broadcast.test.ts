@@ -63,6 +63,9 @@ test("links whose kinds resolve together repaint the editor once", async () => {
   const dispatch = vi.spyOn(view, "dispatch");
   for (const resolveKind of pending.values()) resolveKind();
   await settle(6);
+  // The repaint waits for an animation frame.
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  await settle();
 
   const repaints = (dispatch.mock.calls as unknown[][]).filter(([spec]) => isKindRepaint(spec)).length;
   expect(kinds(content)).toEqual(["file", "file", "file"]);

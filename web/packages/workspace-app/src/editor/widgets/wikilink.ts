@@ -193,9 +193,25 @@ function broadcastKindResolved(): void {
   }
 }
 
+/// Whether a repaint is waiting for the next animation frame.
+let repaintScheduled = false;
+
+/// Repaint every registered view at the next animation frame. Resolves that
+/// settle before that frame share it, so a note whose links resolve in a
+/// burst costs each view one transaction, not one per link. A hidden page
+/// runs no frames and repaints its kinds when it is shown.
+function scheduleKindRepaint(): void {
+  if (repaintScheduled) return;
+  repaintScheduled = true;
+  requestAnimationFrame(() => {
+    repaintScheduled = false;
+    broadcastKindResolved();
+  });
+}
+
 /// Look up a target's kind. Returns the cached kind synchronously, or
 /// undefined while an async resolve is in flight (the pill renders
-/// uncolored until the resolve lands and broadcasts a re-render).
+/// uncolored until the resolve lands and schedules a re-render).
 function getKind(target: string): LinkKind | undefined {
   const cached = kindCache.get(target);
   if (cached !== undefined) return cached;
@@ -224,7 +240,7 @@ function getKind(target: string): LinkKind | undefined {
     })
     .finally(() => {
       inflight.delete(target);
-      broadcastKindResolved();
+      scheduleKindRepaint();
     });
   return undefined;
 }
