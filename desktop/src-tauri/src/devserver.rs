@@ -4194,6 +4194,214 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// The conflict reader as the v0.100.0 desktop shipped it, compiled beside
+    /// the current one so both can be handed the same bodies. A desktop and
+    /// the devserver it dials can be of different releases, and this is the
+    /// reader an older desktop brings to a newer server. The module imports
+    /// nothing from this file, so the released reader calls only the helpers
+    /// released with it.
+    #[expect(
+        dead_code,
+        reason = "the released text is kept whole; no reader builds its `Other`"
+    )]
+    mod released {
+        include!("testdata/released-v0.100.0-conflict-reader.rs");
+
+        /// The released reader is private, as it shipped. This is the one
+        /// item of the module the release did not carry, and it only hands
+        /// that reader to the tests outside.
+        pub(super) async fn read(resp: reqwest::Response) -> SetWorkspaceOnError {
+            refusal_from_conflict(resp).await
+        }
+    }
+
+    /// The fixture line that ends its header. The released text is every byte
+    /// after it.
+    const RELEASED_TEXT_MARKER: &str = "// ---- released text begins below this line ----\n";
+
+    /// The released reader compiled above is the text the tag holds: the
+    /// fixture's bytes below its marker are lines 299 to 496 of this file at
+    /// v0.100.0, and this is their SHA-256. Only comments may stand above the
+    /// marker, so the bytes hashed are all the code the fixture compiles. The
+    /// test reads the fixture and nothing else, so a source tree with no git
+    /// history gives the same verdict.
+    #[test]
+    fn the_released_reader_is_the_tagged_text() {
+        use sha2::{Digest, Sha256};
+
+        let fixture = include_str!("testdata/released-v0.100.0-conflict-reader.rs");
+        let (header, released) = fixture
+            .split_once(RELEASED_TEXT_MARKER)
+            .expect("the fixture keeps its marker line");
+        assert!(
+            header.lines().all(|line| line.starts_with("//")),
+            "the fixture compiles code its digest does not cover:\n{header}"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(released)),
+            "e66f581f25bc8dcfcc2af136803388c600ce7b9868fcc8338aaad590c200665b",
+            "the released reader's text is not the tag's"
+        );
+    }
+
+    /// What a conflict reader made of a 409, in the one form the current error
+    /// type and the released one both map onto.
+    #[derive(Debug, PartialEq)]
+    enum ConflictRead {
+        ActiveTerminals(usize),
+        Refused(String),
+        Other(String),
+    }
+
+    impl From<SetWorkspaceOnError> for ConflictRead {
+        fn from(error: SetWorkspaceOnError) -> Self {
+            match error {
+                SetWorkspaceOnError::ActiveTerminals { active_terminals } => {
+                    Self::ActiveTerminals(active_terminals)
+                }
+                SetWorkspaceOnError::Refused { message } => Self::Refused(message),
+                SetWorkspaceOnError::Other { message } => Self::Other(message),
+            }
+        }
+    }
+
+    impl From<released::SetWorkspaceOnError> for ConflictRead {
+        fn from(error: released::SetWorkspaceOnError) -> Self {
+            match error {
+                released::SetWorkspaceOnError::ActiveTerminals { active_terminals } => {
+                    Self::ActiveTerminals(active_terminals)
+                }
+                released::SetWorkspaceOnError::Refused { message } => Self::Refused(message),
+                released::SetWorkspaceOnError::Other { message } => Self::Other(message),
+            }
+        }
+    }
+
+    /// The 409 bodies a devserver of this release or an earlier one can answer
+    /// a workspace's forget, on or off with, and what a conflict reader makes
+    /// of each: the count where there is a usable one, whatever else the body
+    /// says, and otherwise the reason.
+    fn conflict_bodies() -> Vec<(String, ConflictRead)> {
+        const SENTENCE: &str = "workspace has 3 live terminal session(s); close them or force";
+        const STATUS: &str = "devserver refused with HTTP 409 Conflict";
+        let count = |body: &str, active_terminals| {
+            (
+                body.to_owned(),
+                ConflictRead::ActiveTerminals(active_terminals),
+            )
+        };
+        let reason = |body: &str, message: &str| {
+            (body.to_owned(), ConflictRead::Refused(message.to_owned()))
+        };
+
+        let mut bodies = vec![
+            // This release's live-terminals refusal as chan-server builds it:
+            // the sentence, the code and the count.
+            count(
+                r#"{"error":"workspace has 3 live terminal session(s); close them or force","code":"live_terminals","active_terminals":3}"#,
+                3,
+            ),
+            // The sentence and the count with no code.
+            count(
+                r#"{"error":"workspace has 4 live terminal session(s); close them or force","active_terminals":4}"#,
+                4,
+            ),
+            // The count alone, which a devserver released before the
+            // discriminator existed answers.
+            count(r#"{"active_terminals":2}"#, 2),
+            // The body v0.100.0 answers: the token in `error`, and the count.
+            count(r#"{"error":"live_terminals","active_terminals":5}"#, 5),
+            // Zero is a count like any other.
+            count(
+                r#"{"error":"workspace has 0 live terminal session(s); close them or force","code":"live_terminals","active_terminals":0}"#,
+                0,
+            ),
+            // Without a count the sentence is the answer, code or no code.
+            reason(
+                &format!(r#"{{"error":"{SENTENCE}","code":"live_terminals"}}"#),
+                SENTENCE,
+            ),
+            reason(
+                r#"{"error":"workspace is open in another Chan process"}"#,
+                "workspace is open in another Chan process",
+            ),
+            // The token alone, a blank and nothing at all name no reason, so
+            // the status stands in.
+            reason(r#"{"error":"live_terminals"}"#, STATUS),
+            reason(r#"{"error":"   "}"#, STATUS),
+            reason(r#"{"error":""}"#, STATUS),
+            reason("   ", STATUS),
+            reason("", STATUS),
+            // A body that is not JSON is its own message.
+            reason(
+                "workspace is open in another Chan process",
+                "workspace is open in another Chan process",
+            ),
+        ];
+        // A count that is not a non-negative integer a `u64` holds is no
+        // count, so the body reads as one that carries none.
+        for unusable in [r#""3""#, "-1", "1.5", "null", "18446744073709551616"] {
+            bodies.push(reason(
+                &format!(
+                    r#"{{"error":"{SENTENCE}","code":"live_terminals","active_terminals":{unusable}}}"#
+                ),
+                SENTENCE,
+            ));
+        }
+        bodies
+    }
+
+    /// A 409 carrying `body`, as a conflict reader receives one from its
+    /// caller.
+    fn conflict(body: &str) -> reqwest::Response {
+        axum::http::Response::builder()
+            .status(axum::http::StatusCode::CONFLICT)
+            .body(body.to_owned())
+            .expect("a status and a text body make a response")
+            .into()
+    }
+
+    /// Hand every body to `reader` and name each one it read as anything but
+    /// the table's outcome. Every case reports, so one run names all of them.
+    async fn conflict_misreads<Error, Reading>(
+        reader: impl Fn(reqwest::Response) -> Reading,
+    ) -> Vec<String>
+    where
+        Reading: std::future::Future<Output = Error>,
+        ConflictRead: From<Error>,
+    {
+        let mut wrong = Vec::new();
+        for (body, want) in conflict_bodies() {
+            let got = ConflictRead::from(reader(conflict(&body)).await);
+            if got != want {
+                wrong.push(format!("{body:?} -> {got:?}, wanted {want:?}"));
+            }
+        }
+        wrong
+    }
+
+    #[tokio::test]
+    async fn the_current_reader_reads_each_conflict_body() {
+        let wrong = conflict_misreads(refusal_from_conflict).await;
+        assert!(
+            wrong.is_empty(),
+            "the current reader:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The same bodies through the reader v0.100.0 shipped, so what that
+    /// desktop makes of this release's refusals is what the table says.
+    #[tokio::test]
+    async fn the_released_reader_reads_each_conflict_body() {
+        let wrong = conflict_misreads(released::read).await;
+        assert!(
+            wrong.is_empty(),
+            "the v0.100.0 reader:\n{}",
+            wrong.join("\n")
+        );
+    }
+
     fn other_message(error: SetWorkspaceOnError) -> String {
         match error {
             SetWorkspaceOnError::Other { message } => message,
