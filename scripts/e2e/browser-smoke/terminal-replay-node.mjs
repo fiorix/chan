@@ -91,7 +91,9 @@ async function runCase(name) {
     let hello = await fixture.ready();
     const initialHello = hello;
     assert(hello.tty && hello.raw, "fixture needs a raw PTY");
-    proxy = await startTerminalCutProxy({ targetUrl: upstream.origin, path: "/api/terminal/ws", session, deadlineMs: 20_000 });
+    // A held replay can contain a separate frame for each of the 5,000 fixture rows.
+    proxy = await startTerminalCutProxy({ targetUrl: upstream.origin, path: "/api/terminal/ws", session,
+      deadlineMs: 20_000, maxQueueMessages: 16_384 });
     const controlToken = randomBytes(24).toString("hex");
     control = createServer(async (request, response) => {
       try {
