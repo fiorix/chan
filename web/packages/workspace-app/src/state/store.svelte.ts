@@ -35,7 +35,7 @@ import {
   type WatchSubscription,
   type WsStatus,
 } from "../api/client";
-import { isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
+import { apiErrorCode, isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -6067,9 +6067,11 @@ export const fileOps = {
   /// selected path is a target, deleted deepest first: a directory selected
   /// with all its contents empties and then goes, and one that still holds an
   /// unselected path is refused. A refused delete does not stop the rest: the
-  /// status line says how many went and names the first refusal, and the
-  /// selection keeps the paths that were refused, less any the server no
-  /// longer has. A delete of every path clears the selection.
+  /// status line says how many went and names the first refusal, by the
+  /// server's sentence alone when that sentence names the path (a directory
+  /// that is not empty, a protected path), and the selection keeps the paths
+  /// that were refused, less any the server no longer has. A delete of every
+  /// path clears the selection.
   async removeSelection(paths: readonly string[]): Promise<void> {
     const unique = [...new Set(paths)];
     const targets = windowCaps.workspace
@@ -6109,7 +6111,11 @@ export const fileOps = {
         deleted.push(path);
       } catch (e) {
         const gone = e instanceof ApiError && e.status === 404;
-        refused.push({ path, reason: (e as Error).message, gone });
+        // The sentence of either no-workspace conflict names the path itself.
+        const code = e instanceof ApiError && e.status === 409 ? apiErrorCode(e) : null;
+        const namesPath = code === "directory_not_empty" || code === "protected_path";
+        const sentence = (e as Error).message;
+        refused.push({ path, reason: namesPath ? sentence : `${path}: ${sentence}`, gone });
       }
     }
     // A path the server no longer has is not left selected: it is not in
@@ -6127,7 +6133,7 @@ export const fileOps = {
     const first = refused[0];
     if (!first && refreshError === null) return;
     const outcome = first
-      ? `deleted ${deleted.length} of ${targets.length}; ${first.path}: ${first.reason}`
+      ? `deleted ${deleted.length} of ${targets.length}; ${first.reason}`
       : `deleted ${deleted.length}`;
     ui.status = refreshError === null ? outcome : `${outcome}; refresh failed: ${refreshError}`;
   },
