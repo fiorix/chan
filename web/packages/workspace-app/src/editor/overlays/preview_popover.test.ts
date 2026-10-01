@@ -6,6 +6,7 @@
 // screen, and the keys go to that one.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { api } from "../../api/client";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/client")>();
@@ -101,5 +102,28 @@ describe("one preview popover at a time", () => {
 
     expect(opened).toEqual([{ open: opens, path: shown }]);
     expect(popovers().length).toBe(0);
+  });
+});
+
+test("a previewed note loads images relative to its own path", async () => {
+  vi.mocked(api.read).mockResolvedValueOnce({
+    path: "notes/a.md",
+    content: "![](img.png)\n\n![](https://example.com/x.png)",
+    mtime: null,
+  });
+  const anchor = document.createElement("span");
+  document.body.append(anchor);
+  handles.push(openPreviewPopover({
+    anchor,
+    path: "notes/a.md",
+    fromPath: "other/x.md",
+    onOpen: () => {},
+  }));
+
+  await vi.waitFor(() => {
+    const images = document.querySelectorAll<HTMLImageElement>(".md-preview-md img");
+    expect(images).toHaveLength(2);
+    expect(images[0].getAttribute("src")).toContain("/api/fs/notes/img.png");
+    expect(images[1].getAttribute("src")).toBe("https://example.com/x.png");
   });
 });
