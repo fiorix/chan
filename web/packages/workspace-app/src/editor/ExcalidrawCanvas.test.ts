@@ -449,6 +449,26 @@ describe("a board that has not taken its first seed", () => {
 });
 
 describe("scene session binding loop safety", () => {
+  test("a restored version matches an untouched board and a later edit still pushes", async () => {
+    const withoutVersion = { id: "x", type: "rectangle", versionNonce: 1, isDeleted: false } as WireElement;
+    const { api, session, binding } = await mountBound([withoutVersion]);
+    expect(api.getSceneElementsIncludingDeleted()[0]!.version).toBe(1);
+
+    binding.applySnapshot([wireEl("x", 1)], undefined, {});
+    expect(binding.hasPendingLocal()).toBe(false);
+    binding.flushPendingLocal();
+    expect(session.pushScene).not.toHaveBeenCalled();
+
+    api.setElements([wireEl("x", 2)]);
+    expect(binding.hasPendingLocal()).toBe(true);
+    binding.flushPendingLocal();
+    expect(session.pushScene).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: "x", version: 2 })],
+      undefined,
+      undefined,
+    );
+  });
+
   test("a remote apply never enters undo and never re-pushes", async () => {
     const { api, session, binding } = await mountBound([]);
     binding.applyUpdate({ elements: [wireEl("x", 5)] });

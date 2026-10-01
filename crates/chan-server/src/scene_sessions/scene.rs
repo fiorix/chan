@@ -1134,6 +1134,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_restores_missing_and_zero_element_versions() {
+        let scene = Scene::parse(
+            r#"{"elements":[
+                {"id":"missing","type":"rectangle"},
+                {"id":"zero","type":"rectangle","version":0}
+            ]}"#,
+        )
+        .unwrap();
+
+        for id in ["missing", "zero"] {
+            assert_eq!(versions(&scene, id).0, 1, "{id} is restored at version 1");
+            assert_eq!(scene.element(id).unwrap().value["version"], 1);
+        }
+    }
+
+    #[test]
     fn parse_keeps_the_first_of_duplicate_ids() {
         let s = Scene::parse(
             r#"{"elements":[

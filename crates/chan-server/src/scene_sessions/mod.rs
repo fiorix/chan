@@ -2284,6 +2284,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attach_snapshot_restores_missing_and_zero_element_versions() {
+        let disk = body(json!([
+            { "id": "missing", "type": "rectangle" },
+            { "id": "zero", "type": "rectangle", "version": 0 }
+        ]));
+        let fx = fixture(&[("b.excalidraw", &disk)]);
+        let (_handle, mut rx) = attach(&fx, "b.excalidraw", "win-1").await;
+        let snapshot = drain(&mut rx).remove(0);
+        let elements = snapshot["elements"].as_array().unwrap();
+
+        for id in ["missing", "zero"] {
+            let element = elements
+                .iter()
+                .find(|element| element["id"].as_str() == Some(id))
+                .unwrap();
+            assert_eq!(element["version"], 1, "{id} is sent at version 1");
+        }
+        assert_eq!(snapshot["dirty"], false);
+    }
+
+    #[tokio::test]
     async fn merged_outcome_preserves_durable_baseline_through_observation() {
         let seed = body(json!([elem("x", 1, 1, "a1")]));
         let fx = fixture(&[("b.excalidraw", &seed)]);
