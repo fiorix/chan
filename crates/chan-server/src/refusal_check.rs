@@ -771,32 +771,44 @@ mod tests {
         );
     }
 
+    /// The host dispatch is a fallback, so its lock failure reaches the check
+    /// on an unmatched path: the envelope passes there and the sentence as
+    /// plain text does not, as on a matched handler.
     #[tokio::test]
-    async fn host_lock_exception_requires_dispatch_fallback() {
+    async fn host_lock_refusal_requires_the_envelope() {
         use axum::response::IntoResponse;
-        let response = || {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "config: workspace host lock poisoned",
+        const SENTENCE: &str = "config: workspace host lock poisoned";
+        fn text() -> Response {
+            (StatusCode::INTERNAL_SERVER_ERROR, SENTENCE).into_response()
+        }
+        fn envelope() -> Response {
+            crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, SENTENCE.into())
+        }
+        let through_fallback = |response: fn() -> Response| {
+            let app = check(Router::new().fallback(move || async move { response() }));
+            tokio::spawn(
+                app.oneshot(
+                    Request::get("/tenant/api/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
             )
-                .into_response()
         };
-        let app = check(Router::new().fallback(move || async move { response() }));
-        let result = app
-            .oneshot(
-                Request::get("/tenant/api/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        assert!(
+            through_fallback(text).await.is_err(),
+            "host-lock text from the dispatch fallback must require the envelope"
+        );
+        let result = through_fallback(envelope)
             .await
+            .expect("the envelope passes the check on an unmatched path")
             .unwrap();
         assert_eq!(result.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             to_bytes(result.into_body(), usize::MAX).await.unwrap(),
-            "config: workspace host lock poisoned"
+            r#"{"error":"config: workspace host lock poisoned"}"#
         );
         assert!(
-            !accepts_response("GET", "/api/probe", response()).await,
+            !accepts_response("GET", "/api/probe", text()).await,
             "host-lock text on a matched handler must require the envelope"
         );
     }
