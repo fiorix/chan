@@ -141,7 +141,6 @@ import {
 import { basename, parentDir } from "./format";
 import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
-import { defaultScopeId } from "./scope.svelte";
 import {
   allTerminalTabs,
   applyFsWritable,
@@ -3822,17 +3821,6 @@ function openGraphAtDestination(
   } else {
     openGraphInActivePane(opts);
   }
-}
-
-/** Open the graph overlay, snapping the scope to the active file
- *  when applicable. Idempotent. */
-export function openGraph(): void {
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: defaultScopeId(),
-    pendingSelectId: null,
-  });
-  scheduleSessionSave();
 }
 
 /** Spawn a graph tab rooted at the focused surface's context.

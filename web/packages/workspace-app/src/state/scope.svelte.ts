@@ -1,4 +1,4 @@
-// Scope helpers for the Graph overlay. `ScopeOption` is the
+// The scope type for the Graph overlay. `ScopeOption` is the
 // discriminated union the graph uses to describe "what part of my
 // world am I looking at": a file, directory, git repo, group of
 // visible files, tag, contact, language, the whole workspace, or
@@ -7,21 +7,10 @@
 // Each graph tab stores the chosen scope as a `scopeId` string
 // (`file:<path>`, `dir:<path>`, `tag:<id>`, `language:<lang>`, ...);
 // GraphPanel's `synthesizeScope` turns that id back into a typed
-// ScopeOption and `graphTitle` renders it. `defaultScopeId` picks the
-// id matching what is in front of the user; `scopeKey` and
-// `visibleFilePaths` are small path helpers used by the graph open
-// paths.
+// ScopeOption and `graphTitle` renders it.
 //
 // The Search overlay has no scope picker (search is workspace-wide),
 // so this module carries no dropdown-options builder.
-
-import { layout } from "./tabs.svelte";
-// The `dir` scope reads the file browser's current selection and looks
-// the entry up in the tree to distinguish directory from file.
-// store.svelte imports from this module too, so the cycle is real;
-// both reads happen lazily inside functions (not at module init),
-// which Vite resolves cleanly.
-import { browserSelection, tree } from "./store.svelte";
 
 /// Picker option, as a discriminated union so consumers can
 /// pattern-match on `kind` and access the kind-specific fields
@@ -116,59 +105,3 @@ export type ScopeOption =
     }
   | { id: "workspace"; kind: "workspace"; label: string; enabled?: boolean }
   | { id: "global"; kind: "global"; label: string; enabled?: boolean };
-
-/// Stable group key from a list of paths: sorted + joined with `|`
-/// so two groups with the same set produce the same key. Used to
-/// detect "the same group as before" across layout shuffles.
-export function scopeKey(paths: readonly string[]): string {
-  return [...paths].sort().join("|");
-}
-
-/// Paths for every file tab currently active in any leaf pane.
-/// Returns each path at most once, sorted alphabetically. Workspaces
-/// every overlay's "context dropdown" + the cleanup pass that
-/// prunes group state whose context no longer exists.
-export function visibleFilePaths(): string[] {
-  const out = new Set<string>();
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    const active = node.tabs.find((t) => t.id === node.activeTabId);
-    if (active?.kind === "file" && active.path) out.add(active.path);
-  }
-  return [...out].sort();
-}
-
-/// Pick a default scope id matching what's "in front of" the user
-/// right now: the active pane's active file when it's a file tab,
-/// the selected file or directory when the active tab is a browser,
-/// else "workspace" (always present). Shared between every overlay's
-/// open-from-toolbar entry point and global keybinding so both
-/// snap to the same pick.
-export function defaultScopeId(): string {
-  // Active pane is a file browser: its current selection wins (the
-  // user is looking at the tree, so route the next overlay action at
-  // the selected dir/file).
-  const activeNode = layout.nodes[layout.activePaneId];
-  const activeTab =
-    activeNode && activeNode.kind === "leaf"
-      ? activeNode.tabs.find((tab) => tab.id === activeNode.activeTabId)
-      : undefined;
-  if (activeTab?.kind === "browser") {
-    const sel = browserSelection.path;
-    if (sel) {
-      const entry = tree.entries.find((e) => e.path === sel);
-      if (entry?.is_dir) return `dir:${sel}`;
-      if (entry && !entry.is_dir) return `file:${sel}`;
-    }
-  }
-  // Two or more leaf panes with distinct active files: the group
-  // scope is the natural "everything in front of me" pick. Without
-  // this, opening an overlay from a multi-pane layout would default
-  // to whichever pane happened to be focused last, hiding the other
-  // panes' files from the result set.
-  const visible = visibleFilePaths();
-  if (visible.length >= 2) return `group:${scopeKey(visible)}`;
-  // Otherwise: the active pane's active file.
-  if (activeTab?.kind === "file" && activeTab.path) return `file:${activeTab.path}`;
-  return "workspace";
-}
