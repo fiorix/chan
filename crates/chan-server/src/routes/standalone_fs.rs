@@ -1717,7 +1717,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "directory_not_empty", "path": "full"})
+            json!({"error": "directory is not empty: full", "code": "directory_not_empty", "path": "full"})
         );
         assert!(fx.root.join("full/inner.txt").exists(), "nothing mutated");
 
@@ -1725,7 +1725,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "protected_path", "path": "home/user"})
+            json!({"error": "path is protected: home/user", "code": "protected_path", "path": "home/user"})
         );
     }
 
@@ -2084,7 +2084,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "protected_path", "path": "home/user"})
+            json!({"error": "path is protected: home/user", "code": "protected_path", "path": "home/user"})
         );
     }
 
