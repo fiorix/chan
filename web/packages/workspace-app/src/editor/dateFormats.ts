@@ -100,6 +100,8 @@ const ISO: DateFormatDef = {
   },
 };
 
+const MEDIUM_PARSE_RE = new RegExp(`^(\\d{2}) (${MONTH_SHORT_RE}) (\\d{4})$`);
+
 const MEDIUM: DateFormatDef = {
   id: "medium",
   label: "02 Jan 2029",
@@ -107,8 +109,7 @@ const MEDIUM: DateFormatDef = {
   format: (d) => `${pad2(d.getDate())} ${MONTH_SHORT[d.getMonth()]} ${d.getFullYear()}`,
   pattern: `\\d{2} (?:${MONTH_SHORT_RE}) \\d{4}`,
   parse: (s) => {
-    const re = new RegExp(`^(\\d{2}) (${MONTH_SHORT_RE}) (\\d{4})$`);
-    const m = re.exec(s);
+    const m = MEDIUM_PARSE_RE.exec(s);
     if (!m) return null;
     const [, da, mo, y] = m;
     const moIdx = MONTH_SHORT.indexOf(mo);
@@ -117,6 +118,8 @@ const MEDIUM: DateFormatDef = {
     return ymdValid(d, Number(y), moIdx, Number(da)) ? d : null;
   },
 };
+
+const BRITISH_LONG_PARSE_RE = new RegExp(`^(\\d{1,2}) (${MONTH_LONG_RE}) (\\d{4})$`);
 
 /// "13 April 2024" - British long form. Day first, full month name,
 /// no comma. `\d{1,2}` to accept both "2 April 2024" and "02 April
@@ -128,8 +131,7 @@ const BRITISH_LONG: DateFormatDef = {
   format: (d) => `${d.getDate()} ${MONTH_LONG[d.getMonth()]} ${d.getFullYear()}`,
   pattern: `\\d{1,2} (?:${MONTH_LONG_RE}) \\d{4}`,
   parse: (s) => {
-    const re = new RegExp(`^(\\d{1,2}) (${MONTH_LONG_RE}) (\\d{4})$`);
-    const m = re.exec(s);
+    const m = BRITISH_LONG_PARSE_RE.exec(s);
     if (!m) return null;
     const [, da, mo, y] = m;
     const moIdx = MONTH_LONG.indexOf(mo);
@@ -138,6 +140,8 @@ const BRITISH_LONG: DateFormatDef = {
     return ymdValid(d, Number(y), moIdx, Number(da)) ? d : null;
   },
 };
+
+const BRITISH_ORD_PARSE_RE = new RegExp(`^(\\d{1,2})(?:st|nd|rd|th) (${MONTH_LONG_RE}) (\\d{4})$`);
 
 /// "13th April 2024" - British with ordinal day. The ordinal suffix
 /// keeps this distinct from `british-long` so the two coexist; the
@@ -149,8 +153,7 @@ const BRITISH_ORD: DateFormatDef = {
   format: (d) => `${ordinal(d.getDate())} ${MONTH_LONG[d.getMonth()]} ${d.getFullYear()}`,
   pattern: `\\d{1,2}(?:st|nd|rd|th) (?:${MONTH_LONG_RE}) \\d{4}`,
   parse: (s) => {
-    const re = new RegExp(`^(\\d{1,2})(?:st|nd|rd|th) (${MONTH_LONG_RE}) (\\d{4})$`);
-    const m = re.exec(s);
+    const m = BRITISH_ORD_PARSE_RE.exec(s);
     if (!m) return null;
     const [, da, mo, y] = m;
     const moIdx = MONTH_LONG.indexOf(mo);
@@ -159,6 +162,8 @@ const BRITISH_ORD: DateFormatDef = {
     return ymdValid(d, Number(y), moIdx, Number(da)) ? d : null;
   },
 };
+
+const AMERICAN_LONG_PARSE_RE = new RegExp(`^(${MONTH_LONG_RE}) (\\d{1,2}), (\\d{4})$`);
 
 /// "April 13, 2024" - American long form. Month first, comma after
 /// the day. `\d{1,2}` to accept "April 5, 2024" as well as the
@@ -170,8 +175,7 @@ const AMERICAN_LONG: DateFormatDef = {
   format: (d) => `${MONTH_LONG[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`,
   pattern: `(?:${MONTH_LONG_RE}) \\d{1,2}, \\d{4}`,
   parse: (s) => {
-    const re = new RegExp(`^(${MONTH_LONG_RE}) (\\d{1,2}), (\\d{4})$`);
-    const m = re.exec(s);
+    const m = AMERICAN_LONG_PARSE_RE.exec(s);
     if (!m) return null;
     const [, mo, da, y] = m;
     const moIdx = MONTH_LONG.indexOf(mo);
@@ -286,6 +290,13 @@ export type DateMatch = {
 /// identifiers, slash keeps "/path/04/05/2024.txt" from pilling.
 const SENTINEL_BAD = "A-Za-z0-9./\\-";
 
+/// One scan pattern per catalog format, in catalog order, built once. Each
+/// is global, and a global RegExp keeps its position between calls, so a
+/// scan resets `lastIndex` before it starts.
+const SCAN_PATTERNS: readonly RegExp[] = DATE_FORMATS.map(
+  (fmt) => new RegExp(`(?:^|[^${SENTINEL_BAD}])(${fmt.pattern})(?=$|[^${SENTINEL_BAD}])`, "g"),
+);
+
 /// Find every date occurrence in `text` across every catalog format.
 /// Matches are returned in document order. Overlap resolution uses
 /// a longest-match-wins rule plus an optional `preferredId` so the
@@ -312,10 +323,8 @@ export function findDateMatches(
   const cands: Candidate[] = [];
   for (let i = 0; i < DATE_FORMATS.length; i++) {
     const fmt = DATE_FORMATS[i]!;
-    const re = new RegExp(
-      `(?:^|[^${SENTINEL_BAD}])(${fmt.pattern})(?=$|[^${SENTINEL_BAD}])`,
-      "g",
-    );
+    const re = SCAN_PATTERNS[i]!;
+    re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
       const matched = m[1]!;
