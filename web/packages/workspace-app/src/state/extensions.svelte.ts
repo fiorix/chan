@@ -241,6 +241,12 @@ export function isValidExtensionInfo(value: unknown): value is ExtensionInfo {
     return false;
   }
   if (
+    candidate.running !== undefined &&
+    typeof candidate.running !== "boolean"
+  ) {
+    return false;
+  }
+  if (
     candidate.capabilities !== undefined &&
     (!Array.isArray(candidate.capabilities) ||
       candidate.capabilities.some(
