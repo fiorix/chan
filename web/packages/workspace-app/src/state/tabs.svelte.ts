@@ -1,15 +1,8 @@
 // Tab + pane state.
 //
-// v1 layout: a binary split tree of panes. Each pane holds an ordered list
+// The layout is a binary split tree of panes. Each pane holds an ordered list
 // of tabs and an active tab id. Splits can be horizontal or vertical and
-// nested arbitrarily, but the UI exposes a small set of operations:
-//   - openInActivePane(path)
-//   - splitRight() / splitDown()
-//   - moveTabTo(otherPaneId)
-//   - closeTab()
-//
-// Drag-rearrange of tabs is deferred; for v1 the menu offers explicit
-// actions instead.
+// nested arbitrarily.
 
 import { flushSync } from "svelte";
 import { api, sessionWindowId } from "../api/client";
@@ -1805,7 +1798,7 @@ export type TerminalMovePayload = {
 /// pane. Distinct from `openTerminalInPane({ sessionId })`: this preserves the
 /// moved terminal's NAME verbatim (NO renumber - it's the same terminal, just
 /// in a new window). The source tab is removed WITHOUT killing
-/// the PTY (see `closeTab`'s `keepSession`), so the net effect is the terminal
+/// the PTY, so the net effect is the terminal
 /// leaving the source and appearing here with the same shell + history and no
 /// duplicate. The PTY lives in the shared registry, so the attach succeeds.
 ///
@@ -3144,7 +3137,7 @@ async function loadTabContent(
       t.error = null;
       t.fileMissing = null;
       // Older servers omit `writable`; treat absent as writable so
-      // the lamp behaves the way it did before this field existed.
+      // the lamp does not show a writable file as locked.
       t.fsWritable = r.writable ?? true;
       // The buffer now matches disk; clear any pending external-change
       // banner (this load IS the reload the user opted into, or a
@@ -5075,8 +5068,7 @@ export function openIndexingDashboard(): void {
 /// Materialization is async (needs `api.createDraft()` to mint the
 /// file), so the intent queues to commit-time. Multiple presses queue
 /// multiple staged drafts, each targeting the pane focused at press
-/// time. `paneModeMaterializeStagedDrafts()` is the commit-time
-/// resolver.
+/// time.
 export function paneModeStageDraftEditor(kind: PaneModeDraftEditorKind = "draft"): void {
   if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
   const paneId = paneMode.draft.activePaneId;
@@ -7914,7 +7906,7 @@ export function layoutHasReattachableTerminal(layout: SerNode | null): boolean {
 /// recreates the panes and spawns FRESH shells for the terminals -- the PTYs are
 /// gone after a restart or a workspace off->on, and the layout is what we keep.
 /// Gates the on-disk session save (store.svelte.ts) so a terminal-only or
-/// empty-split window no longer restores blank. A single empty pane stays
+/// empty-split window does not restore blank. A single empty pane stays
 /// unpersisted (it is just the default window).
 export function layoutHasPersistableStructure(layout: SerNode | null): boolean {
   if (!layout) return false;
