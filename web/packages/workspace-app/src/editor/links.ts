@@ -6,7 +6,7 @@
 /// produced (workspace-rooted POSIX, no leading slash). When provided,
 /// the URL portion is rewritten to a file-relative path with an
 /// explicit `./` or `../` prefix so the discriminator at parse
-/// time can tell relative URLs from legacy workspace-rooted ones.
+/// time can tell relative URLs from workspace-rooted ones.
 /// When omitted (no source file), the URL stays workspace-rooted.
 ///
 /// `wasAbs` overrides the relativization: if true, the URL is
@@ -24,8 +24,7 @@ export function wikiLinkToMarkdown(
   // (`/path`) regardless of `fromPath`. Otherwise, with `fromPath`
   // set, the URL is rewritten to a file-relative path so notes
   // stay portable across project layouts. Without `fromPath`, fall
-  // back to the legacy workspace-rooted form (no slash) so no-source-file
-  // callers keep their existing semantics.
+  // back to the workspace-rooted form (no slash).
   const path = wasAbs
     ? `/${target}`
     : fromPath
@@ -74,7 +73,7 @@ export function decodePercent(s: string): string {
 /// Compute a file-relative path from `fromPath`'s directory to
 /// `target`, both workspace-rooted POSIX paths. Always emits a
 /// `./` or `../` prefix so the parser can distinguish a relative
-/// URL from a legacy workspace-rooted one.
+/// URL from a workspace-rooted one.
 ///
 /// Examples (fromPath -> target -> result):
 ///   `Recipes/Pasta.md`    -> `Recipes/Brazilian Rice.md` -> `./Brazilian Rice.md`

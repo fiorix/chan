@@ -2,8 +2,8 @@
   // Tabular renderer for CSV / TSV files. Mounted when an
   // `isCsv(path)` tab is in `mode === "table"`. Source mode is
   // the escape hatch for files the parser misreads or for bulk
-  // edits the table UI doesn't support yet (column ops, sort,
-  // filter -- all out of scope for #29 v1).
+  // edits the table UI doesn't support (column ops, sort,
+  // filter).
   //
   // Round-trip model: the tab's content buffer stays
   // authoritative. We parse on mount + when an external write

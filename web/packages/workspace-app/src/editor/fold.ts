@@ -12,10 +12,10 @@
 // Why a custom gutter instead of `foldGutter()`: @codemirror/lang-markdown adds
 // `foldNodeProp` to many block types (paragraphs, blockquotes, tables, fenced
 // code, ...). The default foldGutter renders a chevron for ANY line where
-// `foldable(state, ...)` returns non-null, so every paragraph got its own
-// chevron. Filtering to "headings only" via foldGutter config isn't possible
-// (no per-line callback), so we render the gutter ourselves and fold / unfold
-// via the existing foldEffect / unfoldEffect.
+// `foldable(state, ...)` returns non-null, so every paragraph would get its
+// own chevron. Filtering to "headings only" via foldGutter config isn't
+// possible (no per-line callback), so this module renders the gutter itself
+// and folds / unfolds via foldEffect / unfoldEffect.
 
 import {
   codeFolding,
@@ -216,7 +216,6 @@ const headingFoldGutter = gutter({
 export function headingFold(): Extension {
   // `codeFolding()` registers the fold state field that foldEffect /
   // unfoldEffect mutate. Without it the chevron click dispatches an effect that
-  // nothing listens to and the fold silently no-ops - gutter clicks logged the
-  // right blockInfo and dispatched, but foldedRanges stayed empty.
+  // nothing listens to and the fold silently no-ops.
   return [codeFolding(), headingFoldGutter];
 }

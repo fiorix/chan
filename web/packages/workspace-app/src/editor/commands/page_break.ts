@@ -37,8 +37,7 @@ function consumeLineBreak(state: EditorViewType["state"], to: number): number {
 /// Newlines to append after the marker so exactly one blank line
 /// separates it from the following content. A fixed "\n\n" on top of a
 /// line break or blank line the document already provides leaves a
-/// 2-blank run after the marker, which slide rendering used to show as
-/// a spacer band above the next slide's heading.
+/// 2-blank run after the marker.
 function separatorAfter(state: EditorViewType["state"], to: number): string {
   const doc = state.doc;
   if (to >= doc.length) return "\n\n";

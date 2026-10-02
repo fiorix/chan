@@ -88,7 +88,7 @@ export type DocPageWindow = { startPx: number; endPx: number };
 /// Choose page windows over measured blocks. Cuts land at block
 /// boundaries; a cut that would orphan headings at a page bottom shifts
 /// up past them; a single block taller than a page is hard-cut at page
-/// height (documented v1 limit); page-break blocks force a cut.
+/// height (a known limit); page-break blocks force a cut.
 export function paginateDocBlocks(
   blocks: readonly DocBlockRect[],
   pageHeightPx: number,

@@ -8,7 +8,7 @@
 //   FrontmatterMark    the opening `---` and closing `---` lines
 //
 // Style: muted (`tags.meta`) so theme rules can dim it. The body is left
-// unstyled - v1 doesn't ship YAML highlighting.
+// unstyled: there is no YAML highlighting.
 //
 // Constraints:
 //   - Block must start at document position 0 (no leading blank lines).

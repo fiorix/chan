@@ -5,9 +5,7 @@
 // block toggles add/remove line prefixes; isActive walks the syntax
 // tree.
 //
-// Naming follows the legacy editor's contract so StyleToolbar.svelte
-// works at cutover with no edits beyond importing from the new
-// component.
+// Naming follows the style-toolbar contract Wysiwyg.svelte exports.
 
 import { syntaxTree } from "@codemirror/language";
 import { enclosingFence } from "./fence";

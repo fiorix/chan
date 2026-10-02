@@ -1,10 +1,9 @@
 // Shared CodeMirror 6 plumbing for both editors (Source + WYSIWYG).
 //
-// Lifted out of the legacy editor/Source.svelte so the WYSIWYG rewrite
-// reuses the same theme handling, find-on-page state, density attribute,
-// and external-sync guard. See web/packages/workspace-app/src/editor/design.md for the
-// invariants this module helps enforce (in particular #1: the doc IS the
-// markdown source, and #8: find shape is identical across modes).
+// Source.svelte and Wysiwyg.svelte share the theme handling, the
+// find-on-page state and the external-sync guard defined here. See
+// design.md beside this file for the invariants this module helps
+// enforce (in particular #1: the doc IS the markdown source).
 
 import {
   Compartment,
@@ -95,8 +94,7 @@ export function makeThemeCompartment(initial: ChanTheme): {
 }
 
 // ---- find-on-page state field ---------------------------------------------
-// Mirror of the legacy WYSIWYG findHighlight plugin and the Source.svelte
-// state field. The FindBar dispatches setFindEffect with the latest ranges
+// The FindBar dispatches setFindEffect with the latest ranges
 // + the active index; the StateField turns those into a Decoration.mark set
 // so CodeMirror paints `.find-match` / `.find-match--current`.
 

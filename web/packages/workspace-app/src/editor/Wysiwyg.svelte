@@ -366,15 +366,12 @@
     };
   }
 
-  /// Find-on-page adapter (same shape as Source.svelte and the legacy
-  /// WYSIWYG; FileEditorTab passes whichever editor is mounted to
-  /// FindBar).
+  /// Find-on-page adapter (same shape as Source.svelte's; FileEditorTab
+  /// passes whichever editor is mounted to FindBar).
   export const findAdapter: FindAdapter = makeFindAdapter(() => view);
 
   /// Style-toolbar contract. Each method routes to the corresponding
-  /// editor-cm6/commands/format function with the live view ref.
-  /// Mirrors the legacy editor's exported imperative API so
-  /// StyleToolbar.svelte works at cutover with no edits.
+  /// commands/format function with the live view ref.
   export function toggleBold(): void { if (view) fmt.toggleBold(view); }
   export function toggleItalic(): void { if (view) fmt.toggleItalic(view); }
   export function toggleStrike(): void { if (view) fmt.toggleStrike(view); }
@@ -921,9 +918,8 @@
 <div class="md-wysiwyg-cm6" data-density={density} data-file-drop-zone bind:this={host}></div>
 
 <style>
-  /* Step 4 styles. Each rule is scoped to .md-wysiwyg-cm6 so we don't
-     bleed into Source mode or the legacy WYSIWYG. CSS variables come
-     from the app theme (theme.css). */
+  /* Each rule is scoped to .md-wysiwyg-cm6 so it does not bleed into
+     Source mode. CSS variables come from the app theme. */
 
   .md-wysiwyg-cm6 {
     flex: 1;
@@ -962,12 +958,9 @@
        first line clears its floating toolbar (2.5rem) or keeps the
        baseline spacing when the toolbar is off (0.5rem). */
     padding-top: var(--editor-top-pad, 0.5rem) !important;
-    /* Always keep 60px below the last line. Combined with the 60px
-       bottom scrollMargin in breathing_room.ts, this is what gives
-       the Google Docs effect: the caret never sits flush with the
-       bottom edge - when it would, CM scrolls so it stays 60px
-       above, and this padding gives the scroll room to happen even
-       at the doc's last line. */
+    /* Always keep 60px below the last line, so the viewport has room
+       to scroll past the doc's last line and the caret is not held
+       flush with the bottom edge there (breathing_room.ts). */
     padding-bottom: 60px !important;
     transition: padding-top 180ms ease;
   }
@@ -976,10 +969,10 @@
      CM6 makes itself while you scroll a tall, mostly-estimated document.
      During a trackpad pan those animated corrections fight the pan - a
      "scroll hangs, jumps the opposite way, then settles" stall.
-     The Google-Docs page-lift effect comes from the 60px
-     bottom padding + scrollMargin (breathing_room.ts), not from smooth,
-     so leaving the scroller at its default (instant) scroll-behavior
-     keeps the lift and removes the stall. */
+     The room below the last line comes from the 60px bottom padding
+     (breathing_room.ts), not from smooth, so leaving the scroller at
+     its default (instant) scroll-behavior keeps it and removes the
+     stall. */
   :global(.md-wysiwyg-cm6 .cm-editor),
   :global(.md-wysiwyg-cm6 .cm-editor .cm-scroller),
   :global(.md-wysiwyg-cm6 .cm-editor .cm-content),
@@ -1789,8 +1782,8 @@
     bottom: 0;
     width: 0;
     height: 0;
-    /* Lower-right triangle "tick" - drag handle that mirrors the
-       legacy editor's resize affordance. Built with CSS borders so
+    /* Lower-right triangle "tick": the resize drag handle. Built
+       with CSS borders so
        the shape scales cleanly without a glyph. The colored bottom
        border + transparent right form the hypotenuse running
        top-left → bottom-right. */
