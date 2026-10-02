@@ -36,6 +36,20 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 
+use crate::control::{
+    control_socket_for_pid, control_socket_for_workspace, control_socket_for_workspace_in_dirs,
+};
+use crate::parentage::{chan_control_socket, detect_parentage, in_devserver_context, Parentage};
+use crate::registry::{
+    cmd_add, cmd_list, ensure_workspace_registered, library, missing_workspace_path,
+    not_a_chan_workspace_hint, same_path,
+};
+
+mod control;
+mod parentage;
+mod registry;
+#[cfg(test)]
+mod test_support;
 mod update;
 
 /// The build script's own rules. `build.rs` pulls this file in with
@@ -1866,91 +1880,6 @@ fn fallback_filter(level: &str) -> tracing_subscriber::EnvFilter {
     )
 }
 
-fn library() -> Result<Library> {
-    Library::open().context("opening chan registry")
-}
-
-fn same_path(a: &Path, b: &Path) -> bool {
-    let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
-    let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
-    ca == cb
-}
-
-fn ensure_workspace_registered(
-    lib: &Library,
-    root: &Path,
-) -> Result<chan_workspace::KnownWorkspace> {
-    lib.register_workspace(root)
-        .with_context(|| format!("registering {}", root.display()))
-}
-
-fn cmd_add(path: PathBuf, semantic_search: bool, reports: bool) -> Result<()> {
-    // Mirror `chan serve`'s behavior: create the directory if it
-    // doesn't exist yet. Single verb covers both "register an
-    // existing dir" and "make a fresh workspace here". A separate
-    // `chan init` would be a synonym; not worth the mental
-    // overhead.
-    if !path.exists() {
-        std::fs::create_dir_all(&path)
-            .with_context(|| format!("creating workspace root {}", path.display()))?;
-    }
-    let lib = library()?;
-    let entry = ensure_workspace_registered(&lib, &path)?;
-    // Opt-in feature flags. Persist before
-    // boot-time activation so a `chan workspace add --reports` lands the
-    // flag immediately + the kickoff scan runs once.
-    if semantic_search || reports {
-        let workspace = lib
-            .open_workspace(&entry.root_path)
-            .with_context(|| format!("opening workspace at {}", entry.root_path.display()))?;
-        if semantic_search {
-            workspace
-                .set_semantic_enabled(true)
-                .context("persisting semantic_enabled flag")?;
-        }
-        if reports {
-            workspace
-                .set_reports_enabled(true)
-                .context("persisting reports_enabled flag")?;
-        }
-        workspace
-            .boot()
-            .context("BOOT after enabling optional features")?;
-    }
-    println!("registered: {}", entry.root_path.display());
-    if semantic_search {
-        println!("semantic search enabled");
-    }
-    if reports {
-        println!("chan-reports enabled");
-    }
-    Ok(())
-}
-
-fn cmd_list(json: bool) -> Result<()> {
-    let workspaces = library()?.list_workspaces();
-    if json {
-        let out = WorkspaceListOutput {
-            workspaces: workspaces.iter().map(WorkspaceListEntry::from).collect(),
-        };
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
-    }
-    if workspaces.is_empty() {
-        println!("(no workspaces registered)");
-        return Ok(());
-    }
-    for d in workspaces {
-        println!(
-            "{}  (last seen {}, metadata {})",
-            d.root_path.display(),
-            d.last_seen_at.format("%Y-%m-%d %H:%M"),
-            d.metadata_key,
-        );
-    }
-    Ok(())
-}
-
 /// Print the offline agent manual for either CLI personality. The desktop
 /// supplies this same renderer to chan-shell so both entrypoints agree.
 pub fn dump_skill(args: chan_shell::DumpSkillArgs) -> Result<()> {
@@ -2567,225 +2496,6 @@ async fn unserve_running(
     Ok(UnserveOutcome::Unserved)
 }
 
-/// Find a control socket for `pid`. A window-spawned server's sockets carry
-/// the pid in their name (`chan-control-<pid>-<rand>`) and match by name
-/// alone; a devserver's are stable-named (`chan-control-s<hash>`, no pid,
-/// so `$CHAN_CONTROL_SOCKET` survives its restarts) and are matched
-/// by asking each candidate who it is (a bounded `Identify` round-trip whose
-/// reply carries the serving pid). A dedicated `chan serve` serve has exactly
-/// one socket; a multi-tenant devserver has one per tenant under the same
-/// pid. Either way every socket routes the `Close { path }` verb to the
-/// server, which acts by path -- so the first match is sufficient and we
-/// must NOT broadcast (once the first tenant unmounts, the rest 404). On
-/// Unix control sockets live in a validated `$XDG_RUNTIME_DIR` or the private
-/// `/tmp/chan-control-<uid>` fallback; on Windows they are named pipes.
-#[cfg(unix)]
-async fn control_socket_for_pid(pid: u32) -> Option<PathBuf> {
-    control_socket_for_pid_in_dirs(unix_control_socket_dirs(), pid, true).await
-}
-
-#[cfg(unix)]
-async fn control_socket_for_workspace(
-    pid: u32,
-    workspace_root: &Path,
-    metadata_key: &str,
-) -> Option<PathBuf> {
-    control_socket_for_workspace_in_dirs(
-        unix_control_socket_dirs(),
-        pid,
-        workspace_root,
-        metadata_key,
-        true,
-    )
-    .await
-}
-
-#[cfg(unix)]
-fn unix_control_socket_dirs() -> Vec<PathBuf> {
-    let xdg_dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from);
-    unix_control_socket_dirs_at(Path::new("/tmp"), xdg_dir.as_deref(), |err| {
-        eprintln!("{err}")
-    })
-}
-
-#[cfg(unix)]
-fn unix_control_socket_dirs_at(
-    fallback_parent: &Path,
-    xdg_dir: Option<&Path>,
-    mut report: impl FnMut(&std::io::Error),
-) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = xdg_dir {
-        match chan_shell::validate_control_socket_dir(dir) {
-            Ok(()) => push_unique_path(&mut dirs, dir.to_path_buf()),
-            Err(err) => report(&err),
-        }
-    }
-    let fallback = chan_shell::control_socket_fallback_dir_at(fallback_parent);
-    match chan_shell::validate_control_socket_dir(&fallback) {
-        Ok(()) => push_unique_path(&mut dirs, fallback),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => report(&err),
-    }
-    dirs
-}
-
-#[cfg(windows)]
-async fn control_socket_for_pid(pid: u32) -> Option<PathBuf> {
-    // Windows control sockets are named pipes under the `\\.\pipe\`
-    // namespace, which is directory-enumerable.
-    control_socket_for_pid_in_dirs([std::path::Path::new(r"\\.\pipe\")], pid, false).await
-}
-
-#[cfg(windows)]
-async fn control_socket_for_workspace(
-    pid: u32,
-    workspace_root: &Path,
-    metadata_key: &str,
-) -> Option<PathBuf> {
-    control_socket_for_workspace_in_dirs(
-        [std::path::Path::new(r"\\.\pipe\")],
-        pid,
-        workspace_root,
-        metadata_key,
-        false,
-    )
-    .await
-}
-
-async fn control_socket_for_pid_in_dirs<I, P>(
-    dirs: I,
-    pid: u32,
-    require_sock_ext: bool,
-) -> Option<PathBuf>
-where
-    I: IntoIterator<Item = P>,
-    P: AsRef<Path>,
-{
-    let mut seen: Vec<PathBuf> = Vec::new();
-    for dir in dirs {
-        let dir = dir.as_ref();
-        if seen.iter().any(|seen| seen == dir) {
-            continue;
-        }
-        seen.push(dir.to_path_buf());
-    }
-    // Pass 1, by name: a pid-named socket needs no round-trip.
-    for dir in &seen {
-        if let Some(socket) = control_socket_for_pid_in(dir, pid, require_sock_ext) {
-            return Some(socket);
-        }
-    }
-    // Pass 2, by identity: stable-named candidates carry no pid, so ask each
-    // one who it is and match the reported pid. Dead sockets fail the connect
-    // immediately; only a live-but-wedged one costs the probe timeout.
-    for dir in &seen {
-        for candidate in chan_shell::stable_control_socket_candidates(dir, require_sock_ext) {
-            if socket_identity_pid(&candidate).await == Some(pid) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-async fn control_socket_for_workspace_in_dirs<I, P>(
-    dirs: I,
-    pid: u32,
-    workspace_root: &Path,
-    metadata_key: &str,
-    require_sock_ext: bool,
-) -> Option<PathBuf>
-where
-    I: IntoIterator<Item = P>,
-    P: AsRef<Path>,
-{
-    let mut candidates = Vec::new();
-    for dir in dirs {
-        let dir = dir.as_ref();
-        for candidate in control_socket_candidates_for_pid_in(dir, pid, require_sock_ext) {
-            push_unique_path(&mut candidates, candidate);
-        }
-        for candidate in chan_shell::stable_control_socket_candidates(dir, require_sock_ext) {
-            push_unique_path(&mut candidates, candidate);
-        }
-    }
-    for candidate in candidates {
-        let Some(identity) = chan_shell::socket_identity(&candidate).await else {
-            continue;
-        };
-        if identity.pid == pid
-            && identity.workspace_root.as_deref() == Some(workspace_root)
-            && identity.metadata_key.as_deref() == Some(metadata_key)
-        {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// The pid serving `socket`, from a bounded `Identify` round-trip. `None` for
-/// a dead / unreachable / wedged socket or an unparseable reply.
-async fn socket_identity_pid(socket: &Path) -> Option<u32> {
-    Some(chan_shell::socket_identity(socket).await?.pid)
-}
-
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
-    }
-}
-
-fn control_socket_candidates_for_pid_in(
-    dir: &Path,
-    pid: u32,
-    require_sock_ext: bool,
-) -> Vec<PathBuf> {
-    #[cfg(unix)]
-    if chan_shell::validate_control_socket_dir(dir).is_err() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| {
-            control_socket_name_matches(&entry.file_name().to_string_lossy(), pid, require_sock_ext)
-        })
-        .map(|entry| entry.path())
-        .filter(|path| {
-            #[cfg(unix)]
-            {
-                chan_shell::validate_control_socket_node(path).is_ok()
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = path;
-                true
-            }
-        })
-        .collect();
-    candidates.sort();
-    candidates
-}
-
-fn control_socket_for_pid_in(dir: &Path, pid: u32, require_sock_ext: bool) -> Option<PathBuf> {
-    control_socket_candidates_for_pid_in(dir, pid, require_sock_ext)
-        .into_iter()
-        .next()
-}
-
-/// True when `name` is a control socket for `pid`
-/// (`chan-control-<pid>-<rand>`), optionally requiring the unix `.sock`
-/// suffix (Windows named pipes have no extension).
-fn control_socket_name_matches(name: &str, pid: u32, require_sock_ext: bool) -> bool {
-    let prefix = format!("chan-control-{pid}-");
-    name.starts_with(&prefix) && (!require_sock_ext || name.ends_with(".sock"))
-}
-
 /// Block (bounded) until the writer lock for `lock_dir` is free after a
 /// serve was asked to unserve. The server drops the flock asynchronously
 /// during graceful shutdown, so a `chan serve` racing right behind would
@@ -3043,20 +2753,6 @@ enum OpenTarget {
     Devserver,
 }
 
-/// The kind of chan instance that spawned the shell `chan serve` runs in,
-/// resolved from `$CHAN_CONTROL_SOCKET`. Drives the no-flag default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Parentage {
-    /// A chan-desktop terminal: its control socket answers `Desktop`.
-    Desktop,
-    /// A `chan devserver` terminal: its control socket answers `Devserver`.
-    Devserver { pid: u32 },
-    /// No chan parent detected (a plain shell, not chan-spawned), an
-    /// unreachable holder, or a standalone serve -- the load-bearing
-    /// "undetectable -> standalone" case.
-    None,
-}
-
 /// Why the routing decision could not pick a target.
 #[derive(Debug, PartialEq, Eq)]
 enum RouteError {
@@ -3266,64 +2962,6 @@ fn devserver_window_opened_message(root: &Path, instance: &DevserverCandidate) -
     )
 }
 
-/// The chan control socket exported into a chan-spawned terminal
-/// (`$CHAN_CONTROL_SOCKET`), trimmed and non-empty, or `None` outside a chan
-/// session. Its mere presence marks "some chan context" even when the holder
-/// cannot be identified.
-fn chan_control_socket() -> Option<String> {
-    std::env::var("CHAN_CONTROL_SOCKET")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Overall bound on the parentage probe's `Identify` round-trip. A holder that
-/// accepts the connection but never replies must not hang `chan serve` (which
-/// then goes on to run a resident server -- this is the only deadline, never a
-/// command-wide one). Sized to the connect+read budget the desktop / devserver
-/// handoffs use.
-const PARENTAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Resolve the kind of chan instance that spawned this shell by an `Identify`
-/// round-trip on `$CHAN_CONTROL_SOCKET` -- the same control-socket /
-/// serving-kind machinery `chan ps` uses. A chan-spawned terminal exports
-/// that socket (`terminal_sessions`); a desktop shell points at the desktop's
-/// embedded server, a devserver shell at the devserver. An absent socket (a
-/// plain shell), an unreachable / wedged holder, or a `standalone` kind all
-/// resolve to [`Parentage::None`].
-async fn detect_parentage() -> Parentage {
-    match chan_control_socket() {
-        Some(socket) => probe_parentage(&PathBuf::from(socket), PARENTAGE_PROBE_TIMEOUT).await,
-        None => Parentage::None,
-    }
-}
-
-/// Identify the serving kind behind `socket` with a `timeout`-bounded
-/// `Identify` round-trip. A wedged holder (accepts but never replies), a
-/// connect failure, a read error, or a non-desktop/devserver reply all resolve
-/// to [`Parentage::None`] so a stale / wedged socket cannot hang `chan serve`.
-/// `timeout` is injectable so the bound is unit-testable.
-async fn probe_parentage(socket: &Path, timeout: Duration) -> Parentage {
-    let identify = chan_shell::send_control_request(socket, chan_shell::ControlRequest::Identify);
-    let Ok(Ok(message)) = tokio::time::timeout(timeout, identify).await else {
-        return Parentage::None;
-    };
-    match serde_json::from_str::<chan_shell::Identity>(&message) {
-        Ok(chan_shell::Identity {
-            kind: chan_shell::ServeKind::Desktop,
-            ..
-        }) => Parentage::Desktop,
-        Ok(chan_shell::Identity {
-            kind: chan_shell::ServeKind::Devserver,
-            pid,
-            ..
-        }) => Parentage::Devserver { pid },
-        // A standalone holder, or a reply we cannot parse: not a context that
-        // changes the default.
-        _ => Parentage::None,
-    }
-}
-
 /// Make a serve root absolute against the process cwd. `canonicalize`
 /// resolves symlinks for an existing dir; `std::path::absolute` makes a
 /// not-yet-created path absolute lexically (so `chan serve new-dir` still
@@ -3342,13 +2980,6 @@ fn absolutize_serve_root(root: PathBuf) -> PathBuf {
         .or_else(|_| std::path::absolute(&root))
         .unwrap_or(root);
     chan_workspace::paths::strip_verbatim_prefix(&absolute)
-}
-
-/// Error for a command invoked without its required workspace path. Every
-/// command names the workspace root explicitly; `hint` is a complete,
-/// valid example invocation to suggest.
-fn missing_workspace_path(cmd: &str, hint: &str) -> anyhow::Error {
-    anyhow::anyhow!("chan {cmd} requires a workspace path; e.g. `{hint}`")
 }
 
 /// Recognize a devserver-URL-shaped value: `scheme://host…`. `chan serve`
@@ -3422,17 +3053,6 @@ async fn cmd_devserver_register(
             anyhow::bail!("chan devserver register {url} needs the chan desktop app running.")
         }
     }
-}
-
-/// True when this CLI runs inside a chan terminal that a `chan devserver`
-/// serves -- `chan devserver register {url}` would otherwise register a devserver into a
-/// devserver, which the registry (a desktop-config concept) does not nest.
-/// Shares [`detect_parentage`]'s `Identify` round-trip on
-/// `$CHAN_CONTROL_SOCKET`; an absent socket / unreachable holder / any other
-/// serving kind ⇒ not a devserver context (so a plain shell or a desktop
-/// terminal proceeds to the handoff).
-async fn in_devserver_context() -> bool {
-    matches!(detect_parentage().await, Parentage::Devserver { .. })
 }
 
 /// One devserver-control round-trip with uniform failure wording: an
@@ -7522,19 +7142,6 @@ fn cmd_index_status(path: Option<PathBuf>, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// User-facing message when a CLI subcommand is
-/// pointed at a path the registry doesn't know. Surfaces a clear
-/// "not a chan workspace at <path>" hint with a `chan workspace add` next-step
-/// instead of leaking the implementation detail (auto-register
-/// side-effect, `WorkspaceNotRegistered(<path>)`, etc.).
-fn not_a_chan_workspace_hint(root: &std::path::Path) -> String {
-    format!(
-        "not a chan workspace at {}; run `chan workspace add {}` first",
-        root.display(),
-        root.display()
-    )
-}
-
 /// Recursive size of every regular file under `dir`. Mirrors the
 /// helper in `chan-server::routes::index` so the CLI status output
 /// agrees with the API's `model_size_bytes` field.
@@ -7899,30 +7506,6 @@ async fn execute_live_workspace_search(
         code: "workspace_search_failed",
         message: format!("decoding workspace search response: {error}"),
     })
-}
-
-#[derive(Serialize)]
-struct WorkspaceListOutput {
-    workspaces: Vec<WorkspaceListEntry>,
-}
-
-#[derive(Serialize)]
-struct WorkspaceListEntry {
-    path: String,
-    /// Stable per-workspace metadata storage key under ~/.chan/workspaces/.
-    metadata_key: String,
-    /// RFC3339 UTC timestamp.
-    last_seen_at: String,
-}
-
-impl From<&KnownWorkspace> for WorkspaceListEntry {
-    fn from(d: &KnownWorkspace) -> Self {
-        Self {
-            path: d.root_path.display().to_string(),
-            metadata_key: d.metadata_key.clone(),
-            last_seen_at: d.last_seen_at.to_rfc3339(),
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -9198,6 +8781,8 @@ fn print_import_summary(summary: &chan_workspace::ImportSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::test_support::spawn_workspace_search_stub;
 
     /// A reports disable asked on a terminal goes ahead only on yes; a
     /// declined prompt, an empty answer and end of input are errors, so the
@@ -10031,44 +9616,6 @@ mod tests {
         assert!(err.contains("not local"), "{err}");
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn probe_parentage_times_out_on_a_wedged_holder() {
-        use tokio::net::UnixListener;
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("hung.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        // Accept the connection but never reply: the probe must elapse to None
-        // rather than hang `chan serve`.
-        let _accept = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                // Hold the stream open without writing a response.
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                drop(stream);
-            }
-        });
-        let start = std::time::Instant::now();
-        let p = probe_parentage(&sock, std::time::Duration::from_millis(150)).await;
-        assert_eq!(p, Parentage::None);
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "probe must give up promptly, took {:?}",
-            start.elapsed()
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn probe_parentage_none_when_no_listener() {
-        // A path with no listener: the connect fails fast -> None, no hang.
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("nope.sock");
-        assert_eq!(
-            probe_parentage(&sock, std::time::Duration::from_secs(3)).await,
-            Parentage::None
-        );
-    }
-
     #[test]
     fn serve_target_flags_are_mutually_exclusive() {
         // clap's `conflicts_with_all` rejects any two target flags at parse
@@ -10386,190 +9933,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn control_socket_for_pid_matches_only_that_pid() {
-        let dir = tempfile::TempDir::new().unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        // A different pid's control socket and an unrelated chan socket are
-        // both ignored.
-        #[cfg(unix)]
-        let _other =
-            std::os::unix::net::UnixListener::bind(dir.path().join("chan-control-999-abcd.sock"))
-                .unwrap();
-        #[cfg(not(unix))]
-        std::fs::write(dir.path().join("chan-control-999-abcd.sock"), b"").unwrap();
-        std::fs::write(dir.path().join("chan-mcp-4242-abcd.sock"), b"").unwrap();
-        assert_eq!(control_socket_for_pid_in(dir.path(), 4242, true), None);
-        // The matching pid's socket is found.
-        let want = dir.path().join("chan-control-4242-ef01.sock");
-        #[cfg(unix)]
-        let _wanted = std::os::unix::net::UnixListener::bind(&want).unwrap();
-        #[cfg(not(unix))]
-        std::fs::write(&want, b"").unwrap();
-        assert_eq!(
-            control_socket_for_pid_in(dir.path(), 4242, true),
-            Some(want)
-        );
-    }
-
-    #[tokio::test]
-    async fn control_socket_for_pid_searches_candidate_dirs() {
-        let first = tempfile::TempDir::new().unwrap();
-        let second = tempfile::TempDir::new().unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for dir in [&first, &second] {
-                std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
-                    .unwrap();
-            }
-        }
-        let want = second.path().join("chan-control-4242-ef01.sock");
-        #[cfg(unix)]
-        let _wanted = std::os::unix::net::UnixListener::bind(&want).unwrap();
-        #[cfg(not(unix))]
-        std::fs::write(&want, b"").unwrap();
-        assert_eq!(
-            control_socket_for_pid_in_dirs([first.path(), second.path()], 4242, true).await,
-            Some(want)
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn control_socket_discovery_refuses_an_untrusted_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let socket = dir.path().join("chan-control-4242-ef01.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(
-            control_socket_for_pid_in_dirs([dir.path()], 4242, true).await,
-            None,
-            "discovered a socket in a directory another user can write"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn control_socket_discovery_refuses_a_regular_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let socket = dir.path().join("chan-control-4242-ef01.sock");
-        std::fs::write(&socket, b"not a socket").unwrap();
-        assert_eq!(
-            control_socket_for_pid_in_dirs([dir.path()], 4242, true).await,
-            None,
-            "discovered a regular file as a socket"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn control_socket_discovery_skips_a_missing_fallback_silently() {
-        let parent = tempfile::TempDir::new().unwrap();
-        let fallback = chan_shell::control_socket_fallback_dir_at(parent.path());
-        let mut errors = Vec::new();
-        let dirs = unix_control_socket_dirs_at(parent.path(), None, |err| {
-            errors.push(err.to_string());
-        });
-        assert!(
-            !fallback.exists(),
-            "discovery created {}",
-            fallback.display()
-        );
-        assert!(!dirs.contains(&fallback));
-        assert!(errors.is_empty(), "missing fallback emitted {errors:?}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn control_socket_discovery_names_an_invalid_existing_fallback() {
-        let parent = tempfile::TempDir::new().unwrap();
-        let fallback = chan_shell::control_socket_fallback_dir_at(parent.path());
-        std::fs::create_dir(&fallback).unwrap();
-        let mut errors = Vec::new();
-        let dirs = unix_control_socket_dirs_at(parent.path(), None, |err| {
-            errors.push(err.to_string());
-        });
-        assert!(!dirs.contains(&fallback));
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains(&fallback.display().to_string()));
-    }
-
-    /// A stub control server on a unix socket that answers every `Identify`
-    /// with the given pid, standing in for a devserver tenant socket.
-    #[cfg(unix)]
-    fn spawn_identify_stub(socket: &std::path::Path, pid: u32) -> tokio::task::JoinHandle<()> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let listener = tokio::net::UnixListener::bind(socket).expect("bind stub socket");
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let (read, mut write) = stream.into_split();
-                let mut line = String::new();
-                let _ = BufReader::new(read).read_line(&mut line).await;
-                let identity = chan_shell::Identity {
-                    kind: chan_shell::ServeKind::Devserver,
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    pid,
-                    workspace_root: None,
-                    metadata_key: None,
-                };
-                let reply = chan_shell::ControlResponse::Ok {
-                    message: serde_json::to_string(&identity).expect("identity json"),
-                };
-                let mut out = serde_json::to_vec(&reply).expect("response json");
-                out.push(b'\n');
-                let _ = write.write_all(&out).await;
-            }
-        })
-    }
-
-    #[cfg(unix)]
-    fn empty_workspace_search_result(root: &Path, key: &str) -> WorkspaceSearchResult {
-        WorkspaceSearchResult {
-            workspace: chan_workspace::WorkspaceSearchIdentity {
-                root: root.display().to_string(),
-                metadata_key: key.into(),
-                display_name: root
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-            },
-            readiness: chan_workspace::WorkspaceReadiness::default(),
-            search: chan_workspace::WorkspaceSearchStatus {
-                requested: false,
-                ready: true,
-                mode: chan_workspace::EffectiveSearchMode::NotRun,
-            },
-            content_hits: Vec::new(),
-            entity_matches: Vec::new(),
-            nodes: Vec::new(),
-            relationships: Vec::new(),
-            traversal: chan_workspace::EffectiveWorkspaceTraversal {
-                depth: 0,
-                direction: chan_workspace::WorkspaceTraversalDirection::Auto,
-                relationship_kinds: Vec::new(),
-                spine_forced: false,
-                profiles: Vec::new(),
-            },
-            truncation: chan_workspace::WorkspaceSearchTruncation::default(),
-            warnings: Vec::new(),
-            errors: Vec::new(),
-        }
-    }
-
     #[tokio::test]
     async fn workspace_status_reports_a_served_workspace_without_taking_the_lock() {
         let config = tempfile::tempdir().unwrap();
@@ -10723,113 +10086,6 @@ mod tests {
         assert!(json.get("index").is_none(), "{json}");
         assert!(json.get("graph").is_none(), "{json}");
         assert!(json.get("report").is_none(), "{json}");
-    }
-
-    #[cfg(unix)]
-    fn spawn_workspace_search_stub(
-        socket: &std::path::Path,
-        identity: chan_shell::Identity,
-        result: WorkspaceSearchResult,
-    ) -> tokio::task::JoinHandle<()> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let listener = tokio::net::UnixListener::bind(socket).expect("bind workspace stub");
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let (read, mut write) = stream.into_split();
-                let mut line = String::new();
-                if BufReader::new(read).read_line(&mut line).await.is_err() {
-                    continue;
-                }
-                let response = match serde_json::from_str::<chan_shell::ControlRequest>(&line) {
-                    Ok(chan_shell::ControlRequest::Identify) => chan_shell::ControlResponse::Ok {
-                        message: serde_json::to_string(&identity).expect("identity json"),
-                    },
-                    Ok(chan_shell::ControlRequest::WorkspaceSearch { .. }) => {
-                        chan_shell::ControlResponse::Ok {
-                            message: serde_json::to_string(&result).expect("search json"),
-                        }
-                    }
-                    _ => chan_shell::ControlResponse::Error {
-                        message: "unsupported request".into(),
-                    },
-                };
-                let mut out = serde_json::to_vec(&response).expect("response json");
-                out.push(b'\n');
-                let _ = write.write_all(&out).await;
-            }
-        })
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn control_socket_for_pid_probes_stable_named_sockets() {
-        // A devserver's stable-named socket carries no pid, so discovery must
-        // resolve it through the Identify round-trip. The wrong pid must NOT
-        // resolve to it (a stale lock record's holder is genuinely gone).
-        let dir = tempfile::TempDir::new().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let stable = dir.path().join("chan-control-s00aa11bb22cc33dd.sock");
-        let stub = spawn_identify_stub(&stable, 4242);
-        assert_eq!(
-            control_socket_for_pid_in_dirs([dir.path()], 4242, true).await,
-            Some(stable.clone())
-        );
-        assert_eq!(
-            control_socket_for_pid_in_dirs([dir.path()], 7777, true).await,
-            None
-        );
-        stub.abort();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn workspace_socket_discovery_matches_root_and_metadata_key() {
-        let dir = tempfile::Builder::new()
-            .prefix("chan-ws-")
-            .tempdir_in("/tmp")
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let root_a = tempfile::TempDir::new().unwrap();
-        let root_b = tempfile::TempDir::new().unwrap();
-        let pid = std::process::id();
-        let result = empty_workspace_search_result(root_b.path(), "key-b");
-        let wrong = dir.path().join(format!("chan-control-{pid}-a.sock"));
-        let right = dir.path().join(format!("chan-control-{pid}-b.sock"));
-        let wrong_stub = spawn_workspace_search_stub(
-            &wrong,
-            chan_shell::Identity {
-                kind: chan_shell::ServeKind::Devserver,
-                version: env!("CARGO_PKG_VERSION").into(),
-                pid,
-                workspace_root: Some(root_a.path().to_path_buf()),
-                metadata_key: Some("key-a".into()),
-            },
-            result.clone(),
-        );
-        let right_stub = spawn_workspace_search_stub(
-            &right,
-            chan_shell::Identity {
-                kind: chan_shell::ServeKind::Devserver,
-                version: env!("CARGO_PKG_VERSION").into(),
-                pid,
-                workspace_root: Some(root_b.path().to_path_buf()),
-                metadata_key: Some("key-b".into()),
-            },
-            result,
-        );
-
-        let selected =
-            control_socket_for_workspace_in_dirs([dir.path()], pid, root_b.path(), "key-b", true)
-                .await;
-        assert_eq!(selected, Some(right));
-        wrong_stub.abort();
-        right_stub.abort();
     }
 
     /// A writer lock the probe could not open refuses the search with an
@@ -11154,44 +10410,6 @@ mod tests {
         assert!(errors[0]
             .message
             .contains(&beta_known.root_path.display().to_string()));
-    }
-
-    #[test]
-    fn control_socket_name_matches_pid_and_ext() {
-        // A unix `.sock` file matches whether or not the suffix is required.
-        assert!(control_socket_name_matches(
-            "chan-control-1234-ab.sock",
-            1234,
-            true
-        ));
-        assert!(control_socket_name_matches(
-            "chan-control-1234-ab.sock",
-            1234,
-            false
-        ));
-        // A Windows named pipe (no extension) matches only when the suffix
-        // is not required.
-        assert!(control_socket_name_matches(
-            "chan-control-1234-deadbeef",
-            1234,
-            false
-        ));
-        assert!(!control_socket_name_matches(
-            "chan-control-1234-deadbeef",
-            1234,
-            true
-        ));
-        // A different pid and an unrelated name never match.
-        assert!(!control_socket_name_matches(
-            "chan-control-9999-ab.sock",
-            1234,
-            true
-        ));
-        assert!(!control_socket_name_matches(
-            "something-else.sock",
-            1234,
-            true
-        ));
     }
 
     #[test]
