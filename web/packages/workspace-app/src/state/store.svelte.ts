@@ -3439,7 +3439,7 @@ registerPaneModeSettledSink((pendingRemoteLayout) => {
 /// label) and stop any pending or future save from re-persisting it. The caller
 /// closes the window afterward. Idempotent; fires a `keepalive` DELETE so the
 /// reap survives an immediate window destroy/unload -- this is the explicit,
-/// synchronous discard signal that replaces the old reliance on a `pagehide`
+/// synchronous discard signal, not a reliance on a `pagehide`
 /// flush (which a hidden/buried WKWebView may never fire).
 ///
 /// `reap: false` (a cross-window terminal MOVE that emptied this window): still
@@ -4393,7 +4393,7 @@ export function fbClearSelection(): void {
   browserSelection.anchor = null;
 }
 
-/// File Browser clipboard (FB2). Module-level (NOT per-instance) so a
+/// File Browser clipboard. Module-level (NOT per-instance) so a
 /// copy/cut in one File Browser can be pasted into another - the spec
 /// explicitly allows cross-instance paste on the same workspace. `mode`
 /// distinguishes copy (duplicate) from cut (move on paste). `paths` is
@@ -4699,9 +4699,9 @@ function applyTreeExpandedReloadSnapshot(): boolean {
 // the file-browser dock, which is not a layout tab) is NOT a durable saved
 // window: `serializeSession()` returns null so no on-disk session blob is
 // written (that is what stops it lingering as a `cs window list` phantom after
-// close -- step-5). But Cmd+R must still RE-ATTACH the surviving server-side
+// close). But Cmd+R must still RE-ATTACH the surviving server-side
 // PTYs, and the reload tsid graft (tabs.svelte.ts) sources tsids from the
-// server session blob -- which is now absent. So we mirror the live layout
+// server session blob -- which such a window does not have. So we mirror the live layout
 // (WITH tsids, plus the rich-prompt pp/rpv) into sessionStorage, which
 // survives a reload but is cleared when the window/tab closes. Same channel as
 // the treeExpanded reload snapshot above: reload reattaches, a real close
@@ -5001,7 +5001,7 @@ async function pollIndexStatusOnce(): Promise<void> {
     const s = await api.indexStatus();
     indexStatus.value = s;
     // Idle → slow poll. Single-file Reindexing → transient cadence
-    // so the post-reindex idle is caught within ~250ms (Bug 1).
+    // so the post-reindex idle is caught within ~250ms.
     // Multi-file Building → fast cadence (the pass takes seconds
     // and per-tick UI churn isn't useful). Error → fast cadence so
     // an operator-visible recovery surfaces quickly.
@@ -5090,8 +5090,7 @@ export function resolvePrompt(value: string | null): void {
 /// `"either"` lets the unified "New File or Directory" prompt accept
 /// both shapes. The modal detects file-vs-dir from the path's trailing
 /// slash: `foo/bar/` is a directory, `foo/bar` (or with an extension)
-/// is a file. Callers resolve the returned path against the chosen kind
-/// via `pathPromptKind()` below.
+/// is a file.
 export type PathPromptKind = "file" | "folder" | "either";
 /// `attach` is the watcher-dialog mode: the user picks a path to
 /// attach a long-running watcher to,
