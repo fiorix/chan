@@ -69,7 +69,13 @@ fn xdg_runtime_dir() -> Option<PathBuf> {
 
 #[cfg(unix)]
 pub(crate) fn unix_socket_dir() -> PathBuf {
-    xdg_runtime_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
+    let xdg = xdg_runtime_dir();
+    unix_socket_dir_from(xdg.as_deref(), Path::new("/tmp"))
+}
+
+#[cfg(unix)]
+fn unix_socket_dir_from(xdg: Option<&Path>, fallback_root: &Path) -> PathBuf {
+    xdg.unwrap_or(fallback_root).to_path_buf()
 }
 
 #[cfg(windows)]
@@ -316,6 +322,60 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[test]
+    fn absent_xdg_creates_and_uses_an_owner_only_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = unix_socket_dir_from(None, root.path());
+        assert_eq!(
+            dir,
+            root.path().join(format!(
+                "chan-control-{}",
+                rustix::process::geteuid().as_raw()
+            ))
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&dir)
+                .expect("fallback directory was not created")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn invalid_xdg_uses_the_owner_only_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let xdg = root.path().join("unsafe-xdg");
+        std::fs::create_dir(&xdg).unwrap();
+        std::fs::set_permissions(&xdg, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let dir = unix_socket_dir_from(Some(&xdg), root.path());
+        assert_ne!(dir, xdg, "selected a writable XDG directory");
+        assert!(dir.starts_with(root.path()));
+        assert_eq!(
+            std::fs::symlink_metadata(&dir)
+                .expect("fallback directory was not created")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn systemd_style_xdg_directory_is_used_without_fallback() {
+        let xdg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(unix_socket_dir_from(Some(xdg.path()), root.path()), xdg.path());
+        let path = xdg.path().join("chan-control-systemd.sock");
+        let _listener = transport::bind(&path).unwrap();
+        assert!(path.exists());
+    }
 
     async fn read_rpc<R: tokio::io::AsyncBufRead + Unpin>(read: &mut R) -> serde_json::Value {
         let mut line = String::new();
