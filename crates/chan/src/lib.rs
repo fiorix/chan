@@ -2624,8 +2624,9 @@ fn unix_control_socket_dirs_at(
         }
     }
     let fallback = chan_shell::control_socket_fallback_dir_at(fallback_parent);
-    match chan_shell::ensure_control_socket_dir(&fallback) {
+    match chan_shell::validate_control_socket_dir(&fallback) {
         Ok(()) => push_unique_path(&mut dirs, fallback),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => report(&err),
     }
     dirs
