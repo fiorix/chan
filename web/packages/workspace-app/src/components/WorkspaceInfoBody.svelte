@@ -3,7 +3,7 @@
   // when the user clicks the Directory row in the hamburger menu, in the
   // graph when the workspace-root node is selected, and on the Dashboard's
   // front Workspace slide. Search index status lives in the Search Status
-  // overlay; the global default-workspace + recents config now lives on the
+  // overlay; the global default-workspace + recents config lives on the
   // Dashboard Workspace slot's flip-back (WorkspaceSlotConfig).
   //
   // Parity with FileInfoBody's directory mode: this body renders the same

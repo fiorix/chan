@@ -151,7 +151,7 @@
     return p === "" ? "/ (workspace root)" : p;
   }
 
-  // Indent depth for the flat directory list. v1: one ridiculously
+  // Indent depth for the flat directory list: one ridiculously
   // simple tree-shape signal; a real tree picker can replace this.
   function depth(p: string): number {
     return p === "" ? 0 : p.split("/").length;

@@ -38,7 +38,7 @@
   import GraphSection from "./settings/GraphSection.svelte";
   import DashboardSection from "./settings/DashboardSection.svelte";
   import SearchSection from "./settings/SearchSection.svelte";
-  // The per-OS shortcut-assignment grid is the Keymap lane's; this
+  // The per-OS shortcut-assignment grid is KeymapSettings' own; this
   // surface owns only its placement in the section below.
   import KeymapSettings from "./KeymapSettings.svelte";
   // The per-workspace tab; its controls call their own endpoints and do not

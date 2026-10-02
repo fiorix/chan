@@ -76,7 +76,7 @@
   // data (indexed content, semantic, or reports) the nudge never shows again,
   // on any client or boot. The fields are server-derived, so the gate holds
   // identically for local and devserver workspaces. The localStorage dismiss
-  // stays as a secondary per-session hide, no longer the primary gate.
+  // is a secondary per-session hide, not the primary gate.
   const workspaceHasData = $derived.by(() => {
     const s = summary;
     return !!s && (s.indexed_docs > 0 || s.semantic_enabled || s.reports_enabled);
@@ -197,8 +197,8 @@
   }
 
   // Keep polling until the workspace has SETTLED, not merely until it
-  // unlocks. Those parted company when the boot stopped locking behind a
-  // recovery pass: `phase === "ready"` now arrives while an index rebuild is
+  // unlocks. The two differ because the boot does not lock behind a
+  // recovery pass: `phase === "ready"` arrives while an index rebuild is
   // still running. Stopping there would freeze the last snapshot mid-rebuild,
   // and the server attaches `summary` only once settled -- so the first-run
   // onboarding nudge would never arrive at all for a workspace that booted
@@ -560,8 +560,8 @@
     flex-direction: column;
     gap: 0.2rem;
   }
-  /* One checkmark toggle per layer (replaces the old on/off label + Turn
-     on/off button). The whole row is a button (role=checkbox) so a click or
+  /* One checkmark toggle per layer.
+     The whole row is a button (role=checkbox) so a click or
      Space/Enter toggles it. */
   .onboard-switch {
     display: flex;

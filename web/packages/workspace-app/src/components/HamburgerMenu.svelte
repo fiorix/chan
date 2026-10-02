@@ -159,8 +159,8 @@
   <!-- Portal the bubble out to <body> so it pins to the viewport
        even when an ancestor (OverlayShell's .panel) has a transform
        set, which would otherwise make `position: fixed` resolve
-       relative to that ancestor (the "menu lands ~8cm away from
-       the click" bug). -->
+       relative to that ancestor and land the menu far from
+       the click. -->
   <ul
     bind:this={menuEl}
     class="hamburger-menu"

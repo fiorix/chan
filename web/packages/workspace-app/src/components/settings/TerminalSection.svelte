@@ -369,7 +369,7 @@
     min-width: 4.5em;
     text-align: right;
   }
-  /* The number input lives inside NumberField now, so the width
+  /* The number input lives inside NumberField, so the width
      reaches it through :global (same trick SettingField uses). */
   :global(input.terminal-font-size) {
     width: 6em;

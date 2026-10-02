@@ -359,8 +359,8 @@
     // Live per-library focus-colour broadcast. Subscribe ONCE PER
     // WINDOW (the var is per-document; <Pane> is per leaf node, so per-pane would
     // open redundant sockets) to this library's colour watch and recolour
-    // `--pane-highlight-color` the instant ANY window of the library changes it --
-    // replacing the v1 "other windows pick it up on next mint" behaviour. Pushes
+    // `--pane-highlight-color` the instant ANY window of the library changes it,
+    // so an open window does not wait for its next mint to pick it up. Pushes
     // the current colour on connect, so this also reconciles with `?pane=`.
     // Apply the var (border) AND sync the menu/`data-focus-color` so a live push
     // doesn't leave the checkmark + new split panes disagreeing with the border.
@@ -523,11 +523,10 @@
     const dir = ctx.dir || rootless;
     // A directory target is ENTERED, not merely highlighted. `revealAndSelect`
     // expands ancestors only, so a standalone window -- whose root is the whole
-    // machine -- rendered `/` with the target collapsed somewhere below it, and
-    // the user had to walk down to the directory they had just asked for. This
-    // is the same defect the fresh-Files-window boot already fixed for itself;
-    // the spawn path kept selecting. Opening at `$HOME` rather than `/` is the
-    // visible half of it on a standalone terminal window.
+    // machine -- would render `/` with the target collapsed somewhere below it,
+    // and the user would have to walk down to the directory they had just asked
+    // for. Opening at `$HOME` rather than `/` is the visible half of it on a
+    // standalone terminal window.
     if (dir !== null && dir !== undefined && ctx.file === undefined) {
       revealPathInBrowser(dir, {
         enter: true,
@@ -1017,8 +1016,8 @@
     }
     // Window reload. macOS: Cmd+R. Linux/Windows: Ctrl+Shift+R, so plain
     // Ctrl+R falls through to a focused terminal's shell (reverse-search) -
-    // claiming Ctrl+R here is exactly what the old `Mod+R` binding did and
-    // what regressed reverse-search. Branch per-OS (the desktop bridge and
+    // one `Mod+R` binding would claim Ctrl+R here and take reverse-search
+    // from the shell. Branch per-OS (the desktop bridge and
     // shouldEscapeTerminal apply the same Cmd-vs-Ctrl+Shift rule).
     // preventDefault suppresses the browser default (soft reload via
     // reloadWindow / the desktop IPC).
@@ -1715,7 +1714,7 @@
     --text-heading: #d8d8de;
     --link: #58a6ff;
     /* Code background needs a clear step away from --bg (#1c1c1e) so
-       fenced blocks and inline `code` read as a slab; #232325 collided
+       fenced blocks and inline `code` read as a slab; #232325 collides
        with --bg-card. Light-mode value (below) does the same against
        the white canvas. */
     --code-bg: #2a2a2c;

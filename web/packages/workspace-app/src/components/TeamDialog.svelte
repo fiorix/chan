@@ -64,12 +64,12 @@
   // the success surface lives in `loadedConfig` below.
   let loadError = $state<string | null>(null);
   // Surfaces the config.toml found in the loaded directory so the user
-  // sees WHAT they are about to bootstrap (TW1). Cleared whenever the
+  // sees WHAT they are about to bootstrap. Cleared whenever the
   // dir input changes or the New/Load mode flips.
   let loadedConfig = $state<{ teamName: string; memberCount: number } | null>(
     null,
   );
-  // Directory autocomplete for the team-dir field (TW1). Listed one
+  // Directory autocomplete for the team-dir field. Listed one
   // level at a time off the typed parent segment; files are excluded so
   // the field nudges toward a directory choice. A request id drops stale
   // responses when the user types faster than the round-trip.
@@ -434,7 +434,7 @@
             </span>
           {:else if loadedConfig}
             <!-- Surface the config.toml the dir resolved to so the user
-                 sees exactly what they are about to bootstrap (TW1). -->
+                 sees exactly what they are about to bootstrap. -->
             <span class="team-load-found" role="status">
               <code class="team-load-file"
                 >{config.teamDir.replace(/\/+$/, "")}/config.toml</code
@@ -774,7 +774,7 @@
   .team-load-error {
     color: var(--danger-text);
   }
-  /* Loaded-config surface (TW1): the resolved config.toml path plus a
+  /* Loaded-config surface: the resolved config.toml path plus a
      one-line team summary, so a Load makes clear what is about to
      bootstrap. */
   .team-load-found {

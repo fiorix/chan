@@ -162,7 +162,7 @@
 <SurfaceThemeField kind="editor" {prefs} {commit} />
 
 <style>
-  /* The number input lives inside NumberField now, so the width
+  /* The number input lives inside NumberField, so the width
      reaches it through :global (same trick SettingField uses). */
   :global(input.editor-font-size) {
     width: 7em;

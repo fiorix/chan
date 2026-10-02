@@ -485,7 +485,7 @@
     await exportPathToPdf(entry.path);
   }
 
-  // Desktop-download progress now shows in the transfer bubble (the single
+  // Desktop-download progress shows in the transfer bubble (the single
   // transfer surface), not an inline inspector indicator.
 
   /// Full-path toggle for the actions section. The header shows the
@@ -783,13 +783,12 @@
 
 <!-- Shared ACTIONS section. Rendered directly under the filename header
      on every surface (File Browser, editor, Graph) so the inspector has
-     one consistent layout: header -> actions -> lazy content. Per
-     inspector-spec.md the actions move up here from the old bottom-of-
-     body placement. The contextual actions differ by entry kind:
+     one consistent layout: header -> actions -> lazy content. The
+     contextual actions differ by entry kind:
        - editable file: Open (gated on the server content kind, so an
          odd-suffix plaintext file opens like the tree double-click);
        - media: View/Zoom (image), View Audio, View Video, or View PDF;
-       - every entry: Upload + Download (+ progress indicator);
+       - every entry: Upload + Download;
        - host-provided: Show File/Directory (onReveal), Graph from here
          (onSetAsScope).
      A full-path toggle reveals the workspace-relative path (header shows

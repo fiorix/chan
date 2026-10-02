@@ -141,7 +141,7 @@
   }
   /* The per-workspace band's shared vocabulary: status and error lines
      under a control, and the key/value fact grid. Declared once here;
-     the band's sections used to each re-declare these. */
+     the band's sections do not each re-declare these. */
   .control :global(.hint) {
     margin: 0;
     color: var(--text-secondary);
@@ -182,8 +182,7 @@
   }
   /* The pill vocabulary, once. PillToggle and PillRadio render the
      bare markup and this is the single .pill block under
-     components/settings/ - the two components, and the two
-     per-workspace copies before them, each used to re-declare it. */
+     components/settings/. */
   .control :global(.pills) {
     display: flex;
     gap: 4px;

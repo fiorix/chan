@@ -246,7 +246,7 @@
   });
 
   /// Workspace root is the focal anchor so the spine grows
-  /// upward from it (GraphCanvas's `hierarchyY` + `parentX`
+  /// upward from it (GraphCanvas's hierarchy `y` + `parentX`
   /// forces lay the depth tiers vertically with focal pinning
   /// at origin).
   const indexingFocal = ["" as string];
@@ -333,9 +333,9 @@
     ),
   );
   // Clamp the controlled cursor to range, then off any disabled slot to
-  // the first enabled one. Keeping the name `slideIndex` lets the
-  // template read the current slot unchanged; it is a derived view of the
-  // prop now, not local state, so there is nothing to keep in sync.
+  // the first enabled one. The template reads the current slot from
+  // `slideIndex`, a derived view of the prop, not local state, so there
+  // is nothing to keep in sync.
   const slideIndex = $derived.by(() => {
     const clamped = Math.min(
       Math.max(0, Math.floor(slide)),
@@ -451,8 +451,8 @@
        content is text-shaped and centered reads better there. -->
   <div class="slide-stage" class:slide-stage-wide={slideIndex === 1}>
     <!-- Carousel slot order: 0 Workspace, 1 Search (indexing graph), 2
-         About. The blocks below stay in their original source order
-         (About, Workspace, indexing) but each guard now tests its NEW
+         About. The blocks below are in a different source order
+         (About, Workspace, indexing); each guard tests its own
          index, so the `{:else}` indexing block catches the remaining
          index 1. -->
     {#if slideIndex === 2}
@@ -515,8 +515,8 @@
         <div class="about-sep" role="separator" aria-hidden="true"></div>
 
         <!-- A one-line statement that chan is built on open source and is
-             itself free/open-source. The detailed dependency list was too
-             much for the About page, so it was dropped, and the license link
+             itself free/open-source. The detailed dependency list is too
+             much for the About page, and the license link
              lives in the repository rather than on this surface. -->
         <div class="about-credits">
           <p class="credits-tagline">
@@ -529,7 +529,7 @@
       <!-- Workspace slot (index 0 / first) hosts `WorkspaceInfoBody`,
            the same inspector body the file browser shows when the
            workspace-root row is selected. Folder-mode parity content;
-           the per-workspace config now lives on this slot's flip-back
+           the per-workspace config lives on this slot's flip-back
            (WorkspaceSlotConfig). `WorkspaceInfoBody` owns its own scroll
            affordance via the slide's `overflow: auto`. -->
       <div class="slide slide-workspace" aria-label="Workspace info">

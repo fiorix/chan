@@ -226,8 +226,8 @@
     Math.max(tab.queueDepth ?? 0, isPending && pendingChipVisible ? 1 : 0),
   );
   // The strip renders independent slots rather than one composite string: the
-  // text slot is advisory, and each affordance it used to merely name is a
-  // real control, so a pointer-only user can reach every one of them.
+  // text slot is advisory, and each affordance is a real control rather
+  // than a name in that text, so a pointer-only user can reach every one of them.
   const textSlot = $derived(
     transientNote ?? (queuedCount > 0 ? `${queuedCount} queued` : null),
   );

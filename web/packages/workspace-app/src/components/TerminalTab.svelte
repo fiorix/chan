@@ -1023,7 +1023,7 @@
     // (no surviving session to reattach to). Reattaching to a long-lived
     // PTY keeps the protocol the program already announced, since a
     // running agent won't re-announce after the reconnect; resetting here
-    // is what regressed Shift+Enter -> newline into a plain submit.
+    // would turn Shift+Enter -> newline into a plain submit.
     const keyboardProtocol = ensureTerminalKeyboardProtocol(
       tab,
       !tab.terminalSessionId,

@@ -141,8 +141,7 @@
     return safe;
   }
 
-  // File Browser native drag IN and OUT is not supported (the macOS
-  // native drag-out crashed and other platforms were no-ops): the
+  // File Browser native drag IN and OUT is not supported: the
   // user exports via the Download button and imports via the Upload
   // button. So `onFileDragStart` does not write the `DownloadURL` /
   // `text/uri-list` browser drag-out payload, does not invoke a
@@ -153,7 +152,7 @@
   function onFileDragStart(e: DragEvent, path: string, isDir: boolean): void {
     if (!e.dataTransfer) return;
     e.dataTransfer.effectAllowed = "move";
-    // Multi-drag (FB3): if the grabbed row is part of the current
+    // Multi-drag: if the grabbed row is part of the current
     // multi-selection, drag the WHOLE selection; otherwise the drag
     // implicitly selects just this row (desktop behavior - grabbing an
     // unselected row drops the old selection).
@@ -208,9 +207,8 @@
 
   /// Resolve the move source(s) from a DragEvent. Returns null if the
   /// drag did not originate in the tree (e.g. external file drop). The
-  /// `paths` array carries the full multi-selection (FB3); it falls back
-  /// to the single `path` for a drag started before the multi-drag
-  /// payload existed.
+  /// `paths` array carries the full multi-selection; it falls back
+  /// to the single `path` for a payload that carries no `paths`.
   function readTreeDrag(
     e: DragEvent,
   ): { path: string; isDir: boolean; paths: string[] } | null {
@@ -256,8 +254,8 @@
   }
 
   function onRowDragOver(e: DragEvent, destDir: string): void {
-    // Only the app-internal tree-move is a valid drop now; external OS
-    // file drops (drag-IN) are no longer accepted (use the Upload
+    // Only the app-internal tree-move is a valid drop; external OS
+    // file drops (drag-IN) are not accepted (use the Upload
     // button). So we only opt in when the drag carries the tree-move
     // mime.
     if (!hasTreeMove(e)) return;
@@ -277,14 +275,14 @@
 
   async function onRowDrop(e: DragEvent, destDir: string): Promise<void> {
     dropTarget = null;
-    // External OS file drops (drag-IN) are no longer accepted; only the
+    // External OS file drops (drag-IN) are not accepted; only the
     // app-internal tree-move resolves. Importing files is the Upload
-    // button's job now.
+    // button's job.
     const src = readTreeDrag(e);
     if (!src) return;
     e.preventDefault();
     e.stopPropagation();
-    // Multi-drag (FB3): move every dragged entry that is a valid drop
+    // Multi-drag: move every dragged entry that is a valid drop
     // into destDir. A directory cannot drop into itself or a descendant;
     // an entry already in destDir is a no-op the server skips. We map
     // each path to its isDir via the visible rows for the self/descendant
@@ -334,7 +332,7 @@
 
   // Per-instance expand/collapse map. Each File Browser surface owns its
   // own record in `fbTreeInstances` keyed by `instanceId`, so expanding a
-  // directory in one surface no longer fans out to every other visible
+  // directory in one surface does not fan out to every other visible
   // surface. The instance is CREATED in an effect (ensureFbTreeInstance
   // mutates $state, which is illegal inside a $derived - it throws
   // state_unsafe_mutation); the $derived only READS it (reactively
@@ -556,8 +554,8 @@
     void onOpen(path);
   }
 
-  /// Single-click selects an entry; the FileBrowserTab side panel
-  /// then renders its details. Files no longer auto-open on click;
+  /// Single-click selects an entry; the file browser's inspector
+  /// then renders its details. Files do not open on click;
   /// double-click (or the Open button in the panel) is the path
   /// to actually opening a file.
   ///
@@ -718,8 +716,7 @@
 
   /// Unified "New File or Directory" entry. Opens a single
   /// PathPromptModal with `kind: "either"`; trailing slash → dir,
-  /// otherwise → file. The kind-specific `newFile` / `newDir`
-  /// helpers stay exported in `fileOps` for callers that want them.
+  /// otherwise → file.
   async function newFileOrDir(parentPath: string): Promise<void> {
     menu = null;
     await fileOps.createFileOrDir(parentPath);
@@ -741,7 +738,7 @@
     tab.showWorkspace = false;
     // The new tab's surface seeds its own per-instance expansion from
     // `tab.expanded` on mount, so there is no global singleton to prime
-    // here anymore.
+    // here.
     tab.expanded = ancestors.length > 0 ? ancestors : undefined;
     fbSelectSingle(path);
     browserSelection.showWorkspace = false;
