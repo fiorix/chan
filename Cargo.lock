@@ -1163,6 +1163,7 @@ dependencies = [
  "chan-revtunnel",
  "chan-workspace",
  "clap 4.6.1",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tokio",

@@ -803,6 +803,8 @@ pub struct ControlSocketCtx {
 /// Bind the control socket at `socket_path` and start accepting connections
 /// served from `ctx`. Dropping the returned handle unbinds it.
 pub fn start(socket_path: PathBuf, ctx: ControlSocketCtx) -> std::io::Result<ControlHandle> {
+    #[cfg(unix)]
+    validate_socket_dir(&socket_path)?;
     let listener = transport::bind(&socket_path)?;
     Ok(ControlHandle {
         accept_loop: spawn_accept_loop(listener, ctx),
@@ -824,6 +826,7 @@ pub fn start(socket_path: PathBuf, ctx: ControlSocketCtx) -> std::io::Result<Con
 pub fn start_stable(socket_path: PathBuf, ctx: ControlSocketCtx) -> std::io::Result<ControlHandle> {
     #[cfg(unix)]
     {
+        validate_socket_dir(&socket_path)?;
         let stable_lock = take_stable_lock(&socket_path)?;
         let listener = transport::bind(&socket_path)?;
         Ok(ControlHandle {
@@ -836,6 +839,20 @@ pub fn start_stable(socket_path: PathBuf, ctx: ControlSocketCtx) -> std::io::Res
     {
         start(socket_path, ctx)
     }
+}
+
+#[cfg(unix)]
+fn validate_socket_dir(socket_path: &Path) -> std::io::Result<()> {
+    let dir = socket_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("control socket {} has no directory", socket_path.display()),
+            )
+        })?;
+    chan_shell::validate_control_socket_dir(dir)
 }
 
 #[cfg(test)]
@@ -5144,9 +5161,15 @@ mod tests {
 
     use serde_json::Value;
 
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        let dir = tempfile::tempdir()?;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+        Ok(dir)
+    }
+
     #[tokio::test]
     async fn unix_transport_bind_sets_socket_mode_0600() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let path = dir.path().join("chan-control-mode.sock");
         let _listener = transport::bind(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -5154,18 +5177,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unix_transport_refuses_a_directory_other_users_can_write() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn control_bind_refuses_a_directory_other_users_can_write() {
+        let dir = private_tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
         let path = dir.path().join("chan-control-untrusted.sock");
-        let result = transport::bind(&path);
-        let error = result.err().expect("bind accepted a world-writable directory");
+        let result = start(
+            path,
+            test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace),
+        );
+        let error = result
+            .err()
+            .expect("bind accepted a world-writable directory");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().contains(&dir.path().display().to_string()));
+        assert!(error
+            .to_string()
+            .contains(&dir.path().display().to_string()));
     }
 
     #[tokio::test]
-    async fn unix_transport_refuses_a_directory_another_user_owns() {
+    async fn control_bind_refuses_a_directory_another_user_owns() {
         use std::os::unix::fs::MetadataExt;
 
         let dir = Path::new("/tmp");
@@ -5174,9 +5204,16 @@ mod tests {
             rustix::process::geteuid().as_raw(),
             "this test requires a /tmp owned by another user"
         );
-        let path = tempfile::NamedTempFile::new_in(dir).unwrap().into_temp_path();
-        let result = transport::bind(&path);
-        let error = result.err().expect("bind accepted a foreign-owned directory");
+        let path = tempfile::NamedTempFile::new_in(dir)
+            .unwrap()
+            .into_temp_path();
+        let result = start(
+            path.to_path_buf(),
+            test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace),
+        );
+        let error = result
+            .err()
+            .expect("bind accepted a foreign-owned directory");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("/tmp"));
     }
@@ -5598,7 +5635,7 @@ mod tests {
 
     #[tokio::test]
     async fn unserve_standalone_fires_shutdown_on_matching_root() {
-        let dir = tempfile::tempdir().expect("root");
+        let dir = private_tempdir().expect("root");
         let (tx, rx) = tokio::sync::watch::channel(false);
         let scope = UnserveScope::Standalone {
             root: dir.path().to_path_buf(),
@@ -5611,8 +5648,8 @@ mod tests {
 
     #[tokio::test]
     async fn unserve_standalone_refuses_a_foreign_root() {
-        let served = tempfile::tempdir().expect("served");
-        let other = tempfile::tempdir().expect("other");
+        let served = private_tempdir().expect("served");
+        let other = private_tempdir().expect("other");
         let (tx, rx) = tokio::sync::watch::channel(false);
         let scope = UnserveScope::Standalone {
             root: served.path().to_path_buf(),
@@ -5625,7 +5662,7 @@ mod tests {
 
     #[tokio::test]
     async fn unserve_unsupported_refuses() {
-        let dir = tempfile::tempdir().expect("root");
+        let dir = private_tempdir().expect("root");
         let resp = handle_unserve(&UnserveScope::Unsupported, dir.path(), false).await;
         assert!(matches!(resp, ControlResponse::Error { .. }));
     }
@@ -5764,7 +5801,7 @@ mod tests {
         use tokio::io::AsyncReadExt;
 
         tokio::time::timeout(Duration::from_secs(15), async {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir().unwrap();
             let socket = dir.path().join("control.sock");
             let mut listener = transport::bind(&socket).unwrap();
             let mut client = tokio::net::UnixStream::connect(&socket).await.unwrap();
@@ -5821,7 +5858,7 @@ mod tests {
     async fn control_request_deadline_serves_an_immediate_request() {
         use std::time::Duration;
         tokio::time::timeout(Duration::from_secs(3), async {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir().unwrap();
             let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
             let handle = start(dir.path().join("control.sock"), ctx).unwrap();
             assert!(matches!(
@@ -5838,7 +5875,7 @@ mod tests {
     async fn control_request_deadline_does_not_limit_a_parked_handover() {
         use std::time::Duration;
         tokio::time::timeout(Duration::from_secs(15), async {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir().unwrap();
             let socket = dir.path().join("control.sock");
             let mut listener = transport::bind(&socket).unwrap();
             let mut client = tokio::net::UnixStream::connect(&socket).await.unwrap();
@@ -5882,7 +5919,7 @@ mod tests {
     #[tokio::test]
     async fn control_unmount_ends_a_parked_handover() {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir().unwrap();
             let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
             let _leader = ctx.session_registry.join("leader", true, None).guard;
             let _follower = ctx.session_registry.join("follower", false, None).guard;
@@ -5928,8 +5965,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_control_removal_beside_an_abandoned_unregister_says_still_releasing() {
         use chan_workspace::paths::root_stall;
-        let cfg = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let cfg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
         let stored = lib.register_workspace(root.path()).unwrap().root_path;
         let host = Arc::new(chan_library::WorkspaceHost::new(
@@ -5975,7 +6012,7 @@ mod tests {
     #[tokio::test]
     async fn control_close_reply_survives_its_own_unmount() {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir().unwrap();
             let fake = Arc::new(FakeHost::new(0));
             let host: Arc<dyn chan_library::HostControl> = fake.clone();
             let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
@@ -6014,7 +6051,7 @@ mod tests {
         // A crashed server leaves its socket node behind (Drop never ran) and
         // holds no flock. The next boot must take the path over, and a client
         // holding the OLD $CHAN_CONTROL_SOCKET value must reach the NEW server.
-        let dir = tempfile::tempdir().expect("socket dir");
+        let dir = private_tempdir().expect("socket dir");
         let path = dir.path().join(stable_socket_name("lib-test", "/blog"));
         drop(std::os::unix::net::UnixListener::bind(&path).expect("stale node"));
         assert!(path.exists(), "the stale node survives its listener");
@@ -6043,7 +6080,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stable_bind_refuses_to_clobber_a_live_server() {
-        let dir = tempfile::tempdir().expect("socket dir");
+        let dir = private_tempdir().expect("socket dir");
         let path = dir.path().join(stable_socket_name("lib-test", "/blog"));
         let cell = Arc::new(RwLock::new(None));
         let _live = start_stable(
@@ -6069,7 +6106,7 @@ mod tests {
         // A dead server's flock can linger in a forked child until it execs
         // (the inherited fd shares the open file description). A holder that
         // vanishes within the takeover's retry budget must not fail the bind.
-        let dir = tempfile::tempdir().expect("socket dir");
+        let dir = private_tempdir().expect("socket dir");
         let path = dir.path().join(stable_socket_name("lib-test", "/blog"));
         let mut lock_path = path.as_os_str().to_owned();
         lock_path.push(".lock");
@@ -6121,7 +6158,7 @@ mod tests {
         // A workspace transfer must stay within the workspace root: in-root
         // paths relativize, an escape is rejected, and the root itself (where
         // `.` resolves) is the empty rel.
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir().unwrap();
         std::fs::create_dir(root.path().join("notes")).unwrap();
         std::fs::write(root.path().join("notes/a.md"), b"x").unwrap();
 
@@ -6131,7 +6168,7 @@ mod tests {
         );
         assert_eq!(abs_to_workspace_rel(root.path(), root.path()).unwrap(), "");
 
-        let outside = tempfile::tempdir().unwrap();
+        let outside = private_tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), b"x").unwrap();
         let err = abs_to_workspace_rel(root.path(), &outside.path().join("secret")).unwrap_err();
         // Typed, so `cs open` can route an escape instead of refusing it -- and
@@ -6281,7 +6318,7 @@ mod tests {
         // path; the control socket signals the window with it, leading `/`
         // stripped, rather than refusing as a workspace-only command. A live
         // /ws subscriber stands in for the connected window.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let file = dir.path().join("note.txt");
         std::fs::write(&file, b"x").unwrap();
 
@@ -6350,7 +6387,7 @@ mod tests {
         // The desktop's native-transfer validator refuses any `.` / `..`
         // part, so a forwarded literal dot fails the whole transfer; the
         // standalone leg must signal the window with the resolved directory.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let dotted = dir.path().join(".");
         // Lexical, not canonical: the typed directory minus the dot.
         let canonical_str = dir.path().to_string_lossy().to_string();
@@ -6404,7 +6441,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn standalone_download_symlinks_signal_archive_names_without_dereferencing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let (tx, mut rx) = broadcast::channel(8);
         for name in ["dangling", "directory"] {
             let target = if name == "dangling" {
@@ -6431,7 +6468,7 @@ mod tests {
         // (the download is saved by that name), `..` components are resolved
         // lexically, and a missing parent still yields a clean path for the
         // transfer route to refuse on its own terms.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let real = dir.path().join("real");
         std::fs::create_dir(&real).unwrap();
         std::fs::write(real.join("f.txt"), b"x").unwrap();
@@ -6518,7 +6555,7 @@ mod tests {
     #[tokio::test]
     async fn the_same_out_of_root_download_succeeds_from_workspace_and_terminal_windows() {
         let (_cfg, _root, workspace_cell) = bound_empty_cell();
-        let outside = tempfile::tempdir().unwrap();
+        let outside = private_tempdir().unwrap();
         let file = outside.path().join("artifact.bin");
         std::fs::write(&file, b"payload").unwrap();
 
@@ -6688,8 +6725,8 @@ mod tests {
 
     #[test]
     fn open_path_creates_markdown_and_broadcasts_window_command() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         std::fs::create_dir_all(root.path().join("notes")).expect("notes dir");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
@@ -6728,8 +6765,8 @@ mod tests {
 
     #[test]
     fn open_path_enters_existing_directory() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         std::fs::create_dir_all(root.path().join("notes/sub")).expect("sub dir");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
@@ -6767,8 +6804,8 @@ mod tests {
     /// extension.
     #[test]
     fn open_path_opens_existing_text_file() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         std::fs::write(root.path().join("notes.txt"), b"plain text\n").expect("seed txt");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
@@ -6801,8 +6838,8 @@ mod tests {
     /// peeks the bytes, it is not extension-only. Proves the content peek.
     #[test]
     fn open_path_opens_extensionless_text_by_content_sniff() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         std::fs::write(root.path().join("LICENSE"), b"All rights reserved.\n").expect("seed file");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
@@ -6834,8 +6871,8 @@ mod tests {
     /// An existing binary file is revealed in its parent directory.
     #[test]
     fn open_path_reveals_binary_file() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         std::fs::create_dir_all(root.path().join("media")).expect("media dir");
         std::fs::write(root.path().join("media/data.bin"), [0u8, 1, 2, 3]).expect("seed binary");
         let lib =
@@ -6876,8 +6913,8 @@ mod tests {
     /// and opened in the editor.
     #[test]
     fn open_path_creates_nonexistent_plaintext() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         std::fs::create_dir_all(root.path().join("notes")).expect("notes dir");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
@@ -6909,8 +6946,8 @@ mod tests {
     }
 
     fn test_workspace() -> (tempfile::TempDir, tempfile::TempDir, Arc<Workspace>) {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
         lib.register_workspace(root.path())
@@ -6930,7 +6967,7 @@ mod tests {
     fn empty_registry() -> (tempfile::TempDir, TerminalRegistry) {
         use crate::config::TerminalConfig;
         use crate::terminal_sessions::RegistryConfig;
-        let root = tempfile::tempdir().expect("workspace root");
+        let root = private_tempdir().expect("workspace root");
         let registry = TerminalRegistry::new(RegistryConfig {
             workspace_root: root.path().to_path_buf(),
             mcp_socket_path: None,
@@ -7739,7 +7776,7 @@ mod tests {
     /// A `/`-rooted capability over a temp tree, standing in for the machine
     /// filesystem a standalone tenant serves.
     fn mini_fs() -> (tempfile::TempDir, chan_workspace::MiniWorkspace) {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("home/user/src")).expect("home");
         std::fs::write(root.join("home/user/notes.md"), "# hi\n").expect("md");
@@ -7804,7 +7841,7 @@ mod tests {
         let err = standalone_open_target(&fs, std::path::Path::new("home/user")).expect_err("rel");
         assert!(err.contains("must be absolute"), "{err}");
         // A real path outside the root is refused rather than clamped.
-        let outside = tempfile::tempdir().expect("outside");
+        let outside = private_tempdir().expect("outside");
         let err = standalone_open_target(&fs, outside.path()).expect_err("outside");
         assert!(err.contains("outside this machine's root"), "{err}");
         drop(dir);
@@ -9763,7 +9800,7 @@ is_lead = false
     fn registry_with_mcp_socket() -> (tempfile::TempDir, TerminalRegistry) {
         use crate::config::TerminalConfig;
         use crate::terminal_sessions::RegistryConfig;
-        let root = tempfile::tempdir().expect("workspace root");
+        let root = private_tempdir().expect("workspace root");
         let registry = TerminalRegistry::new(RegistryConfig {
             workspace_root: root.path().to_path_buf(),
             mcp_socket_path: Some(std::path::PathBuf::from("/tmp/chan-test-mcp.sock")),
@@ -10181,8 +10218,8 @@ position = { row = 0, col = 1 }
         tempfile::TempDir,
         Arc<RwLock<Option<WorkspaceCell>>>,
     ) {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace root");
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
         lib.register_workspace(root.path())

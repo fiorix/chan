@@ -34,9 +34,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::control_socket::transport;
 
-/// Pick a unique IPC endpoint path: `$XDG_RUNTIME_DIR/chan-mcp-<pid>-<hex>.sock`
-/// on Unix when available, `/tmp/chan-mcp-<pid>-<hex>.sock` otherwise, and
-/// `\\.\pipe\chan-mcp-<pid>-<hex>` on Windows.
+/// Pick a unique IPC endpoint path in a validated Unix runtime directory or `/tmp/chan-control-<uid>`, or a named pipe on Windows.
 pub fn pick_socket_path() -> PathBuf {
     pick_named_socket_path("mcp")
 }
@@ -47,10 +45,7 @@ fn random_suffix() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// macOS caps `sun_path` at 104 bytes, so the suffix is short and the
-/// no-XDG fallback stays in short `/tmp`; `/tmp/chan-<name>-<pid>-<8 hex>.sock`
-/// fits well within that. On Windows a named pipe is
-/// `\\.\pipe\chan-<name>-<pid>-<8 hex>`.
+/// macOS caps `sun_path` at 104 bytes, so the suffix and the fixed private `/tmp/chan-control-<uid>` fallback keep the full path short. On Windows a named pipe is `\\.\pipe\chan-<name>-<pid>-<8 hex>`.
 #[cfg(unix)]
 pub(crate) fn pick_named_socket_path(name: &str) -> PathBuf {
     unix_socket_dir().join(format!(
@@ -75,7 +70,24 @@ pub(crate) fn unix_socket_dir() -> PathBuf {
 
 #[cfg(unix)]
 fn unix_socket_dir_from(xdg: Option<&Path>, fallback_root: &Path) -> PathBuf {
-    xdg.unwrap_or(fallback_root).to_path_buf()
+    let fallback = chan_shell::control_socket_fallback_dir_at(fallback_root);
+    if let Some(dir) = xdg {
+        match chan_shell::validate_control_socket_dir(dir) {
+            Ok(()) => return dir.to_path_buf(),
+            Err(err) => tracing::warn!(
+                "local socket directory {} rejected: {err}; using {}",
+                dir.display(),
+                fallback.display()
+            ),
+        }
+    }
+    if let Err(err) = chan_shell::ensure_control_socket_dir(&fallback) {
+        tracing::warn!(
+            "local socket fallback directory {} rejected: {err}",
+            fallback.display()
+        );
+    }
+    fallback
 }
 
 #[cfg(windows)]
@@ -149,6 +161,16 @@ where
 
 #[cfg(unix)]
 async fn connect_owner_socket(socket: &Path) -> std::io::Result<transport::Client> {
+    let dir = socket
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("MCP socket {} has no directory", socket.display()),
+            )
+        })?;
+    chan_shell::validate_control_socket_dir(dir)?;
     crate::local_socket::owner_socket_metadata(socket, crate::local_socket::effective_uid())?;
     transport::connect(socket).await
 }
@@ -160,7 +182,6 @@ fn mcp_socket_fallback_dirs(socket: &Path) -> Vec<PathBuf> {
         push_unique_path(&mut dirs, parent.to_path_buf());
     }
     push_unique_path(&mut dirs, unix_socket_dir());
-    push_unique_path(&mut dirs, PathBuf::from("/tmp"));
     dirs
 }
 
@@ -206,6 +227,9 @@ where
             continue;
         }
         seen_dirs.push(dir.to_path_buf());
+        if chan_shell::validate_control_socket_dir(dir).is_err() {
+            continue;
+        }
         let read_dir = match std::fs::read_dir(dir) {
             Ok(read_dir) => read_dir,
             Err(_) => continue,
@@ -271,6 +295,19 @@ pub fn start<DF>(socket_path: PathBuf, workspace_for: DF) -> std::io::Result<Bri
 where
     DF: Fn() -> Option<Arc<chan_workspace::Workspace>> + Send + Sync + 'static,
 {
+    #[cfg(unix)]
+    {
+        let dir = socket_path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("MCP socket {} has no directory", socket_path.display()),
+                )
+            })?;
+        chan_shell::validate_control_socket_dir(dir)?;
+    }
     let mut listener = transport::bind(&socket_path)?;
     let workspace_for = Arc::new(workspace_for);
     #[cfg(all(test, unix))]
@@ -320,14 +357,21 @@ where
 #[cfg(unix)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        let dir = tempfile::tempdir()?;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+        Ok(dir)
+    }
 
     #[test]
     fn absent_xdg_creates_and_uses_an_owner_only_fallback() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir().unwrap();
         let dir = unix_socket_dir_from(None, root.path());
         assert_eq!(
             dir,
@@ -350,7 +394,7 @@ mod tests {
     fn invalid_xdg_uses_the_owner_only_fallback() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir().unwrap();
         let xdg = root.path().join("unsafe-xdg");
         std::fs::create_dir(&xdg).unwrap();
         std::fs::set_permissions(&xdg, std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -369,11 +413,14 @@ mod tests {
 
     #[tokio::test]
     async fn systemd_style_xdg_directory_is_used_without_fallback() {
-        let xdg = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        assert_eq!(unix_socket_dir_from(Some(xdg.path()), root.path()), xdg.path());
+        let xdg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        assert_eq!(
+            unix_socket_dir_from(Some(xdg.path()), root.path()),
+            xdg.path()
+        );
         let path = xdg.path().join("chan-control-systemd.sock");
-        let _listener = transport::bind(&path).unwrap();
+        let _listener = start(path.clone(), || None).unwrap();
         assert!(path.exists());
     }
 
@@ -388,8 +435,8 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
         tokio::time::timeout(Duration::from_secs(15), async {
-            let config = tempfile::tempdir().unwrap();
-            let root = tempfile::tempdir().unwrap();
+            let config = private_tempdir().unwrap();
+            let root = private_tempdir().unwrap();
             let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
             let workspace = library.open_workspace(root.path()).unwrap();
@@ -407,7 +454,7 @@ mod tests {
             drop(artifacts.mcp_bridge.take());
             let state = artifacts.state.clone();
             let workspace = state.try_workspace().unwrap();
-            let archive_dir = tempfile::tempdir().unwrap();
+            let archive_dir = private_tempdir().unwrap();
             let archive = if import {
                 let path = archive_dir.path().join("metadata.tar.zst");
                 state.library.export_metadata_archive(&state.workspace_root, &path,
@@ -510,8 +557,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_idle_initialized_session_does_not_pin_the_workspace_cell() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let config = tempfile::tempdir().unwrap();
-            let root = tempfile::tempdir().unwrap();
+            let config = private_tempdir().unwrap();
+            let root = private_tempdir().unwrap();
             let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
             let workspace = library.open_workspace(root.path()).unwrap();
@@ -549,8 +596,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_unmount_releases_a_silent_clients_workspace() {
         tokio::time::timeout(Duration::from_secs(4), async {
-            let config = tempfile::tempdir().unwrap();
-            let root = tempfile::tempdir().unwrap();
+            let config = private_tempdir().unwrap();
+            let root = private_tempdir().unwrap();
             let library =
                 chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
@@ -586,8 +633,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_unmount_stops_a_running_tool_body_inside_its_walk() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let config = tempfile::tempdir().unwrap();
-            let root = tempfile::tempdir().unwrap();
+            let config = private_tempdir().unwrap();
+            let root = private_tempdir().unwrap();
             let library =
                 chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
@@ -708,8 +755,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_unmount_closes_hosted_sessions_before_waiting_for_the_flock() {
         tokio::time::timeout(Duration::from_secs(15), async {
-            let config = tempfile::tempdir().unwrap();
-            let root = tempfile::tempdir().unwrap();
+            let config = private_tempdir().unwrap();
+            let root = private_tempdir().unwrap();
             let library =
                 chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
@@ -796,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_connect_falls_back_to_live_socket_when_configured_socket_is_stale() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let preferred = dir.path().join("chan-mcp-stale.sock");
         let live = dir
             .path()
@@ -813,7 +860,7 @@ mod tests {
 
     #[test]
     fn fallback_candidates_require_owned_socket_nodes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let preferred = dir.path().join("chan-mcp-stale.sock");
         let real = dir.path().join("chan-mcp-real.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&real).unwrap();
@@ -829,7 +876,7 @@ mod tests {
 
     #[test]
     fn fallback_candidates_reject_a_different_owner_without_chown() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let preferred = dir.path().join("chan-mcp-stale.sock");
         let real = dir.path().join("chan-mcp-real.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&real).unwrap();
@@ -846,7 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_primary_requires_an_owned_socket_node() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir().unwrap();
         let real = dir.path().join("chan-mcp-real.sock");
         let listener = tokio::net::UnixListener::bind(&real).unwrap();
         let link = dir.path().join("chan-mcp-link.sock");
@@ -864,11 +911,15 @@ mod tests {
     }
 
     #[test]
-    fn fallback_dirs_cover_configured_runtime_and_tmp_once() {
+    fn fallback_dirs_cover_configured_runtime_and_private_tmp_once() {
         let configured = Path::new("/configured/chan-mcp-old.sock");
         let dirs = mcp_socket_fallback_dirs(configured);
         assert!(dirs.contains(&PathBuf::from("/configured")));
-        assert!(dirs.contains(&PathBuf::from("/tmp")));
+        assert!(
+            dirs.contains(&chan_shell::control_socket_fallback_dir_at(Path::new(
+                "/tmp"
+            )))
+        );
         let mut unique = dirs.clone();
         unique.sort();
         unique.dedup();
