@@ -5153,6 +5153,34 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 
+    #[tokio::test]
+    async fn unix_transport_refuses_a_directory_other_users_can_write() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = dir.path().join("chan-control-untrusted.sock");
+        let result = transport::bind(&path);
+        let error = result.err().expect("bind accepted a world-writable directory");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains(&dir.path().display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn unix_transport_refuses_a_directory_another_user_owns() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = Path::new("/tmp");
+        assert_ne!(
+            std::fs::symlink_metadata(dir).unwrap().uid(),
+            rustix::process::geteuid().as_raw(),
+            "this test requires a /tmp owned by another user"
+        );
+        let path = tempfile::NamedTempFile::new_in(dir).unwrap().into_temp_path();
+        let result = transport::bind(&path);
+        let error = result.err().expect("bind accepted a foreign-owned directory");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("/tmp"));
+    }
+
     #[test]
     fn looks_like_html_matches_documents_not_fragments() {
         assert!(looks_like_html(b"<!DOCTYPE html><html></html>"));

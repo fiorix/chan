@@ -1238,6 +1238,19 @@ mod tests {
         assert!(socket.announced.lock().unwrap().is_empty());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_environment_socket_in_a_writable_directory_is_refused() {
+        let dir = SocketDir::new("unsafe-live", 0o777);
+        let tenant = FakeTenant::spawn(&dir.stable(1), None, "wrong peer");
+        let socket = env_socket(&dir.stable(1), None);
+        let error = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .expect_err("connected through a world-writable directory");
+        assert!(error.to_string().contains(&dir.0.display().to_string()));
+        assert_eq!(tenant.connections(), 0, "request reached an untrusted peer");
+    }
+
     // A terminal whose tenant moved to another prefix keeps the socket of
     // the old one, which nothing binds. Its request reaches the one devserver
     // tenant beside that socket that serves its workspace, which is asked who
