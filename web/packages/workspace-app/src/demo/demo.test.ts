@@ -108,6 +108,24 @@ describe("MockWorkspaceStore", () => {
     expect(s.read("docs/a.md")).toBeNull();
   });
 
+  test("an empty folder survives a later mutation until it is moved or removed", () => {
+    const st = new MockWorkspaceStore(fixture());
+    st.create("empty", true);
+    st.create("docs/new.md", false, "x");
+    expect(st.isDir("empty")).toBe(true);
+    expect(st.list("").map((e) => e.path)).toContain("empty");
+
+    st.move("empty", "kept");
+    st.write("docs/other.md", "y");
+    expect(st.isDir("empty")).toBe(false);
+    expect(st.list("").map((e) => e.path)).toContain("kept");
+
+    st.remove("kept");
+    st.create("docs/last.md", false, "z");
+    expect(st.isDir("kept")).toBe(false);
+    expect(st.list("").map((e) => e.path)).not.toContain("kept");
+  });
+
   test("session is in-memory per window", () => {
     const s = new MockWorkspaceStore(fixture());
     expect(s.getSession("w1")).toBeNull();
@@ -187,6 +205,42 @@ describe("createDemoFetch router", () => {
     expect(st.read("docs/a.md")).toBeNull();
   });
 
+  test("a transfer answers a move and a copy with from/to pairs", async () => {
+    for (const op of ["move", "copy"]) {
+      const f = demoFetch(store());
+      const response = await f("/api/fs/transfer", {
+        method: "POST",
+        body: JSON.stringify({ op, sources: ["docs/a.md"], dest_dir: "" }),
+      });
+      expect(await response.json(), op).toEqual({
+        moved: [{ from: "docs/a.md", to: "a.md" }],
+        skipped: [],
+        conflicts: [],
+      });
+    }
+  });
+
+  test("a copy writes the destination, indexes it and keeps the source", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    await f("/api/fs/transfer", {
+      method: "POST",
+      body: JSON.stringify({ op: "copy", sources: ["docs/a.md", "src"], dest_dir: "docs" }),
+    });
+    await f("/api/fs/transfer", {
+      method: "POST",
+      body: JSON.stringify({ op: "copy", sources: ["docs/a.md"], dest_dir: "" }),
+    });
+
+    expect(st.read("a.md")?.content).toBe(A_MD);
+    expect(st.read("docs/a.md")?.content).toBe(A_MD);
+    expect(st.read("docs/src/main.rs")?.content).toBe("fn()");
+    expect(st.read("src/main.rs")?.content).toBe("fn()");
+    const headings = await (await f("/api/headings/a.md")).json();
+    expect(headings.length).toBeGreaterThan(0);
+    expect(headings).toEqual(await (await f("/api/headings/docs/a.md")).json());
+  });
+
   test("streaming read emits meta/chunk/done NDJSON", async () => {
     const f = demoFetch(store());
     const body = await (await f("/api/fs/README.md?stream=1")).text();
@@ -215,6 +269,47 @@ describe("createDemoFetch router", () => {
     };
     expect(draft.path).toBe(".Drafts/untitled-1/draft.md");
     expect(st.read(draft.path)).not.toBeNull();
+  });
+
+  test("discarding a draft drops it from the graph", async () => {
+    const st = store();
+    const graph = new DemoGraph(st);
+    const f = createDemoFetch(st, graph, new MockReports([]));
+    const draft = await (await f("/api/drafts/new", { method: "POST" })).json();
+    await f(`/api/fs/${draft.path}`, { method: "PUT", body: "# Draft heading\n" });
+    expect(graph.headings(draft.path)).toHaveLength(1);
+
+    await f("/api/drafts/discard", { method: "POST", body: JSON.stringify({ path: draft.path }) });
+
+    expect(graph.headings(draft.path)).toEqual([]);
+  });
+
+  test("promoting a draft renames it in the graph", async () => {
+    const st = store();
+    const graph = new DemoGraph(st);
+    const f = createDemoFetch(st, graph, new MockReports([]));
+    const draft = await (await f("/api/drafts/new", { method: "POST" })).json();
+    await f(`/api/fs/${draft.path}`, { method: "PUT", body: "# Draft heading\n" });
+
+    await f("/api/drafts/promote", {
+      method: "POST",
+      body: JSON.stringify({ path: draft.path, target: "docs/promoted.md" }),
+    });
+
+    expect(graph.headings("docs/promoted.md")).toHaveLength(1);
+    expect(graph.headings(draft.path)).toEqual([]);
+  });
+
+  test("the terminal shells list is routed and empty", async () => {
+    const response = await demoFetch(store())("/api/terminal/shells");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ profiles: [], default_profile: null });
+  });
+
+  test("the extensions list is routed and empty", async () => {
+    const response = await demoFetch(store())("/api/extensions");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([]);
   });
 
   test("unhandled GET path is 404", async () => {
