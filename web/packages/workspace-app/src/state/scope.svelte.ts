@@ -1,23 +1,5 @@
-// The scope type for the Graph overlay. `ScopeOption` is the
-// discriminated union the graph uses to describe "what part of my
-// world am I looking at": a file, directory, git repo, group of
-// visible files, tag, contact, language, the whole workspace, or
-// global cross-workspace scope.
-//
-// Each graph tab stores the chosen scope as a `scopeId` string
-// (`file:<path>`, `dir:<path>`, `tag:<id>`, `language:<lang>`, ...);
-// GraphPanel's `synthesizeScope` turns that id back into a typed
-// ScopeOption and `graphTitle` renders it.
-//
-// The Search overlay has no scope picker (search is workspace-wide),
-// so this module carries no dropdown-options builder.
+// GraphPanel resolves each graph tab's scopeId into this type.
 
-/// Picker option, as a discriminated union so consumers can
-/// pattern-match on `kind` and access the kind-specific fields
-/// (path for file/dir, repo path for git_repo, key+paths for
-/// group, nothing extra for workspace or global). `enabled` defaults
-/// true; consumers render it as disabled in the dropdown when
-/// false (e.g. global before cross-workspace indexing ships).
 export type ScopeOption =
   | {
       id: string;
@@ -38,22 +20,6 @@ export type ScopeOption =
       /// means the workspace root itself; consumers should treat that
       /// case the same as `workspace` scope.
       path: string;
-      enabled?: boolean;
-    }
-  | {
-      id: string;
-      kind: "git_repo";
-      label: string;
-      /// Repo path relative to the workspace root.
-      root: string;
-      enabled?: boolean;
-    }
-  | {
-      id: string;
-      kind: "group";
-      label: string;
-      key: string;
-      paths: string[];
       enabled?: boolean;
     }
   | {
@@ -103,5 +69,4 @@ export type ScopeOption =
       language: string;
       enabled?: boolean;
     }
-  | { id: "workspace"; kind: "workspace"; label: string; enabled?: boolean }
-  | { id: "global"; kind: "global"; label: string; enabled?: boolean };
+  | { id: "workspace"; kind: "workspace"; label: string; enabled?: boolean };
