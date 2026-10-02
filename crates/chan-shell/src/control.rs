@@ -1151,9 +1151,10 @@ mod tests {
         }
     }
 
-    /// A directory of the test's own under the temp dir, with the mode it
-    /// is given, removed on drop. The name is short: macOS caps a socket
-    /// path at 104 bytes.
+    /// A directory of the test's own under `/tmp`, with the mode it is
+    /// given, removed on drop. The root is fixed, as the private fallback's
+    /// is: macOS caps a socket path at 104 bytes and its per-user temp dir
+    /// takes 49 of them, which leaves no room for a stable socket's name.
     #[cfg(unix)]
     struct SocketDir(PathBuf);
 
@@ -1161,7 +1162,7 @@ mod tests {
     impl SocketDir {
         fn new(tag: &str, mode: u32) -> Self {
             use std::os::unix::fs::PermissionsExt;
-            let path = std::env::temp_dir().join(format!("cs-{}-{tag}", std::process::id()));
+            let path = Path::new("/tmp").join(format!("cs-{}-{tag}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
