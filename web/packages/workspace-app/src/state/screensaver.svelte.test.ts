@@ -108,6 +108,27 @@ describe("the countdown", () => {
     expect(machine.screensaver.locked).toBe(false);
   });
 
+  test("inner scroller activity resets the countdown and detaches on cleanup", async () => {
+    await load();
+    const scroller = document.createElement("div");
+    document.body.append(scroller);
+    const uninstall = machine.installScreensaverTracker();
+    try {
+      await vi.advanceTimersByTimeAsync(50_000);
+      scroller.dispatchEvent(new Event("scroll", { bubbles: false }));
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(machine.screensaver.locked).toBe(false);
+
+      uninstall();
+      scroller.dispatchEvent(new Event("scroll", { bubbles: false }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(machine.screensaver.locked).toBe(false);
+    } finally {
+      uninstall();
+      scroller.remove();
+    }
+  });
+
   test("never runs while the lock is disabled", async () => {
     await load({ enabled: false });
     machine.noteScreensaverActivity();
