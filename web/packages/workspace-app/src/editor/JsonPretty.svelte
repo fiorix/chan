@@ -15,7 +15,6 @@
   let { value }: { value: string } = $props();
 
   type Parsed =
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     | { ok: true; value: any }
     | { ok: false; error: string };
 
@@ -31,7 +30,6 @@
     // "invalid".
     if (src.trim() === "") return { ok: true, value: null };
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return { ok: true, value: JSON.parse(src) as any };
     } catch (e) {
       return { ok: false, error: (e as Error).message };
