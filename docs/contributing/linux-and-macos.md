@@ -240,7 +240,7 @@ CHAN_HOME=/tmp/chan-devserver-home \
 The built macOS `.app` (`make chan-desktop` produces `target/release/bundle/macos/Chan.app`) reads and writes your **real** `~/.chan` library and, on a plain launch, hands off to your **real** running chan-desktop. To exercise a dev build without disturbing either, run it from a terminal with a throwaway `HOME` and `XDG_RUNTIME_DIR`:
 
 ```sh
-rm -rf /tmp/chan-smoke /tmp/chan-smoke-xdg && mkdir -p /tmp/chan-smoke /tmp/chan-smoke-xdg
+rm -rf /tmp/chan-smoke /tmp/chan-smoke-xdg && mkdir -p /tmp/chan-smoke /tmp/chan-smoke-xdg && chmod 700 /tmp/chan-smoke-xdg
 HOME=/tmp/chan-smoke XDG_RUNTIME_DIR=/tmp/chan-smoke-xdg \
   target/release/bundle/macos/Chan.app/Contents/MacOS/chan-desktop
 ```

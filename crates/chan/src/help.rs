@@ -289,6 +289,7 @@ pub(crate) const CHAN_DEVSERVER_AFTER: &str = r"EXAMPLES:
     forwards its port to local 127.0.0.1:8787, and stays in the
     foreground.
 
+  mkdir -p /tmp/iso-run && chmod 700 /tmp/iso-run
   CHAN_HOME=/tmp/iso XDG_RUNTIME_DIR=/tmp/iso-run \
     chan devserver run --port 8788
     A second, fully isolated instance beside your real one.
@@ -299,9 +300,10 @@ PER PLATFORM:
   and pass --port. CHAN_HOME REPLACES ~/.chan (it is not a parent
   of it): registry, devserver config, tokens, per-workspace
   metadata and locks all move there. The control socket does NOT
-  route through CHAN_HOME -- it lands in $XDG_RUNTIME_DIR (else
-  /tmp) -- so a fully isolated instance needs XDG_RUNTIME_DIR set
-  to its own directory too.
+  route through CHAN_HOME -- it lands in a real, owner-owned 0700
+  $XDG_RUNTIME_DIR, or /tmp/chan-control-<uid> when that is absent
+  or unsafe -- so a fully isolated instance needs its own private
+  XDG_RUNTIME_DIR too.
 
   macOS: run the devserver inside a Lima VM and connect to it, so
   the workspace lives on Linux. Connect script:

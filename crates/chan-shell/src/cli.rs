@@ -62,12 +62,12 @@ Every chan-spawned terminal carries these. Read them; do not set them.
                         When it names a devserver socket that is gone,
                         cs asks the devserver sockets beside it which
                         one serves CHAN_WORKSPACE_PATH, and uses that
-                        one only when exactly one does. It asks only in
-                        a directory without group or world write, such
-                        as the /run/user/<uid> systemd makes on Linux:
-                        not in /tmp, where the sockets are when
-                        XDG_RUNTIME_DIR is unset (the macOS default),
-                        and never on Windows.
+                        one only when exactly one does. It requires a
+                        real directory owned by this user, mode 0700,
+                        and an owned socket node. With no usable
+                        XDG_RUNTIME_DIR, sockets use the private
+                        /tmp/chan-control-<uid> directory. It never
+                        searches on Windows.
   CHAN_WINDOW_ID        the window to act on. Window-targeting commands
                         use it by default; tab openers and pane commands
                         can override it with --window.
