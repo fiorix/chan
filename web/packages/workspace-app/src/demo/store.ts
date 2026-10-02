@@ -41,6 +41,9 @@ export class MockWorkspaceStore {
   #files = new Map<string, MockFileEntry>();
   #children = new Map<string, DirBucket>();
   #dirs = new Set<string>();
+  // Folders created empty. Every other directory is implied by a file under
+  // it, so a rebuild from the file map alone would lose these.
+  #folders = new Set<string>();
   #sessions = new Map<string, unknown>();
 
   constructor(data: MockWorkspaceData) {
@@ -63,15 +66,18 @@ export class MockWorkspaceStore {
       }
       return b;
     };
-    for (const path of this.#files.keys()) {
-      bucket(parentOf(path)).files.add(path);
-      let dir = parentOf(path);
+    const seed = (dir: string): void => {
       while (dir !== "") {
         this.#dirs.add(dir);
         bucket(parentOf(dir)).dirs.add(dir);
         dir = parentOf(dir);
       }
+    };
+    for (const path of this.#files.keys()) {
+      bucket(parentOf(path)).files.add(path);
+      seed(parentOf(path));
     }
+    for (const dir of this.#folders) seed(dir);
   }
 
   isDir(path: string): boolean {
@@ -155,14 +161,8 @@ export class MockWorkspaceStore {
 
   create(path: string, isDir: boolean, content?: string): void {
     if (isDir) {
-      // Directories are implicit in the index; seed an empty bucket so an
-      // empty new folder still lists (until it gets a child).
-      this.#dirs.add(path);
-      if (!this.#children.has(path)) {
-        this.#children.set(path, { dirs: new Set(), files: new Set() });
-      }
-      const b = this.#children.get(parentOf(path));
-      if (b) b.dirs.add(path);
+      this.#folders.add(path);
+      this.#reindex();
       return;
     }
     this.#files.set(path, {
@@ -184,6 +184,9 @@ export class MockWorkspaceStore {
       for (const p of [...this.#files.keys()]) {
         if (p.startsWith(prefix)) this.#files.delete(p);
       }
+      for (const dir of [...this.#folders]) {
+        if (dir === path || dir.startsWith(prefix)) this.#folders.delete(dir);
+      }
     }
     this.#reindex();
   }
@@ -204,6 +207,11 @@ export class MockWorkspaceStore {
         this.#files.delete(p);
         this.#files.set(np, { ...e, path: np });
         renamed.push([p, np]);
+      }
+      for (const dir of [...this.#folders]) {
+        if (dir !== from && !dir.startsWith(prefix)) continue;
+        this.#folders.delete(dir);
+        this.#folders.add(`${to}${dir.slice(from.length)}`);
       }
     }
     this.#reindex();
