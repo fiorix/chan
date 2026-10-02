@@ -37,3 +37,9 @@ As the lead recommends: the removal unregisters the row of the runtime that it c
 1. A forget of a restored workspace whose stored root was pointed at another registered workspace's folder while it was mounted unregisters that workspace's row and leaves the other one whole, pinned red first.
 2. A launcher delete of such a row does the same, pinned.
 3. A removal purges the windows stored under the stored root of the row it removed, whether or not the workspace was mounted, pinned.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+For a removal that nothing races, as the ruling narrowed it: the host's removal keys the workspace by `workspace_key`, unregisters the row its close found or its lookup selected by the root that row stores, and purges the windows recorded under the key, the asked path or the row's root (`remove_workspace_for_root`, `unregister_registered_row` and `workspace_window_ids`, `crates/chan-library/src/host.rs`; `Library::unregister_workspace_row`, `crates/chan-workspace/src/library.rs`; `remove_stored`, `crates/chan-workspace/src/registry.rs`). Pinned in the host's tests, in the launcher's remove route (`crates/chan-server/src/routes/library.rs`) and in the desktop's forget (`desktop/src-tauri/src/main.rs`), which now asserts the asked row gone and the other workspace left. The concurrent selection race is [a-removal-does-not-hold-the-row-it-selected](../v0.102.0/a-removal-does-not-hold-the-row-it-selected.md). The changelog has the entry, with its words narrowed to the case where the link and the registered workspaces stay as they are.

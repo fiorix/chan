@@ -27,6 +27,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 
 On 2026-10-01, accepted integration `d8d30bc29` passed the combined gate with ten more editor rows, the shared request card, media-viewer overlay and code report section with their file-URL and formatting seams, the bounded registration permit, the typed refusal envelope and its launcher/configuration readers, the CLI close reader, the host-lock envelope and the extension tab's unavailable/reload behavior. Its first gate was red at a test's raw temp-path expectation; the canonical-root correction passed the symlinked-temp step on the second gate. The four remaining workspace-app refusal readers passed the combined gate at accepted integration `7758dc8ff`. Open integration `0b3638dcb` adds the launcher's framework refusal conversions and removes its temporary checker admissions, establishes the released desktop reader's input-level proof, shares the unchanged HTTP live-terminals builder, and carries the first bounded frontend hygiene pass. Each accepted range has its own committed-tip gate; the combined gate at the final integration tip remains pending. Broad comments and the remaining hygiene rows, display checks and recorded host decisions stay open; no row here claims rc0, a mixed-process desktop exchange or main acceptance.
 
+On 2026-10-02 accepted integration `d7a7a7fa0` passed the combined gate on Linux, eighty commits over the tip the paragraph above describes and none of them on `main`: `make pre-push` with the Nix hash check inside it, the suites under a symlinked temp directory and the Windows-target check, 5,228 Rust tests passed and none failed. It is the gate that paragraph left pending. An integration of the first sixteen of those commits was red on 2026-10-01 at one test of chan-workspace, a reindex that met the search index's writer lock busy; it was not run again, and the repair below came before the next. Three repairs in the eighty have no item of their own. `chan serve --no-settings`, with `chan open` and `chan workspace serve`, refuses a serve that would hand the workspace to chan-desktop or to a devserver, neither of which would enforce the flag, and names `--standalone`, before anything is created, registered or sent (`cmd_serve`, `crates/chan/src/lib.rs`), which the owner authorized on 2026-10-01. A workspace keeps its writer lock until its index writer, its graph and its recovery worker are gone, the lock being the last field of `Workspace` (`crates/chan-workspace/src/workspace.rs`), so no opener is admitted beside them, authorized the same day. And the search index takes its lock files through the crate's own lock, recorded in [a-spawned-child-holds-a-lock-until-it-execs](v0.101.0/a-spawned-child-holds-a-lock-until-it-execs.md). The limits of the first two, as their acceptances state them: the refusal ran on Linux against a stand-in for the desktop's protocol and no native window, and its help text's width is not certified; the lock's order is pinned at the index and follows from the field order for the graph and the worker, a slow teardown keeps a reopen waiting longer, and a descriptor permit is still released before the index's and the graph's descriptors. Built and recorded in their items: the control socket's owner rule; the startup restore's cap of four, its gate for each root not built and open with the owner; the two exact pins and the gateway's dependency work, with both Nix hashes pinned; four more rows of the frontend review remainder and the workspace demo's seven; and the comment item's passes and deletions. Ten more rows whose builds earlier integrations hold gained their records the same day, from a reading of the code at that tip. Thirteen rows move from build to rc0. No native macOS or Windows run, no reading on a display, no browser smoke and no signed installer check has been made for any of it; those are the owner's at the release candidate.
+
 **Frontend review, phased from v0.100.0**
 
 | item | state | next |
@@ -90,8 +92,8 @@ On 2026-10-01, accepted integration `d8d30bc29` passed the combined gate with te
 | item | state | next |
 | --- | --- | --- |
 | [the-chan-cli-crate-is-one-13k-line-file][clib] | accepted | build |
-| [two-exact-pins-hold-back-web-upgrades][pins] | accepted | build |
-| [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | accepted | build |
+| [two-exact-pins-hold-back-web-upgrades][pins] | accepted | rc0 |
+| [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | accepted | rc0 |
 | [gateway-ci-misses-root-tunnel-crate-changes][gwci] | landed | GA |
 | [the-web-bundles-still-build-on-node-20][nd22] | landed | GA |
 | [the-launcher-build-hint-cannot-run][hint] | landed | GA |
@@ -174,25 +176,25 @@ On 2026-10-01, accepted integration `d8d30bc29` passed the combined gate with te
 | [a-live-drawing-gains-appstate-keys-with-no-edit][aswrt] | accepted | rc0 |
 | [a-drawing-that-does-not-parse-loses-its-editor][drwed] | landed | GA |
 | [a-raw-devserver-restart-may-close-desktop-windows][rrwin] | raised | decide |
-| [a-drawing-library-crash-publishes-an-empty-scene][unmt] | accepted | build |
-| [the-aur-check-is-killed-with-its-hosted-runner][aurkl] | accepted | build |
+| [a-drawing-library-crash-publishes-an-empty-scene][unmt] | accepted | rc0 |
+| [the-aur-check-is-killed-with-its-hosted-runner][aurkl] | accepted | rc0 |
 | [a-browser-show-opens-a-twin-of-a-native-window][natsh] | landed | GA |
 | [a-kept-terminal-row-keeps-its-sessions-alive][ktrow] | withdrawn | GA |
-| [a-destructive-confirm-focuses-its-confirm-button][cfoc] | accepted | build |
-| [a-failed-save-replaces-the-editor-with-its-error][svfal] | accepted | build |
-| [a-test-reads-a-row-before-the-lock-is-released][rowrc] | accepted | build |
-| [a-closed-window-discards-a-connected-record][clwdc] | accepted | build |
+| [a-destructive-confirm-focuses-its-confirm-button][cfoc] | accepted | rc0 |
+| [a-failed-save-replaces-the-editor-with-its-error][svfal] | accepted | rc0 |
+| [a-test-reads-a-row-before-the-lock-is-released][rowrc] | accepted | rc0 |
+| [a-closed-window-discards-a-connected-record][clwdc] | accepted | rc0 |
 | [tests-signal-a-process-they-did-not-start][fkpid] | landed | GA |
-| [a-sweep-test-overran-its-ten-seconds-on-windows][wintmo] | accepted | build |
+| [a-sweep-test-overran-its-ten-seconds-on-windows][wintmo] | accepted | rc0 |
 | [the-root-stall-names-a-step-by-symbols][stsym] | landed | GA |
 | [a-restored-terminals-close-signals-a-bare-pid][impid] | accepted | rc0 |
-| [the-control-sockets-directory-is-believed-as-found][sok] | accepted | build |
+| [the-control-sockets-directory-is-believed-as-found][sok] | accepted | rc0 |
 | [a-test-waits-on-a-reference-and-not-on-the-lock][wkref] | landed | GA |
-| [a-removal-unregisters-by-the-name-it-is-given][rmnam] | accepted | build |
+| [a-removal-unregisters-by-the-name-it-is-given][rmnam] | accepted | rc0 |
 | [an-element-with-no-version-is-written-unedited][nvers] | accepted | rc0 |
-| [a-stroke-in-the-debounce-is-lost-to-a-load][ldstk] | accepted | build |
+| [a-stroke-in-the-debounce-is-lost-to-a-load][ldstk] | accepted | rc0 |
 | [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
-| [a-tab-copy-reseeds-over-a-first-stroke][cpsed] | accepted | build |
+| [a-tab-copy-reseeds-over-a-first-stroke][cpsed] | accepted | rc0 |
 
 ### v0.102.0
 

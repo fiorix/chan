@@ -38,3 +38,9 @@ As the report proposes: run the tab's pending-edit flush before the guard of `re
 1. A replace or an upload over a drawing whose last stroke is inside the debounce leaves the tab alone, dirty and holding the stroke; pinned red first.
 2. The missing-file check the same; pinned red first.
 3. Reload from disk on a drawing with no live session asks before it discards such a stroke; pinned red first.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+Two of the three routes are built, as the owner's ruling accepted the item: a refresh of a tab from disk, which a replace or an upload reaches, and Reload from disk each commit the waiting edits before their guard reads the buffer (`refreshTabFromDisk` and `forceReloadFromDisk`, `web/packages/workspace-app/src``/state/tabs.svelte.ts`). Pinned in `components/FileEditorTab.canvasEdits.test.ts`: a refresh leaves a waiting stroke in the drawing's buffer, and Reload from disk asks before it discards one. **Not built, by that ruling:** the missing-file check (`resolveMissingFileCheck`) still compares the buffer with the saved text and commits nothing first, so the item's second acceptance point is open, and `editor/design.md` says so. The changelog has the entry for the two routes.

@@ -39,3 +39,9 @@ Move each writer above to the field that the drawing's refused save gives a save
 1. A save that throws at a close, at the autosave, at a move or in a draft's flow keeps the editor and says that the file was not saved, pinned for each.
 2. A live session's report of a failed write keeps the editor, pinned.
 3. A load that fails still shows its error in place of the editor.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+The five writers that were left set a save error of their own and no longer the tab's load error, so the editor stays mounted with what was typed and says that the save failed and why (`classicSaveFailure` and its callers in `state/tabs.svelte.ts`, the notice in `components/FileEditorTab.svelte`, under `web/packages/workspace-app/src`); a close of such a tab asks whether to close without saving, and a draft's or a move's failure is notified once. Pinned at the store for the close, the move and the draft's save, and mounted for a rejected text autosave and a rejected drawing autosave; a failed load still replaces the editor, pinned. A live document or drawing whose push is not answered keeps its editor too, by an earlier range. `performSaveOnce` still writes the load error "file is still loading" for a tab that is loading, which is none of the five. The changelog has both entries.

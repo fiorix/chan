@@ -33,3 +33,9 @@ Suggestions, beyond the record: the launcher's reconcile leaves the record of a 
 1. A closed handle whose record reads connected discards nothing, pinned red first.
 2. A closed handle whose record does not read connected discards as now, and the row's Close discards as now; pinned.
 3. `web/packages/launcher/design.md` says what a close of one of two windows on an id does.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+In the shape that is local to the launcher, as ruled: the launcher discards a closed browser window's record only when the record is not connected, and keeps the closed handle until the first push that shows it disconnected, when it discards the record once (`reconcileWindows`, `handleState` and `discardBrowserWindow`, `web/packages/launcher/src/state/windowManager.svelte.ts`). The server's discard route is unchanged. Pinned in `windowManager.svelte.test.ts`: a connected record survives the close of its local browser handle, a disconnected one is discarded, and a kept handle is discarded exactly once; `web/packages/launcher/design.md` says what closing one of two windows on one id does and what it costs. The changelog has the entry.

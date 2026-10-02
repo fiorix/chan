@@ -35,3 +35,9 @@ As suggestions: catch the library's failure around the board, by an error bounda
 1. A library that throws after a seed, with a flush pending, puts nothing in the tab's buffer; pinned red first.
 2. A render after that, for a theme or a read-only change, publishes nothing until the board is seeded again from the buffer; pinned.
 3. The board says that the drawing library failed; checked mounted.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+The canvas is opened for this one change, as ruled, a guard and nothing more. An error boundary around the drawing library (`DrawingBoundary`, `onLibraryFailure`, `web/packages/workspace-app/src``/editor/ExcalidrawCanvas.svelte`) catches a throw, drops the library's handle and the seeded mark, cancels the pending serialize and sets `libraryFailed`; while that is set nothing is rendered into the library again and nothing is published, and an alert says that the drawing library failed. All three acceptance points are pinned in `components/FileEditorTab.canvasEdits.test.ts` under "a drawing library failure": a failure with a stroke waiting keeps the saved buffer and writes nothing, theme and read-only changes do not render the library again, and the alert shows. Recovery is a new mount, which restores the buffer without writing; no render in the same mount carries the buffer again. The changelog has the entry.

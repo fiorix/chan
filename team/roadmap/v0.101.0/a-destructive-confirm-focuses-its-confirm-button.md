@@ -33,3 +33,9 @@ Let the dialog focus its cancel for a confirm marked destructive and its confirm
 1. Enter on a destructive confirm as it opens answers cancel, pinned mounted, red first.
 2. A confirm that is not destructive still answers yes to Enter.
 3. Escape and a click outside still cancel, and the focus goes back where it was.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+The shared confirm dialog focuses Cancel when the confirmation is destructive and its confirm button otherwise, a replacement confirmation included (`components/ConfirmModal.svelte` under `web/packages/workspace-app/src`, with `uiConfirm` in `state/confirm.svelte.ts`); Enter activates a focused button, and elsewhere in the panel it confirms only a confirmation that is not destructive. Nine call sites pass `destructive`. The three acceptance points are pinned in `components/ConfirmModal.test.ts` under "destructive confirm": it opens with Cancel focused and Enter there cancels, a confirmation that is not destructive keeps Enter as confirm, and Escape, a click on the backdrop and the return of focus are as before. The changelog has the entry.

@@ -49,3 +49,9 @@ Whichever is chosen, a log line before `check()` of the CPUs and the memory the 
 1. The owner's choice is in place, and what `check()` still proves and what the bound costs are written where it is set.
 2. The job logs, before `check()`, the CPUs and the memory the container sees and the job count cargo uses.
 3. One run of the job with the bound, on a hosted runner, finishes `check()` with its tests run, and its time is recorded against the runs above.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+The bound is set in the CI wrapper and the published recipe is unchanged, as ruled: `packaging/distros/arch/build-in-ci.sh` takes `AUR_CARGO_JOBS`, a positive integer that defaults to 2, and hands it to the container as `CARGO_BUILD_JOBS`; `build-in-container.sh` carries it to the build user and prints one line of the resources it sees, the CPUs, the cgroup's CPU and memory limits, the machine's memory and the job count, before `makepkg` starts. `test-build-in-ci.sh` pins the handoff; no workflow, Makefile or script runs it. The first two acceptance points are met by the wrapper's comment, the directory's README and that line. **The third is not shown:** a hosted run of the AUR check with its time is main CI's, and none has run on this build. No changelog line.

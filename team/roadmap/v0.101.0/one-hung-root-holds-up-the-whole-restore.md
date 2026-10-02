@@ -33,3 +33,10 @@ The review offers two shapes: run the attempts concurrently under a cap, or gate
 ## Boundaries
 
 `crates/chan-server/src/devserver.rs`: `restore_prepared_workspaces`, the startup phases and `gate_tenant_during_startup`, and the fdstore apply if the choice is to gate per root. The desktop's boot restore was not read for this item.
+
+## What shipped
+
+The cap is built and the gate for each root is not. The build is on the integration branch and not on `main`: three commits in `crates/chan-server/src/devserver.rs`, `crates/chan-server/design.md` and the changelog, accepted on 2026-10-02 on the lead's reading of the fix's production diff whole, its tests not read by the lead, with the combined gate green on Linux at the integration's tip.
+
+- **Four attempts at once.** `restore_prepared_workspaces` keeps at most `STARTUP_RESTORE_CONCURRENCY`, four, mount attempts in flight, admitted in the order the rows were prepared, and starts the next as soon as one ends. A root that does not answer holds one of the four until its own bound of sixty seconds ends, and the rows behind it are mounted meanwhile. Each attempt's bound, the whole restore's budget and its failure reason for the rows still queued when it ends, a stop's cancellation, the fdstore apply after the whole restore and `Ready` after the apply are as they were.
+- **Pinned,** six tests beside the function, red first by the builder's record: the rows behind a held one are mounted while it is held, four attempts run at once and no more, each row has its own outcome whichever settles first, a held row keeps the fdstore apply, `Ready` and the gate waiting, a stop leaves a settled row mounted and cancels the rest, and rows queued when the budget ends fail without an attempt. Each was run 200 times as it is and 200 times on one CPU; of the six mutations two red a second pin of the same range as well.

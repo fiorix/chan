@@ -30,3 +30,9 @@ The test in `crates/chan-server/src/devserver.rs`. No production change.
 
 1. The test reads the row only when the release cannot change what it reads, shown by a run that holds the release where a seam allows.
 2. The test passes in a loop of its module on one CPU beside a compile, and the count is in the report.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+A test-only change: `cancelled_client_off_persists_after_host_detachment` (`crates/chan-server/src/devserver.rs`) waits until no reference is left and the root's lock is free before it reads the row and asserts it stopped, and keeps its other assertions and its ten seconds. The ordering is read in the code; the run that holds the release and the loop the acceptance asks for are not in the tree and were not read for this record. No changelog line, the change being a test's.

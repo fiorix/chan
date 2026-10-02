@@ -30,3 +30,9 @@ Either Hybrid Nav's entry and commit commit every tab's waiting input before the
 
 1. A first stroke waiting at a Hybrid Nav commit is on the tab the pane holds afterwards and in its buffer; pinned red first in the mounted app.
 2. The same at the mode's entry, if its draft replaces what the pane renders.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, in ranges the lead accepted, with the combined gate green on Linux at the integration's tip. This record was written on 2026-10-02 from a reading of the code at that tip; what the acceptance of its range found beyond the code is in the round's records and was not read for it.
+
+Hybrid Nav flushes every file tab's waiting editor input before it copies the layout: at entry and at a transaction's entry before the layout is cloned into the draft, and at commit before the draft is cloned back (`flushLayoutEdits`, called from `enterPaneMode`, `enterPaneModeTransaction` and `commitPaneMode`, `web/packages/workspace-app/src``/state/tabs.svelte.ts`). The canvas is not touched. Both acceptance points are pinned mounted in `components/paneKeepAliveMount.test.ts`: a first stroke waiting at entry survives in both trees, and one waiting at commit survives in the live tree. The changelog says it in a clause of the entry on a drawing's last stroke.
