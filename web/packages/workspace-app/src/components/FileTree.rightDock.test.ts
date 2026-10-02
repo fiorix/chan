@@ -6,7 +6,7 @@
 // pane. A FileBrowserSurface is mounted over the demo workspace in each dock
 // position.
 
-import { mount, tick, unmount } from "svelte";
+import { mount, tick, unmount, type ComponentProps } from "svelte";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import FileBrowserSurface from "./FileBrowserSurface.svelte";
@@ -46,7 +46,7 @@ afterEach(async () => {
   timers.release();
 });
 
-async function render(props: Record<string, unknown>): Promise<HTMLElement> {
+async function render(props: ComponentProps<typeof FileBrowserSurface>): Promise<HTMLElement> {
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(FileBrowserSurface, { target, props }));
