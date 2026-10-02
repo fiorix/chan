@@ -7111,6 +7111,535 @@ mod tests {
         );
     }
 
+    /// The startup restore's attempts beside one another: how many run at
+    /// once, what a held row costs the rows behind it, and what a held row
+    /// still holds up.
+    mod startup_restore_cap {
+        use super::*;
+
+        /// A devserver state before `Ready` whose `roots` are registered and
+        /// prepared as desired-on rows, in that order, with the attempts a
+        /// startup restore runs for them, each bounded by `mount_timeout`.
+        async fn prepared_restore(
+            home: &Path,
+            roots: &[tempfile::TempDir],
+            mount_timeout: Duration,
+        ) -> (Arc<DevserverState>, Vec<MountAttempt>) {
+            let mut state = test_state(home, "127.0.0.1:0".parse().unwrap());
+            Arc::get_mut(&mut state)
+                .expect("fixture: an unshared state")
+                .mount_timeout = mount_timeout;
+            state.host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.join("windows.json"))),
+                "lib-test".into(),
+            );
+            let mut rows = Vec::new();
+            for root in roots {
+                state
+                    .host
+                    .library()
+                    .register_workspace(root.path())
+                    .expect("register");
+                rows.push(PersistedWorkspace {
+                    path: canonical_root(root.path()).to_string_lossy().into_owned(),
+                    desired_on: true,
+                    generation: 1,
+                });
+            }
+            let rows = state.register_restore_rows(rows).await;
+            let attempts = state.prepare_restore_rows(rows);
+            assert!(
+                attempts.len() == roots.len()
+                    && attempts
+                        .iter()
+                        .zip(roots)
+                        .all(|(attempt, root)| attempt.root == canonical_root(root.path())),
+                "fixture: the attempts are not the rows in their order: {attempts:?}"
+            );
+            (state, attempts)
+        }
+
+        fn six_roots() -> Vec<tempfile::TempDir> {
+            (0..6).map(|_| tempfile::tempdir().expect("root")).collect()
+        }
+
+        /// Wait until every startup attempt outside `unsettled` has settled,
+        /// on the coordinator's own change notification.
+        async fn settled_except(state: &DevserverState, unsettled: &[MountAttemptKey]) {
+            loop {
+                let changed = state.startup.changed.notified();
+                let settled = state
+                    .startup
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .iter()
+                    .all(|key| unsettled.contains(key));
+                if settled {
+                    return;
+                }
+                changed.await;
+            }
+        }
+
+        /// A held row costs the restore one slot: the first of six desired-on
+        /// rows hangs on its root, under the production bound, and the five
+        /// behind it, more than the restore runs beside it at once, are
+        /// mounted while it is still held.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn the_rows_behind_a_held_one_are_mounted_while_it_is_held() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let held = attempts[0].clone();
+
+            let stall = root_stall::stall(roots[0].path());
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the first row's attempt never reached its root"
+            );
+
+            let settling = Arc::clone(&state);
+            let held_key = held.key();
+            completes_beside(
+                &stall,
+                "the restore of the rows behind a held one",
+                async move { settled_except(&settling, &[held_key]).await },
+            )
+            .await;
+            for root in &roots[1..] {
+                assert!(
+                    state.host.is_root_mounted(root.path()),
+                    "a row behind the held one was not restored: {}",
+                    root.path().display()
+                );
+            }
+            assert_eq!(
+                state.entry_for(&held.prefix).expect("the held row").status,
+                WorkspaceStatus::Starting,
+                "the held row's attempt ended while its root was held"
+            );
+            assert!(
+                !restore.is_finished(),
+                "the restore returned with a row still held"
+            );
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "the held root did not mount once it answered"
+            );
+        }
+
+        /// With six desired-on rows all hanging on their roots, the restore
+        /// has the first four prepared in flight and no more: the fifth and
+        /// sixth have not taken their prefix's attempt lock, the first thing
+        /// an attempt does, and nothing of theirs has reached a root.
+        ///
+        /// The test drives the restore itself instead of spawning it. When
+        /// the four have reached their roots the restore is between two
+        /// polls, and every attempt it has started has run to its first wait,
+        /// which is past that lock: an attempt lock that is free then is an
+        /// attempt that has not begun.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn four_attempts_run_at_once_and_no_more() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let prefixes: Vec<String> = attempts.iter().map(|a| a.prefix.clone()).collect();
+
+            let stalls: Arc<Vec<root_stall::RootStall>> = Arc::new(
+                roots
+                    .iter()
+                    .map(|root| root_stall::stall(root.path()))
+                    .collect(),
+            );
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let mut restore = std::pin::pin!(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx
+            ));
+
+            let first_four = Arc::clone(&stalls);
+            let reached = tokio::task::spawn_blocking(move || {
+                first_four[..4]
+                    .iter()
+                    .take_while(|stall| stall.wait_entered(HEALTHY_ROOT_BOUND))
+                    .count()
+            });
+            let reached = tokio::select! {
+                _ = &mut restore => panic!("the restore returned with every row's root held"),
+                reached = reached => reached.expect("wait task"),
+            };
+            assert_eq!(
+                reached, 4,
+                "the restore did not have its first four attempts in flight at once"
+            );
+            for (prefix, stall) in prefixes[4..].iter().zip(&stalls[4..]) {
+                let lock = std::pin::pin!(state.mount_attempt_locks.lock(prefix.as_str()));
+                assert!(
+                    futures::poll!(lock).is_ready(),
+                    "a fifth attempt began while four were held: {prefix}"
+                );
+                assert!(
+                    stall.entered().is_empty(),
+                    "a fifth attempt reached its root while four were held: {:?}",
+                    stall.entered()
+                );
+            }
+
+            drop(stalls);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once every root answers");
+            for root in &roots {
+                assert!(
+                    state.host.is_root_mounted(root.path()),
+                    "a row was not restored: {}",
+                    root.path().display()
+                );
+            }
+        }
+
+        /// What the list and the overlay read after a restore does not depend
+        /// on which row settled first. The first of three rows hangs and
+        /// expires at its own bound, shortened here, and the two behind it
+        /// mount: the list is in prefix order with each row's own outcome,
+        /// and every row is still desired on at its generation.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn each_row_has_its_own_outcome_whichever_settles_first() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(3).collect();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, Duration::from_millis(500)).await;
+            let held = attempts[0].prefix.clone();
+            let mut prefixes: Vec<String> = attempts.iter().map(|a| a.prefix.clone()).collect();
+            prefixes.sort();
+            let mut desired: Vec<(String, bool, u64)> = attempts
+                .iter()
+                .map(|a| (a.root.to_string_lossy().into_owned(), true, 1))
+                .collect();
+            desired.sort();
+
+            let stall = root_stall::stall(roots[0].path());
+            let restoring = Arc::clone(&state);
+            completes_beside(&stall, "a restore whose first row hangs", async move {
+                let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+                restore_prepared_workspaces(restoring, attempts, shutdown_rx).await;
+            })
+            .await;
+
+            let entries = state.workspace_entries();
+            assert_eq!(
+                entries.iter().map(|e| e.prefix.clone()).collect::<Vec<_>>(),
+                prefixes,
+                "the list is not the three rows in prefix order"
+            );
+            for entry in &entries {
+                if entry.prefix == held {
+                    assert_eq!(entry.status, WorkspaceStatus::Error, "{entry:?}");
+                    assert!(
+                        entry
+                            .error
+                            .as_deref()
+                            .is_some_and(|reason| reason.contains("timed out after 1 seconds")),
+                        "the held row does not carry its own bound's expiry: {entry:?}"
+                    );
+                } else {
+                    assert!(
+                        entry.on && entry.status == WorkspaceStatus::Running,
+                        "a healthy row is not running: {entry:?}"
+                    );
+                }
+            }
+            let mut persisted: Vec<(String, bool, u64)> = state
+                .host
+                .workspace_overlay()
+                .expect("overlay")
+                .entries()
+                .into_iter()
+                .map(|row| (row.path, row.desired_on, row.generation))
+                .collect();
+            persisted.sort();
+            assert_eq!(
+                persisted, desired,
+                "the overlay does not hold every row desired on at its generation"
+            );
+        }
+
+        /// A held row still holds up what follows the whole restore. With the
+        /// row beside it mounted, the fdstore apply has not begun, `Ready`
+        /// cannot be entered, and the gate answers the mounted tenant 503 with
+        /// its retry hint; the apply begins once the held row settles, and the
+        /// gate opens at `Ready` and not before.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_held_row_keeps_the_fdstore_apply_ready_and_the_gate_waiting() {
+            use tower::ServiceExt;
+
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(2).collect();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            state
+                .startup
+                .advance(StartupPhase::Binding)
+                .expect("preparing -> binding");
+            state
+                .startup
+                .advance(StartupPhase::ServingAndRestoring)
+                .expect("binding -> serving");
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let mounted_path = format!("{}/api/health", attempts[0].prefix);
+            let ask = || {
+                app.clone().oneshot(
+                    HttpRequest::get(mounted_path.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            };
+            let held_key = attempts[1].key();
+
+            let stall = root_stall::stall(roots[1].path());
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the held row's attempt never reached its root"
+            );
+            let settling = Arc::clone(&state);
+            completes_beside(
+                &stall,
+                "the restore of the row beside a held one",
+                async move { settled_except(&settling, &[held_key]).await },
+            )
+            .await;
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "fixture: the row beside the held one is not mounted"
+            );
+
+            let mut apply = std::pin::pin!(state.startup.begin_fdstore_apply_after_restore());
+            assert!(
+                futures::poll!(apply.as_mut()).is_pending(),
+                "the fdstore apply began with a row still held"
+            );
+            assert!(
+                state.startup.advance(StartupPhase::Ready).is_err(),
+                "Ready was entered before the fdstore apply"
+            );
+            let refused = ask().await.unwrap();
+            assert_eq!(
+                refused.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the gate let a mounted tenant's request through with a row still held"
+            );
+            assert_eq!(
+                refused
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+                Some("1")
+            );
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            assert!(
+                tokio::time::timeout(HEALTHY_ROOT_BOUND, apply)
+                    .await
+                    .expect("the fdstore apply begins once the whole restore has ended"),
+                "startup stopped instead of applying the fdstore"
+            );
+            assert_eq!(
+                ask().await.unwrap().status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the gate opened before Ready"
+            );
+            state
+                .startup
+                .advance(StartupPhase::Ready)
+                .expect("fdstore apply -> ready");
+            assert_ne!(
+                ask().await.unwrap().status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the gate stayed closed in Ready"
+            );
+        }
+
+        /// A stop during the restore cancels what has not settled and nothing
+        /// else: the first row, mounted, stays mounted; the row in flight on
+        /// a held root reads cancelled; the last row, still queued, never
+        /// reaches its root; and no startup attempt is left unsettled.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_stop_leaves_a_settled_row_mounted_and_cancels_the_rest() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let in_flight = attempts[1].prefix.clone();
+            let queued = attempts[5].prefix.clone();
+            let unsettled: Vec<MountAttemptKey> =
+                attempts[1..].iter().map(MountAttempt::key).collect();
+
+            let stalls: Vec<root_stall::RootStall> = roots[1..]
+                .iter()
+                .map(|root| root_stall::stall(root.path()))
+                .collect();
+            let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stalls[0].wait_entered(Duration::from_secs(10)),
+                "fixture: the second row's attempt never reached its root"
+            );
+            let settling = Arc::clone(&state);
+            completes_beside(&stalls[0], "the restore of the first row", async move {
+                settled_except(&settling, &unsettled).await
+            })
+            .await;
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "fixture: the first row is not mounted"
+            );
+
+            shutdown.send(true).expect("the restore listens for a stop");
+            completes_beside(&stalls[0], "a stopped restore", async move {
+                restore.await.expect("restore task")
+            })
+            .await;
+
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "the stop closed a row that had settled"
+            );
+            assert!(
+                state
+                    .startup
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .is_empty(),
+                "the stop left a startup attempt unsettled"
+            );
+            let cancelled = state.entry_for(&in_flight).expect("the row in flight");
+            assert!(
+                cancelled
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("cancelled")),
+                "the row in flight does not read cancelled: {cancelled:?}"
+            );
+            assert!(
+                stalls[4].entered().is_empty(),
+                "the queued row's attempt began: {:?}",
+                stalls[4].entered()
+            );
+            assert_eq!(
+                state.entry_for(&queued).expect("the queued row").status,
+                WorkspaceStatus::Starting,
+                "the queued row lost its starting mark"
+            );
+        }
+
+        /// Rows still queued when the restore's budget ends fail with the
+        /// budget's reason and no attempt of their own. Six rows hang, the
+        /// clock is moved past the whole budget in one step, and the first
+        /// row reads its own bound's expiry while the last reads the budget's
+        /// and has never reached its root.
+        #[tokio::test(start_paused = true)]
+        async fn rows_queued_when_the_budget_ends_fail_without_an_attempt() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let first = attempts[0].prefix.clone();
+            let last = attempts[5].prefix.clone();
+
+            let stalls: Arc<Vec<root_stall::RootStall>> = Arc::new(
+                roots
+                    .iter()
+                    .map(|root| root_stall::stall(root.path()))
+                    .collect(),
+            );
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            let waiting = Arc::clone(&stalls);
+            assert!(
+                tokio::task::spawn_blocking(move || {
+                    waiting[0].wait_entered(Duration::from_secs(10))
+                })
+                .await
+                .expect("wait task"),
+                "fixture: the first row's attempt never reached its root"
+            );
+
+            tokio::time::advance(STARTUP_RESTORE_TIMEOUT).await;
+            completes_beside(&stalls[0], "a restore whose budget ended", async move {
+                restore.await.expect("restore task")
+            })
+            .await;
+
+            let expired = state.entry_for(&first).expect("the first row");
+            assert!(
+                expired
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("timed out after 60 seconds")),
+                "the first row does not carry its own bound's expiry: {expired:?}"
+            );
+            let unattempted = state.entry_for(&last).expect("the last row");
+            assert_eq!(
+                unattempted.status,
+                WorkspaceStatus::Error,
+                "{unattempted:?}"
+            );
+            assert_eq!(
+                unattempted.error.as_deref(),
+                Some("startup restore exceeded 480 seconds"),
+                "the last row does not carry the budget's reason"
+            );
+            assert!(
+                stalls[5].entered().is_empty(),
+                "the last row's attempt began after the budget ended: {:?}",
+                stalls[5].entered()
+            );
+        }
+    }
+
     /// Turning off a root that stopped answering settles its row from the
     /// key the record stores, holding no runtime worker: on a runtime with
     /// one worker, turning another root off still completes beside it.
