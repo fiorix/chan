@@ -1,7 +1,7 @@
 // Contact picker bubble.
 //
 // Two trigger shapes, one bubble:
-//   - `@word`   (mode "wiki", legacy): commits `[[<path>|<label>]]`
+//   - `@word`   (mode "wiki"): commits `[[<path>|<label>]]`
 //     so the picked contact lands as a wiki-link pill in the source.
 //   - `@@word`  (mode "mention"): commits `@@<alias-or-stem>`
 //     so the picked contact lands as a mention pill that
@@ -27,8 +27,8 @@ export interface ContactBubbleOpts {
   triggerEnd: number;
   initialQuery: string;
   onDismiss: () => void;
-  /// Insertion mode. "wiki" is the legacy `@` trigger; "mention" is
-  /// the new `@@` trigger that writes `@@<alias-or-stem>` so the
+  /// Insertion mode. "wiki" is the `@` trigger; "mention" is
+  /// the `@@` trigger that writes `@@<alias-or-stem>` so the
   /// graph keeps the mention sigil in the source.
   mode?: ContactBubbleMode;
 }
@@ -235,7 +235,7 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
 
   function commit(c: Contact): void {
     // Two insertion shapes (see module docstring):
-    //   - wiki mode (the legacy `@` trigger): `[[<path>|<label>]]`.
+    //   - wiki mode (the `@` trigger): `[[<path>|<label>]]`.
     //     The wikilink atom widget renders the pill on the next
     //     decoration tick.
     //   - mention mode (the `@@` trigger): `@@<alias-or-stem>`. The

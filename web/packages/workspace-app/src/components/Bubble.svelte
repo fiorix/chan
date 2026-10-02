@@ -46,8 +46,7 @@
 
   /* Active highlight for list-driven keyboard navigation. Soft
      ring around the body so the row reads as "selected" without
-     fighting the body background. Uses --link to match the active
-     border-left treatment search results had pre-bubble. */
+     fighting the body background. Uses --link. */
   .bubble.active .body {
     box-shadow: 0 0 0 2px var(--link);
   }

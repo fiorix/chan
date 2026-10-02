@@ -10,8 +10,8 @@
 //     browser entries, filtered by query substring on path).
 //
 // On commit, replaces `![query` with `![](path)`. Alt text is left
-// empty for v1; the user can edit it via the source-reveal flow
-// (selection-intersect in the image atom widget).
+// empty; the user can edit it in the image widget's edit mode, where
+// the source shows.
 //
 // Upload errors render in the status footer; the list stays available
 // so the user can fall back to in-workspace selection.
@@ -107,8 +107,7 @@ export function openImageBubble(opts: ImageBubbleOpts): ImageBubbleHandle {
   // the URL slot's open boundary (just after `(`), for wrap mode
   // it's the `!` of `![`. Stable across typing inside the trigger:
   // unlike the live caret, this doesn't shift as the user edits,
-  // so the bubble stays put. Matches the legacy editor's "bubble
-  // under the `(` of `![](`" placement.
+  // so the bubble stays put.
   const anchorPos = (): number => opts.triggerStart;
   const anchor = createCaretAnchor(opts.view, anchorPos());
   const shell = openBubbleShell({

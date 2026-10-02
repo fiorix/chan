@@ -6,7 +6,7 @@
 // replacing the `#query` trigger with `#chosen`.
 //
 // No network round-trip per keystroke (graph fetch is one-shot, then
-// in-memory filter). Mirrors the legacy editor's tag picker behavior.
+// in-memory filter).
 
 import type { EditorView } from "@codemirror/view";
 import { openBubbleShell } from "../bubble";
