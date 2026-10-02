@@ -11,12 +11,19 @@ import type {
   MoveResponse,
   TreeEntry,
 } from "../api/types";
-import { parentDir } from "../state/format";
 import type { MockFileEntry, MockWorkspaceData } from "./data";
 
 function baseName(path: string): string {
   const i = path.lastIndexOf("/");
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/// An entry's parent, cut at the last `/` as the server cuts it. The demo
+/// stands in for the server, so it does not take the client's rule: a client
+/// that cut a parent wrongly would otherwise agree with its own stand-in.
+export function parentOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i < 0 ? "" : path.slice(0, i);
 }
 
 function nowSeconds(): number {
@@ -57,12 +64,12 @@ export class MockWorkspaceStore {
       return b;
     };
     for (const path of this.#files.keys()) {
-      bucket(parentDir(path)).files.add(path);
-      let dir = parentDir(path);
+      bucket(parentOf(path)).files.add(path);
+      let dir = parentOf(path);
       while (dir !== "") {
         this.#dirs.add(dir);
-        bucket(parentDir(dir)).dirs.add(dir);
-        dir = parentDir(dir);
+        bucket(parentOf(dir)).dirs.add(dir);
+        dir = parentOf(dir);
       }
     }
   }
@@ -154,7 +161,7 @@ export class MockWorkspaceStore {
       if (!this.#children.has(path)) {
         this.#children.set(path, { dirs: new Set(), files: new Set() });
       }
-      const b = this.#children.get(parentDir(path));
+      const b = this.#children.get(parentOf(path));
       if (b) b.dirs.add(path);
       return;
     }
