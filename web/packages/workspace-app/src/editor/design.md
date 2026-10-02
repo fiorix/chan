@@ -23,7 +23,7 @@ Because the source is the single source of truth, the editor sidesteps a class o
 4. **Visibility rule (per token kind).**
    - **Marks** (bold/italic/strike/code/link markers): hide unless the active selection intersects the OUTER token range `[from, to]`. Equality at the boundary counts as intersection, and the outer-range rule (not per-marker) means a caret near `*a*` reveals both `*` together instead of `*a` then `a*`.
    - **Heading prefixes** (`# `): hide unless the caret line intersects the heading's line. Selection-intersect alone causes flicker as the caret crosses the prefix mid-line.
-   - **Atom widgets**: show widget unless selection intersects the source range; on intersect, suppress the widget and reveal source so the user can edit literally.
+   - **Atom widgets**: each widget runs its own test. The wikilink pill, the date pill, the table grid and a diagram show unless a selection range touches the range they replace, its two ends included; on a touch the widget is suppressed and the source shows, so the user can edit it literally. An image tests the strict interior instead: a caret at either end of its source selects the image and keeps the widget, and only a caret inside the source, or a non-empty range overlapping it, enters edit mode, where the source shows beside a block preview. A page break shows its source while a selection range's lines overlap its line.
    - **Fences**: the ```` ``` ```` markers and the language text beside the opener are hidden unless a selection range's lines overlap the block's lines; an unclosed fence has no closing marker, so its block runs to the end of the parsed node. While revealed, the language text carries a mark, and the badge on the opener row shows the language either way.
    - **List markers**: no selection test, so they render the same with the caret on the item. A marker is replaced by a widget: `-` and an ordered number show their literal text, `*` and `+` show a glyph picked by nesting depth. The indentation before the marker and the whitespace after it are hidden. A task item's `[ ]` / `[x]` is replaced by the checkbox; its bullet is hidden, while an ordered task keeps its number in front of the checkbox.
    - **Always-visible markers** (`>`, `---`): never hidden. A quoted line gets a line decoration; `---` has no handler, so it shows as typed.
@@ -38,7 +38,7 @@ Because the source is the single source of truth, the editor sidesteps a class o
 
 6. **Selection rule for ranges.** A non-empty selection has no reveal rule of its own. Each visibility test in invariant 4 runs over every range of the selection, so a token kind answers a range as it answers a caret: marks and external links reveal when a range touches the token's outer range, heading prefixes and fences when a range's lines overlap theirs, and an atom by its own widget's test. List markers, task checkboxes, `>` and `---` take no selection test and render the same under any selection.
 
-7. **Bubbles** (`[[`, `![`, `@@`, `@`, `#`) open/close from `computeBubbleSpec`, which inspects the doc text around `state.selection.main.head` on every transaction via `bubbleListener`; the editor host mounts/reuses the bubble UI. Triggers also fire in "raw" mode when the caret sits inside an existing Link/Image URL slot or `[[...]]` body, so commit replaces the right range. Triggers never fire inside code ranges, and the reserved macro words (`@today`, `@date`, `@pagebreak`, `@break`) suppress the contact bubble. The bubble keymap intercepts before CM6's defaults via a high-precedence `keymap.of`. Bubbles must NOT call `view.focus()` mid-flow - the caret stays in the document and the popover runs alongside it.
+7. **Bubbles** (`[[`, `![`, `@@`, `@`, `#`) open/close from `computeBubbleSpec`, which inspects the doc text around `state.selection.main.head` on every document or selection change via `bubbleListener`; the editor host mounts/reuses the bubble UI. Triggers also fire in "raw" mode when the caret sits inside an existing Link/Image URL slot or `[[...]]` body, so commit replaces the right range. Triggers never fire inside code ranges, and the reserved macro words (`@today`, `@date`, `@pagebreak`, `@break`) suppress the contact bubble. The bubble keymap intercepts before CM6's defaults via a high-precedence `keymap.of`. Bubbles must NOT call `view.focus()` mid-flow - the caret stays in the document and the popover runs alongside it.
 
 8. **Find** uses one shared `scanMatches` pipeline. The `findField` and `FindAdapter` shape are shared by both Source and WYSIWYG modes.
 
@@ -48,16 +48,17 @@ Because the source is the single source of truth, the editor sidesteps a class o
 
 ## Decoration pipeline
 
-Every ViewUpdate re-walks the viewport syntax tree and merges the four decoration kinds, plus the regex tag/mention/date plugins, into the one DecorationSet CM6 paints.
+The decorations come from several providers, each with its own DecorationSet and its own recompute test, and CM6 merges the sets when it paints. The walker re-walks the viewport syntax tree on a document, viewport, selection or geometry change, or when the parser hands it a new tree; its registry yields the hide markers, the inline marks, the line decorations, and the list marker and checkbox widgets. The atomic widgets are not the walker's: the wikilink pill, the inline image and the date pill each come from a ViewPlugin, and the table, the diagram, the page break and the image's edit preview each from a StateField. The tag and mention plugins scan the viewport text and add marks.
 
 ```mermaid
 flowchart TD
-  subgraph TRIG["ViewUpdate re-run triggers"]
+  subgraph TRIG["ViewUpdate triggers"]
     direction LR
     T1["docChanged"]
     T2["viewportChanged"]
     T3["selectionSet"]
     T4["geometryChanged"]
+    T5["new syntax tree"]
   end
   TRIG --> Walker["walker ViewPlugin (decorationWalker)"]
   Walker --> Iter["iterate viewport syntaxTree, dispatch by node name"]
@@ -65,16 +66,21 @@ flowchart TD
   Reg --> K1["hide markers: Decoration.replace empty"]
   Reg --> K2["inline marks: Decoration.mark class"]
   Reg --> K3["line decorations: Decoration.line class"]
-  Reg --> K4["atomic widgets: Decoration.replace widget"]
-  TRIG -->|"minus geometryChanged"| Regex["regex ViewPlugins: tag / mention / date"]
+  Reg --> K5["list marker and checkbox widgets: Decoration.replace widget, not atomic"]
+  TRIG -->|"docChanged, viewportChanged, selectionSet"| Regex["regex ViewPlugins: tag / mention / date"]
   Regex --> Skip["scan viewport text, skip code ranges"]
   Skip --> K2
-  Skip --> K4
-  K1 --> DSet["DecorationSet"]
-  K2 --> DSet
-  K3 --> DSet
-  K4 --> DSet
-  DSet --> Render["CM6 paints the viewport"]
+  Skip --> K4["atomic widgets: Decoration.replace widget"]
+  TRIG -->|"the same three, plus the plugin's own signal"| Atoms["ViewPlugins: wikilink / inline image"]
+  Atoms --> K4
+  TR["transaction: docChanged or selection; table and diagram also on a new tree"] --> Fields["StateFields: table / diagram / page break / image edit preview"]
+  Fields --> K4
+  K1 --> Merge["CM6 merges the providers' DecorationSets"]
+  K2 --> Merge
+  K3 --> Merge
+  K4 --> Merge
+  K5 --> Merge
+  Merge --> Render["CM6 paints the viewport"]
 ```
 
 ## Why 1-char marks work
@@ -146,7 +152,7 @@ stateDiagram-v2
 
 ## Bubbles
 
-Each transaction recomputes the bubble spec; the host mounts or reuses one popover and commits a range replace through a high-precedence keymap, never stealing focus from the document. A bubble that closes itself (Escape, a click away, a pick) is not opened again while the caret stays in the trigger that opened it, since the next keystroke there only changes the query; a caret that leaves that trigger, or a new trigger, clears that memory. The closes the host makes for its own reasons (another trigger, no trigger, a read-only flip) are not remembered.
+A document or selection change recomputes the bubble spec; the host mounts or reuses one popover and commits a range replace through a high-precedence keymap, never stealing focus from the document. A bubble that closes itself (Escape, a click away, a pick) is not opened again while the caret stays in the trigger that opened it, since the next keystroke there only changes the query; a caret that leaves that trigger, or a new trigger, clears that memory. The closes the host makes for its own reasons (another trigger, no trigger, a read-only flip) are not remembered.
 
 ```mermaid
 sequenceDiagram
