@@ -1251,6 +1251,37 @@ mod tests {
         assert_eq!(tenant.connections(), 0, "request reached an untrusted peer");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_gone_environment_socket_refuses_an_untrusted_search_directory() {
+        let dir = SocketDir::new("unsafe-gone", 0o777);
+        let tenant = FakeTenant::spawn(&dir.stable(2), None, "wrong peer");
+        let socket = env_socket(&dir.stable(1), None);
+        let error = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .expect_err("searched an untrusted directory");
+        let message = error.to_string();
+        assert!(message.contains(&dir.0.display().to_string()), "{message}");
+        assert!(message.contains("0700"), "{message}");
+        assert_eq!(tenant.connections(), 0, "untrusted peer was contacted");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_path_refuses_a_linked_socket_before_connecting() {
+        let dir = SocketDir::new("linked-node", 0o700);
+        let tenant = FakeTenant::spawn(&dir.stable(1), None, "wrong peer");
+        let linked = dir.stable(2);
+        std::os::unix::fs::symlink(dir.stable(1), &linked).unwrap();
+        let error = send_control_request(&linked, ControlRequest::WindowList)
+            .await
+            .expect_err("connected through a socket symlink");
+        let message = error.to_string();
+        assert!(message.contains(&linked.display().to_string()), "{message}");
+        assert!(message.contains("not a socket node"), "{message}");
+        assert_eq!(tenant.connections(), 0, "linked peer was contacted");
+    }
+
     // A terminal whose tenant moved to another prefix keeps the socket of
     // the old one, which nothing binds. Its request reaches the one devserver
     // tenant beside that socket that serves its workspace, which is asked who

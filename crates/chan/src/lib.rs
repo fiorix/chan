@@ -10383,6 +10383,35 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_socket_discovery_refuses_an_untrusted_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("chan-control-4242-ef01.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            control_socket_for_pid_in_dirs([dir.path()], 4242, true).await,
+            None,
+            "discovered a socket in a directory another user can write"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_socket_discovery_refuses_a_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("chan-control-4242-ef01.sock");
+        std::fs::write(&socket, b"not a socket").unwrap();
+        assert_eq!(
+            control_socket_for_pid_in_dirs([dir.path()], 4242, true).await,
+            None,
+            "discovered a regular file as a socket"
+        );
+    }
+
     /// A stub control server on a unix socket that answers every `Identify`
     /// with the given pid, standing in for a devserver tenant socket.
     #[cfg(unix)]
