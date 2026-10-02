@@ -227,3 +227,12 @@ Four more rows of the app shell and the file tree were fixed and the workspace d
 - **The demo's stand-in server (`demo/`).** It cuts a parent by its own rule, as the owner ruled on 2026-09-29; a transfer copies and answers its from and to pairs; its socket answers the heartbeat ping; its store's index keeps an empty folder; its graph follows a draft's discard or promotion; it routes the shells and the extensions lists; and its graph's edge key spells its separator as an escape where the file held two NUL bytes.
 
 Each of the four fixes was pinned red first by its builder's record and has its changelog line; the demo's rows have eleven pins, red first by the same kind of record, and no changelog line, the demo being the site's and no part of a release.
+
+**Left unbuilt on 2026-10-02, each with its reason,** for a later version:
+
+- **The app's mount drops its trackers' teardown handles.** `App.svelte`'s asynchronous mount starts four singleton trackers and keeps no handle to stop them; a cleanup added to that mount alone does not settle who owns them across the bootstrap and a remount, which is lifecycle work beyond one file.
+- **The pane's mark loads its mask by a root-absolute URL.** A relative spelling has to be checked against a tenant served under a prefix and against the asset base the build emits, and no mounted assertion shows which resource the painted CSS loads.
+- **The launcher's private button styles differ from the shared sheet,** in its top bar, its confirm dialog and its update modal, recorded twice by the review; folding them is a visual change that needs a reading on a display.
+- **The demo answers `POST /api/library/command-capabilities` with a 204 and a warning,** unrouted; routing it needs the shape of a minted capability.
+- **The demo's copy skips silently:** a folder created empty and then copied produces nothing, and a transfer into the source's own directory is skipped with no entry, where the server lists it as skipped.
+- **A file response's `repo_root` has no reader.** The wire type keeps the optional field (`web/packages/workspace-app/src/api/types.ts`) and the app reads it nowhere; a search of `crates/chan-server/src` on 2026-10-02 found no field of that name either, so the builder's note that the server still sends it was not confirmed, and the type's field may simply be dead.
