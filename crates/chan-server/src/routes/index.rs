@@ -19,7 +19,7 @@
 //!
 //! Companion CLI: `chan workspace index download-model |
 //! enable-semantic | disable-semantic | status` (see
-//! `crates/chan/src/lib.rs`).
+//! `crates/chan/src/index.rs`).
 //! The Settings UI is built against this contract.
 
 #![cfg(feature = "embeddings")]
