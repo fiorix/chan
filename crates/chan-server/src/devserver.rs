@@ -2128,55 +2128,75 @@ impl WorkspaceRestore {
     }
 }
 
+/// How many attempts the startup restore runs at once. A root that does not
+/// answer holds one of them until its attempt's bound ends while the rows
+/// behind it restore through the rest, and a cold start overlaps at most this
+/// many workspace opens.
+const STARTUP_RESTORE_CONCURRENCY: usize = 4;
+
+/// Run the prepared rows' mount attempts, at most
+/// [`STARTUP_RESTORE_CONCURRENCY`] at a time and admitted in the order
+/// prepared, and return once every one has settled.
+///
+/// An attempt is bounded by the mount timeout or by what is left of the
+/// restore's budget when it starts, whichever is less. Rows still queued when
+/// the budget ends fail with the budget's reason and no attempt. A stop drops
+/// the attempts in flight, cancels them and the queued rows, and leaves a row
+/// that has settled as it settled. The attempts run inside this future, so
+/// the owner that joins it joins them all.
 async fn restore_prepared_workspaces(
     state: Arc<DevserverState>,
     attempts: Vec<MountAttempt>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
     let deadline = tokio::time::Instant::now() + STARTUP_RESTORE_TIMEOUT;
-    let mut attempts = attempts.into_iter();
-    while let Some(attempt) = attempts.next() {
-        if *shutdown_rx.borrow() {
-            state.cancel_mount_attempt(&attempt).await;
-            for pending in attempts {
-                state.cancel_mount_attempt(&pending).await;
+    let mut queued = attempts.into_iter();
+    let mut in_flight: Vec<MountAttempt> = Vec::new();
+    let mut running = FuturesUnordered::new();
+    while !*shutdown_rx.borrow() {
+        while running.len() < STARTUP_RESTORE_CONCURRENCY {
+            let Some(attempt) = queued.next() else {
+                break;
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                let reason = format!(
+                    "startup restore exceeded {} seconds",
+                    STARTUP_RESTORE_TIMEOUT.as_secs()
+                );
+                state.finish_failed_attempt(&attempt, reason.clone());
+                for pending in queued.by_ref() {
+                    state.finish_failed_attempt(&pending, reason.clone());
+                }
+                break;
             }
-            return;
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            let reason = format!(
-                "startup restore exceeded {} seconds",
-                STARTUP_RESTORE_TIMEOUT.as_secs()
-            );
-            state.finish_failed_attempt(&attempt, reason.clone());
-            for pending in attempts {
-                state.finish_failed_attempt(&pending, reason.clone());
-            }
-            return;
-        }
-        let mut restore = Box::pin(state.execute_mount_attempt(
-            attempt.clone(),
-            std::cmp::min(state.mount_timeout, remaining),
-        ));
-        tokio::select! {
-            result = &mut restore => {
-                if let Err(error) = result {
+            let timeout = std::cmp::min(state.mount_timeout, remaining);
+            in_flight.push(attempt.clone());
+            let state = &state;
+            running.push(async move {
+                if let Err(error) = state.execute_mount_attempt(attempt.clone(), timeout).await {
                     eprintln!(
                         "chan devserver: NOTE: could not re-mount {}: {error}",
                         attempt.root.display()
                     );
                 }
-            }
-            _ = shutdown_rx.changed() => {
-                drop(restore);
-                state.cancel_mount_attempt(&attempt).await;
-                for pending in attempts {
-                    state.cancel_mount_attempt(&pending).await;
-                }
-                return;
-            }
+                attempt.key()
+            });
         }
+        tokio::select! {
+            settled = running.next() => match settled {
+                Some(key) => in_flight.retain(|attempt| attempt.key() != key),
+                // Nothing in flight and nothing left to admit.
+                None => return,
+            },
+            _ = shutdown_rx.changed() => break,
+        }
+    }
+    drop(running);
+    for attempt in in_flight.into_iter().chain(queued) {
+        state.cancel_mount_attempt(&attempt).await;
     }
 }
 
