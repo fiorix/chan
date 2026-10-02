@@ -2978,23 +2978,14 @@ export function scheduleWorkspaceRefresh(): void {
 
 // ---- URL hash bridge for layout + UI persistence ------------------------
 //
-// Every visible surface round-trips through the URL hash so a
-// copy-paste of the address bar reproduces the same screen on
-// another browser: pane / tab tree under `s`, plus a per-overlay
-// key (`files`, `search`, `graph`, `settings`). Presence of an
-// overlay key = that overlay is open; its value carries the scoped
-// state (selected entry, query, scope+depth+filters). Settings has
-// no per-overlay state so its value is just `1`.
+// The `s` key carries the pane/tab layout, including graph and browser
+// tabs. The `search` key opens Search with its inspector bit and query.
+// Other overlays, including Settings, have no URL-hash state.
 
 const HASH_LAYOUT = "s";
 const HASH_SIDEBAR = "c"; // "1" if collapsed, absent if expanded
 const HASH_SEARCH = "search";
-// The `settings`, `files`, `graph`, and `search_scope` overlay hash
-// keys are no longer active. Settings is an overlay without hash state;
-// graph and browser surfaces are first-class tabs that persist via the
-// layout `s` key; search is workspace-wide with no scope. Old bookmarks
-// with these keys degrade gracefully: they are
-// not in HASH_KEYS so dropUnknownHashKeys strips them on the next write.
+// Hash writes retain only the layout and workspace-wide Search state.
 const HASH_KEYS = new Set([
   HASH_LAYOUT,
   HASH_SEARCH,
@@ -3092,22 +3083,18 @@ export function persistStateToHash(): void {
   const ser = serializeLayout();
   const url = new URL(window.location.href);
   const params = hashParams();
-  // Canonicalize stale/shared links as we write our state back.
-  // Unknown keys from old builds and legacy experiments are ignored
-  // on restore and should not survive forever once the current app
-  // has touched the URL.
+  // Keep shared links limited to the state this app restores.
   dropUnknownHashKeys(params);
   if (!ser) {
     params.delete(HASH_LAYOUT);
   } else {
     params.set(HASH_LAYOUT, JSON.stringify(ser));
   }
-  // Drop the legacy sidebar-collapsed key from any pre-existing
-  // saved URL hash so it doesn't sit there forever.
+  // Sidebar visibility is not part of the shared URL state.
   params.delete(HASH_SIDEBAR);
   // ---- overlay keys: presence = open ------------------------
-  // Only search is an overlay surface; graph and browser tabs persist via
-  // the layout `s` key above.
+  // Search is the only overlay persisted here; graph and browser tabs
+  // persist via the layout `s` key above.
   if (searchPanel.open) {
     const ins = searchPanel.inspectorOpen ? "1" : "0";
     params.set(HASH_SEARCH, `${ins}:${searchPanel.query ?? ""}`);
@@ -4041,12 +4028,7 @@ export function openGraphFromLink(
   return true;
 }
 
-// ---- file browser overlay ----------------------------------------------
-//
-// The file browser is a window-level overlay (not a tab), so its
-// open + inspector-open state lives here. One per window; the
-// inspector toggle is window-scoped now (was per-tab when the
-// browser was a tab kind) since there's only ever one instance.
+// ---- file browser reveal -----------------------------------------------
 
 /// Reveal a path by OPENING a File Browser TAB: a tab in the active
 /// pane, with the path selected and its ancestor chain expanded;
@@ -4810,12 +4792,12 @@ export function persistTreeExpanded(): void {
 // ---- per-instance reload persistence ----------------------------------------
 //
 // FileTree.svelte renders off the per-instance `expanded` map, so the
-// global reload snapshot above no longer feeds it. Each surface gets its
+// global reload snapshot above does not feed it. Each surface gets its
 // own sessionStorage snapshot keyed by workspace + instance id so a full
 // browser reload restores that surface's expansion. The TAB variant's
 // authoritative store is the layout tab's `expanded` field (round-tripped
 // through the hash + session.json and re-seeded by FileBrowserSurface on
-// mount); the DOCK / overlay variants have no layout home, so this
+// mount); the dock variants have no layout home, so this
 // snapshot is what survives their reload.
 
 const FB_INSTANCE_RELOAD_KEY = "chan.fileBrowser.instanceExpanded";
@@ -4925,7 +4907,7 @@ export function revealAndSelect(path: string): void {
     treeExpanded.map[acc] = true;
   }
   treeExpanded.map[""] = true;
-  // FileTree renders off per-instance maps now, so a reveal must reach
+  // FileTree renders off per-instance maps, so a reveal must reach
   // every live surface (the dock + the active tab) rather than only the
   // global singleton; the entry should appear wherever the user is
   // looking. Expand ancestors only (not the file itself).
@@ -5214,14 +5196,6 @@ export function resolvePathPrompt(value: string | null): void {
 /// active pane on create. Surfacing one set of behaviors via several
 /// affordances keeps the actions consistent regardless of which entry
 /// point the user reaches for.
-
-// `appendDefaultMd` moved to ../state/pathValidate so PathPromptModal
-// can preview the auto-extension live; we re-import below.
-
-// `preserveExtension` moved to ../state/pathValidate so the
-// PathPromptModal can preview the rename-with-preserved-extension
-// inline. We re-import above; the call below is now a defensive
-// idempotent layer (the modal already resolved the extension).
 
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style
 /// prompt) and drag-and-drop. No-ops if source == target. An occupied
