@@ -1,6 +1,6 @@
 # A window hidden on the connecting page is hidden in the desktop's memory alone
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the limit of the shape that the owner confirmed as built on 2026-09-29 for [a-connecting-page-close-discards-its-window](../v0.101.0/a-connecting-page-close-discards-its-window.md), which the lead accepted for that order and said would be raised as an item of its own (`dev/v0101-team/followups/followup-Lead-Services-32.md` in the development tree, Q2; the lead's note to the owner of 2026-09-28 22:14Z, `dev/v0101-team/for-host-2026-09-27.md`), with three findings that the lead's notes on the order's independent review put into that item (`dev/v0101-team/reviews/review-Services-18.md`, F4, F5 and F6, and the notes of 2026-09-28 23:24Z at its end). The review read the range `7f4e2e804..b772a5ddd` on its lane's branch, before that range's fix round, and the lines below are the review's. Read, not run: the order's pins run on the framework's mock runtime, and no desktop was driven.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the limit of the shape that the owner confirmed as built on 2026-09-29 for [a-connecting-page-close-discards-its-window](../done/a-connecting-page-close-discards-its-window.md), which the lead accepted for that order and said would be raised as an item of its own (`dev/v0101-team/followups/followup-Lead-Services-32.md` in the development tree, Q2; the lead's note to the owner of 2026-09-28 22:14Z, `dev/v0101-team/for-host-2026-09-27.md`), with three findings that the lead's notes on the order's independent review put into that item (`dev/v0101-team/reviews/review-Services-18.md`, F4, F5 and F6, and the notes of 2026-09-28 23:24Z at its end). The review read the range `7f4e2e804..b772a5ddd` on its lane's branch, before that range's fix round, and the lines below are the review's. Read, not run: the order's pins run on the framework's mock runtime, and no desktop was driven.
 
 ## What was seen
 
@@ -20,11 +20,11 @@ A window that its user hid on the connecting page stays hidden after the desktop
 
 ## What to do
 
-Decide whether it is built or stays a written cost of [a-connecting-page-close-discards-its-window](../v0.101.0/a-connecting-page-close-discards-its-window.md). The lead's note names one shape, a pending hide that outlives a watcher's replacement, "in the shape of the pending delete that the arm has already" (`followup-Lead-Services-32.md`, Q2); it is a note and not a plan, and nothing of it was read against the code for this item.
+Decide whether it is built or stays a written cost of [a-connecting-page-close-discards-its-window](../done/a-connecting-page-close-discards-its-window.md). The lead's note names one shape, a pending hide that outlives a watcher's replacement, "in the shape of the pending delete that the arm has already" (`followup-Lead-Services-32.md`, Q2); it is a note and not a plan, and nothing of it was read against the code for this item.
 
 ## Boundaries
 
-By the review's citations, `desktop/src-tauri/src/serve.rs`, `main.rs` and `window_watcher.rs`, with their tests, and `desktop/design.md`. What a close on the connecting page does to the record is [a-connecting-page-close-discards-its-window](../v0.101.0/a-connecting-page-close-discards-its-window.md)'s.
+By the review's citations, `desktop/src-tauri/src/serve.rs`, `main.rs` and `window_watcher.rs`, with their tests, and `desktop/design.md`. What a close on the connecting page does to the record is [a-connecting-page-close-discards-its-window](../done/a-connecting-page-close-discards-its-window.md)'s.
 
 ## Acceptance
 

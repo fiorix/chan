@@ -1,6 +1,6 @@
 # A forget of a relinked root waits on a hung root once per registry lookup
 
-Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 by an independent reading of the fix for [a-hung-root-stalls-desktop-close-and-quit](../v0.101.0/a-hung-root-stalls-desktop-close-and-quit.md); the lookup count read in code, the timing inferred and not measured, a source reading at `72578a59b`.
+Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 by an independent reading of the fix for [a-hung-root-stalls-desktop-close-and-quit](../done/a-hung-root-stalls-desktop-close-and-quit.md); the lookup count read in code, the timing inferred and not measured, a source reading at `72578a59b`.
 
 ## Owner ruling
 

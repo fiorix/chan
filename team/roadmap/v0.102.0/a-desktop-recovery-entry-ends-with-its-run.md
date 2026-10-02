@@ -1,6 +1,6 @@
 # A local desktop window's recovery entry can become unreachable after a restart
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 by the independent review of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](../v0.101.0/two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reviews/review-Frontend-18.md` in the development tree, finding 2, older than that range, with the lead's notes, which raise it with a code map first). Read at `e07f3862f`; that a webview keeps `localStorage` for an origin that includes its port is the platform's rule and not read in code; not run.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 by the independent review of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](../done/two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reviews/review-Frontend-18.md` in the development tree, finding 2, older than that range, with the lead's notes, which raise it with a code map first). Read at `e07f3862f`; that a webview keeps `localStorage` for an origin that includes its port is the platform's rule and not read in code; not run.
 
 ## Owner ruling
 

@@ -1,0 +1,56 @@
+# A close or a Disconnect on the connecting page discards a library window and reaps its terminals
+
+Status: shipped in [v0.101.0](../../release/release-v0.101.0.md).
+
+Record before the release: accepted for v0.101.0 by the owner on 2026-09-27; raised for a decision on 2026-09-27 by the code map written for the fix round of the desktop's readiness wait (`dev/v0101-team/int24-docs/codemaps/services-desktop-fix.md` in the development tree, headline 2 and section B), which read it at `9a3dd3e5c`; read again in code at `b1ef073ae`, where the mechanism holds as the map gives it, and not reproduced. A reading on Abandon after a stop that keeps the windows is carried here on 2026-09-28 (below).
+
+## Owner ruling
+
+Accepted on 2026-09-27 for v0.101.0, as the lead recommended. The owner accepted in one answer every recommendation the lead had put to them that day; for this item it was to accept it for this version, with no shape of the fix named.
+
+## What was seen
+
+A devserver window (a `lib-` label) that is still on the bundled connecting page reaches `request_close_window` in four ways: its OS close button (the connecting arm of `on_close_requested`, `desktop/src-tauri/src/serve.rs:949-965`); the page's own Ctrl+D and Cmd/Ctrl+W (`desktop/src/connecting.js:354-365`); the key bridge's close chords while the page is `connecting.html` (`desktop/src-tauri/src/key_bridge.js:127-128`, `:191-193`, `:281-283`); and the Disconnect button the page shows once it has given up (`connecting.js:223-226`). For a `lib-` label, `request_close_window` queues the window's delete, buries the label in the watcher's view, starts the delete and destroys the window (`desktop/src-tauri/src/main.rs:4210-4241`). The delete is `DELETE /api/library/windows/{id}` on the devserver (`discard_library_window`, `desktop/src-tauri/src/devserver.rs:2175-2196`, sent from `main.rs:6550-6557`), whose handler discards the window (`crates/chan-server/src/routes/library.rs:1190-1206`): the host drops its record and reaps its terminal sessions and its session blobs (`discard_window`, `crates/chan-library/src/host.rs:2749-2769`, the reap at `:2834-2859`; `forget_window`, `crates/chan-library/src/terminal_sessions.rs:2681-2689`).
+
+So one close, or one Disconnect, on a window that is waiting for its devserver ends that window for good, with its terminals. The records say it only cancels: `desktop/design.md` says the close chord and the close button on the connecting screen "cancel and really close" (`:180`, `:220`) and that such a window closes "with no prompt" (`:212`), and the page's comments say that Disconnect "destroys the window (same as Cmd+W)" and that on this screen "there is no session or shell worth keeping, only the retry loop being cancelled" (`connecting.js:210-213`, `:345-353`). A devserver window loads this page whenever the desktop builds it (`open_watched_remote_window`, `serve.rs:336-366`): on its first open, when the watcher opens it again, and when a Reload finds no window to retarget (`main.rs:4090-4094`). So a window whose record already holds terminals on the devserver, one the watcher reopens after a reconnect for instance, can be discarded with them from this page (inferred from those paths; not run).
+
+On macOS, Cmd+W through the File menu does something else: it only destroys a window on the connecting screen (`close_spa_or_native_window`, `main.rs:6922-6929`) and leaves its record, which the map infers the watcher reopens at its next reconcile. The same window on its live workspace page asks Hide, Close or Cancel before anything is dropped (`serve.rs:1019-1036`), and Hide buries it with its record (`hide_window_from_close_confirm`, `main.rs:4257-4262`).
+
+**Carried here, read and not run: after a stop that keeps the windows, Abandon may leave them open.** Added on 2026-09-28 from the independent review of the desktop's third fix round (`dev/v0101-team/reviews/review-Services-14.md` in the development tree, the fifth of its display checks), which the lead's notes carry to this item. It is outside that range and older than it, and was read again at `7957bccef`. When a script-backed devserver's control script exits, the desktop retires that devserver's window watcher and keeps its windows, and in retiring it takes the watcher's stop sender out of its map (`mark_devserver_control_exited`, `desktop/src-tauri/src/main.rs:1463-1496`, the stop at `:1484`; `stop_devserver_watcher`, `:1286-1293`). The disconnect overlay's Abandon tears the devserver down (`abandon_devserver_for_window`, `:4252-4269`; `teardown_devserver_connection`, `:1436-1448`), and its removal of the devserver's windows asks the watcher to close them through that same map (`remove_devserver_windows`, `:1301-1309`), where no sender is left. So, by reading, the kept windows stay open after Abandon, and nothing else in the code read closes them, although the overlay's comment says that the window closes through the watcher (`web/packages/workspace-app/src/components/DisconnectOverlay.svelte:61-66`); the review asks for it on a display.
+
+**Corrected on 2026-09-29: the reading above is refuted for the exit watcher.** Read at `4c4ada0a1`: when a control script exits without a healthy connection, the exit watcher closes the devserver's windows first, while the window watcher is still registered, and only then retires that watcher (`desktop/src-tauri/src/main.rs:1854-1862`, with the comment that says why the order matters). So after such a stop no window is left for Abandon to leave open. The plan of the close on the connecting page refuted the reading at its base, and the lead ruled that nothing is built for it (`dev/v0101-team/journals/journal-Lead.md` in the development tree, the entry of 2026-09-28 22:14Z). The other caller that retires the watcher and keeps the windows, a connect that fails with its control terminal still open (`main.rs:1958`), was not traced.
+
+## Desired contract
+
+A close or a Disconnect on a window waiting on its connecting page stops the wait and closes the native window without discarding the window's record or reaping its terminals, as the records say it cancels; a discard stays an explicit choice. The design document and the page's comments say what each close does.
+
+## What to do
+
+Decide what the page's close and Disconnect mean, then make every route to them agree. Two shapes meet the contract: route them through the bury the live page's Hide uses, so the window leaves the screen and stays reopenable from the Window menu with its terminals; or destroy the native window without the delete, as the macOS menu already does, and let the watcher decide whether it reopens. The first keeps a closed window closed; the second can bring it straight back. Keeping the discard instead, and saying so in the records, is the third answer, and it leaves one click able to reap a window's terminals. Red first: a `lib-` window on the connecting page, closed by its button and by Disconnect, with the host's record and a terminal session shown to survive.
+
+## Boundaries
+
+`desktop/src-tauri/src/main.rs` (`request_close_window`), `desktop/src-tauri/src/serve.rs` (`on_close_requested`), `desktop/src/connecting.js`, the close arms of `key_bridge.js`, `desktop/design.md`, and their tests. The server's discard route and the live page's prompt are unchanged.
+
+## Acceptance
+
+1. A `lib-` window on the connecting page, closed by its OS button, by the page's close chords, by the bridge's chords or by Disconnect, leaves the host's window record and its terminal sessions in place, pinned by tests of each route.
+2. The live workspace page's Hide, Close and Cancel behave as now.
+3. `desktop/design.md` and the page's comments say what a close on the connecting page does.
+
+## What shipped
+
+The build is on the integration branch and not on `main`, and the item stays accepted until the readings on a display that it owes are taken at rc0. It came as sixteen commits, `178e160d0` to `26de478d6`: a range (`dev/v0101-team/reports/report-Services-39.md` in the development tree), whose independent review asked for a fix round, with one medium finding (`dev/v0101-team/reviews/review-Services-18.md`, with the lead's notes), and that fix round, verified by the lead at the blob with no review of its own (`dev/v0101-team/reports/report-Services-41.md`). Lines at `4c4ada0a1`.
+
+- **A close or a Disconnect on the connecting page hides the window and keeps its record and its terminals.** A close reads the page that the window shows as one of three answers, the connecting page, another page, or no page read (`serve::PageReading` and `read_page`, `desktop/src-tauri/src/serve.rs:713-723`), and closes by that answer (`close_window_with_page` and `close_devserver_window`, `desktop/src-tauri/src/main.rs:4171-4265`). On the connecting page each route hides the window as the live page's Hide does, the close button, the page's and the bridge's chords, Disconnect and the menu's close among them (`297d39be7`, `dfa423c53`), and a window is discarded only on a page that was read and is not the connecting page (`d089f13f5`, `ece1b3419`).
+- **The words say it.** `desktop/design.md` says what a close on the connecting page does (`:184`, `:215`, `:217`), and the changelog's entry says what v0.100.0 did (`CHANGELOG.md:103`).
+
+**The shape is the lead's ruling, which the owner confirmed as built on 2026-09-29:** the first of the two shapes under What to do, a hide through the bury that the live page's Hide uses. Disconnect means the same, and the button still reads "Disconnect".
+
+**The acceptance at the tip.** The first point is met in code and pinned with the limits below (`main.rs:8369`, `:8423`, `:8446`, `:8493`, `:8524`, `:8560`, `:8587`; `serve.rs:3732`). The second and the third are met.
+
+**What the pins do not show.** They run on the framework's mock runtime against a stand-in that answers 204 to everything. No test shows a record or a terminal session surviving on a real host, a native window leaving, a window event's handler running, the Window menu listing a hidden window, or a webview's URL during a navigation. The page's and the bridge's JavaScript routes and the menu's arm are pinned as text, and the half of the read that fails to get a URL is pinned by nothing (`review-Services-18.md`, "What the mock runtime cannot show").
+
+**Owed at the first release candidate, rc0, on a display:** six steps of the range's report, five of the fix round's and eleven of the review's, on a native desktop with a devserver that can be stopped, on macOS for the menu and its chord. With a devserver stopped and one of its windows on the connecting page, holding a terminal from before: a close by the red button, by each chord, by Disconnect, by File > Close Window and by a double press; after each, the devserver is started and the window reopened from the Window menu, the terminal is there with its scrollback, and the devserver's log shows no DELETE of the window. No desktop was driven.
+
+**The cost:** a window hidden while its devserver does not answer is hidden in the desktop's memory alone, so it opens again after the desktop disconnects from that devserver and connects again, as the changelog's entry says. Raised on 2026-09-30 as [a-connecting-page-hide-lives-in-memory-alone](../v0.102.0/a-connecting-page-hide-lives-in-memory-alone.md).

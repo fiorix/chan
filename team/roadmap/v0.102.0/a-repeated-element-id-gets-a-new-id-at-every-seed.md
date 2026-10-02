@@ -1,6 +1,6 @@
 # An element whose id repeats in a drawing gets a new id at every seed
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the independent review of the seeded board, which landed that day with [the-frontend-review-remainder-has-no-owner](../v0.101.0/the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/reviews/review-Frontend-13.md` in the development tree, its finding 3, with the lead's notes). The review read the app at `0e6018fe9` and the drawing library `@excalidraw/excalidraw` 0.18.1 that it installs, verified the mechanism by reading, inferred the pushes, and ran nothing; the app's lines were read again at `30ffb8027`, and the library's are the review's. New with the seeded board.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the independent review of the seeded board, which landed that day with [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/reviews/review-Frontend-13.md` in the development tree, its finding 3, with the lead's notes). The review read the app at `0e6018fe9` and the drawing library `@excalidraw/excalidraw` 0.18.1 that it installs, verified the mechanism by reading, inferred the pushes, and ran nothing; the app's lines were read again at `30ffb8027`, and the library's are the review's. New with the seeded board.
 
 ## Owner ruling
 

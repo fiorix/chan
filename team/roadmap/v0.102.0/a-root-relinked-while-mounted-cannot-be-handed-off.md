@@ -1,6 +1,6 @@
 # A root relinked while it is mounted cannot be handed off when no devserver record of it reads mounted
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the one residual of [a-relinked-root-window-nests-outside-its-row](../v0.101.0/a-relinked-root-window-nests-outside-its-row.md) that had no item, written in that item's lists of what is left on 2026-09-28 from the readings the lead listed for its landings, and found without a row by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md` in the development tree, T5, part b). Read in code and not run; no pin relinks a root while it is mounted.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the one residual of [a-relinked-root-window-nests-outside-its-row](../done/a-relinked-root-window-nests-outside-its-row.md) that had no item, written in that item's lists of what is left on 2026-09-28 from the readings the lead listed for its landings, and found without a row by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md` in the development tree, T5, part b). Read in code and not run; no pin relinks a root while it is mounted.
 
 ## What was seen
 

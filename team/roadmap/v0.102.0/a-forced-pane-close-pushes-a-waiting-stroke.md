@@ -1,6 +1,6 @@
 # A forced pane close on a live board can push a waiting stroke that a forced tab close drops
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 from the report of the fix round of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](../v0.101.0/two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reports/report-Frontend-33.md` in the development tree, "Residuals", its first, and "What ruling 5 asked: shown first"), which no ruling took up. Read at `e07f3862f`; shown in a test fixture whose board stays mounted, and in the app it rests on the order in which Svelte tears the board down, which is inferred.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 from the report of the fix round of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](../done/two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reports/report-Frontend-33.md` in the development tree, "Residuals", its first, and "What ruling 5 asked: shown first"), which no ruling took up. Read at `e07f3862f`; shown in a test fixture whose board stays mounted, and in the app it rests on the order in which Svelte tears the board down, which is inferred.
 
 ## Owner ruling
 

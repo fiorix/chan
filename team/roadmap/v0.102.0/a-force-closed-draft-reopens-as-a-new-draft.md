@@ -1,6 +1,6 @@
 # A draft reopened after a forced close comes back as a new draft, seeded with what its tab held
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the report of the order that keeps a draft closed during its load (`dev/v0101-team/reports/report-Clients-33.md` in the development tree, "Found beside the order"), whose plan found both cases (`dev/v0101-team/followups/followup-Clients-Lead-13.md`, leaning 3); the lead ruled them raised and not built (`dev/v0101-team/followups/followup-Lead-Clients-22.md`, the eighth point it approves). Read at `a6834b1ee`; not run. The two closes of a pane's tabs in bulk take the same record, which the records do not name and which was read here. It is a row of its own and not what is left of [a-draft-closed-during-its-load-is-trashed](../v0.101.0/a-draft-closed-during-its-load-is-trashed.md): that item's contract is a close that discards a draft whose buffer is not the file, a forced close or a bulk close never takes the draft flow, and the second case below holds for a draft whatever its load did.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the report of the order that keeps a draft closed during its load (`dev/v0101-team/reports/report-Clients-33.md` in the development tree, "Found beside the order"), whose plan found both cases (`dev/v0101-team/followups/followup-Clients-Lead-13.md`, leaning 3); the lead ruled them raised and not built (`dev/v0101-team/followups/followup-Lead-Clients-22.md`, the eighth point it approves). Read at `a6834b1ee`; not run. The two closes of a pane's tabs in bulk take the same record, which the records do not name and which was read here. It is a row of its own and not what is left of [a-draft-closed-during-its-load-is-trashed](../done/a-draft-closed-during-its-load-is-trashed.md): that item's contract is a close that discards a draft whose buffer is not the file, a forced close or a bulk close never takes the draft flow, and the second case below holds for a draft whatever its load did.
 
 ## Owner ruling
 
@@ -33,7 +33,7 @@ A suggestion from the plan, widened here to the bulk closes: each route that tak
 
 ## Boundaries
 
-`web/packages/workspace-app/src/state/tabs.svelte.ts` (the record of a forced close, `dropTabsById`, `reopenClosedTab`, `recoverClosedDraft`, `closeFileTabAfterMove`), the forced closes of `state/store.svelte.ts` and the bulk closes of a pane, with their tests. A single close that is not forced is [a-draft-closed-during-its-load-is-trashed](../v0.101.0/a-draft-closed-during-its-load-is-trashed.md)'s.
+`web/packages/workspace-app/src/state/tabs.svelte.ts` (the record of a forced close, `dropTabsById`, `reopenClosedTab`, `recoverClosedDraft`, `closeFileTabAfterMove`), the forced closes of `state/store.svelte.ts` and the bulk closes of a pane, with their tests. A single close that is not forced is [a-draft-closed-during-its-load-is-trashed](../done/a-draft-closed-during-its-load-is-trashed.md)'s.
 
 ## Acceptance
 

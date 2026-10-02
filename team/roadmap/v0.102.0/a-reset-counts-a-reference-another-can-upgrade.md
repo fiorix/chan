@@ -1,6 +1,6 @@
 # The reset and the import count their own reference down to one and take its drop for the lock's release
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the lead, from the report of the repair of a test that waited on a reference and not on the lock ([a-test-waits-on-a-reference-and-not-on-the-lock](../v0.101.0/a-test-waits-on-a-reference-and-not-on-the-lock.md); `dev/v0101-team/reports/report-Runtime-37.md` in the development tree, "Step 3: the product's callers", its third bullet), whose builder read it at `f3006ec87` and marked it inferred and not reproduced. Read again at `d440ab656`; not run.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the lead, from the report of the repair of a test that waited on a reference and not on the lock ([a-test-waits-on-a-reference-and-not-on-the-lock](../done/a-test-waits-on-a-reference-and-not-on-the-lock.md); `dev/v0101-team/reports/report-Runtime-37.md` in the development tree, "Step 3: the product's callers", its third bullet), whose builder read it at `f3006ec87` and marked it inferred and not reproduced. Read again at `d440ab656`; not run.
 
 ## Owner ruling
 

@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.101.0] - 2026-10-02
+
+v0.101.0 bounds what the server and the desktop do beside a workspace folder that stops answering and a devserver that stops or restarts (opens, closes and removals answer, a starting devserver restores four workspaces at once), answers every HTTP refusal in one JSON envelope with a sentence and a code, moves the control sockets into an owner-only directory, keeps a live drawing's strokes and state across closes, moves and reconnects, makes browser and desktop windows wait for their page and their devserver, and fixes the editor, graph, terminal and launcher defects the frontend review left open.
 
 ### Added
 

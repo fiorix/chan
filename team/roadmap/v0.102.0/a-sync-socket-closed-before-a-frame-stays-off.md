@@ -18,7 +18,7 @@ A reading first, by a web lane, as the lead's note asks: at the head then in han
 
 ## Boundaries
 
-By the report's citations, `web/packages/workspace-app/src/state/docSync.svelte.ts` and `sceneSync.svelte.ts`. What the devserver's gate answers is [a-stopping-devserver-says-it-is-restoring](../v0.101.0/a-stopping-devserver-says-it-is-restoring.md)'s. The other findings of the same section of the report are [a-stopping-devservers-report-left-four-findings](a-stopping-devservers-report-left-four-findings.md).
+By the report's citations, `web/packages/workspace-app/src/state/docSync.svelte.ts` and `sceneSync.svelte.ts`. What the devserver's gate answers is [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md)'s. The other findings of the same section of the report are [a-stopping-devservers-report-left-four-findings](a-stopping-devservers-report-left-four-findings.md).
 
 ## Acceptance
 

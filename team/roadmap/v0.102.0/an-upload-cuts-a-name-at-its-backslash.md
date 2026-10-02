@@ -1,6 +1,6 @@
 # An upload cuts a file's name at its backslash, and the desktop refuses an upload into a directory whose name holds one
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the order that built the backslash's Rust half ([a-backslash-in-a-name-reads-two-ways-on-the-wire](../v0.101.0/a-backslash-in-a-name-reads-two-ways-on-the-wire.md)): its builder's plan named the upload's cut (`dev/v0101-team/followups/followup-Runtime-Lead-22.md` in the development tree, section 1.2), the lead ruled that the cut stays as a guard and is raised for the owner (`dev/v0101-team/followups/followup-Lead-Runtime-38.md`, ruling 4), and the builder's sweep of the desktop found the refusal (`dev/v0101-team/reports/report-Runtime-33.md`, its sweep and its residuals). Read at `fe2708e45`; not run.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-28 by the order that built the backslash's Rust half ([a-backslash-in-a-name-reads-two-ways-on-the-wire](../done/a-backslash-in-a-name-reads-two-ways-on-the-wire.md)): its builder's plan named the upload's cut (`dev/v0101-team/followups/followup-Runtime-Lead-22.md` in the development tree, section 1.2), the lead ruled that the cut stays as a guard and is raised for the owner (`dev/v0101-team/followups/followup-Lead-Runtime-38.md`, ruling 4), and the builder's sweep of the desktop found the refusal (`dev/v0101-team/reports/report-Runtime-33.md`, its sweep and its residuals). Read at `fe2708e45`; not run.
 
 ## Owner ruling
 
@@ -21,7 +21,7 @@ The owner rules first. Suggestions beyond the record: cut a client's name at `\`
 
 ## Boundaries
 
-`crates/chan-server/src/routes/files.rs` (`upload_leaf_filename`) with its three callers and their tests, `desktop/src-tauri/src/upload.rs` (`validate_workspace_rel`) and its tests, and the design documents that describe an upload. The web app's copies of `basename` are [a-backslash-in-a-name-reads-two-ways-on-the-wire](../v0.101.0/a-backslash-in-a-name-reads-two-ways-on-the-wire.md)'s.
+`crates/chan-server/src/routes/files.rs` (`upload_leaf_filename`) with its three callers and their tests, `desktop/src-tauri/src/upload.rs` (`validate_workspace_rel`) and its tests, and the design documents that describe an upload. The web app's copies of `basename` are [a-backslash-in-a-name-reads-two-ways-on-the-wire](../done/a-backslash-in-a-name-reads-two-ways-on-the-wire.md)'s.
 
 ## Acceptance
 

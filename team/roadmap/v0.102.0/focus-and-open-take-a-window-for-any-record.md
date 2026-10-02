@@ -1,6 +1,6 @@
 # The launcher's Focus and Open, and the workspace app's deck, take a window for any record
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29. It is the cost left open by [a-browser-show-opens-a-twin-of-a-native-window](../v0.101.0/a-browser-show-opens-a-twin-of-a-native-window.md), written under that item's What shipped, which no item held as its scope. On 2026-09-29 the owner confirmed the narrowing of a browser's Show as it landed, with this cost noted; the question put with it, whether Focus keeps taking a window for a record of native origin, was answered by that confirmation of what is built, and the owner has not ruled on whether it is ever changed. Read at `4c4ada0a1` by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-8-raised-older-a.md` in the development tree, entry 4); the code was read, that a second window opens is inferred, and nothing was run.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29. It is the cost left open by [a-browser-show-opens-a-twin-of-a-native-window](../done/a-browser-show-opens-a-twin-of-a-native-window.md), written under that item's What shipped, which no item held as its scope. On 2026-09-29 the owner confirmed the narrowing of a browser's Show as it landed, with this cost noted; the question put with it, whether Focus keeps taking a window for a record of native origin, was answered by that confirmation of what is built, and the owner has not ruled on whether it is ever changed. Read at `4c4ada0a1` by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-8-raised-older-a.md` in the development tree, entry 4); the code was read, that a second window opens is inferred, and nothing was run.
 
 ## What was seen
 
@@ -23,7 +23,7 @@ Decide. The alternative that was put to the owner, a Focus that also stops takin
 
 ## Boundaries
 
-By the reading's citations: `web/packages/launcher/src/state/computerActions.ts`, `web/packages/workspace-app/src/api/libraryWindows.ts` and `components/CommandLauncher.svelte`, and the scoped record in `crates/chan-server/src/routes/library.rs`, with their tests. A browser's Show is [a-browser-show-opens-a-twin-of-a-native-window](../v0.101.0/a-browser-show-opens-a-twin-of-a-native-window.md)'s, landed.
+By the reading's citations: `web/packages/launcher/src/state/computerActions.ts`, `web/packages/workspace-app/src/api/libraryWindows.ts` and `components/CommandLauncher.svelte`, and the scoped record in `crates/chan-server/src/routes/library.rs`, with their tests. A browser's Show is [a-browser-show-opens-a-twin-of-a-native-window](../done/a-browser-show-opens-a-twin-of-a-native-window.md)'s, landed.
 
 ## Acceptance
 

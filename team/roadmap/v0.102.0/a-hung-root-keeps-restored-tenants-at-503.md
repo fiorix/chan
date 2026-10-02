@@ -1,6 +1,6 @@
 # A restored root that does not answer keeps every restored tenant at 503 until its bound ends
 
-Status: accepted for v0.102.0 by the owner on 2026-10-02, when the owner ruled that v0.101.0 ships the startup restore's cap alone. Split from [one-hung-root-holds-up-the-whole-restore](../v0.101.0/one-hung-root-holds-up-the-whole-restore.md), whose ruling of 2026-09-29 had built this gate together with the cap. Taken from that item's record of the cap as built; nothing was run for this one.
+Status: accepted for v0.102.0 by the owner on 2026-10-02, when the owner ruled that v0.101.0 ships the startup restore's cap alone. Split from [one-hung-root-holds-up-the-whole-restore](../done/one-hung-root-holds-up-the-whole-restore.md), whose ruling of 2026-09-29 had built this gate together with the cap. Taken from that item's record of the cap as built; nothing was run for this one.
 
 ## Owner ruling
 

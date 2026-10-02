@@ -1,6 +1,6 @@
 # No client reads the code that a stopping devserver answers
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the cost written under What shipped in [a-stopping-devserver-says-it-is-restoring](../v0.101.0/a-stopping-devserver-says-it-is-restoring.md), which no item held. The builder's report names it as a residual (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "The clients of the 503 and the launcher routes, at the tip" and "Residuals"), and a reading of the ledger on 2026-09-29 searched `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` and found no reader (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part c). Read, not run.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the cost written under What shipped in [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md), which no item held. The builder's report names it as a residual (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "The clients of the 503 and the launcher routes, at the tip" and "Residuals"), and a reading of the ledger on 2026-09-29 searched `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` and found no reader (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part c). Read, not run.
 
 ## What was seen
 
@@ -26,7 +26,7 @@ Decide, after the measurement of what a real stop answers, since it says how man
 
 ## Boundaries
 
-By the report's citations: `web/packages/web-shared/src/window-page.ts`, the desktop's probe, and the workspace app's callers of `isTransientApiError`, with their tests. What the devserver answers is [a-stopping-devserver-says-it-is-restoring](../v0.101.0/a-stopping-devserver-says-it-is-restoring.md)'s, and the refusal's envelope is [refusals-answer-in-four-shapes](../v0.101.0/refusals-answer-in-four-shapes.md)'s.
+By the report's citations: `web/packages/web-shared/src/window-page.ts`, the desktop's probe, and the workspace app's callers of `isTransientApiError`, with their tests. What the devserver answers is [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md)'s, and the refusal's envelope is [refusals-answer-in-four-shapes](../done/refusals-answer-in-four-shapes.md)'s.
 
 ## Acceptance
 

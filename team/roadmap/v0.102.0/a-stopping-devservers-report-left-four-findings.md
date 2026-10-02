@@ -1,6 +1,6 @@
 # The report of the stopping devserver's order left four findings outside its items
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. The builder of [a-stopping-devserver-says-it-is-restoring](../v0.101.0/a-stopping-devserver-says-it-is-restoring.md) and [the-launchers-add-and-on-skip-the-stop-check](../v0.101.0/the-launchers-add-and-on-skip-the-stop-check.md) listed them for the lead to raise (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "Found outside the items, for the lead to raise"), and a reading of the ledger on 2026-09-29 could not establish that any was raised (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part d, and "Unknown"). Each was read, three of them by an agent of the builder's seat, and none was run. The lines are the report's, at its lane's tip or, where marked, at its base `61895c96d`.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. The builder of [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md) and [the-launchers-add-and-on-skip-the-stop-check](../done/the-launchers-add-and-on-skip-the-stop-check.md) listed them for the lead to raise (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "Found outside the items, for the lead to raise"), and a reading of the ledger on 2026-09-29 could not establish that any was raised (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part d, and "Unknown"). Each was read, three of them by an agent of the builder's seat, and none was run. The lines are the report's, at its lane's tip or, where marked, at its base `61895c96d`.
 
 ## What was seen
 
@@ -23,7 +23,7 @@ Decide each: an item of its own, a line of an item that exists, or nothing. The 
 
 ## Boundaries
 
-By the report's citations: `web/packages/workspace-app/src/api/client.ts`, `gateway/crates/devserver-proxy/src/proxy.rs` and `crates/chan-server/src/devserver.rs`. A client that does not read the stop's code is [no-client-reads-the-devserver-stopping-code](no-client-reads-the-devserver-stopping-code.md), and a refusal's shape is [refusals-answer-in-four-shapes](../v0.101.0/refusals-answer-in-four-shapes.md)'s.
+By the report's citations: `web/packages/workspace-app/src/api/client.ts`, `gateway/crates/devserver-proxy/src/proxy.rs` and `crates/chan-server/src/devserver.rs`. A client that does not read the stop's code is [no-client-reads-the-devserver-stopping-code](no-client-reads-the-devserver-stopping-code.md), and a refusal's shape is [refusals-answer-in-four-shapes](../done/refusals-answer-in-four-shapes.md)'s.
 
 ## Acceptance
 

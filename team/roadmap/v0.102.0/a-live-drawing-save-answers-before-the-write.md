@@ -1,6 +1,6 @@
 # A save of a live drawing answers before the authority writes the file
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 by the independent review of the live drawing's fix round, which landed that day with [a-live-drawing-gains-appstate-keys-with-no-edit](../v0.101.0/a-live-drawing-gains-appstate-keys-with-no-edit.md) (`dev/v0101-team/reviews/review-Frontend-17.md` in the development tree, its finding 8, with the lead's notes, which raise it at the landing as an item of its own and give no recommendation). The review read it on the client and the server and ran nothing, and found it older than v0.100.0 and outside the ranges it reviewed. Read again at `e2a7e608f` and at `v0.100.0`; not run.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 by the independent review of the live drawing's fix round, which landed that day with [a-live-drawing-gains-appstate-keys-with-no-edit](../done/a-live-drawing-gains-appstate-keys-with-no-edit.md) (`dev/v0101-team/reviews/review-Frontend-17.md` in the development tree, its finding 8, with the lead's notes, which raise it at the landing as an item of its own and give no recommendation). The review read it on the client and the server and ran nothing, and found it older than v0.100.0 and outside the ranges it reviewed. Read again at `e2a7e608f` and at `v0.100.0`; not run.
 
 ## Owner ruling
 
