@@ -386,6 +386,9 @@ export function createDemoFetch(
     if (path === "/api/terminal/next-name" && method === "GET") {
       return text(`Terminal ${++termSeq}`);
     }
+    if (path === "/api/terminal/shells" && method === "GET") {
+      return json({ profiles: [], default_profile: null });
+    }
     if (path === "/api/terminals/roster" && method === "GET") return json({ sessions: [] });
     if (path === "/api/terminals" && method === "POST") {
       return json({ session: `demo-${++termSeq}`, tab_label: "Terminal" });
@@ -411,6 +414,7 @@ export function createDemoFetch(
     if (path === "/api/screensaver/state" && method === "GET") {
       return json({ enabled: false, timeout_secs: 0, theme: "system", pin_set: false });
     }
+    if (path === "/api/extensions" && method === "GET") return json([]);
     if (path === "/api/library/local-color") {
       return method === "GET" ? json({ color: null }) : empty();
     }
