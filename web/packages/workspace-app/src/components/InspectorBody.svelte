@@ -109,7 +109,7 @@
        inspector renders the SAME body as the File Browser folder
        inspector. FileInfoBody looks the entry up from the tree (loading
        the parent dir if needed) and prefers the O(1) /api/report/dir
-       cache the old DirectoryInfoBody used. `label` carries the graph
+       cache. `label` carries the graph
        node's display name. `onReveal` spawns/focuses a File Browser tab
        for the folder on non-browser surfaces. -->
   <FileInfoBody

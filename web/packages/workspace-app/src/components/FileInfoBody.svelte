@@ -895,7 +895,6 @@
       {label || basename(entry.path) || workspace.info?.label || "(root)"}
     </h3>
     {#if isDraftPath(entry.path)}
-      <!-- Drafts notice. Mirrors the copy in DirectoryInfoBody. -->
       <div class="drafts-notice" role="note">
         <strong>Drafts are uncommitted scratch space.</strong>
         Save or discard them from their editor tabs, not the tree.
@@ -1252,9 +1251,6 @@
     gap: 0.4rem;
     margin-bottom: 0.4rem;
   }
-  /* Drafts chip + notice mirror the DirectoryInfoBody styling so
-     the FB-selected Drafts row renders identically to the graph-side
-     dir node inspector. */
   .kind-chip.drafts-chip {
     flex: 1;
     color: #fff;
