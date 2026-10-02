@@ -228,11 +228,12 @@ export function createDemoFetch(
     if (path === "/api/drafts/discard" && method === "POST") {
       const body = parseBody(init) as { path: string };
       store.remove(body.path);
+      graph.removeByPrefix(body.path);
       return empty();
     }
     if (path === "/api/drafts/promote" && method === "POST") {
       const body = parseBody(init) as { path: string; target: string };
-      store.move(body.path, body.target);
+      for (const [from, to] of store.move(body.path, body.target).renamed) graph.renameFile(from, to);
       return json({ path: body.target, name: body.target.split("/").pop() ?? "note", mode: "file" });
     }
 
