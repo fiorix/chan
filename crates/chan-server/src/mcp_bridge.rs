@@ -412,6 +412,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_fallback_does_not_bind_an_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = private_tempdir().unwrap();
+        let fallback = chan_shell::control_socket_fallback_dir_at(root.path());
+        std::fs::create_dir(&fallback).unwrap();
+        std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let selected = unix_socket_dir_from(None, root.path());
+        assert_eq!(selected, fallback);
+        let socket = selected.join("chan-mcp-refused.sock");
+        let error = match start(socket.clone(), || None) {
+            Ok(_) => panic!("bound an MCP endpoint in an unsafe fallback"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(&fallback.display().to_string()));
+        assert!(!socket.exists());
+    }
+
+    #[tokio::test]
     async fn systemd_style_xdg_directory_is_used_without_fallback() {
         let xdg = private_tempdir().unwrap();
         let root = private_tempdir().unwrap();

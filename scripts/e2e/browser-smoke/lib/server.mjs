@@ -10,7 +10,7 @@
 // agents on one machine never hit each other's servers.
 
 import { spawn, execFile } from "node:child_process";
-import { globSync, mkdtempSync, readdirSync, cpSync, writeFileSync, rmSync } from "node:fs";
+import { globSync, mkdtempSync, readdirSync, cpSync, writeFileSync, rmSync, mkdirSync, lstatSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
+const controlSocketDirs = new Map();
 
 // 1x1 red PNG; the markdown seeds size it up via the #w= grammar so
 // the exported pages carry a visible, deterministic image block.
@@ -36,9 +37,11 @@ export function seedWorkspace() {
 /// the control-socket glob.
 export function launchServer(chanBin, workspaceDir, log, options = {}) {
   // CHAN_HOME REPLACES ~/.chan wholesale (config, preferences,
-  // workspace registry); the control socket routes through
-  // $XDG_RUNTIME_DIR and stays discoverable by pid glob.
+  // workspace registry); the private runtime dir keeps this run's
+  // control socket discoverable by pid glob.
   const chanHome = mkdtempSync(join(tmpdir(), "chan-smoke-home-"));
+  const runtimeDir = join(chanHome, "runtime");
+  mkdirSync(runtimeDir, { mode: 0o700 });
   options.prepareChanHome?.(chanHome);
   // --port 0 binds an ephemeral port (the tokenized URL below carries
   // it), so a busy default 8787 -- another chan on the box -- never
@@ -50,9 +53,11 @@ export function launchServer(chanBin, workspaceDir, log, options = {}) {
       ...process.env,
       CHAN_NO_DEVSERVER_HANDOFF: "1",
       CHAN_HOME: chanHome,
+      XDG_RUNTIME_DIR: runtimeDir,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  controlSocketDirs.set(child.pid, runtimeDir);
   const stderrLines = [];
   let resolved = false;
 
@@ -88,13 +93,20 @@ export function launchServer(chanBin, workspaceDir, log, options = {}) {
 }
 
 /// The server's pid-scoped control socket: chan-control-<pid>-<rand>.sock
-/// in $XDG_RUNTIME_DIR (or /tmp). Present once the server is up.
+/// in its private runtime directory. Present once the server is up.
 export function findControlSocket(pid) {
-  const dirs = [process.env.XDG_RUNTIME_DIR, tmpdir(), "/tmp"].filter(Boolean);
+  const uid = process.getuid?.();
+  if (uid === undefined) return null;
+  const dirs = [controlSocketDirs.get(pid), process.env.XDG_RUNTIME_DIR, `/tmp/chan-control-${uid}`].filter(Boolean);
   for (const dir of dirs) {
     try {
+      const meta = lstatSync(dir);
+      if (!meta.isDirectory() || meta.uid !== uid || (meta.mode & 0o777) !== 0o700) continue;
       const hit = readdirSync(dir).find(
-        (name) => name.startsWith(`chan-control-${pid}-`) && name.endsWith(".sock"),
+        (name) =>
+          name.startsWith(`chan-control-${pid}-`) &&
+          name.endsWith(".sock") &&
+          lstatSync(join(dir, name)).isSocket(),
       );
       if (hit) return join(dir, hit);
     } catch {
@@ -105,6 +117,7 @@ export function findControlSocket(pid) {
 }
 
 export async function teardownServer(chanBin, child, workspaceDir, chanHome, log) {
+  controlSocketDirs.delete(child.pid);
   try {
     child.kill("SIGTERM");
     await new Promise((resolve) => {

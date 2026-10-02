@@ -61,6 +61,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 mkdir -p "$TMP_ROOT/chan-home" "$TMP_ROOT/runtime"
+chmod 700 "$TMP_ROOT/runtime"
 case "$BIN" in
     *.AppImage)
         # AppRun rewrites argv[0], but the type-2 runtime preserves an

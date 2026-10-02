@@ -2577,9 +2577,8 @@ async fn unserve_running(
 /// pid. Either way every socket routes the `Close { path }` verb to the
 /// server, which acts by path -- so the first match is sufficient and we
 /// must NOT broadcast (once the first tenant unmounts, the rest 404). On
-/// Unix the socket is a `.sock` file in `$XDG_RUNTIME_DIR` when present and
-/// `/tmp` otherwise; on Windows it is a named pipe under the `\\.\pipe\`
-/// namespace.
+/// Unix control sockets live in a validated `$XDG_RUNTIME_DIR` or the private
+/// `/tmp/chan-control-<uid>` fallback; on Windows they are named pipes.
 #[cfg(unix)]
 async fn control_socket_for_pid(pid: u32) -> Option<PathBuf> {
     control_socket_for_pid_in_dirs(unix_control_socket_dirs(), pid, true).await
@@ -2608,10 +2607,16 @@ fn unix_control_socket_dirs() -> Vec<PathBuf> {
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
     {
-        push_unique_path(&mut dirs, dir);
+        match chan_shell::validate_control_socket_dir(&dir) {
+            Ok(()) => push_unique_path(&mut dirs, dir),
+            Err(err) => eprintln!("{err}"),
+        }
     }
-    push_unique_path(&mut dirs, PathBuf::from("/tmp"));
-    push_unique_path(&mut dirs, std::env::temp_dir());
+    let fallback = chan_shell::control_socket_fallback_dir_at(Path::new("/tmp"));
+    match chan_shell::ensure_control_socket_dir(&fallback) {
+        Ok(()) => push_unique_path(&mut dirs, fallback),
+        Err(err) => eprintln!("{err}"),
+    }
     dirs
 }
 
@@ -2726,6 +2731,10 @@ fn control_socket_candidates_for_pid_in(
     pid: u32,
     require_sock_ext: bool,
 ) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    if chan_shell::validate_control_socket_dir(dir).is_err() {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -2735,6 +2744,17 @@ fn control_socket_candidates_for_pid_in(
             control_socket_name_matches(&entry.file_name().to_string_lossy(), pid, require_sock_ext)
         })
         .map(|entry| entry.path())
+        .filter(|path| {
+            #[cfg(unix)]
+            {
+                chan_shell::validate_control_socket_node(path).is_ok()
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                true
+            }
+        })
         .collect();
     candidates.sort();
     candidates
@@ -10357,13 +10377,26 @@ mod tests {
     #[test]
     fn control_socket_for_pid_matches_only_that_pid() {
         let dir = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         // A different pid's control socket and an unrelated chan socket are
         // both ignored.
+        #[cfg(unix)]
+        let _other =
+            std::os::unix::net::UnixListener::bind(dir.path().join("chan-control-999-abcd.sock"))
+                .unwrap();
+        #[cfg(not(unix))]
         std::fs::write(dir.path().join("chan-control-999-abcd.sock"), b"").unwrap();
         std::fs::write(dir.path().join("chan-mcp-4242-abcd.sock"), b"").unwrap();
         assert_eq!(control_socket_for_pid_in(dir.path(), 4242, true), None);
         // The matching pid's socket is found.
         let want = dir.path().join("chan-control-4242-ef01.sock");
+        #[cfg(unix)]
+        let _wanted = std::os::unix::net::UnixListener::bind(&want).unwrap();
+        #[cfg(not(unix))]
         std::fs::write(&want, b"").unwrap();
         assert_eq!(
             control_socket_for_pid_in(dir.path(), 4242, true),
@@ -10375,7 +10408,18 @@ mod tests {
     async fn control_socket_for_pid_searches_candidate_dirs() {
         let first = tempfile::TempDir::new().unwrap();
         let second = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in [&first, &second] {
+                std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+        }
         let want = second.path().join("chan-control-4242-ef01.sock");
+        #[cfg(unix)]
+        let _wanted = std::os::unix::net::UnixListener::bind(&want).unwrap();
+        #[cfg(not(unix))]
         std::fs::write(&want, b"").unwrap();
         assert_eq!(
             control_socket_for_pid_in_dirs([first.path(), second.path()], 4242, true).await,
@@ -10403,6 +10447,8 @@ mod tests {
     #[tokio::test]
     async fn control_socket_discovery_refuses_a_regular_file() {
         let dir = tempfile::TempDir::new().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket = dir.path().join("chan-control-4242-ef01.sock");
         std::fs::write(&socket, b"not a socket").unwrap();
         assert_eq!(
@@ -10680,6 +10726,8 @@ mod tests {
         // resolve it through the Identify round-trip. The wrong pid must NOT
         // resolve to it (a stale lock record's holder is genuinely gone).
         let dir = tempfile::TempDir::new().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let stable = dir.path().join("chan-control-s00aa11bb22cc33dd.sock");
         let stub = spawn_identify_stub(&stable, 4242);
         assert_eq!(
@@ -10700,6 +10748,8 @@ mod tests {
             .prefix("chan-ws-")
             .tempdir_in("/tmp")
             .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let root_a = tempfile::TempDir::new().unwrap();
         let root_b = tempfile::TempDir::new().unwrap();
         let pid = std::process::id();
@@ -10861,6 +10911,9 @@ mod tests {
         let socket_dir = tempfile::Builder::new()
             .prefix("chan-ws-")
             .tempdir_in("/tmp")
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))
             .unwrap();
         let socket = socket_dir.path().join(format!(
             "chan-control-{}-workspace.sock",

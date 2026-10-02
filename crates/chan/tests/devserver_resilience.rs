@@ -55,10 +55,14 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private runtime dir");
         Self {
             chan_home: tempfile::tempdir().expect("chan home tempdir"),
             home: tempfile::tempdir().expect("home tempdir"),
-            runtime: tempfile::tempdir().expect("runtime tempdir"),
+            runtime,
             scratch: tempfile::tempdir().expect("scratch tempdir"),
         }
     }
@@ -809,6 +813,8 @@ async fn workspace_status_bounds_an_unresponsive_pid_named_holder() {
         .prefix("chan-status-")
         .tempdir_in("/tmp")
         .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = runtime
         .path()
         .join(format!("chan-control-{pid}-wedged.sock"));

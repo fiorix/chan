@@ -124,6 +124,7 @@ const env = {
 for (const dir of [env.HOME, env.XDG_RUNTIME_DIR, env.CHAN_HOME, env.TMPDIR]) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 }
+fs.chmodSync(env.XDG_RUNTIME_DIR, 0o700);
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 log(`work dir ${work}, port ${port}`);

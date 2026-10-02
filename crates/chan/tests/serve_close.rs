@@ -55,10 +55,14 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let sockdir = tempfile::tempdir().expect("sockdir tempdir");
+        std::fs::set_permissions(sockdir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private socket dir");
         Self {
             chan_home: tempfile::tempdir().expect("chan home tempdir"),
             home: tempfile::tempdir().expect("home tempdir"),
-            sockdir: tempfile::tempdir().expect("sockdir tempdir"),
+            sockdir,
             scratch: tempfile::tempdir().expect("scratch tempdir"),
         }
     }
