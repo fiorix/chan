@@ -177,11 +177,32 @@ async fn connect_owner_socket(socket: &Path) -> std::io::Result<transport::Clien
 
 #[cfg(unix)]
 fn mcp_socket_fallback_dirs(socket: &Path) -> Vec<PathBuf> {
+    let xdg = xdg_runtime_dir();
+    mcp_socket_fallback_dirs_from(socket, xdg.as_deref(), Path::new("/tmp"))
+}
+
+/// Every directory a server may have bound its MCP socket in: the configured
+/// socket's own, the runtime directory, and the private fallback a server
+/// started without a usable runtime directory binds in. The list only names
+/// them and creates nothing; the candidate search validates each directory
+/// and skips one that is missing or unsafe.
+#[cfg(unix)]
+fn mcp_socket_fallback_dirs_from(
+    socket: &Path,
+    xdg: Option<&Path>,
+    fallback_root: &Path,
+) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(parent) = socket.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         push_unique_path(&mut dirs, parent.to_path_buf());
     }
-    push_unique_path(&mut dirs, unix_socket_dir());
+    if let Some(dir) = xdg {
+        push_unique_path(&mut dirs, dir.to_path_buf());
+    }
+    push_unique_path(
+        &mut dirs,
+        chan_shell::control_socket_fallback_dir_at(fallback_root),
+    );
     dirs
 }
 
@@ -929,19 +950,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn proxy_connect_finds_a_fallback_server_from_a_valid_runtime_directory() {
+        let xdg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        let fallback = chan_shell::control_socket_fallback_dir_at(root.path());
+        chan_shell::ensure_control_socket_dir(&fallback).unwrap();
+        let live = fallback.join("chan-mcp-live.sock");
+        let listener = tokio::net::UnixListener::bind(&live).unwrap();
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await.unwrap();
+        });
+
+        let stale = xdg.path().join("chan-mcp-stale.sock");
+        let dirs = mcp_socket_fallback_dirs_from(&stale, Some(xdg.path()), root.path());
+        let client = connect_mcp_in(&stale, dirs).await.unwrap();
+        drop(client);
+        accept.await.unwrap();
+    }
+
     #[test]
-    fn fallback_dirs_cover_configured_runtime_and_private_tmp_once() {
-        let configured = Path::new("/configured/chan-mcp-old.sock");
-        let dirs = mcp_socket_fallback_dirs(configured);
-        assert!(dirs.contains(&PathBuf::from("/configured")));
+    fn fallback_dirs_name_the_configured_runtime_and_private_directories_once() {
+        let root = private_tempdir().unwrap();
+        let xdg = root.path().join("runtime");
+        let fallback = chan_shell::control_socket_fallback_dir_at(root.path());
+        let (configured, xdg, fallback) =
+            (Path::new("/configured"), xdg.as_path(), fallback.as_path());
+        let dirs = |socket_dir: &Path, xdg: Option<&Path>| {
+            mcp_socket_fallback_dirs_from(&socket_dir.join("chan-mcp-old.sock"), xdg, root.path())
+        };
+        assert_eq!(dirs(configured, Some(xdg)), [configured, xdg, fallback]);
+        assert_eq!(dirs(configured, None), [configured, fallback]);
+        assert_eq!(dirs(xdg, Some(xdg)), [xdg, fallback]);
+        assert_eq!(dirs(fallback, None), [fallback]);
         assert!(
-            dirs.contains(&chan_shell::control_socket_fallback_dir_at(Path::new(
-                "/tmp"
-            )))
+            !fallback.exists(),
+            "naming the directories created {}",
+            fallback.display()
         );
-        let mut unique = dirs.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(dirs.len(), unique.len());
     }
 }
