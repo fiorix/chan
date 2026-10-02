@@ -330,9 +330,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn control_socket_discovery_names_an_invalid_existing_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
         let parent = tempfile::TempDir::new().unwrap();
         let fallback = chan_shell::control_socket_fallback_dir_at(parent.path());
         std::fs::create_dir(&fallback).unwrap();
+        // The mode `create_dir` leaves follows the process umask, and a umask
+        // of 077 leaves the one mode the rule accepts.
+        std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut errors = Vec::new();
         let dirs = unix_control_socket_dirs_at(parent.path(), None, |err| {
             errors.push(err.to_string());
