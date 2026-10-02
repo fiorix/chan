@@ -12,15 +12,12 @@ export const FS_GRAPH_DEPTH_MAX = 10;
 
 type GraphDepthScope =
   | { kind: "file" }
-  | { kind: "group"; paths: readonly string[] }
   | { kind: "dir"; path: string }
   | { kind: "workspace" }
-  | { kind: "global" }
   | { kind: "tag" }
   | { kind: "mention" }
   | { kind: "contact" }
-  | { kind: "language" }
-  | { kind: "git_repo" };
+  | { kind: "language" };
 
 type FsGraphProbe = {
   nodes: readonly Pick<FsGraphNode, "path">[];
@@ -106,8 +103,7 @@ export function graphDepthCap({
 }: GraphDepthCapInput): number {
   if (!scope) return hardMax;
   if (scope.kind === "file") return 1;
-  if (scope.kind === "group") return clampDepth(scope.paths.length, hardMax);
-  if (scope.kind === "tag" || scope.kind === "git_repo") return hardMax;
+  if (scope.kind === "tag") return hardMax;
   // Mention lens uses depth meaningfully (bidirectional BFS from the
   // mention meta-node), same as the tag lens, so it lifts the cap to
   // the hard max rather than pinning the slider.
@@ -118,7 +114,7 @@ export function graphDepthCap({
   // `[max]` and the user sees there's nothing more to reveal.
   if (scope.kind === "contact") return hardMax;
   if (scope.kind === "language") return 1;
-  if (scope.kind === "workspace" || scope.kind === "global") {
+  if (scope.kind === "workspace") {
     if (!fsGraph) return hardMax;
     if (fsGraph.truncated) return fsMax;
     return clampDepth(maxDepthFromPaths("", fsPaths(fsGraph)), fsMax);

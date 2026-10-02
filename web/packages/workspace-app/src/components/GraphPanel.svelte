@@ -62,7 +62,7 @@
     fbWatchReconcile,
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
-  import { type ScopeOption } from "../state/scope.svelte";
+  import { type ScopeOption } from "../state/scope";
   import { basename, parentDir } from "../state/format";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";

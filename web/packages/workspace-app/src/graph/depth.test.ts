@@ -23,24 +23,6 @@ describe("graphDepthCap", () => {
     expect(graphDepthCap({ scope: { kind: "file" }, nodes: [] })).toBe(1);
   });
 
-  it("caps group scopes at the number of files up to the hard max", () => {
-    expect(
-      graphDepthCap({
-        scope: { kind: "group", paths: ["a.md", "b.md", "c.md"] },
-        nodes: [],
-      }),
-    ).toBe(3);
-    expect(
-      graphDepthCap({
-        scope: {
-          kind: "group",
-          paths: Array.from({ length: 20 }, (_, i) => `${i}.md`),
-        },
-        nodes: [],
-      }),
-    ).toBe(10);
-  });
-
   it("derives directory depth from loaded content graph file paths", () => {
     expect(
       graphDepthCap({
@@ -78,7 +60,7 @@ describe("graphDepthCap", () => {
     ).toBe(FS_GRAPH_DEPTH_MAX);
   });
 
-  it("uses the workspace fs graph probe for workspace and global scopes", () => {
+  it("uses the workspace fs graph probe for workspace scopes", () => {
     expect(
       graphDepthCap({
         scope: { kind: "workspace" },
@@ -91,16 +73,15 @@ describe("graphDepthCap", () => {
     ).toBe(4);
     expect(
       graphDepthCap({
-        scope: { kind: "global" },
+        scope: { kind: "workspace" },
         nodes: [],
         fsGraph: { truncated: true, nodes: [fsNode("notes/projects")] },
       }),
     ).toBe(FS_GRAPH_DEPTH_MAX);
   });
 
-  it("keeps tag and git repo scopes on the hard max", () => {
+  it("keeps tag scopes on the hard max", () => {
     expect(graphDepthCap({ scope: { kind: "tag" }, nodes: [] })).toBe(10);
-    expect(graphDepthCap({ scope: { kind: "git_repo" }, nodes: [] })).toBe(10);
   });
 
   // The depth slider can snap back to 1 when the cap is derived
