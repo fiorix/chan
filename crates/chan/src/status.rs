@@ -8,7 +8,7 @@ use chan_workspace::{KnownWorkspace, Library, RecoveryAction, Workspace, Workspa
 use serde::{Deserialize, Serialize};
 
 use crate::control::control_socket_for_pid;
-use crate::local_devserver_dial_addr;
+use crate::devserver::persisted::local_devserver_dial_addr;
 use crate::registry::{library, missing_workspace_path, not_a_chan_workspace_hint};
 
 /// The process serving a workspace, behind its writer-lock holder.

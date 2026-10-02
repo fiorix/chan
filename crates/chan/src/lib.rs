@@ -32,10 +32,32 @@ use crate::close::cmd_close_cli;
 use crate::config::cmd_config;
 use crate::contacts::cmd_contacts_import_csv;
 use crate::desktop::{cmd_upgrade_desktop, decide_upgrade_route, desktop_companion, UpgradeRoute};
+use crate::devserver::foreground::{
+    build_devserver_tunnel, build_devserver_tunnel_from_env, devserver_listen_override,
+    normalize_tunnel_devserver_name, resolve_devserver_listen, resolve_devserver_port,
+    run_devserver_foreground, warn_non_loopback_bind, MISSING_TUNNEL_URL,
+};
+use crate::devserver::management::{
+    cmd_rotate_devserver_token, drain_devserver_terminals, emit_devserver_token_marker, health_ok,
+    DEVSERVER_TOKEN_WAIT,
+};
+use crate::devserver::persisted::{
+    devserver_addr_from_persisted_args, devserver_chan_home, devserver_log_path,
+    keeps_recorded_service_path, launch_agent_path, launchd_program_arguments,
+    persisted_flag_value, read_launch_agent_plist, read_systemd_unit,
+    recorded_launch_agent_search_path, resolve_devserver_addr, running_systemd_devserver_addr,
+    systemd_execstart_line, systemd_user_unit_dir,
+};
+use crate::devserver::relaunch::resolve_relaunchable_exe;
+use crate::devserver::supervisor::{
+    current_uid, launchctl, launchd_domain_target, launchd_is_active, launchd_service_target,
+    recent_unit_journal, run_tool, systemctl_user, unit_is_active, wait_until_active,
+    wait_until_launchd_active, DEVSERVER_LAUNCHD_LABEL, DEVSERVER_SYSTEMD_UNIT,
+};
 use crate::index::cmd_index;
 use crate::mcp::{cmd_mcp, cmd_mcp_proxy};
 use crate::metadata::cmd_metadata;
-use crate::registry::{cmd_add, cmd_list, library};
+use crate::registry::{cmd_add, cmd_list};
 use crate::remote::{
     cmd_devserver_connect, cmd_devserver_disconnect, cmd_devserver_forget, cmd_devserver_ls,
     cmd_devserver_register,
@@ -51,6 +73,7 @@ mod config;
 mod contacts;
 mod control;
 mod desktop;
+mod devserver;
 mod index;
 mod mcp;
 mod metadata;
@@ -558,32 +581,6 @@ pub fn dump_skill(args: chan_shell::DumpSkillArgs) -> Result<()> {
     Ok(())
 }
 
-/// Devserver twin of [`devserver_port_collision_hint`]: an actionable message
-/// for the devserver's own listener failing to bind with `AddrInUse` (the only
-/// fallible bind that escapes `run_devserver`; the discovery-socket bind is
-/// non-fatal). Unlike the serve-path hint this fires for ANY port and names
-/// it, so a deliberate squatter against an explicit `--port` reads as a
-/// collision in the journal instead of a generic anyhow chain. `None` for
-/// every other error, which keeps its context unchanged.
-fn devserver_bind_collision_hint(addr: SocketAddr, err: &anyhow::Error) -> Option<String> {
-    let io_err = err.root_cause().downcast_ref::<std::io::Error>()?;
-    if io_err.kind() != std::io::ErrorKind::AddrInUse {
-        return None;
-    }
-    let squatter = if addr.port() == DEFAULT_PORT {
-        "most likely another `chan devserver` or a standalone `chan serve` \
-         server (both default to it)"
-    } else {
-        "another process owns it"
-    };
-    Some(format!(
-        "chan devserver: could not bind {addr}: the port is already in use -- \
-         {squatter}. Stop the other process or re-run with a different \
-         `--port` (a listening tunnel-mode devserver defaults to an \
-         OS-assigned free port)."
-    ))
-}
-
 /// Dispatch one `chan devserver` subcommand: a client-side verb goes to its
 /// desktop-launcher handler, and every server-side verb goes through
 /// [`cmd_devserver`] with the flags it carries, so flag semantics and service
@@ -763,129 +760,6 @@ async fn cmd_devserver(args: DevserverServeArgs, verb: DevserverVerb, verbose: b
             run_supervised_devserver(kind, action, addr, force, verbose, tunnel).await
         }
     }
-}
-
-/// Warn when a devserver bind exposes a non-loopback interface: there is no TLS,
-/// only the persisted bearer-token gate.
-fn warn_non_loopback_bind(addr: SocketAddr) {
-    if !addr.ip().is_loopback() {
-        eprintln!(
-            "WARNING: binding to {} exposes the devserver on a non-loopback \
-             interface. There is no TLS and only a bearer-token gate; reach a \
-             remote devserver over `ssh -L` instead of binding it publicly.",
-            addr.ip()
-        );
-    }
-}
-
-/// Build the foreground tunnel config from `--tunnel-token`, warning when the
-/// secret arrived on the command line (visible in `ps`) rather than via
-/// `CHAN_TUNNEL_TOKEN`. Only the foreground / `chan` paths reach this; the
-/// systemd/launchd refusal lives at the call site. These backends persist no
-/// unit to reuse an endpoint from, so a token with no `--tunnel-url` /
-/// `CHAN_TUNNEL_URL` is an error here -- the same refusal the supervised path
-/// only reaches once the installed unit has come up empty too.
-fn build_devserver_tunnel(
-    tunnel_token: Option<String>,
-    tunnel_url: Option<String>,
-    tunnel_devserver_name: Option<&str>,
-) -> Result<Option<chan_server::DevserverTunnel>> {
-    let Some(token) = tunnel_token else {
-        return Ok(None);
-    };
-    // clap does not expose the arg source, so compare to the env directly.
-    if std::env::var("CHAN_TUNNEL_TOKEN").ok().as_deref() != Some(token.as_str()) {
-        eprintln!(
-            "WARNING: --tunnel-token is visible in `ps` output. \
-             Prefer CHAN_TUNNEL_TOKEN env var instead."
-        );
-    }
-    let tunnel_url = tunnel_url.context(MISSING_TUNNEL_URL)?;
-    Ok(Some(chan_server::DevserverTunnel {
-        tunnel_url,
-        token,
-        name: resolve_tunnel_devserver_name(tunnel_devserver_name),
-    }))
-}
-
-/// The refusal when tunnel mode is asked for with no endpoint to dial. Shared
-/// so the unsupervised backends and the supervised one (which reaches it only
-/// after the installed unit yields no endpoint either) read identically.
-const MISSING_TUNNEL_URL: &str =
-    "chan devserver: tunnel mode requires --tunnel-url or CHAN_TUNNEL_URL";
-
-/// Hidden daemon child tunnel config. The token is never accepted as an argv
-/// field here; the parent passes it through CHAN_TUNNEL_TOKEN only. The name
-/// is not a secret and rides argv (`--tunnel-devserver-name`).
-fn build_devserver_tunnel_from_env(
-    tunnel_url: Option<String>,
-    tunnel_devserver_name: Option<String>,
-) -> Result<Option<chan_server::DevserverTunnel>> {
-    let Some(token) = std::env::var("CHAN_TUNNEL_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty())
-    else {
-        return Ok(None);
-    };
-    let tunnel_url = tunnel_url
-        .filter(|url| !url.trim().is_empty())
-        .context("CHAN_TUNNEL_URL or --tunnel-url is required with CHAN_TUNNEL_TOKEN")?;
-    Ok(Some(chan_server::DevserverTunnel {
-        tunnel_url,
-        token,
-        name: resolve_tunnel_devserver_name(tunnel_devserver_name.as_deref()),
-    }))
-}
-
-/// Gateway bound on a devserver's roster label
-/// (`gateway/crates/profile/src/http.rs`, `create_devserver`): 64 bytes.
-/// The CLI caps the announced name to the same bound so the gateway
-/// never has to reject it.
-const TUNNEL_DEVSERVER_NAME_MAX_BYTES: usize = 64;
-
-/// Normalize an explicit `--tunnel-devserver-name`: map control
-/// characters to spaces, collapse whitespace runs, trim, and cap at
-/// the gateway's 64-byte label bound (truncating on a char boundary).
-/// Control characters never reach the wire or the systemd unit from
-/// here: an interior newline would inject unit directives into
-/// `Environment=` and an ANSI escape would corrupt whatever renders
-/// the name. A blank value (after mapping) reads as absent so the
-/// hostname default applies.
-fn normalize_tunnel_devserver_name(raw: &str) -> Option<String> {
-    let mapped: String = raw
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let collapsed = mapped.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() {
-        return None;
-    }
-    Some(truncate_on_char_boundary(&collapsed, TUNNEL_DEVSERVER_NAME_MAX_BYTES).to_string())
-}
-
-/// The display name a tunnel registration announces for the gateway
-/// roster: the explicit `--tunnel-devserver-name` when given, else this
-/// box's hostname (via [`devserver_host_label`]). Never empty.
-fn resolve_tunnel_devserver_name(explicit: Option<&str>) -> String {
-    explicit
-        .and_then(normalize_tunnel_devserver_name)
-        .unwrap_or_else(|| {
-            normalize_tunnel_devserver_name(&devserver_host_label())
-                .expect("devserver_host_label never yields a blank label")
-        })
-}
-
-/// The longest prefix of `s` that fits in `max` bytes without splitting
-/// a UTF-8 code point.
-fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 /// A tunnel registration to bake into a systemd unit: the PAT that flips the
@@ -1141,53 +1015,6 @@ fn service_target_addr(kind: ServiceKind, bind: Option<IpAddr>, port: Option<u16
     resolve_devserver_addr(bind, port, persisted_devserver_addr(kind))
 }
 
-/// Apply the `stop`/`restart` address precedence per field: an explicit CLI
-/// flag wins, else the running service's persisted value, else the built-in
-/// default. Pure (the FS read that yields `persisted` lives in the caller) so the
-/// precedence stays unit-testable.
-fn resolve_devserver_addr(
-    bind: Option<IpAddr>,
-    port: Option<u16>,
-    persisted: Option<SocketAddr>,
-) -> SocketAddr {
-    let ip = bind
-        .or_else(|| persisted.map(|a| a.ip()))
-        .unwrap_or(DEFAULT_DEVSERVER_BIND);
-    let port = port
-        .or_else(|| persisted.map(|a| a.port()))
-        .unwrap_or(DEFAULT_PORT);
-    SocketAddr::new(ip, port)
-}
-
-/// Where to dial this machine's devserver: the running systemd unit's
-/// address, else the persisted port on the default bind.
-fn local_devserver_dial_addr() -> Option<SocketAddr> {
-    running_systemd_devserver_addr().or_else(|| {
-        chan_server::persisted_devserver_port()
-            .map(|port| SocketAddr::new(DEFAULT_DEVSERVER_BIND, port))
-    })
-}
-
-/// The address the RUNNING systemd devserver serves its management API on,
-/// for the verbs that dial it (the `stop` / `--force` terminal drain,
-/// `join`'s health watch) and the bind= report lines. Unit-persisted `--bind`/`--port`
-/// flags are the truth when present; a tunnel unit with no pinned port binds
-/// an OS-assigned one, which the service records in the devserver config at
-/// bind time (before READY=1, so an `is-active` unit has already written it).
-/// `None` when neither source knows a port.
-fn running_systemd_devserver_addr() -> Option<SocketAddr> {
-    let unit = read_systemd_unit();
-    let ip = unit
-        .as_deref()
-        .and_then(|unit| persisted_flag_value(unit, "--bind=")?.parse().ok())
-        .unwrap_or(DEFAULT_DEVSERVER_BIND);
-    let port = unit
-        .as_deref()
-        .and_then(|unit| persisted_flag_value(unit, "--port=")?.parse().ok())
-        .or_else(chan_server::persisted_devserver_port)?;
-    Some(SocketAddr::new(ip, port))
-}
-
 /// The address a supervised backend persisted for its running (or last) service,
 /// or None when nothing is recorded. systemd/launchd carry it in the unit /
 /// agent the supervisor wrote (which survive a `stop`); the `chan` daemon
@@ -1201,192 +1028,6 @@ fn persisted_devserver_addr(kind: ServiceKind) -> Option<SocketAddr> {
     }
 }
 
-/// Parse the `--bind=<ip>` / `--port=<port>` the supervisor persisted into a unit
-/// ExecStart line or a launchd plist's ProgramArguments, into the bound address.
-/// Each value is read up to the next whitespace or `<`, so it works for both the
-/// shell-style ExecStart and the XML-wrapped plist `<string>`. None if either
-/// flag is missing or unparseable.
-fn devserver_addr_from_persisted_args(text: &str) -> Option<SocketAddr> {
-    let ip: IpAddr = persisted_flag_value(text, "--bind=")?.parse().ok()?;
-    let port: u16 = persisted_flag_value(text, "--port=")?.parse().ok()?;
-    Some(SocketAddr::new(ip, port))
-}
-
-/// The value immediately following `flag` in the command a persisted unit or
-/// plist runs (see [`persisted_command_line`]), read up to the next
-/// whitespace or `<` (the XML element close in a plist).
-fn persisted_flag_value<'a>(text: &'a str, flag: &str) -> Option<&'a str> {
-    let command = persisted_command_line(text)?;
-    let start = command.find(flag)? + flag.len();
-    let rest = &command[start..];
-    let end = rest
-        .find(|c: char| c.is_whitespace() || c == '<')
-        .unwrap_or(rest.len());
-    Some(&rest[..end])
-}
-
-/// The command a persisted definition runs: a unit's `ExecStart=` line, or a
-/// plist's `ProgramArguments` array. Flags are read from here alone because a
-/// definition's environment (a recorded PATH, CHAN_HOME) can hold the same
-/// text, and a unit renders its `Environment=` lines before `ExecStart=`.
-fn persisted_command_line(text: &str) -> Option<&str> {
-    if let Some(exec_start) = text
-        .lines()
-        .find_map(|line| line.trim_start().strip_prefix("ExecStart="))
-    {
-        return Some(exec_start);
-    }
-    let (_, arguments) = text.split_once("<key>ProgramArguments</key>")?;
-    let (_, array) = arguments.split_once("<array>")?;
-    array.split_once("</array>").map(|(array, _)| array)
-}
-
-/// The persisted systemd unit contents, if the file exists.
-fn read_systemd_unit() -> Option<String> {
-    std::fs::read_to_string(systemd_user_unit_dir().ok()?.join(DEVSERVER_SYSTEMD_UNIT)).ok()
-}
-
-/// The persisted launchd agent plist contents, if the file exists.
-fn read_launch_agent_plist() -> Option<String> {
-    std::fs::read_to_string(launch_agent_path().ok()?).ok()
-}
-
-/// The `ExecStart=` command line from a systemd unit's text, for `status`.
-fn systemd_execstart_line(unit: &str) -> Option<String> {
-    unit.lines()
-        .find_map(|l| l.strip_prefix("ExecStart=").map(|s| s.trim().to_string()))
-}
-
-/// A launchd plist's `ProgramArguments` joined into one command line, for
-/// `status`. Pulls each `<string>` inside the `<array>` and unescapes it.
-fn launchd_program_arguments(plist: &str) -> Option<String> {
-    let array = plist
-        .split_once("<array>")
-        .and_then(|(_, rest)| rest.split_once("</array>"))
-        .map(|(inner, _)| inner)?;
-    let args: Vec<String> = array
-        .match_indices("<string>")
-        .filter_map(|(i, tag)| {
-            array[i + tag.len()..]
-                .split_once("</string>")
-                .map(|(value, _)| unescape_plist_xml(value))
-        })
-        .collect();
-    (!args.is_empty()).then(|| args.join(" "))
-}
-
-/// Reverse of [`xml_escape`] for displaying persisted plist `<string>` values.
-/// `&amp;` is undone last so an escaped entity body is not re-decoded.
-fn unescape_plist_xml(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-}
-
-/// Whether the foreground devserver binds a local TCP listener. Non-tunnel always
-/// binds. Tunnel mode defaults to no-bind (the gateway is the surface) EXCEPT
-/// under systemd notify, where the loopback management API is needed so
-/// `chan devserver stop` / `restart --force` can drain the terminals
-/// explicitly (restart itself needs no call: the fd store preserves PTYs).
-/// `CHAN_DEVSERVER_LISTEN`
-/// forces either way. Tunnel-off + LISTEN=0 leaves nothing reachable (no local
-/// listener, no tunnel -- only the `chan serve` discovery socket), so it is a
-/// hard error rather than a silently-unreachable devserver.
-fn resolve_devserver_listen(
-    tunnel_mode: bool,
-    under_systemd_notify: bool,
-    listen_override: Option<bool>,
-) -> Result<bool> {
-    let listen = listen_override.unwrap_or(!tunnel_mode || under_systemd_notify);
-    if !listen && !tunnel_mode {
-        anyhow::bail!(
-            "chan devserver: CHAN_DEVSERVER_LISTEN=0 with no tunnel leaves nothing reachable \
-             (no local listener and no tunnel). Set CHAN_TUNNEL_TOKEN to publish through the \
-             gateway, or unset CHAN_DEVSERVER_LISTEN to bind the local listener."
-        );
-    }
-    Ok(listen)
-}
-
-/// Read `CHAN_DEVSERVER_LISTEN` as a tri-state: unset or empty ⇒ `None` (use the
-/// tunnel-mode default), `"0"` ⇒ `Some(false)`, any other non-empty value ⇒
-/// `Some(true)` (mirrors `CHAN_NO_DESKTOP_HANDOFF`'s truthiness).
-fn devserver_listen_override() -> Option<bool> {
-    std::env::var("CHAN_DEVSERVER_LISTEN")
-        .ok()
-        .and_then(|v| parse_listen_override(&v))
-}
-
-/// Pure parse for [`devserver_listen_override`] so the tri-state is unit-tested
-/// without touching the process environment.
-fn parse_listen_override(raw: &str) -> Option<bool> {
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw != "0")
-    }
-}
-
-/// The port a fresh foreground devserver binds. An explicit `--port` always
-/// wins, tunnel mode included. A LISTENING tunnel-mode devserver defaults to
-/// `0` (the OS assigns a free port): its listener is management-only plumbing
-/// behind the gateway -- nothing depends on the number, the bound port is
-/// read back from `local_addr()` and persisted -- while a fixed 8787 default
-/// collides with whatever else owns that port, and the systemd unit path
-/// restarts into the same collision forever. Everything else keeps
-/// [`DEFAULT_PORT`], whose equality with `chan serve`'s default powers the
-/// serve-path collision hint.
-fn resolve_devserver_port(explicit: Option<u16>, tunnel_mode: bool, listen: bool) -> u16 {
-    match explicit {
-        Some(port) => port,
-        None if tunnel_mode && listen => 0,
-        None => DEFAULT_PORT,
-    }
-}
-
-/// Run the devserver in the foreground. The no-supervisor default and the
-/// systemd unit's `ExecStart` / launchd agent's `ProgramArguments` all land
-/// here. `tunnel` carries the gateway registration when `--tunnel-token` is
-/// set; the supervised backends never pass it (tunnel mode is foreground-only).
-async fn run_devserver_foreground(
-    addr: SocketAddr,
-    tunnel: Option<chan_server::DevserverTunnel>,
-    listen: bool,
-) -> Result<()> {
-    let lib = library()?;
-    let result = chan_server::run_devserver(
-        lib,
-        chan_server::DevserverConfig {
-            addr,
-            host_label: devserver_host_label(),
-            tunnel,
-            listen,
-        },
-    )
-    .await;
-    // A bind collision gets the actionable hint (mirrors `cmd_serve`); under
-    // systemd it lands in the journal as the loud failure line.
-    if let Err(err) = &result {
-        if let Some(hint) = devserver_bind_collision_hint(addr, err) {
-            return Err(anyhow::anyhow!(hint));
-        }
-    }
-    result.context("running devserver")
-}
-
-/// Human label for the box, shown in the management API. Falls back to a
-/// generic label when the hostname is empty.
-fn devserver_host_label() -> String {
-    let host = gethostname::gethostname().to_string_lossy().into_owned();
-    if host.trim().is_empty() {
-        "devserver".to_string()
-    } else {
-        host
-    }
-}
-
-/// The systemd user unit name for the devserver.
-const DEVSERVER_SYSTEMD_UNIT: &str = "chan-devserver.service";
 /// Matches the unit's `TimeoutStartSec=10min`, which outlives the bounded
 /// eight-minute startup restore before the devserver emits `READY=1`.
 const DEVSERVER_SYSTEMD_START_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -1657,15 +1298,6 @@ async fn run_health_watchdog(
     }
 }
 
-/// One bounded `/api/health` probe; any non-2xx, transport error, or timeout
-/// is a miss.
-async fn health_ok(client: &reqwest::Client, url: &str, timeout: Duration) -> bool {
-    match tokio::time::timeout(timeout, client.get(url).send()).await {
-        Ok(Ok(resp)) => resp.status().is_success(),
-        _ => false,
-    }
-}
-
 /// `chan devserver start --service=systemd`: ensure the unit is up (linger +
 /// write/enable/start when it is not already running), then return. Enables the
 /// unit so it also comes back on boot. Idempotent: a no-op (beyond re-providing
@@ -1916,71 +1548,6 @@ async fn force_teardown_before_restart(
     }
 }
 
-fn devserver_refusal(status: reqwest::StatusCode, body: &str, fallback: String) -> String {
-    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
-        return fallback;
-    };
-    match body
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .filter(|sentence| !sentence.is_empty())
-    {
-        Some(sentence) => format!("HTTP {status}: {sentence}"),
-        None => fallback,
-    }
-}
-
-/// POST the drain endpoint: every terminal session is closed and the child
-/// processes waited on before this returns Ok. Err carries the reason the
-/// drain could not be confirmed (no token, connect failure, timeout, or
-/// lingering children); callers decide how destructive to be about it.
-async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), String> {
-    let Some(token) = chan_server::persisted_devserver_token() else {
-        return Err("could not read the devserver token".to_string());
-    };
-    drain_devserver_terminals_with_token(addr, &token).await
-}
-
-async fn drain_devserver_terminals_with_token(
-    addr: SocketAddr,
-    token: &str,
-) -> std::result::Result<(), String> {
-    let url = format!("http://{addr}/api/devserver/terminal-sessions/drain");
-    let client = reqwest::Client::new();
-    let request = client.post(&url).bearer_auth(token).send();
-    // The server-side child wait is bounded at 5s; leave headroom.
-    let response = match tokio::time::timeout(Duration::from_secs(10), request).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(e)) => return Err(format!("request failed: {e}")),
-        Err(_) => return Err("request timed out".to_string()),
-    };
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(devserver_refusal(
-            status,
-            &body,
-            format!("HTTP {status}: {body}"),
-        ));
-    }
-    let drained: chan_server::devserver_api::DrainedTerminals = response
-        .json()
-        .await
-        .map_err(|e| format!("parsing drain response: {e}"))?;
-    eprintln!(
-        "chan devserver: drained {} terminal session(s) ({} child process(es) confirmed dead)",
-        drained.closed, drained.dead
-    );
-    if !drained.lingering.is_empty() {
-        return Err(format!(
-            "{} child process(es) still running: {:?}",
-            drained.lingering.len(),
-            drained.lingering
-        ));
-    }
-    Ok(())
-}
-
 /// `chan devserver stop --service=systemd`: stop the running unit AND disable
 /// it, so it does not come back on the next login or boot. Sessions are drained
 /// through the management API first (explicit kill, today's forcefulness for
@@ -2034,149 +1601,6 @@ async fn stop_devserver_under_systemd() -> Result<()> {
     Ok(())
 }
 
-/// `chan devserver rotate-token`: re-mint the devserver bearer. Prefer
-/// rotating THROUGH the running server's management API so the old bearer
-/// stops authorizing immediately (the suspected-leak response); fall back
-/// to rewriting the persisted config when nothing answers, which a
-/// devserver still running elsewhere only picks up at its next restart.
-/// Either way the new `CHAN_DEVSERVER_TOKEN=` marker and `/?t=` URL are
-/// printed: the marker is the scrapers' distribution channel, and a
-/// rotation that does not re-emit it strands them on a dead token.
-async fn cmd_rotate_devserver_token() -> Result<()> {
-    let Some(current) = chan_server::persisted_devserver_token() else {
-        anyhow::bail!(
-            "chan devserver rotate-token: no devserver config with a token \
-             found (~/.chan/devserver/config.json); start a devserver first"
-        );
-    };
-    let dial = local_devserver_dial_addr();
-    if let Some(addr) = dial {
-        if let Some(rotated) = rotate_devserver_token_at(addr, &current).await? {
-            eprintln!("chan devserver: token rotated; the old bearer no longer authorizes");
-            print!("{}", rotated_token_output(Some(addr), &rotated.token));
-            return Ok(());
-        }
-    }
-    match chan_server::rotate_persisted_devserver_token()
-        .context("rewriting ~/.chan/devserver/config.json")?
-    {
-        Some(token) => {
-            eprintln!(
-                "chan devserver: NOTE: no running devserver answered; rotated the \
-                 persisted token only -- a devserver still running elsewhere keeps \
-                 accepting its old token until it restarts"
-            );
-            print!("{}", rotated_token_output(dial, &token));
-            Ok(())
-        }
-        None => anyhow::bail!(
-            "chan devserver rotate-token: no devserver config with a token \
-             found (~/.chan/devserver/config.json); start a devserver first"
-        ),
-    }
-}
-
-async fn rotate_devserver_token_at(
-    addr: SocketAddr,
-    current: &str,
-) -> Result<Option<chan_server::devserver_api::RotatedToken>> {
-    let url = format!("http://{addr}/api/devserver/rotate-token");
-    let client = reqwest::Client::new();
-    let request = client.post(&url).bearer_auth(current).send();
-    match tokio::time::timeout(Duration::from_secs(5), request).await {
-        Ok(Ok(response)) if response.status().is_success() => {
-            let rotated = response
-                .json()
-                .await
-                .context("parsing the rotate-token response")?;
-            Ok(Some(rotated))
-        }
-        Ok(Ok(response)) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-            anyhow::bail!(
-                "chan devserver rotate-token: the running devserver rejected the \
-                 persisted token (401): its in-memory token and \
-                 ~/.chan/devserver/config.json disagree. Restart the devserver, \
-                 then rotate again."
-            );
-        }
-        Ok(Ok(response)) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let refusal = devserver_refusal(status, &body, format!("HTTP {status}"));
-            anyhow::bail!("chan devserver rotate-token: the running devserver answered {refusal}");
-        }
-        // Nothing listening (or too slow): rotate the file instead.
-        Ok(Err(_)) | Err(_) => Ok(None),
-    }
-}
-
-/// The stdout block a rotation prints: the `/?t=` URL (when the serve
-/// address is known) and the LOCKED `CHAN_DEVSERVER_TOKEN=` marker line
-/// the desktop control terminal re-scrapes on every connect.
-fn rotated_token_output(addr: Option<SocketAddr>, token: &str) -> String {
-    let mut out = String::new();
-    if let Some(addr) = addr {
-        out.push_str(&format!(
-            "chan devserver: listening on http://{addr}/?t={token}\n"
-        ));
-    }
-    out.push_str(&format!("{}{token}\n", chan_server::DEVSERVER_TOKEN_MARKER));
-    out
-}
-
-/// How long the supervisor waits for the service's bearer token to land in the
-/// persisted config before giving up. A fresh `Type=simple` unit reports active
-/// before its first persist, so a brief poll covers that race; every later start
-/// finds the token on the first read.
-const DEVSERVER_TOKEN_WAIT: Duration = Duration::from_secs(5);
-
-/// Resolve the persisted devserver bearer token, polling `read` until it yields
-/// a token or `timeout` elapses. Injecting the reader keeps the poll/timeout
-/// contract testable without a real config on disk.
-async fn resolve_devserver_token(
-    read: impl Fn() -> Option<String>,
-    timeout: Duration,
-) -> Option<String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(token) = read() {
-            return Some(token);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// Print the locked `CHAN_DEVSERVER_TOKEN=` marker to stdout -- the same contract
-/// the foreground server emits -- directly from the supervisor, read from the
-/// persisted 0600 config. Token delivery must not depend on this user being able
-/// to read the unit journal (a uid below `SYS_UID_MAX`, or a user outside the
-/// `systemd-journal`/`adm` groups, cannot): the desktop control terminal scrapes
-/// this marker to reconnect, and the journal follow is only human-facing log
-/// streaming. A duplicate marker re-surfaced by the journal on readable hosts is
-/// harmless -- the scraper takes the last one.
-///
-/// Errors when the token never lands within `timeout`. The point of
-/// `--service=systemd` supervision is to hand a client a token to reconnect
-/// with; a unit that is
-/// active but whose token cannot be surfaced is unreachable, so fail loud rather
-/// than babysit it. The unit stays running, so a later re-attach can recover it.
-async fn emit_devserver_token_marker(timeout: Duration) -> Result<()> {
-    match resolve_devserver_token(chan_server::persisted_devserver_token, timeout).await {
-        Some(token) => {
-            println!("{}{token}", chan_server::DEVSERVER_TOKEN_MARKER);
-            Ok(())
-        }
-        None => anyhow::bail!(
-            "chan devserver: the supervised service is active but its bearer \
-             token could not be read from ~/.chan/devserver/config.json; the \
-             control terminal cannot authenticate to it"
-        ),
-    }
-}
-
 /// Ensure lingering is enabled so the user service survives logout. Fails
 /// loudly with a manual hint when it cannot be ensured.
 async fn ensure_systemd_linger() -> Result<()> {
@@ -2215,136 +1639,6 @@ async fn user_linger_enabled(user: &str) -> bool {
     )
 }
 
-/// The `chan` CLI entry points a supervisor may name, as found on disk.
-/// Populated by [`discover_relaunch_candidates`] and consumed by the pure
-/// [`select_relaunchable_exe`].
-#[derive(Debug, Default)]
-struct RelaunchCandidates {
-    /// `current_exe()`, when the OS reports one. On Linux this is the SYMLINK
-    /// TARGET (`/proc/self/exe`), which is why a distro `chan -> chan-desktop`
-    /// install lands here as the desktop binary.
-    current_exe: Option<PathBuf>,
-    /// This process runs from a chan AppImage, so every path under its mount is
-    /// ephemeral.
-    in_chan_appimage: bool,
-    /// An existing `chan` next to `current_exe` (the distro package layout).
-    sibling_chan: Option<PathBuf>,
-    /// The existing local `bin/chan` shim (the macOS / AppImage layout).
-    local_chan: Option<PathBuf>,
-}
-
-/// Pick the binary a unit / plist `ExecStart` (or a daemon re-exec) should name.
-/// Pure: every candidate is already exists-checked by discovery.
-///
-/// Two properties matter. The path must still resolve after the process that
-/// wrote it is gone, and its basename must stay `chan`, because chan-desktop
-/// runs the CLI only when it is invoked through a `chan` name
-/// ([`chan_shell::invoked_as_chan`]). So the winner is deliberately NOT
-/// canonicalized: a `chan` symlink or wrapper script IS the answer, and
-/// resolving it to `chan-desktop` would start the GUI personality instead.
-fn select_relaunchable_exe(candidates: &RelaunchCandidates) -> Result<PathBuf> {
-    let RelaunchCandidates {
-        current_exe,
-        in_chan_appimage,
-        sibling_chan,
-        local_chan,
-    } = candidates;
-
-    // An AppImage run has no stable path of its own: the mount dir disappears,
-    // and the AppImage file itself launches the GUI. Only the local wrapper
-    // (`exec -a chan "$APPIMAGE"`) survives a reboot with the right argv[0].
-    if *in_chan_appimage {
-        return local_chan.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no `chan` CLI entry point for the devserver supervisor: this is an \
-                 AppImage run, whose own path is temporary and launches the desktop GUI. \
-                 Launch Chan Desktop once so it installs the `chan` shim, or install the \
-                 chan CLI, then retry"
-            )
-        });
-    }
-
-    let Some(exe) = current_exe else {
-        // No `current_exe()`: the shim if there is one, else a bare `chan` for
-        // the unit's PATH to resolve.
-        return Ok(local_chan
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(CHAN_CLI_BIN_NAME)));
-    };
-    if chan_shell::invoked_as_chan(exe.as_os_str()) {
-        return Ok(exe.clone());
-    }
-    if is_desktop_binary(exe) {
-        return sibling_chan
-            .clone()
-            .or_else(|| local_chan.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no `chan` CLI entry point for the devserver supervisor: the running \
-                     binary is {} (the desktop GUI personality), with no `chan` beside it \
-                     and no `chan` shim in the local bin dir. Launch Chan Desktop once so \
-                     it installs the shim, or install the chan CLI, then retry",
-                    exe.display()
-                )
-            });
-    }
-    // Some other name (a dev build, a renamed install): it is the CLI already,
-    // so keep it rather than redirecting the supervisor at a different install.
-    Ok(exe.clone())
-}
-
-/// `chan`, plus `.exe` where the platform wants it.
-const CHAN_CLI_BIN_NAME: &str = if cfg!(windows) { "chan.exe" } else { "chan" };
-
-/// Whether `exe` is the desktop GUI binary, which only runs the CLI when it is
-/// invoked through a `chan` name. Stem-based, so `chan-desktop.exe` matches.
-fn is_desktop_binary(exe: &Path) -> bool {
-    exe.file_stem()
-        .is_some_and(|stem| stem == std::ffi::OsStr::new("chan-desktop"))
-}
-
-/// Whether this process runs from a chan AppImage. A foreign `$APPIMAGE`
-/// inherited from another AppImage app (an editor launching chan) does not
-/// count.
-fn running_in_chan_appimage() -> bool {
-    std::env::var_os("APPIMAGE").is_some_and(|appimage| {
-        Path::new(&appimage)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                let name = name.to_ascii_lowercase();
-                name.contains("chan") && name.ends_with(".appimage")
-            })
-    })
-}
-
-/// The live filesystem half of the resolver: probe the two `chan` entry points a
-/// desktop install can have.
-fn discover_relaunch_candidates() -> RelaunchCandidates {
-    let current_exe = std::env::current_exe().ok();
-    let sibling_chan = current_exe
-        .as_deref()
-        .and_then(Path::parent)
-        .map(|dir| dir.join(CHAN_CLI_BIN_NAME))
-        .filter(|chan| chan.exists());
-    let local_chan = chan_workspace::paths::local_bin_dir()
-        .map(|dir| dir.join(CHAN_CLI_BIN_NAME))
-        .filter(|chan| chan.exists());
-    RelaunchCandidates {
-        current_exe,
-        in_chan_appimage: running_in_chan_appimage(),
-        sibling_chan,
-        local_chan,
-    }
-}
-
-/// Resolve a STABLE, relaunchable path to the `chan` CLI for a unit / plist
-/// `ExecStart` or a daemon re-exec. See [`select_relaunchable_exe`] for the
-/// order and why the result is never canonicalized.
-fn resolve_relaunchable_exe() -> Result<PathBuf> {
-    select_relaunchable_exe(&discover_relaunch_candidates())
-}
-
 /// Write `~/.config/systemd/user/chan-devserver.service` whose `ExecStart` runs
 /// the resolved `chan` CLI's foreground devserver on `addr`. Returns the unit
 /// path.
@@ -2374,20 +1668,6 @@ fn write_devserver_unit(
         std::io::stdin().is_terminal(),
     );
     write_rendered_devserver_unit(&unit_path, &unit, tunnel.is_some())
-}
-
-/// Whether a rewrite of the devserver's service definition keeps the `PATH`
-/// the installed one records rather than `current`, this process's own.
-///
-/// The recorded `PATH` is the service's `PATH` for every extension and
-/// terminal it spawns, so only a render from a terminal replaces it. A
-/// render with no terminal on standard input (a desktop connect script, any
-/// other script) keeps it, so a non-interactive `PATH` never replaces a login
-/// one, and so does a terminal render whose `PATH` has no usable entry,
-/// rather than dropping the line. With nothing recorded, every render records
-/// its own.
-fn keeps_recorded_service_path(current: &std::ffi::OsStr, interactive: bool) -> bool {
-    !interactive || chan_systemd::service_search_path(current).is_none()
 }
 
 /// `unit` with the `PATH` line [`keeps_recorded_service_path`] chooses when
@@ -2511,16 +1791,6 @@ fn write_rendered_devserver_unit(
     Ok(update)
 }
 
-/// The `CHAN_HOME` override to bake into a supervised service's environment, if
-/// set to a non-empty value. systemd/launchd start the service with a fresh
-/// environment (not the supervisor's), so a devserver launched under `CHAN_HOME`
-/// must carry it into the unit/plist, otherwise the service falls back to the
-/// real `~/.chan` while the supervisor reads the isolated config, splitting the
-/// token handshake. Mirrors how the log path already resolves through `CHAN_HOME`.
-fn devserver_chan_home() -> Option<String> {
-    std::env::var("CHAN_HOME").ok().filter(|v| !v.is_empty())
-}
-
 #[cfg(test)]
 fn devserver_systemd_unit(
     exe: &Path,
@@ -2601,105 +1871,11 @@ fn devserver_systemd_unit_spec(
     )
 }
 
-/// `$XDG_CONFIG_HOME/systemd/user`, else `$HOME/.config/systemd/user`.
-fn systemd_user_unit_dir() -> Result<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(xdg).join("systemd").join("user"));
-    }
-    let home = std::env::var_os("HOME")
-        .filter(|v| !v.is_empty())
-        .context("no HOME for the systemd user unit directory")?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("systemd")
-        .join("user"))
-}
-
-/// Poll until the unit is active, a failure is reported, or the deadline
-/// passes. Tolerates the brief `activating` window after `enable --now`.
-async fn wait_until_active(timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if unit_is_active().await {
-            return true;
-        }
-        if unit_is_failed().await || Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-}
-
-async fn unit_is_active() -> bool {
-    matches!(
-        run_tool("systemctl", &["--user", "is-active", DEVSERVER_SYSTEMD_UNIT]).await,
-        Ok(output) if output.status.success()
-    )
-}
-
-async fn unit_is_failed() -> bool {
-    matches!(
-        run_tool("systemctl", &["--user", "is-failed", DEVSERVER_SYSTEMD_UNIT]).await,
-        Ok(output) if output.status.success()
-    )
-}
-
-/// Run `systemctl --user <args>`, erroring with stderr on a non-zero exit.
-async fn systemctl_user(args: &[&str]) -> Result<()> {
-    let mut full: Vec<&str> = vec!["--user"];
-    full.extend_from_slice(args);
-    let output = run_tool("systemctl", &full).await?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`systemctl --user {}` failed:\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
-/// The last lines of the unit's journal, for a failure message.
-async fn recent_unit_journal() -> String {
-    match run_tool(
-        "journalctl",
-        &[
-            "--user",
-            "-u",
-            DEVSERVER_SYSTEMD_UNIT,
-            "--no-pager",
-            "-n",
-            "30",
-        ],
-    )
-    .await
-    {
-        Ok(output) => String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string(),
-        Err(e) => format!("(could not read the journal: {e})"),
-    }
-}
-
-/// Run a tool to completion, capturing its output. Errors only when the
-/// tool cannot be spawned (e.g. missing binary), not on a non-zero exit.
-async fn run_tool(program: &str, args: &[&str]) -> Result<std::process::Output> {
-    tokio::process::Command::new(program)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("running `{program} {}`", args.join(" ")))
-}
-
 // ---------------------------------------------------------------------------
 // macOS launchd backend -- mirrors the systemd backend above. The functions are
 // always compiled (they only shell out to `launchctl`) and called only under
 // `cfg!(target_os = "macos")`; the pure helpers stay unit-testable on any host.
 // ---------------------------------------------------------------------------
-
-/// The launchd LaunchAgent label for the devserver. Reverse-DNS off the app
-/// bundle id (`app.chan.desktop`).
-const DEVSERVER_LAUNCHD_LABEL: &str = "app.chan.devserver";
 
 /// `chan devserver start --service=launchd`: ensure the agent is up
 /// (write/enable/bootstrap when it is not already running), then return. A
@@ -2822,59 +1998,6 @@ async fn stop_devserver_under_launchd() -> Result<()> {
     Ok(())
 }
 
-/// The current user's numeric uid for the `gui/<uid>` domain target. Shells out
-/// to `id -u` rather than adding a libc dependency, mirroring the systemd
-/// backend's `$USER` discovery.
-async fn current_uid() -> Result<u32> {
-    let output = run_tool("id", &["-u"]).await?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`id -u` failed:\n{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .context("parsing the current uid from `id -u`")
-}
-
-/// `gui/<uid>` -- the launchd domain target for the user's GUI login session.
-fn launchd_domain_target(uid: u32) -> String {
-    format!("gui/{uid}")
-}
-
-/// `gui/<uid>/<label>` -- the launchd service target for the devserver agent.
-fn launchd_service_target(uid: u32) -> String {
-    format!("gui/{uid}/{DEVSERVER_LAUNCHD_LABEL}")
-}
-
-/// The user's home directory from `$HOME`, for the macOS launchd paths. Mirrors
-/// the `$HOME` resolution the systemd unit-dir helper uses (no `dirs` dep).
-fn home_dir() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .context("no HOME for the launchd agent paths")
-}
-
-/// `~/Library/LaunchAgents/app.chan.devserver.plist`.
-fn launch_agent_path() -> Result<PathBuf> {
-    Ok(home_dir()?
-        .join("Library")
-        .join("LaunchAgents")
-        .join(format!("{DEVSERVER_LAUNCHD_LABEL}.plist")))
-}
-
-/// `~/.chan/devserver/devserver.log` -- where the agent's stdout/stderr land
-/// (launchd has no journal). Co-located with the 0600 devserver config. Routed
-/// through the single chan-home authority (`config_dir`) so `CHAN_HOME` moves it.
-fn devserver_log_path() -> Result<PathBuf> {
-    Ok(chan_workspace::paths::config_dir()
-        .join("devserver")
-        .join("devserver.log"))
-}
-
 /// Write the LaunchAgent plist whose `ProgramArguments` run the resolved `chan`
 /// CLI's foreground devserver on `addr`. Returns the plist path.
 fn write_devserver_launch_agent(addr: SocketAddr) -> Result<PathBuf> {
@@ -2924,18 +2047,6 @@ fn launch_agent_search_path(
         Some(recorded) if keeps_recorded_service_path(current, interactive) => Some(recorded),
         _ => chan_systemd::service_search_path(current),
     }
-}
-
-/// The `PATH` a LaunchAgent plist's `EnvironmentVariables` records, unescaped.
-fn recorded_launch_agent_search_path(plist: &str) -> Option<String> {
-    let (_, environment) = plist.split_once("<key>EnvironmentVariables</key>")?;
-    let (environment, _) = environment.split_once("</dict>")?;
-    let (_, value) = environment.split_once("<key>PATH</key>")?;
-    let (value, _) = value
-        .trim_start()
-        .strip_prefix("<string>")?
-        .split_once("</string>")?;
-    Some(unescape_plist_xml(value))
 }
 
 /// Build the LaunchAgent plist XML. `RunAtLoad` starts it on bootstrap;
@@ -3010,74 +2121,6 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Run `launchctl <args>`, erroring with stderr on a non-zero exit. For the
-/// must-succeed calls (`enable`, `bootstrap`); `bootout` runs best-effort.
-async fn launchctl(args: &[&str]) -> Result<()> {
-    let output = run_tool("launchctl", args).await?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`launchctl {}` failed:\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
-/// Whether the agent is loaded AND running.
-async fn launchd_is_active(uid: u32) -> bool {
-    let service = launchd_service_target(uid);
-    matches!(
-        run_tool("launchctl", &["print", service.as_str()]).await,
-        Ok(output)
-            if output.status.success()
-                && launchd_print_running(&String::from_utf8_lossy(&output.stdout))
-    )
-}
-
-/// Whether the agent is loaded, not running, and last exited non-zero.
-async fn launchd_is_failed(uid: u32) -> bool {
-    let service = launchd_service_target(uid);
-    matches!(
-        run_tool("launchctl", &["print", service.as_str()]).await,
-        Ok(output)
-            if output.status.success()
-                && launchd_print_failed(&String::from_utf8_lossy(&output.stdout))
-    )
-}
-
-/// Parse `launchctl print` output for a running service (`state = running`).
-fn launchd_print_running(out: &str) -> bool {
-    out.lines().any(|l| l.trim() == "state = running")
-}
-
-/// Parse `launchctl print` output for a failed service: not running with a
-/// non-zero `last exit code`. `(never exited)` and `= 0` are not failures.
-fn launchd_print_failed(out: &str) -> bool {
-    let not_running = out.lines().any(|l| l.trim() == "state = not running");
-    let bad_exit = out.lines().find_map(|l| {
-        l.trim()
-            .strip_prefix("last exit code = ")
-            .and_then(|v| v.parse::<i32>().ok())
-    });
-    not_running && matches!(bad_exit, Some(code) if code != 0)
-}
-
-/// Poll until the agent is active, a failure is reported, or the deadline
-/// passes. Tolerates the brief window between bootstrap and first run.
-async fn wait_until_launchd_active(uid: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if launchd_is_active(uid).await {
-            return true;
-        }
-        if launchd_is_failed(uid).await || Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-}
-
 /// The last lines of the agent's log file, for a failure message.
 async fn recent_launchd_log() -> String {
     let path = match devserver_log_path() {
@@ -3098,6 +2141,7 @@ async fn recent_launchd_log() -> String {
 mod tests {
     use super::*;
     use crate::cli::Cli;
+    use crate::devserver::relaunch::{select_relaunchable_exe, RelaunchCandidates};
     use clap::Parser;
 
     /// `make shortcuts-check` diffs the SOURCE text of `KEYBINDINGS_TABLE`
@@ -3119,38 +2163,6 @@ mod tests {
             KEYBINDINGS_TABLE.lines().filter(|l| !l.is_empty()).count() > 10,
             "KEYBINDINGS_TABLE looks empty"
         );
-    }
-
-    #[test]
-    fn devserver_bind_collision_hint_names_any_port() {
-        use std::io::{Error as IoError, ErrorKind};
-        let bind_err = |kind: ErrorKind, addr: &str| {
-            anyhow::Error::from(IoError::from(kind)).context(format!("binding devserver on {addr}"))
-        };
-
-        // An explicit non-default port gets the hint too (a squatter against
-        // `--port 9000` must fail loud with the port named), reading the
-        // AddrInUse through the anyhow context chain the bind site adds.
-        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let hint = devserver_bind_collision_hint(addr, &bind_err(ErrorKind::AddrInUse, "9000"))
-            .expect("hint");
-        assert!(hint.contains("127.0.0.1:9000"), "{hint}");
-        assert!(hint.contains("--port"), "{hint}");
-
-        // The shared default names its likely squatters.
-        let addr: SocketAddr = format!("127.0.0.1:{DEFAULT_PORT}").parse().unwrap();
-        let hint = devserver_bind_collision_hint(addr, &bind_err(ErrorKind::AddrInUse, "8787"))
-            .expect("hint");
-        assert!(hint.contains("chan devserver"), "{hint}");
-        assert!(hint.contains("chan serve"), "{hint}");
-
-        // Any other failure keeps its generic context.
-        assert!(devserver_bind_collision_hint(
-            addr,
-            &bind_err(ErrorKind::PermissionDenied, "8787")
-        )
-        .is_none());
-        assert!(devserver_bind_collision_hint(addr, &anyhow::anyhow!("not io")).is_none());
     }
 
     #[test]
@@ -3304,187 +2316,6 @@ mod tests {
                 "level {level} filter dropped the tokei directive: {rendered}"
             );
         }
-    }
-
-    /// The `listen` resolution matrix: tunnel mode flips the default to no-bind
-    /// UNLESS running under systemd notify; `CHAN_DEVSERVER_LISTEN` overrides;
-    /// tunnel-off + LISTEN=0 is the unreachable-devserver hard error.
-    #[test]
-    fn devserver_listen_matrix() {
-        // Tunnel off: default binds; explicit 1 binds; explicit 0 errors
-        // (nothing reachable). systemd notify makes no difference off-tunnel.
-        assert!(resolve_devserver_listen(false, false, None).unwrap());
-        assert!(resolve_devserver_listen(false, true, None).unwrap());
-        assert!(resolve_devserver_listen(false, false, Some(true)).unwrap());
-        assert!(resolve_devserver_listen(false, false, Some(false)).is_err());
-        // Tunnel on, NOT under systemd: default does NOT bind locally; explicit 0
-        // also doesn't; explicit 1 binds the local listener alongside the tunnel.
-        assert!(!resolve_devserver_listen(true, false, None).unwrap());
-        assert!(!resolve_devserver_listen(true, false, Some(false)).unwrap());
-        assert!(resolve_devserver_listen(true, false, Some(true)).unwrap());
-        // Tunnel on, UNDER systemd notify: default binds the loopback management
-        // API so the `stop` / `--force` terminal drain can reach it; explicit
-        // 0 still opts out.
-        assert!(resolve_devserver_listen(true, true, None).unwrap());
-        assert!(!resolve_devserver_listen(true, true, Some(false)).unwrap());
-    }
-
-    /// `CHAN_DEVSERVER_LISTEN` is a tri-state: unset/empty ⇒ default, `"0"` ⇒
-    /// off, any other non-empty value ⇒ on.
-    #[test]
-    fn devserver_listen_override_parse() {
-        assert_eq!(parse_listen_override(""), None);
-        assert_eq!(parse_listen_override("0"), Some(false));
-        assert_eq!(parse_listen_override("1"), Some(true));
-        // Any non-empty, non-"0" value is truthy (mirrors CHAN_NO_DESKTOP_HANDOFF).
-        assert_eq!(parse_listen_override("yes"), Some(true));
-    }
-
-    /// The port default matrix: an explicit `--port` always wins; a LISTENING
-    /// tunnel-mode devserver defaults to 0 (OS-assigned, so systemd restarts
-    /// never collide on a fixed port); everything else keeps the shared 8787.
-    #[test]
-    fn devserver_port_defaults_by_mode() {
-        // Explicit wins everywhere, tunnel mode included.
-        assert_eq!(resolve_devserver_port(Some(9000), true, true), 9000);
-        assert_eq!(resolve_devserver_port(Some(9000), false, true), 9000);
-        assert_eq!(resolve_devserver_port(Some(DEFAULT_PORT), true, true), 8787);
-        // Tunnel + listen (systemd notify / CHAN_DEVSERVER_LISTEN=1): the OS
-        // assigns the port.
-        assert_eq!(resolve_devserver_port(None, true, true), 0);
-        // Tunnel without a listener: nothing binds; the addr keeps the shared
-        // default for the discovery/window-record report.
-        assert_eq!(resolve_devserver_port(None, true, false), DEFAULT_PORT);
-        // Non-tunnel keeps the shared default the `chan serve` handoff and the
-        // serve-path collision hint rely on.
-        assert_eq!(resolve_devserver_port(None, false, true), DEFAULT_PORT);
-    }
-
-    async fn devserver_refusal_peer(
-        status: u16,
-        body: &str,
-        path: &str,
-    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let body = body.to_owned();
-        let path = path.to_owned();
-        let peer = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut buf = [0; 1024];
-                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let n = stream.read(&mut buf).await.unwrap();
-                    assert_ne!(n, 0, "client sends a complete request");
-                    request.extend_from_slice(&buf[..n]);
-                }
-                let request = String::from_utf8(request).unwrap();
-                assert!(request.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
-                assert!(request.to_ascii_lowercase().contains("authorization: bearer test-token\r\n"));
-                let response = format!(
-                    "HTTP/1.1 {status} Refused\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            })
-            .await
-            .expect("client and refusal peer finish");
-        });
-        (addr, peer)
-    }
-
-    fn devserver_refusal_bodies() -> Vec<(String, Option<String>)> {
-        let mut cases = vec![
-            ("plain refusal\n".to_owned(), None),
-            (String::new(), None),
-            (r#"{"message":"not an envelope"}"#.to_owned(), None),
-            (r#"["not an envelope"]"#.to_owned(), None),
-            (r#"{"error":42}"#.to_owned(), None),
-            (r#"{"error":""}"#.to_owned(), None),
-            (r#"{"error":"unfinished"#.to_owned(), None),
-        ];
-        for sentence in ["drain refused", "  keep this sentence\n", &"x".repeat(600)] {
-            for code in [None, Some("operation_refused")] {
-                let mut body = serde_json::json!({ "error": sentence });
-                if let Some(code) = code {
-                    body["code"] = code.into();
-                }
-                cases.push((body.to_string(), Some(sentence.to_owned())));
-            }
-        }
-        cases
-    }
-
-    #[tokio::test]
-    async fn drain_devserver_refusal_keeps_the_sentence_or_raw_body() {
-        for (body, sentence) in devserver_refusal_bodies() {
-            let (addr, peer) =
-                devserver_refusal_peer(401, &body, "/api/devserver/terminal-sessions/drain").await;
-            let result = drain_devserver_terminals_with_token(addr, "test-token").await;
-            peer.await.unwrap();
-            assert_eq!(
-                result.unwrap_err(),
-                format!(
-                    "HTTP 401 Unauthorized: {}",
-                    sentence.as_deref().unwrap_or(&body)
-                ),
-                "drain refusal body {body:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn rotate_devserver_refusal_keeps_the_sentence_or_status() {
-        let (addr, peer) = devserver_refusal_peer(
-            401,
-            r#"{"error":"a server sentence","code":"unauthorized"}"#,
-            "/api/devserver/rotate-token",
-        )
-        .await;
-        let result = rotate_devserver_token_at(addr, "test-token").await;
-        peer.await.unwrap();
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "chan devserver rotate-token: the running devserver rejected the \
-             persisted token (401): its in-memory token and \
-             ~/.chan/devserver/config.json disagree. Restart the devserver, \
-             then rotate again.",
-            "rotate-token 401 keeps the recovery instructions"
-        );
-
-        for (body, sentence) in devserver_refusal_bodies() {
-            let (addr, peer) =
-                devserver_refusal_peer(500, &body, "/api/devserver/rotate-token").await;
-            let result = rotate_devserver_token_at(addr, "test-token").await;
-            peer.await.unwrap();
-            let suffix = sentence
-                .map(|sentence| format!(": {sentence}"))
-                .unwrap_or_default();
-            assert_eq!(
-                result.unwrap_err().to_string(),
-                format!("chan devserver rotate-token: the running devserver answered HTTP 500 Internal Server Error{suffix}"),
-                "rotate-token refusal body {body:?}"
-            );
-        }
-    }
-
-    /// A rotation MUST re-emit the locked marker line -- it is the desktop
-    /// control terminal's only distribution channel -- and the `/?t=` URL
-    /// when the serve address is known. Red mutation: drop either line
-    /// from `rotated_token_output`.
-    #[test]
-    fn rotated_token_output_reemits_marker_and_url() {
-        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
-        let out = rotated_token_output(Some(addr), "tok-new");
-        assert!(out.contains("http://127.0.0.1:8787/?t=tok-new"), "{out}");
-        assert!(out.contains("CHAN_DEVSERVER_TOKEN=tok-new"), "{out}");
-        // Address unknown: the marker line still goes out.
-        let out = rotated_token_output(None, "tok-2");
-        assert!(!out.contains("listening"), "{out}");
-        assert!(out.contains("CHAN_DEVSERVER_TOKEN=tok-2"), "{out}");
     }
 
     /// Every cell of the `(--service, action)` validity matrix resolves to the
@@ -3648,62 +2479,6 @@ mod tests {
         );
     }
 
-    /// `stop`/`restart` address precedence: explicit flag > running
-    /// persisted > default, applied per field so a flagless restart preserves
-    /// the running address (the bug) while a single flag overrides just that
-    /// field.
-    #[test]
-    fn resolve_devserver_addr_precedence() {
-        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
-        let sock = |s: &str| s.parse::<SocketAddr>().unwrap();
-        assert_eq!(
-            resolve_devserver_addr(None, None, None),
-            sock("127.0.0.1:8787")
-        );
-        assert_eq!(
-            resolve_devserver_addr(None, None, Some(sock("0.0.0.0:9000"))),
-            sock("0.0.0.0:9000")
-        );
-        assert_eq!(
-            resolve_devserver_addr(Some(ip("1.2.3.4")), None, Some(sock("0.0.0.0:9000"))),
-            sock("1.2.3.4:9000")
-        );
-        assert_eq!(
-            resolve_devserver_addr(None, Some(5555), Some(sock("0.0.0.0:9000"))),
-            sock("0.0.0.0:5555")
-        );
-        assert_eq!(
-            resolve_devserver_addr(Some(ip("1.2.3.4")), Some(5555), None),
-            sock("1.2.3.4:5555")
-        );
-    }
-
-    /// The persisted-address parser handles both the systemd ExecStart line and
-    /// the launchd plist `<string>` form, and fails closed when a flag is absent.
-    #[test]
-    fn devserver_addr_parses_from_persisted_forms() {
-        // Old-form ExecStart (no run verb): units installed by an older chan must still parse.
-        assert_eq!(
-            devserver_addr_from_persisted_args(
-                "[Service]\nExecStart=/usr/bin/chan devserver --bind=0.0.0.0 --port=9000\n"
-            ),
-            Some("0.0.0.0:9000".parse().unwrap())
-        );
-        assert_eq!(
-            devserver_addr_from_persisted_args(
-                "<key>ProgramArguments</key>\n<array>\n<string>--bind=192.168.1.5</string>\n\
-                 <string>--port=8080</string>\n</array>"
-            ),
-            Some("192.168.1.5:8080".parse().unwrap())
-        );
-        assert_eq!(
-            devserver_addr_from_persisted_args(
-                "[Service]\nExecStart=/usr/bin/chan devserver --bind=0.0.0.0\n"
-            ),
-            None
-        );
-    }
-
     /// The flags a restart reads back come from the command a definition
     /// runs, never from its environment: a unit's `Environment=` lines render
     /// before `ExecStart=`, and a PATH entry may hold the same text.
@@ -3741,27 +2516,6 @@ mod tests {
             "the port must come from ProgramArguments: {plist}"
         );
         assert_eq!(devserver_addr_from_persisted_args(plist), Some(addr));
-    }
-
-    /// `status` command extraction: the systemd ExecStart value and the
-    /// launchd ProgramArguments joined (with plist `<string>` values unescaped).
-    #[test]
-    fn status_command_extracts_per_backend() {
-        let unit = "[Service]\nExecStart=/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000\nRestart=on-failure\n";
-        assert_eq!(
-            systemd_execstart_line(unit).as_deref(),
-            Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")
-        );
-        let plist = "<array>\n  <string>/usr/bin/chan</string>\n  <string>devserver</string>\n  <string>run</string>\n  <string>--bind=0.0.0.0</string>\n  <string>--port=9000</string>\n</array>";
-        assert_eq!(
-            launchd_program_arguments(plist).as_deref(),
-            Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")
-        );
-        let escaped = "<array><string>/a&amp;b/chan</string><string>devserver</string></array>";
-        assert_eq!(
-            launchd_program_arguments(escaped).as_deref(),
-            Some("/a&b/chan devserver")
-        );
     }
 
     /// The systemd unit template carries WatchdogSec= so a seized-but-
@@ -4353,118 +3107,6 @@ mod tests {
         );
     }
 
-    /// The supervisor `ExecStart` must name a `chan` entry point on every
-    /// install layout, and must NEVER name the desktop binary: chan-desktop
-    /// runs the CLI only when its argv[0] stem is `chan`, so a unit pointing at
-    /// `chan-desktop` starts the GUI personality instead of the devserver.
-    #[test]
-    fn relaunchable_exe_selects_a_chan_entry_point() {
-        struct Case {
-            what: &'static str,
-            candidates: RelaunchCandidates,
-            /// `None` when the layout has no CLI entry point to name.
-            expected: Option<&'static str>,
-        }
-
-        let cases = [
-            Case {
-                what: "a standalone chan CLI is already the entry point",
-                candidates: RelaunchCandidates {
-                    current_exe: Some(PathBuf::from("/opt/bin/chan")),
-                    ..Default::default()
-                },
-                expected: Some("/opt/bin/chan"),
-            },
-            Case {
-                what: "a distro package takes the chan sibling, uncanonicalized",
-                candidates: RelaunchCandidates {
-                    current_exe: Some(PathBuf::from("/usr/bin/chan-desktop")),
-                    sibling_chan: Some(PathBuf::from("/usr/bin/chan")),
-                    local_chan: Some(PathBuf::from("/home/u/.local/bin/chan")),
-                    ..Default::default()
-                },
-                expected: Some("/usr/bin/chan"),
-            },
-            Case {
-                what: "a macOS app has no sibling, so the local shim wins",
-                candidates: RelaunchCandidates {
-                    current_exe: Some(PathBuf::from(
-                        "/Applications/Chan.app/Contents/MacOS/chan-desktop",
-                    )),
-                    local_chan: Some(PathBuf::from("/Users/u/.local/bin/chan")),
-                    ..Default::default()
-                },
-                expected: Some("/Users/u/.local/bin/chan"),
-            },
-            Case {
-                what: "an AppImage run keeps the shim, never its ephemeral mount",
-                candidates: RelaunchCandidates {
-                    current_exe: Some(PathBuf::from("/tmp/.mount_ChanXX/usr/bin/chan-desktop")),
-                    in_chan_appimage: true,
-                    sibling_chan: Some(PathBuf::from("/tmp/.mount_ChanXX/usr/bin/chan")),
-                    local_chan: Some(PathBuf::from("/home/u/.local/bin/chan")),
-                },
-                expected: Some("/home/u/.local/bin/chan"),
-            },
-            Case {
-                what: "an unrecognized name is the CLI already, so keep it",
-                candidates: RelaunchCandidates {
-                    current_exe: Some(PathBuf::from("/opt/bin/chan-0.77")),
-                    ..Default::default()
-                },
-                expected: Some("/opt/bin/chan-0.77"),
-            },
-            Case {
-                what: "no current_exe falls back to the shim",
-                candidates: RelaunchCandidates {
-                    local_chan: Some(PathBuf::from("/home/u/.local/bin/chan")),
-                    ..Default::default()
-                },
-                expected: Some("/home/u/.local/bin/chan"),
-            },
-            Case {
-                what: "the desktop binary with no CLI entry point is an error",
-                candidates: RelaunchCandidates {
-                    current_exe: Some(PathBuf::from("/usr/bin/chan-desktop")),
-                    ..Default::default()
-                },
-                expected: None,
-            },
-            Case {
-                what: "an AppImage run with no shim is an error",
-                candidates: RelaunchCandidates {
-                    current_exe: Some(PathBuf::from("/tmp/.mount_ChanXX/usr/bin/chan-desktop")),
-                    in_chan_appimage: true,
-                    sibling_chan: Some(PathBuf::from("/tmp/.mount_ChanXX/usr/bin/chan")),
-                    ..Default::default()
-                },
-                expected: None,
-            },
-        ];
-
-        for case in cases {
-            let selected = select_relaunchable_exe(&case.candidates);
-            match (&selected, case.expected) {
-                (Ok(exe), Some(expected)) => {
-                    assert_eq!(exe, &PathBuf::from(expected), "{}", case.what);
-                    assert!(
-                        !is_desktop_binary(exe),
-                        "{}: selected the GUI binary {}",
-                        case.what,
-                        exe.display()
-                    );
-                }
-                (Ok(exe), None) => {
-                    panic!("{}: expected an error, got {}", case.what, exe.display())
-                }
-                (Err(e), Some(expected)) => {
-                    panic!("{}: expected {expected}, got error: {e}", case.what)
-                }
-                (Err(_), None) => {}
-            }
-        }
-    }
-
     /// Both supervisor renderers must start the resolved CLI: the first argument
     /// is an executable whose basename is `chan`, and the subcommand is
     /// `devserver`.
@@ -4500,45 +3142,6 @@ mod tests {
                 "{source} command changed: {command}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn resolve_devserver_token_returns_first_available() {
-        // The common case: the token is already on disk, so the first read wins
-        // and no polling happens.
-        let token =
-            resolve_devserver_token(|| Some("tok_abc".to_string()), Duration::from_secs(5)).await;
-        assert_eq!(token.as_deref(), Some("tok_abc"));
-    }
-
-    #[tokio::test]
-    async fn resolve_devserver_token_polls_until_the_token_lands() {
-        // The fresh `Type=simple` race: the unit is active but the service has
-        // not persisted yet, so the first reads miss and a later one succeeds.
-        let calls = std::cell::Cell::new(0u32);
-        let token = resolve_devserver_token(
-            || {
-                let n = calls.get() + 1;
-                calls.set(n);
-                (n >= 3).then(|| "tok_late".to_string())
-            },
-            Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(token.as_deref(), Some("tok_late"));
-        assert!(
-            calls.get() >= 3,
-            "expected polling, saw {} reads",
-            calls.get()
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_devserver_token_gives_up_after_timeout() {
-        // A token that never lands resolves to None at the deadline, which the
-        // caller turns into a loud failure rather than supervising blind.
-        let token = resolve_devserver_token(|| None, Duration::from_millis(150)).await;
-        assert_eq!(token, None);
     }
 
     #[test]
@@ -4924,35 +3527,6 @@ mod tests {
     }
 
     #[test]
-    fn unsupervised_tunnel_still_demands_an_endpoint_up_front() {
-        // Making the endpoint requirement lazy must not make it optional. The
-        // foreground and `chan` backends persist no unit to recover one from,
-        // so for them the refusal fires exactly where it always did.
-        let Err(error) = build_devserver_tunnel(Some("chan_pat_a".into()), None, None) else {
-            panic!("a token with no endpoint must fail on the unsupervised path");
-        };
-        assert_eq!(error.to_string(), MISSING_TUNNEL_URL);
-        // No token is not tunnel mode, endpoint or not.
-        assert!(build_devserver_tunnel(None, None, None).unwrap().is_none());
-        assert!(
-            build_devserver_tunnel(None, Some("https://cli.test".into()), None)
-                .unwrap()
-                .is_none()
-        );
-        // Token plus endpoint resolves to a tunnel.
-        let tunnel = build_devserver_tunnel(
-            Some("chan_pat_a".into()),
-            Some("https://cli.test".into()),
-            Some("office box"),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(tunnel.tunnel_url, "https://cli.test");
-        assert_eq!(tunnel.token, "chan_pat_a");
-        assert_eq!(tunnel.name, "office box");
-    }
-
-    #[test]
     fn persisted_tunnel_readers_round_trip_a_rendered_unit() {
         // The read side against what the write side actually produces, so the
         // two cannot drift: every field a flagless restart depends on comes
@@ -5052,68 +3626,6 @@ mod tests {
         // tunnel mode must not carry that address over as a pin.
         let non_tunnel = "ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
         assert_eq!(persisted_tunnel_pins(non_tunnel), (None, None));
-    }
-
-    #[test]
-    fn persisted_flag_value_reads_tunnel_url_from_execstart() {
-        // The "reuse first-run URL" read: pull --tunnel-url back out of a unit's
-        // ExecStart line the way a flagless restart would.
-        let unit = "ExecStart=/home/dev/.local/bin/chan devserver run \
-                    --tunnel-url=https://first-run.test/v1/tunnel\n";
-        assert_eq!(
-            persisted_flag_value(unit, "--tunnel-url="),
-            Some("https://first-run.test/v1/tunnel")
-        );
-    }
-
-    #[test]
-    fn tunnel_devserver_name_resolves_explicit_then_hostname() {
-        // Explicit wins and is trimmed; blank/whitespace falls back to the
-        // hostname default, which is never empty.
-        assert_eq!(
-            resolve_tunnel_devserver_name(Some("  office box  ")),
-            "office box"
-        );
-        let host_default = resolve_tunnel_devserver_name(None);
-        assert!(!host_default.is_empty());
-        assert_eq!(resolve_tunnel_devserver_name(Some("   ")), host_default);
-    }
-
-    #[test]
-    fn tunnel_devserver_name_maps_control_chars_to_spaces() {
-        // Interior control characters (newline would inject systemd
-        // unit directives, ESC would corrupt renderers) become spaces,
-        // and whitespace runs collapse.
-        assert_eq!(
-            resolve_tunnel_devserver_name(Some("office\nbox")),
-            "office box"
-        );
-        assert_eq!(
-            resolve_tunnel_devserver_name(Some("office\r\n\tbox")),
-            "office box"
-        );
-        assert_eq!(
-            resolve_tunnel_devserver_name(Some("a\u{1b}b")),
-            "a b",
-            "ANSI escape byte maps to a space"
-        );
-        // All-control input reads as blank: hostname default applies.
-        let host_default = resolve_tunnel_devserver_name(None);
-        assert_eq!(resolve_tunnel_devserver_name(Some("\n\t\r")), host_default);
-        // Percent is not a control character; it survives untouched
-        // (the systemd unit write site escapes it, not this layer).
-        assert_eq!(resolve_tunnel_devserver_name(Some("box 50%")), "box 50%");
-    }
-
-    #[test]
-    fn tunnel_devserver_name_caps_at_64_bytes_on_char_boundary() {
-        let long = "x".repeat(80);
-        assert_eq!(resolve_tunnel_devserver_name(Some(&long)), "x".repeat(64));
-        // A multi-byte char straddling the cap is dropped whole, never split.
-        let mut tricky = "x".repeat(63);
-        tricky.push('é'); // 2 bytes: 63 + 2 > 64
-        let resolved = resolve_tunnel_devserver_name(Some(&tricky));
-        assert_eq!(resolved, "x".repeat(63));
     }
 
     #[test]
@@ -5351,31 +3863,5 @@ mod tests {
         );
         assert!(plist.contains("/opt/a &amp; b/chan"));
         assert!(!plist.contains("a & b/chan"));
-    }
-
-    #[test]
-    fn launchd_print_running_reads_state() {
-        // Tab-indented like real `launchctl print` output.
-        assert!(launchd_print_running(
-            "\tstate = running\n\tpid = 4321\n\tlast exit code = (never exited)\n"
-        ));
-        assert!(!launchd_print_running(
-            "\tstate = not running\n\tlast exit code = (never exited)\n"
-        ));
-    }
-
-    #[test]
-    fn launchd_print_failed_only_on_nonzero_exit() {
-        assert!(launchd_print_failed(
-            "\tstate = not running\n\tlast exit code = 1\n"
-        ));
-        // A clean exit, a never-run service, and a running service are not failures.
-        assert!(!launchd_print_failed(
-            "\tstate = not running\n\tlast exit code = 0\n"
-        ));
-        assert!(!launchd_print_failed(
-            "\tstate = not running\n\tlast exit code = (never exited)\n"
-        ));
-        assert!(!launchd_print_failed("\tstate = running\n\tpid = 5\n"));
     }
 }
