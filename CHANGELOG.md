@@ -30,9 +30,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Control sockets use an owner-only directory.** On Unix, servers use a real directory owned by the effective uid with mode 0700, falling back to private `/tmp/chan-control-<uid>` when `$XDG_RUNTIME_DIR` is absent or unsafe; a tenant whose fallback also fails runs without a control socket and logs why. `cs` checks the directory and socket node before connecting or probing and names an unsafe directory in its refusal. When a devserver terminal's socket is gone, `cs` searches only validated sockets beside it for the sole tenant serving its workspace. The move from a direct `/tmp` socket when `$XDG_RUNTIME_DIR` is unset requires a server restart and a new terminal; a terminal from an earlier build cannot find the moved socket.
 
+- **The owner-only socket directory refuses two more cases.** `cs` run as another user than the directory's owner, such as a root shell that kept the user's `$XDG_RUNTIME_DIR` or `$CHAN_CONTROL_SOCKET`, is refused, and the refusal names the directory and its owner. On a machine with no `$XDG_RUNTIME_DIR`, another local user who creates `/tmp/chan-control-<uid>` before the server does denies that user a control socket: the server logs the rejected directory and runs without one, so `cs` does not work in its terminals, and because `cs` connects only in a directory its own user owns, that other user receives none of its requests.
+
 - **A grid or background picked while a live drawing reconnects gives way to the other windows'.** With scene sync on, a grid or background picked in a window while it was reconnecting reached the other windows and the file for a moment when the connection came back, and then that window put back the one it had replaced, or, when the drawing's `appState` did not set it, it stood. It now gives way to the one the other windows hold, and is not sent.
 
 ### Fixed
+
+- **`--no-settings` is refused where it would not be enforced.** The flag is enforced only by the server that `chan serve`, `chan open` or `chan workspace serve` binds itself; neither handoff carries it, so a serve that handed the workspace to a running chan-desktop or devserver opened it with settings writes allowed. Such a serve is now refused before anything is created, registered or sent, with a message that names the receiver and says to use `--standalone` to bind the restricted server or to drop `--no-settings`. A serve with nothing to hand to binds the restricted server as before.
+
+- **A closing workspace releases its search index before its writer lock.** A workspace keeps its writer lock until its search index, graph and recovery worker are gone, so nothing opens the same folder beside a half-closed index, and the search index unlocks its lock files before it closes them, so a process started at that moment, such as a terminal's shell between its fork and its exec, no longer keeps them held. The fault was seen in test runs as a reindex that found the index's lock busy; which process held the lock then was not measured.
 
 - **A restored dashboard opens on an enabled slide.** When its saved slide is past the end of the slide list, the dashboard opens on its first enabled slide instead of keeping the invalid position.
 
@@ -189,6 +195,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Semantic search offers the model download only when the model is missing.** In v0.100.0, any failure to turn on semantic search from the workspace-ready card was taken as a missing model, so the card said "downloads ~63 MB" and the next click started a download, and the Enable semantic search command answered every failure with advice to download the model. A missing model read `model_not_downloaded` as its message, on the card and in Settings. The card now offers the download only when the server reports the model missing and shows the server's sentence for any failure; the command gives its advice only then, and otherwise says why the enable failed.
 
 - **A refused delete in a window without a workspace says why.** In v0.100.0, deleting a directory that still held files, or a protected path, from a window without a workspace reported `delete failed: directory_not_empty` or `delete failed: protected_path` in the status line. It now reads the server's sentence, such as `delete failed: directory is not empty: build`.
+
+### Security
+
+- **Web dependencies are refreshed within their ranges.** Mermaid moves from 11.16.0 to 11.17.2 and DOMPurify from 3.4.11 to 3.4.16, which clears the advisories `npm audit` reported against both in code that ships, five in Mermaid and two in DOMPurify. Seven advisories remain, all in the drawing library adapter's dependency chain, with no upgrade that clears them.
 
 ## [v0.100.0] - 2026-09-23
 
