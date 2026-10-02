@@ -5185,9 +5185,10 @@ mod tests {
             path,
             test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace),
         );
-        let error = result
-            .err()
-            .expect("bind accepted a world-writable directory");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("bind accepted a world-writable directory"),
+        };
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(error
             .to_string()
@@ -5211,9 +5212,10 @@ mod tests {
             path.to_path_buf(),
             test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace),
         );
-        let error = result
-            .err()
-            .expect("bind accepted a foreign-owned directory");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("bind accepted a foreign-owned directory"),
+        };
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("/tmp"));
     }
