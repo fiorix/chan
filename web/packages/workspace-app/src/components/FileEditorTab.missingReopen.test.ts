@@ -88,7 +88,6 @@ function missingTab(fileMissing: FileMissingState): FileTab {
     fileMissing,
     inspectorOpen: false,
     outlineOpen: false,
-    repoRoot: null,
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: false,

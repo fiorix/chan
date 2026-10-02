@@ -99,7 +99,6 @@ function loadedFileTab(): FileTab {
     fileMissing: { path: "notes/loaded.md", fragment: null, suggestedPath: null },
     inspectorOpen: true,
     outlineOpen: true,
-    repoRoot: "/repo",
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: true,

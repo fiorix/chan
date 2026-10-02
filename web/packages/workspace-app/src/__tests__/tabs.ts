@@ -31,7 +31,6 @@ export function fileTab(partial: Partial<FileTab> = {}): FileTab {
     fileMissing: null,
     inspectorOpen: false,
     outlineOpen: false,
-    repoRoot: null,
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: false,

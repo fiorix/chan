@@ -91,7 +91,6 @@ function fileTab(path: string, content: string, over: Partial<FileTab> = {}): Fi
     fileMissing: null,
     inspectorOpen: false,
     outlineOpen: false,
-    repoRoot: null,
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: false,

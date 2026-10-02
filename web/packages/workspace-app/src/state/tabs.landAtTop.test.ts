@@ -53,7 +53,6 @@ function fileTab(path: string): FileTab {
     fileMissing: null,
     inspectorOpen: false,
     outlineOpen: false,
-    repoRoot: null,
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: false,

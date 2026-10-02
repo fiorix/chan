@@ -299,12 +299,6 @@ export type FileTab = {
   /// Per-tab slides preview state. Stored on the tab so a reload can
   /// restore both "in preview" and the slide currently on screen.
   slidePreview?: SlidePreviewTabState;
-  /// Enclosing git repo, relative to the workspace root, for files that
-  /// live inside one. Set on first load from FileResponse.repo_root;
-  /// workspaces the per-file "git repo: <name>" scope option in the
-  /// overlay picker. `null` for files outside any repo (or files
-  /// whose repo coincides with the workspace itself).
-  repoRoot: string | null;
   /// User-toggled "read mode" for this tab (the lamp in
   /// WikiStatusBar). Per-tab so multi-pane layouts can mix
   /// read/write without panes fighting over a global flag.
@@ -2933,7 +2927,6 @@ async function reloadPromotedDraftTab(tab: FileTab, path: string): Promise<void>
   found.tab.loading = true;
   found.tab.error = null;
   found.tab.fileMissing = null;
-  found.tab.repoRoot = null;
   found.tab.fsWritable = true;
   await loadTabContent(found.tab.id, path);
 }
@@ -3123,7 +3116,6 @@ async function loadTabContent(
         t.savedMtimeNs = meta.mtime_ns ?? null;
         t.authorityVersion = meta.authority_version ?? null;
         t.diskConflicted = meta.disk_conflicted ?? false;
-        t.repoRoot = meta.repo_root ?? null;
         t.fsWritable = meta.writable ?? true;
         t.loadProgress = {
           loadedBytes: 0,
@@ -3149,7 +3141,6 @@ async function loadTabContent(
       t.savedMtimeNs = r.mtime_ns ?? null;
       t.authorityVersion = r.authority_version ?? null;
       t.diskConflicted = r.disk_conflicted ?? false;
-      t.repoRoot = r.repo_root ?? null;
       t.error = null;
       t.fileMissing = null;
       // Older servers omit `writable`; treat absent as writable so
@@ -3272,7 +3263,6 @@ export async function openInPane(
     pendingReopen.loading = true;
     pendingReopen.error = null;
     pendingReopen.fileMissing = null;
-    pendingReopen.repoRoot = null;
     pendingReopen.fsWritable = true;
     if (opts.landAtTop) issueCaretCommand(pendingReopen, 0, 0);
     else if (opts.initialSelection)
@@ -3336,7 +3326,6 @@ export async function openInPane(
     inspectorOpen: opts.inspectorOpen ?? false,
     outlineOpen: false,
     slidePreview: { open: false, index: 0, mode: "preview" },
-    repoRoot: null,
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: false,
@@ -4102,7 +4091,6 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
   unresolvedLiveSave: "carry",
-  repoRoot: "carry",
   richPromptCaret: "carry",
   richPromptDraftPath: "carry",
   richPromptHeight: "carry",
@@ -4408,7 +4396,6 @@ const PANE_MODE_BUFFER_FIELDS = [
   "authorityVersion",
   "loading",
   "loadProgress",
-  "repoRoot",
   "openedEmpty",
 ] as const;
 
@@ -5711,7 +5698,6 @@ function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
   tab.savedMtimeNs = response.mtime_ns ?? null;
   tab.authorityVersion = response.authority_version ?? null;
   tab.diskConflicted = response.disk_conflicted ?? false;
-  tab.repoRoot = response.repo_root ?? null;
   tab.fsWritable = response.writable ?? true;
   tab.error = null;
   tab.saveError = null;
@@ -7300,10 +7286,6 @@ function restoreFileTabFromSer(sertab: SerTab): FileTab {
       ),
       mode: sertab.spm === "p" ? "play" : "preview",
     },
-    // repoRoot is filled in by loadTabContent on first read;
-    // restored sessions start with null and get the real value
-    // once the file fetches.
-    repoRoot: null,
     // Restore the user-toggled read mode if it was persisted.
     // fsWritable is NOT carried in the session payload - it's
     // a disk property; the first loadTabContent refreshes it
