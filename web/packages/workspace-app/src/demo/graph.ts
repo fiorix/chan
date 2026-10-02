@@ -273,7 +273,7 @@ export class DemoGraph {
     const edges: GraphViewEdge[] = [];
     const edgeSet = new Set<string>();
     const pushEdge = (edge: GraphViewEdge): void => {
-      const key = `${edge.source} ${edge.target} ${edge.kind}`;
+      const key = `${edge.source}\0${edge.target}\0${edge.kind}`;
       if (edgeSet.has(key)) return;
       edgeSet.add(key);
       edges.push(edge);
