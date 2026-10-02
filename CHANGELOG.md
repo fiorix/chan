@@ -34,6 +34,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A restored dashboard opens on an enabled slide.** When its saved slide is past the end of the slide list, the dashboard opens on its first enabled slide instead of keeping the invalid position.
+
+- **A failed directory refresh keeps its error and can be retried.** If a filesystem reset triggers the first listing of a directory and that listing fails, the file tree keeps the directory's error for a later retry instead of leaving the refresh failure unhandled.
+
+- **Scrolling inside a pane keeps the screensaver idle.** Scrolling a pane's contents resets the inactivity countdown, as scrolling the window does.
+
+- **A shell profile reload keeps the newest answer.** Reloading shell profiles while an earlier load is still waiting keeps the reloaded profiles and loading state when the older request finishes.
+
 - **The outline reads fenced code blocks as the editor does.** In v0.100.0, a line that began with a fence's marker and carried text after it closed the block for the outline, and a run of backticks whose line held another backtick opened one, so a heading after such a line could be missing from the outline, or a line of code could appear in it as a heading. The outline now follows the rules the editor's parser applies: a closing fence is followed by spaces alone, and a backtick fence's info holds no backtick.
 
 - **A link outside the workspace keeps its label.** In v0.100.0, a markdown link whose relative destination escaped the workspace root showed its markers as bare text. It now renders as a broken, inert pill with the link's label.
