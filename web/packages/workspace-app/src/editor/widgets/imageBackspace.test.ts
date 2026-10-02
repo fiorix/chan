@@ -81,9 +81,9 @@ describe("backspace near an inline image", () => {
   });
 
   test("ring set by a click while caret is past the image -> backspace still deletes a char, not the image", () => {
-    // Reproduces the smoke finding: clicking the image lights the
-    // selection ring WITHOUT moving the caret, so a later Backspace
-    // (caret one past) used to nuke the whole image.
+    // Clicking the image lights the selection ring WITHOUT moving the
+    // caret, so a later Backspace (caret one past) must delete one
+    // character and leave the image.
     const { view, cleanup } = mount(`${IMG}X`, IMG.length + 1);
     try {
       const wrap = view.dom.querySelector(

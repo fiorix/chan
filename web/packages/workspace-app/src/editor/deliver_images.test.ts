@@ -71,7 +71,7 @@ describe("rewriteImagePathsForDelivery", () => {
     expect(out).toBe("/home/u/ws/.Drafts/abc123/My Photo.png ");
   });
 
-  // ---- C2: robustness (regex -> parser) ----
+  // ---- robustness ----
 
   test("rewrites a ref after a tab-indented backtick run, which opens no fence", () => {
     const md = "\t```\n![](./y.png#w=1) real";

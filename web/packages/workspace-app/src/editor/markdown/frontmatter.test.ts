@@ -1,8 +1,9 @@
 // Guards the frontmatter block parser against the unclosed-opener
-// corruption: a `---` on line 1 with no closing fence below used to
-// consume every line to EOF and then return false, and because
-// BlockContext never rewinds consumed lines the whole document parsed
-// as one empty Paragraph (no headings, no lists, no HRs anywhere).
+// corruption: a `---` on line 1 with no closing fence below must not
+// consume lines before it knows the block closes. BlockContext never
+// rewinds consumed lines, so a parser that read to EOF and then returned
+// false would leave the whole document as one empty Paragraph (no
+// headings, no lists, no HRs anywhere).
 //
 // We parse through the PROJECT grammar (chanMarkdown), not the stock
 // @lezer/markdown parser, because the corruption is induced by the
@@ -46,7 +47,7 @@ describe("frontmatter parser", () => {
 
   test("valid frontmatter still emits a Frontmatter node", () => {
     const names = nodeNames("---\ntitle: hello\n---\n\n- bullet\n");
-    // No regression: a closed block is dimmed as frontmatter, and content
+    // A closed block is dimmed as frontmatter, and content
     // below the closer still parses.
     expect(names.has("Frontmatter")).toBe(true);
     expect(names.has("FrontmatterMark")).toBe(true);
