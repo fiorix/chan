@@ -721,8 +721,7 @@
   /// ("missing") nodes. Surface an "indexing" cue so an in-flight graph
   /// isn't trusted as complete; once the index is idle, any remaining
   /// dead-end is a real broken link. (`hiddenMissingIds` below pulls
-  /// those dead-ends back while indexing; a per-parent-dir pulse is a
-  /// deferred refinement.)
+  /// those dead-ends back while indexing.)
   const workspaceRecovering = $derived(
     indexStatus.value?.state === "recovering",
   );
@@ -1223,10 +1222,8 @@
   /// Directory node ids hidden when the folder chip is off -- directory-bubble
   /// CLUTTER only. Directories on the file→parent spine (`spineFolderIds`) stay
   /// visible so files keep their containment anchor; the folder chip declutters
-  /// directory bubbles, it does not cut the spine. Only meaningful in filesystem
-  /// mode where directory-kind nodes are emitted; in markdown / language modes
-  /// there are no directory nodes so the set stays empty and the toggle is a
-  /// no-op.
+  /// directory bubbles, it does not cut the spine. Every mode maps a directory
+  /// to a `folder` node, so the set can be non-empty in each of them.
   const hiddenFolderIds = $derived.by(() => {
     const ids = new Set<string>();
     if (show.folder) return ids;
@@ -1273,8 +1270,7 @@
   /// settles, so the graph never presents not-yet-known data as a broken
   /// link. Once `indexBuilding` clears, the `missing` survivors are real
   /// broken links and render with the established dashed-ghost styling.
-  /// (The status bar's "indexing" cue is the loading signal; a
-  /// per-parent-dir pulse is a deferred refinement.)
+  /// (The status bar's "indexing" cue is the loading signal.)
   const hiddenMissingIds = $derived.by(() => {
     const ids = new Set<string>();
     if (!indexBuilding) return ids;

@@ -1519,8 +1519,9 @@
       if (dragActive) {
         const n = nodeById.get(dragId);
         if (n && !n.isFocal) {
-          // Release the node back to the simulation. Focal nodes
-          // remain pinned at origin regardless.
+          // Release the node back to the simulation. A focal node
+          // stays pinned where the drag left it until
+          // `rebuildWorkingSet` pins it to its own position again.
           n.fx = null;
           n.fy = null;
         }
@@ -1637,12 +1638,14 @@
   }
 
   /// Compute the transform that fits the current node set into the
-  /// canvas with `pad` pixels of margin. When a focal node is
-  /// present its world position is pinned to the viewport center so
-  /// the user's anchor stays put across scope / filter / depth
-  /// changes; the zoom is then chosen so the farthest node still
-  /// fits inside the padded viewport. Falls back to bbox-center
-  /// framing for views without a focal pin (e.g. whole-workspace).
+  /// canvas with `pad` pixels of margin. When `anchorFocal` is set
+  /// and a focal node is in the set, its world position is anchored
+  /// in the viewport, centered horizontally and placed vertically by
+  /// `focalAnchor`, so the user's anchor stays put across scope /
+  /// filter / depth changes; the zoom is then chosen so the farthest
+  /// node still fits inside the padded viewport. Falls back to
+  /// bbox-center framing for views without a focal pin (e.g.
+  /// whole-workspace).
   function computeFitForNodes(
     pad: number,
     ids: Set<string> | null,
@@ -1681,11 +1684,10 @@
       halfW = (xmax - xmin) / 2;
       halfH = (ymax - ymin) / 2;
     }
-    // Bottom-anchor mode (Dashboard search-index): seat the focal node near
-    // the bottom edge instead of the vertical center, so the spine grows
-    // upward from it and the root sits just above the carousel scroller. The
-    // fittable height is then the room ABOVE the bottom anchor, not half the
-    // canvas.
+    // Bottom anchor, the prop's default: seat the focal node near the
+    // bottom edge instead of the vertical center, so the spine grows
+    // upward from it. The fittable height is then the room ABOVE the
+    // bottom anchor, not half the canvas.
     const bottomAnchored = focalAnchor === "bottom" && focal !== null;
     const FOCAL_BOTTOM_MARGIN = 56;
     const anchorY = bottomAnchored ? ch - FOCAL_BOTTOM_MARGIN : ch / 2;
@@ -1866,8 +1868,9 @@
   });
 
   /// Nodes / edges arrays changed (new graph payload from the
-  /// server). Full rebuild: regenerate adjacency, recreate the
-  /// working set, restart the sim with alpha=1.
+  /// server). Regenerate adjacency, rebuild the working set, and
+  /// re-warm the sim with an alpha picked by how much of the set
+  /// changed.
   $effect(() => {
     void nodes;
     void edges;
