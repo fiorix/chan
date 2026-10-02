@@ -38,7 +38,7 @@ The analysis is the first deliverable and the owner reads it before the second s
 
 ## What shipped
 
-The split is built and is not on `main`: eight relocation commits and one of prose, accepted by the lead on 2026-10-02 on the builder's proofs and a sample, not on a reading of the moved code. The combined gate of the tip that holds them had not run when this record was written.
+The split is built and is not on `main`: eight relocation commits and one of prose, accepted by the lead on 2026-10-02 on the builder's proofs and a sample, not on a reading of the moved code. The combined gate passed on Linux at the tip that holds them, `4ad8334ba`, on 2026-10-02.
 
 - **The tree.** `crates/chan/src/lib.rs` went from 14,624 lines to 438; what stays there is the module list, `KEYBINDINGS_TABLE`, the public names and `run`, which dispatches. The command grammar is `cli.rs`, 2,107 lines. The commands are in `close.rs`, `config.rs`, `contacts.rs`, `desktop.rs`, `index.rs`, `mcp.rs`, `metadata.rs`, `remote.rs`, `reports.rs`, `search.rs`, `serve.rs` and `status.rs`; what they share is in `control.rs`, `parentage.rs` and `registry.rs`, and `test_support.rs` holds two stubs that tests of several modules use. The devserver is `devserver.rs`, which plans and dispatches, over `devserver/` with `foreground.rs`, `launchd.rs`, `management.rs`, `persisted.rs`, `relaunch.rs`, `supervisor.rs`, `systemd.rs` and `watchdog.rs`. The crate has 34 source files where it had 8, and 20,647 lines in all.
 - **The public surface.** `run`, `Personality`, `dump_skill`, `self_managed_devserver_pid`, `BUILD_ID`, `ServiceKind` and `test_env` are at the root paths they had. `main.rs`, `desktop/`, `crates/chan/tests/`, the lockfiles and the Nix hashes are byte for byte what they were.
