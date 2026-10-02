@@ -83,8 +83,7 @@ describe("WindowRow", () => {
       { icon: true },
     );
     expect(el.querySelector(".row-glyph")).not.toBeNull();
-    // The window row no longer repeats the workspace path (the card carries it),
-    // and the label drops the base prefix -- just "Window N".
+    // The card carries the workspace path; the row uses "Window N".
     expect(el.querySelector(".row-sub")).toBeNull();
     expect(el.textContent).toContain("Window 1");
     expect(el.textContent).not.toContain("/p");

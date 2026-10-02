@@ -4,10 +4,8 @@
 // holds no row: a devserver that answered without one, or a local devserver
 // whose toggle it could not complete.
 //
-// The launcher dropped that row and re-listed instead, so what the user saw
-// after turning a workspace on was whatever the list happened to return. The
-// re-list stays as a backstop for a dropped feed; correctness no longer waits
-// on it.
+// The launcher applies the returned row immediately. A re-list covers a
+// dropped feed without delaying the action's result.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceEntry } from "../api/library";

@@ -390,9 +390,8 @@ export interface DevserverInput {
 }
 
 // ---- The client surface -------------------------------------------------
-// One interface, implemented twice: the live HTTP client below, and the
-// in-memory mock (`./mock`) the launcher runs against until the handlers are
-// deployed. `watchWindows` returns an unsubscribe handle.
+// The live HTTP client and in-memory transports implement this interface.
+// `watchWindows` returns an unsubscribe handle.
 
 /** Mint parameters beyond the window kind. */
 export interface CreateWindowOptions {

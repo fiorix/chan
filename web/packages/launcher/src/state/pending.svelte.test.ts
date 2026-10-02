@@ -3,7 +3,7 @@
 // `status` moves off that (the transition began, so `status` drives the spinner),
 // the row is gone, or the backstop elapses; clear stops the spinner (the reject
 // path). No localStorage: the bridge is in-memory only -- a boot-restore spinner
-// now comes from the backend `status:starting`, not a persisted marker.
+// comes from the backend `status:starting`.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {

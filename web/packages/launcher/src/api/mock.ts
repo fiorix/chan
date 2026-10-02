@@ -1,6 +1,4 @@
-// An in-memory backend implementing the same wire as the live client. The
-// launcher runs against this until the /api/library/* handlers are deployed,
-// which keeps the whole SPA browser-testable with no backend. It seeds a
+// An in-memory backend implementing the live client's API for tests. It seeds a
 // local library plus one devserver so every surface (registry rows, the
 // two-choice dialog, the window feed with both local and remote libraries)
 // has something real to render. Mutations notify the watch subscribers, so

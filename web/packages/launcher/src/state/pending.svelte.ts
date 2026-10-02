@@ -1,6 +1,6 @@
 // Optimistic BRIDGE for the mutating registry actions (workspace on/off, served
 // devserver-workspace on/off, devserver connect/disconnect). The AUTHORITATIVE
-// spinner state is the backend lifecycle `status` each row now carries
+// spinner state is each row's backend lifecycle `status`
 // (`starting` / `connecting`); this store only bridges the brief gap between a
 // click and the first refetch that lands that status, so a click gives instant
 // button feedback before the backend's transition arrives.
