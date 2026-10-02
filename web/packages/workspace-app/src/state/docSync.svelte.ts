@@ -165,7 +165,8 @@ export function isDocSyncEligible(tab: FileTab): boolean {
   if (tab.refusedUnwritten) return false;
   if (tab.mode !== "source" && tab.mode !== "wysiwyg") return false;
   if (!isEditableText(tab.path) || isExcalidraw(tab.path)) return false;
-  // Draft close/promote interleaves saves with file moves; excluded v1.
+  // Draft close/promote interleaves saves with file moves, so a draft
+  // is excluded.
   if (isDraftPath(tab.path)) return false;
   return true;
 }
@@ -421,7 +422,6 @@ export class DocSession {
   /// need no imperative wiring from the host.
   extension(): Extension {
     const slot = new Compartment();
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const session = this;
     return [
       slot.of([]),

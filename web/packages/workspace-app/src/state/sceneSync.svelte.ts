@@ -133,7 +133,8 @@ export function isSceneSyncEligible(tab: FileTab): boolean {
   if (tab.refusedUnwritten) return false;
   if (tab.mode !== "canvas") return false;
   if (!isExcalidraw(tab.path)) return false;
-  // Draft close/promote interleaves saves with file moves; excluded v1.
+  // Draft close/promote interleaves saves with file moves, so a draft
+  // is excluded.
   if (isDraftPath(tab.path)) return false;
   return true;
 }
