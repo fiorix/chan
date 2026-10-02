@@ -551,6 +551,8 @@ Two distinct concurrency primitives:
 
 Status probes (`lock::is_free`, `lock::probe_foreign_holder` and `daemon_lock::daemon_lock_held`) briefly take a free lock without publishing a record. Their shared guard explicitly unlocks before closing the file, so a Unix descriptor inherited by a child cannot keep a completed probe's lock held until exec. A contended probe owns no lock and leaves the holder untouched. A concurrent acquire can still meet contention during the probe itself.
 
+The search index takes tantivy's lock files through the same guard: the writer lock, held for the life of the index, and the meta lock, held briefly around a reader reload or a file collection. Its tantivy directory is `MmapDirectory` with that one difference, because `MmapDirectory` releases a lock only by closing its file, and a descriptor inherited by a child keeps a lock released that way held until exec. Closing an index therefore frees its writer lock at once, so an open admitted after the previous handle's teardown does not find the index writer lock busy, whatever this process spawned while that handle was open.
+
 Content reads do not take the cross-process lock. tantivy is multi-reader-safe by design; sqlite WAL mode plus the r2d2 reader pool lets concurrent readers proceed alongside the writer.
 
 ### Workspace-internal noise filter
