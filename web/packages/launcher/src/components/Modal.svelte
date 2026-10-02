@@ -113,8 +113,8 @@
     color: var(--text);
   }
 
-  /* The corrected dialog spacing: the body has its own bottom padding so the
-     action row never overlaps the last field (the old launcher's bug). */
+  /* The body has its own bottom padding so the
+     action row never overlaps the last field. */
   .modal-body {
     padding: 1.25rem;
   }
