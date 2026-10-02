@@ -2602,20 +2602,31 @@ async fn control_socket_for_workspace(
 
 #[cfg(unix)]
 fn unix_control_socket_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR")
+    let xdg_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-    {
-        match chan_shell::validate_control_socket_dir(&dir) {
-            Ok(()) => push_unique_path(&mut dirs, dir),
-            Err(err) => eprintln!("{err}"),
+        .map(PathBuf::from);
+    unix_control_socket_dirs_at(Path::new("/tmp"), xdg_dir.as_deref(), |err| {
+        eprintln!("{err}")
+    })
+}
+
+#[cfg(unix)]
+fn unix_control_socket_dirs_at(
+    fallback_parent: &Path,
+    xdg_dir: Option<&Path>,
+    mut report: impl FnMut(&std::io::Error),
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = xdg_dir {
+        match chan_shell::validate_control_socket_dir(dir) {
+            Ok(()) => push_unique_path(&mut dirs, dir.to_path_buf()),
+            Err(err) => report(&err),
         }
     }
-    let fallback = chan_shell::control_socket_fallback_dir_at(Path::new("/tmp"));
+    let fallback = chan_shell::control_socket_fallback_dir_at(fallback_parent);
     match chan_shell::ensure_control_socket_dir(&fallback) {
         Ok(()) => push_unique_path(&mut dirs, fallback),
-        Err(err) => eprintln!("{err}"),
+        Err(err) => report(&err),
     }
     dirs
 }
@@ -10456,6 +10467,39 @@ mod tests {
             None,
             "discovered a regular file as a socket"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_socket_discovery_skips_a_missing_fallback_silently() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let fallback = chan_shell::control_socket_fallback_dir_at(parent.path());
+        let mut errors = Vec::new();
+        let dirs = unix_control_socket_dirs_at(parent.path(), None, |err| {
+            errors.push(err.to_string());
+        });
+        assert!(
+            !fallback.exists(),
+            "discovery created {}",
+            fallback.display()
+        );
+        assert!(!dirs.contains(&fallback));
+        assert!(errors.is_empty(), "missing fallback emitted {errors:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_socket_discovery_names_an_invalid_existing_fallback() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let fallback = chan_shell::control_socket_fallback_dir_at(parent.path());
+        std::fs::create_dir(&fallback).unwrap();
+        let mut errors = Vec::new();
+        let dirs = unix_control_socket_dirs_at(parent.path(), None, |err| {
+            errors.push(err.to_string());
+        });
+        assert!(!dirs.contains(&fallback));
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains(&fallback.display().to_string()));
     }
 
     /// A stub control server on a unix socket that answers every `Identify`
