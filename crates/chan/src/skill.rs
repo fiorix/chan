@@ -25,7 +25,7 @@
 use anyhow::{bail, Result};
 use clap::{Command as ClapCommand, CommandFactory};
 
-use crate::Cli;
+use crate::cli::Cli;
 use chan_shell::DumpSkillArgs;
 
 const OUTPUT_BUDGET: usize = 8 * 1024;
@@ -670,7 +670,8 @@ mod tests {
             };
             args
         } else {
-            let crate::Command::DumpSkill { args } = Cli::try_parse_from(words).unwrap().command
+            let crate::cli::Command::DumpSkill { args } =
+                Cli::try_parse_from(words).unwrap().command
             else {
                 panic!("not a manual command: {command}")
             };

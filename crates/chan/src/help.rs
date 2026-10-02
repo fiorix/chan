@@ -3,6 +3,8 @@
 //! See `crates/chan-shell/src/help.rs` for why these are consts and not
 //! doc comments, and why every line stops at 76 columns.
 
+use crate::{help, KEYBINDINGS_TABLE};
+
 /// `chan close` long help (manpage head).
 pub(crate) const CHAN_CLOSE: &str = r#"Tear down the server holding a workspace, the inverse of `chan serve`.
 
@@ -600,4 +602,232 @@ index has picked the new notes up.
 
 SEE ALSO:
   chan workspace index, chan workspace graph.
+"#;
+
+/// `chan serve --help`, assembled at first use: the launcher catalog, then
+/// the generated chord table, then the worked examples. Composed at
+/// runtime rather than with `concat!` because the pieces are consts, not
+/// literals, and the chord table has to stay a separate const for
+/// `make shortcuts-check` to diff it against the generator.
+pub(super) static SERVE_AFTER_HELP: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{SERVE_LAUNCHER}\nIN-APP KEYBINDINGS (Cmd = Ctrl on Linux / Windows):\n\n\
+         {KEYBINDINGS_TABLE}\n{}",
+        help::CHAN_SERVE_AFTER
+    )
+});
+
+/// `chan serve` long help: what serving a workspace actually does.
+pub(super) const SERVE_LONG_ABOUT: &str = r#"Register a directory as a chan workspace and serve it.
+
+`chan open` serves a workspace; `cs open` opens a file in a window.
+
+chan serve PATH creates the directory if it does not exist, registers it
+in the workspace registry, and serves it. Serving is load-bearing: a
+bare `chan workspace add` only registers, while serving mounts the
+workspace so the editor, terminal, search, graph, and a devserver can
+reach it. The path is always explicit -- a bare `chan serve` is an error.
+
+Where it serves follows the shell's parentage and the live same-user
+instances on the box. A chan-desktop terminal stays with the desktop; a
+`chan devserver` terminal stays with that devserver. From a plain shell,
+one live desktop or devserver wins automatically. With both kinds live,
+the standalone CLI prefers the devserver and the desktop CLI preserves
+its desktop behavior. With neither, the standalone CLI binds a local
+server and stays in the foreground until Ctrl-C. --standalone, --desktop,
+and --devserver force one target. --devserver=<port|url> names one local
+devserver explicitly. A missing explicit devserver or an ambiguous set is
+refused rather than guessed. When a registration was sent but no valid
+reply comes back in time, serve exits 1 instead of serving standalone,
+because the devserver may still be mounting the workspace. Other failed
+handoffs fall through to a standalone server.
+
+--on TARGET serves PATH on a REGISTERED remote devserver instead: TARGET
+is the devserver's URL or launcher label as `chan devserver ls` shows
+it, PATH is a path on that machine, and the desktop resolves both and
+refuses ambiguity. It is a different flag from --devserver by design
+(one flag, one object kind): a port-shaped --on and a label-shaped
+--devserver are both refused with a pointer at the other.
+
+The standalone server binds 127.0.0.1:8787 by default (::1 with -6),
+prints "chan is ready:" and the tokened URL on stderr, and opens the
+system browser unless --no-browser. There is no TLS, only a
+bearer-token gate, so a non-loopback --host serves your workspace in
+plaintext and prints a warning saying so.
+
+Without --here, chan serve refuses a path inside a Git, Mercurial, or
+Subversion working tree: it exits 70 and prints a `chan-error:
+vcs-parent` marker on stderr, because the repository root is almost
+always the better workspace root. --here serves the subdirectory
+verbatim.
+
+serve takes a PATH only. A remote devserver is registered with the
+desktop launcher by `chan devserver register URL`; a URL passed here is
+refused with that pointer rather than read as a relative directory.
+"#;
+
+/// The launcher catalog, which is the thing a user reaches for once the
+/// window is up. Kept next to the chord table it introduces.
+const SERVE_LAUNCHER: &str = r#"Inside the window, everything chan can do is one chord away. The command
+launcher is Cmd+K on the macOS desktop app and Ctrl+Alt+K everywhere
+else (web, Linux, Windows). Cmd+P is Team Work, not the launcher.
+
+In a workspace or terminal window the contextual list is empty until you
+type. Typing filters and ranks commands from the focused tab, pane, window,
+and the library serving that window. The scope orbs browse those catalogs
+directly; Computers opens its action branches without requiring a query.
+The Computers SPA searches its authorized aggregate library instead.
+
+Apps you can spawn from it:
+
+  New terminal        a shell tab
+  New team            a Team Work group of agent terminals
+  New draft           a markdown file in the editor
+  New file browser    the workspace file tree
+  New graph           the project link graph
+  New dashboard       workspace status, indexing status, about
+  New diagram         an Excalidraw canvas (workspace windows only)
+  New slide deck      a deck (workspace windows only)
+
+Command categories: Global, Workspace, Search, Apps, Tabs, Panes,
+Editor, File Browser, Terminal, Dashboard, Graph. The surface categories
+(Editor, File Browser, Terminal, Dashboard, Graph) list the commands of
+the focused tab's kind.
+"#;
+
+/// One line of `chan --help`. Kept separate from the Cargo description,
+/// which is package metadata with its own downstream constraints.
+pub(super) const CHAN_ABOUT: &str = "Terminal multiplexer and workspace manager";
+
+/// Orientation for anyone (or anything) meeting chan for the first time.
+/// This is the opening section of `chan dump-skill`, so it carries the one
+/// distinction everything else depends on: whether you are in a workspace
+/// window or a standalone terminal.
+pub(super) const CHAN_LONG_ABOUT: &str = "\
+An IDE in a single binary: a terminal emulator and multiplexer plus a
+workspace manager.
+
+`chan serve PATH` registers a folder as a workspace and serves it. The
+workspace indexes its content for search, builds a graph from the links,
+tags, and mentions in your documents, and hosts the editor, terminals,
+file browser, graph, dashboard, and Team Work over that one tree.
+Everything runs locally; the server binds loopback by default. The
+registry of known workspaces lives in `~/.chan/config.toml`, or under
+`CHAN_HOME` when that is set.
+
+Inside any chan terminal, `cs` drives the window that spawned it. It is
+this same binary under a second name, picked by argv[0], so `cs open
+notes/plan.md` and `chan shell open notes/plan.md` are the same
+command.
+
+Commands disambiguate on their first letters, iproute2 style, at every
+level, so `chan w ls`, `chan de status`, and `chan du` resolve to
+workspace ls, devserver status, and dump-skill. The prefix has to be
+unambiguous: `s` matches both serve and shell, and `c` matches close,
+config, and completions, so each is rejected rather than guessed.";
+
+/// The rest of the orientation. Split from the long_about because clap
+/// prints `after_long_help` below OPTIONS, which is where the two-modes
+/// table reads best.
+pub(super) const CHAN_AFTER_HELP: &str = r#"THE TWO MODES:
+Where you are decides what you can do. There is no environment variable
+that tells them apart: workspace-only commands simply refuse in a
+standalone terminal, and say so.
+
+  A WORKSPACE WINDOW -- the one you want.
+    Unlocks the command launcher, the built-in apps, tabs and panes, and
+    the workspace-only `cs` commands: open, graph, search, export, and
+    terminal team. This is where work belongs.
+
+  A STANDALONE TERMINAL -- no workspace behind it. PTYs start in $HOME.
+    Fully automatable: every `cs terminal` and `cs pane` command works,
+    so scripting it is supported and expected. It is the right place to
+    manage the chan library -- `chan serve`, `chan close`, `chan
+    workspace forget`, `chan ps` -- and the wrong place for heavy
+    work, because none of the workspace surface exists there.
+
+Run a workspace-only command in a standalone terminal and it says so:
+  cs <cmd> is only available in a workspace window; this is a
+  standalone terminal.
+
+TELLING WHERE YOU ARE:
+  $CHAN                 set to 1 inside any chan-spawned terminal
+  $CHAN_CONTROL_SOCKET  required by every `cs` command
+  $CHAN_WINDOW_ID       also required by window-targeting commands
+  $CHAN_TAB_NAME        this tab's name, when it has one
+  $CHAN_TAB_GROUP       this tab's broadcast group, default "default"
+  $CHAN_TERMINAL        configured engine at PTY spawn: xterm or ghostty
+  $CHAN_WORKSPACE_PATH  the served root, or $HOME in a standalone
+                        terminal, so it does NOT identify the mode
+
+EXAMPLES:
+Serve a project and open it:
+  chan serve ~/src/my-project
+
+See what is being served, then tear one down:
+  chan ps
+  chan close ~/src/my-project
+
+Most installs put `cs` on your PATH. If yours did not, link it once:
+  ln -s "$(command -v chan)" ~/.local/bin/cs
+
+Install the topic index so an agent can fetch the pages it needs:
+  mkdir -p ~/.claude/skills/chan
+  chan dump-skill > ~/.claude/skills/chan/SKILL.md
+
+SEE ALSO:
+`chan dump-skill --list` for every topic, then `chan dump-skill --topic
+cs` for the environment contract and `--topic open` for the workspace and
+its apps.
+"#;
+
+/// `chan dump-skill` long help. A const rather than a doc comment because
+/// clap collapses a doc comment's paragraphs into one line, which would
+/// destroy the example block below.
+pub(super) const DUMP_SKILL_LONG_ABOUT: &str = "\
+Print an installable index of chan's agent manual.
+
+The output teaches an agent what chan is and how to drive it: the `cs`
+command surface, the command launcher and built-in apps, authoring
+documents with diagrams and slide decks, the project graph, teams of
+agents, and devservers. Every section is the live `--help` of a real
+command, so the skill cannot go stale against the binary printing it.
+The default index lists a command for every topic. --topic <SLUG> reads one;
+pages over 8 KiB list numbered parts to read with --part N. Each index,
+page or part fits in 8 KiB. --full explicitly prints the entire manual
+without that limit. cs dump-skill accepts the same selectors and prints
+the same bytes, without needing a terminal or running server.
+
+Writes nothing. The document goes to stdout; you decide where it lands.";
+
+/// `chan dump-skill` examples. The install one-liner points at the user's
+/// own agent directory on purpose: writing into a checkout's skills dir
+/// would commit a generated file back into the repo.
+pub(super) const DUMP_SKILL_AFTER_HELP: &str = r#"EXAMPLES:
+Install the skill for a local agent (the usual first run):
+  mkdir -p ~/.claude/skills/chan
+  chan dump-skill > ~/.claude/skills/chan/SKILL.md
+
+See what topics exist, then read one:
+  chan dump-skill --list
+  chan dump-skill --topic teams
+  cs dump-skill --topic serve --part 1
+
+Save the complete manual without the output size limit:
+  chan dump-skill --full > chan-manual.md
+
+Hand a topic to another agent, or drop it into a team brief:
+  chan dump-skill --topic graph | cs copy
+  chan dump-skill --topic cs-terminal-team >> brief.md
+
+SIDE EFFECTS:
+None. Every form writes to stdout only.
+
+CAVEATS:
+A `--topic` page is a fragment: it carries no skill frontmatter, so it is
+a manual page to read, not a file to install as a skill.
+
+SEE ALSO:
+`chan dump-skill --list` for every slug, and `chan --help` for the
+orientation the skill opens with.
 "#;
