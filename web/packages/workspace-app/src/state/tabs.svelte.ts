@@ -7057,7 +7057,7 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
   // back to the About slide (slot 0) unless that slot is disabled.
   if (typeof sertab.cs === "number" && sertab.cs > 0) {
     const want = Math.max(0, Math.floor(sertab.cs));
-    tab.carouselSlide = dashboardSlotEnabled(tab, want)
+    tab.carouselSlide = want < DASHBOARD_SLOT_COUNT && dashboardSlotEnabled(tab, want)
       ? want
       : firstEnabledSlot(tab);
   } else if (!dashboardSlotEnabled(tab, 0)) {
