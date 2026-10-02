@@ -28,7 +28,7 @@ use crate::devserver::watchdog::{run_health_watchdog, DaemonLiveness};
 /// GUI login session (it does NOT survive a full logout; that would need a root
 /// LaunchDaemon). Idempotent: a no-op (beyond re-providing the token) when it is
 /// already active.
-pub(crate) async fn start_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
+pub(super) async fn start_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     let uid = current_uid().await?;
     if launchd_is_active(uid).await {
         emit_devserver_token_marker(DEVSERVER_TOKEN_WAIT).await?;
@@ -46,7 +46,7 @@ pub(crate) async fn start_devserver_under_launchd(addr: SocketAddr) -> Result<()
 /// it if down, re-attach if up), then stay attached and follow its log until
 /// Ctrl-C. Unlike `start` it does not return until the agent stops or the user
 /// detaches.
-pub(crate) async fn join_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
+pub(super) async fn join_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     let uid = current_uid().await?;
 
     if launchd_is_active(uid).await {
@@ -108,7 +108,7 @@ async fn bootstrap_launch_agent(uid: u32, addr: SocketAddr) -> Result<()> {
 /// `chan devserver restart --service=launchd`: rewrite + re-register the agent
 /// (current binary + `addr`) so it bounces (or starts if stopped), then return.
 /// Use `join` to stay attached.
-pub(crate) async fn restart_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
+pub(super) async fn restart_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     let uid = current_uid().await?;
     let was_running = launchd_is_active(uid).await;
     bootstrap_launch_agent(uid, addr).await?;
@@ -124,7 +124,7 @@ pub(crate) async fn restart_devserver_under_launchd(addr: SocketAddr) -> Result<
 /// `bootout` errors when nothing is loaded, which we report as already-stopped;
 /// `disable` is best-effort. The plist stays on disk, so `status` can still
 /// show its last command; `start`/`restart` re-enable it.
-pub(crate) async fn stop_devserver_under_launchd() -> Result<()> {
+pub(super) async fn stop_devserver_under_launchd() -> Result<()> {
     let uid = current_uid().await?;
     let service = launchd_service_target(uid);
     let output = run_tool("launchctl", &["bootout", service.as_str()]).await?;
@@ -197,7 +197,7 @@ fn launch_agent_search_path(
 /// Build the LaunchAgent plist XML. `RunAtLoad` starts it on bootstrap;
 /// `KeepAlive`/`SuccessfulExit=false` restarts it only on a crash (the launchd
 /// analogue of systemd `Restart=on-failure`); stdout/stderr go to `log`.
-pub(crate) fn devserver_launch_agent_plist(
+pub(super) fn devserver_launch_agent_plist(
     exe: &Path,
     addr: SocketAddr,
     log: &Path,

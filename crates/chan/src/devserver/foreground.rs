@@ -33,7 +33,7 @@ fn devserver_bind_collision_hint(addr: SocketAddr, err: &anyhow::Error) -> Optio
 
 /// Warn when a devserver bind exposes a non-loopback interface: there is no TLS,
 /// only the persisted bearer-token gate.
-pub(crate) fn warn_non_loopback_bind(addr: SocketAddr) {
+pub(super) fn warn_non_loopback_bind(addr: SocketAddr) {
     if !addr.ip().is_loopback() {
         eprintln!(
             "WARNING: binding to {} exposes the devserver on a non-loopback \
@@ -51,7 +51,7 @@ pub(crate) fn warn_non_loopback_bind(addr: SocketAddr) {
 /// unit to reuse an endpoint from, so a token with no `--tunnel-url` /
 /// `CHAN_TUNNEL_URL` is an error here -- the same refusal the supervised path
 /// only reaches once the installed unit has come up empty too.
-pub(crate) fn build_devserver_tunnel(
+pub(super) fn build_devserver_tunnel(
     tunnel_token: Option<String>,
     tunnel_url: Option<String>,
     tunnel_devserver_name: Option<&str>,
@@ -163,7 +163,7 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
 /// forces either way. Tunnel-off + LISTEN=0 leaves nothing reachable (no local
 /// listener, no tunnel -- only the `chan serve` discovery socket), so it is a
 /// hard error rather than a silently-unreachable devserver.
-pub(crate) fn resolve_devserver_listen(
+pub(super) fn resolve_devserver_listen(
     tunnel_mode: bool,
     under_systemd_notify: bool,
     listen_override: Option<bool>,
@@ -182,7 +182,7 @@ pub(crate) fn resolve_devserver_listen(
 /// Read `CHAN_DEVSERVER_LISTEN` as a tri-state: unset or empty ⇒ `None` (use the
 /// tunnel-mode default), `"0"` ⇒ `Some(false)`, any other non-empty value ⇒
 /// `Some(true)` (mirrors `CHAN_NO_DESKTOP_HANDOFF`'s truthiness).
-pub(crate) fn devserver_listen_override() -> Option<bool> {
+pub(super) fn devserver_listen_override() -> Option<bool> {
     std::env::var("CHAN_DEVSERVER_LISTEN")
         .ok()
         .and_then(|v| parse_listen_override(&v))
@@ -207,7 +207,7 @@ fn parse_listen_override(raw: &str) -> Option<bool> {
 /// restarts into the same collision forever. Everything else keeps
 /// [`DEFAULT_PORT`], whose equality with `chan serve`'s default powers the
 /// serve-path collision hint.
-pub(crate) fn resolve_devserver_port(
+pub(super) fn resolve_devserver_port(
     explicit: Option<u16>,
     tunnel_mode: bool,
     listen: bool,

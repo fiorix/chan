@@ -6,18 +6,18 @@ use anyhow::Result;
 /// Populated by [`discover_relaunch_candidates`] and consumed by the pure
 /// [`select_relaunchable_exe`].
 #[derive(Debug, Default)]
-pub(crate) struct RelaunchCandidates {
+pub(super) struct RelaunchCandidates {
     /// `current_exe()`, when the OS reports one. On Linux this is the SYMLINK
     /// TARGET (`/proc/self/exe`), which is why a distro `chan -> chan-desktop`
     /// install lands here as the desktop binary.
-    pub(crate) current_exe: Option<PathBuf>,
+    pub(super) current_exe: Option<PathBuf>,
     /// This process runs from a chan AppImage, so every path under its mount is
     /// ephemeral.
-    pub(crate) in_chan_appimage: bool,
+    pub(super) in_chan_appimage: bool,
     /// An existing `chan` next to `current_exe` (the distro package layout).
-    pub(crate) sibling_chan: Option<PathBuf>,
+    pub(super) sibling_chan: Option<PathBuf>,
     /// The existing local `bin/chan` shim (the macOS / AppImage layout).
-    pub(crate) local_chan: Option<PathBuf>,
+    pub(super) local_chan: Option<PathBuf>,
 }
 
 /// Pick the binary a unit / plist `ExecStart` (or a daemon re-exec) should name.
@@ -29,7 +29,7 @@ pub(crate) struct RelaunchCandidates {
 /// ([`chan_shell::invoked_as_chan`]). So the winner is deliberately NOT
 /// canonicalized: a `chan` symlink or wrapper script IS the answer, and
 /// resolving it to `chan-desktop` would start the GUI personality instead.
-pub(crate) fn select_relaunchable_exe(candidates: &RelaunchCandidates) -> Result<PathBuf> {
+pub(super) fn select_relaunchable_exe(candidates: &RelaunchCandidates) -> Result<PathBuf> {
     let RelaunchCandidates {
         current_exe,
         in_chan_appimage,

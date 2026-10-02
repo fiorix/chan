@@ -87,7 +87,7 @@ async fn drain_devserver_terminals_with_token(
 /// Either way the new `CHAN_DEVSERVER_TOKEN=` marker and `/?t=` URL are
 /// printed: the marker is the scrapers' distribution channel, and a
 /// rotation that does not re-emit it strands them on a dead token.
-pub(crate) async fn cmd_rotate_devserver_token() -> Result<()> {
+pub(super) async fn cmd_rotate_devserver_token() -> Result<()> {
     let Some(current) = chan_server::persisted_devserver_token() else {
         anyhow::bail!(
             "chan devserver rotate-token: no devserver config with a token \

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 /// The systemd user unit name for the devserver.
-pub(crate) const DEVSERVER_SYSTEMD_UNIT: &str = "chan-devserver.service";
+pub(super) const DEVSERVER_SYSTEMD_UNIT: &str = "chan-devserver.service";
 
 /// Poll until the unit is active, a failure is reported, or the deadline
 /// passes. Tolerates the brief `activating` window after `enable --now`.
@@ -20,7 +20,7 @@ pub(super) async fn wait_until_active(timeout: Duration) -> bool {
     }
 }
 
-pub(crate) async fn unit_is_active() -> bool {
+pub(super) async fn unit_is_active() -> bool {
     matches!(
         run_tool("systemctl", &["--user", "is-active", DEVSERVER_SYSTEMD_UNIT]).await,
         Ok(output) if output.status.success()
@@ -83,12 +83,12 @@ pub(super) async fn run_tool(program: &str, args: &[&str]) -> Result<std::proces
 
 /// The launchd LaunchAgent label for the devserver. Reverse-DNS off the app
 /// bundle id (`app.chan.desktop`).
-pub(crate) const DEVSERVER_LAUNCHD_LABEL: &str = "app.chan.devserver";
+pub(super) const DEVSERVER_LAUNCHD_LABEL: &str = "app.chan.devserver";
 
 /// The current user's numeric uid for the `gui/<uid>` domain target. Shells out
 /// to `id -u` rather than adding a libc dependency, mirroring the systemd
 /// backend's `$USER` discovery.
-pub(crate) async fn current_uid() -> Result<u32> {
+pub(super) async fn current_uid() -> Result<u32> {
     let output = run_tool("id", &["-u"]).await?;
     if !output.status.success() {
         anyhow::bail!(
@@ -127,7 +127,7 @@ pub(super) async fn launchctl(args: &[&str]) -> Result<()> {
 }
 
 /// Whether the agent is loaded AND running.
-pub(crate) async fn launchd_is_active(uid: u32) -> bool {
+pub(super) async fn launchd_is_active(uid: u32) -> bool {
     let service = launchd_service_target(uid);
     matches!(
         run_tool("launchctl", &["print", service.as_str()]).await,

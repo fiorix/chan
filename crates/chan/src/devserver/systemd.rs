@@ -22,7 +22,7 @@ use crate::ServiceKind;
 
 /// A tunnel registration to bake into a systemd unit: the PAT that flips the
 /// devserver into tunnel mode and the gateway endpoint it dials.
-pub(crate) struct SystemdTunnel {
+pub(super) struct SystemdTunnel {
     token: String,
     url: String,
     /// The `--bind` to pin in the unit's ExecStart: `Some` when given
@@ -70,7 +70,7 @@ pub(crate) struct SystemdTunnel {
 /// refused upstream). Errs only when a token IS in play and neither the CLI nor
 /// the unit names an endpoint for it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn supervised_tunnel_spec(
+pub(super) fn supervised_tunnel_spec(
     kind: ServiceKind,
     tunnel_token: Option<String>,
     tunnel_url: Option<String>,
@@ -182,7 +182,7 @@ const DEVSERVER_SYSTEMD_START_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// write/enable/start when it is not already running), then return. Enables the
 /// unit so it also comes back on boot. Idempotent: a no-op (beyond re-providing
 /// the token) when the service is already active.
-pub(crate) async fn start_devserver_under_systemd(
+pub(super) async fn start_devserver_under_systemd(
     addr: SocketAddr,
     tunnel: Option<SystemdTunnel>,
 ) -> Result<()> {
@@ -209,7 +209,7 @@ pub(crate) async fn start_devserver_under_systemd(
 /// watchdog until Ctrl-C. This is the "bring it up and watch it" form connect
 /// scripts use; unlike `start` it does not return until the service stops or
 /// the user detaches.
-pub(crate) async fn join_devserver_under_systemd(
+pub(super) async fn join_devserver_under_systemd(
     addr: SocketAddr,
     tunnel: Option<SystemdTunnel>,
 ) -> Result<()> {
@@ -377,7 +377,7 @@ async fn bootstrap_systemd_unit(
 /// falling back to stop-then-start when the drain cannot complete, so a
 /// wedged devserver still restarts WITHOUT resurrecting its terminals).
 /// Use `join` to stay attached.
-pub(crate) async fn restart_devserver_under_systemd(
+pub(super) async fn restart_devserver_under_systemd(
     addr: SocketAddr,
     force: bool,
     tunnel: Option<SystemdTunnel>,
@@ -457,7 +457,7 @@ async fn stop_unit_after_drain(
     control.command(&["stop", DEVSERVER_SYSTEMD_UNIT]).await
 }
 
-pub(crate) async fn stop_devserver_under_systemd() -> Result<()> {
+pub(super) async fn stop_devserver_under_systemd() -> Result<()> {
     let was_active = unit_is_active().await;
     let drain = match (was_active, running_systemd_devserver_addr()) {
         (true, Some(dial)) => Some(drain_devserver_terminals(dial).await),
@@ -672,7 +672,7 @@ fn write_rendered_devserver_unit(
 }
 
 #[cfg(test)]
-pub(crate) fn devserver_systemd_unit(
+pub(super) fn devserver_systemd_unit(
     exe: &Path,
     addr: SocketAddr,
     chan_home: Option<&str>,

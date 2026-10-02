@@ -10,7 +10,7 @@ use crate::{DEFAULT_DEVSERVER_BIND, DEFAULT_PORT};
 /// flag wins, else the running service's persisted value, else the built-in
 /// default. Pure (the FS read that yields `persisted` lives in the caller) so the
 /// precedence stays unit-testable.
-pub(crate) fn resolve_devserver_addr(
+pub(super) fn resolve_devserver_addr(
     bind: Option<IpAddr>,
     port: Option<u16>,
     persisted: Option<SocketAddr>,
@@ -58,7 +58,7 @@ pub(super) fn running_systemd_devserver_addr() -> Option<SocketAddr> {
 /// Each value is read up to the next whitespace or `<`, so it works for both the
 /// shell-style ExecStart and the XML-wrapped plist `<string>`. None if either
 /// flag is missing or unparseable.
-pub(crate) fn devserver_addr_from_persisted_args(text: &str) -> Option<SocketAddr> {
+pub(super) fn devserver_addr_from_persisted_args(text: &str) -> Option<SocketAddr> {
     let ip: IpAddr = persisted_flag_value(text, "--bind=")?.parse().ok()?;
     let port: u16 = persisted_flag_value(text, "--port=")?.parse().ok()?;
     Some(SocketAddr::new(ip, port))
@@ -94,24 +94,24 @@ fn persisted_command_line(text: &str) -> Option<&str> {
 }
 
 /// The persisted systemd unit contents, if the file exists.
-pub(crate) fn read_systemd_unit() -> Option<String> {
+pub(super) fn read_systemd_unit() -> Option<String> {
     std::fs::read_to_string(systemd_user_unit_dir().ok()?.join(DEVSERVER_SYSTEMD_UNIT)).ok()
 }
 
 /// The persisted launchd agent plist contents, if the file exists.
-pub(crate) fn read_launch_agent_plist() -> Option<String> {
+pub(super) fn read_launch_agent_plist() -> Option<String> {
     std::fs::read_to_string(launch_agent_path().ok()?).ok()
 }
 
 /// The `ExecStart=` command line from a systemd unit's text, for `status`.
-pub(crate) fn systemd_execstart_line(unit: &str) -> Option<String> {
+pub(super) fn systemd_execstart_line(unit: &str) -> Option<String> {
     unit.lines()
         .find_map(|l| l.strip_prefix("ExecStart=").map(|s| s.trim().to_string()))
 }
 
 /// A launchd plist's `ProgramArguments` joined into one command line, for
 /// `status`. Pulls each `<string>` inside the `<array>` and unescapes it.
-pub(crate) fn launchd_program_arguments(plist: &str) -> Option<String> {
+pub(super) fn launchd_program_arguments(plist: &str) -> Option<String> {
     let array = plist
         .split_once("<array>")
         .and_then(|(_, rest)| rest.split_once("</array>"))
