@@ -1567,8 +1567,12 @@ mod tests {
         // A $CHAN_CONTROL_SOCKET pointing at a socket whose server has exited
         // (the file is gone, common after a devserver restart) surfaces a
         // friendly stale-socket message, not a raw connect trace.
+        #[cfg(unix)]
         let dir = SocketDir::new("stale", 0o700);
+        #[cfg(unix)]
         let missing = dir.0.join("chan-control-cs-test-does-not-exist.sock");
+        #[cfg(not(unix))]
+        let missing = std::env::temp_dir().join("chan-control-cs-test-does-not-exist.sock");
         let _ = std::fs::remove_file(&missing);
         let err = send_control_request(&missing, ControlRequest::WindowList)
             .await
