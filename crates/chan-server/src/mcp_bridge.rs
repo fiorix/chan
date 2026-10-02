@@ -367,8 +367,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn systemd_style_xdg_directory_is_used_without_fallback() {
+    #[tokio::test]
+    async fn systemd_style_xdg_directory_is_used_without_fallback() {
         let xdg = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         assert_eq!(unix_socket_dir_from(Some(xdg.path()), root.path()), xdg.path());
