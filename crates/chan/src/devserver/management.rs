@@ -32,7 +32,7 @@ fn devserver_refusal(status: reqwest::StatusCode, body: &str, fallback: String) 
 /// processes waited on before this returns Ok. Err carries the reason the
 /// drain could not be confirmed (no token, connect failure, timeout, or
 /// lingering children); callers decide how destructive to be about it.
-pub(crate) async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), String> {
+pub(super) async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), String> {
     let Some(token) = chan_server::persisted_devserver_token() else {
         return Err("could not read the devserver token".to_string());
     };

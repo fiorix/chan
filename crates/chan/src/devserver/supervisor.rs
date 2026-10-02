@@ -7,7 +7,7 @@ pub(crate) const DEVSERVER_SYSTEMD_UNIT: &str = "chan-devserver.service";
 
 /// Poll until the unit is active, a failure is reported, or the deadline
 /// passes. Tolerates the brief `activating` window after `enable --now`.
-pub(crate) async fn wait_until_active(timeout: Duration) -> bool {
+pub(super) async fn wait_until_active(timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         if unit_is_active().await {
@@ -35,7 +35,7 @@ async fn unit_is_failed() -> bool {
 }
 
 /// Run `systemctl --user <args>`, erroring with stderr on a non-zero exit.
-pub(crate) async fn systemctl_user(args: &[&str]) -> Result<()> {
+pub(super) async fn systemctl_user(args: &[&str]) -> Result<()> {
     let mut full: Vec<&str> = vec!["--user"];
     full.extend_from_slice(args);
     let output = run_tool("systemctl", &full).await?;
@@ -50,7 +50,7 @@ pub(crate) async fn systemctl_user(args: &[&str]) -> Result<()> {
 }
 
 /// The last lines of the unit's journal, for a failure message.
-pub(crate) async fn recent_unit_journal() -> String {
+pub(super) async fn recent_unit_journal() -> String {
     match run_tool(
         "journalctl",
         &[
@@ -73,7 +73,7 @@ pub(crate) async fn recent_unit_journal() -> String {
 
 /// Run a tool to completion, capturing its output. Errors only when the
 /// tool cannot be spawned (e.g. missing binary), not on a non-zero exit.
-pub(crate) async fn run_tool(program: &str, args: &[&str]) -> Result<std::process::Output> {
+pub(super) async fn run_tool(program: &str, args: &[&str]) -> Result<std::process::Output> {
     tokio::process::Command::new(program)
         .args(args)
         .output()
@@ -103,18 +103,18 @@ pub(crate) async fn current_uid() -> Result<u32> {
 }
 
 /// `gui/<uid>` -- the launchd domain target for the user's GUI login session.
-pub(crate) fn launchd_domain_target(uid: u32) -> String {
+pub(super) fn launchd_domain_target(uid: u32) -> String {
     format!("gui/{uid}")
 }
 
 /// `gui/<uid>/<label>` -- the launchd service target for the devserver agent.
-pub(crate) fn launchd_service_target(uid: u32) -> String {
+pub(super) fn launchd_service_target(uid: u32) -> String {
     format!("gui/{uid}/{DEVSERVER_LAUNCHD_LABEL}")
 }
 
 /// Run `launchctl <args>`, erroring with stderr on a non-zero exit. For the
 /// must-succeed calls (`enable`, `bootstrap`); `bootout` runs best-effort.
-pub(crate) async fn launchctl(args: &[&str]) -> Result<()> {
+pub(super) async fn launchctl(args: &[&str]) -> Result<()> {
     let output = run_tool("launchctl", args).await?;
     if !output.status.success() {
         anyhow::bail!(
@@ -167,7 +167,7 @@ fn launchd_print_failed(out: &str) -> bool {
 
 /// Poll until the agent is active, a failure is reported, or the deadline
 /// passes. Tolerates the brief window between bootstrap and first run.
-pub(crate) async fn wait_until_launchd_active(uid: u32, timeout: Duration) -> bool {
+pub(super) async fn wait_until_launchd_active(uid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         if launchd_is_active(uid).await {

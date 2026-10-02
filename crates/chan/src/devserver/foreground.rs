@@ -77,7 +77,7 @@ pub(crate) fn build_devserver_tunnel(
 /// The refusal when tunnel mode is asked for with no endpoint to dial. Shared
 /// so the unsupervised backends and the supervised one (which reaches it only
 /// after the installed unit yields no endpoint either) read identically.
-pub(crate) const MISSING_TUNNEL_URL: &str =
+pub(super) const MISSING_TUNNEL_URL: &str =
     "chan devserver: tunnel mode requires --tunnel-url or CHAN_TUNNEL_URL";
 
 /// Hidden daemon child tunnel config. The token is never accepted as an argv
@@ -117,7 +117,7 @@ const TUNNEL_DEVSERVER_NAME_MAX_BYTES: usize = 64;
 /// `Environment=` and an ANSI escape would corrupt whatever renders
 /// the name. A blank value (after mapping) reads as absent so the
 /// hostname default applies.
-pub(crate) fn normalize_tunnel_devserver_name(raw: &str) -> Option<String> {
+pub(super) fn normalize_tunnel_devserver_name(raw: &str) -> Option<String> {
     let mapped: String = raw
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })

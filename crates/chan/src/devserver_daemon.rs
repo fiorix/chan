@@ -625,9 +625,9 @@ async fn watchdog(record: DaemonRecord) -> Result<()> {
     );
     // The subject deliberately omits the pid: the watchdog re-pins to a
     // restarted daemon's pid, so a pid baked in here would go stale.
-    crate::run_health_watchdog(
+    crate::devserver::watchdog::run_health_watchdog(
         &record.addr,
-        crate::DaemonLiveness::Chan {
+        crate::devserver::watchdog::DaemonLiveness::Chan {
             record_path: daemon_record_path(),
             pid: record.pid,
         },

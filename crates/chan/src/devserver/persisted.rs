@@ -40,7 +40,7 @@ pub(crate) fn local_devserver_dial_addr() -> Option<SocketAddr> {
 /// an OS-assigned one, which the service records in the devserver config at
 /// bind time (before READY=1, so an `is-active` unit has already written it).
 /// `None` when neither source knows a port.
-pub(crate) fn running_systemd_devserver_addr() -> Option<SocketAddr> {
+pub(super) fn running_systemd_devserver_addr() -> Option<SocketAddr> {
     let unit = read_systemd_unit();
     let ip = unit
         .as_deref()
@@ -67,7 +67,7 @@ pub(crate) fn devserver_addr_from_persisted_args(text: &str) -> Option<SocketAdd
 /// The value immediately following `flag` in the command a persisted unit or
 /// plist runs (see [`persisted_command_line`]), read up to the next
 /// whitespace or `<` (the XML element close in a plist).
-pub(crate) fn persisted_flag_value<'a>(text: &'a str, flag: &str) -> Option<&'a str> {
+pub(super) fn persisted_flag_value<'a>(text: &'a str, flag: &str) -> Option<&'a str> {
     let command = persisted_command_line(text)?;
     let start = command.find(flag)? + flag.len();
     let rest = &command[start..];
@@ -145,7 +145,7 @@ fn unescape_plist_xml(s: &str) -> String {
 /// one, and so does a terminal render whose `PATH` has no usable entry,
 /// rather than dropping the line. With nothing recorded, every render records
 /// its own.
-pub(crate) fn keeps_recorded_service_path(current: &std::ffi::OsStr, interactive: bool) -> bool {
+pub(super) fn keeps_recorded_service_path(current: &std::ffi::OsStr, interactive: bool) -> bool {
     !interactive || chan_systemd::service_search_path(current).is_none()
 }
 
@@ -155,12 +155,12 @@ pub(crate) fn keeps_recorded_service_path(current: &std::ffi::OsStr, interactive
 /// must carry it into the unit/plist, otherwise the service falls back to the
 /// real `~/.chan` while the supervisor reads the isolated config, splitting the
 /// token handshake. Mirrors how the log path already resolves through `CHAN_HOME`.
-pub(crate) fn devserver_chan_home() -> Option<String> {
+pub(super) fn devserver_chan_home() -> Option<String> {
     std::env::var("CHAN_HOME").ok().filter(|v| !v.is_empty())
 }
 
 /// `$XDG_CONFIG_HOME/systemd/user`, else `$HOME/.config/systemd/user`.
-pub(crate) fn systemd_user_unit_dir() -> Result<PathBuf> {
+pub(super) fn systemd_user_unit_dir() -> Result<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(xdg).join("systemd").join("user"));
     }
@@ -183,7 +183,7 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 /// `~/Library/LaunchAgents/app.chan.devserver.plist`.
-pub(crate) fn launch_agent_path() -> Result<PathBuf> {
+pub(super) fn launch_agent_path() -> Result<PathBuf> {
     Ok(home_dir()?
         .join("Library")
         .join("LaunchAgents")
@@ -200,7 +200,7 @@ pub(crate) fn devserver_log_path() -> Result<PathBuf> {
 }
 
 /// The `PATH` a LaunchAgent plist's `EnvironmentVariables` records, unescaped.
-pub(crate) fn recorded_launch_agent_search_path(plist: &str) -> Option<String> {
+pub(super) fn recorded_launch_agent_search_path(plist: &str) -> Option<String> {
     let (_, environment) = plist.split_once("<key>EnvironmentVariables</key>")?;
     let (environment, _) = environment.split_once("</dict>")?;
     let (_, value) = environment.split_once("<key>PATH</key>")?;
