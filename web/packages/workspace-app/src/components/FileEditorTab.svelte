@@ -570,7 +570,7 @@
 
   // Find-on-page adapter for whichever editor is mounted. Both
   // editors expose `findAdapter` (see editor/find.ts FindAdapter)
-  // with the same shape; FindBar.svelte workspaces it. We re-derive
+  // with the same shape; FindBar.svelte drives it. We re-derive
   // on mode flip so a Wysiwyg <-> Source toggle while the bar is
   // open re-paints highlights against the new view.
   const findAdapter = $derived(
@@ -586,10 +586,6 @@
     revealPathInBrowser(tab.path, { inspectorOpen: true });
     closeTabMenu();
   }
-
-  // In-tab find was removed; the browser's native ⌘F applies. The
-  // editor's selectable text (WYSIWYG and source) is plain DOM, so
-  // browser find lights up matches the way users already expect.
 
   /// True while the popover for THIS tab is open. The tab-menu state
   /// is shared so the trigger button (in Pane.svelte's tab strip) can
@@ -1068,7 +1064,7 @@
   {#if menuOpen}
     <!-- Tab menu bubble. Anchored to the tab title in the pane's
          tab strip; rendered here so it has direct access to the
-         live Wysiwyg ref + selVer signal that workspaces the
+         live Wysiwyg ref + selVer signal that drives the
          formatting buttons' "on" states. -->
     <div
       class="tab-menu-bubble"
