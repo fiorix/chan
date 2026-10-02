@@ -27,14 +27,12 @@ type Mark =
   | { phase: "absent"; value: string | null }
   | { phase: MarkPhase; value: string; remainingMs: number };
 
-/** A caller's reading of a window's record once its page answers: a socket
- * tagged with the window's id is live, none is, or the record no longer
- * exists. */
+/** The window record's connection state when its page answers. */
 export type WindowConnection = "connected" | "disconnected" | "gone";
 
 type Arrival = "navigate" | "stay" | "closed";
 
-/** An unreadable location is not evidence of an empty window. */
+/** Require a readable blank location before treating a window as empty. */
 export function isBlankWindow(h: Window): boolean {
   try {
     return h.location.href === "" || h.location.href === "about:blank";
@@ -43,10 +41,8 @@ export function isBlankWindow(h: Window): boolean {
   }
 }
 
-/** A blank window whose readable document carries no mark of any age or form,
- * as `window.open` makes one. A wait marks every readable document it takes
- * and leaves a mark on one that carried a mark, so a blank that an earlier
- * wait left answers false. So does an unreadable document. */
+/** A fresh blank window has a readable document with an absent owner mark.
+ * Marks of any age identify a document already taken by a wait. */
 export function isUnmarkedBlankWindow(h: Window): boolean {
   if (!isBlankWindow(h)) return false;
   const page = readableDocument(h);
@@ -61,11 +57,8 @@ function readableDocument(h: Window): Document | undefined {
   }
 }
 
-// Opener pages share the document, not their module state, so the mark says
-// until when its phase holds by the clock every page of the browser reads. A
-// value that has expired, or promises more than its phase allows, as after
-// the clock was set back, is no mark: the window is repaired rather than kept
-// out of reach.
+// Document marks coordinate opener pages with independent module state.
+// Expired or excessive deadlines allow another wait to repair the window.
 function readMark(
   page: Document | undefined,
   value = page?.documentElement.getAttribute(WINDOW_PAGE_OWNER_ATTRIBUTE) ?? null,
@@ -101,8 +94,7 @@ type WaitOptions = {
   readConnection?: (signal: AbortSignal) => WindowConnection | Promise<WindowConnection>;
 };
 
-/** Decide again from what the window holds. `expired` is the mark whose time
- * ran out while it was followed, so that mark no longer counts. */
+/** Reassess the window after the followed mark expires. */
 type Again = { again: true; expired?: string };
 
 export function navigateWindowWhenReady(
@@ -119,11 +111,8 @@ export function navigateWindowWhenReady(
   return pending;
 }
 
-// Other opener pages have their own module state but share the window's
-// document, so what another page is doing with the window is read from the
-// mark on it. A navigating mark is a wait already decided. A waiting one is
-// followed until it is decided, so no caller answers for the window before its
-// owner does.
+// Shared document marks coordinate independent opener pages. Follow a waiting
+// owner until it decides; a navigating owner has already committed its answer.
 async function settle(h: Window, url: string, checkPage: WindowPageCheck, opts: WaitOptions): Promise<boolean> {
   let expired: string | undefined;
   let first = true;
@@ -141,8 +130,8 @@ async function settle(h: Window, url: string, checkPage: WindowPageCheck, opts: 
   }
 }
 
-// A follower sends nothing: it watches what the window shares until the owner
-// has decided, the window has closed, or the mark's time has run out.
+// Followers observe the document until its owner decides, it closes, or the
+// ownership deadline expires.
 function follow(h: Window, page: Document, mark: { value: string; remainingMs: number }): Promise<boolean | Again> {
   return new Promise((resolve) => {
     const finish = (outcome: boolean | Again) => {
@@ -198,9 +187,8 @@ function own(
     }
     return false;
   };
-  // A window whose socket came back during the wait is on its page and keeps
-  // it; one whose record went away ends the wait as a closed window does. A
-  // blank window holds no page, whatever its record says.
+  // A connected window keeps its page; a removed record ends the wait.
+  // Blank windows proceed to navigation.
   const arrive = async (): Promise<Arrival> => {
     if (!(await check())) return "closed";
     if (!opts.readConnection || isBlankWindow(h)) return "navigate";
@@ -208,9 +196,8 @@ function own(
     if (connection === "gone") return "closed";
     return connection === "connected" && !isBlankWindow(h) ? "stay" : "navigate";
   };
-  // Another page can take this window once this wait's mark has run out, as
-  // it does when this page's timers fire late. This wait then answers what
-  // that page makes of the window, and its caller closes nothing under it.
+  // After expiry, another opener can take ownership. Follow its decision
+  // when this page's timers resume.
   const taken = (): boolean => {
     if (!page || readableDocument(h) !== page) return false;
     const current = readMark(page);
@@ -223,8 +210,7 @@ function own(
       if (taken()) return { again: true };
       if (arrival === "closed" || h.closed) return false;
       if (arrival === "stay") return true;
-      // The navigation replaces the document the window holds now, which need
-      // not be the one the wait began on.
+      // Mark the document held at navigation time.
       const current = readableDocument(h);
       h.location.href = url;
       writeMark(current, "navigating");

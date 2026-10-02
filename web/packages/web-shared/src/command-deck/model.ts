@@ -3,9 +3,8 @@ export type DeckEntryMode = "contextual" | "computers";
 
 const SESSION_DECK_DRAFT_PREFIX = "chan.command-launcher.v1:";
 
-// Svelte libraries may publish icons as either Svelte 5 Components or the
-// backwards-compatible class-shaped component type. The deck only invokes the
-// shared size/stroke props; keeping this boundary opaque accepts both forms.
+// Svelte libraries publish icons as function components or class constructors.
+// The opaque boundary accepts both through their shared size/stroke props.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type DeckIcon = any;
 
@@ -101,10 +100,8 @@ function parseOperation(value: unknown): DeckOperation | null {
   const itemId = boundedString(raw.itemId, 512);
   const title = boundedString(raw.title, 256);
   if (!itemId || !title) return null;
-  // `preparing`, `pending`, and `success` describe work backed by a promise
-  // that does not survive a hide, reload, or handover to another source.
-  // Restoring one would paint a state nothing can clear. An `error` is kept
-  // only when the deck showed it on a card; host-reported errors stay out.
+  // Only confirmation and displayed-error cards have meaning after restore.
+  // Promise-backed cards belong to the page and command source running them.
   if (raw.kind === "preparing" || raw.kind === "pending" || raw.kind === "success") return null;
   if (raw.kind === "confirm") {
     const message = boundedString(raw.message, 1024);
@@ -134,7 +131,7 @@ function parseOperation(value: unknown): DeckOperation | null {
   return null;
 }
 
-/** Parse untrusted persisted state. Runtime command callbacks never enter storage. */
+/** Restore bounded serializable draft fields from untrusted state. */
 export function parseDeckDraft(value: unknown, fallback: DeckDraft): DeckDraft {
   if (!value || typeof value !== "object") return fallback;
   const raw = value as Partial<DeckDraft>;
@@ -188,7 +185,7 @@ export function clearClonedSessionDeckDrafts(target: Window | null): void {
       if (key?.startsWith(SESSION_DECK_DRAFT_PREFIX)) storage.removeItem(key);
     }
   } catch {
-    // A storage-denied child still navigates; it cannot restore a cloned draft.
+    // Navigation remains available when storage access is denied.
   }
 }
 

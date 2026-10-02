@@ -1,12 +1,6 @@
-// A failed request has to say something. Both profile views draw their error
-// line only when the message is truthy, so an HttpError with an empty message
-// renders nothing at all and a failed request reads as a successful one, on
-// the screen where a credential is revoked.
-//
-// Three ways the message came out empty: a non-JSON error body can be empty,
-// `{"error": ""}` slips past `??` because an empty string is not nullish, and
-// `res.statusText` is empty over HTTP/2, which carries no reason phrase and is
-// how this SPA is served.
+// Profile views render errors by message truthiness, so blank bodies and
+// empty service messages need a status-code fallback. HTTP/2 supplies the
+// status code even when the reason phrase is empty.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -94,8 +88,7 @@ describe("a failed request", () => {
   });
 
   test("never falls back to statusText, which h2 leaves empty", async () => {
-    // A server that does send a reason phrase must not change the answer: the
-    // status number is the field that is always there.
+  // The status code gives the same fallback on HTTP/1 and HTTP/2.
     respondWith(418, "", null, "I'm a teapot");
 
     const err = await failureFrom(request("/api/thing"));

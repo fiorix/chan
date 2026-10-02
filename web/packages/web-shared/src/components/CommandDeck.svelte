@@ -70,10 +70,7 @@
   // (Escape, the backdrop, the host hiding the deck) hands focus back.
   let closingRun: object | null = null;
   let confirmKeyReleased = true;
-  // Whoever holds the operation card owns it: a preparation between its start
-  // and its paint, an executing command between its pending card and its
-  // result. A background call whose token no longer matches has lost the card
-  // and must not paint into it.
+  // Tokens bind card writes to the preparation or command currently owning it.
   let preparationToken: object | null = null;
   let executionToken: object | null = null;
 
@@ -106,7 +103,7 @@
       void tick().then(() => input?.focus());
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
-      // Handing focus back is not navigation: it must not scroll the page.
+      // Preserve the viewport while restoring the caller's focus.
       if (!closingRun && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
       returnFocus = null;
     }
@@ -289,14 +286,10 @@
       const chosen = onChoose(item);
       closedDuringChoose = !open;
       const result = await chosen;
-      // A hidden pending command can finish after the draft it started with
-      // was cleared and swapped for a fresh one. Never paint that result into
-      // the new draft.
+      // Results belong to the draft that started the command.
       if (draft !== executionDraft) return;
       if (result) {
-        // A confirmation answers the run that asked for it. Once the card has
-        // been released or handed to a newer run, this answer describes a
-        // decision the deck is no longer offering.
+        // Only the current card owner can offer its follow-up confirmation.
         if (executionToken !== token) return;
         executionDraft.operation = {
           kind: "confirm",
@@ -347,9 +340,8 @@
     else void execute(item);
   }
 
-  /// Give the card back to the results list. The command behind it may still
-  /// be in flight, so its ownership drops with it and its result stays off
-  /// screen.
+  /// Return to the results list and release ownership of the operation card.
+  /// An in-flight command settles independently.
   function releaseOperation(): void {
     preparationToken = null;
     executionToken = null;
@@ -416,9 +408,8 @@
     event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
-      // Escape cancels confirmation preparation without hiding the deck. An
-      // executing command also releases its blocking view while its promise
-      // continues in the background.
+      // Escape returns to the results list. An executing command continues
+      // settling in the background.
       if (draft.operation?.kind === "preparing" || draft.operation?.kind === "pending") {
         releaseOperation();
         return;

@@ -351,8 +351,7 @@ describe("CommandDeck lazy confirmation", () => {
     await tick();
     expect(target.querySelector(".deck-operation")?.textContent).toContain("Working");
 
-    // Escape hands the card back to the list. The command keeps running, but
-    // its answer is to a question the deck has stopped asking.
+    // Escape returns to the results while the pending command settles.
     escape();
     await tick();
     running.resolve(confirmation("Dismissed confirmation"));

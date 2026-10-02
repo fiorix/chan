@@ -9,10 +9,7 @@ export function createModalFocus(options: {
 } {
   let panel: HTMLElement | undefined;
 
-  // The element that held focus when the dialog opened, read before the
-  // panel takes it. Closing hands focus back, so the caret returns to the
-  // surface that asked (a terminal, an editor) with no click. A target the
-  // answer removed (a closed tab, a restarted terminal) is skipped.
+  // Restore the connected caller element so its caret resumes after dismissal.
   const active = document.activeElement;
   const returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
 
@@ -35,11 +32,8 @@ export function createModalFocus(options: {
   const STOP_WITHOUT_TABINDEX =
     'audio[controls], video[controls], [contenteditable]:not([contenteditable="false"])';
 
-  // The controls Tab stops on inside the panel, in DOM order: a tabindex
-  // puts an element in the order or takes it out, and without one its kind
-  // decides; a disabled control (a disabled fieldset disables what it
-  // holds), an inert one, and one that is not displayed or not visible are
-  // skipped, as the browser skips them.
+  // Tab stops follow DOM order and require an enabled, rendered control
+  // outside inert subtrees. Explicit tabindex takes precedence over kind.
   function tabStops(root: HTMLElement): HTMLElement[] {
     return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => {
       const index = Number.parseInt(el.getAttribute("tabindex") ?? "", 10);
@@ -58,12 +52,8 @@ export function createModalFocus(options: {
     return true;
   }
 
-  // Tab and Shift+Tab wrap inside the panel, so focus cannot leave a
-  // dialog marked modal: Tab past the last control goes to the first, and
-  // Shift+Tab before the first goes to the last. From the panel or outside,
-  // either direction starts at its corresponding end. Between the ends the browser moves focus,
-  // and a Tab a control inside has already taken (PathPromptModal's input
-  // completes a path with it) stays that control's.
+  // Wrap Tab at the panel's ends. Between them, the browser moves focus;
+  // controls such as path completion can consume Tab before this handler.
   function wrapTab(e: KeyboardEvent): void {
     if (!panel || e.defaultPrevented) return;
     const stops = tabStops(panel);
@@ -85,9 +75,7 @@ export function createModalFocus(options: {
     }
   }
 
-  // Escape closes this dialog and goes no further. App's document-level
-  // handler answers Escape too, by closing the topmost overlay, and must
-  // not act on a press the dialog has already taken.
+  // Consume Escape here so one press dismisses one surface.
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape") {
       e.preventDefault();

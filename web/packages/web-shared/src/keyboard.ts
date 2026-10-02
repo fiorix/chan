@@ -51,16 +51,10 @@ export type ShortcutKey = {
   consumable: boolean;
 };
 
-/// Resolve a keydown to the key it names for shortcuts, or null when no
-/// shortcut may claim it: a lone modifier, an IME composition, a dead key
-/// outside Option, or AltGr character entry. Top-row digits keep their
-/// position, so AZERTY's unshifted digit row still selects tabs. Letters and
-/// punctuation follow the layout, including Caps Lock. Option can replace
-/// the key with a glyph or a dead key; only then, where the event carries no
-/// supported symbol, does the physical position decide.
-///
-/// AltGr is refused off macOS only. There Option is Alt, and an engine may
-/// report it as AltGraph as well, which must not disable every Option chord.
+/// Resolve a keydown to its shortcut token. Text entry, composition and lone
+/// modifiers yield null. Top-row digits follow physical position; letters and
+/// punctuation follow the layout, including Caps Lock. Option substitutions
+/// use the physical fallback. macOS treats AltGraph reports as Option.
 export function shortcutKey(
   e: ShortcutKeyEvent,
   mac: boolean = macUserAgent(),
@@ -95,8 +89,7 @@ export function shiftedPunctuationBase(symbol: string): string | undefined {
 }
 
 /// Resolve letter shortcuts through the active layout, including Caps Lock.
-/// Option can replace a letter with a glyph or dead key; retain the physical
-/// fallback only for those events, where the browser exposes no base letter.
+/// Option substitutions use the physical fallback.
 export function shortcutLetter(e: ShortcutKeyEvent): string | null {
   const key = shortcutKey(e)?.key;
   return key && /^[A-Z]$/.test(key) ? key : null;
