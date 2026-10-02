@@ -210,6 +210,28 @@ export class MockWorkspaceStore {
     return { renamed, rewritten: [], conflicts: [] };
   }
 
+  /// Copy a file, or a directory's whole subtree, and return the paths
+  /// written. The source stays.
+  copy(from: string, to: string): string[] {
+    const written: string[] = [];
+    const mtime = nowSeconds();
+    const source = this.#files.get(from);
+    if (source) {
+      this.#files.set(to, { ...source, path: to, mtime });
+      written.push(to);
+    } else {
+      const prefix = `${from}/`;
+      for (const [p, e] of [...this.#files]) {
+        if (!p.startsWith(prefix)) continue;
+        const np = `${to}/${p.slice(prefix.length)}`;
+        this.#files.set(np, { ...e, path: np, mtime });
+        written.push(np);
+      }
+    }
+    this.#reindex();
+    return written;
+  }
+
   // --- session (per-window layout) ---
   getSession(windowId: string): unknown | null {
     return this.#sessions.has(windowId) ? this.#sessions.get(windowId) : null;

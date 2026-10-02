@@ -137,17 +137,21 @@ export function createDemoFetch(
     }
     if (path === "/api/fs/transfer" && method === "POST") {
       const body = parseBody(init) as { op: string; sources: string[]; dest_dir: string };
-      const renamed: Array<[string, string]> = [];
+      const moved: Array<{ from: string; to: string }> = [];
       for (const src of body?.sources ?? []) {
         const dest = `${body.dest_dir ? `${body.dest_dir}/` : ""}${src.slice(src.lastIndexOf("/") + 1)}`;
         if (dest === src) continue;
         if (body.op === "move") {
-          const moved = store.move(src, dest);
-          for (const [from, to] of moved.renamed) graph.renameFile(from, to);
+          for (const [from, to] of store.move(src, dest).renamed) graph.renameFile(from, to);
+        } else {
+          for (const to of store.copy(src, dest)) {
+            const entry = store.get(to);
+            if (entry?.kind === "document") graph.indexFile(to, entry.content ?? "");
+          }
         }
-        renamed.push([src, dest]);
+        moved.push({ from: src, to: dest });
       }
-      return json({ moved: renamed, copied: [], skipped: [], conflicts: [] });
+      return json({ moved, skipped: [], conflicts: [] });
     }
     if (path.startsWith("/api/fs/")) {
       const rel = decodePath(path.slice("/api/fs/".length));
