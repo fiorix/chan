@@ -2833,11 +2833,11 @@ export async function relistTreeDir(dir: string): Promise<void> {
   for (let waited = 0; tree.loadingDirs[dir] && waited < 2000; waited += 100) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (!tree.loadedDirs[dir]) {
-    await loadTreeDir(dir);
-    return;
-  }
   try {
+    if (!tree.loadedDirs[dir]) {
+      await loadTreeDir(dir);
+      return;
+    }
     const entries = await api.list(dir);
     tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
   } catch {
