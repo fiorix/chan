@@ -617,6 +617,48 @@ mod tests {
         (tmp, idx)
     }
 
+    /// A second descriptor of this process on the live writer's lock file,
+    /// sharing its open file description: what a child process holds from
+    /// fork until exec.
+    #[cfg(target_os = "linux")]
+    fn writer_lock_duplicate(index_dir: &Path) -> std::fs::File {
+        use std::os::fd::{BorrowedFd, RawFd};
+        use std::os::unix::fs::MetadataExt;
+
+        let lock = std::fs::metadata(bm25_dir(index_dir).join(".tantivy-writer.lock")).unwrap();
+        for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+            let entry = entry.unwrap();
+            // Other tests open and close descriptors while this one lists them.
+            let Ok(target) = std::fs::metadata(entry.path()) else {
+                continue;
+            };
+            if (target.dev(), target.ino()) != (lock.dev(), lock.ino()) {
+                continue;
+            }
+            let fd: RawFd = entry.file_name().to_str().unwrap().parse().unwrap();
+            // SAFETY: the caller's index keeps its writer, and so this
+            // descriptor, open for the whole call.
+            let held = unsafe { BorrowedFd::borrow_raw(fd) };
+            return std::fs::File::from(held.try_clone_to_owned().unwrap());
+        }
+        panic!("no descriptor of this process is open on the writer lock file");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_closed_index_reopens_while_a_duplicate_of_its_writer_lock_is_open() {
+        let (tmp, idx) = fresh();
+        let duplicate = writer_lock_duplicate(tmp.path());
+        drop(idx);
+        let reopened = Bm25Index::open(tmp.path());
+        assert!(
+            reopened.is_ok(),
+            "a closed index left its writer lock held through a duplicate descriptor: {:?}",
+            reopened.err()
+        );
+        drop(duplicate);
+    }
+
     #[test]
     fn empty_index_returns_no_hits() {
         let (_tmp, idx) = fresh();
