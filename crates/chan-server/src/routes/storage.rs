@@ -58,11 +58,16 @@ struct ResetResponse {
     removed_entries: usize,
 }
 
-/// How long the reset path waits for outstanding `Arc<Workspace>` clones
-/// (in-flight handlers and MCP tool bodies, the dropped indexer's
-/// detached tokio tasks) to drop before giving up. Editor-side I/O
-/// is fast (markdown reads / writes); 5 s is comfortable headroom
-/// without making a misclick feel like a hang.
+/// The bound of each of the reset path's four waits, which it makes one
+/// after another under the cell's write guard: for outstanding
+/// `Arc<Workspace>` clones (in-flight handlers and MCP tool bodies, the
+/// dropped indexer's detached tokio tasks) to drop, for the workspace's last
+/// owner once the route has dropped its own reference, for the writer lock
+/// that owner's drop releases, and for a reopen refused over that lock.
+/// Editor-side I/O is fast (markdown reads / writes), so the first wait
+/// ends in milliseconds and the other three find nothing to wait for; each
+/// lasts its whole bound only while its own rare state does, twenty seconds
+/// in the worst case.
 #[cfg(not(test))]
 const RESET_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -132,8 +137,14 @@ fn err_from_reset(e: &ResetError) -> Response {
 
 /// Replace `state.workspace_cell` end-to-end. Holds the write lock the
 /// entire time so handlers receive a nonblocking busy result throughout
-/// the old-workspace to new-workspace transition; they never observe the
-/// `None` middle state.
+/// the old-workspace to new-workspace transition, and do not observe the
+/// `None` middle state of a swap that ends with a workspace in the cell.
+///
+/// One ending leaves the cell empty: a reopen that fails past its one retry,
+/// or that is still refused over the writer lock when its bound runs out,
+/// returns its error with nothing to put back. Handlers then read a missing
+/// workspace, a permanent fault: this route and the metadata import are the
+/// cell's only writers, and both start from a cell that holds a workspace.
 ///
 /// Drain protocol: we keep one strong `Arc<Workspace>` aside (`workspace_strong`)
 /// after taking the cell out, then poll `Arc::strong_count` until only
@@ -160,7 +171,9 @@ fn err_from_reset(e: &ResetError) -> Response {
 /// still held at the end of that wait, chan-workspace refuses the reset, the
 /// reopen waits for the lock within a bound of its own
 /// ([`reopen_released`]), and the answer is Busy over the reopened
-/// workspace.
+/// workspace. A lock that the wait saw free and that chan-workspace then
+/// refuses the reset or the reopen over is another process's: no wait is
+/// spent on it, and the answer is that refusal.
 fn perform_reset(
     state: &AppState,
     mode: ResetMode,

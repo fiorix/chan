@@ -267,7 +267,8 @@ fn perform_metadata_import_with(
     // lock as Busy (503 with Retry-After) for the life of the drain,
     // extraction, and reopen; releasing the guard around the empty slot
     // would instead read as Missing, a permanent-looking 500 for a window
-    // that clears in seconds.
+    // that clears in seconds. Missing is what a reopen that fails leaves
+    // behind: its error returns below with the slot still empty.
     let mut cell_guard = state
         .workspace_cell
         .write()
@@ -412,7 +413,9 @@ pub(super) struct Reopened {
 }
 
 /// Reopen the workspace a route let go, as restoration work for its cell: a
-/// cell left empty reads as a missing workspace to every later request.
+/// cell left empty reads as a missing workspace to every later request. That
+/// is what an `Err` from here leaves: the route returns it with its cell
+/// empty, since no workspace is left to put back.
 ///
 /// `releasing` is the bound to wait in when the route gave up waiting for the
 /// writer lock ([`Release::LockNotFreed`]): the lock is then on its way out
