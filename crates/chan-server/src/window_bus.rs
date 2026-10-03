@@ -371,6 +371,7 @@ mod tests {
             pane_bus.complete(&pane_id, serde_json::json!({ "activePaneId": "p1" }))
         });
         let prompt = tokio::time::timeout(std::time::Duration::from_secs(2), &mut pane).await;
+        eprintln!("pane_reply_elapsed_ms={}", start.elapsed().as_millis());
         permit.mark_committed();
         drop(permit);
         let prompt_in_time = prompt.is_ok();
@@ -454,6 +455,8 @@ mod tests {
         }));
         assert!(map_poisoned.is_err());
         assert!(bus.export_job(&id).is_some());
-        assert!(bus.complete(&id, serde_json::json!({ "ok": true, "out": "a.pdf" })));
+        assert!(!bus.complete(&id, serde_json::json!({ "ok": true, "out": "a.pdf" })));
+        let (next, _reply, _progress) = bus.register_export("b.pdf".into());
+        assert!(bus.complete(&next, serde_json::json!({ "ok": true, "out": "b.pdf" })));
     }
 }

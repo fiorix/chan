@@ -5920,7 +5920,12 @@ mod tests {
             .unwrap()
             .mark_failed(result.unwrap_err().to_string());
         drop(permit);
+        let started = std::time::Instant::now();
         let response = tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await;
+        eprintln!(
+            "failed_commit_response_elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         assert!(response.is_ok(), "failed commit kept export parked");
         match response.unwrap().unwrap() {
             ControlResponse::Error { message } => {
