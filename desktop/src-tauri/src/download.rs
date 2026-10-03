@@ -513,17 +513,20 @@ pub(crate) fn reap_orphaned_download_temps(
     reaped
 }
 
+/// The name a download is saved under in the Downloads folder: the part of
+/// `filename` after its last `/`, whole, with each character a host cannot
+/// hold in a name replaced by `_`. A `\` is one of them and is replaced, not
+/// cut at: on Unix it is part of the name the download had, and on Windows it
+/// is a separator, which a saved name must not carry out of the folder.
+/// Trailing dots and spaces go, a name left empty is `download`, and a
+/// Windows device name gains a `_`.
 fn sanitize_filename(filename: &str) -> String {
-    let base = filename
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(filename)
-        .trim();
+    let base = filename.rsplit('/').next().unwrap_or(filename).trim();
     let cleaned: String = base
         .chars()
         .map(|character| {
             if character.is_control()
-                || matches!(character, ':' | '<' | '>' | '"' | '|' | '?' | '*')
+                || matches!(character, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
             {
                 '_'
             } else {
