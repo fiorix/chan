@@ -44,6 +44,7 @@ import {
   layout,
   overwriteConflictedTab,
   reloadConflictedTab,
+  reloadTabFromDisk,
   reorderTab,
   saveTab,
   scheduleAutosave,
@@ -1217,6 +1218,46 @@ describe("the first attach of a tab that is not clean", () => {
         buffer: "hello!",
         saved: "hello!",
         token: "2000000000",
+        owns: true,
+      },
+    });
+    cleanup();
+  });
+
+  test("a first frame that lands while the tab loads is not judged: the attach waits for the load and takes the file", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    let finish = (): void => {};
+    vi.spyOn(api, "readStream").mockImplementation(async (_path, options) => {
+      options?.onChunk?.("hello th", { loadedBytes: 8, totalBytes: 11 });
+      await new Promise<void>((resolve) => (finish = resolve));
+      return { path: t.path, content: "hello there", mtime: 2, mtime_ns: MTIME, writable: true };
+    });
+    const dials = sockets.length;
+    // A reload of the tab: its host releases the session while it loads.
+    const loading = reloadTabFromDisk(t.id);
+    releaseDocSession(t.id);
+    await flushMicro();
+    const midLoad = { loading: t.loading, buffer: t.content, saved: t.saved };
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+    const atTheFrame = { prompt: conflictDialog.open, pushed: sock.frames("push").length, owns: isDocAttached(t) };
+    finish();
+    await loading;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: t.content } });
+    acquireDocSession(t);
+    redial(dials).frame(snap("hello there", 3));
+    await flushMicro();
+
+    expect({ midLoad, atTheFrame, attached: read(t, view) }).toEqual({
+      midLoad: { loading: true, buffer: "hello th", saved: "" },
+      atTheFrame: { prompt: false, pushed: 0, owns: false },
+      attached: {
+        pushed: 0,
+        prompt: null,
+        editor: "hello there",
+        buffer: "hello there",
+        saved: "hello there",
+        token: MTIME,
         owns: true,
       },
     });

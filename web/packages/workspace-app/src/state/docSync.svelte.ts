@@ -62,7 +62,10 @@ import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
   clearUnresolvedLiveSave,
+  conflictDialog,
+  isTabSaving,
   markTabFileMissing,
+  registerClassicSaveWatch,
   registerLiveSessionKind,
   registerPaneModeSettledSink,
   setTabDocState,
@@ -331,6 +334,22 @@ export class DocSession {
   /// tab's buffer is pushed over the snapshot. Null when the tab held edits
   /// of its own.
   private cleanAtSnapshot: string | null = null;
+  /// What the classic path left on the tab when this session's first
+  /// snapshot was taken into it: the text of the tab's last load or save,
+  /// which its edits were made on, and the tokens of that. Kept until the
+  /// first attach, which can run after the snapshot, and null from then on.
+  private beforeFirstSnapshot: Pick<
+    FileTab,
+    "saved" | "savedMtime" | "savedMtimeNs" | "authorityVersion" | "diskConflicted"
+  > | null = null;
+  private firstAttachDone = false;
+  /// Why the first attach is held, and null when it is not. A held session
+  /// has left its socket and reads `dialing`: the tab is the classic path's,
+  /// with the tokens of its load, as if no frame had come. "save" waits for
+  /// the tab's classic save that was running at the first frame, "user" for
+  /// the conflict prompt's answer and "load" for the tab's load to end. None
+  /// dials by itself.
+  private held: "save" | "user" | "load" | null = null;
 
   private pushInFlight = false;
   private pushOutcomeUnresolved = false;
@@ -550,6 +569,10 @@ export class DocSession {
   /// loop; permanent stops stay stopped.
   healAfterFallbackSave(): void {
     if (this.retryStopped || this.closedByUs) return;
+    if (this.held !== null) {
+      this.resumeFirstAttach();
+      return;
+    }
     if (this.status !== "degraded") return;
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) return;
     this.hardResync();
@@ -583,12 +606,25 @@ export class DocSession {
     this.releaseTimer = setTimeout(() => this.destroy(), DOC_RELEASE_LINGER_MS);
   }
 
-  /// Cancel a pending lingered release (the tab re-acquired).
+  /// Cancel a pending lingered release (the tab re-acquired). The tab's host
+  /// releases and takes the session again around a load, which is how a held
+  /// first attach learns that the tab took the file.
   retain(): void {
     if (this.releaseTimer !== null) {
       clearTimeout(this.releaseTimer);
       this.releaseTimer = null;
     }
+    this.resumeFirstAttach();
+  }
+
+  /// Whether the first attach waits for the tab's running save to end.
+  waitsOnSave(): boolean {
+    return this.held === "save";
+  }
+
+  /// The tab's classic save ended, written or not.
+  saveEnded(): void {
+    if (this.held === "save") this.resumeFirstAttach();
   }
 
   // ---- editor binding --------------------------------------------------
@@ -682,6 +718,9 @@ export class DocSession {
     }
     this.attachQueued = false;
     const S = this.shadowText.toString();
+    // A clean tab holds the authority's text once it has attached, its own
+    // or the snapshot's, which ends the banner that says the file changed.
+    if (pendingOverride === undefined && D === this.cleanAtSnapshot) this.tab.externalChange = false;
 
     let pending: ChangeSet | { from: number; to: number; insert: string }[] | null =
       null;
@@ -692,9 +731,12 @@ export class DocSession {
             ? pendingOverride
             : null;
       } else if (D === this.cleanAtSnapshot) {
-        // The tab takes the snapshot as a load takes the file, which also
-        // ends the banner that says the file changed.
-        this.tab.externalChange = false;
+        // The tab takes the snapshot as a load takes the file.
+      } else if (this.beforeFirstSnapshot !== null && S !== lf(this.beforeFirstSnapshot.saved)) {
+        // Edits made since the snapshot landed, over a file that changed
+        // under the tab.
+        this.holdFirstAttach("user", this.tab.savedMtimeNs ?? null, this.shadowVersion, this.tab.diskConflicted ?? false);
+        return;
       } else {
         pending = presentableDiff(S, D).map((c) => ({
           from: c.fromA,
@@ -736,6 +778,8 @@ export class DocSession {
     });
     this.collabInstalled = true;
     this.cleanAtSnapshot = null;
+    this.firstAttachDone = true;
+    this.beforeFirstSnapshot = null;
     // (4) re-dispatch pending as normal edits: they become unconfirmed
     // local updates and push through the pump.
     if (pending !== null) {
@@ -743,6 +787,77 @@ export class DocSession {
     }
     this.promoteIfChannelUp();
     this.maybePush();
+  }
+
+  /// Why this session's first attach over `snapshot` must not run, and null
+  /// when it may. Nothing the user did not choose is pushed over another
+  /// writer's text, an open conflict prompt is answered by its buttons alone,
+  /// and one edit travels one channel:
+  ///
+  /// - A classic save of the tab is running. Its write would land beside the
+  ///   push of the same edit, so the attach waits for it to end.
+  /// - The tab's conflict prompt is open: a classic save was refused while
+  ///   the session dialed.
+  /// - The tab holds edits and the snapshot is not the text they were made
+  ///   on, so another writer changed the file under them. The owner's
+  ///   ruling is the classic path's answer, the conflict prompt, and no
+  ///   rebase: the tab does not reliably hold the text its edits began from
+  ///   once a session has written a snapshot into its saved text.
+  ///
+  /// A tab that is loading holds part of a file and no saved text, so it is
+  /// not judged: the attach waits for the load, after which the tab's host
+  /// takes the session again.
+  private firstAttachHold(snapshot: string): "save" | "user" | "load" | null {
+    if (this.tab.loading) return "load";
+    if (isTabSaving(this.tabId)) return "save";
+    if (conflictDialog.open && conflictDialog.tabId === this.tabId) return "user";
+    const base = lf(this.beforeFirstSnapshot?.saved ?? this.tab.saved);
+    const buffer = lf(this.tab.content);
+    return buffer !== base && snapshot !== base && snapshot !== buffer ? "user" : null;
+  }
+
+  /// Hold the first attach: leave the socket, so no session of this tab
+  /// exists at the server and its classic saves are answered as a tab's with
+  /// no session are, and hand the tab back to the classic path as its load
+  /// left it. For a tab with edits over a file that changed, open the
+  /// conflict prompt as a refused classic save does, with the snapshot's
+  /// token and version as what Overwrite writes against. The prompt's
+  /// Reload loads the file and its Overwrite saves the classic way; either
+  /// ends at `resumeFirstAttach` with a tab that has nothing to push.
+  private holdFirstAttach(
+    why: "save" | "user" | "load",
+    mtimeNs: string | null,
+    version: number,
+    diskConflicted: boolean,
+  ): void {
+    if (this.beforeFirstSnapshot !== null) Object.assign(this.tab, this.beforeFirstSnapshot);
+    this.beforeFirstSnapshot = null;
+    this.cleanAtSnapshot = null;
+    this.haveSnapshot = false;
+    this.held = why;
+    this.clearReconnectTimer();
+    this.clearAttachTimer();
+    this.closeSocket();
+    this.setStatus("dialing");
+    if (why !== "user" || (conflictDialog.open && conflictDialog.tabId === this.tabId)) return;
+    conflictDialog.open = true;
+    conflictDialog.tabId = this.tabId;
+    conflictDialog.path = this.tab.path;
+    conflictDialog.currentMtime = null;
+    conflictDialog.currentMtimeNs = mtimeNs;
+    conflictDialog.currentAuthorityVersion = version;
+    conflictDialog.diskConflicted = diskConflicted;
+  }
+
+  /// Dial for the attach that was held: the tab's save ended, a classic save
+  /// of it landed, or its host took the session again after a load. The
+  /// snapshot that answers is judged as a first one.
+  private resumeFirstAttach(): void {
+    if (this.held === null || this.closedByUs || this.retryStopped) return;
+    // A load in flight ends with the host taking the session again.
+    if (this.tab.loading) return;
+    this.held = null;
+    this.dial(true);
   }
 
   /// Promote to `attached` whenever the shadow is synced and the
@@ -1073,6 +1188,22 @@ export class DocSession {
         notify("Connection resync dropped unconfirmed edits (recovery copy kept)");
       }
     }
+    if (!this.firstAttachDone) {
+      // Judged before anything of the snapshot is written to the tab, which
+      // a held attach leaves to the classic path.
+      const hold = this.firstAttachHold(f.doc);
+      if (hold !== null) {
+        this.holdFirstAttach(hold, f.mtime_ns ?? null, f.version, f.conflicted ?? false);
+        return;
+      }
+      this.beforeFirstSnapshot ??= {
+        saved: this.tab.saved,
+        savedMtime: this.tab.savedMtime,
+        savedMtimeNs: this.tab.savedMtimeNs,
+        authorityVersion: this.tab.authorityVersion,
+        diskConflicted: this.tab.diskConflicted,
+      };
+    }
     if (!this.collabInstalled) {
       // Read before `writeSaved` below puts the snapshot in the tab's saved
       // text. A buffer still equal to the text an earlier snapshot found
@@ -1373,6 +1504,15 @@ registerLiveSessionKind({
   // A document session holds nothing of the buffer outside the editor,
   // whose text the resolution's answer replaces.
   tookDisk() {},
+});
+
+registerClassicSaveWatch({
+  waitsOnSave(tabId: string) {
+    return registry.get(tabId)?.waitsOnSave() ?? false;
+  },
+  saveEnded(tabId: string) {
+    registry.get(tabId)?.saveEnded();
+  },
 });
 
 // Hybrid Nav settles by swapping the whole tree, which replaces the tab
