@@ -7693,6 +7693,234 @@ mod tests {
         );
     }
 
+    /// An open of a root whose unregister is outstanding, its caller gone,
+    /// does not read the root's registry row: it waits for the registry-write
+    /// permit inside its release budget, then answers as for an owner that
+    /// has not released, with no filesystem open dispatched and the row in
+    /// the retry state.
+    #[tokio::test]
+    async fn an_open_beside_an_abandoned_unregister_answers_still_releasing() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        host.open_release_budget = Duration::from_millis(40);
+        let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+        let removal = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(root.path(), false))
+            .await;
+        assert!(
+            removal.is_none(),
+            "fixture: the removal did not reach its unregister"
+        );
+        let (opened, opening) = std::sync::mpsc::channel();
+        *host.open_thread_probe.lock().unwrap() = Some(opened);
+
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            host.open_or_get_registered_workspace(root.path(), serve_config("/ws")),
+        )
+        .await
+        .expect("an open beside an abandoned unregister did not answer");
+        assert!(
+            matches!(refused, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+            "an open beside an abandoned unregister: {refused:?}"
+        );
+        assert!(
+            opening.try_recv().is_err(),
+            "the open dispatched its filesystem open beside an outstanding unregister"
+        );
+        assert_eq!(
+            host.workspace_status(root.path()),
+            (
+                WorkspaceStatus::Error,
+                Some("workspace is still releasing; retry".into())
+            ),
+            "the refused open's answer is not the row's words"
+        );
+        assert!(host.mounted_prefixes().unwrap().is_empty());
+    }
+
+    /// Wait until the open running as `mount` holds the mount permit of
+    /// `key`, where it waits for an outstanding registry write, or has
+    /// answered, then leave a dispatch time to show.
+    async fn at_the_registry_gate<T>(
+        host: &WorkspaceHost,
+        key: &Path,
+        mount: &tokio::task::JoinHandle<T>,
+    ) {
+        let mount_permit = (key.to_path_buf(), RootCall::Mount);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !mount.is_finished() && host.root_calls.try_lock(&mount_permit).is_some() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fixture: the open neither answered nor took its mount permit");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// An open that finds a registry write of its root outstanding, as a
+    /// registration's blocking call holds the permit, waits with its mount
+    /// starting and no filesystem open dispatched, and opens once the write
+    /// returns inside the budget.
+    #[tokio::test]
+    async fn an_open_waits_for_a_registry_write_that_returns_inside_its_budget() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        // The write is released by the test, so keep the budget far above
+        // any wait on a loaded runner.
+        host.open_release_budget = Duration::from_secs(60);
+        let host = Arc::new(host);
+        let key = canonical_key(root.path());
+        let write = host
+            .root_calls
+            .lock(&(key.clone(), RootCall::RegistryWrite))
+            .await;
+        let (opened, opening) = std::sync::mpsc::channel();
+        *host.open_thread_probe.lock().unwrap() = Some(opened);
+        let mounting = Arc::clone(&host);
+        let mounting_root = root.path().to_path_buf();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/ws"))
+                .await
+        });
+        at_the_registry_gate(&host, &key, &mount).await;
+        assert!(
+            opening.try_recv().is_err(),
+            "the open dispatched its filesystem open beside an outstanding registry write"
+        );
+        assert!(
+            !mount.is_finished(),
+            "the open answered beside an outstanding registry write"
+        );
+        assert_eq!(
+            host.workspace_status(root.path()),
+            (WorkspaceStatus::Starting, None),
+            "an open waiting for a registry write does not read starting"
+        );
+
+        drop(write);
+        let mounted = tokio::time::timeout(Duration::from_secs(10), mount)
+            .await
+            .expect("the open did not answer once the write returned")
+            .unwrap()
+            .expect("the open mounts once the write has returned");
+        assert_eq!(mounted.prefix, "/ws");
+        assert!(
+            opening.try_recv().is_ok(),
+            "fixture: the mount ran no filesystem open"
+        );
+        host.close_workspace_for_root(root.path(), false)
+            .await
+            .unwrap();
+    }
+
+    /// An open that waited out an unregister of its root reads the registry
+    /// after it: the row is gone, so the open answers that the root is not
+    /// registered and mounts nothing.
+    #[tokio::test]
+    async fn an_open_that_waited_for_an_unregister_finds_no_row() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        host.open_release_budget = Duration::from_secs(60);
+        let host = Arc::new(host);
+        let key = canonical_key(root.path());
+        let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+        let removal = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(root.path(), false))
+            .await;
+        assert!(
+            removal.is_none(),
+            "fixture: the removal did not reach its unregister"
+        );
+        let mounting = Arc::clone(&host);
+        let mounting_root = root.path().to_path_buf();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/ws"))
+                .await
+        });
+        at_the_registry_gate(&host, &key, &mount).await;
+        assert!(
+            !mount.is_finished(),
+            "the open answered beside an outstanding unregister"
+        );
+
+        drop(held);
+        let answer = tokio::time::timeout(Duration::from_secs(10), mount)
+            .await
+            .expect("the open did not answer once the unregister returned")
+            .unwrap();
+        assert!(
+            matches!(
+                answer,
+                Err(Error::Core(ChanError::WorkspaceNotRegistered(_)))
+            ),
+            "an open after the unregister it waited for: {answer:?}"
+        );
+        assert!(host.mounted_prefixes().unwrap().is_empty());
+        assert!(
+            host.library().workspace_paths_for(root.path()).is_none(),
+            "the unregister the open waited for kept the row"
+        );
+    }
+
+    /// The open's wait for its mount permit and its wait for an outstanding
+    /// registry write share one release budget: an open that got its mount
+    /// permit halfway through the budget gives the write the other half,
+    /// not a budget of its own.
+    #[tokio::test(start_paused = true)]
+    async fn an_opens_two_permit_waits_share_one_release_budget() {
+        const BUDGET: Duration = Duration::from_secs(4);
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        host.open_release_budget = BUDGET;
+        let host = Arc::new(host);
+        let key = canonical_key(root.path());
+        let mount_permit = host.root_calls.lock(&(key.clone(), RootCall::Mount)).await;
+        let _write = host
+            .root_calls
+            .lock(&(key.clone(), RootCall::RegistryWrite))
+            .await;
+        let mounting = Arc::clone(&host);
+        let mounting_root = root.path().to_path_buf();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/ws"))
+                .await
+        });
+        // The budget starts when the open marks its mount starting. The
+        // clock is paused, so no time passes between that and the read here.
+        while host.workspace_status(root.path()).0 != WorkspaceStatus::Starting {
+            tokio::task::yield_now().await;
+        }
+        let started = tokio::time::Instant::now();
+        tokio::time::sleep(BUDGET / 2).await;
+        drop(mount_permit);
+        let refused = mount.await.unwrap();
+        let waited = started.elapsed();
+        assert!(
+            matches!(refused, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+            "an open beside an outstanding registry write: {refused:?}"
+        );
+        assert!(
+            waited >= BUDGET && waited < BUDGET + BUDGET / 4,
+            "the open answered after {waited:?}, not after its one budget of {BUDGET:?}"
+        );
+    }
+
     /// A removal waits for its unregister's permit after its close, so a
     /// removal of a mounted workspace refused there, beside an unregister
     /// whose caller gave up, has taken the workspace down and recorded its

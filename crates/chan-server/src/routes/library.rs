@@ -3881,6 +3881,58 @@ mod devserver_route_tests {
             assert_eq!(row, body["error"], "the answer is not the row's words");
         }
 
+        /// An on of a root whose registration is still outstanding, its
+        /// caller gone, waits for that registry write inside the open's
+        /// release budget and then answers as beside an abandoned open,
+        /// having started no call of its own on the root.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_launcher_on_beside_an_abandoned_registration_answers_still_releasing() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let stored = lib.register_workspace(root.path()).unwrap().root_path;
+            let on = format!("/api/library/workspaces/{}/on", workspace_id(root.path()));
+            let (_host, router) = mutable_router(lib);
+            let stall = root_stall::stall_matching(root.path(), &[root_stall::REGISTER_WORKSPACE]);
+            let add = serde_json::json!({ "path": root.path().to_string_lossy() }).to_string();
+            let first = tokio::spawn(send(
+                router.clone(),
+                "POST",
+                "/api/library/workspaces".into(),
+                Some(add),
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the add never reached the root's registration"
+            );
+            first.abort();
+            assert!(
+                first.await.unwrap_err().is_cancelled(),
+                "fixture: the add answered"
+            );
+            let again = router.clone();
+            let (status, retry_after, body) = completes_beside(
+                &stall,
+                "an on beside an abandoned registration",
+                async move { send(again, "POST", on, None).await },
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "on: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "on: {body}");
+            assert_eq!(body["error"], STILL_RELEASING);
+            assert_eq!(
+                row_error(&router, &stored).await,
+                body["error"],
+                "the answer is not the row's words"
+            );
+            assert_eq!(
+                stall.entered().len(),
+                1,
+                "the on started a call on the root beside the held registration: {:?}",
+                stall.entered()
+            );
+        }
+
         /// Send `first` and leave it held at the call `stall` holds on the
         /// root, as a client that goes away does, then send `delete` beside
         /// that call. Answers the delete and what the row of `stored` then
