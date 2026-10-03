@@ -303,8 +303,11 @@ type QueuedPush = {
   /// as it goes on the wire (`drainQueued`), over the authority's as it is
   /// then; until then this says only that the push sends one.
   appState: WireAppState | null;
-  /// This window's appState claim as it stood when that appState was built,
-  /// which the push's ack confirms.
+  /// The keys of this window's appState claim the push carries, which its
+  /// ack confirms. For a push on the wire they are in the appState it sent.
+  /// For a queued one they are what the drain lays over the authority's
+  /// appState: every offer that joined the queue added its keys, and none
+  /// is dropped while the push waits.
   claim: WireAppState | null;
   files: WireFiles | null;
 };
@@ -651,6 +654,12 @@ export class SceneSession {
       }
       if (sent !== undefined) {
         q.appState = sent;
+        // An offer that joins a queued push adds to the keys that push
+        // carries and drops none: a key the session's claim lost meanwhile
+        // (its tab turned read only and back) is still on the board and
+        // still this push's to send. The two are one object again, so the
+        // push's ack ends the claim.
+        if (q.claim !== null) this.appStateClaim = { ...q.claim, ...this.appStateClaim };
         q.claim = this.appStateClaim;
       }
       if (files !== undefined) q.files = { ...(q.files ?? {}), ...files };
