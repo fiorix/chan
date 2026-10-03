@@ -1728,6 +1728,39 @@ describe("a live drawing", () => {
     });
   });
 
+  test("a board first shown while its session is between sockets pushes nothing and takes a peer's background from the next snapshot", async () => {
+    const { tab } = await loadedTab("notes/live.excalidraw", DRAWING);
+    // A tab restored behind another has a session and no board: the host
+    // loads the canvas when the tab is first shown.
+    const target = document.createElement("div");
+    document.body.append(target);
+    const hidden = mount(FileEditorTab, { target, props: { tab, active: false, focused: false } });
+    await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+    const socket = sceneSockets[0]!;
+    socket.open();
+    socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    expect(tab.doc?.state).toBe("attached");
+    vi.useFakeTimers();
+    socket.drop();
+    // The pane shows the tab: its editor mounts in front, inside the
+    // session's linger, and the board seeds from the buffer of the load.
+    await unmount(hidden);
+    const { board } = await mountBoard(tab);
+    await board.start();
+    const next = await nextSocket();
+    // A peer picked a background while this window was away.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      sockets: sceneSockets.length,
+      pushes: sceneSockets.flatMap((s) => s.pushes()),
+      background: board.appState.viewBackgroundColor,
+      dirty: isDirty(tab),
+    }).toEqual({ sockets: 2, pushes: [], background: BACKGROUND, dirty: false });
+  });
+
   /// The element ids of each push on `socket`.
   const idsPushed = (socket: SceneSocket) =>
     socket.pushes().map((p) => (p.elements as { id: string }[]).map((e) => e.id));
