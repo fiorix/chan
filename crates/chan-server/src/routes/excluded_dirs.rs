@@ -8,9 +8,12 @@
 //! This route edits ONLY the per-workspace additions.
 //!
 //! Names are exact directory BASENAMES matched at any depth, case-insensitive
-//! (no globs, no paths). PUT persists the set and refreshes a warm report on
-//! the blocking pool; that refresh walks and parses the workspace. It also
-//! queues the indexer's rebuild to apply the same policy to search and graph.
+//! (no globs, no paths). A name keeps a `\` it already holds and gains none
+//! here: PUT takes a name that holds one when a directory of the workspace
+//! has that name, or when the stored set already holds it, and refuses any
+//! other. PUT persists the set and refreshes a warm report on the blocking
+//! pool; that refresh walks and parses the workspace. It also queues the
+//! indexer's rebuild to apply the same policy to search and graph.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -63,8 +66,10 @@ pub async fn api_excluded_dirs_get(State(state): State<Arc<AppState>>) -> Respon
     }
 }
 
-/// Normalize the requested set: trim, drop blanks, reject path separators
-/// (a name, not a path), lower-case (matching is case-insensitive), dedupe.
+/// Normalize the requested set: trim, drop blanks, reject a `/` (a name, not
+/// a path), lower-case (matching is case-insensitive), dedupe. A `\` stays:
+/// on Unix it is part of a name, so the names alone do not decide it and
+/// [`unknown_backslash_name`] asks the workspace.
 /// Returns the clean set, or the offending raw entry on a hard reject.
 fn normalize(raw: &[String]) -> Result<Vec<String>, String> {
     let mut seen = HashSet::new();
@@ -74,7 +79,7 @@ fn normalize(raw: &[String]) -> Result<Vec<String>, String> {
         if name.is_empty() {
             continue;
         }
-        if name.contains('/') || name.contains('\\') {
+        if name.contains('/') {
             return Err(entry.clone());
         }
         let lower = name.to_ascii_lowercase();
@@ -83,6 +88,45 @@ fn normalize(raw: &[String]) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+/// The first of `names` that holds a `\` and that the workspace does not
+/// know: neither one of its stored additions, nor the name of a directory of
+/// its tree, compared as the walk compares a name, by basename at any depth
+/// and ignoring ASCII case.
+///
+/// A name keeps a backslash it already holds and no request creates one. On
+/// Unix a directory can have a `\` in its name; on Windows, where `\`
+/// separates components, none can, so there every such name is unknown
+/// unless it is stored. A stored name is not looked for: the set is sent
+/// whole at every change, and a name whose directory has gone since must
+/// not refuse the next one. The tree is walked, on the caller's blocking
+/// thread, only when some name with a `\` is not stored.
+fn unknown_backslash_name(
+    workspace: &chan_workspace::Workspace,
+    names: &[String],
+) -> Result<Option<String>, chan_workspace::ChanError> {
+    let stored = workspace.excluded_dirs()?;
+    let asked: Vec<&String> = names
+        .iter()
+        .filter(|name| name.contains('\\'))
+        .filter(|name| !stored.iter().any(|kept| kept.eq_ignore_ascii_case(name)))
+        .collect();
+    if asked.is_empty() {
+        return Ok(None);
+    }
+    let tree = workspace.list_tree()?;
+    let named = |name: &str| {
+        tree.iter().any(|entry| {
+            entry.is_dir
+                && entry
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|basename| basename.eq_ignore_ascii_case(name))
+        })
+    };
+    Ok(asked.into_iter().find(|name| !named(name)).cloned())
 }
 
 pub async fn api_excluded_dirs_put(
@@ -103,6 +147,19 @@ pub async fn api_excluded_dirs_put(
         Err(e) => return err_state(&e),
     };
     blocking_response("excluded directories", move || {
+        match unknown_backslash_name(&workspace, &dirs) {
+            Ok(None) => {}
+            Ok(Some(name)) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no directory in this workspace is named {name}; a name can hold a \
+                         backslash only when a directory already has it"
+                    ),
+                )
+            }
+            Err(e) => return err_from(&e),
+        }
         if let Err(e) = workspace.set_excluded_dirs(dirs) {
             return err_from(&e);
         }
