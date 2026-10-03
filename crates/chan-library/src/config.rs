@@ -105,15 +105,22 @@ pub struct TerminalConfig {
     /// Linux server reached from a browser on another OS gets the Linux
     /// default even though that client renders xterm.js correctly; the value
     /// is a default, not a lock, and over-applying it costs nothing but
-    /// `secret_masking`, which is xterm-only and off by default.
+    /// `secret_masking`, which is xterm-only.
     #[serde(default = "default_terminal_ghostty")]
     pub ghostty: bool,
     /// Whether xterm.js terminals visually obscure the values of
     /// secret-looking `NAME=value` assignments. The buffer remains
     /// cleartext so selection, copy, replay, and snapshots are unchanged.
     /// Ghostty terminals do not support xterm decorations and ignore this.
-    #[serde(default = "default_terminal_secret_masking")]
-    pub secret_masking: bool,
+    ///
+    /// `None` is a choice nobody made. It is left out of `server.toml` and of
+    /// the preferences a page reads, and a page that finds no choice masks by
+    /// the kind of its window: on in a control terminal, which prints a
+    /// bearer token, and off in every other. `Some` is the user's choice and
+    /// decides in both, so an explicit `false` is stored and sent as `false`
+    /// and is not the same as no choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_masking: Option<bool>,
     /// Literal, case-insensitive variable-name suffixes that trigger visual
     /// secret masking. Deserialization drops entries outside `[A-Za-z0-9_]+`
     /// with a warning rather than failing the whole config load, dedupes
@@ -209,7 +216,7 @@ impl Default for TerminalConfig {
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
             ghostty: default_terminal_ghostty(),
-            secret_masking: default_terminal_secret_masking(),
+            secret_masking: None,
             secret_mask_suffixes: default_terminal_secret_mask_suffixes(),
             profiles: Vec::new(),
             default_profile: None,
@@ -247,10 +254,6 @@ fn default_terminal_mouse_capture() -> bool {
 
 fn default_terminal_ghostty() -> bool {
     cfg!(target_os = "linux")
-}
-
-fn default_terminal_secret_masking() -> bool {
-    false
 }
 
 fn default_terminal_secret_mask_suffixes() -> Vec<String> {

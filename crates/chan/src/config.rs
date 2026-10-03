@@ -27,6 +27,9 @@ enum ConfigValueKind {
     /// `get` reads it as null rather than failing to find a leaf, and `none`
     /// clears it. `Enum`'s optional form, without a fixed value set.
     OptionalString,
+    /// A bool whose field skip-serializes away while no choice is made, so
+    /// `get` reads it as null, and `none` clears it. `Bool`'s optional form.
+    OptionalBool,
     StringList(usize),
     Color,
     Collection(&'static str),
@@ -275,7 +278,7 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     },
     ConfigKeySpec {
         key: "server.terminal.secret_masking",
-        kind: ConfigValueKind::Bool,
+        kind: ConfigValueKind::OptionalBool,
     },
     ConfigKeySpec {
         key: "server.terminal.secret_mask_suffixes",
@@ -382,7 +385,8 @@ fn read_config_key(
     match spec.kind {
         ConfigValueKind::OptionalU32Range(..)
         | ConfigValueKind::OptionalEnum(..)
-        | ConfigValueKind::OptionalString => Ok(serde_json::Value::Null),
+        | ConfigValueKind::OptionalString
+        | ConfigValueKind::OptionalBool => Ok(serde_json::Value::Null),
         // Color leaves sit under `skip_serializing_if` parents (the graph
         // palettes, the terminal custom colors), so a config that never
         // set them serializes no leaf at all; absent means unset.
@@ -631,6 +635,15 @@ fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Val
                 Value::Null
             } else {
                 Value::String(raw.to_owned())
+            }
+        }
+        ConfigValueKind::OptionalBool => {
+            if matches!(raw, "none" | "null") {
+                Value::Null
+            } else {
+                Value::Bool(raw.parse::<bool>().with_context(|| {
+                    format!("{}: expected true|false|none, got `{raw}`", spec.key)
+                })?)
             }
         }
         ConfigValueKind::StringList(max) => {
@@ -1065,7 +1078,11 @@ mod tests {
             shortcuts,
             ..Default::default()
         };
-        (editor, ServerConfig::default())
+        // A choice made, for the same reason as the palette: a masking
+        // preference left unset never reaches the dump.
+        let mut server = ServerConfig::default();
+        server.terminal.secret_masking = Some(true);
+        (editor, server)
     }
 
     #[test]
@@ -1130,7 +1147,7 @@ mod tests {
         let mut editor = EditorPrefs::default();
         let mut server = ServerConfig::default();
         write_server_config_key(&mut server, "terminal.secret_masking", "true").unwrap();
-        assert!(server.terminal.secret_masking);
+        assert_eq!(server.terminal.secret_masking, Some(true));
         assert_eq!(
             read_config_key(&editor, &server, "terminal.secret_masking").unwrap(),
             serde_json::json!(true)
@@ -1295,7 +1312,7 @@ mod tests {
     #[test]
     fn config_secret_masking_false_and_true_persist_in_isolated_home() {
         let env = test_env::ChanTestEnv::new();
-        assert!(!ServerConfig::default().terminal.secret_masking);
+        assert_eq!(ServerConfig::default().terminal.secret_masking, None);
 
         cmd_config(ConfigAction::Set {
             key: "terminal.secret_masking".into(),
@@ -1304,7 +1321,7 @@ mod tests {
         .unwrap();
         let path = env.home().join("server.toml");
         let saved = ServerConfig::load_from(&path).unwrap();
-        assert!(!saved.terminal.secret_masking);
+        assert_eq!(saved.terminal.secret_masking, Some(false));
 
         cmd_config(ConfigAction::Set {
             key: "server.terminal.secret_masking".into(),
@@ -1312,6 +1329,6 @@ mod tests {
         })
         .unwrap();
         let saved = ServerConfig::load_from(&path).unwrap();
-        assert!(saved.terminal.secret_masking);
+        assert_eq!(saved.terminal.secret_masking, Some(true));
     }
 }

@@ -181,7 +181,7 @@ mod tests {
                 mcp_env: true,
                 mouse_capture: false,
                 ghostty: true,
-                secret_masking: false,
+                secret_masking: Some(false),
                 secret_mask_suffixes: vec!["TOKEN".into(), "PRIVATE_KEY".into()],
                 // Populated rather than defaulted so the round trip actually
                 // exercises the `[[terminal.profiles]]` array-of-tables: an
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(cfg.scrollback_mb, 10);
         assert_eq!(cfg.default_term, "xterm-256color");
         assert!(cfg.mouse_capture);
-        assert!(!cfg.secret_masking);
+        assert_eq!(cfg.secret_masking, None);
         assert!(cfg.secret_mask_suffixes.contains(&"TOKEN".to_string()));
     }
 
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(cfg.terminal.scrollback_mb, 10);
         assert_eq!(cfg.terminal.default_term, "xterm-256color");
         assert!(cfg.terminal.mouse_capture);
-        assert!(!cfg.terminal.secret_masking);
+        assert_eq!(cfg.terminal.secret_masking, None);
         assert!(cfg
             .terminal
             .secret_mask_suffixes
@@ -325,7 +325,7 @@ mod tests {
         let p = tmp.path().join("server.toml");
         std::fs::write(&p, "[terminal]\nsecret_masking = true\n").unwrap();
         let cfg = ServerConfig::load_from(&p).unwrap();
-        assert!(cfg.terminal.secret_masking);
+        assert_eq!(cfg.terminal.secret_masking, Some(true));
     }
 
     #[test]

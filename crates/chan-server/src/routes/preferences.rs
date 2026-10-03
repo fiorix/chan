@@ -164,7 +164,35 @@ struct PreferencesPatch {
     // ServerConfig owner.
     attachments_dir: Option<String>,
     search_aggression: Option<SearchAggression>,
-    terminal: Option<TerminalConfig>,
+    terminal: Option<TerminalPatch>,
+}
+
+/// The `terminal` object of a preferences write. A page sends the whole
+/// object back, so every field replaces the stored one. `secret_masking` is
+/// the exception, because its stored value has a third state, no choice,
+/// that a field left out would otherwise overwrite: an object that leaves the
+/// key out keeps the stored choice, `null` clears it, and `true` or `false`
+/// sets it.
+#[derive(Debug, Clone)]
+struct TerminalPatch {
+    config: TerminalConfig,
+    names_secret_masking: bool,
+}
+
+impl<'de> Deserialize<'de> for TerminalPatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let names_secret_masking = object.contains_key("secret_masking");
+        let config = serde_json::from_value(serde_json::Value::Object(object))
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            config,
+            names_secret_masking,
+        })
+    }
 }
 
 fn deserialize_nullable_editor_font_size<'de, D>(
@@ -278,8 +306,12 @@ impl PreferencesPatch {
         if let Some(value) = self.search_aggression {
             server.search.aggression = value;
         }
-        if let Some(value) = self.terminal {
-            server.terminal = sanitize_terminal_config(value);
+        if let Some(patch) = self.terminal {
+            let mut terminal = sanitize_terminal_config(patch.config);
+            if !patch.names_secret_masking {
+                terminal.secret_masking = server.terminal.secret_masking;
+            }
+            server.terminal = terminal;
         }
         Ok(())
     }
