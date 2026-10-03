@@ -218,8 +218,24 @@ export class MockWorkspaceStore {
     return { renamed, rewritten: [], conflicts: [] };
   }
 
-  /// Copy a file, or a directory's whole subtree, and return the paths
-  /// written. The source stays.
+  /// A name for `name` in `destDir` that nothing holds: the name itself, or
+  /// the name with " copy", then " copy 2", " copy 3", before its extension,
+  /// as the server picks one, so a transfer overwrites nothing.
+  freeName(destDir: string, name: string): string {
+    const prefix = destDir ? `${destDir}/` : "";
+    const taken = (path: string) => this.#files.has(path) || this.isDir(path);
+    if (!taken(`${prefix}${name}`)) return `${prefix}${name}`;
+    // A dot that leads the name or ends it starts no extension.
+    const dot = name.lastIndexOf(".");
+    const cut = dot > 0 && dot < name.length - 1 ? dot : name.length;
+    for (let n = 1; ; n += 1) {
+      const candidate = `${prefix}${name.slice(0, cut)} copy${n === 1 ? "" : ` ${n}`}${name.slice(cut)}`;
+      if (!taken(candidate)) return candidate;
+    }
+  }
+
+  /// Copy a file, or a directory's whole subtree with the folders created
+  /// empty in it, and return the file paths written. The source stays.
   copy(from: string, to: string): string[] {
     const written: string[] = [];
     const mtime = nowSeconds();
@@ -234,6 +250,9 @@ export class MockWorkspaceStore {
         const np = `${to}/${p.slice(prefix.length)}`;
         this.#files.set(np, { ...e, path: np, mtime });
         written.push(np);
+      }
+      for (const dir of [...this.#folders]) {
+        if (dir === from || dir.startsWith(prefix)) this.#folders.add(`${to}${dir.slice(from.length)}`);
       }
     }
     this.#reindex();

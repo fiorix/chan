@@ -18,7 +18,7 @@ import type { DemoGraph } from "./graph";
 import { exportMetadata, importMetadata } from "./metadata";
 import type { MockReports } from "./report";
 import { linkTargets, mentionLabels, searchContent, searchFiles } from "./search";
-import { kindForPath, type MockWorkspaceStore } from "./store";
+import { kindForPath, parentOf, type MockWorkspaceStore } from "./store";
 import { applyUpload } from "./upload";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
@@ -138,9 +138,17 @@ export function createDemoFetch(
     if (path === "/api/fs/transfer" && method === "POST") {
       const body = parseBody(init) as { op: string; sources: string[]; dest_dir: string };
       const moved: Array<{ from: string; to: string }> = [];
+      const skipped: string[] = [];
       for (const src of body?.sources ?? []) {
-        const dest = `${body.dest_dir ? `${body.dest_dir}/` : ""}${src.slice(src.lastIndexOf("/") + 1)}`;
-        if (dest === src) continue;
+        // A move into the source's own directory changes nothing, and the
+        // server lists it as skipped. Every other destination takes a free
+        // name, so a copy beside its source and a name already taken both
+        // land under a new one.
+        if (body.op === "move" && parentOf(src) === body.dest_dir) {
+          skipped.push(src);
+          continue;
+        }
+        const dest = store.freeName(body.dest_dir, src.slice(src.lastIndexOf("/") + 1));
         if (body.op === "move") {
           for (const [from, to] of store.move(src, dest).renamed) graph.renameFile(from, to);
         } else {
@@ -151,7 +159,7 @@ export function createDemoFetch(
         }
         moved.push({ from: src, to: dest });
       }
-      return json({ moved, skipped: [], conflicts: [] });
+      return json({ moved, skipped, conflicts: [] });
     }
     if (path.startsWith("/api/fs/")) {
       const rel = decodePath(path.slice("/api/fs/".length));
