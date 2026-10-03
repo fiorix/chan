@@ -1611,6 +1611,19 @@ impl Drop for CopyStage<'_> {
     }
 }
 
+/// SHA-256 of a text file's content as a load delivers it.
+///
+/// A text read ([`RootedFs::read_text_with_stat`] and its chunked form)
+/// validates UTF-8 and changes nothing, so the bytes of the text it returns
+/// are the bytes of the file. A conditional write that carries the hash of
+/// what its writer loaded compares it with this over the file's current text:
+/// the two differ exactly when the file no longer holds the bytes that writer
+/// loaded, whatever its mtime says.
+pub fn loaded_text_sha256(text: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).into()
+}
+
 /// The refusal for non-UTF-8 bytes bound for the editable text file `rel`.
 fn non_utf8_editable_text(rel: &str) -> ChanError {
     ChanError::NonUtf8EditableText(format!(
@@ -1803,6 +1816,54 @@ pub(crate) fn split_name_ext(name: &str) -> (String, String) {
             (name[..idx].to_string(), name[idx..].to_string())
         }
         _ => (name.to_string(), String::new()),
+    }
+}
+
+#[cfg(test)]
+mod loaded_text_tests {
+    use super::*;
+
+    fn hex(hash: [u8; 32]) -> String {
+        hash.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn loaded_text_sha256_is_the_sha256_of_the_texts_utf8_bytes() {
+        assert_eq!(
+            hex(loaded_text_sha256("")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            hex(loaded_text_sha256("loaded")),
+            "2cab953f2b3607b36259abeb3703329d6b301b31277402ebf9f2b3b93e31dd53"
+        );
+    }
+
+    /// A read that ever stripped a byte-order mark or folded a line ending
+    /// would hand a writer a text that hashes unlike its file, and every
+    /// conditional save of that file would conflict.
+    #[test]
+    fn a_text_read_hashes_as_the_files_bytes_on_disk() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        let bytes = "\u{feff}one\r\ntwo\rthree\n\u{e9}\n".as_bytes();
+        std::fs::write(root.path().join("note.md"), bytes).unwrap();
+        let on_disk: [u8; 32] = Sha256::digest(bytes).into();
+
+        let (text, _) = rooted.read_text_with_stat("note.md").unwrap();
+        assert_eq!(loaded_text_sha256(&text), on_disk);
+
+        let mut streamed = String::new();
+        rooted
+            .read_text_with_stat_chunked("note.md", 3, |event| {
+                if let TextReadEvent::Chunk(chunk) = event {
+                    streamed.push_str(chunk);
+                }
+                true
+            })
+            .unwrap();
+        assert_eq!(loaded_text_sha256(&streamed), on_disk);
     }
 }
 
