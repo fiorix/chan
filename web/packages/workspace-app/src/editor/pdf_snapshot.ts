@@ -30,14 +30,61 @@ export const DEFAULT_STEP_TIMEOUT_MS = 15_000;
 /// start an unbounded number of fetches or decodes at once.
 export const IMAGE_PREP_BATCH = 8;
 
+/// Run `work` over one batch of images together and return what each
+/// made, in order.
+///
+/// When an image fails, the images after it in the document are aborted
+/// and not waited for, the ones before it are, and the failure thrown is
+/// the first in the document: which image an export names does not depend
+/// on which of them an engine settles first.
+function runImageBatch<T, U>(
+  batch: readonly T[],
+  work: (item: T, stop: AbortSignal) => Promise<U>,
+): Promise<U[]> {
+  return new Promise<U[]>((resolve, reject) => {
+    const stops = batch.map(() => new AbortController());
+    const values = new Array<U>(batch.length);
+    const settled = batch.map(() => false);
+    let failedAt = batch.length;
+    let failure: unknown;
+    const decide = (): void => {
+      // An image before the first failure may still fail before it.
+      if (settled.slice(0, failedAt).includes(false)) return;
+      if (failedAt < batch.length) reject(failure);
+      else resolve(values);
+    };
+    batch.forEach((item, index) => {
+      work(item, stops[index]!.signal).then(
+        (value) => {
+          values[index] = value;
+          settled[index] = true;
+          decide();
+        },
+        (err: unknown) => {
+          settled[index] = true;
+          if (index < failedAt) {
+            failedAt = index;
+            failure = err;
+            for (const later of stops.slice(index + 1)) later.abort();
+          }
+          decide();
+        },
+      );
+    });
+  });
+}
+
+/// Run `work` over the images in document order, a batch at a time.
+/// `work` writes nothing to the page: the caller does, with what comes
+/// back, so a preparation that fails leaves no late write behind it.
 async function mapImageSteps<T, U>(
   items: readonly T[],
-  work: (item: T) => Promise<U>,
+  work: (item: T, stop: AbortSignal) => Promise<U>,
 ): Promise<U[]> {
   const results: U[] = [];
   for (let at = 0; at < items.length; at += IMAGE_PREP_BATCH) {
     results.push(
-      ...(await Promise.all(items.slice(at, at + IMAGE_PREP_BATCH).map(work))),
+      ...(await runImageBatch(items.slice(at, at + IMAGE_PREP_BATCH), work)),
     );
   }
   return results;
@@ -90,16 +137,45 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+/// Settle as `work` does, or reject as soon as `stop` aborts. What is
+/// stopped this way is never what a failure reports.
+function untilStopped<T>(work: Promise<T>, stop?: AbortSignal): Promise<T> {
+  if (!stop) return work;
+  return new Promise<T>((resolve, reject) => {
+    const stopped = (): void => reject(new SnapshotError("stopped"));
+    if (stop.aborted) {
+      stopped();
+      return;
+    }
+    stop.addEventListener("abort", stopped, { once: true });
+    const settle = (): void => stop.removeEventListener("abort", stopped);
+    work.then(
+      (value) => {
+        settle();
+        resolve(value);
+      },
+      (err) => {
+        settle();
+        reject(err);
+      },
+    );
+  });
+}
+
 /// Fetch a same-origin resource and return it as a data: URL, bounded
-/// by `timeoutMs`. Returns null on any failure; the audit names the
-/// leftover.
+/// by `timeoutMs` and given up when `stop` aborts. Returns null on any
+/// failure; the audit names the leftover.
 async function fetchAsDataUrl(
   url: string,
   timeoutMs: number,
+  stop?: AbortSignal,
 ): Promise<string | null> {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const abort = (): void => controller.abort();
+    const timer = setTimeout(abort, timeoutMs);
+    stop?.addEventListener("abort", abort, { once: true });
+    if (stop?.aborted) abort();
     try {
       const resp = await fetch(url, { signal: controller.signal });
       if (!resp.ok) return null;
@@ -107,6 +183,7 @@ async function fetchAsDataUrl(
       return await withTimeout(blobToDataUrl(blob), timeoutMs, `encode ${url}`);
     } finally {
       clearTimeout(timer);
+      stop?.removeEventListener("abort", abort);
     }
   } catch {
     return null;
@@ -149,8 +226,9 @@ function notAnImageType(type: string): boolean {
 async function fetchImageAsDataUrl(
   url: string,
   timeoutMs: number,
+  stop: AbortSignal,
 ): Promise<string | null> {
-  const inlined = await fetchAsDataUrl(url, timeoutMs);
+  const inlined = await fetchAsDataUrl(url, timeoutMs, stop);
   if (inlined && notAnImageType(dataUrlType(inlined))) {
     throw new SnapshotError(
       `image ${resourceName(url)} is ${dataUrlType(inlined)}, not an image`,
@@ -247,10 +325,10 @@ async function inlineFonts(root: HTMLElement, timeoutMs: number): Promise<void> 
 async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void> {
   const htmlImages = await mapImageSteps(
     Array.from(root.querySelectorAll("img")),
-    async (img) => {
+    async (img, stop) => {
       const src = img.getAttribute("src") ?? "";
       if (!src || isInlineUrl(src)) return null;
-      const inlined = await fetchImageAsDataUrl(src, timeoutMs);
+      const inlined = await fetchImageAsDataUrl(src, timeoutMs, stop);
       return { img, src, inlined };
     },
   );
@@ -259,16 +337,25 @@ async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void>
     result.img.setAttribute("src", result.inlined);
     sourceNames.set(result.img, resourceName(result.src));
   }
-  await mapImageSteps(Array.from(root.querySelectorAll("image")), async (image) => {
-    for (const attr of IMAGE_HREF_ATTRS) {
-      const href = image.getAttribute(attr);
-      if (!href || isInlineUrl(href)) continue;
-      const inlined = await fetchImageAsDataUrl(href, timeoutMs);
-      if (!inlined) continue;
-      image.setAttribute(attr, inlined);
+  const svgImages = await mapImageSteps(
+    Array.from(root.querySelectorAll("image")),
+    async (image, stop) => {
+      const inlined: { attr: string; href: string; data: string }[] = [];
+      for (const attr of IMAGE_HREF_ATTRS) {
+        const href = image.getAttribute(attr);
+        if (!href || isInlineUrl(href)) continue;
+        const data = await fetchImageAsDataUrl(href, timeoutMs, stop);
+        if (data) inlined.push({ attr, href, data });
+      }
+      return { image, inlined };
+    },
+  );
+  for (const { image, inlined } of svgImages) {
+    for (const { attr, href, data } of inlined) {
+      image.setAttribute(attr, data);
       sourceNames.set(image, resourceName(href));
     }
-  });
+  }
 }
 
 /// Make the page self-contained: images, SVG image hrefs, url() tokens
@@ -363,16 +450,22 @@ export class PageImages {
   }
 }
 
-/// Decode an image in the app's own document, bounded by `timeoutMs`.
+/// Decode an image in the app's own document, bounded by `timeoutMs` and
+/// given up when `stop` aborts.
 async function decodeImage(
   src: string,
   name: string,
   timeoutMs: number,
+  stop: AbortSignal,
 ): Promise<HTMLImageElement> {
   const image = new Image();
   image.src = src;
   try {
-    await withTimeout(image.decode(), timeoutMs, `decode of image ${name}`);
+    await withTimeout(
+      untilStopped(image.decode(), stop),
+      timeoutMs,
+      `decode of image ${name}`,
+    );
   } catch (err) {
     if (err instanceof SnapshotError) throw err;
     throw new SnapshotError(`image ${name} could not be decoded`);
@@ -589,12 +682,12 @@ export async function liftPageImages(
 ): Promise<void> {
   const decoded = await mapImageSteps(
     Array.from(root.querySelectorAll("img")),
-    async (img) => {
+    async (img, stop) => {
       if (img.hasAttribute(LIFTED_ATTR)) return null;
       const src = img.getAttribute("src") ?? "";
       if (!src.startsWith("data:")) return null;
       const name = sourceNames.get(img) ?? resourceName(src);
-      const bitmap = await decodeImage(src, name, timeoutMs);
+      const bitmap = await decodeImage(src, name, timeoutMs, stop);
       return { img, name, bitmap };
     },
   );
@@ -634,19 +727,26 @@ export async function liftPageImages(
   // An <image> of an inline SVG is drawn inside that SVG, under and over
   // its other shapes, so it stays in the page's document. Decoding it
   // here still proves its bytes are an image before any page is drawn.
-  await mapImageSteps(Array.from(root.querySelectorAll("image")), async (image) => {
-    if (image.hasAttribute(DECODED_ATTR)) return;
-    for (const attr of IMAGE_HREF_ATTRS) {
-      const href = image.getAttribute(attr);
-      if (!href?.startsWith("data:")) continue;
-      await decodeImage(
-        href,
-        sourceNames.get(image) ?? resourceName(href),
-        timeoutMs,
-      );
-      image.setAttribute(DECODED_ATTR, "");
-    }
-  });
+  const svgImages = await mapImageSteps(
+    Array.from(root.querySelectorAll("image")),
+    async (image, stop) => {
+      if (image.hasAttribute(DECODED_ATTR)) return null;
+      let decoded = false;
+      for (const attr of IMAGE_HREF_ATTRS) {
+        const href = image.getAttribute(attr);
+        if (!href?.startsWith("data:")) continue;
+        await decodeImage(
+          href,
+          sourceNames.get(image) ?? resourceName(href),
+          timeoutMs,
+          stop,
+        );
+        decoded = true;
+      }
+      return decoded ? image : null;
+    },
+  );
+  for (const image of svgImages) image?.setAttribute(DECODED_ATTR, "");
 }
 
 /// The colour that marks slot `slot` of a marker raster. Red carries the
