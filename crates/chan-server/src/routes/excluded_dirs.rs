@@ -446,6 +446,43 @@ mod tests {
         );
     }
 
+    /// The function the route calls looks through the names it is handed
+    /// and nowhere else: it takes a name a directory has after more names
+    /// than a listing of the tree holds, pulls none past that directory,
+    /// and pulls none at all for a set that needs no look.
+    #[tokio::test]
+    async fn the_routes_look_is_the_walk_it_is_handed_and_stops_at_the_name() {
+        let app = route_test_app();
+        let workspace = app.state.try_workspace().unwrap();
+        let before = chan_workspace::fs_ops::LIST_TREE_LIMIT + 1;
+        let entries = vec!["vendor".to_string(), "X\\y".to_string()];
+        let mut pulled = 0usize;
+        let directories = std::iter::repeat_n("other", before)
+            .chain(std::iter::once("x\\Y"))
+            .chain(std::iter::repeat_n("later", 3))
+            .inspect(|_| pulled += 1);
+        assert_eq!(
+            refused_backslash_entry(&workspace, &entries, false, directories).unwrap(),
+            None,
+            "a name was refused that the walk handed to the look has, past a listing's limit"
+        );
+        assert_eq!(
+            pulled,
+            before + 1,
+            "the look did not stop at the directory that has the name"
+        );
+
+        let unasked = vec!["vendor".to_string()];
+        let mut pulled = 0usize;
+        let directories = std::iter::repeat_n("other", 3).inspect(|_| pulled += 1);
+        assert_eq!(
+            refused_backslash_entry(&workspace, &unasked, false, directories).unwrap(),
+            None,
+            "a set with no name that holds a backslash was refused"
+        );
+        assert_eq!(pulled, 0, "a set that needs no look advanced the walk");
+    }
+
     /// The names come from a walk in progress and not from a listing built
     /// ahead of it: a directory made under one the walk has named and not
     /// yet read is met by the same walk.
