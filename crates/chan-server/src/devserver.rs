@@ -2021,27 +2021,50 @@ impl DevserverState {
     /// persisted root that stopped answering is skipped with a note instead
     /// of holding up the restore of every row after it.
     ///
-    /// Each registration resolves its root's key and goes through the
-    /// host's keyed registration, so it holds the root's registry-write
-    /// permit as a serve request's does. A restore that expires on a root
-    /// leaves that one registration behind, and a later registration of the
-    /// root waits for it instead of starting another.
+    /// Each such row resolves its root's key, and the rows that resolve to
+    /// one key, two spellings of one root, share one registration and its
+    /// outcome: they are kept or skipped together, and neither waits at the
+    /// other's permit. The registration goes through the host's keyed
+    /// registration, so it holds the root's registry-write permit as a
+    /// serve request's does. A restore that expires on a root leaves that
+    /// one registration behind, and a later registration of the root waits
+    /// for it instead of starting another.
     async fn register_restore_rows(
         &self,
         rows: Vec<PersistedWorkspace>,
     ) -> Vec<PersistedWorkspace> {
+        type Registration = Arc<tokio::sync::OnceCell<Result<(), String>>>;
         let registered = registered_root_keys(self.host.library());
         let deadline = tokio::time::Instant::now() + self.mount_timeout;
+        let by_key: Arc<Mutex<HashMap<PathBuf, Registration>>> = Arc::default();
         let registering: Vec<_> = rows
             .into_iter()
             .map(|row| {
                 let root = PathBuf::from(&row.path);
                 let task = (!registered.contains(&root)).then(|| {
                     let host = Arc::clone(&self.host);
+                    let by_key = Arc::clone(&by_key);
                     tokio::spawn(async move {
                         tokio::time::timeout_at(deadline, async {
-                            let key = host.root_key(&root).await?;
-                            host.register_workspace_keyed(&root, &key, None).await
+                            let key = host
+                                .root_key(&root)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            let registration = by_key
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .entry(key.clone())
+                                .or_default()
+                                .clone();
+                            registration
+                                .get_or_init(|| async {
+                                    host.register_workspace_keyed(&root, &key, None)
+                                        .await
+                                        .map(drop)
+                                        .map_err(|error| restore_registration_note(&error))
+                                })
+                                .await
+                                .clone()
                         })
                         .await
                     })
@@ -2056,11 +2079,11 @@ impl DevserverState {
                 continue;
             };
             let failure = match task.await {
-                Ok(Ok(Ok(_))) => {
+                Ok(Ok(Ok(()))) => {
                     kept.push(row);
                     continue;
                 }
-                Ok(Ok(Err(error))) => error.to_string(),
+                Ok(Ok(Err(failure))) => failure,
                 Ok(Err(_)) => format!(
                     "it did not answer within {} seconds",
                     whole_seconds(self.mount_timeout)
@@ -3504,6 +3527,21 @@ fn registered_row_for<'a>(rows: &'a [KnownWorkspace], key: &Path) -> Option<&'a 
         rows.iter()
             .find(|row| registry_row_keys(row).contains(&key))
     })
+}
+
+/// What a restore's note says of a row whose registration answered `error`.
+/// The registration's own call never answers that the workspace is already
+/// open: that answer is its wait for the root's registry-write permit running
+/// out, behind a registration or a removal of the root that has not
+/// returned.
+fn restore_registration_note(error: &Error) -> String {
+    match error {
+        Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => {
+            "a registration or a removal of it that was already running did not return in time"
+                .into()
+        }
+        other => other.to_string(),
+    }
 }
 
 /// Every registered root by the keys its registry row goes by
@@ -10014,6 +10052,22 @@ mod tests {
             "the restore left out a spelling of a root whose registration outlasted the release \
              budget"
         );
+    }
+
+    /// A restore's note for a row refused at the registry-write permit says
+    /// what it waited behind, not that the workspace is open, and every
+    /// other failure keeps its own sentence.
+    #[test]
+    fn a_restore_row_refused_at_its_permit_is_noted_as_behind_a_registry_write() {
+        let refused = Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen);
+        assert_eq!(
+            restore_registration_note(&refused),
+            "a registration or a removal of it that was already running did not return in time"
+        );
+        let missing = Error::Core(chan_workspace::ChanError::WorkspaceRootMissing(
+            "/gone".into(),
+        ));
+        assert_eq!(restore_registration_note(&missing), missing.to_string());
     }
 
     #[test]
