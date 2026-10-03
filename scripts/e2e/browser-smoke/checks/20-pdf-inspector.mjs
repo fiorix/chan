@@ -29,6 +29,7 @@ const BLUE = [20, 90, 200];
 const ORANGE = [230, 60, 20];
 const ROSE = [220, 20, 120];
 const GREEN = [0, 150, 80];
+const CYAN = [17, 153, 211];
 
 /// A deck page of the export: A4 landscape, the 16:9 slide fitted to the
 /// page's width and centred on it, laid out as play lays it out on a
@@ -269,16 +270,17 @@ async function watchImageLift(page, expectedImage) {
     const originalClone = Element.prototype.cloneNode;
     const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker", "height-only"]);
     const capture = { before: null, after: null };
-    const read = (host) => Object.fromEntries(
-      [...host.querySelectorAll("img[alt]")]
+    const read = (host) => ({
+      ...Object.fromEntries([...host.querySelectorAll("img[alt]")]
         .filter((img) => names.has(img.alt))
         .map((img) => [img.alt, {
           rect: img.getBoundingClientRect().toJSON(),
           parent: img.parentElement?.getBoundingClientRect().toJSON(),
           natural: [img.naturalWidth, img.naturalHeight],
           style: [getComputedStyle(img).width, getComputedStyle(img).height],
-        }]),
-    );
+        }])),
+      anchor: host.querySelector("#clip-anchor")?.getBoundingClientRect().toJSON(),
+    });
     Element.prototype.setAttribute = function (name, value) {
       if (!capture.before && name === "src" && this instanceof HTMLImageElement &&
           String(value).startsWith("data:")) {
@@ -349,18 +351,25 @@ function inspectLayoutImages(rasters, capture) {
       faults.push(`${name}: its composed ${a.width}x${a.height} box became ${b.width}x${b.height}`);
     }
   }
+  const amber = colourBox(page, AMBER);
+  const green = colourBox(page, GREEN);
+  const clipped = amber && green ? {
+    x0: Math.min(amber.x0, green.x0), x1: Math.max(amber.x1, green.x1),
+    y0: Math.min(amber.y0, green.y0), y1: Math.max(amber.y1, green.y1),
+    width: Math.max(amber.x1, green.x1) - Math.min(amber.x0, green.x0) + 1,
+    height: Math.max(amber.y1, green.y1) - Math.min(amber.y0, green.y0) + 1,
+  } : null;
   const expected = [
-    ["wide-table", TEAL, before["wide-table"]?.rect.width, before["wide-table"]?.rect.height],
-    ["contain", VIOLET, 80, 80],
-    ["partial-clip", AMBER, before["partial-clip"]?.rect.width,
+    ["wide-table", colourBox(page, TEAL), before["wide-table"]?.rect.width, before["wide-table"]?.rect.height],
+    ["contain", colourBox(page, VIOLET), 80, 80],
+    ["partial-clip", clipped, before["partial-clip"]?.rect.width,
       Math.max(0, Math.min(before["partial-clip"]?.rect.bottom ?? 0,
         before["partial-clip"]?.parent?.bottom ?? 0) -
         Math.max(before["partial-clip"]?.rect.top ?? 0,
           before["partial-clip"]?.parent?.top ?? 0))],
   ];
   const ink = {};
-  for (const [name, colour, width, height] of expected) {
-    const box = colourBox(page, colour);
+  for (const [name, box, width, height] of expected) {
     ink[name] = box;
     if (!box || !(width > 0 && height > 0)) {
       faults.push(`${name}: no measurable image colour or composed box`);
@@ -368,6 +377,16 @@ function inspectLayoutImages(rasters, capture) {
     }
     if (Math.abs(box.width - width * scale) > 4 || Math.abs(box.height - height * scale) > 4) {
       faults.push(`${name}: PDF colour is ${box.width}x${box.height}, composed ${width}x${height} at ${scale.toFixed(3)} raster px per CSS px`);
+    }
+  }
+  const anchor = colourBox(page, CYAN);
+  if (!amber || !green || !anchor || !before["partial-clip"] || !before.anchor) {
+    faults.push("partial-clip: both colours and the reference box must be visible");
+  } else {
+    const boundaryInPdf = (green.y0 - anchor.y0) / scale;
+    const boundaryComposed = before["partial-clip"].rect.top + 6 - before.anchor.top;
+    if (Math.abs(boundaryInPdf - boundaryComposed) > 2) {
+      faults.push(`partial-clip: colour boundary ${boundaryInPdf} CSS px below anchor, composed ${boundaryComposed}`);
     }
   }
   if (!before["wide-table"] || before["wide-table"].natural[0] !== 900 ||
