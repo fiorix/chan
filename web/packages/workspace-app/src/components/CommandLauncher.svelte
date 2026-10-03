@@ -49,6 +49,7 @@
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
   import { sessionWindowId } from "../api/client";
+  import { isTauriDesktop } from "../api/desktop";
   import { ApiError } from "../api/errors";
   import { notify } from "../state/notify.svelte";
   import {
@@ -390,12 +391,17 @@
 
   /// The actions this particular window can take. Focus and Show both route
   /// through focusLibraryWindow, which unhides and raises in one step, so a
-  /// window offers one of the two and never both. A feed-only window cannot
-  /// be focused by this host: the browser launch route looks only in its local
-  /// registry, and the native command targets a local webview label. The
-  /// capability route also refuses Hide and Close for it.
+  /// window offers one of the two and never both.
+  ///
+  /// A window this host's registry does not hold (`managed: false`) is offered
+  /// only what can be carried out on it. Hide, Close and the un-hide behind
+  /// Show act on that registry, so it is offered none of them. A visible one
+  /// keeps Focus in chan-desktop, where the window watcher opens it under the
+  /// label the native focus command targets. A browser is offered nothing: the
+  /// launch route redirects to the record's own page, which this host may not
+  /// serve.
   function scopedWindowActions(window: ScopedLibraryWindow): WindowActionId[] {
-    if (window.managed === false) return [];
+    if (window.managed === false) return !window.hidden && isTauriDesktop() ? ["focus"] : [];
     const manageable = !window.control;
     const actions: WindowActionId[] = [window.hidden ? "show" : "focus"];
     if (manageable && !window.hidden) actions.push("hide");
