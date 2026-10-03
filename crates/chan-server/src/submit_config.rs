@@ -2,8 +2,8 @@
 //! bytes live in chan-shell (`SubmitAgent::default_template`); this module
 //! lets a user override them without a rebuild by editing
 //! `<config>/chan/submit.toml`, so a client
-//! (agy/claude/codex/gemini/kimi/opencode) changing its submit behavior is a
-//! config edit, not a release. Env
+//! (agy/claude/codex/gemini/kimi/muse/opencode) changing its submit behavior
+//! is a config edit, not a release. Env
 //! `CHAN_SUBMIT_<AGENT>` still takes precedence over the file (resolved in
 //! chan-shell at chord-application time).
 //!
@@ -20,6 +20,8 @@
 //! template = '{}\r'
 //! [kimi]
 //! template = '\e[200~{}\e[201~\r'
+//! [muse]
+//! template = '{}\r'
 //! [opencode]
 //! template = '\e[200~{}\e[201~\r'
 //! ```
@@ -38,6 +40,7 @@ struct SubmitOverridesFile {
     codex: Option<AgentChord>,
     gemini: Option<AgentChord>,
     kimi: Option<AgentChord>,
+    muse: Option<AgentChord>,
     opencode: Option<AgentChord>,
 }
 
@@ -55,6 +58,7 @@ impl SubmitOverridesFile {
             ("codex", self.codex),
             ("gemini", self.gemini),
             ("kimi", self.kimi),
+            ("muse", self.muse),
             ("opencode", self.opencode),
         ] {
             if let Some(chord) = chord {

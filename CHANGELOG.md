@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`muse` is a submit agent.** `cs terminal write --submit=muse` is accepted and encodes as `--submit=gemini` does: the body, then a bare CR as a queue entry of its own one idle gate later. A terminal whose spawn command names `muse` as a whole word, or whose spawn environment sets `CHAN_AGENT=muse`, is derived as muse, so `cs terminal list` reports it, a team member that runs it gets its identity poke and its chord line in the generated bootstrap, and `submit.toml` takes a `[muse]` section (`CHAN_SUBMIT_MUSE` in the environment).
+
 ### Changed
 
 - **`chan workspace forget` stops when its host says the workspace is still releasing.** When the devserver or desktop that holds a workspace answers a forget with `workspace is still releasing; retry`, the command prints that answer, leaves the workspace registered and exits 75, so a script can tell "run it again" from a refusal. In v0.101.0 it printed that it could not reach the server, unregistered the workspace on disk and exited 0, which left the host holding a workspace its registry file no longer had. Any other error a holder answers to `chan close` or `chan workspace forget` is now printed with the "could not reach the server" warning, where only the command's own context was.

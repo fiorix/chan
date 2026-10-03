@@ -75,6 +75,13 @@ pub enum SubmitAgent {
     // Kimi Code 0.31.0.
     /// Kimi Code: bracketed paste, then CR
     Kimi,
+    // Takes gemini's encoding whole: its template, and its body and chord as
+    // separately idle-gated queue entries. Under those bytes a single-line, a
+    // three-line and a 41-line body each arrived as one submitted message.
+    // Whether muse needs the split, as Gemini 0.51 does, was not measured.
+    // Live-probed 2026-10-03 against Muse Code 1.4.2.
+    /// Muse: a CR in its own separate write, as gemini
+    Muse,
     // Its TUI accepts bracketed paste followed by CR in the same PTY write.
     // The bracketed form is the default because it is proven for multiline,
     // paste-sized input, and chronological notification batches. Live-probed
@@ -118,7 +125,7 @@ impl ResolvedSubmit {
     }
 
     /// Whether this resolved shape is proven for chronological notification
-    /// batching. Gemini remains a singleton boundary.
+    /// batching. Gemini and muse remain singleton boundaries.
     pub fn is_batchable(&self) -> bool {
         self.source == SubmitTemplateSource::BuiltIn
             && matches!(
@@ -141,9 +148,9 @@ pub struct PtyInputPlan {
 
 impl SubmitAgent {
     /// Resolve an agent NAME ("agy" | "claude" | "codex" | "gemini" | "kimi"
-    /// | "opencode") to its variant without clap's `ValueEnum::from_str` (so a
-    /// caller that only has the string does not have to pull clap in). Returns
-    /// `None` for an unknown name.
+    /// | "muse" | "opencode") to its variant without clap's
+    /// `ValueEnum::from_str` (so a caller that only has the string does not
+    /// have to pull clap in). Returns `None` for an unknown name.
     pub fn from_agent_name(name: &str) -> Option<Self> {
         match name {
             "agy" => Some(SubmitAgent::Agy),
@@ -151,6 +158,7 @@ impl SubmitAgent {
             "codex" => Some(SubmitAgent::Codex),
             "gemini" => Some(SubmitAgent::Gemini),
             "kimi" => Some(SubmitAgent::Kimi),
+            "muse" => Some(SubmitAgent::Muse),
             "opencode" => Some(SubmitAgent::OpenCode),
             _ => None,
         }
@@ -164,6 +172,7 @@ impl SubmitAgent {
             SubmitAgent::Codex => "codex",
             SubmitAgent::Gemini => "gemini",
             SubmitAgent::Kimi => "kimi",
+            SubmitAgent::Muse => "muse",
             SubmitAgent::OpenCode => "opencode",
         }
     }
@@ -174,15 +183,16 @@ impl SubmitAgent {
     /// (teamDialog.svelte.ts).
     ///
     /// `CHAN_AGENT` wins when it names a known agent ("agy"/"claude"/"codex"/
-    /// "gemini"/"kimi"/"opencode") or an explicit shell ("none"/"shell" ->
-    /// `None`); an unrecognized value falls through to the command sniff (the
-    /// escape hatch is opt-in, a typo should not silently disable submit). The
-    /// command match is a LOOSE whole-word sniff:
-    /// agy/claude/codex/gemini/kimi/opencode recognized anywhere in the
+    /// "gemini"/"kimi"/"muse"/"opencode") or an explicit shell ("none"/"shell"
+    /// -> `None`); an unrecognized value falls through to the command sniff
+    /// (the escape hatch is opt-in, a typo should not silently disable
+    /// submit). The command match is a LOOSE whole-word sniff:
+    /// agy/claude/codex/gemini/kimi/muse/opencode recognized anywhere in the
     /// command as a word, so wrappers like
     /// `my-claude.sh`, `/usr/local/bin/codex-cli`, or `claude --resume` still
-    /// resolve, while `claudette` does not. `None` means a shell member with
-    /// no submit chord.
+    /// resolve, while `claudette` does not. A command that names two agents
+    /// derives the one earlier in that alphabetical order. `None` means a
+    /// shell member with no submit chord.
     pub fn derive(command: &str, chan_agent: Option<&str>) -> Option<SubmitAgent> {
         if let Some(raw) = chan_agent {
             match raw.trim().to_ascii_lowercase().as_str() {
@@ -191,6 +201,7 @@ impl SubmitAgent {
                 "codex" => return Some(SubmitAgent::Codex),
                 "gemini" => return Some(SubmitAgent::Gemini),
                 "kimi" => return Some(SubmitAgent::Kimi),
+                "muse" => return Some(SubmitAgent::Muse),
                 "opencode" => return Some(SubmitAgent::OpenCode),
                 "none" | "shell" => return None,
                 // Unrecognized CHAN_AGENT: ignore it, sniff the command.
@@ -208,6 +219,8 @@ impl SubmitAgent {
             Some(SubmitAgent::Gemini)
         } else if word_match(&c, "kimi") {
             Some(SubmitAgent::Kimi)
+        } else if word_match(&c, "muse") {
+            Some(SubmitAgent::Muse)
         } else if word_match(&c, "opencode") {
             Some(SubmitAgent::OpenCode)
         } else {
@@ -219,10 +232,11 @@ impl SubmitAgent {
     /// `{}` placeholder for the normalized submit body. These ARE
     /// the live-probed default bytes; an override (env / config file) replaces
     /// the whole template. claude appends the modifyOtherKeys Cmd+Enter CSI;
-    /// gemini a bare CR; agy, codex, kimi, and opencode wrap the text in
-    /// bracketed paste then CR. Codex needs the wrap to keep its paste-burst
-    /// coalescing from eating the submit; agy, kimi, and opencode each keep
-    /// their own measured template even where the current bytes agree.
+    /// gemini and muse a bare CR; agy, codex, kimi, and opencode wrap the text
+    /// in bracketed paste then CR. Codex needs the wrap to keep its
+    /// paste-burst coalescing from eating the submit; agy, kimi, and opencode
+    /// each keep their own measured template even where the current bytes
+    /// agree, and muse keeps its own arm beside gemini's for the same reason.
     fn default_template(self) -> &'static str {
         match self {
             SubmitAgent::Agy => "\x1b[200~{}\x1b[201~\r",
@@ -230,6 +244,7 @@ impl SubmitAgent {
             SubmitAgent::Codex => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Gemini => "{}\r",
             SubmitAgent::Kimi => "\x1b[200~{}\x1b[201~\r",
+            SubmitAgent::Muse => "{}\r",
             SubmitAgent::OpenCode => "\x1b[200~{}\x1b[201~\r",
         }
     }
@@ -245,11 +260,12 @@ impl SubmitAgent {
 }
 
 /// Process-global per-agent chord template overrides, keyed by agent name
-/// ("agy"/"claude"/"codex"/"gemini"/"kimi"/"opencode"). The server loads these
-/// from `<config>/chan/submit.toml` once at startup via `set_chord_overrides`;
-/// env `CHAN_SUBMIT_<AGENT>` still takes precedence at apply time. Default
-/// `None` means "no file overrides", which every chan-shell-only caller
-/// (the `cs` CLI) sees, so it falls back to env + built-in.
+/// ("agy"/"claude"/"codex"/"gemini"/"kimi"/"muse"/"opencode"). The server
+/// loads these from `<config>/chan/submit.toml` once at startup via
+/// `set_chord_overrides`; env `CHAN_SUBMIT_<AGENT>` still takes precedence
+/// at apply time. Default `None` means "no file overrides", which every
+/// chan-shell-only caller (the `cs` CLI) sees, so it falls back to env +
+/// built-in.
 static CHORD_OVERRIDES: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
 
 /// Install the config-file chord template overrides (agent name -> template
@@ -340,11 +356,14 @@ pub fn submit_chord_bytes(submit: &ResolvedSubmit) -> Vec<u8> {
 /// Whether `text` submitted under `submit` needs its chord delivered as a
 /// SEPARATE PTY write. Gemini 0.51 converts a Return received too soon after
 /// inserted text into Shift+Return, including text delivered as bracketed
-/// paste, so a Gemini body and its bare CR never share a write. A message
-/// missing either half has nothing to split. Cheap enough for the enqueue
-/// path: it never renders the template around the payload.
+/// paste, so a Gemini body and its bare CR never share a write, and muse is
+/// written as gemini is. A message missing either half has nothing to split.
+/// Cheap enough for the enqueue path: it never renders the template around
+/// the payload.
 pub fn splits_submit_chord(text: &str, submit: &ResolvedSubmit) -> bool {
-    submit.agent == SubmitAgent::Gemini && !text.is_empty() && !chord_is_empty(&submit.template)
+    matches!(submit.agent, SubmitAgent::Gemini | SubmitAgent::Muse)
+        && !text.is_empty()
+        && !chord_is_empty(&submit.template)
 }
 
 /// Whether a template's chord half (everything outside `{}`) is empty, the
@@ -356,7 +375,7 @@ fn chord_is_empty(template: &str) -> bool {
 /// Build the ordered PTY input for one logical message, encoding only after
 /// an optional batch body has been formed. A plan always has at least one
 /// part; two parts mean the chord must land as its own write, which happens
-/// for Gemini and for the proven batched Claude built-in.
+/// for Gemini, for muse and for the proven batched Claude built-in.
 pub fn plan_submitted_input(
     text: String,
     submit: Option<&ResolvedSubmit>,
@@ -405,9 +424,9 @@ pub fn apply_submit_chord(data: String, submit: Option<SubmitAgent>) -> String {
 /// agents need ONE write (the chord is part of it, via `apply_submit_chord`),
 /// so a caller can write/enqueue the single element verbatim.
 ///
-/// gemini is the exception. gemini 0.51 converts a closely following Return
-/// into Shift+Return, including after bracketed paste. Only a CR delivered as
-/// its OWN later write submits gemini, so for gemini this
+/// gemini is the exception, and muse with it. gemini 0.51 converts a closely
+/// following Return into Shift+Return, including after bracketed paste. Only
+/// a CR delivered as its OWN later write submits gemini, so for both this
 /// returns TWO writes (the text body, then the submit chord alone) which the
 /// caller MUST deliver as separate events: separate write-queue items, whose
 /// drainer idle-gates between them, or separate PTY writes with a caller-owned
@@ -620,6 +639,7 @@ mod tests {
             assert!(built_in(agent).is_batchable(), "{}", agent.name());
         }
         assert!(!built_in(SubmitAgent::Gemini).is_batchable());
+        assert!(!built_in(SubmitAgent::Muse).is_batchable());
     }
 
     #[test]
@@ -1015,6 +1035,7 @@ mod tests {
             SubmitAgent::Codex,
             SubmitAgent::Gemini,
             SubmitAgent::Kimi,
+            SubmitAgent::Muse,
             SubmitAgent::OpenCode,
         ] {
             assert_eq!(SubmitAgent::from_agent_name(a.name()), Some(a));

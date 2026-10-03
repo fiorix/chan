@@ -927,7 +927,7 @@ pub enum TerminalAction {
         /// to exactly one trailing newline before its chord; an empty body
         /// stays chord-only. ONE chord is encoded per command, so target a
         /// mixed-agent group per session rather than by group. Values:
-        /// agy | claude | codex | gemini | kimi | opencode.
+        /// agy | claude | codex | gemini | kimi | muse | opencode.
         /// Omit the flag to write pure bytes: the input parks in the agent's
         /// compose box unsubmitted (a bare newline is a newline to an agent,
         /// not a submit).

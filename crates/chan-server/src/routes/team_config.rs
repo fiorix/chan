@@ -163,15 +163,15 @@ fn member_agent(m: &Member) -> Option<&'static str> {
 /// shared submit map (`chan_shell::apply_submit_chord` / submitMode.ts;
 /// the chord is the agent's DEFAULT template, overridable at runtime):
 /// claude uses the xterm
-/// modifyOtherKeys Cmd+Enter CSI; gemini submits on a bare CR; agy, codex,
-/// kimi, and opencode use bracketed paste followed by CR in one write
+/// modifyOtherKeys Cmd+Enter CSI; gemini and muse submit on a bare CR; agy,
+/// codex, kimi, and opencode use bracketed paste followed by CR in one write
 /// (codex coalesces a single `text + CR` write into a paste burst whose
 /// trailing CR never submits), so a bare CR alone does NOT submit codex.
 fn submit_chord_literal(agent: Option<&str>) -> &'static str {
     match agent {
         // agy, codex, kimi, and opencode use bracketed paste before the CR.
         Some("agy" | "codex" | "kimi" | "opencode") => "bracketed-paste + \\r",
-        Some("gemini") => "\\r",
+        Some("gemini" | "muse") => "\\r",
         // claude is the default chord for any agent member; a shell member
         // (None) is not poked as an agent, so it falls through to the claude
         // literal only as a harmless default in the note.

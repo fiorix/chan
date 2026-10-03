@@ -3588,12 +3588,12 @@ impl QueueSource {
     }
 }
 
-/// Which portion of a logical message a queue entry delivers. Gemini is the
-/// one agent whose submit chord must arrive as its OWN keypress, and live
-/// probing found no fixed sub-idle gap safe across the required input shapes.
-/// A Gemini message therefore takes a `Body` entry and a `Chord` entry that
-/// the drainer separates with a full idle gate. Everything else is one
-/// `Whole` entry.
+/// Which portion of a logical message a queue entry delivers. Gemini's submit
+/// chord must arrive as its OWN keypress, and live probing found no fixed
+/// sub-idle gap safe across the required input shapes. A Gemini message
+/// therefore takes a `Body` entry and a `Chord` entry that the drainer
+/// separates with a full idle gate, and a muse message, which is encoded as
+/// gemini's, takes the same two. Everything else is one `Whole` entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessagePart {
     Whole,
@@ -3625,8 +3625,8 @@ struct QueuedMessage {
     part: MessagePart,
 }
 
-/// Message depth of a queue: the count of TAIL entries. A split Gemini message
-/// contributes exactly one tail, so this counts messages, not entries.
+/// Message depth of a queue: the count of TAIL entries. A split Gemini or muse
+/// message contributes exactly one tail, so this counts messages, not entries.
 fn msg_depth(queue: &VecDeque<QueuedMessage>) -> usize {
     queue
         .iter()
@@ -3646,8 +3646,8 @@ fn fresh_queue_state() -> (Mutex<VecDeque<QueuedMessage>>, AtomicI64, AtomicBool
     )
 }
 
-/// The entries one logical message occupies, in order. A Gemini body and its
-/// bare CR are separate entries; everything else is one.
+/// The entries one logical message occupies, in order. A Gemini or muse body
+/// and its bare CR are separate entries; everything else is one.
 fn message_parts(data: &str, submit: Option<&ResolvedSubmit>) -> &'static [MessagePart] {
     match submit {
         Some(submit) if chan_shell::splits_submit_chord(data, submit) => {
@@ -5085,8 +5085,8 @@ impl Session {
     /// dropped).
     /// Returns the message depth after the push: the poke's 1-based position
     /// among the PENDING MESSAGES, the same number the SPA badge and
-    /// `cs terminal list --json` show. A Gemini poke occupies two entries and
-    /// still reports position 1 on an empty queue.
+    /// `cs terminal list --json` show. A Gemini or muse poke occupies two
+    /// entries and still reports position 1 on an empty queue.
     fn enqueue_cs_write(&self, data: String, submit: Option<ResolvedSubmit>) -> Option<usize> {
         self.enqueue(data, submit, QueueSource::CsWrite, None)
     }
@@ -6417,6 +6417,7 @@ mod tests {
             SubmitAgent::Codex => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Gemini => "{}\r",
             SubmitAgent::Kimi => "\x1b[200~{}\x1b[201~\r",
+            SubmitAgent::Muse => "{}\r",
             SubmitAgent::OpenCode => "\x1b[200~{}\x1b[201~\r",
         };
         ResolvedSubmit {

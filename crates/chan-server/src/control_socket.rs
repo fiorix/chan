@@ -2230,12 +2230,12 @@ async fn require_single_pane_window(window_id: &str, ctx: &ControlSocketCtx) -> 
 const TEAM_SPAWN_POKE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Gap between the body write and the submit-chord write of a multi-write
-/// poke (gemini: the prompt, then the bare CR as a distinct keypress). The
-/// gap lets gemini render + settle on the body before the CR arrives, so the
-/// CR is read as Enter rather than coalesced into the body's read. The
-/// queue-based poke paths (cs / Rich Prompt) get this separation for free
-/// from the drainer's idle-gating; this direct-write spawn path needs an
-/// explicit gap.
+/// poke (gemini and muse: the prompt, then the bare CR as a distinct
+/// keypress). The gap lets the agent render + settle on the body before the
+/// CR arrives, so the CR is read as Enter rather than coalesced into the
+/// body's read. The queue-based poke paths (cs / Rich Prompt) get this
+/// separation for free from the drainer's idle-gating; this direct-write
+/// spawn path needs an explicit gap.
 const SUBMIT_SPLIT_GAP: std::time::Duration = std::time::Duration::from_millis(400);
 
 #[derive(Debug)]
@@ -2260,7 +2260,8 @@ struct TeamSpawn {
     failed: Vec<(String, String)>,
     /// One exact session handle per AGENT member plus the ordered PTY writes
     /// that deliver and submit its identity prompt. Most agents use one write;
-    /// gemini uses two with a gap so its CR remains a distinct keypress.
+    /// gemini and muse use two with a gap so the CR remains a distinct
+    /// keypress.
     pokes: Vec<TeamPoke>,
     /// Each spawned member's tab name + live `session_id`, for the
     /// SPA-surfacing push (`WindowCommand::TeamSpawned`).
@@ -2475,8 +2476,9 @@ async fn deliver_team_pokes(pokes: &mut [TeamPoke]) -> TeamPokeResult {
         .await
         {
             Ok(true) => {
-                // Most agents have a single write; gemini has two (prompt,
-                // then the bare CR), which must arrive as distinct keypresses.
+                // Most agents have a single write; gemini and muse have two
+                // (prompt, then the bare CR), which must arrive as distinct
+                // keypresses.
                 for (index, write) in poke.writes.iter().enumerate() {
                     if index > 0 {
                         tokio::time::sleep(SUBMIT_SPLIT_GAP).await;
