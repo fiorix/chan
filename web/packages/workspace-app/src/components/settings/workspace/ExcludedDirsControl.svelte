@@ -7,6 +7,7 @@
 
   import { onDestroy, onMount } from "svelte";
   import { api } from "../../../api/client";
+  import { ApiError } from "../../../api/errors";
   import { tree } from "../../../state/store.svelte";
   import type { ExcludedDirsView } from "../../../api/types";
   import SettingField from "../SettingField.svelte";
@@ -18,6 +19,8 @@
   let draft = $state("");
   let loadError = $state<string | null>(null);
   let saveStatus = $state<SaveStatus>("idle");
+  // The server's sentence for the set it last refused, until the list changes.
+  let refused = $state<string | null>(null);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   // Counts edits, so the answer to a save sent before a later edit does not
   // replace the list the user has changed since; that edit's own save follows.
@@ -45,10 +48,10 @@
     return parts.length ? parts[parts.length - 1] : p;
   }
 
-  // Directory basenames from the loaded tree, minus what's already excluded
-  // and what the list refuses, for the add-input's autocomplete. Only
-  // currently-loaded dirs show up; the field still accepts any typed name the
-  // list takes (the blocklist matches at any depth).
+  // Directory basenames from the loaded tree, minus what's already excluded,
+  // for the add-input's autocomplete. Only currently-loaded dirs show up; the
+  // field still accepts any typed name the list takes (the blocklist matches
+  // at any depth).
   const suggestions = $derived.by(() => {
     const have = new Set([...additions, ...(view?.defaults ?? [])]);
     const names = new Set<string>();
@@ -61,18 +64,20 @@
   });
 
   // Mirror the server's normalize(): trim, lower-case (matching is
-  // case-insensitive), reject path separators (a name, not a path).
+  // case-insensitive), reject a `/` (a name, not a path). A `\` is part of a
+  // name wherever a directory can have one, so the server decides it: it
+  // takes the name when a directory of the workspace has it.
   function normalizeName(raw: string): string | null {
     const name = raw.trim();
     if (!name) return null;
-    if (name.includes("/") || name.includes("\\")) return null;
+    if (name.includes("/")) return null;
     return name.toLowerCase();
   }
 
   // Why the name in the field is refused, for as long as it stands there.
   const refusal = $derived(
     draft.trim() !== "" && normalizeName(draft) === null
-      ? "A name cannot hold / or \\: the list takes directory names, not paths."
+      ? "A name cannot hold /: the list takes directory names, not paths."
       : null,
   );
 
@@ -82,11 +87,13 @@
     draft = "";
     if (additions.includes(name) || (view?.defaults ?? []).includes(name)) return;
     additions = [...additions, name].sort();
+    refused = null;
     scheduleSave();
   }
 
   function remove(name: string): void {
     additions = additions.filter((d) => d !== name);
+    refused = null;
     scheduleSave();
   }
 
@@ -105,20 +112,51 @@
     saveTimer = setTimeout(save, 600);
   }
 
-  async function save(): Promise<void> {
+  // Of what the control lets through, the server refuses only a name that
+  // holds a `\` and that its last answer does not hold. So these are the names
+  // a refused set can have been refused for, found without reading the
+  // server's sentence.
+  function refusable(names: string[]): string[] {
+    const taken = view?.workspace ?? [];
+    return names.filter((name) => name.includes("\\") && !taken.includes(name));
+  }
+
+  async function save(afterRefusal = false): Promise<void> {
     saveTimer = null;
     saveStatus = "saving";
     const sentAfter = edits;
+    const sent = additions;
     try {
-      const v = await api.setExcludedDirs(additions);
+      const v = await api.setExcludedDirs(sent);
       if (edits !== sentAfter) return;
       view = v;
       additions = [...v.workspace];
       saveStatus = "saved";
     } catch (e) {
       if (edits !== sentAfter) return;
+      const names = afterRefusal ? [] : refusable(sent);
+      if (e instanceof ApiError && e.status === 400 && names.length > 0) {
+        takeBack(names, e.message);
+        return;
+      }
       saveStatus = { error: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  // A refused set left as it is would be refused again at every later save,
+  // so the names it can have been refused for leave the list. The server's
+  // sentence says which one it refused; with one such name the page knows it
+  // too and hands it back to a field its user is not typing in. The rest of
+  // the set is saved once when it differs from what the server holds: a save
+  // rebuilds the index, and a second refusal reads as any failed save.
+  function takeBack(names: string[], sentence: string): void {
+    additions = additions.filter((name) => !names.includes(name));
+    refused = sentence.charAt(0).toUpperCase() + sentence.slice(1);
+    if (names.length === 1 && draft.trim() === "") draft = names[0];
+    const taken = view?.workspace ?? [];
+    const differs = additions.length !== taken.length || additions.some((name) => !taken.includes(name));
+    if (differs) void save(true);
+    else saveStatus = "idle";
   }
 
   const saveLabel = $derived(
@@ -168,8 +206,8 @@
           </span>
         {/if}
       </div>
-      {#if refusal}
-        <p class="hint err" role="alert">{refusal}</p>
+      {#if refusal ?? refused}
+        <p class="hint err" role="alert">{refusal ?? refused}</p>
       {/if}
 
       {#if additions.length === 0}
