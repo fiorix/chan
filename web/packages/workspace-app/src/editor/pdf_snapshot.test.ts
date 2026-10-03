@@ -508,3 +508,167 @@ describe("a document's images across its pages", () => {
     ).rejects.toThrow("image has no place on the page: /api/fs/shots/lost.png");
   });
 });
+
+describe("what an image's address answers with", () => {
+  function fetchAnswers(type: string): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => fetchOk("<html>sign in</html>", type)),
+    );
+  }
+
+  test("a body that is not an image refuses the page and names the image", async () => {
+    fetchAnswers("text/html");
+    const root = page('<img src="/api/fs/shots/photo.png?t=tok">');
+    let failure: unknown = null;
+    await inlinePageResources(root).catch((err) => (failure = err));
+    expect(failure).toBeInstanceOf(SnapshotError);
+    const message = (failure as Error).message;
+    expect(message).toContain("/api/fs/shots/photo.png");
+    expect(message).toContain("text/html");
+    expect(message).not.toContain("tok");
+  });
+
+  test("the same holds for an <image> inside an inline SVG", async () => {
+    fetchAnswers("text/html; charset=utf-8");
+    const root = page(
+      '<svg><image href="/api/fs/shots/pic.png?t=tok"></image></svg>',
+    );
+    let failure: unknown = null;
+    await inlinePageResources(root).catch((err) => (failure = err));
+    expect(failure).toBeInstanceOf(SnapshotError);
+    const message = (failure as Error).message;
+    expect(message).toContain("/api/fs/shots/pic.png");
+    expect(message).toContain("text/html");
+    expect(message).not.toContain("tok");
+  });
+
+  test("a body of no declared type is inlined, and its decode decides", async () => {
+    // A server with no media type for an extension answers this, and an
+    // engine reads an image by its bytes, not by the type it came with.
+    fetchAnswers("application/octet-stream");
+    const root = page('<img src="/api/fs/shots/photo.webp?t=tok">');
+    await inlinePageResources(root);
+    expect(root.querySelector("img")?.getAttribute("src")).toMatch(
+      /^data:application\/octet-stream;base64,/,
+    );
+    expect(() => auditSelfContained(root)).not.toThrow();
+
+    const decodes = heldDecodes();
+    vi.stubGlobal("Image", StandInImage);
+    let failure: unknown = null;
+    const lift = liftPageImages(root, new PageImages()).catch(
+      (err) => (failure = err),
+    );
+    await settled();
+    decodes[0]!.settle(false);
+    await lift;
+    expect((failure as Error).message).toBe(
+      "image /api/fs/shots/photo.webp could not be decoded",
+    );
+  });
+});
+
+describe("auditSelfContained on images", () => {
+  test("refuses a data: URI that is not an image's, on <img> and on <image>", () => {
+    const img = page('<img src="data:text/html,%3Cp%3Ehi%3C/p%3E">');
+    expect(() => auditSelfContained(img)).toThrow(
+      /img src data:text\/html is not an image/,
+    );
+
+    const image = page(
+      '<svg><image href="data:application/json;base64,e30="></image></svg>',
+    );
+    expect(() => auditSelfContained(image)).toThrow(
+      /image href data:application\/json is not an image/,
+    );
+  });
+
+  test("names a leaked image without the query its address carries", () => {
+    const root = page('<img src="/api/fs/shots/missing.png?t=tok">');
+    let message = "";
+    try {
+      auditSelfContained(root);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("img src /api/fs/shots/missing.png");
+    expect(message).not.toContain("tok");
+  });
+
+  test("refuses an <img> that carries a srcset and names its candidates", () => {
+    const root = page(
+      '<img src="data:image/png;base64,AAAA" ' +
+        'srcset="/api/fs/a.png?t=tok 1x, /api/fs/a@2x.png?t=tok 2x">',
+    );
+    let message = "";
+    try {
+      auditSelfContained(root);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("img srcset /api/fs/a.png, /api/fs/a@2x.png");
+    expect(message).not.toContain("tok");
+  });
+
+  test("refuses a <picture> by the candidates its sources offer", () => {
+    const root = page(
+      "<picture>" +
+        '<source srcset="/api/fs/wide.webp?t=tok" media="(min-width: 800px)">' +
+        '<img src="data:image/png;base64,AAAA">' +
+        "</picture>",
+    );
+    let message = "";
+    try {
+      auditSelfContained(root);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("source srcset /api/fs/wide.webp");
+    expect(message).not.toContain("tok");
+    expect(message).not.toContain("disallowed element");
+  });
+});
+
+describe("an <image> inside an inline SVG", () => {
+  beforeEach(() => {
+    vi.stubGlobal("Image", StandInImage);
+  });
+
+  test("is decoded before the page is drawn, and fails by name when it does not", async () => {
+    const decodes = heldDecodes();
+    const drawn = standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
+    const root = page(
+      '<svg><image href="/api/fs/shots/pic.png?t=tok"></image></svg>',
+    );
+    let failure: unknown = null;
+    const snapshot = snapshotPage(root, { widthPx: 100, heightPx: 80 }).catch(
+      (err) => (failure = err),
+    );
+    await settled();
+    expect(decodes).toHaveLength(1);
+    expect(drawn).toEqual([]);
+
+    decodes[0]!.settle(false);
+    await snapshot;
+    expect((failure as Error).message).toBe(
+      "image /api/fs/shots/pic.png could not be decoded",
+    );
+    expect(drawn).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
+  test("stays in the page's document once it has decoded", async () => {
+    decodesSettleAtOnce();
+    const drawn = standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
+    const root = page(
+      '<svg><image href="/api/fs/shots/pic.png?t=tok"></image></svg>',
+    );
+    await snapshotPage(root, { widthPx: 100, heightPx: 80 });
+    expect(root.querySelector("image")?.getAttribute("href")).toMatch(
+      /^data:image\/png;base64,/,
+    );
+    expect(drawn.map((d) => d.what)).toEqual(["page"]);
+    vi.restoreAllMocks();
+  });
+});
