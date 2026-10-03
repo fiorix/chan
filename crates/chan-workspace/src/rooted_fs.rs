@@ -640,13 +640,30 @@ impl RootedFs {
         rel: &str,
         max_bytes: usize,
     ) -> Result<(String, FileStat)> {
-        use std::io::Read;
+        self.read_text_with_stat_bounded_from(rel, max_bytes, 0)
+    }
+
+    /// Read one bounded UTF-8 page from a byte offset, including the open
+    /// handle's stat. Up to three preceding bytes fit within the read cap so
+    /// an offset inside a character can name that character's first byte.
+    pub(crate) fn read_text_with_stat_bounded_from(
+        &self,
+        rel: &str,
+        max_bytes: usize,
+        offset: u64,
+    ) -> Result<(String, FileStat)> {
+        use std::io::{Read, Seek, SeekFrom};
+        if offset > 0 && max_bytes < 7 {
+            return Err(ChanError::Io(
+                "bounded text page needs at least seven bytes at a nonzero offset".to_string(),
+            ));
+        }
         if !self.editable_text_gate(rel) {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
         let (dir, rel_path) = self.resolve_io(rel)?;
         ensure_regular_file_in(&dir, &rel_path)?;
-        let f = dir.open(&rel_path).map_err(ChanError::from)?;
+        let mut f = dir.open(&rel_path).map_err(ChanError::from)?;
         let meta = f.metadata()?;
         let stat = FileStat {
             size: meta.len(),
@@ -654,24 +671,43 @@ impl RootedFs {
             mtime_ns: mtime_ns_cap(&meta),
             is_dir: false,
         };
+        if offset >= stat.size {
+            return Ok((String::new(), stat));
+        }
         // The window ends at the size the open handle reported, so bytes
         // the file gains after the open are not read.
-        let limit = stat.size.min(max_bytes as u64);
+        let start = offset.saturating_sub(3);
+        let limit = (stat.size - start).min(max_bytes as u64);
+        f.seek(SeekFrom::Start(start))?;
         let mut bytes = Vec::with_capacity(limit as usize);
         f.take(limit).read_to_end(&mut bytes)?;
-        let cut = limit < stat.size && bytes.len() as u64 == limit;
+        let prefix_len = (offset - start) as usize;
+        if bytes.len() <= prefix_len {
+            return Ok((String::new(), stat));
+        }
+        if offset > 0 && bytes[prefix_len] & 0xc0 == 0x80 {
+            let mut first = prefix_len;
+            while first > 0 && bytes[first] & 0xc0 == 0x80 {
+                first -= 1;
+            }
+            return Err(ChanError::Io(format!(
+                "offset {offset} falls inside a UTF-8 character starting at byte {}",
+                start + first as u64
+            )));
+        }
+        let cut = start + limit < stat.size && bytes.len() as u64 == limit;
         if cut {
-            if let Err(error) = std::str::from_utf8(&bytes) {
+            if let Err(error) = std::str::from_utf8(&bytes[prefix_len..]) {
                 // Only a character the cut splits ends the bytes early; an
                 // invalid byte before it is left for the check below.
                 if error.error_len().is_none() {
-                    bytes.truncate(error.valid_up_to());
+                    bytes.truncate(prefix_len + error.valid_up_to());
                 }
             }
         }
         // Validated as `read_text_with_stat` validates, with its error.
-        let mut text = String::with_capacity(bytes.len());
-        bytes.as_slice().read_to_string(&mut text)?;
+        let mut text = String::with_capacity(bytes.len() - prefix_len);
+        (&bytes[prefix_len..]).read_to_string(&mut text)?;
         Ok((text, stat))
     }
 

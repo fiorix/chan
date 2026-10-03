@@ -7,14 +7,15 @@
 pub const READ_FILE_DESC: &str = "\
 Read the UTF-8 content of a file in the active workspace. The path is \
 POSIX-style in chan's public namespace. Returns { path, content, \
-size, mtime_ns }. A file \
-larger than 256 KiB is read only up to 256 KiB, cut back to a \
-character boundary, and the response includes `truncated: true` \
-plus a `note` describing the cap; `size` is the whole file's, taken \
-from its metadata rather than by reading it. In that case re-issue \
-with a smaller scope (or open the file in the editor if you need \
-the full thing). Pass `mtime_ns` back on `write_file` as \
-`expected_mtime_ns` to detect concurrent edits.";
+size, mtime_ns }. Pass optional `offset` as a byte position at a UTF-8 \
+character boundary to read a later page. Each page reads at most \
+256 KiB, cut back to a character boundary; `size` is the whole file's \
+stat size. When bytes follow, the response includes `truncated: true`, \
+`next_offset` for the next call, and a `note` about the cap. An offset \
+inside a character errors and names its first byte; an offset at or \
+past the end returns empty content with the current size. Pass \
+`mtime_ns` back on `write_file` as `expected_mtime_ns` to detect \
+concurrent edits.";
 
 /// Description of the write_file tool. Writes apply immediately
 /// through chan-workspace's sandbox; if the user's intent looks

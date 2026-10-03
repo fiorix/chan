@@ -2,7 +2,7 @@
 //
 // Standard tools covering the editor's common operations:
 //
-//   read_file(path)       -> string
+//   read_file(path, offset?) -> { path, content, size, next_offset? }
 //   write_file(path, ...) -> { path, bytes_written }
 //   list_files()          -> tree
 //   resolve_path(path)    -> physical path metadata
@@ -34,7 +34,7 @@ use crate::error::{LlmError, Result};
 /// read for assistant reasoning, and a tiny fraction of any frontier
 /// model's context window. A larger file is read only up to the cap,
 /// cut back to a character boundary, and answered as truncated with the
-/// whole file's size from its stat, so the model can narrow its read.
+/// whole file's size from its stat, so the model can request the next page.
 /// Without the cap, a misnamed binary or a runaway pasted-image markdown
 /// can bloat the next turn's request body and the user's token bill.
 pub const READ_FILE_CAP_BYTES: usize = 256 * 1024;
@@ -287,15 +287,26 @@ fn arg_string<'a>(args: &'a Json, key: &str) -> Result<&'a str> {
 
 fn exec_read_file(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let path = arg_string(args, "path")?;
+    let offset = match args.get("offset") {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            LlmError::Tool("invalid `offset`: expected a non-negative integer".to_string())
+        })?,
+        None => 0,
+    };
     // The read stops at the cap, cut back to a character boundary, and
     // takes its stat from the open handle (no second-syscall race), so the
     // file's size comes from the stat and `mtime_ns` can be echoed to the
     // model and accepted back on `write_file` for an OCC check.
-    let (content, stat) = ctx
-        .workspace
-        .read_text_with_stat_bounded(path, READ_FILE_CAP_BYTES)?;
+    let (content, stat) =
+        ctx.workspace
+            .read_text_with_stat_bounded_from(path, READ_FILE_CAP_BYTES, offset)?;
     let size = stat.size;
-    let truncated = size > READ_FILE_CAP_BYTES as u64;
+    let next_offset = offset.saturating_add(content.len() as u64);
+    let truncated = if offset == 0 {
+        size > READ_FILE_CAP_BYTES as u64
+    } else {
+        next_offset < size
+    };
     let mut out = serde_json::json!({
         "path": path,
         "content": content,
@@ -306,9 +317,12 @@ fn exec_read_file(args: &Json, ctx: &ToolContext) -> Result<Json> {
     }
     if truncated {
         out["truncated"] = serde_json::Value::Bool(true);
-        out["note"] = serde_json::json!(format!(
-            "file truncated to {READ_FILE_CAP_BYTES} bytes; full size {size}"
-        ));
+        out["next_offset"] = serde_json::json!(next_offset);
+        out["note"] = serde_json::json!(if offset == 0 {
+            format!("file truncated to {READ_FILE_CAP_BYTES} bytes; full size {size}")
+        } else {
+            format!("file page at byte {offset} truncated; full size {size}")
+        });
     }
     Ok(out)
 }
@@ -513,6 +527,11 @@ pub fn standard_tool_schemas() -> Vec<ToolSchema> {
                     "path": {
                         "type": "string",
                         "description": "POSIX rel path in chan's public namespace."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Optional byte offset at a UTF-8 character boundary."
                     }
                 },
                 "required": ["path"],
@@ -637,7 +656,104 @@ mod tests {
             &ctx,
         )
         .unwrap();
+        assert_eq!(second["content"].as_str().map(str::len), Some(4));
         assert_eq!(second["content"], "tail");
+    }
+
+    #[test]
+    fn read_file_pages_preserve_multibyte_text() {
+        let (_cfg, root, ctx) = fixture();
+        let text = format!(
+            "{}\u{e9}{}\u{20ac}{}\u{10348}tail",
+            "x".repeat(READ_FILE_CAP_BYTES - 1),
+            "y".repeat(READ_FILE_CAP_BYTES - 6),
+            "z".repeat(READ_FILE_CAP_BYTES - 7),
+        );
+        std::fs::write(root.path().join("paged.md"), &text).unwrap();
+        let mut offset = 0_u64;
+        let mut joined = String::new();
+        let mut pages = 0;
+        loop {
+            let args = if offset == 0 {
+                serde_json::json!({"path": "paged.md"})
+            } else {
+                serde_json::json!({"path": "paged.md", "offset": offset})
+            };
+            let page = execute("read_file", &args, &ctx).unwrap();
+            let content = page["content"].as_str().unwrap();
+            assert!(!content.is_empty(), "page {pages} made no progress");
+            assert!(content.len() <= READ_FILE_CAP_BYTES);
+            assert_eq!(page["size"], text.len() as u64);
+            joined.push_str(content);
+            pages += 1;
+            if let Some(next) = page.get("next_offset") {
+                assert_eq!(next.as_u64(), Some(offset + content.len() as u64));
+                assert_eq!(page["truncated"], true);
+                offset = next.as_u64().unwrap();
+            } else {
+                assert!(page.get("truncated").is_none());
+                break;
+            }
+            assert!(pages < 8, "read_file did not reach the end");
+        }
+        assert_eq!(joined, text);
+        assert_eq!(pages, 4);
+    }
+
+    #[test]
+    fn read_file_offset_reports_shrink_and_refuses_invalid_offsets() {
+        let (_cfg, root, ctx) = fixture();
+        let path = root.path().join("paged.md");
+        std::fs::write(&path, format!("{}tail", "x".repeat(READ_FILE_CAP_BYTES))).unwrap();
+        let first = execute("read_file", &serde_json::json!({"path": "paged.md"}), &ctx).unwrap();
+        let offset = first["next_offset"].as_u64().unwrap();
+        std::fs::write(&path, "short").unwrap();
+        let last = execute(
+            "read_file",
+            &serde_json::json!({"path": "paged.md", "offset": offset}),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(last["content"], "");
+        assert_eq!(last["size"], 5);
+        assert!(last.get("next_offset").is_none());
+        assert_ne!(first["size"], last["size"]);
+
+        std::fs::write(&path, "a\u{20ac}b").unwrap();
+        let inside = execute(
+            "read_file",
+            &serde_json::json!({"path": "paged.md", "offset": 2}),
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(inside.contains("offset 2"), "{inside}");
+        assert!(inside.contains("byte 1"), "{inside}");
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("2"),
+            serde_json::Value::Null,
+        ] {
+            let error = execute(
+                "read_file",
+                &serde_json::json!({"path": "paged.md", "offset": invalid}),
+                &ctx,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("offset"), "{error}");
+        }
+    }
+
+    #[test]
+    fn read_file_schema_accepts_a_byte_offset() {
+        let schema = standard_tool_schemas()
+            .into_iter()
+            .find(|schema| schema.name == "read_file")
+            .unwrap();
+        assert!(schema.parameters["properties"]["offset"].is_object());
+        assert_eq!(schema.parameters["properties"]["offset"]["minimum"], 0);
     }
 
     #[test]

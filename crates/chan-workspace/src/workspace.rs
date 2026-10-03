@@ -1972,6 +1972,21 @@ impl Workspace {
         self.fs.read_text_with_stat_bounded(rel, max_bytes)
     }
 
+    /// Read one UTF-8 page from `offset` within a file, with its open-handle
+    /// stat. The offset is a byte position and must start a character. The
+    /// read uses at most `max_bytes` including up to three preceding bytes to
+    /// check that boundary, so nonzero offsets require a cap of at least seven.
+    /// A page at or beyond the file's end is empty and still carries its stat.
+    pub fn read_text_with_stat_bounded_from(
+        &self,
+        rel: &str,
+        max_bytes: usize,
+        offset: u64,
+    ) -> Result<(String, FileStat)> {
+        self.fs
+            .read_text_with_stat_bounded_from(rel, max_bytes, offset)
+    }
+
     /// Stream UTF-8 text in chunks and include the open-handle stat.
     /// Returns early with `Ok(())` when the callback returns false,
     /// which lets HTTP callers stop disk reads after the client
@@ -8724,6 +8739,48 @@ mod tests {
         let (content, stat) = workspace.read_text_with_stat_bounded("b.md", 3).unwrap();
         assert_eq!(content, "abc");
         assert_eq!(stat.size, 5);
+    }
+
+    #[test]
+    fn read_text_with_stat_bounded_from_reads_one_page_and_checks_its_offset() {
+        let (_cfg, _root, workspace) = fixture();
+        let text = "abc\u{20ac}def";
+        workspace.write_text("a.md", text).unwrap();
+        let (page, stat) = workspace
+            .read_text_with_stat_bounded_from("a.md", 8, 3)
+            .unwrap();
+        assert_eq!(page, "\u{20ac}de");
+        assert_eq!(stat.size, text.len() as u64);
+        for offset in [4, 5] {
+            let error = workspace
+                .read_text_with_stat_bounded_from("a.md", 8, offset)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("offset {offset}")), "{error}");
+            assert!(error.contains("byte 3"), "{error}");
+        }
+        for offset in [text.len() as u64, text.len() as u64 + 1] {
+            let (page, end_stat) = workspace
+                .read_text_with_stat_bounded_from("a.md", 8, offset)
+                .unwrap();
+            assert!(page.is_empty());
+            assert_eq!(end_stat.size, text.len() as u64);
+        }
+    }
+
+    #[test]
+    fn bounded_text_offsets_name_the_start_of_multibyte_characters() {
+        let (_cfg, _root, workspace) = fixture();
+        let text = "a\u{e9}b\u{20ac}c\u{10348}d";
+        workspace.write_text("a.md", text).unwrap();
+        for (offset, start) in [(2, 1), (5, 4), (9, 8), (10, 8), (11, 8)] {
+            let error = workspace
+                .read_text_with_stat_bounded_from("a.md", 16, offset)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("offset {offset}")), "{error}");
+            assert!(error.contains(&format!("byte {start}")), "{error}");
+        }
     }
 
     #[test]

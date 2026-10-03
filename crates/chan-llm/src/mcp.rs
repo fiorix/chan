@@ -363,6 +363,22 @@ fn parse_content_length(header: &[u8]) -> std::io::Result<usize> {
 pub struct ReadFileParams {
     /// POSIX-style path in chan's public namespace.
     pub path: String,
+    /// Byte offset at a UTF-8 character boundary.
+    #[serde(default, deserialize_with = "deserialize_read_file_offset")]
+    pub offset: Option<u64>,
+}
+
+fn deserialize_read_file_offset<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("invalid offset: expected a non-negative integer"))
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -433,26 +449,25 @@ impl Server {
     #[tool(description = "\
 Read the UTF-8 content of a file in the active workspace. The path is \
 POSIX-style in chan's public namespace. Returns { path, content, \
-size, mtime_ns }. A file \
-larger than 256 KiB is read only up to 256 KiB, cut back to a \
-character boundary, and the response includes `truncated: true` \
-plus a `note` describing the cap; `size` is the whole file's, taken \
-from its metadata rather than by reading it. In that case re-issue \
-with a smaller scope (or open the file in the editor if you need \
-the full thing). Pass `mtime_ns` back on `write_file` as \
-`expected_mtime_ns` to detect concurrent edits.")]
+size, mtime_ns }. Pass optional `offset` as a byte position at a UTF-8 \
+character boundary to read a later page. Each page reads at most \
+256 KiB, cut back to a character boundary; `size` is the whole file's \
+stat size. When bytes follow, the response includes `truncated: true`, \
+`next_offset` for the next call, and a `note` about the cap. An offset \
+inside a character errors and names its first byte; an offset at or \
+past the end returns empty content with the current size. Pass \
+`mtime_ns` back on `write_file` as `expected_mtime_ns` to detect \
+concurrent edits.")]
     async fn read_file(
         &self,
         Parameters(p): Parameters<ReadFileParams>,
         context: RequestContext<RoleServer>,
     ) -> std::result::Result<String, ErrorData> {
-        run_tool(
-            "read_file",
-            serde_json::json!({"path": p.path}),
-            self.workspace_for.clone(),
-            context,
-        )
-        .await
+        let mut args = serde_json::json!({"path": p.path});
+        if let Some(offset) = p.offset {
+            args["offset"] = serde_json::json!(offset);
+        }
+        run_tool("read_file", args, self.workspace_for.clone(), context).await
     }
 
     #[tool(description = "\
@@ -1306,6 +1321,10 @@ mod tests {
             read.description.as_deref(),
             Some(crate::prompts::READ_FILE_DESC)
         );
+        assert!(
+            serde_json::Value::Object((*read.input_schema).clone())["properties"]["offset"]
+                .is_object()
+        );
         let write = Server::write_file_tool_attr();
         assert_eq!(
             write.description.as_deref(),
@@ -1379,6 +1398,7 @@ mod tests {
             .read_file(
                 Parameters(ReadFileParams {
                     path: "a.md".into(),
+                    offset: None,
                 }),
                 request_context(),
             )
@@ -1410,6 +1430,23 @@ mod tests {
             serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(page["content"], "def");
         session.abort();
+    }
+
+    #[test]
+    fn read_file_params_name_invalid_offsets() {
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("2"),
+            serde_json::Value::Null,
+        ] {
+            let error = serde_json::from_value::<ReadFileParams>(
+                serde_json::json!({"path": "a.md", "offset": invalid}),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("offset"), "{error}");
+        }
     }
 
     #[tokio::test]
@@ -1457,7 +1494,10 @@ mod tests {
                 .unwrap();
             let out = server
                 .read_file(
-                    Parameters(ReadFileParams { path: path.into() }),
+                    Parameters(ReadFileParams {
+                        path: path.into(),
+                        offset: None,
+                    }),
                     request_context(),
                 )
                 .await
