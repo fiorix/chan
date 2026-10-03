@@ -1395,6 +1395,28 @@ describe("a live drawing", () => {
       .toEqual({ ok: true, gone: true, pushes: [] });
   });
 
+  // An unforced close commits every tab's input and checks it in the task its
+  // frame arrives in, and closes in the turns after, so what can still wait
+  // when the tabs go is a stroke drawn after that check.
+  test.each(["close_pane", "close_all"])("an unforced %s delivers a stroke drawn after its check", async (kind) => {
+    const { pane, tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    const closing = paneExec({ kind, pane_id: pane.id });
+    board.stroke(STROKE);
+    const closed = await closing;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect({
+      closed,
+      gone: readTab(tab.id) === undefined,
+      pushed: socket.pushes().map((f) => (f.elements as { id: string }[]).map((e) => e.id)),
+    }).toEqual({
+      closed: { ok: true, summary: kind === "close_pane" ? `closed pane ${pane.id}` : "closed 1 tab(s)", blocked: [] },
+      gone: true,
+      pushed: [["stroke"]],
+    });
+  });
+
   const BACKGROUND = "#abcdef";
   /// What the authority holds beyond the file: the file's element one version
   /// on, a peer's element and a peer's background.
