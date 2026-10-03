@@ -8184,6 +8184,163 @@ mod tests {
         });
     }
 
+    /// A caller that leaves once its blocking open has completed, and before
+    /// it has received the result, is dropped on a runtime worker, and the
+    /// result with it. Releasing that result stops the workspace's open-time
+    /// recovery and joins its worker, which can be inside a filesystem call
+    /// on the root, so the runtime worker hands the result to the blocking
+    /// pool and runs its next task while the recovery is still held.
+    ///
+    /// The runtime has one worker, held in a task of its own from before the
+    /// open completes until the caller is aborted, so the caller is never
+    /// polled in between and never receives. Every blocking thread but the
+    /// open's is held too, so a blocking task queued behind the open runs
+    /// only once the open's task has stored its result.
+    #[test]
+    fn an_unreceived_open_result_leaves_the_runtime_worker_free() {
+        const BLOCKING_THREADS: usize = 4;
+        const WORKER_FREE_BOUND: Duration = Duration::from_secs(5);
+        struct DroppedOn(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for DroppedOn {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(BLOCKING_THREADS)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            let library = state.host.library();
+            library.register_workspace(root.path()).unwrap();
+            // A rebuild marker gives the open a recovery pass to run, and so
+            // a recovery worker for the result's release to join.
+            let graph_dir = library
+                .workspace_paths_for(root.path())
+                .expect("registered")
+                .graph_dir;
+            std::fs::create_dir_all(&graph_dir).unwrap();
+            std::fs::write(graph_dir.join("rebuild.inprogress"), b"").unwrap();
+            let (recovery_reached, recovery_release) =
+                chan_workspace::workspace::arm_open_recovery_pause_for_test(
+                    root.path().canonicalize().unwrap(),
+                );
+
+            let open_stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+            let (dropped, dropped_on) = std::sync::mpsc::channel();
+            let opening = Arc::clone(&state.host);
+            let opening_root = root.path().to_path_buf();
+            let config = tenant_config(state.addr, "/unreceived");
+            let caller = tokio::spawn(async move {
+                let mounting =
+                    std::pin::pin!(opening.open_or_get_registered_workspace(opening_root, config));
+                // Declared after the mount, so it drops first and names the
+                // thread before that thread releases the mount's result.
+                let _dropped = DroppedOn(dropped);
+                mounting.await
+            });
+            assert!(
+                open_stall.wait_entered(HEALTHY_ROOT_BOUND),
+                "fixture: the open never reached its filesystem call"
+            );
+
+            // The caller is parked on its blocking open. Hold the worker so
+            // the open's completion cannot wake the caller into receiving.
+            let (holding, held) = std::sync::mpsc::channel();
+            let (free, freed) = std::sync::mpsc::channel::<()>();
+            let holder = tokio::spawn(async move {
+                let _ = holding.send(std::thread::current().id());
+                let _ = freed.recv_timeout(HEALTHY_ROOT_BOUND);
+            });
+            let worker = held
+                .recv_timeout(HEALTHY_ROOT_BOUND)
+                .expect("fixture: the worker never ran its holder");
+            let (plugged, plugs_in) = std::sync::mpsc::channel();
+            let mut unplug = Vec::new();
+            let plugs: Vec<_> = (1..BLOCKING_THREADS)
+                .map(|_| {
+                    let plugged = plugged.clone();
+                    let (release, released) = std::sync::mpsc::channel::<()>();
+                    unplug.push(release);
+                    tokio::task::spawn_blocking(move || {
+                        let _ = plugged.send(());
+                        let _ = released.recv_timeout(HEALTHY_ROOT_BOUND);
+                    })
+                })
+                .collect();
+            for _ in &plugs {
+                plugs_in
+                    .recv_timeout(HEALTHY_ROOT_BOUND)
+                    .expect("fixture: a blocking thread was not free to plug");
+            }
+            let after_open = tokio::task::spawn_blocking(|| ());
+
+            drop(open_stall);
+            recovery_reached
+                .recv_timeout(HEALTHY_ROOT_BOUND)
+                .expect("fixture: the open started no recovery worker");
+            // The open makes no filesystem call after it starts its recovery,
+            // so from here the stall holds the recovery worker alone.
+            let stall = root_stall::stall(root.path());
+            recovery_release.send(()).unwrap();
+            assert!(
+                stall.wait_entered(HEALTHY_ROOT_BOUND),
+                "fixture: the recovery worker never reached the stall"
+            );
+            after_open.await.expect("fixture: the task behind the open");
+            drop(unplug);
+            for plug in plugs {
+                plug.await.expect("fixture: a plug");
+            }
+
+            caller.abort();
+            drop(free);
+            holder.await.expect("fixture: the holder");
+            assert_eq!(
+                dropped_on
+                    .recv_timeout(HEALTHY_ROOT_BOUND)
+                    .expect("fixture: the caller was never dropped"),
+                worker,
+                "fixture: the caller was not dropped on the runtime's worker"
+            );
+            let (ran, running) = std::sync::mpsc::channel();
+            tokio::spawn(async move {
+                let _ = ran.send(());
+            });
+            assert!(
+                running.recv_timeout(WORKER_FREE_BOUND).is_ok(),
+                "the runtime's one worker ran no task for {WORKER_FREE_BOUND:?} after it dropped \
+                 the caller of a completed open: it waits on the recovery held at {:?}",
+                stall.entered()
+            );
+            assert!(caller.await.unwrap_err().is_cancelled());
+
+            drop(stall);
+            tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                open_after_release(
+                    &state.host,
+                    root.path(),
+                    tenant_config(state.addr, "/fresh"),
+                ),
+            )
+            .await
+            .expect("the unreceived result did not drain")
+            .expect("a fresh caller mounts once the unreceived result is released");
+            state
+                .host
+                .close_workspace_for_root(root.path(), false)
+                .await
+                .unwrap();
+        });
+    }
+
     #[test]
     fn registered_mounts_retain_admission_through_an_abandoned_root_check() {
         abandoned_root_check_holds_mount_admission(false);
