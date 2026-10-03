@@ -280,24 +280,24 @@ impl Library {
     pub fn unregister_workspace(&self, root: &Path) -> Result<bool> {
         #[cfg(any(test, feature = "test-hooks"))]
         let _step = crate::paths::root_stall::UNREGISTER_WORKSPACE.open();
-        // Peek before delegating so the return value reflects whether the
-        // workspace was registered. reset_workspace itself is idempotent on a
-        // never-opened workspace (returns removed_entries = 0), but we
-        // don't want to wipe state for a path the user never
-        // registered with this Library, just in case it collides
-        // with an unrelated cached entry from an earlier install.
+        // One lookup serves the whole removal: it says whether the
+        // workspace is registered, which the return value reflects, names
+        // the row's metadata key for the wipe, and is the match the registry
+        // removal applies. A lookup of a root whose row's cached path is
+        // stale waits on the other rows' roots, so each further one would
+        // wait again beside a root that does not answer.
         let found = self.match_root(root);
-        let registered = self
-            .inner
-            .registry
-            .lock()
-            .unwrap()
-            .find_matched(&found)
-            .is_some();
-        if !registered {
+        let Some(metadata_key) = self.matched_metadata_key(&found) else {
             return Ok(false);
-        }
-        self.reset_workspace(root, ResetMode::Everything)?;
+        };
+        self.refuse_if_live(root)?;
+        self.reset_matched(
+            root,
+            &found,
+            &metadata_key,
+            ResetMode::Everything,
+            &crate::progress::NoProgress,
+        )?;
         Ok(true)
     }
 
@@ -489,17 +489,36 @@ impl Library {
         // no key in the registry, so there is nothing for this
         // Library to wipe.
         let found = self.match_root(root);
-        let Some(metadata_key) = self
-            .inner
+        let Some(metadata_key) = self.matched_metadata_key(&found) else {
+            return Ok(ResetReport { removed_entries: 0 });
+        };
+        self.reset_matched(root, &found, &metadata_key, mode, progress)
+    }
+
+    /// The metadata key of the row `found` names, read from the rows as they
+    /// are now. `None` when no row matches.
+    fn matched_metadata_key(&self, found: &RootMatch) -> Option<String> {
+        self.inner
             .registry
             .lock()
             .unwrap()
-            .find_matched(&found)
-            .map(|e| e.metadata_key.clone())
-        else {
-            return Ok(ResetReport { removed_entries: 0 });
-        };
-        let (_lock, removed) = self.wipe_row_state(&metadata_key, root, progress)?;
+            .find_matched(found)
+            .map(|row| row.metadata_key.clone())
+    }
+
+    /// Wipe the state of the row `found` names, stored under
+    /// `metadata_key`, and for [`ResetMode::Everything`] drop the row. The
+    /// removal applies `found` itself, re-checked against the rows as they
+    /// are then, so a reset looks its root up in the registry once.
+    fn reset_matched(
+        &self,
+        root: &Path,
+        found: &RootMatch,
+        metadata_key: &str,
+        mode: ResetMode,
+        progress: &dyn crate::progress::ProgressCallback,
+    ) -> Result<ResetReport> {
+        let (_lock, removed) = self.wipe_row_state(metadata_key, root, progress)?;
         // Hold the writer lock across the registry update so a
         // concurrent open_workspace cannot lazily recreate the state we
         // just wiped, lazily commit a half-formed index/graph dir,
@@ -509,9 +528,8 @@ impl Library {
         // the opposite order. _lock is dropped at the end of the
         // function after the registry write completes.
         if matches!(mode, ResetMode::Everything) {
-            let found = self.match_root(root);
             let mut reg = self.inner.registry.lock().unwrap();
-            if reg.remove_matched(&found) {
+            if reg.remove_matched(found) {
                 reg.save_to(&self.inner.config_path)?;
             }
         }
