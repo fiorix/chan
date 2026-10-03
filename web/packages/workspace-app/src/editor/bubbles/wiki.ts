@@ -747,7 +747,9 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
     } else {
       // Generate a fresh id, write to the target file via CAS, then
       // insert the link. If the write fails (mtime conflict, network),
-      // surface the error and leave the bubble open.
+      // surface the error and leave the bubble open. The write hands over
+      // the text the blocks came from: the token is a timestamp on the
+      // standalone surface, where a changed file can keep it.
       anchorId = makeBlockId();
       const newContent = insertBlockAnchor(blockOriginalText, block, anchorId);
       status.textContent = "Adding anchor...";
@@ -758,6 +760,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
           blockMtimeNs,
           blockMtime,
           blockAuthorityVersion,
+          blockOriginalText,
         );
         if (!alive) return;
         blockOriginalText = newContent;
