@@ -2448,9 +2448,15 @@ export function resolvePendingPrompt(
 /// bubble surfaces "already sent" rather than letting the user silently
 /// re-edit a delivered message). Stale/foreign ids no-op (same guard as
 /// `resolvePendingPrompt` -- every attached socket sees acks it doesn't own).
+///
+/// The ack moves a prompt that is still in flight and no other. A terminal
+/// phase stands on the tab until the bubble consumes it, which it does only
+/// once its draft is loaded, so the ack can arrive over one: over a refusal
+/// it would read "already sent" and clear a text that was never queued.
 export function resolvePromptCancelled(tab: TerminalTab, id: string, removed: boolean): void {
   const pending = tab.pendingPrompt;
   if (!pending || pending.id !== id) return;
+  if (pending.phase !== "sent" && pending.phase !== "queued" && pending.phase !== "recalling") return;
   tab.pendingPrompt = { ...pending, phase: removed ? "recalled" : "drained" };
 }
 
