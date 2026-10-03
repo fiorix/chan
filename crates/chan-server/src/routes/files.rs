@@ -3825,7 +3825,7 @@ mod write_tests {
             std::fs::read(root.path().join("active.pdf")).unwrap(),
             b"%PDF-current"
         );
-        assert!(state.window_bus.retire_export(&id));
+        assert!(state.window_bus.retire_export(&id).await);
         let late = super::api_upload_file(
             State(state),
             Query(super::UploadRootQuery::default()),
@@ -3871,7 +3871,7 @@ mod write_tests {
         )))
         .await
         .unwrap();
-        assert!(!state.window_bus.retire_export(&id));
+        assert!(!state.window_bus.retire_export(&id).await);
         tx.send(super::RequestBodyMessage::Complete).await.unwrap();
         assert!(worker.await.unwrap().is_err());
         assert!(!root.path().join("late.pdf").exists());

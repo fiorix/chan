@@ -3191,7 +3191,7 @@ where
     if let Err(message) =
         send_window_command_if_live(session_registry, window_id, command, events_tx)
     {
-        window_bus.retire_export(&request_id);
+        window_bus.retire_export(&request_id).await;
         return ControlResponse::Error { message };
     }
     let (mut quiet, absolute) = job.deadlines();
@@ -3199,7 +3199,7 @@ where
         tokio::select! {
             biased;
             reply = &mut rx => {
-                let mut response = if job.committed() {
+                let mut response = if job.retire().await {
                     ControlResponse::Export {
                         out_path: out.clone(),
                         window_id: None,
@@ -3216,7 +3216,7 @@ where
                 return response;
             }
             () = &mut *client_eof => {
-                let committed = window_bus.retire_export(&request_id) || job.committed();
+                let committed = window_bus.retire_export(&request_id).await || job.retire().await;
                 let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
                 if committed {
                     return ControlResponse::Export { out_path: out, window_id: Some(window_id.to_string()) };
@@ -3224,7 +3224,7 @@ where
                 return ControlResponse::Error { message: format!("export in window {window_id} cancelled when its caller closed") };
             }
             _ = tokio::time::sleep_until(absolute) => {
-                let committed = window_bus.retire_export(&request_id) || job.committed();
+                let committed = window_bus.retire_export(&request_id).await || job.retire().await;
                 return finish_export_at_bound(window_id, &request_id, &out, "15m absolute", committed, runtime);
             }
             changed = progress.changed() => {
@@ -3234,8 +3234,8 @@ where
                 }
             }
             _ = tokio::time::sleep_until(quiet) => {
-                match window_bus.retire_export_if_quiet_elapsed(&request_id, tokio::time::Instant::now()) {
-                    Ok(committed) => return finish_export_at_bound(window_id, &request_id, &out, "90s quiet", committed || job.committed(), runtime),
+                match window_bus.retire_export_if_quiet_elapsed(&request_id, tokio::time::Instant::now()).await {
+                    Ok(committed) => return finish_export_at_bound(window_id, &request_id, &out, "90s quiet", committed || job.retire().await, runtime),
                     Err(next_deadline) => quiet = next_deadline,
                 }
             }
@@ -5989,7 +5989,7 @@ mod tests {
         let mut permit = job.begin_commit("a.pdf").unwrap();
         permit.mark_committed();
         drop(permit);
-        let committed = bus.retire_export(&id) || job.committed();
+        let committed = bus.retire_export(&id).await || job.committed();
         let response = finish_export_at_bound(
             "w-committed",
             &id,

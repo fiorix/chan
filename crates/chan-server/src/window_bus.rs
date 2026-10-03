@@ -1,21 +1,11 @@
-//! The window bus: the blocked-transport side of the `cs pane` round-trip.
+//! Parked SPA replies for `cs pane`, copy, paste, and export.
 //!
-//! `cs pane` needs a REPLY from the SPA (the layout lives only in the
-//! frontend), so the control handler cannot answer synchronously the way
-//! `cs term list` does. It mirrors the `cs terminal survey` mechanism
-//! (`survey.rs`) one-for-one: the handler mints a `request_id`, parks a
-//! oneshot here, pushes a `pane_query` window_command carrying that id, and
-//! AWAITS the oneshot. The SPA reads its `layout`, then
-//! `POST /api/window/reply` deserializes the `{ requestId, payload }` body
-//! and calls [`WindowBus::complete`], which fires the oneshot and unblocks
-//! the handler with the payload.
-//!
-//! Kept on the same `Arc<WindowBus>`-on-`AppState` shape as `SurveyBus`
-//! (created in `lib.rs`, passed to the control socket for the `register` +
-//! `await` side, cloned onto `AppState` for the reply route's `complete`
-//! side) so the two round-trip buses read identically. The reply payload is
-//! an opaque `serde_json::Value` so the QUERY (returns the layout) and the
-//! future EXEC ops (return a success/partial result) share one bus.
+//! The request bus owns one-shot reply senders. The export registry maps an
+//! export request id to its deadlines and guarded upload state. A permit
+//! enters `committing` under a short job lock, then releases that lock while
+//! the workspace performs the atomic write. Retirement removes the id and
+//! awaits the permit's outcome without holding either registry lock, so a
+//! stalled export write cannot delay another window reply.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -38,19 +28,27 @@ pub struct WindowBus {
 
 struct ExportState {
     active: bool,
+    committing: bool,
     committed: bool,
     pages_finished: u64,
     quiet_deadline: tokio::time::Instant,
     absolute_deadline: tokio::time::Instant,
 }
 
-/// The upload permit remains held through the atomic rename. Retirement
-/// cannot claim timeout after that rename has won the race.
-pub(crate) struct ExportCommitPermit<'a>(MutexGuard<'a, ExportState>);
+/// Records a guarded upload in flight without holding a lock during I/O.
+/// Retirement awaits its drop and then observes whether it committed.
+pub(crate) struct ExportCommitPermit<'a>(&'a ExportJob);
 
 impl ExportCommitPermit<'_> {
     pub(crate) fn mark_committed(&mut self) {
-        self.0.committed = true;
+        self.0.lock_state().committed = true;
+    }
+}
+
+impl Drop for ExportCommitPermit<'_> {
+    fn drop(&mut self) {
+        self.0.lock_state().committing = false;
+        self.0.commit_changes.send_replace(());
     }
 }
 
@@ -58,16 +56,24 @@ pub(crate) struct ExportJob {
     out: String,
     state: Mutex<ExportState>,
     progress: watch::Sender<Option<tokio::time::Instant>>,
+    commit_changes: watch::Sender<()>,
 }
 
 impl ExportJob {
+    fn lock_state(&self) -> MutexGuard<'_, ExportState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     pub(crate) fn begin_commit(
         &self,
         path: &str,
     ) -> chan_workspace::Result<ExportCommitPermit<'_>> {
-        let state = self.state.lock().expect("export job poisoned");
+        let mut state = self.lock_state();
         let now = tokio::time::Instant::now();
         if !state.active
+            || state.committing
             || state.committed
             || self.out != path
             || now >= state.quiet_deadline
@@ -77,33 +83,51 @@ impl ExportJob {
                 "export job retired, expired, or upload path differs".into(),
             ));
         }
-        Ok(ExportCommitPermit(state))
+        state.committing = true;
+        Ok(ExportCommitPermit(self))
     }
 
-    fn retire(&self) -> bool {
-        let mut state = self.state.lock().expect("export job poisoned");
-        state.active = false;
-        state.committed
+    pub(crate) async fn retire(&self) -> bool {
+        self.lock_state().active = false;
+        self.committed_after_commit().await
+    }
+
+    async fn committed_after_commit(&self) -> bool {
+        let mut changes = self.commit_changes.subscribe();
+        loop {
+            let settled = {
+                let state = self.lock_state();
+                (!state.committing).then_some(state.committed)
+            };
+            if let Some(committed) = settled {
+                return committed;
+            }
+            let _ = changes.changed().await;
+        }
     }
 
     pub(crate) fn committed(&self) -> bool {
-        self.state.lock().expect("export job poisoned").committed
+        self.lock_state().committed
     }
 
     pub(crate) fn deadlines(&self) -> (tokio::time::Instant, tokio::time::Instant) {
-        let state = self.state.lock().expect("export job poisoned");
+        let state = self.lock_state();
         (state.quiet_deadline, state.absolute_deadline)
     }
 
     fn page_finished(&self, count: u64) -> bool {
-        let mut state = self.state.lock().expect("export job poisoned");
+        let mut state = self.lock_state();
         let now = tokio::time::Instant::now();
         if !state.active || now >= state.quiet_deadline || now >= state.absolute_deadline {
             return false;
         }
-        if count > state.pages_finished {
+        let advanced = count > state.pages_finished;
+        if advanced {
             state.pages_finished = count;
             state.quiet_deadline = now + EXPORT_QUIET_TIMEOUT;
+        }
+        drop(state);
+        if advanced {
             self.progress.send_replace(Some(now));
         }
         true
@@ -117,6 +141,12 @@ impl Default for WindowBus {
 }
 
 impl WindowBus {
+    fn lock_exports(&self) -> MutexGuard<'_, HashMap<String, Arc<ExportJob>>> {
+        self.exports
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     pub fn new() -> Self {
         Self {
             requests: RoundTripBus::new("win-"),
@@ -140,30 +170,29 @@ impl WindowBus {
     ) {
         let (id, rx) = self.requests.register();
         let (progress, updates) = watch::channel(None);
+        let (commit_changes, _) = watch::channel(());
         let now = tokio::time::Instant::now();
-        self.exports.lock().expect("export jobs poisoned").insert(
+        self.lock_exports().insert(
             id.clone(),
             Arc::new(ExportJob {
                 out,
                 state: Mutex::new(ExportState {
                     active: true,
+                    committing: false,
                     committed: false,
                     pages_finished: 0,
                     quiet_deadline: now + EXPORT_QUIET_TIMEOUT,
                     absolute_deadline: now + EXPORT_ABSOLUTE_TIMEOUT,
                 }),
                 progress,
+                commit_changes,
             }),
         );
         (id, rx, updates)
     }
 
     pub(crate) fn export_job(&self, id: &str) -> Option<Arc<ExportJob>> {
-        self.exports
-            .lock()
-            .expect("export jobs poisoned")
-            .get(id)
-            .cloned()
+        self.lock_exports().get(id).cloned()
     }
 
     pub fn page_finished(&self, id: &str, count: u64) -> bool {
@@ -171,36 +200,37 @@ impl WindowBus {
             .is_some_and(|job| job.page_finished(count))
     }
 
-    /// Retire the job, returning whether its guarded upload already committed.
-    pub fn retire_export(&self, id: &str) -> bool {
-        let mut exports = self.exports.lock().expect("export jobs poisoned");
-        let committed = exports.remove(id).is_some_and(|job| job.retire());
+    /// Retire the job and await an upload that already entered its commit.
+    pub async fn retire_export(&self, id: &str) -> bool {
+        let job = self.lock_exports().remove(id);
         self.requests.cancel(id);
-        committed
+        match job {
+            Some(job) => job.retire().await,
+            None => false,
+        }
     }
 
     /// Compare the quiet deadline and retire under the same job lock that a
     /// page report updates, so a report accepted at the edge cannot be lost.
-    pub(crate) fn retire_export_if_quiet_elapsed(
+    pub(crate) async fn retire_export_if_quiet_elapsed(
         &self,
         id: &str,
         now: tokio::time::Instant,
     ) -> Result<bool, tokio::time::Instant> {
-        let mut exports = self.exports.lock().expect("export jobs poisoned");
-        let Some(job) = exports.get(id) else {
+        let Some(job) = self.export_job(id) else {
             self.requests.cancel(id);
             return Ok(false);
         };
-        let mut state = job.state.lock().expect("export job poisoned");
-        if state.active && now < state.quiet_deadline {
-            return Err(state.quiet_deadline);
+        {
+            let mut state = job.lock_state();
+            if state.active && now < state.quiet_deadline {
+                return Err(state.quiet_deadline);
+            }
+            state.active = false;
         }
-        state.active = false;
-        let committed = state.committed;
-        drop(state);
-        exports.remove(id);
+        self.lock_exports().remove(id);
         self.requests.cancel(id);
-        Ok(committed)
+        Ok(job.committed_after_commit().await)
     }
 
     /// Drop a parked request without firing it; see [`RoundTripBus::cancel`].
@@ -212,16 +242,15 @@ impl WindowBus {
     /// [`RoundTripBus::complete`]. `false` is what `/api/window/reply` maps
     /// to a 404.
     pub fn complete(&self, request_id: &str, payload: Value) -> bool {
-        let mut exports = self.exports.lock().expect("export jobs poisoned");
-        if let Some(job) = exports.get(request_id) {
-            let mut state = job.state.lock().expect("export job poisoned");
+        if let Some(job) = self.export_job(request_id) {
+            let mut state = job.lock_state();
             let now = tokio::time::Instant::now();
-            if now >= state.quiet_deadline || now >= state.absolute_deadline {
+            if !state.active || now >= state.quiet_deadline || now >= state.absolute_deadline {
                 return false;
             }
             state.active = false;
             drop(state);
-            exports.remove(request_id);
+            self.lock_exports().remove(request_id);
         }
         self.requests.complete(request_id, payload)
     }
@@ -257,7 +286,7 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(11)).await;
         assert!(bus.page_finished(&id, 2));
         assert!(matches!(
-            bus.retire_export_if_quiet_elapsed(&id, tokio::time::Instant::now()),
+            bus.retire_export_if_quiet_elapsed(&id, tokio::time::Instant::now()).await,
             Err(deadline) if deadline > tokio::time::Instant::now()
         ));
         assert!(bus.complete(&id, serde_json::json!({ "ok": true, "out": "a.pdf" })));
@@ -269,7 +298,7 @@ mod tests {
         let (id, reply, _progress) = bus.register_export("a.pdf".into());
         tokio::time::advance(EXPORT_QUIET_TIMEOUT).await;
         assert!(!bus.complete(&id, serde_json::json!({ "ok": true, "out": "a.pdf" })));
-        bus.retire_export(&id);
+        bus.retire_export(&id).await;
         assert!(reply.await.is_err());
     }
 
@@ -291,12 +320,14 @@ mod tests {
         let (pane_id, pane_reply) = bus.register();
         let bound_bus = Arc::clone(&bus);
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let bound = tokio::task::spawn_blocking(move || {
+        let bound = tokio::spawn(async move {
             let _ = started_tx.send(());
-            bound_bus.retire_export_if_quiet_elapsed(
-                &export_id,
-                tokio::time::Instant::now() + EXPORT_QUIET_TIMEOUT,
-            )
+            bound_bus
+                .retire_export_if_quiet_elapsed(
+                    &export_id,
+                    tokio::time::Instant::now() + EXPORT_QUIET_TIMEOUT,
+                )
+                .await
         });
         started_rx.await.unwrap();
         let start = std::time::Instant::now();
@@ -331,14 +362,67 @@ mod tests {
         let permit = job.begin_commit("a.pdf").unwrap();
         let retiring_bus = Arc::clone(&bus);
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let retired = tokio::task::spawn_blocking(move || {
+        let retired = tokio::spawn(async move {
             let _ = started_tx.send(());
-            retiring_bus.retire_export(&id)
+            retiring_bus.retire_export(&id).await
         });
         started_rx.await.unwrap();
         drop(permit);
         assert!(!retired.await.unwrap());
         assert!(!job.committed());
         assert!(job.begin_commit("a.pdf").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_atomic_write_releases_the_export_commit() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let bus = WindowBus::new();
+        let (id, _reply, _progress) = bus.register_export("a.pdf".into());
+        let job = bus.export_job(&id).unwrap();
+        let mut permit = None;
+        let result = workspace.write_atomic_stream(
+            "a.pdf",
+            chan_workspace::AtomicWriteKind::Bytes,
+            |sink| {
+                sink.write_chunk(b"%PDF-test")?;
+                permit = Some(job.begin_commit("a.pdf")?);
+                Err(chan_workspace::ChanError::Io(
+                    "injected before rename".into(),
+                ))
+            },
+        );
+        assert!(result.is_err());
+        drop(permit);
+        assert!(!root.path().join("a.pdf").exists());
+        assert!(!job.committed());
+        assert!(
+            job.begin_commit("a.pdf").is_ok(),
+            "failed write must leave the job active"
+        );
+    }
+
+    #[test]
+    fn poisoned_export_locks_are_recovered() {
+        let bus = WindowBus::new();
+        let (id, _reply, _progress) = bus.register_export("a.pdf".into());
+        let job = bus.export_job(&id).unwrap();
+        let state_poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = job.state.lock().unwrap();
+            panic!("poison export state");
+        }));
+        assert!(state_poisoned.is_err());
+        assert!(!job.committed());
+        drop(job.begin_commit("a.pdf").unwrap());
+        let map_poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _exports = bus.exports.lock().unwrap();
+            panic!("poison export map");
+        }));
+        assert!(map_poisoned.is_err());
+        assert!(bus.export_job(&id).is_some());
+        assert!(bus.complete(&id, serde_json::json!({ "ok": true, "out": "a.pdf" })));
     }
 }
