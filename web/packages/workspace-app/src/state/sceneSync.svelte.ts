@@ -479,6 +479,18 @@ export class SceneSession {
     return !this.closedByUs && !this.retryStopped;
   }
 
+  /// The tab turned read only, which its host reports. A read-only tab
+  /// pushes nothing, so no ack can end an appState claim it holds, and while
+  /// the claim stood, a peer's value for its keys would stay off the board
+  /// and the tab would read unsaved for as long as read mode lasts. The
+  /// claim is dropped, and a board that shows it takes the scene's appState
+  /// without it.
+  tabTurnedReadOnly(): void {
+    if (this.appStateClaim === null || !this.isReadOnlyAttach()) return;
+    this.appStateClaim = null;
+    if (this.canvasAdopted) this.binding?.applyUpdate({ elements: [], appState: this.sceneAppState() });
+  }
+
   /// True when the session is degraded specifically by a CONNECTION-class
   /// outage that is still retrying; the save path suppresses the doomed
   /// classic PUT (same rationale and shape as DocSession.isOutagePaused).

@@ -1280,7 +1280,9 @@ describe("a canvas tab", () => {
 
   test("hands the island its read-only state and the live scene session", async () => {
     // A class instance: $state keeps it as is, where it would proxy a plain object.
-    island.session = new (class LiveSession {})();
+    island.session = new (class LiveSession {
+      tabTurnedReadOnly(): void {}
+    })();
     const tab = seat(canvasTab({ readMode: true }));
     await render(tab);
     expect(island.props?.readonly).toBe(true);

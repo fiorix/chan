@@ -450,6 +450,12 @@
         releaseSceneSession(tabId);
       });
   });
+  // A read-only tab pushes nothing, so its scene session is told when the
+  // tab turns read only and drops an appState claim no push can then end.
+  $effect(() => {
+    const session = sceneSession;
+    if (session && (tab.readMode || !tab.fsWritable)) untrack(() => session.tabTurnedReadOnly());
+  });
   /// Per-editor-mount collab + presence extension bundle, minted ONCE
   /// per (session, mode) and memoized. session.extension() mints a fresh
   /// compartment + ViewPlugin every call, and the ViewPlugin's

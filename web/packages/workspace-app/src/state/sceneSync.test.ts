@@ -1649,6 +1649,24 @@ describe("a push the authority never accepted", () => {
     });
   });
 
+  test.each([
+    ["read only drops its claim and hands the board the authority's appState", true],
+    ["writable keeps its claim", false],
+  ])("a session told that its tab turned read only while the tab is %s", (_what, readOnly) => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding } = attached(tab!);
+    session.degrade();
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+    tab!.readMode = readOnly;
+    session.tabTurnedReadOnly();
+
+    expect({ claimed: isDocUnflushed(tab!.id), handed: binding.updates.map((u) => u.appState) }).toEqual({
+      claimed: !readOnly,
+      handed: readOnly ? [{}] : [],
+    });
+  });
+
   test("an appState offered by a canvas that binds between two sockets is no claim", () => {
     // A canvas mounted while the socket is down gets no replay, so it has
     // adopted nothing of this session's scene: what it offers is the buffer
