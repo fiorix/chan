@@ -89,7 +89,8 @@ vi.mock("../editor/link_preview", async (importOriginal) => {
 });
 
 /// The board island, replaced by a probe that keeps the props FileEditorTab
-/// hands it.
+/// hands it and answers the calls FileEditorTab makes on a board, as a board
+/// with no live session does.
 const island = vi.hoisted(() => {
   const island = {
     props: null as Record<string, unknown> | null,
@@ -98,6 +99,7 @@ const island = vi.hoisted(() => {
     module: {
       default: (_anchor: unknown, props: Record<string, unknown>) => {
         island.props = props;
+        return { focusCanvas() {}, flushPendingEdits() {}, restoreOverScene: () => false };
       },
     },
   };

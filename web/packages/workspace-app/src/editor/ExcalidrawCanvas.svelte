@@ -776,6 +776,42 @@
     flushSerialize();
   }
 
+  /// Lay a recovery entry's scene over a live session's board as a local
+  /// change, and answer whether it did: false means this is no such board,
+  /// and the caller restores through the buffer, which reseeds the board.
+  ///
+  /// A live board holds its authority's scene, which a peer may have changed
+  /// since the entry was written, so the entry is not put in its place. What
+  /// it holds beyond that scene is taken: an element whose id the board
+  /// lacks, or holds at a lower version, tombstones counted, and the files
+  /// the board lacks. Each such element differs from what the authority is
+  /// known to hold, so the flush below offers it. An element the board holds
+  /// at the same or a higher version stays the board's, a peer's delete among
+  /// them, and so does an element the entry lacks: the entry carries no
+  /// tombstone, so one its user deleted cannot be told from one a peer added.
+  /// The entry's appState is not taken: an appState is one value with no
+  /// version, so the entry's cannot be told from an older one than the
+  /// authority's.
+  export function restoreOverScene(json: string): boolean {
+    if (!api || !ex || !session || !seeded) return false;
+    const scene = ex.restore(parseScene(json), null, null, { repairBindings: true });
+    const held = new Map(api.getSceneElementsIncludingDeleted().map((el) => [el.id, el.version] as const));
+    const beyond = scene.elements.filter((el) => (held.get(el.id) ?? -1) < el.version);
+    api.updateScene({
+      elements: ex.reconcileElements(
+        api.getSceneElementsIncludingDeleted(),
+        beyond as unknown as Parameters<typeof ex.reconcileElements>[1],
+        api.getAppState(),
+      ),
+      captureUpdate: ex.CaptureUpdateAction.NEVER,
+    } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
+    const files = Object.values(scene.files);
+    if (files.length > 0) api.addFiles(files);
+    if (serializeTimer !== null) clearTimeout(serializeTimer);
+    flushSerialize();
+    return true;
+  }
+
   onDestroy(() => {
     flushPendingEdits();
     root?.unmount();

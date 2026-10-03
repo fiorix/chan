@@ -177,7 +177,13 @@
   // whiteboards do not all spin up a React root at once (Pane keeps every
   // file-tab body mounted). The typeof import(...) below is a type-only
   // query and does not pull the module into the eager graph.
-  let canvasRef: { focusCanvas: () => void; flushPendingEdits: () => void } | undefined = $state();
+  let canvasRef:
+    | {
+        focusCanvas: () => void;
+        flushPendingEdits: () => void;
+        restoreOverScene: (json: string) => boolean;
+      }
+    | undefined = $state();
   $effect(() => registerPendingEditFlush(tab.id, () => canvasRef?.flushPendingEdits()));
 
   let ExcalidrawCanvas =
@@ -331,7 +337,12 @@
 
   function restoreFromBuffer(): void {
     if (!recoveredBuffer) return;
-    setTabContent(tab, recoveredBuffer.content);
+    // A live session's board takes the entry as a local change over the
+    // authority's scene and writes the result into the buffer itself. Any
+    // other tab takes the entry as its buffer.
+    if (!canvasRef?.restoreOverScene(recoveredBuffer.content)) {
+      setTabContent(tab, recoveredBuffer.content);
+    }
     recoveredBuffer = null;
     // The restored content now diverges from disk, so the persistence
     // effect re-persists it under the current session on the next tick.
@@ -981,8 +992,9 @@
   {#if recoveredBuffer}
     <!-- Hang-recovery banner. Surfaces when a previous page load left
          unsaved content for this file that diverges from disk. The user
-         picks Restore (replace the editor content with the buffer) or
-         Discard (keep the disk content). Either choice dismisses it. -->
+         picks Restore (replace the editor content with the buffer, or on
+         a live drawing lay the buffer over the board) or Discard (keep the
+         disk content). Either choice dismisses it. -->
     <div class="recovery-banner" role="alert">
       <span class="recovery-banner-text">
         Unsaved changes from a previous session were found.
