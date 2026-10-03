@@ -21,6 +21,7 @@
 
 import type { Ghostty, Terminal } from "ghostty-web";
 import type { TerminalPreferences } from "../api/types";
+import { windowModeSecretMaskingEnabled } from "../state/windowMode";
 
 export type TerminalBackend = "xterm" | "ghostty";
 
@@ -34,10 +35,20 @@ export type GhosttyKit = {
 /// Backend for a newly spawned terminal. Spawn-time only, same contract
 /// as scrollback / mouse_capture: read once at terminal start, so
 /// flipping the setting later affects only newly opened terminals.
-/// Absent field (older server) means xterm.js, today's behavior.
+/// Absent field (older server) means xterm.js.
+///
+/// A control terminal whose masking starts on is xterm whatever
+/// `terminal.ghostty` says: the masker exists on xterm alone, and a
+/// control terminal is the one surface sure to print a bearer token. An
+/// explicit `secret_masking: false` there keeps the configured backend,
+/// as every other window does.
 export function terminalBackendFromPrefs(
   prefs: TerminalPreferences | undefined,
+  mode: { terminalControl: boolean } = { terminalControl: false },
 ): TerminalBackend {
+  if (mode.terminalControl && windowModeSecretMaskingEnabled(prefs?.secret_masking, mode)) {
+    return "xterm";
+  }
   return (prefs?.ghostty ?? false) ? "ghostty" : "xterm";
 }
 

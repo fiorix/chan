@@ -18,11 +18,6 @@ describe("terminalBackendFromPrefs", () => {
 });
 
 describe("the backend of a terminal by its window and its masking", () => {
-  const backendFor = terminalBackendFromPrefs as (
-    prefs: TerminalPreferences | undefined,
-    mode: { terminalControl: boolean },
-  ) => TerminalBackend;
-
   // A control terminal whose masking starts on is xterm, the one backend
   // that masks; every other cell is the configured backend.
   test.each([
@@ -45,7 +40,7 @@ describe("the backend of a terminal by its window and its masking", () => {
         ghostty,
         ...(secretMasking === undefined ? {} : { secret_masking: secretMasking }),
       } as TerminalPreferences;
-      expect(backendFor(prefs, { terminalControl })).toBe(backend);
+      expect(terminalBackendFromPrefs(prefs, { terminalControl })).toBe<TerminalBackend>(backend);
     },
   );
 });

@@ -994,11 +994,13 @@
     }
     // Backend honors the Settings toggle under the same spawn-time
     // contract (read once here; flipping it affects only newly opened
-    // terminals). Absent field (older server) means xterm.js. The
-    // ghostty kit lazy-loads ~420KB of WASM + JS only on this branch;
-    // a failed load falls back to xterm.js rather than breaking the
-    // spawn (fail-open, matching the mouse filter's philosophy).
-    backend = terminalBackendFromPrefs(terminalPrefs);
+    // terminals), except in a control terminal whose masking starts on,
+    // which is xterm, the backend that masks. Absent field (older server)
+    // means xterm.js. The ghostty kit lazy-loads ~420KB of WASM + JS only
+    // on this branch; a failed load falls back to xterm.js rather than
+    // breaking the spawn (fail-open, matching the mouse filter's
+    // philosophy).
+    backend = terminalBackendFromPrefs(terminalPrefs, { terminalControl: ui.terminalControl });
     let ghosttyKit: GhosttyKit | null = null;
     if (backend === "ghostty") {
       try {

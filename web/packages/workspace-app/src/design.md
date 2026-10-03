@@ -128,6 +128,10 @@ A terminal session frame names the byte cursor at the end of the attach replay. 
 
 A reset can repaint only what the ring retains: if the ring has dropped bytes, history older than its first byte is lost from the client, and a line above the replay reports the missed byte count. With an older server that omits `replay_bytes`, the client keeps its screen and still asks for the whole ring, so history may repeat rather than be erased. The snapshot guard covers replay frame arrival through `ready`; it does not wait for every queued renderer write to finish parsing.
 
+## A terminal's backend and its masking
+
+A terminal's backend and its secret masking are both chosen once, when the terminal spawns. Masking is seeded by the window: an explicit `terminal.secret_masking` wins, and an unset one is on in a control terminal and off in every other window; the tab's own toggle changes that terminal alone and never swaps its backend. The masker exists on the xterm backend only, so a control terminal whose masking starts on spawns on xterm whatever `terminal.ghostty` says, and the ghostty kit is not loaded for it. An explicit `secret_masking: false` there keeps the configured backend, as every other window does, and a ghostty terminal offers no masking.
+
 ## Transfer teardown and native upload routing
 
 Page teardown saves transfer records as they stood before cancellation and then suspends all storage writes until `pageshow`. Transport cancellation still settles the in-memory rows; its promise callbacks, pending progress timers and bubble changes cannot replace the teardown record. Reload turns a saved active row into an interrupted one, with Retry for a download. A page restored without reloading retains its cancelled in-memory rows and resumes persistence on its next transfer change.
