@@ -91,8 +91,9 @@ function meta() {
 }
 
 /// A read that sends its meta and then parks before any content, finishing
-/// with `content` only when released.
-function parkedRead(content = WHOLE): {
+/// with `content` only when released. With `first` it parks after that much
+/// of the content has arrived.
+function parkedRead(content = WHOLE, first?: string): {
   release: () => void;
   signal: () => AbortSignal | undefined;
 } {
@@ -101,6 +102,9 @@ function parkedRead(content = WHOLE): {
   vi.spyOn(api, "readStream").mockImplementation(async (_path, opts) => {
     signal = opts?.signal ?? undefined;
     opts?.onMeta?.(meta());
+    if (first !== undefined) {
+      opts?.onChunk?.(first, { loadedBytes: first.length, totalBytes: content.length });
+    }
     await new Promise<void>((resolve) => {
       release = resolve;
     });
@@ -558,11 +562,12 @@ describe("the reopen of a draft whose path was deleted mints a new draft", () =>
   });
 
   test("nor the bytes of a load that was running", async () => {
-    const read = parkedRead();
+    const read = parkedRead(WHOLE, "# Draft\n\nwor");
     resetLayout([], { id: PANE_ID });
     const opened = openInPane(PANE_ID, DRAFT_PATH);
     const tabId = activePane().tabs[0]!.id;
-    await vi.waitFor(() => expect(liveTab(tabId)?.loadProgress?.totalBytes).toBe(WHOLE.length));
+    await vi.waitFor(() => expect(liveTab(tabId)?.content).toBe("# Draft\n\nwor"));
+    expect(liveTab(tabId)?.loading, "the load is still running").toBe(true);
     await deleteDraftDirectory();
     read.release();
     await opened;
