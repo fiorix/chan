@@ -36,6 +36,10 @@ export type HeldNames = {
 /// What `backslashReason` answers when it refuses.
 export const BACKSLASH_REASON = "\\ cannot be added to a name";
 
+/// What the path prompt says in its place where the `\` reads as a
+/// separator (`backslashSeparates`).
+export const BACKSLASH_SEPARATOR_REASON = `${BACKSLASH_REASON}; use / between directories`;
+
 function backslashes(name: string): number {
   return name.split("\\").length - 1;
 }
@@ -51,6 +55,30 @@ function backslashes(name: string): number {
 /// name of a move also passes when it holds no more `\` than the source's
 /// name.
 export function backslashReason(path: string, held: HeldNames = {}): string | null {
+  return refusedName(path, held) === null ? null : BACKSLASH_REASON;
+}
+
+/// Whether the `\` the rule refuses in `path` reads as a separator typed in
+/// the place of a `/`: the text of the refused name before its first `\`,
+/// with the path that leads to the name, is a directory by `isDir`. A `\`
+/// that opens a name follows no such text. It is a hint for the sentence
+/// shown and changes no verdict: `backslashReason` refuses the path either
+/// way.
+export function backslashSeparates(
+  path: string,
+  held: HeldNames,
+  isDir: (path: string) => boolean,
+): boolean {
+  const refused = refusedName(path, held);
+  if (refused === null) return false;
+  const nameStart = refused.lastIndexOf("/") + 1;
+  const at = refused.indexOf("\\", nameStart);
+  return at > nameStart && isDir(refused.slice(0, at));
+}
+
+/// The path as far as the first name the rule refuses, that name included,
+/// or null when every name passes.
+function refusedName(path: string, held: HeldNames): string | null {
   if (!path.includes("\\")) return null;
   const names = path.replace(/\/+$/, "").split("/");
   const sourceNames = held.source ? held.source.split("/") : null;
@@ -67,7 +95,7 @@ export function backslashReason(path: string, held: HeldNames = {}): string | nu
       (i === names.length - 1 &&
         sourceNames !== null &&
         backslashes(name) <= backslashes(sourceNames[sourceNames.length - 1]));
-    if (!kept) return BACKSLASH_REASON;
+    if (!kept) return acc;
   }
   return null;
 }

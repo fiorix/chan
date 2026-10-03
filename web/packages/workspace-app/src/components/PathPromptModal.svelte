@@ -17,12 +17,15 @@
   } from "../state/store.svelte";
   import {
     BACKSLASH_REASON,
+    BACKSLASH_SEPARATOR_REASON,
     DEFAULT_NEW_FILENAME_STEM,
     appendDefaultMd,
     backslashRuleSubject,
+    backslashSeparates,
     preserveExtension,
     proposeDefaultFilename,
     validatePath,
+    type HeldNames,
   } from "../state/pathValidate";
   import { longestCommonPrefix } from "../state/lcp";
   import { GRAPH_LINK_PREFIX, parseGraphLink } from "../state/tabs.svelte";
@@ -179,15 +182,11 @@
     // trailing slash through when we've resolved the kind to a folder;
     // file create / move / rename still reject it with a name hint.
     const allowTrailingSlash = effectiveKind === "folder";
-    // What a name that holds a `\` is held against: the entry being moved
-    // and the entries the tree has listed. A directory the tree has not
-    // listed yet is refused until the load effect below brings its listing.
     const opts = {
       allowAbsolute: pathPromptState.allowAbsolute,
       allowTrailingSlash,
       root: typedPathRoot(),
-      source: pathPromptState.sourcePath,
-      exists: (path: string) => entryByPath.has(path),
+      ...heldNames(),
     };
     const rawCheck = validatePath(trimmed, opts);
     if (!rawCheck.ok) return rawCheck;
@@ -221,6 +220,16 @@
   /// (existing file at the target) and the kind-mismatch check
   /// (typed `foo/` but `foo` is a file, not a directory).
   const entryByPath = $derived(new Map(tree.entries.map((e) => [e.path, e])));
+
+  /// What a name that holds a `\` is held against: the entry being moved
+  /// and the entries the tree has listed. A directory the tree has not
+  /// listed yet is refused until the load effect below brings its listing.
+  function heldNames(): HeldNames {
+    return {
+      source: pathPromptState.sourcePath,
+      exists: (path: string) => entryByPath.has(path),
+    };
+  }
 
   /// Tagged suggestion. `dir` is the existing autocomplete from the
   /// loaded tree; `new-file` is the placeholder filename the prompt
@@ -423,6 +432,11 @@
         }
         const listing = firstAncestor(judged, (dir) => tree.loadingDirs[dir] === true);
         if (listing) return { kind: "dir-listing", path: listing };
+        // A `\` typed after a directory the tree lists reads as a separator,
+        // so the row also says what to type. The path is refused all the same.
+        if (backslashSeparates(judged, heldNames(), (dir) => folderSet.has(dir))) {
+          return { kind: "invalid", reason: BACKSLASH_SEPARATOR_REASON };
+        }
       }
       return { kind: "invalid", reason: validation.reason };
     }

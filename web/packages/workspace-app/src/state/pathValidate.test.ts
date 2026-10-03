@@ -4,6 +4,7 @@ import {
   appendDefaultMd,
   backslashReason,
   backslashRuleSubject,
+  backslashSeparates,
   preserveExtension,
   proposeDefaultFilename,
   splitPath,
@@ -44,6 +45,39 @@ describe("backslashReason", () => {
     ["a path with nothing to hold it against", "x\\y/a.md", {}],
   ] as const)("%s is refused", (_name, path, held) => {
     expect(backslashReason(path, held)).toBe(REFUSED);
+  });
+});
+
+describe("backslashSeparates", () => {
+  const dirs = ["docs", "docs/watch", "x", "x\\y"];
+  const isDir = (path: string) => dirs.includes(path);
+  const exists = (path: string) => [...dirs, "notes.md"].includes(path);
+
+  test.each([
+    ["a new name after a listed directory", "docs\\new.md", { exists }],
+    ["a new name after a listed directory inside another", "docs/watch\\new.md", { exists }],
+    ["a path of two, the first after a listed directory", "docs\\watch\\new.md", { exists }],
+    ["a path that stops at the backslash", "docs\\", { exists }],
+    ["a move's last name after a listed directory", "docs\\notes.md", { source: "notes.md", exists }],
+  ] as const)("%s reads as a separator", (_name, path, held) => {
+    expect(backslashSeparates(path, held, isDir)).toBe(true);
+  });
+
+  test.each([
+    ["a path that holds none", "docs/new.md", { exists }],
+    ["a path the rule passes", "x\\y/new.md", { exists }],
+    ["a name whose text before it names nothing", "p\\q.md", { exists }],
+    ["a name whose text before it names a file", "notes.md\\x", { exists }],
+    ["a refused name after a directory that holds one after a listed directory's name", "x\\y/p\\q.md", { exists }],
+  ] as const)("%s does not", (_name, path, held) => {
+    expect(backslashSeparates(path, held, isDir)).toBe(false);
+  });
+
+  test.each([
+    ["under a directory", "docs/\\new.md"],
+    ["at the top", "\\new.md"],
+  ])("a backslash that opens a name %s follows no directory, whatever the caller calls one", (_where, path) => {
+    expect(backslashSeparates(path, {}, () => true)).toBe(false);
   });
 });
 
