@@ -1021,6 +1021,15 @@ impl Drop for WorkspaceOffSettlement<'_> {
     }
 }
 
+/// Where a mount request left its workspace.
+struct MountedAt {
+    /// The prefix the workspace's record is kept at.
+    record: String,
+    /// The prefix the host serves the workspace at: the record's, or the
+    /// prefix of the mount the root already had.
+    served: String,
+}
+
 impl DevserverState {
     /// Register the workspace at `root` and mount it (on) at the stable
     /// prefix derived from the root its registry row stores, whichever
@@ -1047,12 +1056,15 @@ impl DevserverState {
             .within_mount_bound(started, root, self.host.root_key(root))
             .await??;
         let mounted = self.mount_key_at(root, &key, None, started).await?;
-        Ok((mounted, key))
+        Ok((mounted.served, key))
     }
 
-    /// Publish desired-on + `starting` before awaiting the bounded mount.
-    /// Returns the prefix actually mounted at (or the current stable prefix
-    /// when an equivalent attempt is already pending).
+    /// Publish desired-on + `starting` before awaiting the bounded mount of
+    /// the workspace `root` resolves to, asked for at `prefix`, the prefix
+    /// that names `root`. Returns the prefix the workspace's record is kept
+    /// at: `prefix`, or the prefix of the registry row the registration
+    /// answers when `root` is another row's (see
+    /// [`mount_key_at`](Self::mount_key_at)).
     ///
     /// Rejects a `prefix` that collides with the reserved `/api/` namespace.
     /// The host's own collision guard rejects a `prefix` already taken by a
@@ -1063,7 +1075,9 @@ impl DevserverState {
         let key = self
             .within_mount_bound(started, root, self.host.root_key(root))
             .await??;
-        self.mount_key_at(root, &key, Some(prefix), started).await
+        self.mount_key_at(root, &key, Some(prefix), started)
+            .await
+            .map(|mounted| mounted.record)
     }
 
     /// [`mount_at`](Self::mount_at) once `root` has resolved to `key`, for a
@@ -1071,18 +1085,27 @@ impl DevserverState {
     /// names none, at the prefix derived from the root the registration's
     /// registry row stores. The workspace's record goes by that stored root
     /// whichever spelling `root` is, so one workspace has one record and one
-    /// prefix, which every entry point finds. The registration and the attempt
-    /// share the one mount bound with the resolution before them, so the
-    /// request answers within it whichever step the root stops answering in;
-    /// only the wait for the prefix's attempt lock falls outside it, as for
-    /// every attempt.
+    /// prefix, which every entry point finds.
+    ///
+    /// A request keeps the prefix it names when `root` is the answered row's
+    /// stored root, or is `key`, as the root of a record kept under the
+    /// canonical path is. Any other `root` resolves into the directory of a
+    /// registry row that does not store it, as the stored root of a second
+    /// row for that directory does: the mount then goes at the answered
+    /// row's own prefix, as a request that names none does, so the directory
+    /// is mounted once, under one record, whichever of its rows is asked.
+    ///
+    /// The registration and the attempt share the one mount bound with the
+    /// resolution before them, so the request answers within it whichever
+    /// step the root stops answering in; only the wait for the prefix's
+    /// attempt lock falls outside it, as for every attempt.
     async fn mount_key_at(
         &self,
         root: &Path,
         key: &Path,
         prefix: Option<&str>,
         started: tokio::time::Instant,
-    ) -> Result<String, Error> {
+    ) -> Result<MountedAt, Error> {
         self.startup.refuse_mount_at_stop(root)?;
         if let Some(prefix) = prefix {
             reject_reserved_prefix(prefix)?;
@@ -1101,18 +1124,26 @@ impl DevserverState {
                 error => error,
             })?;
         let prefix = match prefix {
-            Some(prefix) => prefix.to_string(),
-            None => registered_workspace_prefix(&row.root_path)?,
+            Some(prefix) if root == row.root_path || root == key => prefix.to_string(),
+            _ => registered_workspace_prefix(&row.root_path)?,
         };
         let Some(attempt) = self.begin_registered_mount(&row.root_path, key, &prefix)? else {
-            return Ok(prefix);
+            return Ok(MountedAt {
+                served: prefix.clone(),
+                record: prefix,
+            });
         };
         self.persist_state();
-        self.execute_mount_attempt(
-            attempt,
-            self.mount_timeout.saturating_sub(started.elapsed()),
-        )
-        .await
+        let served = self
+            .execute_mount_attempt(
+                attempt,
+                self.mount_timeout.saturating_sub(started.elapsed()),
+            )
+            .await?;
+        Ok(MountedAt {
+            record: prefix,
+            served,
+        })
     }
 
     /// Run one step of a mount request that started at `started` within what
@@ -1426,6 +1457,12 @@ impl DevserverState {
     /// but keeps the registration with an empty token; `on:true` remounts at
     /// the SAME prefix with a freshly-minted token. Idempotent in both
     /// directions. Distinct from Forget, which drops the registration.
+    ///
+    /// Where the registry holds a second row for the directory the row at
+    /// `prefix` resolves into, an `on` mounts that directory under the row
+    /// the registration answers, at that row's own prefix
+    /// ([`mount_at`](Self::mount_at)), and returns that row: the row at
+    /// `prefix` stays off, with the record it had.
     async fn set_workspace_on(
         &self,
         prefix: &str,
@@ -1446,8 +1483,8 @@ impl DevserverState {
                 None => return Ok(SetWorkspaceOnResult::Updated(None)),
             },
         };
-        if on {
-            self.mount_at(&root, prefix).await?;
+        let answered = if on {
+            self.mount_at(&root, prefix).await?
         } else {
             // A pending attempt must lose to the newer off intent before its
             // completion can publish. A mounted row can first run the existing
@@ -1493,10 +1530,11 @@ impl DevserverState {
             }
             self.host.clear_canonical_root_lifecycle(&root);
             self.persist_state();
-        }
+            prefix.to_string()
+        };
         Ok(SetWorkspaceOnResult::Updated(
-            self.entry_for(prefix)
-                .or_else(|| self.library_off_entry(prefix)),
+            self.entry_for(&answered)
+                .or_else(|| self.library_off_entry(&answered)),
         ))
     }
 
