@@ -710,6 +710,66 @@ describe("a drawing nobody drew on", () => {
 
     expect(disk.get(tab.path)?.content).toContain("first-stroke");
   });
+
+  const PICTURE_FILES = { picture: { id: "picture", mimeType: "image/png", dataURL: "data:image/png;base64,AAAA", created: 1 } };
+  const PICTURE = { id: "image", type: "image", version: 1, versionNonce: 5, fileId: "picture", status: "saved", isDeleted: false };
+  const PICTURE_DRAWING = JSON.stringify({ elements: [PICTURE], appState: {}, files: PICTURE_FILES }, null, 2);
+  const elementsOf = (json: string | undefined) =>
+    (JSON.parse(json ?? "{}") as { elements?: Array<{ id: string; status?: string }> }).elements?.map((el) => [el.id, el.status]);
+
+  test("an image the library marks as failing to decode leaves the drawing clean and unwritten", async () => {
+    const { pane, tab, write } = await loadedTab("notes/picture.excalidraw", PICTURE_DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    board.failImageDecode("picture");
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({
+      marked: (board.elements as Array<{ status?: string }>).map((el) => el.status),
+      dirty,
+      writes: write.mock.calls.length,
+      content: disk.get(tab.path)?.content,
+    }).toEqual({ marked: ["error"], dirty: false, writes: 0, content: PICTURE_DRAWING });
+  });
+
+  test("a stroke drawn after the library's mark is written, with the mark", async () => {
+    const { pane, tab } = await loadedTab("notes/picture.excalidraw", PICTURE_DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    board.failImageDecode("picture");
+    await vi.advanceTimersByTimeAsync(200);
+    board.stroke({ id: "stroke", type: "line", version: 1 });
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ dirty, written: elementsOf(disk.get(tab.path)?.content) }).toEqual({
+      dirty: true, written: [["image", "error"], ["stroke", undefined]],
+    });
+  });
+
+  test("a stroke in the same debounce as the library's mark is written", async () => {
+    const { tab } = await loadedTab("notes/picture.excalidraw", PICTURE_DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    board.failImageDecode("picture");
+    board.stroke({ id: "stroke", type: "line", version: 1 });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect({ dirty: isDirty(tab), buffer: elementsOf(tab.content) }).toEqual({
+      dirty: true, buffer: [["image", "error"], ["stroke", undefined]],
+    });
+  });
 });
 
 describe("a board during its tab's load", () => {
@@ -1636,5 +1696,33 @@ describe("a live drawing", () => {
       background: PICKED,
       pushed: [PICKED],
     });
+  });
+
+  test("an image the library marks as failing to decode is not pushed, and a stroke after it is", async () => {
+    const files = { picture: { id: "picture", mimeType: "image/png", dataURL: "data:image/png;base64,AAAA", created: 1 } };
+    const image = { id: "image", type: "image", version: 1, versionNonce: 5, fileId: "picture", status: "saved", isDeleted: false };
+    const { tab } = await loadedTab("notes/live-picture.excalidraw", JSON.stringify({ elements: [image], appState: {}, files }));
+    const { board } = await mountBoard(tab);
+    await board.start();
+    await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+    const socket = sceneSockets[0]!;
+    socket.open();
+    socket.frame({
+      type: "snapshot", path: tab.path, version: 1, elements: [image], appState: {}, files,
+      dirty: false, mtime_ns: "1000000000", cursors: [],
+    });
+    expect(tab.doc?.state).toBe("attached");
+    const debounce = () => new Promise((resolve) => setTimeout(resolve, 260));
+    await debounce();
+    board.failImageDecode("picture");
+    await debounce();
+    const afterMark = { pushes: socket.pushes().length, dirty: isDirty(tab) };
+    board.stroke(STROKE);
+    await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
+
+    expect({
+      afterMark,
+      pushed: (socket.pushes()[0]!.elements as Array<{ id: string }>).map((el) => el.id),
+    }).toEqual({ afterMark: { pushes: 0, dirty: false }, pushed: ["stroke"] });
   });
 });

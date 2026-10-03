@@ -33,6 +33,12 @@
 //      (react-dom.development.js:18724-18741), or calls a class boundary's
 //      componentDidCatch (:18746-18786). Deletions run in the mutation phase
 //      before that callback's layout phase (:22891, :26849-26862).
+//   8. After a scene gains image elements, the library decodes their files,
+//      and for a file that fails it replaces every element, giving each
+//      image of that file `status: "error"` (:28641-28666) in a copy whose
+//      version, nonce and timestamp move; an image already marked is left
+//      as it is (chunk:22848-22870). The replace is a scene update, so a
+//      change is reported after it.
 //
 // The restore and the serializer are read from dist/dev/chunk-4FTI6OG3.js,
 // the reconcile from dist/dev/index.js.
@@ -182,6 +188,9 @@ export type Board = {
   holdRenders(): void;
   /// Run the held renders: each shows its appState and reports the change.
   render(): Promise<void>;
+  /// Step 8: the library marks every image of a file that failed to decode
+  /// and reports the change.
+  failImageDecode(fileId: string): void;
   /// Unmount the library's App and report its failure to a rendered boundary.
   fail(): void;
 };
@@ -273,6 +282,20 @@ export function excalidrawBoard(latest: () => unknown): Board {
       held = null;
       for (const run of runs) run();
       await Promise.resolve();
+    },
+    failImageDecode(fileId) {
+      elements = elements.map((element) =>
+        element.type === "image" && element.fileId === fileId && element.status !== "error"
+          ? {
+              ...element,
+              status: "error",
+              updated: Date.now(),
+              version: Number(element.version) + 1,
+              versionNonce: Number(element.versionNonce ?? 0) + 1,
+            }
+          : element,
+      );
+      latestProps().onChange();
     },
     fail() {
       elements = [];
