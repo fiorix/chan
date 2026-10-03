@@ -205,7 +205,8 @@ Disable terminal secret masking explicitly:
 KEYS:
 The leaf paths printed by `chan config get` are the current serialized
 values. Every printed scalar is readable and writable. Optional editor
-font and Hybrid surface values accept `none` to clear them.
+font, Hybrid surface, terminal secret masking and default profile values
+accept `none` to clear them.
 
 Enum values are the lowercase values printed by get. Integers retain
 their live bounds: editor font 10..=32, terminal scrollback 10..=50,
