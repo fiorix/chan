@@ -8,7 +8,7 @@ import FileEditorTab from "./FileEditorTab.svelte";
 import { api, sessionWindowId } from "../api/client";
 import { setSocketFactory } from "../api/transport";
 import { demoSocketFactory } from "../demo/socket";
-import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
+import { resetSceneSyncForTests, sceneSessionFor } from "../state/sceneSync.svelte";
 import { applySessionRoster } from "../state/session.svelte";
 import { ApiError } from "../api/errors";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
@@ -1599,40 +1599,124 @@ describe("a live drawing", () => {
     return next;
   }
 
-  test.each([
-    ["refused while the socket is down", true],
-    ["on the wire when the socket drops", false],
-  ])("a background %s gives way to the reattach's snapshot and is not offered again", async (_when, refused) => {
-    const PICKED = "#123456";
-    const { tab, board, socket } = await attachedDrawing();
-    // The library's render of the snapshot's appState comes first.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    vi.useFakeTimers();
-    if (refused) socket.drop();
-    board.pickBackground(PICKED);
-    await vi.advanceTimersByTimeAsync(250);
-    const beforeDrop = backgroundsPushed(socket);
-    if (!refused) socket.drop();
-    const next = await nextSocket();
-    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
-    await vi.advanceTimersByTimeAsync(400);
-    vi.useRealTimers();
+  const PICKED = "#123456";
+  type Attached = Awaited<ReturnType<typeof attachedDrawing>>;
+  /// Each way a background this window picked misses the authority. A way
+  /// picks the background on fake time, lets the board's flush offer it, and
+  /// answers the socket the next snapshot lands on.
+  const MISSES: [string, unknown[], (at: Attached) => Promise<SceneSocket>][] = [
+    [
+      "refused while the socket is down",
+      [],
+      async ({ board, socket }) => {
+        socket.drop();
+        board.pickBackground(PICKED);
+        await vi.advanceTimersByTimeAsync(250);
+        return nextSocket();
+      },
+    ],
+    [
+      "on the wire when the socket drops",
+      [PICKED],
+      async ({ board, socket }) => {
+        board.pickBackground(PICKED);
+        await vi.advanceTimersByTimeAsync(250);
+        socket.drop();
+        return nextSocket();
+      },
+    ],
+    [
+      "refused between a new socket's opening and its snapshot",
+      [],
+      async ({ board, socket }) => {
+        socket.drop();
+        const next = await nextSocket();
+        board.pickBackground(PICKED);
+        await vi.advanceTimersByTimeAsync(250);
+        return next;
+      },
+    ],
+    [
+      "refused while the session is degraded with its socket open",
+      [],
+      async ({ tab, board, socket }) => {
+        sceneSessionFor(tab.id)!.degrade();
+        board.pickBackground(PICKED);
+        await vi.advanceTimersByTimeAsync(250);
+        return socket;
+      },
+    ],
+  ];
 
-    expect({
-      beforeDrop,
+  /// What a pick that no authority confirmed reads as once the next snapshot
+  /// has been applied, and again once the authority has acked the push that
+  /// offers it. The snapshot holds a peer's background, picked meanwhile.
+  async function throughSnapshot(tab: FileTab, board: ReturnType<typeof excalidrawBoard>, on: SceneSocket) {
+    const before = backgroundsPushed(on).length;
+    on.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    await vi.advanceTimersByTimeAsync(400);
+    const read = () => ({
       background: board.appState.viewBackgroundColor,
       buffer: tab.content.includes(PICKED),
-      pushed: backgroundsPushed(next),
+      offered: backgroundsPushed(on).slice(before),
       dirty: isDirty(tab),
       state: tab.doc?.state,
-    }).toEqual({
-      beforeDrop: refused ? [] : [PICKED],
-      background: "#ffffff",
-      buffer: false,
-      pushed: [],
-      dirty: false,
-      state: "attached",
     });
+    const waiting = read();
+    on.frame({ type: "push-ok", version: 2, changed: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const confirmed = read();
+    vi.useRealTimers();
+    return { waiting, confirmed };
+  }
+  const KEEPS_THE_PICK = {
+    waiting: { background: PICKED, buffer: true, offered: [PICKED], dirty: true, state: "attached" },
+    confirmed: { background: PICKED, buffer: true, offered: [PICKED], dirty: false, state: "attached" },
+  };
+
+  test.each(MISSES)(
+    "a background %s stays over the next snapshot, is offered after it and reads unsaved until its ack",
+    async (_way, sentBefore, miss) => {
+      const at = await attachedDrawing();
+      // The library's render of the snapshot's appState comes first.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      vi.useFakeTimers();
+      const on = await miss(at);
+      const before = sceneSockets.flatMap((socket) => backgroundsPushed(socket));
+
+      expect({ before, ...(await throughSnapshot(at.tab, at.board, on)) }).toEqual({ before: sentBefore, ...KEEPS_THE_PICK });
+    },
+  );
+
+  test("a background on the wire at a drop with no board bound ends as it does with one", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    await unmount(mounted.pop()!);
+    const { board: rebound } = await mountBoard(tab);
+    socket.drop();
+    const next = await nextSocket();
+    const before = backgroundsPushed(socket);
+    // The board binds after the snapshot has landed, so the session replays it.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    await rebound.start();
+    await vi.advanceTimersByTimeAsync(400);
+    const read = () => ({
+      background: rebound.appState.viewBackgroundColor,
+      buffer: tab.content.includes(PICKED),
+      offered: backgroundsPushed(next),
+      dirty: isDirty(tab),
+      state: tab.doc?.state,
+    });
+    const waiting = read();
+    next.frame({ type: "push-ok", version: 2, changed: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const confirmed = read();
+    vi.useRealTimers();
+
+    expect({ before, waiting, confirmed }).toEqual({ before: [PICKED], ...KEEPS_THE_PICK });
   });
 
   /// The element ids of each push on `socket`.
