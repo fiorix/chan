@@ -88,6 +88,33 @@ describe("inlinePageResources", () => {
     expect(() => auditSelfContained(root)).not.toThrow();
   });
 
+  test("leaves a fragment-only src alone when currentSrc resolves to the page", async () => {
+    imagesHaveBoxes();
+    vi.stubGlobal("fetch", vi.fn(async () => fetchOk("<!doctype html>", "text/html")));
+    const root = page('<img src="#">');
+    const img = root.querySelector("img")!;
+    Object.defineProperty(img, "currentSrc", { value: "http://localhost:3000/#" });
+
+    await expect(inlinePageResources(root)).resolves.toBeUndefined();
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(img.getAttribute("src")).toBe("#");
+  });
+
+  test("fetches and names an ordinary image by its src attribute", async () => {
+    imagesHaveBoxes();
+    const root = page('<img src="/api/fs/missing.png?t=tok">');
+    const img = root.querySelector("img")!;
+    Object.defineProperty(img, "currentSrc", {
+      value: "http://localhost:3000/api/fs/missing.png?t=tok",
+    });
+
+    await expect(inlinePageResources(root)).rejects.toThrow(
+      "image /api/fs/missing.png could not be fetched",
+    );
+    expect(fetch).toHaveBeenCalledWith("/api/fs/missing.png?t=tok", expect.anything());
+  });
+
   test("starts independent image fetches before either one settles", async () => {
     decodesSettleAtOnce();
     vi.stubGlobal("Image", StandInImage);
