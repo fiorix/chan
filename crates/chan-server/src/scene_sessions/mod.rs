@@ -1868,11 +1868,14 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
 /// does beside a free one, and says in the log that it is still looking
 /// once `STOP_CELL_WARN_AFTER` has passed. The reset or the import that
 /// holds the cell flushes and closes the sessions itself only once its
-/// first wait has ended with no other owner of the workspace; one whose
-/// first wait ends busy lets the cell go with every session as it was, and
-/// the flusher is then the only one left to flush them. Nothing here bounds
-/// the looking: the tenant's task owner aborts a flusher that has not ended
-/// by the end of its shutdown grace.
+/// first wait has ended with no other owner of the workspace. One whose
+/// first wait ends busy flushes and closes them too when it reads the stop
+/// signal as it lets the cell go; when the stop lands after that read, the
+/// cell is let go with every session as it was and the flusher is the only
+/// one left to flush them. Nothing here bounds the looking: the tenant's
+/// task owner aborts a flusher that has not ended by the end of its
+/// shutdown grace, which is why a route that sees the stop does not leave
+/// its sessions to the flusher.
 pub fn spawn_flusher(
     registry: Arc<SceneRegistry>,
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
@@ -4162,9 +4165,10 @@ mod tests {
         );
     }
 
-    /// A reset or an import whose first wait ends busy holds the cell for
-    /// that wait and lets it go with its workspace in it and every session
-    /// as it was, so the flusher is the only one left to flush them.
+    /// A reset or an import whose first wait ends busy, and which reads no
+    /// stop signal as it lets the cell go, lets it go with its workspace in
+    /// it and every session as it was. A stop that landed after that read
+    /// leaves the flusher the only one to flush them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_flusher_told_to_stop_flushes_after_a_long_hold_that_ends_busy() {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))]);

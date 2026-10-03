@@ -286,7 +286,7 @@ fn perform_metadata_import_with(
         std::thread::sleep(Duration::from_millis(25));
     }
     if Arc::strong_count(&workspace_strong) > 1 {
-        install_workspace_cell(state, &mut cell_guard, workspace_strong, search_aggression);
+        restore_busy_workspace(state, &mut cell_guard, workspace_strong, search_aggression);
         return Err(MetadataImportError::Busy);
     }
     close_workspace_sessions(state, &workspace_strong, "import");
@@ -574,6 +574,43 @@ pub(super) fn close_workspace_sessions(
             .await;
     });
     state.terminal_sessions.close_all(CloseReason::Workspace);
+}
+
+/// Fill the cell again with the workspace a route's first wait found another
+/// owner of, and stand in for the flushers of a tenant told to stop.
+///
+/// The route has closed no session by then: it closes them only past
+/// admission. A flusher told to stop flushes them once it can read the cell,
+/// but the tenant's task owner aborts a flusher that has not ended by the
+/// end of its shutdown grace, and a hold that begins as the stop lands, or
+/// after it, can last past that. So at a stop the route flushes and closes the
+/// document and drawing sessions itself, as a stopped flusher does, and
+/// leaves the terminals to the tenant's teardown.
+///
+/// The stop signal is read last, with the cell filled and its write guard
+/// still held. A stop that lands after that read finds a cell its flushers
+/// can read at their next look, with their whole grace ahead of them. The
+/// signal's value is all that is read: the task owner sends it before every
+/// abort it makes, so a tenant whose signal reads false has aborted nothing.
+pub(super) fn restore_busy_workspace(
+    state: &AppState,
+    cell_slot: &mut Option<WorkspaceCell>,
+    workspace: Arc<Workspace>,
+    search_aggression: SearchAggression,
+) {
+    install_workspace_cell(state, cell_slot, workspace.clone(), search_aggression);
+    if *state.shutdown_rx.borrow() {
+        futures::executor::block_on(async {
+            state
+                .doc_sessions
+                .close_all("shutdown", Some(&workspace), &state.self_writes)
+                .await;
+            state
+                .scene_sessions
+                .close_all("shutdown", Some(&workspace), &state.self_writes)
+                .await;
+        });
+    }
 }
 
 pub(super) fn workspace_search_aggression(

@@ -24,7 +24,8 @@ use crate::state::AppState;
 
 use super::metadata::{
     close_workspace_sessions, held_past_release, install_workspace_cell, lock_still_held,
-    reopen_released, workspace_search_aggression, Release, WorkspaceCellInstallError,
+    reopen_released, restore_busy_workspace, workspace_search_aggression, Release,
+    WorkspaceCellInstallError,
 };
 
 /// Body of `POST /api/storage/reset`. Two modes mirror the chan-
@@ -167,7 +168,11 @@ fn err_from_reset(e: &ResetError) -> Response {
 /// fresh watcher + indexer). This avoids reopening through chan-workspace,
 /// which would race the lingering Arc on the per-workspace flock and fail
 /// with `WorkspaceLocked`. A Busy after our copy is dropped has already
-/// closed the workspace's sessions; a Busy before it has not.
+/// closed the workspace's sessions; a Busy before it has not, unless the
+/// tenant has been told to stop by then: its task owner may abort the
+/// flushers before they can read the cell again, so the route flushes and
+/// closes the document and drawing sessions before it lets the cell go
+/// ([`restore_busy_workspace`]).
 ///
 /// A workspace that no owner holds cannot be put back. When its lock is
 /// still held at the end of that wait, chan-workspace refuses the reset, the
@@ -251,7 +256,7 @@ fn perform_reset_with(
         // caller retries the reset. Reusing `workspace_strong` instead
         // of reopening sidesteps chan-workspace's per-workspace flock (which
         // a lingering Arc still holds).
-        install_workspace_cell(state, &mut cell_guard, workspace_strong, search_aggression);
+        restore_busy_workspace(state, &mut cell_guard, workspace_strong, search_aggression);
         return Err(ResetError::Busy);
     }
     // Admission succeeded. Flush dirty authorities against the old workspace
