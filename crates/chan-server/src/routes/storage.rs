@@ -804,6 +804,12 @@ mod tests {
     #[cfg(unix)]
     const LATE_REFERENCE_HOLD: Duration = Duration::from_millis(150);
 
+    /// How long a pin waits for its route at the session close. A route that
+    /// answers before it gets there never opens the gate, so the wait ends
+    /// on the route's answer or here and never on the gate alone.
+    #[cfg(unix)]
+    const SESSION_CLOSE_WAIT: Duration = Duration::from_secs(10);
+
     /// What a route answered beside a late reference, and what its cell holds
     /// once it has answered: whether that is the workspace the route started
     /// with, or why it holds none.
@@ -846,11 +852,21 @@ mod tests {
         let (counted, at_the_close) = tokio::sync::oneshot::channel();
         let (go_on, gone_on) = std::sync::mpsc::channel();
         install_test_session_close_gate(&state.workspace_root, counted, gone_on);
-        let route = tokio::spawn({
+        let mut route = tokio::spawn({
             let state = state.clone();
             async move { session_operation(state, archive.as_deref()).await }
         });
-        at_the_close.await.unwrap();
+        tokio::select! {
+            reached = at_the_close => reached.expect("the gate fires or stays installed"),
+            answer = &mut route => panic!(
+                "the route answered {} before its session close",
+                answer.unwrap().status()
+            ),
+            () = tokio::time::sleep(SESSION_CLOSE_WAIT) => panic!(
+                "the route neither reached its session close nor answered \
+                 within {SESSION_CLOSE_WAIT:?}"
+            ),
+        }
         let late = started_with
             .upgrade()
             .expect("the route holds its reference at the session close");
