@@ -10,9 +10,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`muse` is a submit agent.** `cs terminal write --submit=muse` is accepted and encodes as `--submit=gemini` does: the body, then a bare CR as a queue entry of its own one idle gate later. A terminal whose spawn command names `muse` as a whole word, or whose spawn environment sets `CHAN_AGENT=muse`, is derived as muse, so `cs terminal list` reports it, a team member that runs it gets its identity poke and its chord line in the generated bootstrap, and `submit.toml` takes a `[muse]` section (`CHAN_SUBMIT_MUSE` in the environment).
 
+- **The scene socket's `push-ok` frame says whether the push changed the drawing.** It carries `changed`: true when the authority's scene took anything from the push, false when it changed nothing.
+
 ### Changed
 
 - **`chan workspace forget` stops when its host says the workspace is still releasing.** When the process that holds a workspace answers a forget over its control socket with `workspace is still releasing; retry`, the command prints that answer, leaves the workspace registered and exits 75, so a script can tell a host that has not let go from a refusal. In v0.101.0 it printed that it could not reach the server, unregistered the workspace on disk and exited 0, which left the host holding a workspace its registry file no longer had. The change covers the request the command sends to the holder's control socket: the desktop app's own `chan` asks the desktop over its handoff socket first, and an answer there is not read this way. Running the command again repeats the request only while the host still serves the workspace; once the host has taken it down, the second run finds nothing serving it and forgets it on disk without asking the host. Any other error a holder answers to `chan close` or `chan workspace forget` is now printed with the "could not reach the server" warning, where only the command's own context was.
+
+- **A cancelled workspace search stops sooner.** It reads its cancel flag after each of its catalog's graph queries and at each hop of a seed, not only between seeds. One query with the pass over its rows still runs to its end.
 
 ### Fixed
 
@@ -21,6 +25,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A launcher delete on a devserver that must retry leaves the workspace off.** Deleting a workspace from a devserver's launcher while an earlier call on its folder had not let go answered 503 with `workspace is still releasing; retry` and left a failed or starting workspace marked on, so the devserver's next save wrote it on and a restart mounted a workspace whose removal had been asked for. The launcher's delete on a devserver now runs the devserver's own forget and leaves the workspace off, as `DELETE /api/devserver/workspaces/{prefix}` does. The answer is unchanged.
 
 - **A close beside a removal leaves no on/off state for the removed workspace.** A close of an unmounted workspace that ran while a removal whose caller had left was finishing could record the workspace off after the removal had forgotten its state, and a devserver started before its next save registered the workspace again, off. The close now forgets what it recorded when the workspace is no longer registered.
+
+- **A request a route cannot read is refused in one fixed sentence.** A body, a query or a path of the wrong shape no longer repeats the deserializer's message, which named Rust types such as `OpenWorkspaceRequest`. The detail is logged at debug.
+
+- **A storage reset or a metadata import beside a late reference no longer leaves the workspace missing.** When another reference to the workspace was taken at the wrong moment they answered 500 and the workspace read as missing until a restart. They now wait for the workspace to be released, or answer busy.
+
+- **`.webp`, `.avif` and `.bmp` files are served with their image types.** They were served as `application/octet-stream`.
+
+- **A drawing whose image fails to decode no longer reads as edited.** The mark the drawing library puts on such an image is not saved as an edit by itself and is not sent to a live session by itself.
+
+- **JSON values keep readable colours on a light surface in a dark app.** The JSON view colours its values by the nearest theme.
+
+- **A change of the graph's focal nodes alone takes effect at once.** It warms the layout, so the pins and releases apply without waiting for another change.
+
+- **A fenced code block closes on a closer followed by a tab.**
+
+- **The style toolbar names the chord the editor binds.**
+
+- **A link pill that could not be resolved asks again.** Only an answer is kept; a failed request no longer fixes the pill's kind for the life of the page.
 
 ### Security
 
