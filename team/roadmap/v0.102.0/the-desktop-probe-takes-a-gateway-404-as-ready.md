@@ -38,3 +38,13 @@ A code map first: which answers a gateway gives the desktop's probe, which carri
 1. A gateway target in a tunnel's gap is not ready to the connecting page's probe or to a retarget's, pinned red first with the gateway's own answer.
 2. A gateway target that answers its tenant's page is still ready, and a loopback target is classified as now.
 3. A reading on a display: a devserver behind a gateway restarted with windows open, and each window on its page again once the tunnel is back.
+
+## Code map of 2026-10-03
+
+Read in the code on the v0.102.0 integration branch by a builder and not run: no gateway, desktop or tunnel was driven.
+
+The gateway answers the probe the same way for a tunnel that is gone and for a session that is absent, expired, revoked or another devserver's: its own 404 through `not_found_response` (`gateway/crates/devserver-proxy/src/proxy.rs:293-311`, `:407-421`, `:2057-2091`), as JSON or as an HTML page by the request's `Accept`, with no mark of the cause, since the gate hides on purpose whether a devserver exists (`proxy.rs:51-55`). A tenant that is not mounted is forwarded to the host, whose root fallback answers with the launcher, normally a 200, so it reads as ready. A mounted tenant's own 404 is forwarded with no mark either. A tunnel the gateway still holds and cannot use answers 502 or 504. So the wire does not tell a gone tunnel from a stale session, and a 404 carries no reliable provenance.
+
+Of this item's three suggestions, a mark on the gateway's own 404 would mark both of those causes and weaken what the gate hides, and no endpoint on the public path tells them apart; each changes the gateway's contract, which the owner ruled out. The bound on the desktop's side is the one to build.
+
+The lead ruled its shape the same day, inside the owner's ruling and the owner's to overturn. The count lives in the desktop's Rust beside the classifier, keyed by window and target, so the connecting page and an open window's retarget share one rule and `desktop/src/connecting.js` is not touched. A gateway's 404 is not ready for the first 15 probes of a window's target and is taken as it is today after them; any other answer resets the count. At the pace the map read for each caller, that is about 30 seconds on the connecting page, inside its 20 attempts, and a few minutes for an open window, which keeps its page meanwhile; the build confirms both. So the desired contract's "never" holds during the bound and not past it: a gap that outlasts the bound still navigates, which is the fallback the owner ruled.
