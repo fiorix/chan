@@ -34,3 +34,11 @@ A later version, by the recommendation. A code map first, of every reader of `co
 1. With two clients holding one window id, each can read whether its own socket is live, pinned through the feed.
 2. A desktop's Reload that found its target not ready navigates when the target is ready, although another desktop holds that window, pinned.
 3. The three design documents' sentences on this cost are gone or say what the code does.
+
+## What shipped
+
+Built in part on 2026-10-03 on the v0.102.0 integration branch and not on `main`: the server's half, in a range the lead accepted on its report, its status files and an independent review of its whole diff, which found nothing above low. This record was written that day from those.
+
+A client tags its event socket: `GET {tenant}/ws?w=<window_id>&h=<holder>`, where `h` is opaque to the server, 1 to 64 characters of `[A-Za-z0-9_-]`. A missing, empty, repeated or malformed `h` is not an error: the socket counts toward `connected` and adds no holder. A window's record carries `holders`, the distinct tags with a live socket for the window, sorted; this server always sends it, empty when none, and a record without the field comes from a server that does not count them. `connected` is unchanged. A holder that arrives or leaves wakes the feed as a change of `connected` does, the scoped row carries the list, and the capability launch route copies a valid `h` into the tenant URL it redirects to (`crates/chan-library/src/window_presence.rs`, `windows.rs`; `crates/chan-server/src/routes/ws.rs`, `routes/library.rs`). Pinned red first through the feed with two tagged sockets on one window: acceptance 1, the server's part.
+
+The row stays open: no client tags its socket or reads the list yet. Left for the three client parts: the page reads `h` from its URL and sends it on `/ws`; the launcher's and the desktop's openers mint a tag unique to the client instance and decide by it; the desktop sets the list to "cannot say" wherever it forces `connected` to false for a buried window or a dead feed, since a stale list beside `connected: false` would read as live; acceptance 2 and 3. A tag is a claim and not an identity: any client that can open a window's socket can present any tag.
