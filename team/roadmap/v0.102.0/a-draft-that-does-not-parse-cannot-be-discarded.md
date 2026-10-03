@@ -30,3 +30,9 @@ If the owner allows it, the draft's close opens its dialog without a save when t
 
 1. The owner's ruling is recorded here.
 2. If a discard is allowed: a draft drawing whose buffer does not parse, closed, reaches its own dialog, and its Discard removes the draft with nothing written first, pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+A draft drawing whose unsaved text does not parse runs no save at its close and opens the draft's own dialog (`handleDraftTabClose`, `web/packages/workspace-app/src/state/tabs.svelte.ts`; `web/packages/workspace-app/src/components/DraftCloseModal.svelte`). The dialog then names no destination, gives the parse reason and offers Discard Draft and Cancel alone, with focus on Cancel. Discard removes the draft with nothing written first, and Cancel keeps the tab with the text as typed. The ruling is read as the state in which the close's save is refused: a draft whose text on disk does not parse and has no unsaved edit keeps the dialog that saves it, since its save promotes the file as it is. Pinned in `DraftCloseModal.test.ts` and `tabs.drawingSave.test.ts`, each pin red under a mutation; `web/packages/workspace-app/src/editor/design.md` describes the close. Left by it: what a reopen does with a draft discarded this way, raised as [a-reopened-broken-drawing-comes-back-clean](a-reopened-broken-drawing-comes-back-clean.md).

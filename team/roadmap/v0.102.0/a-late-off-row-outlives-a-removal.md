@@ -26,3 +26,9 @@ As the plan proposes: the close's arm for a root no runtime holds writes the off
 
 1. Once a removal's unregister has returned, no overlay row names the removed workspace, whatever close by root ran beside it; pinned where a seam can hold the order.
 2. `crates/chan-library/design.md` says what is left, if anything.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+A close by root that takes no runtime down writes its off, reads the registry again and forgets what it wrote when no row stores the root (`record_off_while_registered`, `crates/chan-library/src/host.rs`), in both arms of `close_workspace_for_root_locked` that write an off. Pinned through a test seam between the arm's row read and its write, through which a held unregister returns: an order held with no thread race and no timing, and with nothing registered or relinked beside the removal. The arm for a runtime that was gone by the time it was closed has no pin of its own. `crates/chan-library/design.md` says what a close beside a removal leaves.

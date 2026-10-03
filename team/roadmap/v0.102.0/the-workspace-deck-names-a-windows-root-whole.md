@@ -28,3 +28,9 @@ A suggestion beyond the record: the deck looks the window's workspace up among t
 
 1. A window on a Windows host whose workspace has a labelled row is named by that label in the workspace app's deck, pinned red first.
 2. The two design documents say what each deck shows for a window and for a row, and when a root reads whole.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+The workspace app's deck names a workspace window by the label of the row that lists its workspace (`scopedWindowContext`, `scopedWorkspaceName`, `web/packages/workspace-app/src/components/CommandLauncher.svelte`), as the launcher's deck does. A window no row lists is named from its own path cut at `/` alone, which is the launcher's rule too, so a Windows root that no row lists reads whole; no cut at a backslash was added, since a Unix directory's name may hold one. Pinned with a row that stores a Windows root, red first; both design documents say what each deck shows for a row and for a window, and when a root reads whole. Nothing was run on Windows.

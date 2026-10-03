@@ -40,3 +40,9 @@ A suggestion from the plan, widened here to the bulk closes: each route that tak
 1. A draft whose file a forced or a bulk close left in place is not reopened as a second draft, pinned red first through the move, a scripted close and a bulk close.
 2. A draft whose read failed after some bytes, closed with force and reopened, seeds no new draft with those bytes, pinned red first.
 3. What a reopen does after each such route is stated in this item and pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+A closed tab now records what its close did with a draft's file, and the reopen follows it (`reopenClosedTab`, `recoverClosedDraft`, `closeTabOnce`, `web/packages/workspace-app/src/state/tabs.svelte.ts`; `settleDeleted`, `web/packages/workspace-app/src/state/store.svelte.ts`). After a scripted close of the tab, of its pane or of every pane, forced or not, the draft's file stays: the reopen opens that draft by its path and mints nothing, with the buffer it held when that buffer was the file, unsaved text included after a forced close, as any other file's tab reopens; a tab whose last read had failed or whose load was running reads the file again. After a move to another window nothing is remembered and a reopen here opens nothing of that draft: the lead ruled so, since the other window holds it. After a delete of the path the reopen mints a new draft, seeded with the closed buffer only when that buffer was the file. Pinned in `tabs.draftClose.test.ts`, red first through the move, a scripted close and a bulk close, each pin red under a mutation. Not built, as this item says: a scripted close still leaves an empty or seed-only draft in the drafts; a file that is no draft is still remembered after a move.

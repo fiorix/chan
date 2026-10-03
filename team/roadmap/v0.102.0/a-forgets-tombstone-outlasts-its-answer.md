@@ -29,3 +29,9 @@ As suggestions: every error of the host puts the tombstone back as the still-rel
 
 1. A forget of a starting record whose host removal fails with an error other than still releasing leaves a record that a save writes and a start restores as the host holds it; pinned red first.
 2. An attempt that completed on a tombstone behind a forget answered still releasing unregisters nothing; pinned red first.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+Every error of the host's removal stands the forget's record down (`forget_workspace`, `stand_down_refused_forget`, `crates/chan-server/src/devserver.rs`): a starting record's tombstone goes back off at its own generation and any other record turns off. A mount attempt that completes on a tombstone removes nothing while the registry still holds the workspace: it closes what it mounted, takes back its starting mark and drops the tombstone (`settle_forgotten_completion`); the host's removal runs only for a workspace the registry has dropped. That is not the check this item suggested, which passes before the removal starts and cannot stop one that waits for the root's lock behind the forget. Its consequence: a forget whose caller left before the host answered ends with the workspace registered and off, where the attempt's removal used to finish it. Two pins, red first, each red under a mutation; the stale attempt's pin runs the settlement and not the attempt's task. `crates/chan-server/design.md` and the changelog say what a failed forget leaves.

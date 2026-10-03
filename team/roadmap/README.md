@@ -29,7 +29,7 @@ At the v0.101.0 GA on 2026-10-02 six items moved here from that version: four wh
 
 On 2026-10-03 the owner raised one more from use and accepted it with the report: that no line chan prints opens a running devserver in a browser, which also asks that secret masking default on in a control terminal alone. The same day the owner's own PDF exports of a slide deck were read back pixel by pixel, which settles the causes of [a-slide-decks-pdf-lacks-the-images-it-shows][pdimg] and adds to it the width half of the one design box it already named: a deck's PDF breaks lines the deck keeps whole when it plays, and paints a scrollbar into the raster. Also that day the owner asked for, and accepted with the request, `muse` as a name `cs terminal write --submit` takes, encoded as gemini's is: [the-submit-agents-name-no-muse][smuse].
 
-On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepted rows whose shape was open, a choice inside five build rows, and thirteen of the fifteen raised rows: five are accepted for a build, four for a reading or a measurement first, one closes with its documents, one closes as written costs, one carries to a later version, and one stays as it is until [a-connected-record-does-not-say-whose-socket][sockw] lands. Two raised rows still wait on a reading only the owner can take: [a-raw-devserver-restart-may-close-desktop-windows][rrwin] and [a-host-side-hide-commits-no-waiting-stroke][hdnpg]. Each item records its ruling.
+On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepted rows whose shape was open, a choice inside five build rows, and thirteen of the fifteen raised rows: five are accepted for a build, four for a reading or a measurement first, one closes with its documents, one closes as written costs, one carries to a later version, and one stays as it is until [a-connected-record-does-not-say-whose-socket][sockw] lands. Two raised rows still wait on a reading only the owner can take: [a-raw-devserver-restart-may-close-desktop-windows][rrwin] and [a-host-side-hide-commits-no-waiting-stroke][hdnpg]. Each item records its ruling. The same day the first eight rows were built on the integration branch, each item recording what shipped, and one item was raised from a build: [a-reopened-broken-drawing-comes-back-clean][rbrk].
 
 | item | state | next |
 | --- | --- | --- |
@@ -43,10 +43,10 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-workspace-search-stops-only-between-seeds][sseed] | accepted | build |
 | [the-chan-crate-exports-a-test-only-module][tstmod] | accepted | build |
 | [a-repeated-element-id-gets-a-new-id-at-every-seed][rpid] | accepted | build |
-| [a-released-commands-success-paints-over-the-deck][rlsok] | accepted | build |
+| [a-released-commands-success-paints-over-the-deck][rlsok] | accepted | cut |
 | [the-desktop-probe-takes-a-gateway-404-as-ready][gwnfd] | accepted | build |
 | [a-connected-record-does-not-say-whose-socket][sockw] | accepted | build |
-| [a-draft-that-does-not-parse-cannot-be-discarded][drdsc] | accepted | build |
+| [a-draft-that-does-not-parse-cannot-be-discarded][drdsc] | accepted | cut |
 | [a-control-socket-close-outlives-its-client][ctlcs] | accepted | build |
 | [a-close-answers-before-the-writer-lock-is-free][clfre] | accepted | build |
 | [an-unreceived-open-result-blocks-a-runtime-worker][unrc] | accepted | build |
@@ -60,23 +60,23 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [the-fdstore-e2e-prints-the-devservers-token][tokpr] | accepted | build |
 | [typed-and-dropped-names-disagree-on-a-backslash][bstyp] | accepted | build |
 | [the-desktop-cuts-a-download-name-at-its-backslash][bsd] | accepted | build |
-| [a-force-closed-draft-reopens-as-a-new-draft][freop] | accepted | build |
+| [a-force-closed-draft-reopens-as-a-new-draft][freop] | accepted | cut |
 | [a-reset-counts-a-reference-another-can-upgrade][rsupg] | accepted | build |
 | [the-control-socket-identity-names-no-library][cslib] | accepted | build |
 | [the-desktops-menu-copies-a-window-outside-its-row][mnu] | accepted | build |
-| [the-workspace-deck-names-a-windows-root-whole][dkwin] | accepted | build |
+| [the-workspace-deck-names-a-windows-root-whole][dkwin] | accepted | cut |
 | [a-background-the-authority-never-took-turns-back][bgrv] | accepted | build |
 | [hybrid-nav-leaves-a-live-drawing-unsaved][hnsav] | accepted | build |
 | [a-save-fallback-writes-an-unseeded-boards-buffer][unsd] | accepted | build |
 | [a-live-drawing-save-answers-before-the-write][erlsv] | accepted | build |
-| [a-late-off-row-outlives-a-removal][offwin] | accepted | build |
-| [a-launcher-delete-leaves-a-devserver-record-on][ldrec] | accepted | build |
-| [a-forgets-tombstone-outlasts-its-answer][fgtomb] | accepted | build |
+| [a-late-off-row-outlives-a-removal][offwin] | accepted | cut |
+| [a-launcher-delete-leaves-a-devserver-record-on][ldrec] | accepted | cut |
+| [a-forgets-tombstone-outlasts-its-answer][fgtomb] | accepted | cut |
 | [chan-workspace-forget-ignores-the-hosts-answer][fgcli] | accepted | build |
 | [a-desktop-recovery-entry-ends-with-its-run][rcorg] | accepted | decide |
 | [any-later-write-retires-a-recovery-entry][rcstl] | accepted | build |
 | [restore-on-a-live-board-pushes-an-older-scene][rstlv] | accepted | build |
-| [the-decks-close-row-keeps-the-window-session][dkcls] | accepted | build |
+| [the-decks-close-row-keeps-the-window-session][dkcls] | accepted | cut |
 | [a-forced-pane-close-pushes-a-waiting-stroke][fclng] | accepted | build |
 | [a-removal-does-not-hold-the-row-it-selected][rmrace] | accepted | build |
 | [a-window-close-does-not-save-first][wclsv] | accepted | build |
@@ -87,7 +87,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-connecting-page-hide-lives-in-memory-alone][hdmem] | accepted | build |
 | [a-sync-socket-closed-before-a-frame-stays-off][syoff] | accepted | read |
 | [an-off-and-the-cli-forget-name-another-workspace][fgoth] | accepted | build |
-| [a-refused-add-registers-late-and-an-on-is-not-kept][adon] | closed | cost |
+| [a-refused-add-registers-late-and-an-on-is-not-kept][adon] | withdrawn | GA |
 | [a-root-relinked-while-mounted-cannot-be-handed-off][rlmt] | deferred | move |
 | [no-client-reads-the-devserver-stopping-code][stprd] | accepted | measure |
 | [a-stopping-devservers-report-left-four-findings][stp4] | accepted | build |
@@ -103,6 +103,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
 | [no-printed-line-opens-the-devserver-in-a-browser][dsurl] | accepted | build |
 | [the-submit-agents-name-no-muse][smuse] | accepted | build |
+| [a-reopened-broken-drawing-comes-back-clean][rbrk] | raised | decide |
 
 [dedup]: v0.102.0/one-question-is-answered-in-many-places.md
 [cmts]: v0.102.0/frontend-comments-narrate-history.md
@@ -174,6 +175,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 [rgate]: v0.102.0/a-hung-root-keeps-restored-tenants-at-503.md
 [dsurl]: v0.102.0/no-printed-line-opens-the-devserver-in-a-browser.md
 [smuse]: v0.102.0/the-submit-agents-name-no-muse.md
+[rbrk]: v0.102.0/a-reopened-broken-drawing-comes-back-clean.md
 
 ## Completed
 

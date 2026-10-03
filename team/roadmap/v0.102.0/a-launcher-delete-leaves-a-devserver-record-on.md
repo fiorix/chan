@@ -31,3 +31,9 @@ The fix round's two shapes, each more than one call: a hook through which the la
 
 1. A launcher delete on a devserver, refused at the unregister's own conflict, of a failed and of a starting record, then a save and a restore, mounts nothing; pinned red first.
 2. The same refused at the registry-write permit, with a restore before the held unregister returns; pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+The hook, as the lead ruled: the launcher's delete on a devserver is the devserver's forget. A surface supplies its own removal (`WorkspaceRemoval`, `crates/chan-server/src/routes/library.rs`), which `handle_remove_workspace` runs in place of the host's and answers the same way, so the 503 with `Retry-After: 1` is unchanged at both refusal points and a delete the host fails turns the record off as a forget's does. The overlay's format is unchanged. Pinned for a failed and for a starting record, at the unregister's own conflict and beside an abandoned unregister, red first. Left: the launcher's off still touches no devserver record; the same hook would serve it.

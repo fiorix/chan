@@ -25,3 +25,9 @@ As the builder recommends: the deck's row discards the window's session before i
 ## Acceptance
 
 1. The deck's Close window and a chord assigned to it discard the window's session before they ask the desktop, and no save of the page follows; pinned red first.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+The deck's Close window row, and a chord assigned to it, discard the window's session before they write the recovery buffer and ask the desktop (`discardWindowSession` then `flushAndCloseWindow`, `web/packages/workspace-app/src/state/commands/global.ts`), the order of the close-window command. Pinned in `App.windowClose.test.ts` in the shape of the row's other pins, and in `globalWindowCommands.test.ts` against the real store: the row sends the session's `DELETE`, then the close request, and neither the debounced save nor the save at a `pagehide` writes the session after it. The close prompt's module still imports no store.

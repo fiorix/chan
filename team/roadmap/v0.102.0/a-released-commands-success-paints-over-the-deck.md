@@ -33,3 +33,9 @@ Give the success path the ownership the error path has: after the command answer
 1. A released awaited command that succeeds paints nothing and runs no success handler, with the draft showing the list, a newer command's card or a question; pinned red first.
 2. A command that still owns its card shows its success and runs its host's handler as before; pinned.
 3. Every new pin has a mutation that turns it red at its own assertion, and the two design documents say which run shows its success.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff and its own gate. This record was written that day from that reading.
+
+A command shows its success, and the host's handler runs, only while its run holds the deck: the deck open, on the draft that started the run, with the run's token (`holdsDeck`, `web/packages/web-shared/src/components/CommandDeck.svelte`), read when the command answers and again after the success card's 260 ms. A run that lost the deck retires its own card and does nothing else. Unlike an error, a success does not ask for the run's pending card. Built to this item's letter, a Close chosen from a window's own actions stopped showing its success, because both hosts clear the card themselves when that window leaves the roster; that was measured red in the workspace app, and the lead ruled that the token alone decides a success. Pinned in `CommandDeck.test.ts` and the workspace app's `CommandLauncher.test.ts`, each pin red under a mutation; `web/packages/launcher/design.md` and the workspace app's `design.md` say which run shows its success and how that differs from an error. Not run: Show, and the launcher's own fallback, which was read only. A success that answers a hidden deck, or one hidden inside the 260 ms, no longer runs the host's handler, so the draft is not cleared.
