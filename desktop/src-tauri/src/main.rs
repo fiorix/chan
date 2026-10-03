@@ -2998,7 +2998,10 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
 /// [`chan_server::mount_timed_out`]'s words, naming the path as it was sent.
 /// The registration's blocking call is not cancelled there and ends when the
 /// path answers; an open dropped there gives the root's lock back to a close
-/// or a removal.
+/// or a removal. If a window mint fails after `serve::start` first publishes
+/// the mount, that function awaits `stop_handle` to close it. This bound can
+/// expire during that close; this function then emits the mount-timeout notice
+/// without observing the close's result.
 #[cfg(any(unix, windows))]
 async fn register_and_open_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -6486,12 +6489,12 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
 /// Mint a copy of the local workspace window `source`: a record of its own
 /// for the same workspace, stamped `origin`. New Window copies with a native
 /// origin, which the watcher opens as a window, and Open in Browser with a
-/// browser origin, which it gives no native twin. The copy stores the root of
-/// the workspace's registry row, the path the launcher nests its windows
-/// under, whatever path `source` stores: the host finds the workspace runtime,
-/// or the registry row, that goes by the source's path. A source stored under
-/// another path, such as the one a relinked root resolves to, keeps it. A
-/// source that stores no path names no workspace and is refused.
+/// browser origin, which it gives no native twin. The host first looks for a
+/// workspace runtime that goes by the source's path, by its canonical root or
+/// the root it was opened at, and stores the root that runtime was opened at.
+/// Otherwise it stores the root of a registry row that goes by the path, or
+/// the source path itself when neither does. A source that stores no path
+/// names no workspace and is refused.
 fn mint_workspace_window_copy(
     embedded: &embedded::EmbeddedServer,
     source: &chan_server::WindowRecord,
