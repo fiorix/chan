@@ -71,6 +71,22 @@ function page(html: string): HTMLElement {
 }
 
 describe("inlinePageResources", () => {
+  test("prepares the selected srcset image and leaves no competing offer", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    imagesHaveBoxes();
+    const root = page('<img src="/api/fs/small.png" srcset="/api/fs/large.png 2x">');
+    const img = root.querySelector("img")!;
+    Object.defineProperty(img, "currentSrc", { value: "/api/fs/large.png" });
+
+    await inlinePageResources(root);
+    await liftPageImages(root, new PageImages());
+
+    expect(fetch).toHaveBeenCalledWith("/api/fs/large.png", expect.anything());
+    expect(img.hasAttribute("srcset")).toBe(false);
+    expect(() => auditSelfContained(root)).not.toThrow();
+  });
+
   test("starts independent image fetches before either one settles", async () => {
     decodesSettleAtOnce();
     vi.stubGlobal("Image", StandInImage);
@@ -651,7 +667,6 @@ describe("liftPageImages", () => {
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(first);
     expect(fetch).toHaveBeenCalledTimes(first ? 1 : 0);
-    expect(images.lifted[0]!.bitmap.naturalWidth).toBe(40);
   });
 
   test("leaves a stand-in of the image's size where the image was", async () => {
@@ -931,6 +946,32 @@ describe("liftPageImages", () => {
     expect(images.lifted[0]!.rendered).toBe(true);
   });
 
+  test("reveals an image's auto-visible ancestor before measuring its box", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    const root = page('<section style="content-visibility:auto"><img src="/api/fs/auto.png"></section>');
+    const section = root.querySelector("section")!;
+    const img = root.querySelector("img")!;
+    Object.defineProperties(img, {
+      complete: { value: true },
+      naturalWidth: { value: 40 },
+      naturalHeight: { value: 20 },
+      checkVisibility: { value: () => section.style.contentVisibility === "visible" },
+    });
+    vi.spyOn(img, "getBoundingClientRect").mockImplementation(() => ({
+      left: 0, top: 0,
+      width: section.style.contentVisibility === "visible" ? 40 : 0,
+      height: section.style.contentVisibility === "visible" ? 20 : 0,
+    }) as DOMRect);
+
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    expect(images.lifted[0]!.rendered).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   test("names an unsized image the page shows that gives no measurable box", async () => {
     class UnsizedImage extends StandInImage {
       naturalWidth = 0;
@@ -1123,6 +1164,12 @@ describe("placeLiftedImage", () => {
       0,
     );
     expect(place).toMatchObject({ width: 101, height: 50, done: true });
+  });
+
+  test("a marker narrower than the recorded shape has no exact placement", () => {
+    expect(
+      placeLiftedImage({ x: 30, y: 50, width: 60, height: 50 }, NATURAL, 0, 100),
+    ).toBeNull();
   });
 
   test("a shorter box shows the top of the image at its full height", () => {

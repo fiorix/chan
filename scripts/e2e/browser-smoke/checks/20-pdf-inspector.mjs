@@ -272,6 +272,7 @@ async function watchImageLift(page, expectedImage) {
     const originalClone = Element.prototype.cloneNode;
     const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker", "height-only", "absolute-escape", "auto-visible"]);
     const capture = { before: null, after: null };
+    const lifted = new Set();
     const read = (host) => ({
       ...Object.fromEntries([...host.querySelectorAll("img[alt]")]
         .filter((img) => names.has(img.alt))
@@ -284,6 +285,7 @@ async function watchImageLift(page, expectedImage) {
       anchor: host.querySelector("#clip-anchor")?.getBoundingClientRect().toJSON(),
     });
     Element.prototype.setAttribute = function (name, value) {
+      if (name === "data-chan-export-image") lifted.add(this);
       if (!capture.before && name === "src" && this instanceof HTMLImageElement &&
           String(value).startsWith("data:")) {
         let host = this.parentElement;
@@ -304,7 +306,7 @@ async function watchImageLift(page, expectedImage) {
       }
       return originalClone.call(this, deep);
     };
-    window.__pdfImageLift = { capture, restore: () => {
+    window.__pdfImageLift = { capture, liftCount: () => lifted.size, restore: () => {
       Element.prototype.setAttribute = original;
       Element.prototype.cloneNode = originalClone;
     } };
@@ -422,6 +424,55 @@ function inspectLayoutImages(rasters, capture) {
   return { details: { capture, ink }, faults };
 }
 
+function inspectPageEdge(rasters) {
+  const page = rasters[0];
+  const teal = colourBox(page, TEAL);
+  const rose = colourBox(page, ROSE);
+  const scale = page.width / 669;
+  const faults = [];
+  if (!teal || !(teal.width > 5 * scale && teal.width < 100 * scale)) {
+    faults.push(`page edge: expected a cropped teal portion, got ${JSON.stringify(teal)}`);
+  }
+  if (rose) faults.push(`page edge: the image's clipped rose half was painted at ${rose.x0}-${rose.x1}`);
+  return { details: { teal, rose }, faults };
+}
+
+function inspectFloatEnd(rasters) {
+  const page = rasters[0];
+  const blue = colourBox(page, BLUE);
+  const scale = page.width / 669;
+  const faults = [];
+  if (!blue || !(blue.width > 95 * scale && blue.width < 105 * scale) ||
+      !(blue.height > 5 * scale && blue.height < 100 * scale)) {
+    faults.push(`float end: expected the page's short blue cut, got ${JSON.stringify(blue)}`);
+  }
+  return { details: { blue }, faults };
+}
+
+function inspectRotate(rasters) {
+  const page = rasters[0];
+  const teal = colourBox(page, TEAL);
+  const rose = colourBox(page, ROSE);
+  const faults = [];
+  if (!teal || !rose || !(rose.x1 < teal.x0)) {
+    faults.push(`rotate: rose must precede teal, got ${JSON.stringify({ teal, rose })}`);
+  }
+  return { details: { teal, rose }, faults };
+}
+
+function inspectClipPath(rasters) {
+  const page = rasters[0];
+  const amber = colourBox(page, AMBER);
+  const green = colourBox(page, GREEN);
+  const scale = page.width / 669;
+  const faults = [];
+  if (!amber || !green || !(amber.y1 < green.y0) ||
+      Math.abs((green.y1 - amber.y0 + 1) / scale - 64) > 3) {
+    faults.push(`clip path: expected 64 CSS px with amber above green, got ${JSON.stringify({ amber, green })}`);
+  }
+  return { details: { amber, green }, faults };
+}
+
 async function openFileBrowser(page) {
   const open = await page.$(".file-tree, [role=tree]");
   if (open) return;
@@ -525,6 +576,10 @@ export default {
         pages: 1,
         inspect: inspectHeightImage,
       },
+      { file: "layout-page-edge.md", pdf: "layout-page-edge.pdf", orientation: "portrait", minPages: 1, inspect: inspectPageEdge },
+      { file: "layout-float-end.md", pdf: "layout-float-end.pdf", orientation: "portrait", minPages: 1, inspect: inspectFloatEnd },
+      { file: "layout-rotate.md", pdf: "layout-rotate.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate },
+      { file: "layout-clip-path.md", pdf: "layout-clip-path.pdf", orientation: "portrait", minPages: 1, inspect: inspectClipPath },
       {
         file: "missing-image.md",
         pdf: "missing-image.pdf",
@@ -535,14 +590,14 @@ export default {
     // What the pixel reads measured, for the message of a failed run.
     const pixels = {};
     const faults = [];
-    for (const c of cases) {
+    const selected = process.env.SMOKE_PDF_CASES?.split(",").map((name) => name.trim()).filter(Boolean);
+    for (const c of cases.filter((item) => !selected || selected.includes(item.file))) {
       const target = join(ctx.downloadDir, c.pdf);
       if (existsSync(target)) rmSync(target);
 
       await selectTreeFile(page, c.file);
-      if (c.file === "layout-images.md" || c.file === "layout-height.md") {
-        await watchImageLift(page, c.file === "layout-images.md" ? "wide-table" : "height-only");
-      }
+      await watchImageLift(page, c.file === "layout-images.md" ? "wide-table" :
+        c.file === "layout-height.md" ? "height-only" : "");
       await clickExportToPdf(page);
       if (c.failure) {
         let refused = "";
@@ -556,16 +611,24 @@ export default {
           throw new Error(`${c.pdf}: expected a named image refusal, got ${refused || "a PDF"}`);
         }
         details[c.file] = refused;
+        await page.evaluate(() => {
+          window.__pdfImageLift?.restore();
+          delete window.__pdfImageLift;
+        });
         continue;
       }
       const bytes = await pdfOrFailure(page, target);
       await ctx.shot(`exported-${c.file}`);
-      const capture = (c.file === "layout-images.md" || c.file === "layout-height.md") ? await page.evaluate(() => {
-        const result = window.__pdfImageLift?.capture;
+      const lift = await page.evaluate(() => {
+        const result = {
+          ...window.__pdfImageLift?.capture,
+          count: window.__pdfImageLift?.liftCount(),
+        };
         window.__pdfImageLift?.restore();
         delete window.__pdfImageLift;
         return result;
-      }) : undefined;
+      });
+      details[`${c.file}:liftCount`] = lift.count;
 
       if (c.pages !== undefined) {
         details[c.file] = await ctx.assertPdf(bytes, {
@@ -589,7 +652,7 @@ export default {
         details[`${c.file}:boundaries`] = await ctx.assertNoDuplicateBands(bytes);
       }
       if (c.inspect) {
-        const read = c.inspect(await pdfPageRasters(bytes), capture);
+        const read = c.inspect(await pdfPageRasters(bytes), lift);
         details[`${c.file}:pixels`] = read.details;
         pixels[c.pdf] = read.details;
         faults.push(...read.faults.map((fault) => `${c.pdf} ${fault}`));
