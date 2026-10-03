@@ -701,6 +701,24 @@ describe("contextual command deck", () => {
     expect(titles(target)).toEqual(["Focus", "Hide", "Close"]);
   });
 
+  for (const hidden of [false, true]) {
+    test(`a window from another host offers Focus alone when hidden is ${hidden}`, async () => {
+      scopedLibrary.load.mockResolvedValue({
+        ...librarySnapshot,
+        windows: [
+          librarySnapshot.windows[0],
+          { ...librarySnapshot.windows[1], hidden, managed: false },
+        ],
+      });
+      const target = openLauncher();
+      await flush();
+      await openWindowList(target);
+      row(target, "Window 2 [release checks]").click();
+      await tick();
+      expect(titles(target)).toEqual(["Focus"]);
+    });
+  }
+
   test("the Close card names the live terminal count, read when it is raised", async () => {
     scopedLibrary.liveTerminals.mockResolvedValue(3);
     const target = openLauncher();
