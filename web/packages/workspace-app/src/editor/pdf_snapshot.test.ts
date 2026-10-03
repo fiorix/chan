@@ -522,6 +522,53 @@ describe("liftPageImages", () => {
     expect(img.style.getPropertyValue("aspect-ratio")).toBe("40 / 20");
   });
 
+  test("an image narrower than its natural size keeps its intrinsic layout contribution", async () => {
+    imagesHaveBoxes();
+    const { root } = await lifted(
+      '<img src="/api/fs/table.png" style="width:20px">',
+    );
+    const img = root.querySelector("img")!;
+    expect(decodeURIComponent(img.getAttribute("src")!)).toContain(
+      'width="40" height="20"',
+    );
+    expect(img.getAttribute("width")).toBe("40");
+  });
+
+  test("a closed details image with a box is not painted", async () => {
+    imagesHaveBoxes();
+    Object.defineProperty(HTMLImageElement.prototype, "checkVisibility", {
+      configurable: true,
+      value(this: HTMLImageElement) {
+        return !this.closest("details:not([open])");
+      },
+    });
+    const { images } = await lifted(
+      '<details><summary>closed</summary><img src="/api/fs/closed.png"></details>',
+    );
+    expect(images.lifted[0]!.rendered).toBe(false);
+    expect(() => images.assertPainted()).not.toThrow();
+    delete (HTMLImageElement.prototype as { checkVisibility?: () => boolean }).checkVisibility;
+  });
+
+  test("an ancestor that clips the whole image records it as not shown", async () => {
+    imagesHaveBoxes();
+    decodesSettleAtOnce();
+    const root = page(
+      '<div style="height:0;overflow:hidden"><img src="/api/fs/covered.png"></div>',
+    );
+    vi.spyOn(root.querySelector("div")!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, width: 100, height: 0 } as DOMRect,
+    );
+    vi.spyOn(root.querySelector("img")!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, width: 40, height: 20 } as DOMRect,
+    );
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.rendered).toBe(false);
+    expect(() => images.assertPainted()).not.toThrow();
+  });
+
   test("names an unsized image the page shows that gives no measurable box", async () => {
     class UnsizedImage extends StandInImage {
       naturalWidth = 0;
