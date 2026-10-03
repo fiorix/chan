@@ -9869,6 +9869,79 @@ mod tests {
         });
     }
 
+    /// Two persisted rows can spell one workspace the registry lacks: a link
+    /// and the folder it points at resolve to one key. The restore registers
+    /// that key once and both rows share the outcome, so a registration that
+    /// outlasts the open's release budget, as one whose registry lookup waits
+    /// on another root does, leaves neither row out.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restore_keeps_every_spelling_of_a_root_whose_registration_outlasts_the_budget() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let folder = holder.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let link = holder.path().join("link");
+        std::os::unix::fs::symlink(&folder, &link).unwrap();
+        let folder = canonical_root(&folder);
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let rows: Vec<PersistedWorkspace> = [&folder, &link]
+            .into_iter()
+            .map(|root| PersistedWorkspace {
+                path: root.to_string_lossy().into_owned(),
+                desired_on: true,
+                generation: 1,
+            })
+            .collect();
+        let spellings: Vec<String> = rows.iter().map(|row| row.path.clone()).collect();
+
+        // Stalled by its link, the root holds a registration under either
+        // spelling, whichever row's comes first.
+        let stall = root_stall::stall_matching(&link, &[root_stall::REGISTER_WORKSPACE]);
+        let restoring = Arc::clone(&state);
+        let restore = tokio::spawn(async move { restoring.register_restore_rows(rows).await });
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
+            while stall.entered().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fixture: the restore's registration never reached the stall");
+        // A registration that waits its whole release budget behind the held
+        // one is refused, so a row that waited there has been refused too.
+        let waited = state
+            .host
+            .register_workspace_keyed(&folder, &folder, None)
+            .await;
+        assert!(
+            matches!(
+                waited,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "fixture: the held registration did not outlast the release budget: {waited:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            stall.entered().len(),
+            1,
+            "the restore started more than one registration of one key: {:?}",
+            stall.entered()
+        );
+
+        drop(stall);
+        let kept = tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+            .await
+            .expect("the restore did not finish once its registration returned")
+            .expect("the restore");
+        assert_eq!(
+            kept.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            spellings,
+            "the restore left out a spelling of a root whose registration outlasted the release \
+             budget"
+        );
+    }
+
     #[test]
     fn opens_of_a_hung_root_hold_one_blocking_thread() {
         hung_root_hop_holds_one_blocking_thread(false);
