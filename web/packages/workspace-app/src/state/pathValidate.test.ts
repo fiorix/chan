@@ -2,17 +2,61 @@ import { describe, expect, test } from "vitest";
 import {
   DEFAULT_NEW_FILENAME_STEM,
   appendDefaultMd,
+  backslashReason,
   preserveExtension,
   proposeDefaultFilename,
   splitPath,
   validatePath,
 } from "./pathValidate";
 
+const REFUSED = "\\ cannot be added to a name";
+
+describe("backslashReason", () => {
+  const exists = (path: string) => ["x\\y", "deep", "deep/p\\q", "a\\b.md"].includes(path);
+
+  test.each([
+    ["a path that holds none", "notes/a.md", {}],
+    ["a rename that keeps the one its name holds", "a\\c.md", { source: "a\\b.md" }],
+    ["a rename that moves the one its name holds", "ab\\.md", { source: "a\\b.md" }],
+    ["a rename that drops it", "ab.md", { source: "a\\b.md" }],
+    ["a move that keeps the name", "notes/a\\b.md", { source: "a\\b.md" }],
+    ["a move into a listed directory that holds one", "x\\y/a.md", { source: "a.md", exists }],
+    ["a move into a listed directory under another", "deep/p\\q/a.md", { source: "a.md", exists }],
+    ["a rename beside the source, under a directory nothing lists", "far/p\\q/b.md", { source: "far/p\\q/a.md" }],
+    ["a rename of a directory that holds one", "x\\z", { source: "x\\y" }],
+    ["a directory typed with a trailing slash", "x\\z/", { source: "x\\y" }],
+    ["an entry that exists, with no source", "a\\b.md", { exists }],
+    ["a new file in a listed directory that holds one", "x\\y/new.md", { exists }],
+  ] as const)("%s passes", (_name, path, held) => {
+    expect(backslashReason(path, held)).toBeNull();
+  });
+
+  test.each([
+    ["a name that gains one", "a\\b.md", { source: "ab.md" }],
+    ["a name that holds one more", "a\\b\\c.md", { source: "a\\b.md" }],
+    ["a move onto an entry that holds one", "a\\b.md", { source: "notes.md", exists }],
+    ["a new name with no source", "p\\q.md", { exists }],
+    ["a new directory on the way", "p\\q/a.md", { source: "a.md", exists }],
+    ["a new directory under the source's own", "far/p\\q/n\\w/b.md", { source: "far/p\\q/a.md" }],
+    ["a directory at another place than the source's", "p\\q/b.md", { source: "far/p\\q/a.md" }],
+    ["an absolute path, which the tree does not list", "/var/x\\y/a.md", { exists }],
+    ["a path with nothing to hold it against", "x\\y/a.md", {}],
+  ] as const)("%s is refused", (_name, path, held) => {
+    expect(backslashReason(path, held)).toBe(REFUSED);
+  });
+});
+
 describe("validatePath", () => {
-  test("a backslash is refused as a character a name cannot hold", () => {
-    for (const path of ["a\\b.md", "dir/a\\b.md"]) {
-      expect(validatePath(path)).toEqual({ ok: false, reason: "\\ is not allowed in a name" });
+  test("a backslash is refused when the caller names nothing that holds one", () => {
+    for (const path of ["a\\b.md", "dir/a\\b.md", "a\\b/c.md", "x\\y/"]) {
+      expect(validatePath(path, { allowTrailingSlash: true })).toEqual({ ok: false, reason: REFUSED });
     }
+  });
+  test("a backslash a name holds passes with the rest of the path still checked", () => {
+    const held = { source: "a\\b.md", exists: (path: string) => path === "x\\y" };
+    expect(validatePath("x\\y/a\\b.md", held)).toEqual({ ok: true });
+    expect(validatePath("x\\y/", { ...held, allowTrailingSlash: true })).toEqual({ ok: true });
+    expect(validatePath("x\\y/a\\b?.md", held).ok, "a character Windows refuses").toBe(false);
   });
   test("empty input is rejected", () => {
     expect(validatePath("")).toEqual({ ok: false, reason: "path is empty" });

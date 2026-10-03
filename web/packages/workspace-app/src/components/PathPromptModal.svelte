@@ -176,16 +176,19 @@
     // trailing slash through when we've resolved the kind to a folder;
     // file create / move / rename still reject it with a name hint.
     const allowTrailingSlash = effectiveKind === "folder";
-    const rawCheck = validatePath(trimmed, {
+    // What a name that holds a `\` is held against: the entry being moved
+    // and the entries the tree has listed. A directory the tree has not
+    // listed yet is refused until the load effect below brings its listing.
+    const opts = {
       allowAbsolute: pathPromptState.allowAbsolute,
       allowTrailingSlash,
-    });
+      source: pathPromptState.sourcePath,
+      exists: (path: string) => entryByPath.has(path),
+    };
+    const rawCheck = validatePath(trimmed, opts);
     if (!rawCheck.ok) return rawCheck;
     if (effectiveValue && effectiveValue !== trimmed) {
-      const effCheck = validatePath(effectiveValue, {
-        allowAbsolute: pathPromptState.allowAbsolute,
-        allowTrailingSlash,
-      });
+      const effCheck = validatePath(effectiveValue, opts);
       if (!effCheck.ok) return effCheck;
     }
     // Caller-supplied validator (e.g. "must be editable text") runs

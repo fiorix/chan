@@ -25,12 +25,57 @@ const WIN_RESERVED = new Set([
   "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ]);
 
+/// What a name that holds a `\` is compared with: `source` is the path of
+/// the entry a move or a rename is about, and `exists` answers whether an
+/// entry is at a workspace path now.
+export type HeldNames = {
+  source?: string | null;
+  exists?: (path: string) => boolean;
+};
+
+const BACKSLASH_REASON = "\\ cannot be added to a name";
+
+function backslashes(name: string): number {
+  return name.split("\\").length - 1;
+}
+
+/// The rule for a `\` in a path a user typed or dropped: a name keeps a `\`
+/// it holds and gains none. On a Unix server `\` is a character of a name,
+/// while Windows reads it as a separator, so a name that holds one would not
+/// open there. Returns the refusal, or null when every name passes.
+///
+/// A directory on the way to the target passes when it is there already:
+/// `exists` knows it, or it is on the way to `source` too. The last name
+/// passes in a move when it holds no more `\` than the source's name, and
+/// with no source when the entry it names exists, since nothing is made.
+export function backslashReason(path: string, held: HeldNames = {}): string | null {
+  if (!path.includes("\\")) return null;
+  const names = path.replace(/\/+$/, "").split("/");
+  const sourceNames = held.source ? held.source.split("/") : null;
+  let acc = "";
+  let onSource = sourceNames !== null;
+  for (let i = 0; i < names.length; i += 1) {
+    const name = names[i];
+    acc = i === 0 ? name : `${acc}/${name}`;
+    onSource = onSource && sourceNames![i] === name;
+    if (!name.includes("\\")) continue;
+    const kept =
+      i === names.length - 1 && sourceNames
+        ? backslashes(name) <= backslashes(sourceNames[sourceNames.length - 1])
+        : onSource || held.exists?.(acc) === true;
+    if (!kept) return BACKSLASH_REASON;
+  }
+  return null;
+}
+
 /// Validate a relative path that the user typed for create / move
 /// / rename. Returns a structured result so the caller can show
-/// the reason inline instead of a generic "invalid".
+/// the reason inline instead of a generic "invalid". `held` is what
+/// `backslashReason` compares a name that holds a `\` with; without it
+/// every `\` is refused.
 export function validatePath(
   raw: string,
-  opts: { allowAbsolute?: boolean; allowTrailingSlash?: boolean } = {},
+  opts: { allowAbsolute?: boolean; allowTrailingSlash?: boolean } & HeldNames = {},
 ): PathCheck {
   if (raw === "") return { ok: false, reason: "path is empty" };
   const trimmed = raw.trim();
@@ -69,12 +114,8 @@ export function validatePath(
   if (/[\x00-\x1f]/.test(trimmed)) {
     return { ok: false, reason: "control characters are not allowed" };
   }
-  // On a Unix server `\` is a character of a name, but Windows reads it
-  // as a separator, so a name that holds one would not open there. It is
-  // refused with the other characters Windows does not allow in a name.
-  if (trimmed.includes("\\")) {
-    return { ok: false, reason: "\\ is not allowed in a name" };
-  }
+  const backslash = backslashReason(pathForSegments, opts);
+  if (backslash) return { ok: false, reason: backslash };
   const segments = pathForSegments.startsWith("/")
     ? pathForSegments.slice(1).split("/")
     : pathForSegments.split("/");
