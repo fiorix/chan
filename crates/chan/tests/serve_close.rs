@@ -348,13 +348,22 @@ fn holder_answering_a_removal(
     ws: &Path,
     words: &'static str,
 ) -> std::thread::JoinHandle<Option<chan_shell::ControlRequest>> {
-    use std::io::Write;
-
     let lock_dir = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
         .expect("open the sandbox registry")
         .workspace_paths_for(ws)
         .expect("the workspace is registered")
         .lock;
+    holder_answering_a_removal_at(sandbox, ws, &lock_dir, words)
+}
+
+fn holder_answering_a_removal_at(
+    sandbox: &Sandbox,
+    ws: &Path,
+    lock_dir: &Path,
+    words: &'static str,
+) -> std::thread::JoinHandle<Option<chan_shell::ControlRequest>> {
+    use std::io::Write;
+
     let lock = chan_workspace::lock::WorkspaceLock::acquire(&lock_dir, ws)
         .expect("hold the workspace's writer lock");
     let socket = sandbox
@@ -391,6 +400,79 @@ fn holder_answering_a_removal(
         stream.write_all(&reply).ok()?;
         Some(request)
     })
+}
+
+/// Register two distinct rows, then point the first row's stored root at
+/// the second workspace's folder without changing either row.
+fn relinked_rows(sandbox: &Sandbox) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::symlink;
+
+    let saved = sandbox.scratch.path().join("saved");
+    let other = sandbox.scratch.path().join("other");
+    std::fs::create_dir(&saved).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let lib =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml")).unwrap();
+    let saved_row = lib.register_workspace(&saved).unwrap();
+    let other_row = lib.register_workspace(&other).unwrap();
+    let saved_state = lib.workspace_paths_for_row(&saved_row).root;
+    let other_state = lib.workspace_paths_for_row(&other_row).root;
+    std::fs::write(other_state.join("keep"), b"other workspace state").unwrap();
+    std::fs::remove_dir(&saved).unwrap();
+    symlink(&other, &saved).unwrap();
+    (saved, other, saved_state, other_state)
+}
+
+#[test]
+fn forget_of_a_relinked_stored_root_leaves_the_other_row_and_its_state() {
+    let sandbox = Sandbox::new();
+    let (saved, other, saved_state, other_state) = relinked_rows(&sandbox);
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&saved)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().all(|row| row.root_path != saved), "{rows:?}");
+    assert!(rows.iter().any(|row| row.root_path == other), "{rows:?}");
+    assert!(!saved_state.exists());
+    assert_eq!(
+        std::fs::read(other_state.join("keep")).unwrap(),
+        b"other workspace state"
+    );
+}
+
+#[test]
+fn forget_of_a_relinked_stored_root_asks_its_holder_by_that_name() {
+    let sandbox = Sandbox::new();
+    let (saved, other, saved_state, other_state) = relinked_rows(&sandbox);
+    let holder =
+        holder_answering_a_removal_at(&sandbox, &saved, &saved_state.join("locks"), "other error");
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&saved)
+        .output()
+        .unwrap();
+    let request = holder.join().unwrap();
+    assert!(
+        matches!(&request, Some(chan_shell::ControlRequest::Close { path, remove: true }) if path == &saved),
+        "{request:?}"
+    );
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().all(|row| row.root_path != saved));
+    assert!(rows.iter().any(|row| row.root_path == other));
+    assert_eq!(
+        std::fs::read(other_state.join("keep")).unwrap(),
+        b"other workspace state"
+    );
 }
 
 /// `chan workspace forget` whose host answers that the workspace is still

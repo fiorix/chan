@@ -181,6 +181,101 @@ async fn forget_alias_preserves_requests_and_refused_registrations() {
 }
 
 #[tokio::test]
+async fn forget_reads_a_desktops_still_releasing_answer() {
+    let sandbox = Sandbox::new();
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().to_str().unwrap();
+    let (code, _, err) = sandbox.run(&["workspace", "add", path]).await;
+    assert_eq!(code, 0, "{err}");
+    let config = sandbox.chan_home.path().join("config.toml");
+    let before = std::fs::read(&config).unwrap();
+    let answer = format!(
+        "removing {path}: {}",
+        chan_server::WORKSPACE_STILL_RELEASING
+    );
+    let reply = answer.clone();
+    let _listener = start_listener(sandbox.socket(), move |_| {
+        let message = reply.clone();
+        async move { Response::Error { message } }
+    })
+    .unwrap();
+
+    let out = sandbox
+        .command(&["workspace", "forget", path])
+        .env("CHAN_DESKTOP_HANDOFF", "1")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains(&answer));
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+
+    // A close with the same answer and a forget with another desktop error
+    // keep the best-effort control-socket fallback.
+    let close = sandbox
+        .command(&["close", path])
+        .env("CHAN_DESKTOP_HANDOFF", "1")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(close.status.code(), Some(0), "{close:?}");
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+}
+
+#[tokio::test]
+async fn forget_sends_the_stored_root_to_the_desktop_after_it_is_relinked() {
+    use std::os::unix::fs::symlink;
+    use std::sync::{Arc, Mutex};
+
+    let sandbox = Sandbox::new();
+    let saved = sandbox.home.path().join("saved");
+    let other = sandbox.home.path().join("other");
+    std::fs::create_dir(&saved).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let lib =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml")).unwrap();
+    let saved_row = lib.register_workspace(&saved).unwrap();
+    let other_row = lib.register_workspace(&other).unwrap();
+    let other_state = lib.workspace_paths_for_row(&other_row).root;
+    std::fs::write(other_state.join("keep"), b"other workspace state").unwrap();
+    std::fs::remove_dir(&saved).unwrap();
+    symlink(&other, &saved).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::clone(&seen);
+    let _listener = start_listener(sandbox.socket(), move |request| {
+        requests.lock().unwrap().push(request);
+        async {
+            Response::Closed {
+                desktop_version: CHAN_VERSION.into(),
+            }
+        }
+    })
+    .unwrap();
+
+    let out = sandbox
+        .command(&["workspace", "forget", saved.to_str().unwrap()])
+        .env("CHAN_DESKTOP_HANDOFF", "1")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let requests = seen.lock().unwrap();
+    assert!(
+        matches!(requests.as_slice(), [Request::CloseWorkspace { workspace_path, remove: true, .. }] if workspace_path == saved.to_str().unwrap()),
+        "{requests:?}"
+    );
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().all(|row| row.root_path != saved_row.root_path));
+    assert!(rows.iter().any(|row| row.root_path == other_row.root_path));
+    assert_eq!(
+        std::fs::read(other_state.join("keep")).unwrap(),
+        b"other workspace state"
+    );
+}
+
+#[tokio::test]
 async fn serve_close_and_forget_render_the_desktop_replies() {
     let sandbox = Sandbox::new();
     let _listener = start_listener(sandbox.socket(), |req| async move { fake_desktop(req) })

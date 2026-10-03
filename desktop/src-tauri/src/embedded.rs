@@ -1344,5 +1344,18 @@ mod tests {
                 "the answer is not the row's words"
             );
         }
+
+        #[tokio::test]
+        async fn a_removal_of_a_workspace_still_open_here_answers_releasing() {
+            let (library, stored, _key, _dirs) = registered_root();
+            let held = library.open_workspace(&stored).expect("hold the workspace");
+            let embedded = EmbeddedServer::for_tests(library).await;
+            let answer = embedded
+                .remove_workspace_root(&stored, false)
+                .await
+                .expect_err("a held workspace was removed");
+            assert!(answer.ends_with(STILL_RELEASING), "{answer}");
+            drop(held);
+        }
     }
 }

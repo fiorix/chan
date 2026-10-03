@@ -10472,6 +10472,61 @@ mod tests {
             );
         }
 
+        #[cfg(unix)]
+        #[test]
+        fn a_handoff_forget_by_a_stored_root_relinked_to_another_workspace_keeps_the_other() {
+            if !own_home(
+                "a_handoff_forget_by_a_stored_root_relinked_to_another_workspace_keeps_the_other",
+            ) {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            let onto = RelinkedOnto::relink(&desktop, &root);
+
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                root.stored.clone(),
+                true,
+            ));
+
+            onto.assert_untouched(&desktop, &outcome);
+            assert!(desktop.row(&root.stored).is_none(), "{outcome:?}");
+            assert!(!desktop.embedded().is_workspace_mounted_by_key(&root.now));
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_handoff_removal_of_a_workspace_still_open_here_answers_releasing() {
+            if !own_home("a_handoff_removal_of_a_workspace_still_open_here_answers_releasing") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = tempfile::tempdir().expect("root");
+            let stored = desktop.register(root.path());
+            let held = desktop
+                .library
+                .open_workspace(&stored)
+                .expect("hold the workspace");
+            let answer = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                stored,
+                true,
+            ));
+            assert!(
+                matches!(answer, Err(ref message) if message.ends_with(chan_server::WORKSPACE_STILL_RELEASING)),
+                "{answer:?}"
+            );
+            drop(held);
+        }
+
         /// The same forget of a root that a handoff mounted, whose registration
         /// resolved the path the handoff sent, forgets it and leaves the other
         /// workspace as it was.
