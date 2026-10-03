@@ -499,7 +499,9 @@ export class SceneSession {
   /// the claim stood, a peer's value for its keys would stay off the board
   /// and the tab would read unsaved for as long as read mode lasts. The
   /// claim is dropped, and a board that shows it takes the scene's appState
-  /// without it.
+  /// without it. A key that a push on the wire or queued carries is still
+  /// in that appState and stays on the board: its push goes out whatever
+  /// the tab's mode, and the authority then holds the key.
   tabTurnedReadOnly(): void {
     if (this.appStateClaim === null || !this.isReadOnlyAttach()) return;
     this.appStateClaim = null;
