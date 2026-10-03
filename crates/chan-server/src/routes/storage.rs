@@ -145,7 +145,8 @@ fn err_from_reset(e: &ResetError) -> Response {
 /// or that is still refused over the writer lock when its bound runs out,
 /// returns its error with nothing to put back. Handlers then read a missing
 /// workspace, a permanent fault: this route and the metadata import are the
-/// cell's only writers, and both start from a cell that holds a workspace.
+/// only code that fills the cell, and both start from a cell that holds a
+/// workspace.
 ///
 /// Drain protocol: we keep one strong `Arc<Workspace>` aside (`workspace_strong`)
 /// after taking the cell out, then poll `Arc::strong_count` until only
