@@ -2634,16 +2634,30 @@ impl WorkspaceHost {
     /// live feed; see `window_in_live_feed`). Empty
     /// when no registry is installed (a host that never opened one has no windows).
     pub fn assemble_window_records(&self) -> Vec<WindowRecord> {
+        let (mut records, fed) = self.window_records_by_source();
+        records.extend(fed);
+        records
+    }
+
+    /// The window set [`assemble_window_records`](Self::assemble_window_records)
+    /// answers, in its two parts and from one read of each: the records of
+    /// this host's own window registry, then those a connected devserver's
+    /// feed lists. A caller that tells the two apart takes both from this
+    /// one read, since a window minted between two reads of the registry is
+    /// in the second alone.
+    pub fn window_records_by_source(&self) -> (Vec<WindowRecord>, Vec<WindowRecord>) {
+        let fed = || {
+            self.devserver_feed()
+                .map(|feed| feed.windows())
+                .unwrap_or_default()
+        };
         let Some(registry) = self.window_registry() else {
             // No local registry installed: still surface a connected devserver's
             // windows, so a desktop holding only remote connections lists them.
-            return self
-                .devserver_feed()
-                .map(|feed| feed.windows())
-                .unwrap_or_default();
+            return (Vec::new(), fed());
         };
         let library_id = self.library_id();
-        let mut records: Vec<WindowRecord> = registry
+        let records: Vec<WindowRecord> = registry
             .snapshot()
             .into_iter()
             // An OFF workspace's window records stay on disk (so turning it back
@@ -2667,13 +2681,10 @@ impl WorkspaceHost {
                 record
             })
             .collect();
-        // Append connected devservers' windows after the local set. Each record
+        // Connected devservers' windows come after the local set. Each record
         // carries its own remote `library_id`, so the desktop groups them under
         // the right per-library window-menu section.
-        if let Some(feed) = self.devserver_feed() {
-            records.extend(feed.windows());
-        }
-        records
+        (records, fed())
     }
 
     /// The leader window_id of the tenant that governs an operation on `kind` /

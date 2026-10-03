@@ -583,10 +583,10 @@ struct ScopedLibraryWindow {
     connected: bool,
     hidden: bool,
     control: bool,
-    /// Whether this host's window registry holds the window. The visibility
-    /// and close actions act on that registry alone, so a row that a
-    /// connected devserver's feed contributed under this library's id reads
-    /// `false`.
+    /// Whether this row is one this host's window registry holds. The
+    /// visibility and close actions act on that registry alone, so a row
+    /// that a connected devserver's feed contributed under this library's id
+    /// reads `false`, whatever window id it carries.
     managed: bool,
     launch_path: String,
 }
@@ -694,26 +694,16 @@ fn scoped_local_windows(
     capability: &LibraryCommandCapability,
 ) -> Vec<ScopedLibraryWindow> {
     let library_id = host.library_id();
-    // The registry's own rows, by id. Every other row of the assembled set
-    // came from a connected devserver's feed.
-    let held: std::collections::HashSet<String> = host
-        .window_registry()
-        .map(|registry| {
-            registry
-                .snapshot()
-                .into_iter()
-                .map(|row| row.window_id)
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut rows: Vec<_> = host
-        .assemble_window_records()
+    // One read of the window set, in its two parts: a row of the first is
+    // one this host's registry holds, and a row of the second came from a
+    // connected devserver's feed.
+    let (held, fed) = host.window_records_by_source();
+    let mut rows: Vec<_> = held
         .into_iter()
-        .filter(|record| record.library_id == library_id)
-        .map(|record| {
-            let managed = held.contains(&record.window_id);
-            scoped_window(capability, record, managed)
-        })
+        .map(|record| (record, true))
+        .chain(fed.into_iter().map(|record| (record, false)))
+        .filter(|(record, _)| record.library_id == library_id)
+        .map(|(record, managed)| scoped_window(capability, record, managed))
         .collect();
     rows.sort_by(|a, b| {
         // The registry's display order (control first, then Terminal before
