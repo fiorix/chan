@@ -21,6 +21,9 @@
 # kills its live terminals even though the unit itself is restored.
 #
 # Everything runs against a throwaway CHAN_HOME and a throwaway port.
+# `chan devserver restart` prints the devserver token on stdout; the suite
+# masks it, so a run's log never carries a token. A failed run keeps its work
+# dir, and the CHAN_HOME inside it holds that token (devserver/config.json).
 #
 # Run this inside an sdme container, never on a host serving live
 # terminals. The throwaway CHAN_HOME and port do not isolate the part
@@ -60,10 +63,14 @@ finish_success() {
     rm -rf "$WORK"
 }
 
-# Every `chan devserver restart` of the suite. Extra arguments go to the
-# restart.
+# Every `chan devserver restart` of the suite. The command prints the token
+# on stdout as a CHAN_DEVSERVER_TOKEN=<token> line, and a launch URL would
+# carry it as ?t=. Mask both so the log a run leaves behind never holds a
+# live token. Extra arguments go to the restart.
 restart_devserver() {
-    "$CHAN" devserver restart --service=systemd "$@" --bind=127.0.0.1 --port="$PORT"
+    "$CHAN" devserver restart --service=systemd "$@" --bind=127.0.0.1 --port="$PORT" \
+        | sed -E -e 's/^(CHAN_DEVSERVER_TOKEN=).*/\1<redacted>/' \
+            -e 's/([?&]t=)[^&[:space:]]*/\1<redacted>/g'
 }
 
 # Self-test seam for the ordering above (systemd is never touched):
