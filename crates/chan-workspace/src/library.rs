@@ -1760,6 +1760,88 @@ mod tests {
         drop(stall);
     }
 
+    /// A reset that drops its row drops the row whose state it wiped and no
+    /// other. A registration can land between the reset's lookup and its
+    /// removal, and when the relinked row's root does not answer that
+    /// registration's alias probe in time it appends a row of its own for
+    /// the same directory, under the canonical path the reset matched. That
+    /// row keeps its registration: its state was not wiped.
+    #[cfg(unix)]
+    #[test]
+    fn a_reset_keeps_a_row_registered_under_its_match_since_its_lookup() {
+        use std::os::unix::fs::symlink;
+        // Registers `root` once, from the reset's first progress event:
+        // after the reset's lookup and before its registry removal.
+        struct RegisterDuringTheWipe {
+            lib: Library,
+            stored: PathBuf,
+            root: PathBuf,
+            registered: std::sync::Mutex<Option<KnownWorkspace>>,
+        }
+        impl crate::progress::ProgressCallback for RegisterDuringTheWipe {
+            fn on_progress(&self, _: crate::progress::ProgressEvent) {
+                let mut registered = self.registered.lock().unwrap();
+                if registered.is_some() {
+                    return;
+                }
+                // The registration's own lookup of its root goes through;
+                // the probe of the relinked row's root after it is held past
+                // the probe's budget.
+                let stall = crate::paths::root_stall::stall_after(&self.stored, 1);
+                let row = crate::registry::with_alias_probe_budget(
+                    std::time::Duration::from_millis(50),
+                    || self.lib.register_workspace(&self.root),
+                )
+                .expect("fixture: register during the wipe");
+                assert!(
+                    stall.wait_entered(std::time::Duration::from_secs(10)),
+                    "fixture: the registration's alias probe never reached the stall"
+                );
+                *registered = Some(row);
+            }
+        }
+        let (lib, _cfg, holder) = lib();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let row = lib.register_workspace(&parent.join("ws")).unwrap();
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let relinked = moved.join("ws");
+
+        let during = RegisterDuringTheWipe {
+            lib: lib.clone(),
+            stored: row.root_path.clone(),
+            root: relinked.clone(),
+            registered: std::sync::Mutex::new(None),
+        };
+        lib.reset_workspace_with(&relinked, ResetMode::Everything, &during)
+            .expect("reset the relinked root");
+        let later = during
+            .registered
+            .lock()
+            .unwrap()
+            .take()
+            .expect("fixture: the reset reported no progress");
+        assert_ne!(
+            later.metadata_key, row.metadata_key,
+            "fixture: the registration found the relinked row"
+        );
+        let kept: Vec<String> = lib
+            .list_workspaces()
+            .into_iter()
+            .map(|kept| kept.metadata_key)
+            .collect();
+        assert!(
+            !kept.contains(&row.metadata_key),
+            "the reset kept the row whose state it wiped"
+        );
+        assert!(
+            kept.contains(&later.metadata_key),
+            "the reset removed a row registered since its lookup, whose state it did not wipe"
+        );
+    }
+
     /// A test that holds one named step of an open holds that step's call in
     /// every build profile, a release build's stripped symbols included.
     #[test]
