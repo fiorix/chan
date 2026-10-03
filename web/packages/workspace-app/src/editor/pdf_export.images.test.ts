@@ -240,4 +240,27 @@ describe("how long a document's images may take to prepare", () => {
       `document resources timed out after ${bound}ms`,
     );
   });
+
+  test("the document bound prevents later image batches from starting", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const replies: ((response: Response) => void)[] = [];
+    const fetched = vi.fn(() => new Promise<Response>((resolve) => replies.push(resolve)));
+    vi.stubGlobal("fetch", fetched);
+    const exported = exportMarkdownToPdf({
+      path: "notes/doc.md", markdown: documentOf(9), theme: "light",
+    });
+    let failure: unknown = null;
+    exported.catch((err) => (failure = err));
+    for (let turn = 0; replies.length < 8 && turn < 500; turn++) await nextTurn();
+    expect(replies).toHaveLength(8);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect((failure as Error | null)?.message).toBe(
+      "document resources timed out after 90000ms",
+    );
+    for (const answer of replies) {
+      answer({ ok: true, blob: async () => new Blob([TINY_PNG], { type: "image/png" }) } as Response);
+    }
+    for (let turn = 0; turn < 20; turn++) await nextTurn();
+    expect(fetched).toHaveBeenCalledTimes(8);
+  });
 });

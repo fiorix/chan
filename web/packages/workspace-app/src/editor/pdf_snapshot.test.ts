@@ -190,6 +190,51 @@ describe("inlinePageResources", () => {
     expect(() => auditSelfContained(root)).toThrow(SnapshotError);
   });
 
+  test.each([
+    ["missing", { ok: false } as Response],
+    ["wrong type", fetchOk("<html>sign in</html>", "text/html")],
+  ])("a hidden image with a %s answer cannot fail the audit", async (_case, response) => {
+    vi.stubGlobal("fetch", vi.fn(async () => response));
+    const root = page('<div style="display:none"><img src="/api/fs/hidden.png"></div>');
+    await inlinePageResources(root);
+    expect(() => auditSelfContained(root)).not.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("a hidden image that cannot decode is not decoded", async () => {
+    vi.stubGlobal("Image", class {
+      src = "";
+      naturalWidth = 40;
+      naturalHeight = 20;
+      decode() { return Promise.reject(new Error("bad image")); }
+    });
+    const root = page('<div style="display:none"><img src="/api/fs/hidden.png"></div>');
+    await inlinePageResources(root);
+    const images = new PageImages();
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.rendered).toBe(false);
+    expect(() => auditSelfContained(root)).not.toThrow();
+  });
+
+  test.each([
+    ["fetch first", '<img src="/api/fs/missing.png"><img src="/api/fs/bad.png">', "missing"],
+    ["decode first", '<img src="/api/fs/bad.png"><img src="/api/fs/missing.png">', "bad"],
+  ])("%s names the first failing image", async (_case, html, first) => {
+    imagesHaveBoxes();
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) =>
+      String(url).includes("missing") ? { ok: false } as Response :
+        fetchOk("bad", "image/png"),
+    ));
+    vi.stubGlobal("Image", class {
+      src = "";
+      naturalWidth = 40;
+      naturalHeight = 20;
+      decode() { return Promise.reject(new Error("bad image")); }
+    });
+    await expect(snapshotPage(page(html), { widthPx: 100, heightPx: 80 }))
+      .rejects.toThrow(`image /api/fs/${first}.png`);
+  });
+
   test("carries referenced app font faces onto the page, inlined", async () => {
     const style = document.createElement("style");
     style.dataset.testFonts = "1";
@@ -1042,6 +1087,18 @@ describe("an image the page shows in a box of another shape than its own", () =>
     MARKER = { x: 10, y: 20, w: 80, h: 10 };
 
     expect(await drawnAt(root)).toEqual([10, 20, 80, 40]);
+  });
+
+  test("a fractional CSS box scales a bitmap by its exact used size", async () => {
+    const root = page(
+      '<img src="/api/fs/shots/fit.png" style="width:10.4px;height:10.4px;object-fit:none">',
+    );
+    laidOut(root.querySelector("img")!, {
+      left: 0, top: 0, width: 20.8, height: 20.8,
+    });
+    MARKER = { x: 10, y: 20, w: 80, h: 80 };
+    const place = await drawnAt(root);
+    expect(place[2]).toBeCloseTo(80 * 80 / 20.8, 1);
   });
 });
 
