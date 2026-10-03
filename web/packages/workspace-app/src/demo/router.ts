@@ -7,6 +7,7 @@
 // Everything else returns a benign inert response so no surface errors;
 // unhandled paths are logged once so a gap shows in the test's output.
 
+import type { ScopedLibrarySnapshot } from "../api/libraryCommand";
 import type { FetchImpl } from "../api/transport";
 import type {
   ConfigPatchRequest,
@@ -22,6 +23,9 @@ import { kindForPath, parentOf, type MockWorkspaceStore } from "./store";
 import { applyUpload } from "./upload";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
+
+/// The one command capability the demo mints.
+const COMMAND_CAPABILITY = "demo-command-capability";
 
 // Log every routed request so a component test's output shows which mock
 // routes the app reached and in what order.
@@ -425,6 +429,16 @@ export function createDemoFetch(
     if (path === "/api/extensions" && method === "GET") return json([]);
     if (path === "/api/library/local-color") {
       return method === "GET" ? json({ color: null }) : empty();
+    }
+    // The capability a window mints to read the library that serves it, in
+    // the server's shape: a token and its lifetime. The demo serves one
+    // window of one workspace, so the library under the token holds no other
+    // window and no workspace to open.
+    if (path === "/api/library/command-capabilities" && method === "POST") {
+      return json({ token: COMMAND_CAPABILITY, expires_in_seconds: 300 });
+    }
+    if (path === `/api/library/command-capabilities/${COMMAND_CAPABILITY}` && method === "GET") {
+      return json({ library_id: "demo", windows: [], workspaces: [] } satisfies ScopedLibrarySnapshot);
     }
 
     warnOnce(`${method} ${path}`);
