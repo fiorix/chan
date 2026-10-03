@@ -40,7 +40,11 @@ describe("launcher button stylesheet ownership", () => {
     }
     expect(app).not.toContain(".update-actions .secondary {");
     expect(app).not.toContain(".update-actions .primary {");
+    expect(app).not.toContain(".update-actions button:disabled {");
+    expect(rule(shared, ".btn")).toContain("padding: 0.5rem 0.9rem;");
     expect(rule(shared, ".btn")).toContain("border-radius: 7px;");
+    expect(rule(shared, ".btn:disabled")).toContain("opacity: 0.55;");
+    expect(rule(shared, ".btn:disabled")).toContain("cursor: default;");
     expect(rule(shared, ".btn.primary")).toContain("background: var(--brand);");
   });
 });

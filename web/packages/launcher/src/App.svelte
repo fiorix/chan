@@ -196,7 +196,7 @@
     {/if}
     <div class="update-actions">
       <button
-        class="secondary"
+        class="btn secondary"
         type="button"
         onclick={() => (updateReadyVersion = null)}
         disabled={updateRestarting}
@@ -204,7 +204,7 @@
         Later
       </button>
       <button
-        class="primary"
+        class="btn primary"
         type="button"
         onclick={() => void restartAfterUpdate()}
         disabled={updateRestarting}
@@ -258,26 +258,5 @@
     justify-content: center;
     gap: 0.4rem;
     min-height: 2.1rem;
-    padding: 0 0.85rem;
-    border-radius: 6px;
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .update-actions button:disabled {
-    cursor: progress;
-    opacity: 0.65;
-  }
-
-  .update-actions .secondary {
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text-secondary);
-  }
-
-  .update-actions .primary {
-    border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
-    background: var(--accent);
-    color: #fff;
   }
 </style>

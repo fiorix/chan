@@ -12,10 +12,9 @@
    This sheet owns the primitives it defines. Library and Gateways wear the
    card primitives below; their own rules add spacing on top (a header's gap
    and padding, one margin) and style the parts inside a card, never the
-   primitive's box. TopBar's icon buttons use the `.icon-btn` primitive and
-   add only their active-state tints. The update modal's footer in App.svelte
-   styles its own `.primary` and `.secondary` buttons rather than wearing
-   `.btn`. */
+   primitive's box. TopBar's icon buttons use `.icon-btn` and add only their
+   active-state tints. The update modal and confirmation dialog wear `.btn`;
+   the update footer adds only its icon alignment and spacing. */
 
 :root {
   --bg: #1c1c1e;
