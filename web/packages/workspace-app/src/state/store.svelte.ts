@@ -5223,16 +5223,21 @@ async function listForBackslashRule(path: string): Promise<string | null> {
 
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style
 /// prompt), the editor's inline rename and drag-and-drop. No-ops if
-/// source == target. An occupied
-/// target is refused by name: `preflight_rename` in chan-workspace answers
-/// 409 for any destination that already exists and is not the same file, so
-/// there is nothing to offer the user beyond saying which path is taken.
-/// Refreshes the tree and re-keys open tabs so in-memory state follows
-/// the rename without a refetch round-trip.
+/// source == target. An occupied target is refused by name:
+/// `preflight_rename` in chan-workspace answers 409 for any destination that
+/// already exists and is not the same file, so there is nothing to offer the
+/// user beyond saying which path is taken. Refreshes the tree and re-keys
+/// open tabs so in-memory state follows the rename without a refetch
+/// round-trip.
 ///
 /// A target that holds a `\` is held to `backslashReason`, the path prompt's
 /// rule, before anything is sent: the server takes a `\` as a character of a
 /// name on Unix, so nothing after this would refuse a name that gains one.
+/// The rule passes a name that exists, so a move onto one is refused as
+/// occupied, whatever the name holds.
+///
+/// `failed` opens each refusal's sentence but the two every caller words as
+/// a move's: a rename says "rename failed", a drop "move failed".
 ///
 /// The server runs the rename + link-rewrite pass synchronously. For a
 /// single-file rename with few backlinks this is sub-100ms; for a
@@ -5241,7 +5246,11 @@ async function listForBackslashRule(path: string): Promise<string | null> {
 /// delay so a fast rename doesn't flash an indicator, but a slow one
 /// still tells the user the UI hasn't frozen.
 const MOVING_STATUS_DELAY_MS = 200;
-async function performMove(path: string, target: string): Promise<void> {
+async function performMove(
+  path: string,
+  target: string,
+  failed: "rename failed" | "move failed" = "rename failed",
+): Promise<void> {
   if (target === path) return;
   const draftsReason =
     fileBrowserDraftsPathReason(path) ?? fileBrowserDraftsPathReason(target);
@@ -5251,7 +5260,7 @@ async function performMove(path: string, target: string): Promise<void> {
   }
   const unlisted = await listForBackslashRule(target);
   if (unlisted !== null) {
-    ui.status = `rename failed: '${unlisted}' could not be listed`;
+    ui.status = `${failed}: '${unlisted}' could not be listed`;
     return;
   }
   const backslash = backslashReason(target, {
@@ -5259,13 +5268,13 @@ async function performMove(path: string, target: string): Promise<void> {
     exists: (at) => tree.entries.some((e) => e.path === at),
   });
   if (backslash) {
-    ui.status = `rename failed: ${backslash}`;
+    ui.status = `${failed}: ${backslash}`;
     return;
   }
   const existing = tree.entries.find((e) => e.path === target);
   if (existing) {
     if (existing.is_dir) {
-      ui.status = `rename failed: '${target}' is an existing directory`;
+      ui.status = `${failed}: '${target}' is an existing directory`;
       return;
     }
     ui.status = occupiedNameStatus("move failed", target);
@@ -5324,7 +5333,7 @@ async function performMove(path: string, target: string): Promise<void> {
       ui.status = null;
     }
   } catch (e) {
-    ui.status = `rename failed: ${(e as Error).message}`;
+    ui.status = `${failed}: ${(e as Error).message}`;
   } finally {
     if (movingTimer) clearTimeout(movingTimer);
     if (ui.status === "Moving...") ui.status = null;
@@ -5885,7 +5894,7 @@ export const fileOps = {
   /// by drag-and-drop in the file browser. Same file overwrite
   /// confirm and post-move bookkeeping as rename.
   async moveTo(from: string, to: string): Promise<void> {
-    await performMove(from, to);
+    await performMove(from, to, "move failed");
   },
   /// Multi-entry drop target. One atomic transfer for the whole set, with the
   /// drafts refusal, the occupied-name refusal, the tab re-key and the

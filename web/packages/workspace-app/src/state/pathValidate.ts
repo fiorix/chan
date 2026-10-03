@@ -45,10 +45,11 @@ function backslashes(name: string): number {
 /// while Windows reads it as a separator, so a name that holds one would not
 /// open there. Returns the refusal, or null when every name passes.
 ///
-/// A directory on the way to the target passes when it is there already:
-/// `exists` knows it, or it is on the way to `source` too. The last name
-/// passes in a move when it holds no more `\` than the source's name, and
-/// with no source when the entry it names exists, since nothing is made.
+/// A name passes when it is there already, since nothing is made: `exists`
+/// knows it, or it is on the way to `source` too. So a move onto an entry
+/// that exists passes, and its caller says that the name is taken. The last
+/// name of a move also passes when it holds no more `\` than the source's
+/// name.
 export function backslashReason(path: string, held: HeldNames = {}): string | null {
   if (!path.includes("\\")) return null;
   const names = path.replace(/\/+$/, "").split("/");
@@ -61,9 +62,11 @@ export function backslashReason(path: string, held: HeldNames = {}): string | nu
     onSource = onSource && sourceNames![i] === name;
     if (!name.includes("\\")) continue;
     const kept =
-      i === names.length - 1 && sourceNames
-        ? backslashes(name) <= backslashes(sourceNames[sourceNames.length - 1])
-        : onSource || held.exists?.(acc) === true;
+      onSource ||
+      held.exists?.(acc) === true ||
+      (i === names.length - 1 &&
+        sourceNames !== null &&
+        backslashes(name) <= backslashes(sourceNames[sourceNames.length - 1]));
     if (!kept) return BACKSLASH_REASON;
   }
   return null;
