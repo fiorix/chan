@@ -4125,17 +4125,23 @@ mod tests {
             .insert("strokeColor".into(), "#ff0000".into());
         fx.external_write("b.excalidraw", &body(json!([edited])));
 
-        let taken = held_cell::while_held(&cell, || {
+        let met = held_cell::while_held(&cell, || {
             events
                 .send(modified("b.excalidraw"))
                 .expect("the reconciler listens");
             // No value is queued once the reconciler, the only receiver, has
-            // taken the event; it then looks into the cell at once.
-            let taken = held_cell::within(held_cell::MUST_HAPPEN, || events.is_empty());
-            std::thread::sleep(Duration::from_millis(100));
-            taken
+            // taken it. It takes one event at a time and looks into the cell
+            // for each before it takes the next, so once it has taken a
+            // second it has met the held cell with the first. The second
+            // names a path with no session: only the reconcile owed to the
+            // first can fold the outside write in.
+            let took_the_first = held_cell::within(held_cell::MUST_HAPPEN, || events.is_empty());
+            events
+                .send(modified("no-session.excalidraw"))
+                .expect("the reconciler listens");
+            took_the_first && held_cell::within(held_cell::MUST_HAPPEN, || events.is_empty())
         });
-        assert!(taken, "the reconciler never took the event");
+        assert!(met, "the reconciler never took its events");
 
         let reconciled = held_cell::within(held_cell::MUST_HAPPEN, || {
             ha.session().authority_view().0.contains("#ff0000")
