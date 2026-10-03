@@ -26,6 +26,7 @@ import { filesContext } from "./fileContext.svelte";
 import { editorToolsPrefs } from "./editorTools.svelte";
 import { classifyPath, isCsv, isEditableText, isExcalidraw, isJson } from "./fileTypes";
 import { basename } from "./format";
+import { backslashReason } from "./pathValidate";
 import { edgeSplitSpec, type PaneMouseSplitEdge } from "./paneMouseSplit";
 import type { FileKind } from "./kinds";
 import {
@@ -2915,6 +2916,14 @@ export function resolveDraftClose(action: "cancel" | "discard" | "save"): void {
   const target = draftCloseState.target.trim();
   if (action === "save" && target.length === 0) {
     draftCloseState.error = "Choose a destination path";
+    return;
+  }
+  // The promotion creates the destination, so its typed path is held to the
+  // backslash rule. This dialog reads no tree, so it cannot tell a directory
+  // whose name holds a `\` already, and refuses every one.
+  const backslash = action === "save" ? backslashReason(target) : null;
+  if (backslash) {
+    draftCloseState.error = backslash;
     return;
   }
   draftCloseState.resolve = null;
