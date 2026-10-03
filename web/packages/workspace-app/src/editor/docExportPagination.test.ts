@@ -185,6 +185,19 @@ describe("the export inlines each image once", () => {
     // The export decodes each image it inlined, and jsdom decodes none.
     decodesSettleAtOnce();
     vi.stubGlobal("Image", StandInImage);
+    // This test's block layout model gives child images zero boxes unless
+    // their painted box is supplied separately.
+    vi.spyOn(HTMLImageElement.prototype, "getClientRects").mockReturnValue([
+      { width: 40, height: 20 },
+    ] as unknown as DOMRectList);
+    vi.spyOn(HTMLImageElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLImageElement) {
+        const block = layoutRect(this);
+        const height = block.height || 20;
+        return { ...block, width: 40, right: 40, height,
+          bottom: block.top + height } as DOMRect;
+      },
+    );
     const pages: HTMLElement[] = [];
     const delivery = deliverImagesLate();
     await exportMarkdownToPdf(
