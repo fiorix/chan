@@ -299,6 +299,40 @@ describe("a backslash in a typed path", () => {
     expect(okButton(target).disabled).toBe(true);
   });
 
+  describe("typed where a separator goes, after a directory the tree lists", () => {
+    const SEPARATOR = "✗ \\ cannot be added to a name; use / between directories";
+
+    test.each([
+      ["a new file", "create", undefined, "docs\\new.md"],
+      ["a new file under a directory inside another", "create", undefined, "docs/watch\\new.md"],
+      ["a path of two, the first after the directory", "create", undefined, "docs\\watch\\new.md"],
+      ["a path that stops at it", "create", undefined, "docs\\"],
+      ["a move", "move", "notes.md", "docs\\notes.md"],
+      ["a path to open", "open", undefined, "docs\\new.md"],
+    ] as const)("%s is refused and told to use a slash", async (_name, mode, sourcePath, typed) => {
+      const target = mountModal();
+      await openDialog(target, { kind: "file", mode, sourcePath }, typed);
+
+      expect(statusText(target)).toBe(SEPARATOR);
+      expect(okButton(target).disabled).toBe(true);
+    });
+
+    test.each([
+      ["after a file's name", "create", "notes.md\\x"],
+      ["at the start of a name under the directory", "create", "docs/\\new.md"],
+      ["in a new name under a directory whose own name holds one after a listed directory's", "create", "x\\y/p\\q.md"],
+    ] as const)("one %s is refused with the rule's sentence alone", async (_name, mode, typed) => {
+      // `x` is listed too, so the text before the path's first `\` names a
+      // directory; the name the rule refuses is `p\q.md`, and `x\y/p` is none.
+      tree.entries = [...tree.entries, { path: "x", is_dir: true, mtime: null, size: 0 }];
+      const target = mountModal();
+      await openDialog(target, { kind: "file", mode }, typed);
+
+      expect(statusText(target)).toBe(REFUSED);
+      expect(okButton(target).disabled).toBe(true);
+    });
+  });
+
   test("a move onto an existing name that holds one reads as a move onto any existing file", async () => {
     const target = mountModal();
     await openDialog(target, { kind: "file", mode: "move", sourcePath: "notes.md" }, "a\\b.md");
@@ -384,6 +418,16 @@ describe("a backslash in a typed path", () => {
       await openDialog(target, { kind: "file", mode: "open", allowAbsolute: true }, "/abs/root/p\\q.md");
 
       expect(told(target)).toEqual({ rule: true, refused: true });
+    });
+
+    test("with a backslash where a separator goes, after a directory the tree lists, is refused and told to use a slash", async () => {
+      const target = mountModal();
+      await openDialog(target, { kind: "file", mode: "open", allowAbsolute: true }, "/abs/root/docs\\new.md");
+
+      expect({ told: statusText(target), refused: okButton(target).disabled }).toEqual({
+        told: "✗ \\ cannot be added to a name; use / between directories",
+        refused: true,
+      });
     });
 
     test("through a directory that holds a backslash is accepted once the listing that names it has come", async () => {
