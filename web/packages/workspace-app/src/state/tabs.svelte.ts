@@ -5829,10 +5829,12 @@ export async function overwriteConflictedTab(): Promise<void> {
 /// Save-funnel delegate: "saved" consumed the save (every local edit is
 /// confirmed and the authority flushed to disk); "degraded" and
 /// "classic" fall through to the PUT path below. "unresolved" keeps
-/// the buffer without starting a competing PUT.
+/// the buffer without starting a competing PUT. "refused" writes nothing
+/// either: the session still owns saves and has written on the tab's save
+/// line why the file was not saved.
 export type DocSaveDelegate = (
   t: FileTab,
-) => Promise<"saved" | "degraded" | "classic" | "unresolved">;
+) => Promise<"saved" | "degraded" | "classic" | "unresolved" | "refused">;
 
 export type PushSettlement = "settled" | "unresolved";
 
@@ -5994,7 +5996,9 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // waits a finite time for any in-flight push. An unresolved result
   // retains the buffer and reason; a positive answer permits the classic
   // path below with its latest flush token. A successful classic save
-  // then heals the session through the fallback-saved hook.
+  // then heals the session through the fallback-saved hook. A refusal
+  // comes from a session that has not degraded: the buffer is not its to
+  // write, so nothing is written and its reason stays on the save line.
   if (isDocAttached(t)) {
     for (const delegate of docSaveDelegates) {
       const r = await delegate(t);
@@ -6009,6 +6013,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
         withholdUnresolvedLiveSave(t);
         return;
       }
+      if (r === "refused") return;
       break;
     }
   }

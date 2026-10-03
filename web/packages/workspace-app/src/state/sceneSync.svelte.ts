@@ -206,6 +206,13 @@ export type ScenePeerCursor = {
   selected?: string[];
 };
 
+/// The save line of a save that timed out waiting for the authority's flush
+/// on a tab with no canvas bound, where the classic fallback is refused. It
+/// follows "Not saved:" on the toolbar and "was not saved because" in a
+/// close's question.
+const UNBOUND_FALLBACK_REASON =
+  "the server has not written it, and this tab has no board open to save it from";
+
 /// Error reasons that must not trigger a reconnect loop (the retry would
 /// fail identically). Transient reasons (bad-scene, malformed-frame,
 /// session-closed) recover through reconnect + snapshot instead.
@@ -600,6 +607,29 @@ export class SceneSession {
   degrade(): void {
     if (this.status === "degraded" || this.status === "off") return;
     this.setStatus("degraded");
+  }
+
+  /// Whether a save whose flush failed must leave the file alone, saying so
+  /// on the tab's save line when the flush's own error has not.
+  ///
+  /// With no canvas bound, nothing mirrors a board into the tab's buffer: a
+  /// drawing tab restored and never shown, or a board whose library never
+  /// reported its init, holds the text of its load. The session goes on
+  /// stamping the authority's version and flush mtime on the tab all the
+  /// same, so a classic write of that buffer would pass the server's check,
+  /// and its replace deletes every element the text lacks, a peer's later
+  /// edit among them. The save writes nothing and the session keeps owning
+  /// saves, so the next one asks the authority again.
+  ///
+  /// A push of this window's with no known outcome is not this case: a
+  /// canvas made it, and the settle wait and its withheld fallback own it.
+  refusesFallback(): boolean {
+    if (this.binding !== null || this.pushOutcomeUnresolved) return false;
+    if (this.flushError === null) {
+      this.flushError = UNBOUND_FALLBACK_REASON;
+      this.tab.saveError = this.flushError;
+    }
+    return true;
   }
 
   /// A bounded wait cannot turn silence or socket closure into an ack.
@@ -1280,6 +1310,7 @@ registerLiveSessionKind({
     const session = registry.get(t.id);
     if (!session || !session.ownsSaves()) return "classic";
     if (await session.flush()) return "saved";
+    if (session.refusesFallback()) return "refused";
     session.degrade();
     // Degrade stops new pushes. Only an ack of every queued push permits
     // a classic PUT; the finite wait can end with that fallback withheld.
