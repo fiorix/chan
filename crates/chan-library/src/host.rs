@@ -1425,10 +1425,11 @@ impl WorkspaceHost {
     ///
     /// Holding its mount permit, the open waits inside the same budget for a
     /// registry write of the root that is outstanding, a registration or an
-    /// unregister whose blocking call has not returned, and answers the same
-    /// way when the budget runs out first. It lets the registry-write permit
-    /// go before it dispatches its filesystem open, so it neither refuses nor
-    /// delays a later write of the root.
+    /// unregister whose blocking call has not returned, under the root's key
+    /// and the keys its registry row stores (`registry_writes_settled`), and
+    /// answers the same way when the budget runs out first. It lets each
+    /// registry-write permit go before it dispatches its filesystem open, so
+    /// it neither refuses nor delays a later write of the root.
     ///
     /// Starting and its success, failure or cancellation settlement share this
     /// body. The raw public entry is non-idempotent; the idempotent entry checks
@@ -1481,18 +1482,17 @@ impl WorkspaceHost {
                 // The filesystem open reads the root's registry row before it
                 // holds the writer lock, and a registration or an unregister
                 // of the root can be outstanding, its caller gone. Wait for
-                // the registry-write permit inside the same budget and let it
-                // go at once: the open holds it across nothing, so it neither
-                // refuses nor delays a later write.
+                // each registry-write permit such a write can hold, inside
+                // the same budget, and let it go at once: the open holds it
+                // across nothing, so it neither refuses nor delays a later
+                // write.
                 match tokio::time::timeout_at(
                     deadline,
-                    self.root_calls
-                        .lock(&(mounting.root.clone(), RootCall::RegistryWrite)),
+                    self.registry_writes_settled(root, &mounting.root),
                 )
                 .await
                 {
-                    Ok(write) => {
-                        drop(write);
+                    Ok(()) => {
                         self.open_registered_workspace_inner(
                             root,
                             &mut permit,
@@ -1509,6 +1509,44 @@ impl WorkspaceHost {
         self.settle_mount(&mounting.root, &result);
         mounting.armed = false;
         result
+    }
+
+    /// Wait until no registry write of the workspace an open of `root` reads
+    /// is outstanding, by taking each registry-write permit such a write can
+    /// hold and letting it go at once, one at a time.
+    ///
+    /// A registration holds its permit under the root's canonical key, `key`.
+    /// A removal holds its own under the key of the workspace it names
+    /// (`workspace_key`), which for a root that resolves elsewhere than when
+    /// its row was written can be the root the row stores or the canonical
+    /// path it last resolved to. So the wait covers `key` and both keys of
+    /// the row the open reads, found without asking any filesystem: the row
+    /// whose cached canonical path is `key`, or else the row that stores
+    /// `root` as given.
+    ///
+    /// A removal keyed otherwise is not waited for: one whose runtime was
+    /// mounted at a resolution its row never recorded, one of a row whose
+    /// root resolves elsewhere than the cached path it was found by here,
+    /// and one of a relinked row asked here by a path the row does not
+    /// store, before any registration has resolved it.
+    async fn registry_writes_settled(&self, root: &Path, key: &Path) {
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        let rows = self.library.list_workspaces();
+        let row = rows
+            .iter()
+            .find(|row| row.cached_canonical_path() == key)
+            .or_else(|| rows.iter().find(|row| row.root_path == given));
+        let mut keys = vec![key.to_path_buf()];
+        for stored in row.into_iter().flat_map(registry_row_keys) {
+            if !keys.iter().any(|kept| kept == stored) {
+                keys.push(stored.to_path_buf());
+            }
+        }
+        for key in keys {
+            drop(self.root_calls.lock(&(key, RootCall::RegistryWrite)).await);
+        }
     }
 
     /// The raw mount: open the per-workspace handle (acquiring the flock) and
