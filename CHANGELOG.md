@@ -18,6 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A cancelled workspace search stops sooner.** It reads its cancel flag after each of its catalog's graph queries and at each hop of a seed, not only between seeds. One query with the pass over its rows still runs to its end.
 
+- **The desktop's native upload refuses only what the server refuses.** It accepts a target directory whose name holds a backslash, and refuses only a `..` component and an empty file path; the server answers the rest.
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
@@ -43,6 +45,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The style toolbar names the chord the editor binds.**
 
 - **A link pill that could not be resolved asks again.** Only an answer is kept; a failed request no longer fixes the pill's kind for the life of the page.
+
+- **A `chan serve` handed off to the desktop for a path that stops answering is given up after 60 seconds.** The launcher shows a notice that names the path, where the handoff waited with no window and no notice.
+
+- **New Window and Open in Browser store their window under the workspace's registry row.** A copy of a window stored under the path a relinked root resolves to now nests under its workspace in the launcher.
+
+- **A download or a PDF export of a file whose name holds a backslash is saved under its whole name.** The backslash is replaced by `_` (`a\b.md` is saved as `a_b.md`), where the name was cut to the part after it.
 
 ### Security
 
