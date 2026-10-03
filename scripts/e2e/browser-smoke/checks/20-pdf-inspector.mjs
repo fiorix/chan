@@ -3,16 +3,15 @@
 // orientation, and per-page nonzero raster ink.
 //
 // Ink alone is passed by a page that has its text and has lost its image,
-// so two exports are also read pixel by pixel. Their images are written
-// here, each of one known colour, and the check finds that colour on the
+// so two exports are also read pixel by pixel. Their seeded images each
+// have one known colour, and the check finds that colour on the
 // page: an image is where its slide puts it and as large as play shows it,
 // a slide taller or wider than its page comes out whole and smaller, a
 // block wider than the slide paints no scrollbar, and a line that fits in
 // play does not break in the PDF.
 
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { crc32, deflateSync } from "node:zlib";
 
 import {
   colourBox,
@@ -27,53 +26,6 @@ const VIOLET = [128, 0, 200];
 const AMBER = [255, 176, 0];
 const BLUE = [20, 90, 200];
 const ORANGE = [230, 60, 20];
-
-/// An opaque 8-bit RGB PNG whose pixel at (x, y) is `colourAt(x, y)`.
-function png(width, height, colourAt) {
-  const stride = 1 + width * 3;
-  const rows = Buffer.alloc(height * stride);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      rows.set(colourAt(x, y), y * stride + 1 + x * 3);
-    }
-  }
-  const chunk = (tag, data) => {
-    const body = Buffer.concat([Buffer.from(tag, "latin1"), data]);
-    const out = Buffer.alloc(body.length + 8);
-    out.writeUInt32BE(data.length, 0);
-    body.copy(out, 4);
-    out.writeUInt32BE(crc32(body), body.length + 4);
-    return out;
-  };
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = 2;
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk("IHDR", header),
-    chunk("IDAT", deflateSync(rows)),
-    chunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
-/// The images `seed/deck-box.md` and `seed/doc.md` name. `tall.png` is
-/// twice as tall as it is wide and ends in a foot of its own colour, so a
-/// page that cuts the image shows no foot.
-function writeImages(dir) {
-  for (const [name, colour] of [
-    ["mark-teal.png", TEAL],
-    ["mark-violet.png", VIOLET],
-    ["mark-amber.png", AMBER],
-  ]) {
-    writeFileSync(join(dir, name), png(8, 8, () => colour));
-  }
-  writeFileSync(
-    join(dir, "tall.png"),
-    png(100, 200, (_x, y) => (y < 180 ? BLUE : ORANGE)),
-  );
-}
 
 /// A deck page of the export: A4 landscape, the 16:9 slide fitted to the
 /// page's width and centred on it, laid out as play lays it out on a
@@ -305,7 +257,6 @@ export default {
   name: "pdf-inspector",
   async run(ctx) {
     const { page } = ctx;
-    writeImages(ctx.workspaceDir);
     await openFileBrowser(page);
     await ctx.shot("file-browser");
 
