@@ -1,6 +1,10 @@
 # The pins of a case-only rename run in no gate
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. Found by a reading of the integration gate's log and of the build files on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-4-build-deps.md` in the development tree, "Gate residual 3: casefold fixtures" and T6), which says that recurring coverage is new scope that needs a row. The log and the files were read; no test was run for the reading.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. Found by a reading of the integration gate's log and of the build files on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-4-build-deps.md` in the development tree, "Gate residual 3: casefold fixtures" and T6), which says that recurring coverage is new scope that needs a row. The log and the files were read; no test was run for the reading. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: recurring coverage is wanted. The macOS CI job sets the variable to a case-folding directory, and a run that skips the pins says so in its verdict.
 
 ## What was seen
 

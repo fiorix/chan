@@ -1,6 +1,10 @@
 # Document sync and scene sync stay off for a page's life when their first connection closes before a frame
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. Found beside the order on a stopping devserver by its builder (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "Found outside the items, for the lead to raise", its second entry), read by an agent of that seat and not run. The lead told the owner of it on 2026-09-28 and said that it would be raised at the landing, "to be read by a web lane first" (`dev/v0101-team/for-host-2026-09-27.md`, the entry of 23:18Z); a reading of the ledger on 2026-09-29 found no item for it (`dev/v0101-team/machine-move/lead38-recon-1-prior-host-questions.md`, E4). No record of a web lane's reading was found.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. Found beside the order on a stopping devserver by its builder (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "Found outside the items, for the lead to raise", its second entry), read by an agent of that seat and not run. The lead told the owner of it on 2026-09-28 and said that it would be raised at the landing, "to be read by a web lane first" (`dev/v0101-team/for-host-2026-09-27.md`, the entry of 23:18Z); a reading of the ledger on 2026-09-29 found no item for it (`dev/v0101-team/machine-move/lead38-recon-1-prior-host-questions.md`, E4). No record of a web lane's reading was found. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: the reading is accepted. A web seat reads the first dial at the current head, and a fix is ruled after it.
 
 ## What was seen
 

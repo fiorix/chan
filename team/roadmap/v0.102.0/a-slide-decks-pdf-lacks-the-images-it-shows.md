@@ -1,10 +1,12 @@
 # A slide deck's PDF lacks the images the deck shows
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0, on the owner's word "add to next roadmap for fixing"; raised by the owner the same day, from use. Read in code at `4c4ada0a1`. The causes below were a reading when the item was written; on 2026-10-03 the owner's own exports of the deck were read back pixel by pixel, and the section "What the exports show" records which of them that measurement settles.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0, on the owner's word "add to next roadmap for fixing"; raised by the owner the same day, from use. Read in code at `4c4ada0a1`. The causes below were a reading when the item was written; on 2026-10-03 the owner's own exports of the deck were read back pixel by pixel, and the section "What the exports show" records which of them that measurement settles. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 
 Accepted on 2026-09-29 for the next version: the owner reported the defect and asked in the same sentence to "add to next roadmap for fixing". It is not part of v0.101.0. The shape of the fix is not ruled.
+
+On 2026-10-03 the owner ruled, as the lead recommended: a slide taller than the export's box comes out whole at a smaller scale.
 
 ## What was seen
 

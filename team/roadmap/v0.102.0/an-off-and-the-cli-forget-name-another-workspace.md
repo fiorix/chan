@@ -1,6 +1,10 @@
 # The launcher's off and `chan workspace forget` can still act on another workspace after the removal's repair
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It holds what the repair of [a-removal-unregisters-by-the-name-it-is-given](../done/a-removal-unregisters-by-the-name-it-is-given.md) leaves, by its builder's report (`dev/v0101-team/reports/report-Runtime-39.md` in the development tree, "Callers at the tip and remaining naming costs" and the residuals of its last section), which the report calls a map derived from source. The lead told the owner of two of the cases on 2026-09-29 and said that both would be raised (`dev/v0101-team/for-host-2026-09-27.md`, the entry of 00:14Z), and a reading of the ledger that day found no item for them (`dev/v0101-team/machine-move/lead38-recon-1-prior-host-questions.md`, E5). The repair is ten commits, built and not landed, `2b5ebe6d1..1bd028bef`; the lines below are the report's, at that range's tip. Read, not run: the repair's fixtures exercise no CLI.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It holds what the repair of [a-removal-unregisters-by-the-name-it-is-given](../done/a-removal-unregisters-by-the-name-it-is-given.md) leaves, by its builder's report (`dev/v0101-team/reports/report-Runtime-39.md` in the development tree, "Callers at the tip and remaining naming costs" and the residuals of its last section), which the report calls a map derived from source. The lead told the owner of two of the cases on 2026-09-29 and said that both would be raised (`dev/v0101-team/for-host-2026-09-27.md`, the entry of 00:14Z), and a reading of the ledger that day found no item for them (`dev/v0101-team/machine-move/lead38-recon-1-prior-host-questions.md`, E5). The repair is ten commits, built and not landed, `2b5ebe6d1..1bd028bef`; the lines below are the report's, at that range's tip. Read, not run: the repair's fixtures exercise no CLI. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: accepted as one item, for a build.
 
 ## What was seen
 

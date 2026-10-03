@@ -1,6 +1,10 @@
 # A standalone Files write is not shown to be refused when a change kept the file's mtime token
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the limit that the lead's acceptance of a test-only order names and that no item held (`dev/v0101-team/machine-move/lead30-services45-acceptance.md` in the development tree; `dev/v0101-team/reports/report-Services-45.md`, its last paragraph; `dev/v0101-team/machine-move/lead38-recon-10-residuals-release.md`, "Residuals the team can close under existing authority"). The lead read the production path at `main` `e07f3862f` when the order was cut (`dev/v0101-team/tasks/task-Lead-Services-45.md`). Read, not run: no test and no probe holds the case.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the limit that the lead's acceptance of a test-only order names and that no item held (`dev/v0101-team/machine-move/lead30-services45-acceptance.md` in the development tree; `dev/v0101-team/reports/report-Services-45.md`, its last paragraph; `dev/v0101-team/machine-move/lead38-recon-10-residuals-release.md`, "Residuals the team can close under existing authority"). The lead read the production path at `main` `e07f3862f` when the order was cut (`dev/v0101-team/tasks/task-Lead-Services-45.md`). Read, not run: no test and no probe holds the case. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: the reading and a probe are accepted; what a write must answer is ruled after them.
 
 ## What was seen
 

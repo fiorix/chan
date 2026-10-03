@@ -1,6 +1,10 @@
 # No client reads the code that a stopping devserver answers
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. It is the cost written under What shipped in [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md), which no item held. The builder's report names it as a residual (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "The clients of the 503 and the launcher routes, at the tip" and "Residuals"), and a reading of the ledger on 2026-09-29 searched `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` and found no reader (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part c). Read, not run.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the cost written under What shipped in [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md), which no item held. The builder's report names it as a residual (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "The clients of the 503 and the launcher routes, at the tip" and "Residuals"), and a reading of the ledger on 2026-09-29 searched `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` and found no reader (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part c). Read, not run. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: the measurement is accepted, of how often a real stop reaches a client as the 503, taken by the team. A build is ruled after it.
 
 ## What was seen
 

@@ -1,6 +1,6 @@
 # One question is answered independently in three to eight places
 
-Status: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02 with its remaining work; what was built by then shipped in [v0.101.0](../../release/release-v0.101.0.md).
+Status: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02 with its remaining work; what was built by then shipped in [v0.101.0](../../release/release-v0.101.0.md). Ruled on 2026-10-03: see Owner ruling.
 
 Record before the release: accepted for v0.101.0 by the owner on 2026-09-24; raised for v0.101.0 from the frontend review (its second theme and Phase 3: 134 verified patterns, 23 of them filed as medium findings), phased out of v0.100.0. The medium findings were re-verified against `main` at `d3de0180b` and all still apply; several have grown.
 
@@ -9,6 +9,8 @@ Record before the release: accepted for v0.101.0 by the owner on 2026-09-24; rai
 Accepted on 2026-09-24. The owner wants the code de-duplicated and its modules organised properly, and left the timing to the lead's recommendation: after [source-text-tests-pin-spelling-not-behaviour](../done/source-text-tests-pin-spelling-not-behaviour.md), because both move the same test files. That recommendation also proposed mechanical seams only, the five shared primitives the review names (modal shell, slot table, WebGL program helper, card chrome, deck focus restore) and no module decomposition. The owner's words about organising the modules properly read wider than that last clause, so how far module decomposition goes is confirmed with the owner before the lane fixes its scope.
 
 On 2026-09-26 the owner chose B for the module question: the mechanical seams and the five primitives, plus the seven extractions the dedup forces, each a new module that retires copies; the package and drawer reorganisation is not part of this item.
+
+On 2026-10-03 the owner ruled, as the lead recommended: the launcher's in-memory API is left out of the extractions.
 
 ## What was seen
 

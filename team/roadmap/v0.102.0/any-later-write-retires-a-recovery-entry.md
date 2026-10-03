@@ -1,10 +1,12 @@
 # Any later write of a file retires its recovery entry, and a live board's close causes one
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 by the independent review of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](../done/two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reviews/review-Frontend-18.md` in the development tree, finding 5, with the lead's notes, which raise it at the landing). The rule is older than that range, which relies on it for every window that goes. Read at `e07f3862f`; each step is read and the sequences are inferred; not run.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 by the independent review of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](../done/two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reviews/review-Frontend-18.md` in the development tree, finding 5, with the lead's notes, which raise it at the landing). The rule is older than that range, which relies on it for every window that goes. Read at `e07f3862f`; each step is read and the sequences are inferred; not run. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 
 Accepted on 2026-09-29 for a later version. The owner accepted in one answer every recommendation the lead had put to them that day, and with that answer closed v0.101.0's intake under one rule: a raised item enters v0.101.0 only when it loses a user's data or weakens security and its fix is small and local, a test-only or infrastructure item only when it makes the release gate or a release job unreliable, and an item whose fix changes a contract or reopens excluded scope, or whose fault is a wrong state with a rare trigger, goes to v0.102.0. Under that rule this item goes to v0.102.0 with [a-desktop-recovery-entry-ends-with-its-run](a-desktop-recovery-entry-ends-with-its-run.md), as one design of the recovery buffer: the rule serves every editor, so its fix changes what the recovery buffer promises each of them; the rule is older than v0.100.0, and the changelog states it for v0.101.0. The shape is not ruled: the rule by which an entry is stale, and where the buffer lives. When it was raised the lead recommended accepting it for v0.101.0, since a stroke is lost with no word. It is not part of v0.101.0.
+
+On 2026-10-03 the owner ruled, as the lead recommended: an entry is stale only once the file holds what the entry holds. The rule compares content, not the file's mtime.
 
 ## What was seen
 

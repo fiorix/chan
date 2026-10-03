@@ -1,6 +1,10 @@
 # Four gaps lie outside what the design of a removal's row claim guarantees
 
-Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner has not ruled on this item. The four are named as open by the design record of [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md): its reviews and the lead's dispositions on them call each "separate acceptance work" (`dev/v0101-team/reviews/review-Runtime-24.md` and `review-Runtime-25.md` in the development tree, with `dev/v0101-team/followups/followup-Runtime-Lead-33.md`), and a reading of the ledger on 2026-09-29 found no item for any of them (`dev/v0101-team/machine-move/lead38-recon-6-runtime-hold.md`, section 2a and "Ledger corrections", which says that its search was not exhaustive). Read from source by the design's builder and its reviewers; nothing was run, and no test holds any of the four.
+Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. The four are named as open by the design record of [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md): its reviews and the lead's dispositions on them call each "separate acceptance work" (`dev/v0101-team/reviews/review-Runtime-24.md` and `review-Runtime-25.md` in the development tree, with `dev/v0101-team/followups/followup-Runtime-Lead-33.md`), and a reading of the ledger on 2026-09-29 found no item for any of them (`dev/v0101-team/machine-move/lead38-recon-6-runtime-hold.md`, section 2a and "Ledger corrections", which says that its search was not exhaustive). Read from source by the design's builder and its reviewers; nothing was run, and no test holds any of the four. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: accepted as a reading. Each of the four gaps is read against the current code, with lines, and ruled after that reading.
 
 ## What was seen
 

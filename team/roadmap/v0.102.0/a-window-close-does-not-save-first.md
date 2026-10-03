@@ -1,10 +1,12 @@
 # A window's close does not save first, so a drawing's last stroke waits in the recovery buffer
 
-Status: raised for a decision on 2026-09-29 by the owner's ruling on the close of a window, built under [two-closes-still-drop-a-drawings-last-stroke](../done/two-closes-still-drop-a-drawings-last-stroke.md): in v0.101.0 a window's close does not ask about unsaved drawings, as built, and the ask is raised as an item of its own for a later version, so it is held under v0.102.0. The question is the builder's and the lead's, put to the owner on 2026-09-28 (`dev/v0101-team/reports/report-Frontend-31.md` in the development tree, "The question for the host, in my words"; `dev/v0101-team/followups/followup-Lead-Frontend-23.md`, rulings 1 and 2). Read at `4c4ada0a1`; nothing of the ask is built, and nothing was run.
+Status: raised for a decision on 2026-09-29 by the owner's ruling on the close of a window, built under [two-closes-still-drop-a-drawings-last-stroke](../done/two-closes-still-drop-a-drawings-last-stroke.md): in v0.101.0 a window's close does not ask about unsaved drawings, as built, and the ask is raised as an item of its own for a later version, so it is held under v0.102.0. The question is the builder's and the lead's, put to the owner on 2026-09-28 (`dev/v0101-team/reports/report-Frontend-31.md` in the development tree, "The question for the host, in my words"; `dev/v0101-team/followups/followup-Lead-Frontend-23.md`, rulings 1 and 2). Read at `4c4ada0a1`; nothing of the ask is built, and nothing was run. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 
 Ruled on 2026-09-29. The owner accepted in one answer every recommendation the lead had put to them that day; for this question it was to keep the close as built in v0.101.0, a close that does not ask and that writes each tab's waiting input to the recovery buffer, and to raise the ask as an item of its own for a later version. Whether a window's close saves first, and in which version, is not ruled. It is not part of v0.101.0.
+
+On 2026-10-03 the owner ruled, as the lead recommended: a window's close stays as built for v0.102.0, and the documents say that it does not save first.
 
 ## What was seen
 

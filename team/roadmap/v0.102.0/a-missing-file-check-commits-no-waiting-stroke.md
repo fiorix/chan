@@ -1,6 +1,10 @@
 # The missing-file check commits no waiting stroke before it reloads
 
-Status: raised for a decision on 2026-10-02 and held under v0.102.0. It is the third route of [a-stroke-in-the-debounce-is-lost-to-a-load](../done/a-stroke-in-the-debounce-is-lost-to-a-load.md), whose other two routes are built in v0.101.0 as the owner accepted that item; by a ruling of the lead's on 2026-10-02 the third gets a row of its own, since a standing hold on missing-file work keeps it out of v0.101.0. Read in the code at `d7a7a7fa0`; not run.
+Status: raised for a decision on 2026-10-02 and held under v0.102.0. It is the third route of [a-stroke-in-the-debounce-is-lost-to-a-load](../done/a-stroke-in-the-debounce-is-lost-to-a-load.md), whose other two routes are built in v0.101.0 as the owner accepted that item; by a ruling of the lead's on 2026-10-02 the third gets a row of its own, since a standing hold on missing-file work keeps it out of v0.101.0. Read in the code at `d7a7a7fa0`; not run. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: accepted for a build. The standing hold on missing-file work that kept it out of v0.101.0 is not the owner's and ended with that release.
 
 ## What was seen
 

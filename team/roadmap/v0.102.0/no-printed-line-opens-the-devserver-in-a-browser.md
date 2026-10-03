@@ -1,10 +1,12 @@
 # No printed line opens the devserver in a browser
 
-Status: raised by the owner on 2026-10-03, from use, while opening a running devserver in a browser to work around [a-slide-decks-pdf-lacks-the-images-it-shows](a-slide-decks-pdf-lacks-the-images-it-shows.md). Read in code at `13cf4e175`; `chan devserver status` was run against the owner's running devserver and its output is quoted below. The masking reading was not run.
+Status: raised by the owner on 2026-10-03, from use, while opening a running devserver in a browser to work around [a-slide-decks-pdf-lacks-the-images-it-shows](a-slide-decks-pdf-lacks-the-images-it-shows.md). Read in code at `13cf4e175`; `chan devserver status` was run against the owner's running devserver and its output is quoted below. The masking reading was not run. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 
 Accepted on 2026-10-03 for v0.102.0 on the owner's word "new roadmap item". The shape of the fix is not ruled; the exposure question under "What to do" is open.
+
+On 2026-10-03 the owner ruled, as the lead recommended: `status` prints the launch URL with its token only when its output is a terminal, and a flag forces it elsewhere. The masking default is built as this item describes.
 
 ## What was seen
 
