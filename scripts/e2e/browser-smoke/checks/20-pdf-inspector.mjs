@@ -7,8 +7,9 @@
 // have one known colour, and the check finds that colour on the
 // page: an image is where its slide puts it and as large as play shows it,
 // a slide taller or wider than its page comes out whole and smaller, a
-// block wider than the slide paints no scrollbar, and a line that fits in
-// play does not break in the PDF.
+// block wider than the slide paints no scrollbar, a line that fits in
+// play does not break in the PDF, and an image with no size of its own is
+// as wide as play lays it out.
 
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +27,7 @@ const VIOLET = [128, 0, 200];
 const AMBER = [255, 176, 0];
 const BLUE = [20, 90, 200];
 const ORANGE = [230, 60, 20];
+const ROSE = [220, 20, 120];
 
 /// A deck page of the export: A4 landscape, the 16:9 slide fitted to the
 /// page's width and centred on it, laid out as play lays it out on a
@@ -39,6 +41,8 @@ function slideOf(raster) {
     /// Raster px of one px of the slide's zoomed content.
     pxPerContentPx: 2 * pxPerCss,
     padding: 54 * pxPerCss,
+    /// How wide the slide's content is, in px of that content.
+    contentPx: (1920 - 2 * 54) / 2,
   };
 }
 
@@ -111,7 +115,7 @@ function scrollbarRows(raster) {
 function inspectBoxDeck(rasters) {
   const faults = [];
   const details = {};
-  const [image, lines, tall, wide] = rasters;
+  const [image, lines, tall, wide, unsized] = rasters;
 
   // Page 1: one image under a heading, 180 px wide in the deck's content.
   {
@@ -201,6 +205,47 @@ function inspectBoxDeck(rasters) {
       );
     }
   }
+
+  // Page 5: an image with no size of its own, an SVG that carries only a
+  // viewBox ten times as wide as tall, under a marker 100 px wide, on a
+  // slide the same wide block shrinks. Play lays such an image out as wide
+  // as the slide's content, and the marker says what scale the slide came
+  // out at.
+  {
+    const slide = slideOf(unsized);
+    const marker = colourBox(unsized, TEAL);
+    const box = colourBox(unsized, ROSE);
+    if (!marker) {
+      faults.push("page 5: the marker image is not on the page");
+    } else if (!box) {
+      faults.push("page 5: the image with no size of its own is not on the page");
+    } else {
+      const scale = marker.width / (100 * slide.pxPerContentPx);
+      const width = slide.contentPx * slide.pxPerContentPx * scale;
+      details.unsized = {
+        width: box.width,
+        height: box.height,
+        scale: Number(scale.toFixed(3)),
+      };
+      if (Math.abs(box.width - width) > 0.02 * width) {
+        faults.push(
+          `page 5: the image with no size of its own is ${box.width} px wide; play ` +
+            `shows it as wide as the slide's content, ${width.toFixed(1)} px`,
+        );
+      }
+      if (Math.abs(box.width / box.height - 10) > 0.4) {
+        faults.push(
+          `page 5: the image with no size of its own is ${box.width}x${box.height}, ` +
+            "not ten times as wide as tall",
+        );
+      }
+      if (box.count < 0.95 * box.width * box.height) {
+        faults.push(
+          `page 5: ${box.count} px of the image's colour in a ${box.width}x${box.height} box`,
+        );
+      }
+    }
+  }
   return { details, faults };
 }
 
@@ -283,7 +328,7 @@ export default {
         file: "deck-box.md",
         pdf: "deck-box.pdf",
         orientation: "landscape",
-        pages: 4,
+        pages: 5,
         inspect: inspectBoxDeck,
       },
     ];

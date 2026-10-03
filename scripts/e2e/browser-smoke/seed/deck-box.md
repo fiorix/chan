@@ -38,3 +38,13 @@ A line of text above an image taller than what is left of the slide.
 ```sh
 tar --extract --file rootfs.tar --directory /var/lib/machines/guest --numeric-owner --xattrs --acls --same-permissions --delay-directory-restore --exclude ./dev --exclude ./proc
 ```
+
+<hr class="chan-page-break">
+
+![](mark-teal.png#w=100)
+
+![](mark-rose.svg)
+
+```sh
+tar --extract --file rootfs.tar --directory /var/lib/machines/guest --numeric-owner --xattrs --acls --same-permissions --delay-directory-restore --exclude ./dev --exclude ./proc
+```

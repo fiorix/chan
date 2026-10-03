@@ -392,6 +392,50 @@ describe("liftPageImages", () => {
     );
   });
 
+  test("an image with no natural size stands in at the size its style resolves to", async () => {
+    class UnsizedImage extends StandInImage {
+      naturalWidth = 0;
+      naturalHeight = 0;
+    }
+    vi.stubGlobal("Image", UnsizedImage);
+    imagesHaveBoxes();
+    // A slide scaled to half its size, as the export's fit does: the rect
+    // is half of what the image takes in the page's layout.
+    vi.spyOn(HTMLImageElement.prototype, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 20,
+      height: 10,
+    } as DOMRect);
+    const { root } = await lifted(
+      '<img src="/api/fs/viewbox.svg?t=tok" style="width:40px;height:20px">',
+    );
+
+    const img = root.querySelector("img")!;
+    expect(decodeURIComponent(img.getAttribute("src")!)).toContain(
+      'width="40" height="20"',
+    );
+    expect(img.getAttribute("width")).toBe("40");
+    expect(img.style.getPropertyValue("aspect-ratio")).toBe("40 / 20");
+  });
+
+  test("an image the page lays out wider than its natural size stands in that wide", async () => {
+    // An SVG that carries only a viewBox reports a natural size in some
+    // engines, and that is not the size they lay it out at: it takes the
+    // width of what holds it. The image here is 40 by 20.
+    imagesHaveBoxes();
+    const { root } = await lifted(
+      '<img src="/api/fs/viewbox.svg?t=tok" style="width:80px">',
+    );
+
+    const img = root.querySelector("img")!;
+    expect(decodeURIComponent(img.getAttribute("src")!)).toContain(
+      'width="80" height="40"',
+    );
+    expect(img.getAttribute("width")).toBe("80");
+    expect(img.style.getPropertyValue("aspect-ratio")).toBe("40 / 20");
+  });
+
   test("names an unsized image the page shows that gives no measurable box", async () => {
     class UnsizedImage extends StandInImage {
       naturalWidth = 0;
