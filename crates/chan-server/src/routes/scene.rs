@@ -121,9 +121,11 @@ pub(crate) enum ServerFrame {
     },
     /// The in-flight push merged; `version` is the session version
     /// after the merge (unchanged when every pushed element lost the
-    /// merge).
+    /// merge). `changed` says whether the push changed the authority's
+    /// scene: when it did, the authority is dirty until its next `flush`
+    /// frame; when it did not, the push left nothing to write.
     #[serde(rename = "push-ok")]
-    PushOk { version: u64 },
+    PushOk { version: u64, changed: bool },
     /// A peer's pointer moved. Same fields as a `snapshot.cursors`
     /// entry.
     #[serde(rename = "cursor")]
@@ -542,8 +544,18 @@ mod tests {
             r##"{"type":"update","version":5,"elements":[],"appState":{"viewBackgroundColor":"#fff"},"files":{"f2":{"dataURL":"data:y"}}}"##
         );
         assert_eq!(
-            enc(&ServerFrame::PushOk { version: 5 }),
-            r#"{"type":"push-ok","version":5}"#
+            enc(&ServerFrame::PushOk {
+                version: 5,
+                changed: true
+            }),
+            r#"{"type":"push-ok","version":5,"changed":true}"#
+        );
+        assert_eq!(
+            enc(&ServerFrame::PushOk {
+                version: 5,
+                changed: false
+            }),
+            r#"{"type":"push-ok","version":5,"changed":false}"#
         );
     }
 

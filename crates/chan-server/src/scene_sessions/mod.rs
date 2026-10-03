@@ -1140,7 +1140,8 @@ impl SceneAttachHandle {
     /// Merge one push. Accepted values fan to the OTHER attachments
     /// and the sender gets `push-ok`, both enqueued under the same
     /// lock. A fully discarded push still acks (the sender's elements
-    /// lost the merge everywhere, nothing to fan). An Err means the
+    /// lost the merge everywhere, nothing to fan), and the ack says
+    /// that the push changed nothing. An Err means the
     /// route should answer an `error` frame and drop this attachment;
     /// the authority scene is untouched (the push is all-or-nothing).
     pub fn push(
@@ -1157,7 +1158,8 @@ impl SceneAttachHandle {
         let applied = st
             .scene
             .apply_push_with_limit(elements, app_state, files, write_budget)?;
-        if !applied.is_empty() {
+        let changed = !applied.is_empty();
+        if changed {
             st.version += 1;
             let frame = update_frame(st.version, applied);
             st.fan_except(self.attach_id, &frame);
@@ -1166,6 +1168,7 @@ impl SceneAttachHandle {
         }
         let ok = serialize(&ServerFrame::PushOk {
             version: st.version,
+            changed,
         });
         st.send_to(self.attach_id, ok);
         Ok(())
