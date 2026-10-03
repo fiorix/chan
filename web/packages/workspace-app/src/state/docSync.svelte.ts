@@ -321,6 +321,16 @@ export class DocSession {
   /// The attach readiness check failed (editor doc had not caught up to
   /// the buffer yet); retry on the next view update.
   private attachQueued = false;
+  /// The text the tab held when a snapshot landed on it with no collab
+  /// installed and nothing of its user's in the buffer: the buffer was its
+  /// saved text. Such a tab has nothing to push, so where that text differs
+  /// from the snapshot the difference is the file's, and the attach takes
+  /// the snapshot. The attach can run after the snapshot, at a view's bind
+  /// or its fill, so it takes the snapshot only while the buffer is still
+  /// this text: a key typed in between makes the tab dirty, and a dirty
+  /// tab's buffer is pushed over the snapshot. Null when the tab held edits
+  /// of its own.
+  private cleanAtSnapshot: string | null = null;
 
   private pushInFlight = false;
   private pushOutcomeUnresolved = false;
@@ -656,7 +666,8 @@ export class DocSession {
   /// and on view rebind. `pendingOverride` carries the hard-resync
   /// rebased changeset (C' = C.map(B)); when absent, pending is the
   /// content diff shadow -> view doc (degraded-window and pre-attach
-  /// edits merge instead of clobbering).
+  /// edits merge instead of clobbering), and nothing for a tab that was
+  /// clean when its snapshot landed and still is (`cleanAtSnapshot`).
   private tryAttach(pendingOverride?: ChangeSet | null): void {
     if (!this.view || !this.slot || !this.haveSnapshot) return;
     if (this.collabInstalled && pendingOverride === undefined) return;
@@ -680,6 +691,10 @@ export class DocSession {
           pendingOverride !== null && !pendingOverride.empty
             ? pendingOverride
             : null;
+      } else if (D === this.cleanAtSnapshot) {
+        // The tab takes the snapshot as a load takes the file, which also
+        // ends the banner that says the file changed.
+        this.tab.externalChange = false;
       } else {
         pending = presentableDiff(S, D).map((c) => ({
           from: c.fromA,
@@ -720,6 +735,7 @@ export class DocSession {
       ),
     });
     this.collabInstalled = true;
+    this.cleanAtSnapshot = null;
     // (4) re-dispatch pending as normal edits: they become unconfirmed
     // local updates and push through the pump.
     if (pending !== null) {
@@ -1055,6 +1071,15 @@ export class DocSession {
         pendingOverride = null;
         console.warn("[chan] doc resync: rebase failed, dropping local edits", e);
         notify("Connection resync dropped unconfirmed edits (recovery copy kept)");
+      }
+    }
+    if (!this.collabInstalled) {
+      // Read before `writeSaved` below puts the snapshot in the tab's saved
+      // text. A buffer still equal to the text an earlier snapshot found
+      // clean is clean still.
+      const buffer = lf(this.tab.content);
+      if (buffer !== this.cleanAtSnapshot) {
+        this.cleanAtSnapshot = buffer === lf(this.tab.saved) ? buffer : null;
       }
     }
     this.shadowText = Text.of(f.doc.split("\n"));
