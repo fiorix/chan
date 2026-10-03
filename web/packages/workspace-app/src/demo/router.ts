@@ -318,7 +318,7 @@ export function createDemoFetch(
       const target = qs.get("target") ?? "";
       if (store.isDir(target)) return json({ path: target, kind: "file", is_dir: true });
       const resolved = graph.resolve(target, "", true);
-      if (resolved === null) return notFound("broken link");
+      if (resolved === null) return json({ error: "link target not found", code: "link_not_found" }, 404);
       return json({ path: resolved, kind: "file" });
     }
 
