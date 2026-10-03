@@ -310,7 +310,9 @@ type QueuedPush = {
   /// ack confirms. For a push on the wire they are in the appState it sent.
   /// For a queued one they are what the drain lays over the authority's
   /// appState: every offer that joined the queue added its keys, and none
-  /// is dropped while the push waits.
+  /// is dropped while the push waits, but for one case. A tab that takes
+  /// the disk's scene through a conflict's resolution empties them, and
+  /// the push's appState with them (`tabTookDisk`).
   claim: WireAppState | null;
   files: WireFiles | null;
 };
