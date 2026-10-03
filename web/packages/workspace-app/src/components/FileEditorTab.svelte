@@ -181,7 +181,7 @@
     | {
         focusCanvas: () => void;
         flushPendingEdits: () => void;
-        restoreOverScene: (json: string) => boolean;
+        restoreOverScene: (json: string) => "not-live" | "applied" | "nothing-newer" | "unreadable";
       }
     | undefined = $state();
   $effect(() => registerPendingEditFlush(tab.id, () => canvasRef?.flushPendingEdits()));
@@ -287,6 +287,9 @@
   // `tab.path` because tab ids regenerate on every page load; the path
   // is what survives the reload the recovery exists for.
   let recoveredBuffer: EditorBuffer | null = $state(null);
+  /// Why the last Restore took nothing of the offered entry, shown in the
+  /// banner in place of its offer while the entry stays.
+  let restoreTookNothing: string | null = $state(null);
 
   $effect(() => {
     // Recovery decision. Deliberately depends on the on-disk content
@@ -301,7 +304,11 @@
     // effect can touch storage.
     const saved = tab.saved;
     if (saved === undefined || tab.loading) return;
-    recoveredBuffer = divergentBufferOrNull(tab.path, tab.path, saved);
+    const offered = divergentBufferOrNull(tab.path, tab.path, saved);
+    recoveredBuffer = offered;
+    // A reason given for an entry stays while that entry is offered: a
+    // peer's edit moves the saved text and runs this again with it.
+    if (offered === null) restoreTookNothing = null;
   });
 
   $effect(() => {
@@ -342,13 +349,22 @@
     // result is the board's serialization and never the entry's bytes, so
     // no save can retire the stored entry by holding its content, and it is
     // retired here: the recovery effect would offer it again as soon as the
-    // tab's saved text moves. Any other tab takes the entry as its buffer.
-    if (canvasRef?.restoreOverScene(recoveredBuffer.content)) {
-      clearEditorBuffer(tab.path);
-    } else {
-      setTabContent(tab, recoveredBuffer.content);
+    // tab's saved text moves. An entry such a board took nothing of stays
+    // stored and offered, with the reason in the banner: nothing was applied
+    // that could stand in for it. Any other tab takes the entry as its
+    // buffer.
+    const taken = canvasRef?.restoreOverScene(recoveredBuffer.content) ?? "not-live";
+    if (taken === "unreadable" || taken === "nothing-newer") {
+      restoreTookNothing =
+        taken === "unreadable"
+          ? "The unsaved changes cannot be read as a drawing, so nothing was restored."
+          : "Nothing was restored: the unsaved changes hold no element newer than this board's, and Restore on a live drawing leaves its grid, background and deleted elements as they are.";
+      return;
     }
+    if (taken === "applied") clearEditorBuffer(tab.path);
+    else setTabContent(tab, recoveredBuffer.content);
     recoveredBuffer = null;
+    restoreTookNothing = null;
     // Restored content that diverges from disk is persisted again under the
     // current session by the persistence effect on the next tick.
   }
@@ -356,6 +372,7 @@
   function discardBuffer(): void {
     clearEditorBuffer(tab.path);
     recoveredBuffer = null;
+    restoreTookNothing = null;
   }
 
   /// Read-only mode for this tab. The status bar's lamp toggles
@@ -999,10 +1016,12 @@
          unsaved content for this file that diverges from disk. The user
          picks Restore (replace the editor content with the buffer, or on
          a live drawing lay the buffer over the board) or Discard (keep the
-         disk content). Either choice dismisses it. -->
+         disk content). Either choice dismisses it, but for a Restore that
+         took nothing of the buffer on a live drawing: the banner then says
+         why, and stays. -->
     <div class="recovery-banner" role="alert">
       <span class="recovery-banner-text">
-        Unsaved changes from a previous session were found.
+        {restoreTookNothing ?? "Unsaved changes from a previous session were found."}
       </span>
       <button
         type="button"

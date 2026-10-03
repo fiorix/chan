@@ -99,7 +99,7 @@ const island = vi.hoisted(() => {
     module: {
       default: (_anchor: unknown, props: Record<string, unknown>) => {
         island.props = props;
-        return { focusCanvas() {}, flushPendingEdits() {}, restoreOverScene: () => false };
+        return { focusCanvas() {}, flushPendingEdits() {}, restoreOverScene: () => "not-live" as const };
       },
     },
   };

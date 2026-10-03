@@ -781,10 +781,14 @@
   }
 
   /// Lay a recovery entry's scene over a live session's board as a local
-  /// change, and answer whether it did: false means this is no such board,
-  /// and the caller restores through the buffer, which reseeds the board. A
-  /// session that has stopped for good has no authority whose scene the
-  /// merge would keep, so its board is no such board either.
+  /// change, and answer what came of it. "not-live" means this is no such
+  /// board, and the caller restores through the buffer, which reseeds the
+  /// board; a session that has stopped for good has no authority whose scene
+  /// the merge would keep, so its board is no such board either. On a live
+  /// board, "unreadable" means the entry does not parse as a scene and
+  /// "nothing-newer" that it holds nothing this takes: the board is left as
+  /// it is, and the caller keeps the entry. "applied" means the board took
+  /// something of it.
   ///
   /// A live board holds its authority's scene, which a peer may have changed
   /// since the entry was written, so the entry is not put in its place. What
@@ -798,11 +802,16 @@
   /// The entry's appState is not taken: an appState is one value with no
   /// version, so the entry's cannot be told from an older one than the
   /// authority's.
-  export function restoreOverScene(json: string): boolean {
-    if (!api || !ex || !seeded || !session?.reachesAuthority()) return false;
-    const scene = ex.restore(parseScene(json), null, null, { repairBindings: true });
+  export function restoreOverScene(json: string): "not-live" | "applied" | "nothing-newer" | "unreadable" {
+    if (!api || !ex || !seeded || !session?.reachesAuthority()) return "not-live";
+    const entry = parseScene(json);
+    if (!Array.isArray(entry?.elements)) return "unreadable";
+    const scene = ex.restore(entry, null, null, { repairBindings: true });
     const held = new Map(api.getSceneElementsIncludingDeleted().map((el) => [el.id, el.version] as const));
     const beyond = scene.elements.filter((el) => (held.get(el.id) ?? -1) < el.version);
+    const onBoard = api.getFiles();
+    const files = Object.values(scene.files).filter((file) => !(file.id in onBoard));
+    if (beyond.length === 0 && files.length === 0) return "nothing-newer";
     api.updateScene({
       elements: ex.reconcileElements(
         api.getSceneElementsIncludingDeleted(),
@@ -811,11 +820,10 @@
       ),
       captureUpdate: ex.CaptureUpdateAction.NEVER,
     } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
-    const files = Object.values(scene.files);
     if (files.length > 0) api.addFiles(files);
     if (serializeTimer !== null) clearTimeout(serializeTimer);
     flushSerialize();
-    return true;
+    return "applied";
   }
 
   onDestroy(() => {
