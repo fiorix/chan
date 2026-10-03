@@ -3199,9 +3199,16 @@ where
         tokio::select! {
             biased;
             reply = &mut rx => {
-                let mut response = match reply {
-                    Ok(payload) => export_reply_response(&payload),
-                    Err(_) => ControlResponse::Error { message: "export request cancelled before a reply".into() },
+                let mut response = if job.committed() {
+                    ControlResponse::Export {
+                        out_path: out.clone(),
+                        window_id: None,
+                    }
+                } else {
+                    match reply {
+                        Ok(payload) => export_reply_response(&payload),
+                        Err(_) => ControlResponse::Error { message: "export request cancelled before a reply".into() },
+                    }
                 };
                 if let ControlResponse::Export { window_id: actual, .. } = &mut response {
                     *actual = Some(window_id.to_string());
