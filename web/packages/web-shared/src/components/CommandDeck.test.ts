@@ -1046,6 +1046,28 @@ describe("command success ownership", () => {
     expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
   });
 
+  it("a success card the host cleared gives way to a newer command inside its 260 ms", async () => {
+    const second = deferred<void>();
+    const onChoose = vi.fn()
+      .mockImplementationOnce(async () => {})
+      .mockImplementationOnce(() => second.promise);
+    const { entry, onSuccess } = start(true, onChoose);
+    await flush();
+    expect(draft().operation?.kind).toBe("success");
+    draft().operation = null;
+    await flush();
+    closeResult().click();
+    await flush();
+    const newer = draft().operation;
+    expect(newer?.kind).toBe("pending");
+    await settle();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(draft().operation).toBe(newer);
+    second.resolve();
+    await settle();
+    expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
+  });
+
   it("a success card retires on a draft replaced inside its 260 ms", async () => {
     const { onSuccess } = start(true, async () => {});
     await flush();
