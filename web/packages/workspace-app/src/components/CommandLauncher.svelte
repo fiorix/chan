@@ -391,9 +391,10 @@
   /// The actions this particular window can take. Focus and Show both route
   /// through focusLibraryWindow, which unhides and raises in one step, so a
   /// window offers one of the two and never both. The capability route
-  /// refuses Hide and Close on a control terminal, so neither is offered
-  /// there.
+  /// refuses Hide and Close on a control terminal or a window this host does
+  /// not manage, so neither is offered there.
   function scopedWindowActions(window: ScopedLibraryWindow): WindowActionId[] {
+    if (window.managed === false) return ["focus"];
     const manageable = !window.control;
     const actions: WindowActionId[] = [window.hidden ? "show" : "focus"];
     if (manageable && !window.hidden) actions.push("hide");

@@ -23,6 +23,8 @@ export interface ScopedLibraryWindow {
   connected: boolean;
   hidden: boolean;
   control: boolean;
+  /** False when this host sees the window through a devserver feed alone. */
+  managed?: boolean;
   /** Same-origin redirect that revalidates the capability before attaching. */
   launch_path: string;
 }
