@@ -688,6 +688,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn content_type_for_maps_webp_avif_and_bmp_case_insensitively() {
+        for (path, expected) in [
+            ("shot.webp", "image/webp"),
+            ("SHOT.WEBP", "image/webp"),
+            ("shot.avif", "image/avif"),
+            ("SHOT.AVIF", "image/avif"),
+            ("shot.bmp", "image/bmp"),
+            ("SHOT.BMP", "image/bmp"),
+        ] {
+            assert_eq!(content_type_for(path), expected, "{path}");
+        }
+    }
+
     #[tokio::test]
     async fn serve_launcher_serves_the_pwa_manifest() {
         let uri: axum::http::Uri = "/manifest.webmanifest".parse().unwrap();
