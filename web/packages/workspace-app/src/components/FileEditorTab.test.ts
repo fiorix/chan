@@ -568,18 +568,11 @@ describe("the body menu", () => {
 });
 
 describe("recovering unsaved work from an earlier page load", () => {
-  /// A buffer another page load left behind for the tab's path. It is dated
-  /// ahead of any save the doc session reports, so only the component's own
-  /// decisions can retire it.
+  /// A buffer another page load left behind for the tab's path.
   function strandBuffer(path: string, content: string): void {
     localStorage.setItem(
       bufferKey(path),
-      JSON.stringify({
-        content,
-        updatedAt: Date.now() + 86_400_000,
-        path,
-        sessionId: "an-earlier-load",
-      }),
+      JSON.stringify({ content, updatedAt: Date.now(), path, sessionId: "an-earlier-load" }),
     );
   }
 

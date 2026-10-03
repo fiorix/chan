@@ -287,19 +287,15 @@
     // (`tab.saved`), NOT `tab.content`: it re-runs on load / save /
     // reload but never on keystrokes, so it cannot mistake the user's
     // own in-progress edits for a prior session. divergentBufferOrNull
-    // offers a buffer only when it came from a different page load,
-    // diverges from disk, and postdates the last save; on a save it
-    // resolves to null, which dismisses the banner with no extra
-    // bookkeeping. Declared before the persistence effect so it
-    // captures the buffer before that effect can touch storage.
+    // offers a buffer only when it came from a different page load and
+    // diverges from disk, whenever the file was written; a save that
+    // puts the buffer's content on disk resolves to null, which
+    // dismisses the banner with no extra bookkeeping. Declared before
+    // the persistence effect so it captures the buffer before that
+    // effect can touch storage.
     const saved = tab.saved;
     if (saved === undefined || tab.loading) return;
-    recoveredBuffer = divergentBufferOrNull(
-      tab.path,
-      tab.path,
-      saved,
-      tab.savedMtimeNs,
-    );
+    recoveredBuffer = divergentBufferOrNull(tab.path, tab.path, saved);
   });
 
   $effect(() => {
@@ -319,8 +315,9 @@
     // edit. A pending recovery buffer is left alone: it belongs to a
     // previous load and its banner is still being offered, so clearing
     // it here would lose unsaved work if the user switches tabs before
-    // acting. The recovery effect above drops that banner on the next
-    // save, after which this branch clears normally.
+    // acting. The recovery effect above drops that banner at a save
+    // once the file holds the buffer or the stored entry is this
+    // load's own, after which this branch clears normally.
     const content = tab.content;
     const saved = tab.saved;
     if (saved === undefined || tab.loading) return;

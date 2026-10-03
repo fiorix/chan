@@ -191,7 +191,7 @@ describe("what a window that goes leaves for the next open", () => {
     const raw = localStorage.getItem(bufferKey(path));
     if (raw === null) return "nothing stored";
     localStorage.setItem(bufferKey(path), JSON.stringify({ ...JSON.parse(raw), sessionId: "an-earlier-load" }));
-    return divergentBufferOrNull(path, path, disk, DISK_MTIME_NS)?.content ?? "nothing offered";
+    return divergentBufferOrNull(path, path, disk)?.content ?? "nothing offered";
   }
 
   const WAYS: [string, () => Promise<void>][] = [

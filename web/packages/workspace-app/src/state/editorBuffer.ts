@@ -68,7 +68,7 @@ export interface EditorBuffer {
   /// Unsaved content as of the last debounced write.
   content: string;
   /// Wall-clock ms since epoch of the last write. Drives TTL eviction
-  /// and the age-vs-save staleness guard in `divergentBufferOrNull`.
+  /// and the size cap's oldest-first order.
   updatedAt: number;
   /// Workspace-relative path of the tab when the buffer was written.
   /// Guards against restoring one file's content into a different
@@ -276,26 +276,26 @@ export function pruneEditorBuffers(): number {
 }
 
 /// Decide whether a stored buffer should surface the restore banner.
-/// Returns the buffer only when it is recoverable work from a crashed
-/// earlier load; returns null (and clears the entry when it is proven
-/// stale) otherwise.
+/// Returns the buffer only when it is recoverable work from an earlier
+/// load; returns null otherwise, and clears an entry stored for another
+/// path.
 ///
 /// A buffer is offered only when ALL hold:
 ///   * its path matches the current tab (not stale wrong-file content),
 ///   * it came from a DIFFERENT page load (own-session edits are live,
 ///     already in the editor, never a recovery candidate),
-///   * its content diverges from disk (nothing to recover otherwise),
-///   * it postdates the file's last on-disk save (an older buffer was
-///     superseded by our own save or another writer).
+///   * its content diverges from disk (nothing to recover otherwise).
 ///
-/// `updatedAt` (browser wall clock) and `savedMtimeNs` (filesystem
-/// mtime) share one machine clock here (chan is single-machine,
-/// loopback), so comparing them is meaningful.
+/// A buffer is stale only once the file holds what it holds, so the
+/// file's mtime is not compared with the buffer's stamp. A write after
+/// the stamp need not carry the buffer's last change: a peer's edit, a
+/// scene session's write at its last detach, and a save of older content
+/// still on the wire all land after it, and the page's clock and the
+/// file's may be two machines'.
 export function divergentBufferOrNull(
   key: string,
   tabPath: string,
   diskContent: string,
-  savedMtimeNs?: string | null,
 ): EditorBuffer | null {
   const buf = readEditorBuffer(key);
   if (!buf) return null;
@@ -305,12 +305,5 @@ export function divergentBufferOrNull(
   }
   if (buf.sessionId === SESSION_ID) return null;
   if (buf.content === diskContent) return null;
-  if (savedMtimeNs != null) {
-    const savedMs = Number(savedMtimeNs) / 1e6;
-    if (Number.isFinite(savedMs) && buf.updatedAt < savedMs) {
-      clearEditorBuffer(key);
-      return null;
-    }
-  }
   return buf;
 }

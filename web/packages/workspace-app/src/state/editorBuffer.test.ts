@@ -191,27 +191,10 @@ describe("divergentBufferOrNull recovery decision", () => {
     expect(readEditorBuffer("notes/a.md")).toBeNull();
   });
 
-  test("clears + returns null when the buffer predates the last on-disk save", () => {
-    const now = Date.now();
-    // Buffer captured 10s before the file was last saved: stale.
-    writeForeignBuffer("notes/a.md", "obsolete", "notes/a.md", now - 10_000);
-    const savedNs = String(now * 1_000_000);
-    expect(divergentBufferOrNull("notes/a.md", "notes/a.md", "disk", savedNs)).toBeNull();
-    expect(readEditorBuffer("notes/a.md")).toBeNull();
-  });
-
-  test("returns the buffer when it postdates the last on-disk save", () => {
-    const now = Date.now();
-    writeForeignBuffer("notes/a.md", "newer work", "notes/a.md", now);
-    const savedNs = String((now - 10_000) * 1_000_000);
-    const buf = divergentBufferOrNull("notes/a.md", "notes/a.md", "disk", savedNs);
-    expect(buf).not.toBeNull();
-    expect(buf!.content).toBe("newer work");
-  });
-
-  test("skips the mtime guard when no saved mtime is known", () => {
-    writeForeignBuffer("notes/a.md", "recovered", "notes/a.md");
-    expect(divergentBufferOrNull("notes/a.md", "notes/a.md", "disk", null)).not.toBeNull();
+  test("returns a diverging buffer however long ago it was stamped, and leaves it stored", () => {
+    writeForeignBuffer("notes/a.md", "older work", "notes/a.md", Date.now() - MS_PER_DAY);
+    expect(divergentBufferOrNull("notes/a.md", "notes/a.md", "disk")?.content).toBe("older work");
+    expect(readEditorBuffer("notes/a.md")?.content).toBe("older work");
   });
 });
 
