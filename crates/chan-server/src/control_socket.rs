@@ -5824,6 +5824,10 @@ mod tests {
         }
         tokio::time::advance(std::time::Duration::from_secs(21)).await;
         assert!(
+            task.is_finished(),
+            "page progress extended the absolute cap past 15m"
+        );
+        assert!(
             matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("15m absolute"))
         );
     }
