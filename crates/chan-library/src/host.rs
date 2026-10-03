@@ -9343,6 +9343,87 @@ mod tests {
         );
     }
 
+    /// A runtime whose blocking pool has begun its shutdown refuses a task
+    /// inside the spawn, and drops the task's closure there while it holds
+    /// the pool's own lock, which every blocking spawn of that runtime
+    /// takes. The release of an unreceived open waits on its workspace for
+    /// as long as the root's filesystem makes it, so it is not made inside
+    /// that refusal: a second blocking spawn returns while the release is
+    /// still held.
+    ///
+    /// The workspace owns its recovery driver and drops it with its last
+    /// reference, so a driver whose drop waits holds the release where the
+    /// join of a recovery worker would.
+    #[test]
+    fn a_refused_release_of_an_unreceived_open_leaves_the_blocking_pool_free() {
+        const HELD: Duration = Duration::from_secs(30);
+        const SPAWN_BOUND: Duration = Duration::from_secs(5);
+        struct HeldRelease {
+            entered: std::sync::mpsc::Sender<std::thread::ThreadId>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl chan_workspace::RecoveryDriver for HeldRelease {
+            fn wake(&self, _: chan_workspace::WorkspaceGeneration) {}
+        }
+        impl Drop for HeldRelease {
+            fn drop(&mut self) {
+                let _ = self.entered.send(std::thread::current().id());
+                let _ = self.release.lock().unwrap().recv_timeout(HELD);
+            }
+        }
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.stop_open_recovery();
+        let (entered, entry) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        workspace.set_recovery_driver(Arc::new(HeldRelease {
+            entered,
+            release: Mutex::new(released),
+        }));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        runtime.shutdown_background();
+        let answer = OpenAnswer {
+            opened: Some(Ok(workspace)),
+            permit: None,
+        };
+        let dropping = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                let _context = handle.enter();
+                drop(answer);
+            })
+        };
+        assert_eq!(
+            entry
+                .recv_timeout(HELD)
+                .expect("fixture: the release of the unreceived open never began"),
+            dropping.thread().id(),
+            "a stopping runtime's refused release was not made by the thread that dropped \
+             the open's answer"
+        );
+        let (spawned, spawning) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            drop(handle.spawn_blocking(|| ()));
+            let _ = spawned.send(());
+        });
+        let free = spawning.recv_timeout(SPAWN_BOUND).is_ok();
+        release.send(()).unwrap();
+        dropping.join().unwrap();
+        other.join().unwrap();
+        assert!(
+            free,
+            "a blocking spawn waited {SPAWN_BOUND:?} behind the release of an unreceived open \
+             that its stopping runtime had refused"
+        );
+    }
+
     /// A recovery driver that reports, when its workspace is destroyed,
     /// whether the call permit `call` is still held. The workspace owns its
     /// driver, so this observes the workspace's release on whichever thread
