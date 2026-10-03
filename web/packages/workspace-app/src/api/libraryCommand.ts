@@ -21,6 +21,9 @@ export interface ScopedLibraryWindow {
   label: string;
   workspace_path: string | null;
   connected: boolean;
+  /** The holder tags that have a live socket for this window, sorted and
+   * distinct. A library that does not count holders leaves it out. */
+  holders?: string[];
   hidden: boolean;
   control: boolean;
   /** False when this host sees the window through a devserver feed alone. */
