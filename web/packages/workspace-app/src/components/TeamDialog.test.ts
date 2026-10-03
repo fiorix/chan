@@ -22,6 +22,7 @@ vi.mock("../state/teamOrchestrator.svelte", async (importOriginal) => ({
 
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import {
+  agentForCommand,
   closeTeamDialog,
   defaultTeamConfig,
   openTeamDialog,
@@ -117,6 +118,17 @@ describe("the dialog", () => {
     expect(row.querySelector(".team-member-command")).not.toBeNull();
     expect(row.querySelector<HTMLInputElement>(".team-member-env")!.placeholder).toContain("CHAN_AGENT");
     expect(row.querySelector("select")).toBeNull();
+  });
+
+  test("names above the agents every command it reads as an agent, then the env override", () => {
+    const named = [...target.querySelectorAll(".team-agent-hint code")].map((code) => code.textContent ?? "");
+    const agents = named.slice(0, named.indexOf("CHAN_AGENT"));
+
+    expect(named).toEqual([
+      "agy", "claude", "codex", "gemini", "kimi", "muse", "opencode",
+      "CHAN_AGENT", "none", "shell",
+    ]);
+    expect(agents.map((name) => agentForCommand(name)), "each name is a command read as that agent").toEqual(agents);
   });
 
   test("marks an agent not yet placed in the split grid drag-me", async () => {
