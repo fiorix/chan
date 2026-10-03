@@ -20,6 +20,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The desktop's native upload refuses only what the server refuses.** It accepts a target directory whose name holds a backslash, and refuses only a `..` component and an empty file path; the server answers the rest.
 
+- **`cs pane close --force` and `cs pane close-all --force` drop a live drawing's stroke still inside its 200 ms wait.** They release the pane's live sessions at once, as `cs pane close-tab --force` does; the stroke could still reach the server while the board was torn down.
+
+- **A window's saved session is read in one shape.** A session saved as a bare pane tree, the shape from before the session payload, restores no layout.
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
@@ -51,6 +55,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **New Window and Open in Browser store their window under the workspace's registry row.** A copy of a window stored under the path a relinked root resolves to now nests under its workspace in the launcher.
 
 - **A download or a PDF export of a file whose name holds a backslash is saved under its whole name.** The backslash is replaced by `_` (`a\b.md` is saved as `a_b.md`), where the name was cut to the part after it.
+
+- **A save of a live drawing answers once the file holds it.** A save of a drawing open in a live session answered saved when the server acknowledged this window's change, up to about a second before the server wrote the file. It now answers at the server's write, and Reload from disk asks before it discards a change the server has taken and not written.
+
+- **A live drawing a peer edited during Hybrid Nav reads saved after the commit.** It read unsaved with nothing of this window's unsaved, and its close was refused with no message, until the next edit.
+
+- **A stroke drawn just before the watcher's missing-file check is kept.** The check reloaded a drawing whose last stroke was still inside the board's 200 ms wait, and the reload dropped it. The check now commits the stroke first and leaves an unsaved tab's buffer alone.
+
+- **A save of a live drawing whose board is not open writes no stale text over the drawing.** When the server could not write the file, a save of a drawing tab that was restored and never shown fell back to writing the text it had loaded, which could delete what a peer drew since. The save now writes nothing and says that the file was not saved.
+
+- **A Rich Prompt message the queue refused keeps its text when its cancel is answered late.** With the composer hidden when the refusal arrived, the cancel's answer replaced it, and the composer came back empty saying "already sent".
+
+- **An upload refused with 503 shows the server's reason.** The transfer's row and the status line said `server busy` for every 503. They now show what the server answered, `the devserver is stopping` for one.
 
 ### Security
 
