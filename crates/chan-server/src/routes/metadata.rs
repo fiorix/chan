@@ -5,7 +5,7 @@
 //! host filesystem paths.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -156,7 +156,10 @@ fn metadata_download_response(download: MetadataExportDownload) -> Response {
     response
 }
 
+#[cfg(not(test))]
 const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 enum MetadataImportError {
@@ -240,7 +243,15 @@ fn perform_metadata_import(
         return Err(MetadataImportError::Busy);
     }
     close_workspace_sessions(state, &workspace_strong, "import");
+    let released = Arc::downgrade(&workspace_strong);
+    let lock_dir = workspace_strong.paths().lock.clone();
     drop(workspace_strong);
+    if let Some(workspace) =
+        held_past_release(&released, &lock_dir, Instant::now() + IMPORT_DRAIN_DEADLINE)
+    {
+        install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
+        return Err(MetadataImportError::Busy);
+    }
 
     let import_result = state
         .library
@@ -260,6 +271,35 @@ fn perform_metadata_import(
 
     restore_result?;
     import_result
+}
+
+/// Wait, once a route has dropped its own reference, until the workspace is
+/// let go: no strong reference left and its writer lock free, the two facts
+/// the host's teardown waits for before it answers.
+///
+/// A route counts its reference down to one before it drops it, but the count
+/// does not see a weak reference, and an owner that upgrades one between the
+/// count and the drop becomes the workspace's last owner. The workspace and
+/// its lock then go when that owner lets go, on its thread, and until then
+/// chan-workspace refuses a reset or an import as a workspace still open in
+/// this process.
+///
+/// Returns the workspace when an owner still holds it at `deadline`, for the
+/// caller to put back in its cell and answer busy. `None` means the workspace
+/// is let go, or that at the deadline only its lock was still on its way out,
+/// which the caller's own call to chan-workspace then reports.
+pub(super) fn held_past_release(
+    released: &Weak<Workspace>,
+    lock_dir: &Path,
+    deadline: Instant,
+) -> Option<Arc<Workspace>> {
+    while released.strong_count() > 0 || !chan_workspace::lock::is_free(lock_dir) {
+        if Instant::now() >= deadline {
+            return released.upgrade();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    None
 }
 
 #[cfg(all(test, unix))]
@@ -290,6 +330,8 @@ pub(crate) fn install_test_session_close_gate(
 /// Run only after the old workspace has drained, while its cell write guard
 /// still excludes new handlers. These callers run on the blocking pool; the
 /// flush futures use the retained workspace directly and never read the cell.
+/// The sessions stay closed when the caller then answers busy because
+/// [`held_past_release`] found the workspace still held.
 pub(super) fn close_workspace_sessions(
     state: &AppState,
     workspace: &Arc<Workspace>,

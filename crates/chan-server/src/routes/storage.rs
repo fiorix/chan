@@ -23,8 +23,8 @@ use crate::routes::run_blocking;
 use crate::state::AppState;
 
 use super::metadata::{
-    close_workspace_sessions, install_workspace_cell, workspace_search_aggression,
-    WorkspaceCellInstallError,
+    close_workspace_sessions, held_past_release, install_workspace_cell,
+    workspace_search_aggression, WorkspaceCellInstallError,
 };
 
 /// Body of `POST /api/storage/reset`. Two modes mirror the chan-
@@ -138,14 +138,21 @@ fn err_from_reset(e: &ResetError) -> Response {
 /// Drain protocol: we keep one strong `Arc<Workspace>` aside (`workspace_strong`)
 /// after taking the cell out, then poll `Arc::strong_count` until only
 /// our copy remains. Holding the write lock means no NEW handler can
-/// reborrow the workspace, so the count is monotonically non-increasing
-/// once the cell is gone -- a `strong_count > 1` deadline expiry is a
-/// genuine "an MCP tool body / detached task is still pinning the workspace".
+/// reborrow the workspace from the cell, so a `strong_count > 1` deadline
+/// expiry is a genuine "an MCP tool body / detached task is still pinning
+/// the workspace".
 ///
-/// On Busy we restore the original `workspace_strong` as the cell (with
+/// The count does not see a weak reference, which an indexer task or a
+/// chan-workspace check can upgrade after the count reads one. So once our
+/// copy is dropped we wait, within the same bound, for the workspace to be
+/// let go by whichever owner lets it go last ([`held_past_release`]), and
+/// only then ask chan-workspace for the reset.
+///
+/// On Busy we restore the workspace we started with as the cell (with
 /// fresh watcher + indexer). This avoids reopening through chan-workspace,
 /// which would race the lingering Arc on the per-workspace flock and fail
-/// with `WorkspaceLocked`.
+/// with `WorkspaceLocked`. A Busy after our copy is dropped has already
+/// closed the workspace's sessions; a Busy before it has not.
 fn perform_reset(
     state: &AppState,
     mode: ResetMode,
@@ -224,9 +231,18 @@ fn perform_reset_with(
     // Admission succeeded. Flush dirty authorities against the old workspace
     // and close sessions before releasing its writer lock.
     close_workspace_sessions(state, &workspace_strong, "reset");
-    // Last strong ref is ours. Drop it so chan-workspace's flock releases
-    // before `reset_workspace` tries to verify exclusive access.
+    // Drop our reference, then wait for the workspace's last owner to let it
+    // go, so chan-workspace's flock is released before `reset_workspace`
+    // verifies exclusive access.
+    let released = Arc::downgrade(&workspace_strong);
+    let lock_dir = workspace_strong.paths().lock.clone();
     drop(workspace_strong);
+    if let Some(workspace) =
+        held_past_release(&released, &lock_dir, Instant::now() + RESET_DRAIN_DEADLINE)
+    {
+        install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
+        return Err(ResetError::Busy);
+    }
     // Compute the wipe and restoration independently. Even a partial wipe
     // must run through open_workspace so its lazily-created skeleton is
     // repaired before the operation error is returned.
