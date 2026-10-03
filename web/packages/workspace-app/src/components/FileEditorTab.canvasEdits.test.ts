@@ -2047,12 +2047,23 @@ describe("a live drawing", () => {
     /// Leave a recovery entry for the drawing, as an earlier page load does:
     /// its scene then, in the library's serialization.
     function strand(elements: unknown[], appState: Record<string, unknown> = { viewBackgroundColor: "#ffffff" }): void {
-      const content = JSON.stringify({ type: "excalidraw", version: 2, source: "chan", elements, appState, files: {} });
+      strandText(JSON.stringify({ type: "excalidraw", version: 2, source: "chan", elements, appState, files: {} }));
+    }
+
+    /// Leave a recovery entry that holds `content`, whatever it is.
+    function strandText(content: string): void {
       localStorage.setItem(
         bufferKey(PATH),
         JSON.stringify({ content, updatedAt: Date.now(), path: PATH, sessionId: "an-earlier-load" }),
       );
     }
+
+    /// What the recovery banner says, and null when none is shown.
+    const bannerText = () => document.querySelector(".recovery-banner-text")?.textContent?.trim() ?? null;
+    const stored = () => localStorage.getItem(bufferKey(PATH)) !== null;
+    const UNREADABLE = "The unsaved changes cannot be read as a drawing, so nothing was restored.";
+    const NOTHING_NEWER =
+      "Nothing was restored: the unsaved changes hold no element newer than this board's, and Restore on a live drawing leaves its grid, background and deleted elements as they are.";
 
     /// Press Restore, on fake time from the press on, so that a test reads
     /// the board at once and again after the board's wait.
@@ -2159,11 +2170,68 @@ describe("a live drawing", () => {
       await vi.advanceTimersByTimeAsync(400);
       vi.useRealTimers();
 
+      // Nothing of the entry is taken, so it stays stored and offered.
       expect({
         tie: (board.elements as { id: string; x?: number }[]).find((e) => e.id === "tie")?.x,
         pushed: pushed(socket),
-        banner: document.querySelector(".recovery-banner") !== null,
-      }).toEqual({ tie: 9, pushed: [], banner: false });
+        banner: bannerText(),
+        stored: stored(),
+      }).toEqual({ tie: 9, pushed: [], banner: NOTHING_NEWER, stored: true });
+    });
+
+    test("on a live board keeps an entry that differs by its background alone, and says what Restore leaves", async () => {
+      // A background picked before the reload that no authority confirmed.
+      strand([ON_DISK], { viewBackgroundColor: "#fedcba" });
+      const { board, socket } = await attachedDrawing();
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({
+        background: board.appState.viewBackgroundColor,
+        pushed: pushed(socket),
+        banner: bannerText(),
+        stored: stored(),
+      }).toEqual({ background: "#ffffff", pushed: [], banner: NOTHING_NEWER, stored: true });
+    });
+
+    test("on a live board keeps an entry that cannot be read as a drawing, and says so", async () => {
+      strandText('{"type":"excalidraw","elements":[');
+      const { board, socket } = await attachedDrawing();
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({ board: shownIds(board), pushed: pushed(socket), banner: bannerText(), stored: stored() }).toEqual({
+        board: ["on-disk"],
+        pushed: [],
+        banner: UNREADABLE,
+        stored: true,
+      });
+    });
+
+    test("on a board whose session the server closed for good puts the entry's scene in place of the board's", async () => {
+      // The session object stays the tab's after the close and has no
+      // authority left. The entry lacks the file's element and holds a
+      // background of its own, and Restore takes it whole.
+      strand([MINE], { viewBackgroundColor: "#fedcba" });
+      const { tab, board, socket } = await attachedDrawing();
+      socket.frame({ type: "closed" });
+      expect(tab.doc?.state).toBe("off");
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({
+        board: shownIds(board),
+        background: board.appState.viewBackgroundColor,
+        buffer: tab.content.includes('"on-disk"'),
+        pushed: pushed(socket),
+        banner: bannerText(),
+      }).toEqual({ board: ["mine"], background: "#fedcba", buffer: false, pushed: [], banner: null });
     });
 
     test("on a board with no live session puts the entry's scene in place of the board's", async () => {
