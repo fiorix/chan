@@ -835,7 +835,7 @@ describe("a save that waits on this window's own push", () => {
 // delete every element a peer drew since.
 describe("a save of a drawing whose session has no canvas", () => {
   /// What the save line says of a save refused for want of a board.
-  const NO_BOARD_SAID = "the server has not written it, and this tab has no board open to save it from";
+  const NO_BOARD_SAID = "the server has not confirmed writing it, and this tab has no board open to save it from";
 
   /// A tab attached with no canvas bound, over an authority a peer has
   /// drawn on since the tab's load and has not written.

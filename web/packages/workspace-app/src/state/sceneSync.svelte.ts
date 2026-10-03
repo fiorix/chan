@@ -206,12 +206,13 @@ export type ScenePeerCursor = {
   selected?: string[];
 };
 
-/// The save line of a save that timed out waiting for the authority's flush
-/// on a tab with no canvas bound, where the classic fallback is refused. It
-/// follows "Not saved:" on the toolbar and "was not saved because" in a
-/// close's question.
+/// The save line of a save refused for want of a board: the authority has
+/// not said the file holds the scene, whether the save's wait ran out or the
+/// session cannot ask, and no canvas is bound to save it from. It follows
+/// "Not saved:" on the toolbar and "was not saved because" in a close's
+/// question.
 const UNBOUND_FALLBACK_REASON =
-  "the server has not written it, and this tab has no board open to save it from";
+  "the server has not confirmed writing it, and this tab has no board open to save it from";
 
 /// Error reasons that must not trigger a reconnect loop (the retry would
 /// fail identically). Transient reasons (bad-scene, malformed-frame,
