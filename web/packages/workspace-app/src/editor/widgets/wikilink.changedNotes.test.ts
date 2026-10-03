@@ -6,6 +6,7 @@
 // again without a reload. The resolver is stubbed to answer from the
 // in-memory demo workspace, which the file operations run over.
 
+import type { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const resolveLink = vi.hoisted(() => vi.fn());
@@ -82,15 +83,34 @@ afterEach(async () => {
   timers.release();
 });
 
-/// A note beside `path` that links it, mounted. Answers the kind its pill
-/// shows now.
-async function pillFor(path: string): Promise<() => string | undefined> {
-  const { content } = await mountWysiwyg({
+/// A note beside `path` that links it, mounted, with its editor.
+async function mountLink(path: string): Promise<{ kind: () => string | undefined; view: EditorView }> {
+  const { content, view } = await mountWysiwyg({
     value: `see [x](${path.slice("notes/".length)})`,
     currentPath: "notes/a.md",
   });
   await settle(6);
-  return () => content.querySelector<HTMLElement>(".cm-md-wiki-pill")?.dataset.refkind;
+  return { kind: () => content.querySelector<HTMLElement>(".cm-md-wiki-pill")?.dataset.refkind, view };
+}
+
+/// Answers the kind the pill of a note that links `path` shows now.
+async function pillFor(path: string): Promise<() => string | undefined> {
+  return (await mountLink(path)).kind;
+}
+
+const NOT_FOUND = (): ApiError => new ApiError(404, "link target not found", { code: "link_not_found" });
+
+/// Hold the resolver's next answer. `answer` then gives it what the notes
+/// held when it was asked: the note, or the route's not-found.
+function holdNextAnswer(): { answer: (found: boolean) => void } {
+  let settle: (found: boolean) => void = () => {};
+  resolveLink.mockImplementationOnce(
+    (target: string) =>
+      new Promise((resolve, reject) => {
+        settle = (found) => (found ? resolve({ path: target, kind: "file", is_dir: false }) : reject(NOT_FOUND()));
+      }),
+  );
+  return { answer: (found) => settle(found) };
 }
 
 /// The pill's kind before and after `change`, with no caret move and no
@@ -141,6 +161,50 @@ describe("a watch frame", () => {
     await settle(6);
 
     expect({ kind: kind(), asked: resolveLink.mock.calls.length - asked }).toEqual({ kind: "file", asked: 0 });
+  });
+});
+
+// A request on the wire when the change is heard was asked of the notes as
+// they were. Its answer may land after the pill has asked again.
+describe("an answer asked before a change and landed after it", () => {
+  test("of a note's creation is dropped: the pill keeps the kind it asked for since", async () => {
+    const early = holdNextAnswer();
+    const kind = await pillFor(absent());
+    disk.create(absent(), false, "new");
+    onWatchEvent({ type: "watch", event: { kind: "Created", path: absent() } });
+    await settle(6);
+    early.answer(false);
+    await settle(6);
+
+    expect(kind()).toBe("file");
+  });
+
+  test("of a note's removal is dropped: the pill keeps the kind it asked for since", async () => {
+    const early = holdNextAnswer();
+    const kind = await pillFor(there());
+    disk.remove(there());
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: there() } });
+    await settle(6);
+    early.answer(true);
+    await settle(6);
+
+    expect(kind()).toBe("broken");
+  });
+
+  test("does not free its target for a third request while the second is on the wire", async () => {
+    const early = holdNextAnswer();
+    const { view } = await mountLink(absent());
+    holdNextAnswer();
+    onWatchEvent({ type: "watch", event: { kind: "Created", path: absent() } });
+    await settle(6);
+    const second = resolveLink.mock.calls.length;
+    early.answer(false);
+    await settle(6);
+    // A caret move outside the link, which makes the editor scan its pills.
+    view.dispatch({ selection: { anchor: 1 } });
+    await settle(6);
+
+    expect({ second, after: resolveLink.mock.calls.length }).toEqual({ second: 2, after: 2 });
   });
 });
 
