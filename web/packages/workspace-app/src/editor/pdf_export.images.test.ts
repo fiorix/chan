@@ -174,3 +174,51 @@ describe("a document whose image has no box where it was composed", () => {
     expect(drawn.map((d) => d.what)).toEqual(["page"]);
   });
 });
+
+describe("how long a document's images may take to prepare", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function documentOf(images: number): string {
+    return (
+      Array.from({ length: images }, (_, i) => `![](shots/${i}.png)`).join("\n\n") +
+      "\n"
+    );
+  }
+
+  test.each([
+    // One batch of eight: the pass's own 30 s, and 30 s for the batch.
+    [8, 60_000],
+    // A ninth image is a second batch.
+    [9, 90_000],
+    // Thirteen batches would be allowed 420 s: the ceiling holds at 300.
+    [100, 300_000],
+  ])("%i images that never arrive fail the export after %i ms", async (count, bound) => {
+    // Only the timeouts are faked: the export reaches its resource pass
+    // through real module loads, and no fake time passes until it has.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // A fetch that answers nothing, not even its abort.
+    const fetched = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetched);
+
+    const exported = exportMarkdownToPdf({
+      path: "notes/doc.md",
+      markdown: documentOf(count),
+      theme: "light",
+    });
+    let failure: unknown = null;
+    exported.catch((err) => (failure = err));
+    for (let turn = 0; fetched.mock.calls.length === 0 && turn < 500; turn++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(fetched).toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(bound - 1);
+    expect(failure).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect((failure as Error | null)?.message).toBe(
+      `document resources timed out after ${bound}ms`,
+    );
+  });
+});
