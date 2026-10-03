@@ -475,6 +475,53 @@ fn forget_of_a_relinked_stored_root_asks_its_holder_by_that_name() {
     );
 }
 
+#[test]
+fn forget_of_an_unregistered_alias_keeps_the_resolved_lookup() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = Sandbox::new();
+    let (saved, other, saved_state, _other_state) = relinked_rows(&sandbox);
+    let alias = sandbox.scratch.path().join("alias");
+    symlink(&other, &alias).unwrap();
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&alias)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().any(|row| row.root_path == saved), "{rows:?}");
+    assert!(rows.iter().all(|row| row.root_path != other), "{rows:?}");
+    assert!(saved_state.exists());
+}
+
+#[test]
+fn close_of_a_relinked_stored_root_keeps_its_resolved_request_name() {
+    let sandbox = Sandbox::new();
+    let (saved, other, _saved_state, other_state) = relinked_rows(&sandbox);
+    let holder = holder_answering_a_removal_at(
+        &sandbox,
+        &other,
+        &other_state.join("locks"),
+        "other error",
+    );
+    let out = sandbox.command().arg("close").arg(&saved).output().unwrap();
+    let request = holder.join().unwrap();
+    assert!(
+        matches!(&request, Some(chan_shell::ControlRequest::Close { path, remove: false }) if path == &other),
+        "{request:?}"
+    );
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().any(|row| row.root_path == saved));
+    assert!(rows.iter().any(|row| row.root_path == other));
+}
+
 /// `chan workspace forget` whose host answers that the workspace is still
 /// releasing: the host has forgotten nothing, so the command prints the
 /// host's words, exits 75 and leaves the registry as the host holds it.

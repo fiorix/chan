@@ -219,7 +219,39 @@ async fn forget_reads_a_desktops_still_releasing_answer() {
         .await
         .unwrap();
     assert_eq!(close.status.code(), Some(0), "{close:?}");
+    assert!(String::from_utf8_lossy(&close.stdout).contains("not served"));
     assert_eq!(std::fs::read(&config).unwrap(), before);
+}
+
+#[tokio::test]
+async fn forget_falls_through_after_an_unrelated_desktop_error() {
+    let sandbox = Sandbox::new();
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().to_str().unwrap();
+    let (code, _, err) = sandbox.run(&["workspace", "add", path]).await;
+    assert_eq!(code, 0, "{err}");
+    let _listener = start_listener(sandbox.socket(), |_| async {
+        Response::Error {
+            message: "desktop cannot remove this workspace".into(),
+        }
+    })
+    .unwrap();
+
+    let out = sandbox
+        .command(&["workspace", "forget", path])
+        .env("CHAN_DESKTOP_HANDOFF", "1")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("not served") && stdout.contains("unregistered"), "{stdout}");
+    assert!(
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+            .unwrap()
+            .list_workspaces()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
