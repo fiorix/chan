@@ -265,6 +265,31 @@ export type SceneCanvasBinding = {
 
 const registry = new Map<string, SceneSession>();
 
+/// The appState claim a session held when it was torn down, kept for the
+/// session its tab acquires next. A rename releases the session of the old
+/// path at once and the tab's host acquires one for the new path in the same
+/// flush, and the pick no authority confirmed follows the tab there, as its
+/// unpushed elements do, which the board keeps and offers to the session it
+/// binds next. An entry lasts as long as a release lingers, so the claim of a
+/// tab that closed goes with it.
+const handedOnClaims = new Map<string, { claim: WireAppState; timer: ReturnType<typeof setTimeout> }>();
+
+function handOnClaim(tabId: string, claim: WireAppState): void {
+  takeHandedOnClaim(tabId);
+  handedOnClaims.set(tabId, {
+    claim,
+    timer: setTimeout(() => handedOnClaims.delete(tabId), SCENE_RELEASE_LINGER_MS),
+  });
+}
+
+function takeHandedOnClaim(tabId: string): WireAppState | null {
+  const handed = handedOnClaims.get(tabId);
+  if (!handed) return null;
+  clearTimeout(handed.timer);
+  handedOnClaims.delete(tabId);
+  return handed.claim;
+}
+
 /// Coalesced outbound state while a push is in flight: later local
 /// deltas for the same element replace earlier ones (the canvas already
 /// carries the newest version), appState replaces wholesale, files
@@ -410,7 +435,8 @@ export class SceneSession {
   /// push-ok of the push that carried it, unless a key joined it since, or
   /// when the session stops retrying. While it stands the tab reads unsaved.
   /// Each offer makes a new object, so a push tells the claim it carried
-  /// from a later one by identity.
+  /// from a later one by identity. A session starts with the claim its tab's
+  /// last session held when it was torn down, if one was handed on.
   private appStateClaim: WireAppState | null = null;
 
   private cursors = new Map<number, ScenePeerCursor>();
@@ -427,6 +453,7 @@ export class SceneSession {
     this.tabId = tab.id;
     this.path = tab.path;
     this.boundTab = tab;
+    this.appStateClaim = takeHandedOnClaim(tab.id);
     this.mirror();
     this.dial();
   }
@@ -1354,6 +1381,7 @@ export class SceneSession {
       w.resolve(false);
     }
     this.releaseUnaccepted();
+    if (this.appStateClaim !== null) handOnClaim(this.tabId, this.appStateClaim);
     this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.binding = null;
@@ -1428,6 +1456,7 @@ export function sceneSyncRosterChanged(): void {
 export function resetSceneSyncForTests(): void {
   for (const s of [...registry.values()]) s.release({ immediate: true });
   registry.clear();
+  for (const tabId of [...handedOnClaims.keys()]) takeHandedOnClaim(tabId);
   serverSupportsSceneSync = null;
 }
 

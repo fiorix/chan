@@ -13,6 +13,7 @@ import { setSocketFactory } from "../api/transport";
 import {
   acquireSceneSession,
   isSceneSyncEligible,
+  releaseSceneSession,
   resetSceneSyncForTests,
   SCENE_ATTACH_TIMEOUT_MS,
   SCENE_FLUSH_TIMEOUT_MS,
@@ -1612,6 +1613,39 @@ describe("a push the authority never accepted", () => {
     expect({ acked, after }).toEqual({
       acked: { gridSize: 40, viewBackgroundColor: "#111111" },
       after: { gridSize: 10 },
+    });
+  });
+
+  test.each([
+    ["inside the release's linger takes the claim", 0, true],
+    ["past the release's linger takes none", 300, false],
+  ])("a session its tab acquires %s", (_when, wait, taken) => {
+    vi.useFakeTimers();
+    const MINE = { viewBackgroundColor: "#111111" };
+    const PEERS = { viewBackgroundColor: "#222222", gridModeEnabled: true };
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    sock.drop();
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    // A rename releases the session at once; the tab's host acquires the next.
+    releaseSceneSession(tab!.id, { immediate: true });
+    vi.advanceTimersByTime(wait);
+    const next = acquireSceneSession(tab!)!;
+    const held = isDocUnflushed(tab!.id);
+    const board = new FakeBinding();
+    board.session = next;
+    next.bindCanvas(board);
+    const on = lastSocket();
+    on.open();
+    on.frame(snap([], { appState: PEERS }));
+    vi.useRealTimers();
+
+    const BOTH = { ...PEERS, ...MINE };
+    expect({ held, handed: board.snapshots.at(-1)?.appState, pushed: on.frames("push") }).toEqual({
+      held: taken,
+      handed: taken ? BOTH : PEERS,
+      pushed: taken ? [{ type: "push", elements: [], appState: BOTH }] : [],
     });
   });
 
