@@ -114,6 +114,19 @@ pub(crate) fn workspace_still_releasing() -> Response {
     response
 }
 
+/// The sentence a route answers when another chan process holds a
+/// workspace's writer lock.
+const WORKSPACE_OPEN_ELSEWHERE: &str =
+    "This workspace is open in another chan process. Quit it and try again.";
+
+/// The refusal of an add, an on or a removal of a workspace whose writer
+/// lock another process holds: 409 and one sentence. The launcher's add, on
+/// and delete and the devserver's add, turn-on and forget answer that lock
+/// with it, so their status and sentence have one definition.
+pub(crate) fn workspace_open_elsewhere() -> Response {
+    err(StatusCode::CONFLICT, WORKSPACE_OPEN_ELSEWHERE.into())
+}
+
 /// The 409 an unforced off, forget or delete answers while the workspace
 /// still has live terminal sessions: the code a client branches on, beside
 /// the count it confirms with before it retries forced. The launcher's

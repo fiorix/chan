@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
 use crate::devserver::{bytes_eq, ForceQuery};
-use crate::error::{live_terminals_refusal, workspace_still_releasing};
+use crate::error::{live_terminals_refusal, workspace_open_elsewhere, workspace_still_releasing};
 use crate::extract::{Bytes, Json, Path as AxumPath, Query};
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
@@ -1890,17 +1890,6 @@ fn mount_timed_out_refusal(root: &Path) -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         crate::error::mount_timed_out(root),
     )
-}
-
-/// The sentence a launcher route answers when another chan process holds a
-/// workspace's writer lock.
-const WORKSPACE_OPEN_ELSEWHERE: &str =
-    "This workspace is open in another chan process. Quit it and try again.";
-
-/// The refusal of an add, an on or a delete of a workspace whose writer lock
-/// another process holds: 409 and one sentence, whichever of them asks.
-fn workspace_open_elsewhere() -> Response {
-    crate::error::err(StatusCode::CONFLICT, WORKSPACE_OPEN_ELSEWHERE.into())
 }
 
 /// `POST /api/library/workspaces` `{path}`: register the local folder in the host

@@ -3325,6 +3325,12 @@ async fn handle_list(State(state): State<Arc<DevserverState>>) -> Json<Vec<Works
     Json(state.workspace_entries())
 }
 
+/// `POST /api/devserver/workspaces` `{path}`: register the folder and mount
+/// it. A workspace whose writer lock another process holds answers as the
+/// launcher's add does: 409 and the sentence of
+/// [`workspace_open_elsewhere`](crate::error::workspace_open_elsewhere). A
+/// stopping host answers 503, and every other failure 400, each with the
+/// error's own sentence.
 async fn handle_open(
     State(state): State<Arc<DevserverState>>,
     Json(req): Json<OpenWorkspaceRequest>,
@@ -3334,6 +3340,9 @@ async fn handle_open(
         Err(e @ Error::ShuttingDown(_)) => {
             crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
+        Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
+            crate::error::workspace_open_elsewhere()
+        }
         Err(e) => crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
@@ -3341,7 +3350,10 @@ async fn handle_open(
 /// `DELETE /api/devserver/workspaces/{prefix}`: forget the workspace. A removal
 /// that meets an earlier call of this process on the root that has not let go
 /// answers as the launcher's delete does: 503, `Retry-After: 1` and the words
-/// `workspace is still releasing; retry`.
+/// `workspace is still releasing; retry`. One whose unregister meets a writer
+/// lock another process holds answers as that delete does too: 409 and the
+/// sentence of
+/// [`workspace_open_elsewhere`](crate::error::workspace_open_elsewhere).
 async fn handle_forget(
     State(state): State<Arc<DevserverState>>,
     AxumPath(prefix_tail): AxumPath<String>,
@@ -3361,6 +3373,9 @@ async fn handle_forget(
         Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             crate::error::workspace_still_releasing()
         }
+        Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
+            crate::error::workspace_open_elsewhere()
+        }
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -3372,7 +3387,11 @@ async fn handle_forget(
 /// we recover the prefix by stripping the trailing `/on`. A capture that is
 /// not `<prefix>/on` is not this endpoint and 404s. The body is
 /// [`SetWorkspaceOnRequest`]; the response is the updated [`WorkspaceEntry`]
-/// (404 when the prefix is not a registered workspace).
+/// (404 when the prefix is not a registered workspace). A turn-on of a
+/// workspace whose writer lock another process holds answers as the
+/// launcher's on does: 409 and the sentence of
+/// [`workspace_open_elsewhere`](crate::error::workspace_open_elsewhere). A
+/// turn-off takes no writer lock and cannot meet it.
 async fn handle_set_workspace_on(
     State(state): State<Arc<DevserverState>>,
     AxumPath(captured): AxumPath<String>,
@@ -3403,6 +3422,9 @@ async fn handle_set_workspace_on(
         }
         Err(e @ Error::ShuttingDown(_)) => {
             crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+        }
+        Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
+            crate::error::workspace_open_elsewhere()
         }
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -9480,8 +9502,8 @@ mod tests {
         let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
         assert_eq!(
             status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "fixture: the host did not fail the removal: {body}"
+            StatusCode::CONFLICT,
+            "fixture: the host did not fail the removal over that lock: {body}"
         );
         assert_eq!(
             state.host.library().list_workspaces().len(),
