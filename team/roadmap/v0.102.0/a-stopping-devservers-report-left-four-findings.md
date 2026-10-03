@@ -33,3 +33,9 @@ By the report's citations: `web/packages/workspace-app/src/api/client.ts`, `gate
 
 1. Each of the four, and the difference the report only names, has a recorded disposition.
 2. The save during a stop is traced, and the trace says whether a launcher's off can be written back on.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. No browser was driven.
+
+The one finding the owner's disposition builds is built: an upload refused with 503 fails with the sentence and the code of the response's body, through the path every other refusal takes (`xhrTextError`, `web/packages/workspace-app/src/api/client.ts`). The transfer's row and the status line show what the server answered, `the devserver is stopping` for one, where they said `server busy`. The special case's retry interval went with it: nothing read it. The other three findings are closed by the owner's dispositions of 2026-10-03, recorded above.

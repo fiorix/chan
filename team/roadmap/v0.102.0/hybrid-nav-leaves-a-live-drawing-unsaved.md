@@ -30,3 +30,9 @@ As suggestions: let the saved mark follow the tab the canvas mirrors into, or ha
 
 1. After a Hybrid Nav commit over a peer's edit mirrored during the mode, the live drawing reads saved and its close closes it; pinned red first.
 2. A stroke of this window's not yet acknowledged still reads unsaved after the commit; pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. No browser was driven.
+
+When Hybrid Nav settles, the scene session derives the saved mark again on the tab that won, by the rule a mirror applies (`resyncMirror`, `web/packages/workspace-app/src/state/sceneSync.svelte.ts`), so a live drawing a peer edited during the mode reads saved after the commit and a change of this window's still reads unsaved. It is the third of the item's three shapes: it keeps no record of what was confirmed during the mode, which the commit's carry of the layout tab's fields would otherwise have to keep in step with every other writer of the mark. It runs only under a bound canvas. Pinned red first as the item describes. Left: the settle also fires at the mode's entry and cancel, where no case it changes was found and none is pinned; and it does not run the canvas's check for an appState not yet pushed, a state that exists only between a reattach's snapshot and the board's next mirror.

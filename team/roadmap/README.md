@@ -29,7 +29,7 @@ At the v0.101.0 GA on 2026-10-02 six items moved here from that version: four wh
 
 On 2026-10-03 the owner raised one more from use and accepted it with the report: that no line chan prints opens a running devserver in a browser, which also asks that secret masking default on in a control terminal alone. The same day the owner's own PDF exports of a slide deck were read back pixel by pixel, which settles the causes of [a-slide-decks-pdf-lacks-the-images-it-shows][pdimg] and adds to it the width half of the one design box it already named: a deck's PDF breaks lines the deck keeps whole when it plays, and paints a scrollbar into the raster. Also that day the owner asked for, and accepted with the request, `muse` as a name `cs terminal write --submit` takes, encoded as gemini's is: [the-submit-agents-name-no-muse][smuse].
 
-On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepted rows whose shape was open, a choice inside five build rows, and thirteen of the fifteen raised rows: five are accepted for a build, four for a reading or a measurement first, one closes with its documents, one closes as written costs, one carries to a later version, and one stays as it is until [a-connected-record-does-not-say-whose-socket][sockw] lands. Two raised rows still wait on a reading only the owner can take: [a-raw-devserver-restart-may-close-desktop-windows][rrwin] and [a-host-side-hide-commits-no-waiting-stroke][hdnpg]. Each item records its ruling. The same day the first eight rows were built on the integration branch, each item recording what shipped, and one item was raised from a build: [a-reopened-broken-drawing-comes-back-clean][rbrk]. Later that day three more rows were built, a fourth was built in part and stays open, and a second item was raised from a build: [a-forget-finds-its-host-by-the-lock-record-alone][fglck]. The owner accepted both raised items that day, each as the lead recommended. Later that day two more rows were built and three were built in part, a reading was recorded for the owner, and four items were raised from the builds: [a-fence-in-view-decorates-every-row-of-its-block][fnc], [a-hardlink-pair-split-across-pages-is-not-joined][hlpg], [a-directory-seed-scans-the-catalog-per-node][dirsc] and [an-abandoned-open-recreates-removed-metadata][oprm]. The owner ruled on all four and on the reading that day, each as the lead recommended: the fence handler is measured first, the hardlink pairs, the search's last pass and the files token are accepted for a build, and the open's leftover stays a written cost. Four desktop rows followed that day: three were built, and the desktop's half of the upload's.
+On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepted rows whose shape was open, a choice inside five build rows, and thirteen of the fifteen raised rows: five are accepted for a build, four for a reading or a measurement first, one closes with its documents, one closes as written costs, one carries to a later version, and one stays as it is until [a-connected-record-does-not-say-whose-socket][sockw] lands. Two raised rows still wait on a reading only the owner can take: [a-raw-devserver-restart-may-close-desktop-windows][rrwin] and [a-host-side-hide-commits-no-waiting-stroke][hdnpg]. Each item records its ruling. The same day the first eight rows were built on the integration branch, each item recording what shipped, and one item was raised from a build: [a-reopened-broken-drawing-comes-back-clean][rbrk]. Later that day three more rows were built, a fourth was built in part and stays open, and a second item was raised from a build: [a-forget-finds-its-host-by-the-lock-record-alone][fglck]. The owner accepted both raised items that day, each as the lead recommended. Later that day two more rows were built and three were built in part, a reading was recorded for the owner, and four items were raised from the builds: [a-fence-in-view-decorates-every-row-of-its-block][fnc], [a-hardlink-pair-split-across-pages-is-not-joined][hlpg], [a-directory-seed-scans-the-catalog-per-node][dirsc] and [an-abandoned-open-recreates-removed-metadata][oprm]. The owner ruled on all four and on the reading that day, each as the lead recommended: the fence handler is measured first, the hardlink pairs, the search's last pass and the files token are accepted for a build, and the open's leftover stays a written cost. Four desktop rows followed that day: three were built, and the desktop's half of the upload's. Then six rows of the store and the scene's sync were built, the page's half of a live drawing's save among them, with two more rows of the frontend review remainder.
 
 | item | state | next |
 | --- | --- | --- |
@@ -66,9 +66,9 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [the-desktops-menu-copies-a-window-outside-its-row][mnu] | accepted | cut |
 | [the-workspace-deck-names-a-windows-root-whole][dkwin] | accepted | cut |
 | [a-background-the-authority-never-took-turns-back][bgrv] | accepted | build |
-| [hybrid-nav-leaves-a-live-drawing-unsaved][hnsav] | accepted | build |
+| [hybrid-nav-leaves-a-live-drawing-unsaved][hnsav] | accepted | cut |
 | [a-save-fallback-writes-an-unseeded-boards-buffer][unsd] | accepted | build |
-| [a-live-drawing-save-answers-before-the-write][erlsv] | accepted | build |
+| [a-live-drawing-save-answers-before-the-write][erlsv] | accepted | cut |
 | [a-late-off-row-outlives-a-removal][offwin] | accepted | cut |
 | [a-launcher-delete-leaves-a-devserver-record-on][ldrec] | accepted | cut |
 | [a-forgets-tombstone-outlasts-its-answer][fgtomb] | accepted | cut |
@@ -90,11 +90,11 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-refused-add-registers-late-and-an-on-is-not-kept][adon] | withdrawn | GA |
 | [a-root-relinked-while-mounted-cannot-be-handed-off][rlmt] | deferred | move |
 | [no-client-reads-the-devserver-stopping-code][stprd] | accepted | measure |
-| [a-stopping-devservers-report-left-four-findings][stp4] | accepted | build |
+| [a-stopping-devservers-report-left-four-findings][stp4] | accepted | cut |
 | [a-stale-files-token-can-equal-the-current-one][eqtok] | accepted | build |
 | [focus-and-open-take-a-window-for-any-record][fcany] | raised | decide |
 | [the-casefold-pins-run-in-no-gate][cfgat] | accepted | build |
-| [a-missing-file-check-commits-no-waiting-stroke][mfchk] | accepted | build |
+| [a-missing-file-check-commits-no-waiting-stroke][mfchk] | accepted | cut |
 | [one-question-is-answered-in-many-places][dedup] | accepted | build |
 | [frontend-comments-narrate-history][cmts] | accepted | build |
 | [the-frontend-review-remainder-has-no-owner][ferem] | accepted | build |

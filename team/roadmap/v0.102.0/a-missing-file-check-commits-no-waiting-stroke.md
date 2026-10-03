@@ -26,3 +26,9 @@ Commit the tab's waiting edits before the comparison, as the two built routes do
 
 1. A stroke waiting when the missing-file check runs survives it, pinned red first.
 2. `editor/design.md` says what the check commits.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. No browser was driven.
+
+The missing-file check commits the tab's waiting input before it compares the buffer with the saved text (`resolveMissingFileCheck`, `web/packages/workspace-app/src/state/tabs.svelte.ts`), as a refresh and a forced reload do, so a stroke still inside the board's wait is in the buffer when the check decides, and an unsaved tab's buffer is left alone. Pinned mounted, red first. One sentence in the editor's design.
