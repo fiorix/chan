@@ -59,7 +59,9 @@ use crate::doc_sessions::recovery::{
     self, RecoveryAuthority, RecoveryBaseline, RecoveryConflict, RecoveryKind, RecoveryRecord,
     RecoveryState,
 };
-use crate::doc_sessions::{read_cell, read_cell_within, CellRead, CELL_RETRY, STOP_CELL_WAIT};
+use crate::doc_sessions::{
+    read_cell, read_cell_once_let_go, CellRead, CELL_RETRY, STOP_CELL_WARN_AFTER,
+};
 use crate::routes::scene::{PeerSceneCursor, ServerFrame};
 use crate::self_writes::{
     check_write_preconditions, SelfWrites, WritePreconditionError, WritePreconditions,
@@ -1861,10 +1863,16 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
 /// Spawned once in build_app next to the doc-session tasks.
 ///
 /// A tick that finds the workspace cell held does its flushes at a later
-/// tick. Told to stop beside a held cell, it waits up to `STOP_CELL_WAIT`
-/// for the cell and then leaves its sessions as they are: the reset or the
-/// import that holds the cell flushes and closes them once its drain ends,
-/// and closing them here would take them from the registry unflushed.
+/// tick. Told to stop beside a held cell, it looks again every `CELL_RETRY`
+/// until the cell can be read, then flushes and closes its sessions as it
+/// does beside a free one, and says in the log that it is still looking
+/// once `STOP_CELL_WARN_AFTER` has passed. The reset or the import that
+/// holds the cell flushes and closes the sessions itself only once its
+/// first wait has ended with no other owner of the workspace; one whose
+/// first wait ends busy lets the cell go with every session as it was, and
+/// the flusher is then the only one left to flush them. Nothing here bounds
+/// the looking: the tenant's task owner aborts a flusher that has not ended
+/// by the end of its shutdown grace.
 pub fn spawn_flusher(
     registry: Arc<SceneRegistry>,
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
@@ -1878,19 +1886,20 @@ pub fn spawn_flusher(
                 _ = tokio::time::sleep(FLUSH_TICK) => {}
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
-                        let ws = match read_cell_within(&workspace_cell, STOP_CELL_WAIT).await {
-                            CellRead::Workspace(ws) => Some(ws),
-                            CellRead::Empty => None,
-                            CellRead::Held => {
+                        let ws = read_cell_once_let_go(
+                            &workspace_cell,
+                            STOP_CELL_WARN_AFTER,
+                            || {
                                 tracing::warn!(
                                     sessions = registry.sessions_snapshot().len(),
-                                    waited = ?STOP_CELL_WAIT,
-                                    "workspace cell held at shutdown; drawing sessions are \
-                                     left for its holder to flush"
+                                    held_for = ?STOP_CELL_WARN_AFTER,
+                                    "workspace cell still held at shutdown; the drawing \
+                                     flusher keeps looking and flushes its sessions once the \
+                                     cell is let go"
                                 );
-                                return;
-                            }
-                        };
+                            },
+                        )
+                        .await;
                         registry
                             .close_all("shutdown", ws.as_ref(), &self_writes)
                             .await;
@@ -4218,7 +4227,7 @@ mod tests {
 
         held_cell::while_held(&cell, || {
             stop.send(true).expect("the flusher listens");
-            // Well inside the flusher's wait for the cell.
+            // Let go before the flusher says that the cell is still held.
             std::thread::sleep(Duration::from_millis(300));
         });
 

@@ -2285,29 +2285,37 @@ pub(crate) fn read_cell(cell: &RwLock<Option<WorkspaceCell>>) -> CellRead {
 /// How often a session task looks again into a cell it found held.
 pub(crate) const CELL_RETRY: Duration = Duration::from_millis(25);
 
-/// How long a flusher told to stop waits for a held cell before it leaves
-/// its sessions to the cell's holder. A tenant's tasks get five seconds to
-/// end, so the wait leaves two for the flush itself.
+/// How long a flusher told to stop has looked into a held cell when it says
+/// so in the log. It is no bound: the flusher keeps looking.
 #[cfg(not(test))]
-pub(crate) const STOP_CELL_WAIT: Duration = Duration::from_secs(3);
+pub(crate) const STOP_CELL_WARN_AFTER: Duration = Duration::from_secs(3);
 #[cfg(test)]
-pub(crate) const STOP_CELL_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const STOP_CELL_WARN_AFTER: Duration = Duration::from_secs(1);
 
-/// [`read_cell`] for a flusher told to stop, which looks again every
-/// [`CELL_RETRY`] while the cell is held and until `bound` has passed. It
-/// sleeps between looks and never waits on the cell itself. `Held` means the
-/// bound ran out.
-pub(crate) async fn read_cell_within(
+/// [`read_cell`] for a flusher told to stop: the workspace of a cell that no
+/// writer holds, or `None` when that cell is empty. While the cell is held
+/// it looks again every [`CELL_RETRY`], for as long as the hold lasts. It
+/// sleeps between looks and never waits on the cell itself, so it keeps no
+/// worker and ends when its task is aborted. `still_held` runs once, at the
+/// first look that finds the cell held `warn_after` into the wait.
+pub(crate) async fn read_cell_once_let_go(
     cell: &RwLock<Option<WorkspaceCell>>,
-    bound: Duration,
-) -> CellRead {
-    let deadline = tokio::time::Instant::now() + bound;
+    warn_after: Duration,
+    mut still_held: impl FnMut(),
+) -> Option<Arc<Workspace>> {
+    let warn_at = tokio::time::Instant::now() + warn_after;
+    let mut warned = false;
     loop {
         match read_cell(cell) {
-            CellRead::Held if tokio::time::Instant::now() < deadline => {
+            CellRead::Workspace(workspace) => return Some(workspace),
+            CellRead::Empty => return None,
+            CellRead::Held => {
+                if !warned && tokio::time::Instant::now() >= warn_at {
+                    warned = true;
+                    still_held();
+                }
                 tokio::time::sleep(CELL_RETRY).await;
             }
-            read => return read,
         }
     }
 }
@@ -2317,10 +2325,16 @@ pub(crate) async fn read_cell_within(
 /// Spawned once in build_app next to the other long-lived tasks.
 ///
 /// A tick that finds the workspace cell held does its flushes at a later
-/// tick. Told to stop beside a held cell, it waits up to `STOP_CELL_WAIT`
-/// for the cell and then leaves its sessions as they are: the reset or the
-/// import that holds the cell flushes and closes them once its drain ends,
-/// and closing them here would take them from the registry unflushed.
+/// tick. Told to stop beside a held cell, it looks again every `CELL_RETRY`
+/// until the cell can be read, then flushes and closes its sessions as it
+/// does beside a free one, and says in the log that it is still looking
+/// once `STOP_CELL_WARN_AFTER` has passed. The reset or the import that
+/// holds the cell flushes and closes the sessions itself only once its
+/// first wait has ended with no other owner of the workspace; one whose
+/// first wait ends busy lets the cell go with every session as it was, and
+/// the flusher is then the only one left to flush them. Nothing here bounds
+/// the looking: the tenant's task owner aborts a flusher that has not ended
+/// by the end of its shutdown grace.
 pub fn spawn_flusher(
     registry: Arc<DocRegistry>,
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
@@ -2334,19 +2348,20 @@ pub fn spawn_flusher(
                 _ = tokio::time::sleep(FLUSH_TICK) => {}
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
-                        let ws = match read_cell_within(&workspace_cell, STOP_CELL_WAIT).await {
-                            CellRead::Workspace(ws) => Some(ws),
-                            CellRead::Empty => None,
-                            CellRead::Held => {
+                        let ws = read_cell_once_let_go(
+                            &workspace_cell,
+                            STOP_CELL_WARN_AFTER,
+                            || {
                                 tracing::warn!(
                                     sessions = registry.sessions_snapshot().len(),
-                                    waited = ?STOP_CELL_WAIT,
-                                    "workspace cell held at shutdown; document sessions are \
-                                     left for its holder to flush"
+                                    held_for = ?STOP_CELL_WARN_AFTER,
+                                    "workspace cell still held at shutdown; the document \
+                                     flusher keeps looking and flushes its sessions once the \
+                                     cell is let go"
                                 );
-                                return;
-                            }
-                        };
+                            },
+                        )
+                        .await;
                         registry
                             .close_all("shutdown", ws.as_ref(), &self_writes)
                             .await;
@@ -5088,7 +5103,7 @@ mod tests {
 
         held_cell::while_held(&cell, || {
             stop.send(true).expect("the flusher listens");
-            // Well inside the flusher's wait for the cell.
+            // Let go before the flusher says that the cell is still held.
             std::thread::sleep(Duration::from_millis(300));
         });
 
@@ -5100,6 +5115,54 @@ mod tests {
             fx.workspace.read_text("a.md").unwrap(),
             "unflushed",
             "the flusher told to stop gave up on a cell that was let go inside its wait"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_look_of_a_stopped_flusher_says_once_that_the_cell_is_still_held() {
+        let fx = fixture(&[]);
+        let cell = held_cell::cell_of(&fx.workspace);
+        let warn_after = Duration::from_millis(200);
+        let said = Arc::new(Mutex::new(Vec::new()));
+
+        let looking = held_cell::while_held(&cell, || {
+            let started = Instant::now();
+            let looking = tokio::spawn({
+                let cell = cell.clone();
+                let said = said.clone();
+                async move {
+                    read_cell_once_let_go(&cell, warn_after, || {
+                        said.lock().unwrap().push(started.elapsed());
+                    })
+                    .await
+                }
+            });
+            assert!(
+                held_cell::within(held_cell::MUST_HAPPEN, || !said.lock().unwrap().is_empty()),
+                "the look never said that the cell was still held"
+            );
+            // Four more looks, none of which may say it again.
+            std::thread::sleep(CELL_RETRY * 4);
+            looking
+        });
+
+        let workspace = looking
+            .await
+            .expect("the look ends once the cell is let go");
+        assert!(
+            workspace.is_some_and(|workspace| Arc::ptr_eq(&workspace, &fx.workspace)),
+            "the look ended without the workspace of the cell that was let go"
+        );
+        let said = said.lock().unwrap();
+        assert_eq!(
+            said.len(),
+            1,
+            "the look said more than once that the cell was still held: {said:?}"
+        );
+        assert!(
+            said[0] >= warn_after,
+            "the look said after {:?} that the cell was still held, before {warn_after:?}",
+            said[0]
         );
     }
 }

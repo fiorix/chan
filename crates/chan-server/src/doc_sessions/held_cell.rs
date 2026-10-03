@@ -16,10 +16,10 @@ pub(crate) type Cell = Arc<RwLock<Option<WorkspaceCell>>>;
 /// How long a pin waits for what must happen.
 pub(crate) const MUST_HAPPEN: Duration = Duration::from_secs(10);
 
-/// A hold of the cell that outlasts the time a flusher told to stop waits
-/// for a held cell.
+/// A hold of the cell that outlasts the time after which a flusher told to
+/// stop says that the cell is still held.
 pub(crate) const A_LONG_HOLD: Duration =
-    super::STOP_CELL_WAIT.saturating_add(Duration::from_millis(500));
+    super::STOP_CELL_WARN_AFTER.saturating_add(Duration::from_millis(500));
 
 /// How long the probe of [`worker_stays_free`] may take to end.
 const PROBE_BOUND: Duration = Duration::from_secs(5);
