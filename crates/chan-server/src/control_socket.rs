@@ -6860,6 +6860,185 @@ mod tests {
         }
     }
 
+    /// How long a [`HeldCell`] keeps the write guard when nobody lets it go.
+    /// A reader that waits for the cell on the runtime's only worker parks
+    /// the test itself, so the hold has to end on its own for such a run to
+    /// end red and not hung.
+    const HELD_AT_MOST: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// How long unrelated async work is given to make progress beside a
+    /// held cell: well past any scheduling delay, and well inside
+    /// [`HELD_AT_MOST`], so a parked worker cannot meet it.
+    const PROGRESS_WITHIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// The workspace cell's write guard held on another thread, as a storage
+    /// reset or a metadata import holds it.
+    struct HeldCell {
+        release: std::sync::mpsc::Sender<()>,
+        writer: std::thread::JoinHandle<()>,
+    }
+
+    impl HeldCell {
+        fn hold(cell: &Arc<RwLock<Option<WorkspaceCell>>>) -> Self {
+            let cell = Arc::clone(cell);
+            let (ready, held) = std::sync::mpsc::sync_channel(0);
+            let (release, released) = std::sync::mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                let _guard = cell.write().expect("workspace cell writer");
+                ready.send(()).expect("signal the held write guard");
+                let _ = released.recv_timeout(HELD_AT_MOST);
+            });
+            held.recv().expect("the writer holds the workspace cell");
+            Self { release, writer }
+        }
+
+        fn let_go(self) {
+            let _ = self.release.send(());
+            self.writer.join().expect("workspace cell writer");
+        }
+    }
+
+    /// A task that reports once a short timer of its own has fired, which
+    /// it cannot do while the runtime's only worker is parked.
+    fn unrelated_progress() -> tokio::sync::oneshot::Receiver<()> {
+        let (fired, progress) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = fired.send(());
+        });
+        progress
+    }
+
+    /// The sentence the HTTP handlers answer beside a held cell.
+    async fn http_busy_sentence() -> String {
+        let response = crate::error::err_state(&crate::state::StateAccessError::Busy);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the busy refusal's body");
+        let body: Value = serde_json::from_slice(&body).expect("the busy refusal's json");
+        body["error"]
+            .as_str()
+            .expect("the busy refusal's sentence")
+            .to_string()
+    }
+
+    /// Run `request` on a workspace tenant whose cell is held, on the
+    /// runtime's only worker, and return its answer once unrelated async
+    /// work has made progress beside it. The request is scheduled first: a
+    /// wait for the cell there parks the worker, and the timer behind it
+    /// cannot fire.
+    async fn answer_beside_a_held_cell(request: ControlRequest) -> ControlResponse {
+        let (_cfg, _root, cell) = bound_empty_cell();
+        let ctx = test_ctx(Arc::clone(&cell), ControlTenant::Workspace);
+        let held = HeldCell::hold(&cell);
+        let answer = tokio::spawn(async move { handle_request(request, &ctx).await });
+        let progress = tokio::time::timeout(PROGRESS_WITHIN, unrelated_progress()).await;
+        let answer = tokio::time::timeout(PROGRESS_WITHIN, answer).await;
+        held.let_go();
+        assert!(
+            matches!(progress, Ok(Ok(()))),
+            "a command's wait for the workspace cell starved unrelated async progress"
+        );
+        answer
+            .expect("the command did not answer beside a held cell")
+            .expect("the command's task")
+    }
+
+    /// While a storage reset or a metadata import holds the workspace cell,
+    /// a command that needs the workspace answers at once the sentence the
+    /// HTTP handlers answer, and keeps no runtime worker waiting.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_command_beside_a_held_workspace_cell_answers_busy_at_once() {
+        let response = answer_beside_a_held_cell(ControlRequest::OpenGraph {
+            window_id: "window-a".to_string(),
+            path: None,
+            destination: None,
+        })
+        .await;
+        match response {
+            ControlResponse::Error { message } => {
+                assert_eq!(
+                    message,
+                    "workspace busy: workspace state is temporarily unavailable; retry in a moment"
+                );
+                assert_eq!(
+                    message,
+                    http_busy_sentence().await,
+                    "the socket's busy sentence is not the HTTP handlers'"
+                );
+            }
+            other => panic!("a command beside a held cell answered {other:?}"),
+        }
+    }
+
+    /// A window close that cannot look for the window's saved layout,
+    /// because the cell is held, answers busy and not that no such window
+    /// or layout exists.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_window_close_beside_a_held_workspace_cell_does_not_answer_no_window() {
+        let response = answer_beside_a_held_cell(ControlRequest::WindowClose {
+            id: "window-a".to_string(),
+            force: false,
+        })
+        .await;
+        match response {
+            ControlResponse::Error { message } => assert_eq!(
+                message,
+                "workspace busy: workspace state is temporarily unavailable; retry in a moment",
+                "a window close beside a held cell answered another error"
+            ),
+            other => panic!("a window close beside a held cell answered {other:?}"),
+        }
+    }
+
+    /// Identify beside a held cell waits for it off the runtime's worker,
+    /// and answers the workspace's root and metadata key once the cell is
+    /// let go, so the CLI still finds the process that serves a workspace.
+    #[tokio::test(flavor = "current_thread")]
+    async fn identify_beside_a_held_workspace_cell_waits_off_the_worker_and_answers_the_workspace()
+    {
+        let (_cfg, _root, cell) = bound_empty_cell();
+        let (root, key) = {
+            let cell = cell.read().unwrap();
+            let workspace = &cell.as_ref().expect("a bound cell").workspace;
+            (
+                workspace.canonical_root().to_string_lossy().into_owned(),
+                workspace.metadata_key().to_string(),
+            )
+        };
+        let ctx = test_ctx(Arc::clone(&cell), ControlTenant::Workspace);
+        let held = HeldCell::hold(&cell);
+        let answer =
+            tokio::spawn(async move { handle_request(ControlRequest::Identify, &ctx).await });
+        let progress = tokio::time::timeout(PROGRESS_WITHIN, unrelated_progress()).await;
+        let answered_while_held = answer.is_finished();
+        held.let_go();
+        assert!(
+            matches!(progress, Ok(Ok(()))),
+            "Identify's wait for the workspace cell starved unrelated async progress"
+        );
+        assert!(
+            !answered_while_held,
+            "Identify answered beside a held cell, before it could read the workspace"
+        );
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), answer)
+            .await
+            .expect("Identify did not answer once the cell was let go")
+            .expect("Identify's task");
+        let ControlResponse::Ok { message } = response else {
+            panic!("Identify answered {response:?}");
+        };
+        let identity: Value = serde_json::from_str(&message).expect("the identity's json");
+        assert_eq!(
+            (
+                identity["workspace_root"].as_str(),
+                identity["metadata_key"].as_str()
+            ),
+            (Some(root.as_str()), Some(key.as_str())),
+            "Identify did not answer the workspace it serves: {identity}"
+        );
+    }
+
     #[test]
     fn workspace_search_runs_off_runtime_thread() {
         let runtime = tokio::runtime::Builder::new_current_thread()

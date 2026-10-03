@@ -2003,6 +2003,99 @@ fn router_with_extensions(
 }
 
 #[cfg(test)]
+mod reindex_cancel_at_shutdown_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// A cell over an empty workspace with a live indexer, and that indexer.
+    fn bound_cell() -> (
+        [tempfile::TempDir; 2],
+        Arc<RwLock<Option<WorkspaceCell>>>,
+        Arc<indexer::Indexer>,
+    ) {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace root");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        library
+            .register_workspace(root.path())
+            .expect("register workspace");
+        let workspace = library.open_workspace(root.path()).expect("open workspace");
+        let (index_tx, index_rx) = broadcast::channel::<WatchEvent>(1);
+        // Keep the channel open for the indexer's lifetime; the test never
+        // sends on it.
+        std::mem::forget(index_tx);
+        let indexer = Arc::new(indexer::Indexer::spawn(
+            workspace.clone(),
+            index_rx,
+            false,
+            chan_workspace::SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        ));
+        let cell = Arc::new(RwLock::new(Some(WorkspaceCell {
+            workspace,
+            watch_handle: None,
+            indexer: Arc::clone(&indexer),
+        })));
+        ([cfg, root], cell, indexer)
+    }
+
+    /// The stop's side task beside a cell that a storage reset or a metadata
+    /// import holds when the signal fires: it keeps no runtime worker while
+    /// it waits, and cancels the reindex once the cell is let go.
+    ///
+    /// The hold ends on its own after two seconds, so a task that waits for
+    /// the cell on the runtime's only worker ends this test red and not
+    /// hung; unrelated async work is given one second, well past any
+    /// scheduling delay and well inside the hold.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_stops_reindex_cancel_beside_a_held_cell_keeps_no_worker_and_cancels_once_let_go() {
+        let (_dirs, cell, indexer) = bound_cell();
+        let writer_cell = Arc::clone(&cell);
+        let (ready, held) = mpsc::sync_channel(0);
+        let (release, released) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let _guard = writer_cell.write().expect("workspace cell writer");
+            ready.send(()).expect("signal the held write guard");
+            let _ = released.recv_timeout(Duration::from_secs(2));
+        });
+        held.recv().expect("the writer holds the workspace cell");
+        let (shutdown, signal) = watch::channel(false);
+        shutdown.send(true).expect("signal the stop");
+
+        // Scheduled first: a wait for the cell here parks the only worker,
+        // and the timer behind it cannot fire.
+        let stop = tokio::spawn(cancel_reindex_at_shutdown(Arc::clone(&cell), signal));
+        let (fired, progress) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = fired.send(());
+        });
+        let progress = tokio::time::timeout(Duration::from_secs(1), progress).await;
+        let cancelled_while_held = indexer.cancel_requested();
+        // A hold that ended on its own has nobody left to tell.
+        let _ = release.send(());
+        writer.join().expect("workspace cell writer");
+
+        assert!(
+            matches!(progress, Ok(Ok(()))),
+            "the stop's wait for the workspace cell starved unrelated async progress"
+        );
+        assert!(
+            !cancelled_while_held,
+            "fixture: the reindex was cancelled while the cell was held"
+        );
+        tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("the stop's task did not end once the cell was let go")
+            .expect("the stop's task");
+        assert!(
+            indexer.cancel_requested(),
+            "the stop did not cancel the reindex once the cell was let go"
+        );
+    }
+}
+
+#[cfg(test)]
 mod bulk_transfer_construction_tests {
     use super::*;
     use crate::bulk_transfer::{BulkTransferLane, ACTIVE_CAPACITY, WAITING_CAPACITY};

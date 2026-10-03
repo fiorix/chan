@@ -308,6 +308,12 @@ impl Indexer {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// Whether a rebuild has been told to bail.
+    #[cfg(test)]
+    pub(crate) fn cancel_requested(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
     /// Snapshot the current status. Cheap.
     pub fn snapshot(&self) -> IndexStatus {
         self.status.lock().unwrap().clone()
