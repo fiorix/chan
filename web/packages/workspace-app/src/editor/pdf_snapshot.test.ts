@@ -823,6 +823,79 @@ describe("liftPageImages", () => {
     expect(() => images.assertPainted()).not.toThrow();
   });
 
+  test("an absolute image skips overflow below its containing block", async () => {
+    decodesSettleAtOnce();
+    imagesHaveBoxes();
+    const root = page(
+      '<div style="position:relative"><div style="height:0;overflow-x:hidden;overflow-y:hidden">' +
+        '<img src="/api/fs/absolute.png" style="position:absolute"></div></div>',
+    );
+    const [holder, inner] = Array.from(root.querySelectorAll("div"));
+    vi.spyOn(holder!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, width: 100, height: 100 } as DOMRect,
+    );
+    vi.spyOn(inner!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, width: 100, height: 0 } as DOMRect,
+    );
+    vi.spyOn(root.querySelector("img")!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 20, width: 40, height: 20 } as DOMRect,
+    );
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.rendered).toBe(true);
+  });
+
+  test("a positioned zero-height containing block clips its absolute image", async () => {
+    decodesSettleAtOnce();
+    imagesHaveBoxes();
+    const root = page(
+      '<div style="position:relative;height:0;overflow-x:hidden;overflow-y:hidden">' +
+        '<img src="/api/fs/covered.png" style="position:absolute"></div>',
+    );
+    vi.spyOn(root.querySelector("div")!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, width: 100, height: 0 } as DOMRect,
+    );
+    vi.spyOn(root.querySelector("img")!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 20, width: 40, height: 20 } as DOMRect,
+    );
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.rendered).toBe(false);
+  });
+
+  test("display contents has no clipping box", async () => {
+    decodesSettleAtOnce();
+    imagesHaveBoxes();
+    const root = page(
+      '<div style="display:contents;overflow-x:hidden;overflow-y:hidden"><img src="/api/fs/contents.png"></div>',
+    );
+    vi.spyOn(root.querySelector("div")!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, width: 0, height: 0 } as DOMRect,
+    );
+    vi.spyOn(root.querySelector("img")!, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, width: 40, height: 20 } as DOMRect,
+    );
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.rendered).toBe(true);
+  });
+
+  test("content-visibility auto does not hide an offscreen export", async () => {
+    decodesSettleAtOnce();
+    imagesHaveBoxes();
+    const root = page('<img src="/api/fs/auto.png">');
+    Object.defineProperty(root.querySelector("img")!, "checkVisibility", {
+      value: (options?: { contentVisibilityAuto?: boolean }) => !options?.contentVisibilityAuto,
+    });
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.rendered).toBe(true);
+  });
+
   test("names an unsized image the page shows that gives no measurable box", async () => {
     class UnsizedImage extends StandInImage {
       naturalWidth = 0;

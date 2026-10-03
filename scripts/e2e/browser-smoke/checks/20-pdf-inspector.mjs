@@ -30,6 +30,8 @@ const ORANGE = [230, 60, 20];
 const ROSE = [220, 20, 120];
 const GREEN = [0, 150, 80];
 const CYAN = [17, 153, 211];
+const MAGENTA = [180, 0, 180];
+const LIME = [80, 180, 10];
 
 /// A deck page of the export: A4 landscape, the 16:9 slide fitted to the
 /// page's width and centred on it, laid out as play lays it out on a
@@ -268,7 +270,7 @@ async function watchImageLift(page, expectedImage) {
   await page.evaluate((expected) => {
     const original = Element.prototype.setAttribute;
     const originalClone = Element.prototype.cloneNode;
-    const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker", "height-only"]);
+    const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker", "height-only", "absolute-escape", "auto-visible"]);
     const capture = { before: null, after: null };
     const read = (host) => ({
       ...Object.fromEntries([...host.querySelectorAll("img[alt]")]
@@ -397,6 +399,17 @@ function inspectLayoutImages(rasters, capture) {
     faults.push("hidden images: the browser did not compose both source elements");
   }
   if (colourBox(page, ROSE)) faults.push("hidden images: rose pixels appeared in the PDF");
+  for (const [name, colour] of [["absolute-escape", MAGENTA], ["auto-visible", LIME]]) {
+    const composed = before[name]?.rect;
+    const box = colourBox(page, colour);
+    ink[name] = box;
+    if (!composed || !(composed.width > 0 && composed.height > 0) || !box) {
+      faults.push(`${name}: no composed box or PDF colour`);
+    } else if (Math.abs(box.width / scale - composed.width) > 2 ||
+        Math.abs(box.height / scale - composed.height) > 2) {
+      faults.push(`${name}: PDF colour ${box.width / scale}x${box.height / scale} CSS px, composed ${composed.width}x${composed.height}`);
+    }
+  }
   const marker = colourBox(page, BLUE);
   const table = ink["wide-table"];
   const markerTop = before["hidden-marker"]?.rect.top;

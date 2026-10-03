@@ -15,3 +15,7 @@
 
 <div style="visibility:hidden"><img alt="hidden-unsized" src="mark-rose.svg"></div>
 <img alt="hidden-marker" src="mark-blue.svg">
+
+<div style="position:relative;height:70px"><div style="height:0;overflow:hidden"><img alt="absolute-escape" src="mark-magenta.svg" style="position:absolute;top:20px;left:0;width:60px;height:20px"></div></div>
+
+<div style="content-visibility:auto;contain-intrinsic-size:60px 30px;height:30px"><img alt="auto-visible" src="mark-lime.svg" style="width:60px;height:20px"></div>
