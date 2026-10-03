@@ -79,7 +79,45 @@ async fn fixture() -> Fixture {
     fixture_with_registry(true, false).await
 }
 
+/// A feed that lists, under this library's id, a window id it is told
+/// after the fixture is built: one this host's registry also holds.
+struct EchoFeed {
+    library_id: String,
+    window_id: Arc<RwLock<String>>,
+}
+
+impl DevserverFeedSource for EchoFeed {
+    fn windows(&self) -> Vec<WindowRecord> {
+        let mut rows = RemoteFeed.windows();
+        rows[0].library_id = self.library_id.clone();
+        rows[0].window_id = self.window_id.read().unwrap().clone();
+        rows
+    }
+
+    fn workspaces(&self) -> Vec<LauncherWorkspace> {
+        Vec::new()
+    }
+
+    fn pane_color(&self, _library_id: &str) -> Option<String> {
+        None
+    }
+}
+
 async fn fixture_with_registry(registry: bool, local_feed: bool) -> Fixture {
+    fixture_with_feed(registry, |host| {
+        if local_feed {
+            Arc::new(LocalFeed(host.library_id().into()))
+        } else {
+            Arc::new(RemoteFeed)
+        }
+    })
+    .await
+}
+
+async fn fixture_with_feed(
+    registry: bool,
+    feed: impl FnOnce(&WorkspaceHost) -> Arc<dyn DevserverFeedSource>,
+) -> Fixture {
     let config = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -92,11 +130,7 @@ async fn fixture_with_registry(registry: bool, local_feed: bool) -> Fixture {
             "local".into(),
         );
     }
-    if local_feed {
-        host.install_devserver_feed(Arc::new(LocalFeed(host.library_id().into())));
-    } else {
-        host.install_devserver_feed(Arc::new(RemoteFeed));
-    }
+    host.install_devserver_feed(feed(&host));
     let prefix = chan_library::allocate_workspace_prefix(workspace.path()).unwrap();
     host.open_or_get_registered_workspace(
         workspace.path(),
@@ -542,6 +576,48 @@ async fn a_snapshot_marks_the_windows_its_registry_holds() {
     assert_eq!(
         action["window"]["managed"], true,
         "a window the capability opened"
+    );
+}
+
+/// The mark is the row's source, read with the row: a feed row that carries
+/// this library's id and the id of a window the registry holds reads
+/// `managed: false` beside the registry's own row of that id.
+#[tokio::test]
+async fn a_feed_row_under_a_registry_windows_id_reads_unmanaged() {
+    let echoed = Arc::new(RwLock::new(String::new()));
+    let feed_id = Arc::clone(&echoed);
+    let fixture = fixture_with_feed(true, move |host| {
+        Arc::new(EchoFeed {
+            library_id: host.library_id().into(),
+            window_id: feed_id,
+        })
+    })
+    .await;
+    *echoed.write().unwrap() = fixture.window_id.clone();
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+    let snapshot = send(
+        &router,
+        "GET",
+        &format!("/api/library/command-capabilities/{capability}"),
+        None,
+        None,
+    )
+    .await;
+    let (status, snapshot) = json(snapshot).await;
+    assert_eq!(status, StatusCode::OK, "fixture: the snapshot: {snapshot}");
+    let mut marks: Vec<bool> = snapshot["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|window| window["window_id"] == fixture.window_id.as_str())
+        .map(|window| window["managed"].as_bool().expect("a window's mark"))
+        .collect();
+    marks.sort_unstable();
+    assert_eq!(
+        marks,
+        [false, true],
+        "the feed's row and the registry's row under one window id: {snapshot}"
     );
 }
 
