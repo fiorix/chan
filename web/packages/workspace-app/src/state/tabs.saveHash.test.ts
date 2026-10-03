@@ -13,6 +13,8 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  clearRecentlyClosedTabsForTest,
+  closeTab,
   conflictDialog,
   dismissConflict,
   layout,
@@ -20,6 +22,7 @@ import {
   moveTab,
   overwriteConflictedTab,
   reloadTabFromDisk,
+  reopenClosedTab,
   saveTab,
   type FileTab,
 } from "./tabs.svelte";
@@ -177,6 +180,7 @@ beforeEach(() => {
 
 afterEach(() => {
   dismissConflict();
+  clearRecentlyClosedTabsForTest();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   document.head.querySelector('meta[name="chan-files"]')?.remove();
@@ -483,6 +487,30 @@ describe("Overwrite's choice lasts until a write of its tab is answered or the t
       file: scene("mine"),
       content: scene("mine"),
       saved: scene("mine"),
+      token: "151",
+    });
+  });
+
+  test("a tab closed with the choice unanswered and reopened as it closed still writes under it", async () => {
+    await refusedTab();
+    failNextWrite = "network";
+    await overwriteConflictedTab();
+    // A forced close saves nothing, and the reopen replays the tab's buffer,
+    // its saved text and the token the click adopted.
+    await closeTab(layout.activePaneId, TAB, { force: true });
+    expect(readTab(TAB), "the tab is closed").toBeUndefined();
+    expect(reopenClosedTab()).toBe(true);
+    const t = liveFileTabById(TAB)!;
+    expect(held(t)).toEqual({ content: "loaded and mine", saved: "loaded", token: "150" });
+
+    await saveTab(t);
+    expect(puts.at(-1)).toEqual({ token: "150", sha: null, body: "loaded and mine" });
+    expect({ writes: puts.length, prompt: conflictDialog.open, file: file.text, ...held(t) }).toEqual({
+      writes: 3,
+      prompt: false,
+      file: "loaded and mine",
+      content: "loaded and mine",
+      saved: "loaded and mine",
       token: "151",
     });
   });
