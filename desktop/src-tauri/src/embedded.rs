@@ -702,22 +702,22 @@ impl EmbeddedServer {
     /// whichever of the two keys the caller holds. The host answers from the
     /// keys it stores, so no root's filesystem is asked.
     pub fn mint_workspace_window(&self, key: &Path) -> Result<WindowRecord, String> {
-        self.host
-            .mint_workspace_window(key, chan_server::WindowOrigin::Native)
-            .map_err(|e| format!("minting a window: {e}"))
+        self.mint_workspace_window_with_origin(key, chan_server::WindowOrigin::Native)
     }
 
-    /// Mint a BROWSER-affinity window: the watcher never opens a native twin for
-    /// it (it skips non-native origins), so the record exists purely for a
-    /// browser tab that holds its own `window_id`. Backs the Window menu's "Open in Browser".
-    pub fn mint_browser_window(
+    /// [`mint_workspace_window`](Self::mint_workspace_window) with the client
+    /// `origin` to stamp. A browser origin marks a record that exists purely
+    /// for a browser tab holding its own `window_id`: the watcher never opens
+    /// a native twin for it (it skips non-native origins). Backs the Window
+    /// menu's New Window and "Open in Browser".
+    pub fn mint_workspace_window_with_origin(
         &self,
-        kind: chan_server::WindowKind,
-        workspace_path: Option<String>,
+        key: &Path,
+        origin: chan_server::WindowOrigin,
     ) -> Result<WindowRecord, String> {
         self.host
-            .mint_window_with_origin(kind, workspace_path, chan_server::WindowOrigin::Browser)
-            .map_err(|e| format!("minting a browser window: {e}"))
+            .mint_workspace_window(key, origin)
+            .map_err(|e| format!("minting a window: {e}"))
     }
 
     /// The library's first-open rule: mint exactly one boot terminal the first

@@ -6486,22 +6486,22 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
 /// Mint a copy of the local workspace window `source`: a record of its own
 /// for the same workspace, stamped `origin`. New Window copies with a native
 /// origin, which the watcher opens as a window, and Open in Browser with a
-/// browser origin, which it gives no native twin. The copy stores the path
-/// `source` stores.
+/// browser origin, which it gives no native twin. The copy stores the root of
+/// the workspace's registry row, the path the launcher nests its windows
+/// under, whatever path `source` stores: the host finds the workspace runtime,
+/// or the registry row, that goes by the source's path. A source stored under
+/// another path, such as the one a relinked root resolves to, keeps it. A
+/// source that stores no path names no workspace and is refused.
 fn mint_workspace_window_copy(
     embedded: &embedded::EmbeddedServer,
     source: &chan_server::WindowRecord,
     origin: chan_server::WindowOrigin,
 ) -> Result<chan_server::WindowRecord, String> {
-    let workspace_path = source.workspace_path.clone();
-    match origin {
-        chan_server::WindowOrigin::Native => {
-            embedded.mint_window(chan_server::WindowKind::Workspace, workspace_path)
-        }
-        chan_server::WindowOrigin::Browser => {
-            embedded.mint_browser_window(chan_server::WindowKind::Workspace, workspace_path)
-        }
-    }
+    let path = source
+        .workspace_path
+        .as_deref()
+        .ok_or_else(|| format!("window {} stores no workspace path", source.window_id))?;
+    embedded.mint_workspace_window_with_origin(Path::new(path), origin)
 }
 
 /// Open a new window of the workspace that owns the currently
