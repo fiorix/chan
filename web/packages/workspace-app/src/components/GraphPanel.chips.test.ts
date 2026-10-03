@@ -19,6 +19,7 @@ vi.mock("../api/client", async (importOriginal) =>
 import GraphPanel from "./GraphPanel.svelte";
 import {
   canvas,
+  fsg,
   g,
   graphServer,
   graphTab,
@@ -292,6 +293,80 @@ describe("the chip state a tab keeps", () => {
 });
 
 describe("the filesystem graph's chips", () => {
+  function groupedFile(path: string) {
+    return { ...fsg.file(path), link_group: "0123456789abcdef" };
+  }
+
+  function serveLinked(paths: string[], withEdge?: { source: string; target: string }): void {
+    graphServer.fs = {
+      nodes: [fsg.dir(""), ...paths.map(groupedFile)],
+      edges: [
+        ...paths.map((path) => fsg.contains("", path)),
+        ...(withEdge ? [{ ...withEdge, kind: "hardlink" as const }] : []),
+      ],
+    };
+  }
+
+  function hardlinkEdges(): string[] {
+    return (canvas.props?.visibleEdges ?? [])
+      .filter((edge) => edge.kind === "mention")
+      .map((edge) => [edge.source, edge.target].sort().join(">"));
+  }
+
+  test("joins a pair split across filesystem pages and filters the joined edge", async () => {
+    serveLinked(["a.md", "b.md"]);
+    graphServer.fsPageSize = 2;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem" }));
+    expect(graphServer.fsGraphCalls.some((call) => call.cursor)).toBe(true);
+    expect((await openChips(tab)).get("hardlink")?.count).toBe(2);
+    expect(hardlinkEdges()).toEqual(["a.md>b.md"]);
+    tab.filters.mention = false;
+    await settle(2);
+    expect(hardlinkEdges()).toEqual([]);
+  });
+
+  test("joins a file loaded by a later directory expansion", async () => {
+    graphServer.fs = {
+      nodes: [fsg.dir(""), groupedFile("a.md"), fsg.dir("notes"), groupedFile("notes/b.md")],
+      edges: [fsg.contains("", "a.md"), fsg.contains("", "notes"), fsg.contains("notes", "notes/b.md")],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem", expanded: { "": true } }));
+    expect((await openChips(tab)).get("hardlink")?.count).toBe(0);
+    closeTabMenu();
+    canvas.props!.onSelect("notes");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(graphServer.fsGraphCalls.some((call) => call.path === "notes")).toBe(true);
+    expect((await openChips(tab)).get("hardlink")?.count).toBe(2);
+    expect(hardlinkEdges()).toEqual(["a.md>notes/b.md"]);
+  });
+
+  test("joins every pair of three loaded paths", async () => {
+    serveLinked(["a.md", "b.md", "c.md"]);
+    graphServer.fsPageSize = 2;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem" }));
+    expect((await openChips(tab)).get("hardlink")?.count).toBe(3);
+    expect(hardlinkEdges().sort()).toEqual(["a.md>b.md", "a.md>c.md", "b.md>c.md"]);
+  });
+
+  test("does not count a group with only one loaded path", async () => {
+    serveLinked(["a.md"]);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem" }));
+    expect((await openChips(tab)).get("hardlink")?.count).toBe(0);
+    expect(hardlinkEdges()).toEqual([]);
+  });
+
+  test.each([
+    ["a.md", "b.md"],
+    ["b.md", "a.md"],
+  ])("deduplicates a delivered edge ordered %s to %s", async (source, target) => {
+    serveLinked(["a.md", "b.md"], { source, target });
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem" }));
+    expect((await openChips(tab)).get("hardlink")?.count).toBe(2);
+    expect(hardlinkEdges()).toEqual(["a.md>b.md"]);
+  });
+
   test("count loaded symlinks and the files joined by hardlinks", async () => {
     graphServer.fs = {
       nodes: [
