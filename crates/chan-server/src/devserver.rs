@@ -8915,6 +8915,63 @@ mod tests {
         drop(handle);
     }
 
+    /// A forget of a starting record whose removal the host fails otherwise
+    /// than still releasing, here at the unregister of a workspace another
+    /// process holds, has run the removal's close first, as one answered
+    /// still releasing has. The record is left off, not a tombstone: a save
+    /// writes its row off and a start restores it off, as the host holds
+    /// the workspace.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_starting_record_whose_forget_fails_otherwise_is_left_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).unwrap();
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        state.persist_state();
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(true),
+            "fixture: a starting record's row is on"
+        );
+        let _foreign = hold_foreign_lock(state.host.library(), &stored);
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "fixture: the host did not fail the removal: {body}"
+        );
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "fixture: a removal the host failed unregistered the workspace"
+        );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the starting record a forget the host failed left"
+        );
+        state.persist_state();
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(false),
+            "the overlay row at the next save"
+        );
+        let (restored, mounts) = restored_at(home.path(), &prefix).await;
+        assert_eq!(
+            (restored, mounts),
+            (Some((DesiredMount::Off, MountPhase::Stopped)), false),
+            "what a restart restores of a workspace whose forget the host failed"
+        );
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
