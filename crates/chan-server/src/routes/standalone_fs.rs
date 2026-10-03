@@ -1651,20 +1651,29 @@ mod tests {
         assert_eq!(adopted["mtime_ns"], current_ns.to_string());
     }
 
-    /// A write's token is the file's mtime and nothing of its bytes, so a
-    /// token that equals the current mtime is accepted over bytes its
-    /// writer never read. The test stamps the mtime back to the token, the
-    /// way a tool that restores timestamps does, so it does not wait for
-    /// the filesystem's clock to give two writes one timestamp.
-    #[tokio::test]
-    async fn a_token_equal_to_the_mtime_of_changed_bytes_is_accepted_over_them() {
-        let fx = files_fixture();
-        let response = raw_put(&fx, "/api/fs/note.md", "loaded").await;
+    /// SHA-256 of the text `loaded`, as lowercase hex.
+    const LOADED_SHA256: &str = "2cab953f2b3607b36259abeb3703329d6b301b31277402ebf9f2b3b93e31dd53";
+    /// SHA-256 of the text `another writer's`, as lowercase hex.
+    const ANOTHER_WRITERS_SHA256: &str =
+        "ba05b40737c0268f92bc379051d6967c9aeb8a7ae0ebc9daa5ae5823306e1757";
+
+    /// Writes `loaded` to `note.md` through the route and returns the token
+    /// the route answered for it.
+    async fn load_note(fx: &Fixture) -> String {
+        let response = raw_put(fx, "/api/fs/note.md", "loaded").await;
         assert_eq!(response.status(), StatusCode::OK);
-        let token = body_json(response).await["mtime_ns"]
+        body_json(response).await["mtime_ns"]
             .as_str()
             .expect("the loaded bytes' token")
-            .to_string();
+            .to_string()
+    }
+
+    /// Leaves `note.md` holding another writer's bytes under the token of the
+    /// loaded ones, and returns that token. It stamps the mtime back to the
+    /// token, the way a tool that restores timestamps does, so it does not
+    /// wait for the filesystem's clock to give two writes one timestamp.
+    async fn another_writers_bytes_under_the_loaded_token(fx: &Fixture) -> String {
+        let token = load_note(fx).await;
         let token_ns: i64 = token.parse().expect("a nanosecond token");
 
         let on_disk = fx.root.join("note.md");
@@ -1690,6 +1699,16 @@ mod tests {
             Some(token_ns),
             "the change that keeps the token did not stage"
         );
+        token
+    }
+
+    /// A write's token is the file's mtime and nothing of its bytes, so a
+    /// save that carries the token alone, when it equals the current mtime,
+    /// is accepted over bytes its writer never read.
+    #[tokio::test]
+    async fn a_token_equal_to_the_mtime_of_changed_bytes_is_accepted_over_them() {
+        let fx = files_fixture();
+        let token = another_writers_bytes_under_the_loaded_token(&fx).await;
 
         let response = raw_put(
             &fx,
@@ -1698,7 +1717,168 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(std::fs::read(fx.root.join("note.md")).unwrap(), b"mine");
+    }
+
+    #[tokio::test]
+    async fn a_save_with_the_hash_of_what_it_loaded_conflicts_over_bytes_changed_under_its_token() {
+        let fx = files_fixture();
+        let token = another_writers_bytes_under_the_loaded_token(&fx).await;
+
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_mtime_ns={token}&expected_sha256={LOADED_SHA256}"),
+            "mine",
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(fx.root.join("note.md")).unwrap(),
+            b"another writer's",
+            "the save replaced bytes its writer never loaded"
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "write_conflict");
+        assert_eq!(body["current_mtime_ns"], token);
+    }
+
+    #[tokio::test]
+    async fn a_save_with_only_the_hash_of_what_it_loaded_conflicts_over_changed_bytes() {
+        let fx = files_fixture();
+        another_writers_bytes_under_the_loaded_token(&fx).await;
+
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_sha256={LOADED_SHA256}"),
+            "mine",
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(fx.root.join("note.md")).unwrap(),
+            b"another writer's",
+            "the save replaced bytes its writer never loaded"
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(response).await["code"], "write_conflict");
+    }
+
+    #[tokio::test]
+    async fn a_save_with_a_hash_conflicts_once_its_file_is_gone() {
+        let fx = files_fixture();
+        load_note(&fx).await;
+        let on_disk = fx.root.join("note.md");
+        std::fs::remove_file(&on_disk).unwrap();
+
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_sha256={LOADED_SHA256}"),
+            "mine",
+        )
+        .await;
+        assert!(
+            !on_disk.exists(),
+            "the save created a file its writer loaded and another removed"
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(response).await["code"], "write_conflict");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_hash_is_a_400_and_writes_nothing() {
+        let fx = files_fixture();
+        load_note(&fx).await;
+        let short = &LOADED_SHA256[1..];
+        let not_hex = format!("g{short}");
+        for malformed in ["nope", "", short, not_hex.as_str()] {
+            let response = raw_put(
+                &fx,
+                &format!("/api/fs/note.md?expected_sha256={malformed}"),
+                "mine",
+            )
+            .await;
+            assert_eq!(
+                std::fs::read(fx.root.join("note.md")).unwrap(),
+                b"loaded",
+                "a save with the malformed hash {malformed:?} wrote"
+            );
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "the malformed hash {malformed:?}"
+            );
+            assert_eq!(
+                body_json(response).await,
+                json!({"error": "expected_sha256 must be 64 hexadecimal characters"})
+            );
+        }
+    }
+
+    /// The hash is one more refusal and loosens none: bytes that hash as the
+    /// save says are written, with a token and without, in either case of
+    /// hex.
+    #[tokio::test]
+    async fn a_save_with_the_hash_of_the_bytes_on_disk_is_written() {
+        let fx = files_fixture();
+        let token = another_writers_bytes_under_the_loaded_token(&fx).await;
+        let on_disk = fx.root.join("note.md");
+
+        let upper = ANOTHER_WRITERS_SHA256.to_ascii_uppercase();
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_mtime_ns={token}&expected_sha256={upper}"),
+            "mine",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(std::fs::read(&on_disk).unwrap(), b"mine");
+
+        std::fs::write(&on_disk, "loaded").unwrap();
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_sha256={LOADED_SHA256}"),
+            "mine again",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(std::fs::read(&on_disk).unwrap(), b"mine again");
+    }
+
+    #[tokio::test]
+    async fn a_stale_token_conflicts_though_the_hash_matches() {
+        let fx = files_fixture();
+        let token = load_note(&fx).await;
+        let stale = mismatching_mtime_ns(token.parse().expect("a nanosecond token"));
+
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_mtime_ns={stale}&expected_sha256={LOADED_SHA256}"),
+            "mine",
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(fx.root.join("note.md")).unwrap(),
+            b"loaded",
+            "a matching hash let a stale token through"
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_save_equal_to_the_bytes_on_disk_passes_whatever_hash_it_carries() {
+        let fx = files_fixture();
+        another_writers_bytes_under_the_loaded_token(&fx).await;
+
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_sha256={LOADED_SHA256}"),
+            "another writer's",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(fx.root.join("note.md")).unwrap(),
+            b"another writer's"
+        );
     }
 
     #[tokio::test]
