@@ -1613,12 +1613,13 @@ impl Drop for CopyStage<'_> {
 
 /// SHA-256 of a text file's content as a load delivers it.
 ///
-/// A text read ([`RootedFs::read_text_with_stat`] and its chunked form)
-/// validates UTF-8 and changes nothing, so the bytes of the text it returns
-/// are the bytes of the file. A conditional write that carries the hash of
-/// what its writer loaded compares it with this over the file's current text:
-/// the two differ exactly when the file no longer holds the bytes that writer
-/// loaded, whatever its mtime says.
+/// A text read (`read_text_with_stat` and its chunked form, on
+/// [`crate::Workspace`] and [`crate::MiniWorkspace`]) validates UTF-8 and
+/// changes nothing, so the bytes of the text it returns are the bytes of the
+/// file. A conditional write that carries the hash of what its writer loaded
+/// compares it with this over the file's current text: the two differ exactly
+/// when the file no longer holds the bytes that writer loaded, whatever its
+/// mtime says.
 pub fn loaded_text_sha256(text: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(text.as_bytes()).into()
