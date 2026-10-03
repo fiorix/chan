@@ -616,6 +616,16 @@ export function auditSelfContained(root: HTMLElement): void {
   }
 }
 
+/// A raster has nothing to scroll, and an element styled to scroll paints
+/// its scrollbar into the page when it overflows. Every page's document
+/// carries this, so no stylesheet a page brings can paint one: the
+/// standard property, and the pseudo-element for the engines that paint
+/// their scrollbars through it.
+const NO_SCROLLBAR_STYLE =
+  '<style xmlns="http://www.w3.org/1999/xhtml">' +
+  "*{scrollbar-width:none}*::-webkit-scrollbar{display:none}" +
+  "</style>";
+
 /// Serialize the page element into an <svg><foreignObject> document.
 /// XMLSerializer emits well-formed XHTML with the namespace on the
 /// root, which is what the foreignObject content model requires.
@@ -623,7 +633,7 @@ export function pageSvgDocument(root: HTMLElement, box: PageBoxPx): string {
   const xhtml = new XMLSerializer().serializeToString(root);
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${box.widthPx}" height="${box.heightPx}">` +
-    `<foreignObject width="100%" height="100%">${xhtml}</foreignObject></svg>`
+    `<foreignObject width="100%" height="100%">${NO_SCROLLBAR_STYLE}${xhtml}</foreignObject></svg>`
   );
 }
 
