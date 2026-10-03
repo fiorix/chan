@@ -25,8 +25,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::Metadata;
+use std::hash::{BuildHasher, RandomState};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -236,6 +237,11 @@ pub struct NodeView {
     pub permission: Option<chan_workspace::PathPermission>,
     #[serde(skip_serializing_if = "is_one")]
     pub link_count: u64,
+    /// The value the nodes of one file share when it has more than one link:
+    /// see [`link_group_of`]. A paged directory walk carries it and no other
+    /// answer does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_group: Option<String>,
     /// Last-modified time in unix seconds, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtime: Option<i64>,
@@ -458,13 +464,17 @@ pub fn build_fs_graph(
 /// (`limit` nodes, clamped) plus a `cursor` to resume. File scope is
 /// always small (the file plus its parent / symlink target), so it is
 /// never paged -- it returns the whole `done: true` payload regardless
-/// of the paging params. The walk's node/edge CONTENTS are identical to
-/// `build_fs_graph`; only delivery is split into frames.
+/// of the paging params. The walk's node ids and its `contains` and
+/// `symlink` edges are those of `build_fs_graph`; only delivery is split
+/// into frames.
 ///
 /// Hardlink edges are emitted per batch from the inodes seen in that
-/// batch (`finish`), so a hardlink pair split across two batches is not
-/// joined in paged mode. That is the one paged-mode content caveat;
-/// the whole-scope path (`build_fs_graph`) keeps hardlinks intact.
+/// batch (`finish`), so a batch joins by an edge only the pairs it
+/// delivers whole. For the pairs a batch boundary splits, every node of a
+/// directory-scope batch that has more than one link carries a
+/// `link_group` ([`link_group_of`]), and the client joins the nodes of one
+/// load that share a value. The whole-scope path (`build_fs_graph`) joins
+/// every pair by an edge and carries no group.
 pub fn build_fs_graph_paged(
     workspace: &chan_workspace::Workspace,
     p: &FsGraphParams,
@@ -521,6 +531,7 @@ pub fn build_fs_graph_paged(
         .clamp(BATCH_MIN_NODES, BATCH_MAX_NODES);
 
     let mut walker = FsGraphWalker::new(r.root.clone(), workspace.walk_filter().clone());
+    walker.link_groups = true;
     let next = walker.walk_directory_paged(
         &r.rel,
         &r.abs,
@@ -760,6 +771,24 @@ fn nlink_of(_meta: &Metadata) -> u64 {
     1
 }
 
+/// The key of the link groups, drawn once in the process.
+static LINK_GROUP_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
+/// The group value of a file that has more than one link: its `(st_dev,
+/// st_ino)` hashed under a key drawn once in this process, as 16 lowercase
+/// hex digits.
+///
+/// Two nodes of one file carry the same value on every batch of a load, so a
+/// client can join a hardlink pair that a batch boundary split. The value has
+/// no order and no inode can be read from it: equality is all it says. Two
+/// different files share a value with probability 2^-64 a pair, far below
+/// what the walk's own races with the filesystem cost. The key does not
+/// outlive the process, so a load that spans a server restart reads two keys
+/// and a pair split across the restart is not joined.
+fn link_group_of(inode: (u64, u64)) -> String {
+    format!("{:016x}", LINK_GROUP_KEY.hash_one(inode))
+}
+
 fn mtime_of(meta: &Metadata) -> Option<i64> {
     meta.modified()
         .ok()?
@@ -842,6 +871,10 @@ struct FsGraphWalker {
     /// to emit a single `hardlink` edge between any two paths sharing
     /// the same inode.
     inode_paths: HashMap<(u64, u64), Vec<String>>,
+    /// Whether nodes with more than one link carry a `link_group`. Set by
+    /// the paged directory walk, whose batches cannot join every pair by an
+    /// edge.
+    link_groups: bool,
     truncated: bool,
 }
 
@@ -889,8 +922,19 @@ impl FsGraphWalker {
             edges: Vec::new(),
             edge_set: HashSet::new(),
             inode_paths: HashMap::new(),
+            link_groups: false,
             truncated: false,
         }
+    }
+
+    /// The link group of a node with `link_count` links, on a walk that
+    /// carries them. Only a regular file counts more than one link, and a
+    /// platform that gives no inode gives no group.
+    fn link_group(&self, meta: &Metadata, link_count: u64) -> Option<String> {
+        if !self.link_groups || link_count <= 1 {
+            return None;
+        }
+        inode_key(meta).map(link_group_of)
     }
 
     fn finish(mut self) -> (Vec<NodeView>, Vec<EdgeView>, bool) {
@@ -1033,7 +1077,8 @@ impl FsGraphWalker {
     /// Returns `None` for a skipped (blocklisted) entry, otherwise the
     /// `ChildOutcome` so the caller can decide on descent. The single
     /// source of per-child behaviour for both the recursive and paged
-    /// walks, so the two stay byte-identical in their node/edge output.
+    /// walks, so the two differ in their node/edge output only by the link
+    /// groups a paged walk carries.
     fn emit_child(
         &mut self,
         parent_rel: &str,
@@ -1070,6 +1115,7 @@ impl FsGraphWalker {
                     path_class: None,
                     permission: None,
                     link_count: 1,
+                    link_group: None,
                     mtime: None,
                     target: None,
                     outside: false,
@@ -1232,6 +1278,7 @@ impl FsGraphWalker {
         let ft = meta.file_type();
         let class = chan_workspace::fs_ops::classify_abs(&self.root, abs).ok();
         let kind = node_kind_from_class(class.as_ref(), &ft);
+        let link_count = class.as_ref().map(|c| c.link_count).unwrap_or(1);
 
         let mut node = NodeView {
             id: rel.to_owned(),
@@ -1241,7 +1288,8 @@ impl FsGraphWalker {
             size: if ft.is_file() { meta.len() } else { 0 },
             path_class: class.clone(),
             permission: class.as_ref().map(|c| c.permission),
-            link_count: class.as_ref().map(|c| c.link_count).unwrap_or(1),
+            link_count,
+            link_group: self.link_group(meta, link_count),
             mtime: mtime_of(meta),
             target: None,
             outside: false,
@@ -1304,6 +1352,7 @@ impl FsGraphWalker {
                 path_class: None,
                 permission: None,
                 link_count: 1,
+                link_group: None,
                 mtime: None,
                 target: Some(target.to_string_lossy().into_owned()),
                 outside: true,
@@ -1332,6 +1381,7 @@ impl FsGraphWalker {
                     path_class: None,
                     permission: None,
                     link_count: 1,
+                    link_group: None,
                     mtime: None,
                     target: Some(target.to_string_lossy().into_owned()),
                     outside: false,
@@ -1372,6 +1422,7 @@ impl FsGraphWalker {
                     path_class: None,
                     permission: None,
                     link_count: 1,
+                    link_group: None,
                     mtime: None,
                     target: Some(target.to_string_lossy().into_owned()),
                     outside: false,
@@ -1404,6 +1455,7 @@ impl FsGraphWalker {
         } else {
             None
         };
+        let link_count = class.as_ref().map(|c| c.link_count).unwrap_or(1);
         let node = NodeView {
             id: rel.to_owned(),
             kind,
@@ -1412,7 +1464,8 @@ impl FsGraphWalker {
             size: if ft.is_file() { meta.len() } else { 0 },
             path_class: class.clone(),
             permission: class.as_ref().map(|c| c.permission),
-            link_count: class.as_ref().map(|c| c.link_count).unwrap_or(1),
+            link_count,
+            link_group: self.link_group(meta, link_count),
             mtime: mtime_of(meta),
             target: target_readlink,
             outside: false,
