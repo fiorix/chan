@@ -5836,7 +5836,8 @@ export async function overwriteConflictedTab(): Promise<void> {
 /// confirmed and the authority flushed to disk); "degraded" and
 /// "classic" fall through to the PUT path below. "unresolved" keeps
 /// the buffer without starting a competing PUT. "refused" writes nothing
-/// either: the session still owns saves and has written on the tab's save
+/// either: the buffer is not the tab's to write, in any state of its
+/// session, and a session that is still the tab's has written on the save
 /// line why the file was not saved.
 export type DocSaveDelegate = (
   t: FileTab,
@@ -5994,18 +5995,23 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     t.error = "file is still loading";
     return;
   }
-  // A live session owns this tab's saves: confirmed edits are already
-  // on the authority, so "save" means "flush to disk", never a PUT
-  // (the ConflictModal is unreachable while attached). Delegates run in
-  // registration order; "classic" means "not my session, ask the next
-  // one". A flush failure degrades the owning session, stops its pump,
-  // waits a finite time for any in-flight push. An unresolved result
-  // retains the buffer and reason; a positive answer permits the classic
-  // path below with its latest flush token. A successful classic save
-  // then heals the session through the fallback-saved hook. A refusal
-  // comes from a session that has not degraded: the buffer is not its to
-  // write, so nothing is written and its reason stays on the save line.
-  if (isDocAttached(t)) {
+  // A tab that mirrors a live session asks it first, in whatever state
+  // the session is: the mirror is on the tab from the session's first
+  // turn to its release. While the session owns the tab's saves,
+  // confirmed edits are already on the authority, so "save" means "flush
+  // to disk", never a PUT (the ConflictModal is unreachable while
+  // attached). Delegates run in registration order; "classic" means "not
+  // mine to answer, ask the next one", which a session that has stopped
+  // owning saves also answers for a buffer the classic path may write. A
+  // flush failure degrades the owning session, stops its pump, waits a
+  // finite time for any in-flight push. An unresolved result retains the
+  // buffer and reason; a positive answer permits the classic path below
+  // with its latest flush token. A successful classic save then heals the
+  // session through the fallback-saved hook. A refusal holds a buffer
+  // that is not the tab's to write, whether or not the session owns
+  // saves: nothing is written, and a session that is still the tab's
+  // keeps its reason on the save line.
+  if (t.doc !== undefined) {
     for (const delegate of docSaveDelegates) {
       const r = await delegate(t);
       if (r === "classic") continue;

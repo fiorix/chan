@@ -358,9 +358,10 @@ export class SceneSession {
   /// scene, so `flush()` can resolve immediately when there is nothing
   /// unflushed.
   private serverDirty = false;
-  /// The save error this session wrote for a flush the server could not
-  /// make. A flush that lands clears it, and only it: an error the classic
-  /// save wrote stays until a save of that path clears it.
+  /// The save error this session wrote: for a flush the server could not
+  /// make, or for a save it refused for want of a board. A flush that lands
+  /// clears it, and only it: an error the classic save wrote stays until a
+  /// save of that path clears it.
   private flushError: string | null = null;
 
   private pushInFlight = false;
@@ -475,6 +476,7 @@ export class SceneSession {
   bindCanvas(binding: SceneCanvasBinding): void {
     if (this.releaseTimer !== null) this.retain();
     this.binding = binding;
+    this.retireUnboundRefusal();
     if (this.haveSnapshot) {
       const recoveringClaims = this.unboundClaims !== null;
       this.replayToBinding(binding, [...this.shadowElements.values()], this.shadowAppState, this.shadowFiles);
@@ -609,8 +611,8 @@ export class SceneSession {
     this.setStatus("degraded");
   }
 
-  /// Whether a save whose flush failed must leave the file alone, saying so
-  /// on the tab's save line when the flush's own error has not.
+  /// Whether a save the authority has not answered must leave the file alone,
+  /// saying so on the tab's save line when a flush's own error has not.
   ///
   /// With no canvas bound, nothing mirrors a board into the tab's buffer: a
   /// drawing tab restored and never shown, or a board whose library never
@@ -618,11 +620,15 @@ export class SceneSession {
   /// stamping the authority's version and flush mtime on the tab all the
   /// same, so a classic write of that buffer would pass the server's check,
   /// and its replace deletes every element the text lacks, a peer's later
-  /// edit among them. The save writes nothing and the session keeps owning
-  /// saves, so the next one asks the authority again.
+  /// edit among them. That is so in every state of the session, so the save
+  /// writes nothing whether or not the session owns saves: one that does is
+  /// asked again by the next save, and one that is degraded or off answers
+  /// the same until a board binds or the session is released.
   ///
   /// A push of this window's with no known outcome is not this case: a
   /// canvas made it, and the settle wait and its withheld fallback own it.
+  ///
+  /// Only a registered session is asked: a released one speaks for no tab.
   refusesFallback(): boolean {
     if (this.binding !== null || this.pushOutcomeUnresolved) return false;
     if (this.flushError === null) {
@@ -630,6 +636,16 @@ export class SceneSession {
       this.tab.saveError = this.flushError;
     }
     return true;
+  }
+
+  /// Take the unbound refusal's reason off the save line once it has stopped
+  /// being true: a board has bound, the authority says the file holds the
+  /// scene, or this session is no longer the tab's. A flush frame retires it
+  /// as it does a flush's own error.
+  private retireUnboundRefusal(): void {
+    if (this.flushError !== UNBOUND_FALLBACK_REASON) return;
+    if (this.tab.saveError === this.flushError) this.tab.saveError = null;
+    this.flushError = null;
   }
 
   /// A bounded wait cannot turn silence or socket closure into an ack.
@@ -1065,6 +1081,7 @@ export class SceneSession {
       this.queued = null;
     }
     this.serverDirty = f.dirty;
+    if (!f.dirty) this.retireUnboundRefusal();
     this.stampMtime(f.mtime_ns ?? null);
     this.cursors.clear();
     for (const c of f.cursors) {
@@ -1228,6 +1245,7 @@ export class SceneSession {
     this.closeSocket();
     this.binding = null;
     this.cursors.clear();
+    this.retireUnboundRefusal();
     registry.delete(this.tabId);
     setTabDocState(this.tab, null);
   }
@@ -1308,8 +1326,16 @@ export function resetSceneSyncForTests(): void {
 registerLiveSessionKind({
   async save(t: FileTab) {
     const session = registry.get(t.id);
-    if (!session || !session.ownsSaves()) return "classic";
+    if (!session) return "classic";
+    // A session that has stopped owning saves leaves the buffer a bound
+    // canvas mirrored to the classic write, and still holds one no canvas
+    // wrote.
+    if (!session.ownsSaves()) return session.refusesFallback() ? "refused" : "classic";
     if (await session.flush()) return "saved";
+    // A release resolves the wait too. A session that is gone answers for
+    // nothing on the tab: it writes no reason and mirrors no status, and
+    // whatever released it owns the tab's next save.
+    if (registry.get(t.id) !== session) return "refused";
     if (session.refusesFallback()) return "refused";
     session.degrade();
     // Degrade stops new pushes. Only an ack of every queued push permits
