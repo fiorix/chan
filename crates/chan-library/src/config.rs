@@ -581,22 +581,45 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn secret_masking_defaults_off_and_preserves_explicit_true() {
-        let config = TerminalConfig::default();
-        assert!(!config.secret_masking);
+    fn secret_masking_is_unset_until_named_and_an_explicit_false_is_kept() {
+        /// What a serialized config says of `secret_masking`: `None` when it
+        /// leaves the key out.
+        fn masking(config: &TerminalConfig) -> Option<serde_json::Value> {
+            serde_json::to_value(config)
+                .unwrap()
+                .get("secret_masking")
+                .cloned()
+        }
+
+        let default = TerminalConfig::default();
         assert_eq!(
-            config.secret_mask_suffixes,
+            masking(&default),
+            None,
+            "a default config names a choice for secret_masking"
+        );
+        assert_eq!(
+            default.secret_mask_suffixes,
             DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES
+        );
+        assert!(
+            !toml::to_string(&default)
+                .unwrap()
+                .contains("secret_masking"),
+            "an unset secret_masking is written to the file"
         );
 
         let missing: TerminalConfig = serde_json::from_value(json!({})).unwrap();
-        assert!(!missing.secret_masking);
+        assert_eq!(masking(&missing), None);
 
-        let configured: TerminalConfig = serde_json::from_value(json!({
-            "secret_masking": true
-        }))
-        .unwrap();
-        assert!(configured.secret_masking);
+        for choice in [true, false] {
+            let configured: TerminalConfig =
+                serde_json::from_value(json!({ "secret_masking": choice })).unwrap();
+            assert_eq!(masking(&configured), Some(json!(choice)));
+            // The file keeps the choice, an explicit `false` included.
+            let file = toml::to_string(&configured).unwrap();
+            let reloaded: TerminalConfig = toml::from_str(&file).unwrap();
+            assert_eq!(masking(&reloaded), Some(json!(choice)), "{file}");
+        }
     }
 
     #[test]

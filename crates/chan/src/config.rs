@@ -1269,6 +1269,30 @@ mod tests {
     }
 
     #[test]
+    fn config_secret_masking_reads_null_until_it_is_set_and_none_clears_it() {
+        let editor = EditorPrefs::default();
+        let mut server = ServerConfig::default();
+        assert_eq!(
+            read_config_key(&editor, &server, "terminal.secret_masking").unwrap(),
+            serde_json::Value::Null,
+            "a config that never set terminal.secret_masking reads a choice for it"
+        );
+
+        write_server_config_key(&mut server, "terminal.secret_masking", "false").unwrap();
+        assert_eq!(
+            read_config_key(&editor, &server, "terminal.secret_masking").unwrap(),
+            serde_json::json!(false)
+        );
+
+        let cleared = write_server_config_key(&mut server, "terminal.secret_masking", "none");
+        assert!(cleared.is_ok(), "{cleared:?}");
+        assert_eq!(
+            read_config_key(&editor, &server, "terminal.secret_masking").unwrap(),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn config_secret_masking_false_and_true_persist_in_isolated_home() {
         let env = test_env::ChanTestEnv::new();
         assert!(!ServerConfig::default().terminal.secret_masking);

@@ -620,7 +620,6 @@ mod tests {
             json["transfer_max_bytes"],
             state.library.transfer_max_bytes()
         );
-        assert_eq!(json["terminal"]["secret_masking"], false);
 
         assert!(
             serde_json::from_value::<PatchConfigBody>(json!({
@@ -1042,7 +1041,6 @@ mod tests {
         let json = to_json(&view);
         assert_eq!(json["revision"], 1);
         assert!(json["workspaces"].is_array());
-        assert_eq!(json["preferences"]["terminal"]["secret_masking"], false);
         assert_eq!(
             json["preferences"]["terminal"]["secret_mask_suffixes"][0],
             "TOKEN"
@@ -1339,5 +1337,172 @@ mod tests {
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    /// The `terminal` object of the preferences a page reads.
+    fn terminal_as_read(state: &AppState) -> serde_json::Value {
+        let view = preferences_view(state).expect("preferences view");
+        serde_json::to_value(view).expect("serialize")["terminal"].clone()
+    }
+
+    /// What the preferences a page reads say of `terminal.secret_masking`:
+    /// `None` when they leave the key out.
+    fn masking_as_read(state: &AppState) -> Option<serde_json::Value> {
+        terminal_as_read(state).get("secret_masking").cloned()
+    }
+
+    /// Write a `terminal` object the way a page does, at the state's current
+    /// revision, saving through `save_server`.
+    fn write_terminal_saving(
+        state: &AppState,
+        terminal: serde_json::Value,
+        save_server: impl FnOnce(&ServerConfig) -> Result<(), Error>,
+    ) {
+        let body = serde_json::from_value::<PatchConfigBody>(json!({
+            "expected_revision": state.config_revision.load(Ordering::Relaxed),
+            "preferences": { "terminal": terminal.clone() },
+        }));
+        assert!(
+            body.is_ok(),
+            "the terminal object {terminal} was refused: {:?}",
+            body.as_ref().err()
+        );
+        let written = patch_config_with_saves(state, body.unwrap(), noop_save_editor, save_server);
+        assert!(
+            written.is_ok(),
+            "the terminal object {terminal} was not applied: {:?}",
+            written.as_ref().err()
+        );
+    }
+
+    fn write_terminal(state: &AppState, terminal: serde_json::Value) {
+        write_terminal_saving(state, terminal, noop_save_server);
+    }
+
+    /// The `terminal` object as a page read it, with `secret_masking` set to
+    /// `choice`.
+    fn terminal_choosing(state: &AppState, choice: serde_json::Value) -> serde_json::Value {
+        let mut terminal = terminal_as_read(state);
+        terminal["secret_masking"] = choice;
+        terminal
+    }
+
+    #[test]
+    fn the_view_leaves_secret_masking_out_until_it_is_set() {
+        let state = make_test_state(false);
+
+        assert_eq!(
+            masking_as_read(&state),
+            None,
+            "a config that never set terminal.secret_masking sends a choice for it"
+        );
+        let global = to_json(&global_config_view(&state).expect("global config view"));
+        assert!(global["preferences"]["terminal"]
+            .get("secret_masking")
+            .is_none());
+    }
+
+    #[test]
+    fn a_terminal_write_that_leaves_secret_masking_out_keeps_the_stored_choice() {
+        let state = make_test_state(false);
+        write_terminal(&state, terminal_choosing(&state, json!(true)));
+        assert_eq!(masking_as_read(&state), Some(json!(true)));
+
+        let mut terminal = terminal_as_read(&state);
+        terminal
+            .as_object_mut()
+            .expect("a terminal object")
+            .remove("secret_masking");
+        terminal["font_size"] = json!(20);
+        write_terminal(&state, terminal);
+
+        assert_eq!(
+            masking_as_read(&state),
+            Some(json!(true)),
+            "a terminal write that did not name secret_masking changed the stored choice"
+        );
+        assert_eq!(terminal_as_read(&state)["font_size"], 20);
+    }
+
+    #[test]
+    fn a_null_secret_masking_clears_the_stored_choice() {
+        let state = make_test_state(false);
+        write_terminal(&state, terminal_choosing(&state, json!(false)));
+        assert_eq!(masking_as_read(&state), Some(json!(false)));
+
+        write_terminal(&state, terminal_choosing(&state, serde_json::Value::Null));
+
+        assert_eq!(
+            masking_as_read(&state),
+            None,
+            "a null for secret_masking left the stored choice in place"
+        );
+    }
+
+    /// The stored terminal config as the file would hold it.
+    fn terminal_as_stored(state: &AppState) -> serde_json::Value {
+        serde_json::to_value(&state.server_config.lock().unwrap().terminal).expect("serialize")
+    }
+
+    #[test]
+    fn a_terminal_object_sent_back_as_it_was_read_changes_nothing() {
+        for chosen in [None, Some(true), Some(false)] {
+            let state = make_test_state(false);
+            if let Some(choice) = chosen {
+                write_terminal(&state, terminal_choosing(&state, json!(choice)));
+            }
+            let before = terminal_as_stored(&state);
+
+            write_terminal(&state, terminal_as_read(&state));
+
+            assert_eq!(
+                terminal_as_stored(&state),
+                before,
+                "a page that sent back the terminal object it read changed what is stored, \
+                 from a choice of {chosen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_secret_masking_is_not_written_to_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        let state = make_test_state(false);
+        let mut terminal = terminal_as_read(&state);
+        terminal
+            .as_object_mut()
+            .expect("a terminal object")
+            .remove("secret_masking");
+        terminal["font_size"] = json!(20);
+
+        write_terminal_saving(&state, terminal, |config| config.save_to(&path));
+
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(file.contains("font_size = 20"), "{file}");
+        assert!(
+            !file.contains("secret_masking"),
+            "a config that never set terminal.secret_masking wrote a choice for it:\n{file}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_false_survives_a_save_and_a_reload_as_false() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        let state = make_test_state(false);
+
+        write_terminal_saving(&state, terminal_choosing(&state, json!(false)), |config| {
+            config.save_to(&path)
+        });
+
+        let reloaded = ServerConfig::load_from(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reloaded.terminal)
+                .unwrap()
+                .get("secret_masking"),
+            Some(&json!(false)),
+            "an explicit false for terminal.secret_masking was read back as unset"
+        );
     }
 }
