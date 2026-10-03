@@ -38,6 +38,50 @@
         : v,
     );
   }
+
+  /// A parsed scene's elements with each element after the first of a
+  /// repeated id under an id of its own: the repeated id, a dash and the
+  /// element's place among its repeats, counted on past any id the scene
+  /// holds. It is a function of the scene alone, so every seed of one buffer
+  /// puts the same ids on the board, in every window. The library's restore
+  /// gives such an element a random id at each call, and the authority keeps
+  /// the first element of a repeated id only, so a board seeded twice would
+  /// offer its session one element under two ids and the file would gain a
+  /// copy. The first element keeps the id, as it does at the authority.
+  export function distinctIds<T>(elements: readonly T[]): readonly T[] {
+    const idOf = (el: T): string | null => {
+      const id = (el as { id?: unknown } | null)?.id;
+      return typeof id === "string" ? id : null;
+    };
+    const held = new Set<string>();
+    let repeated = false;
+    for (const el of elements) {
+      const id = idOf(el);
+      if (id === null) continue;
+      if (held.has(id)) repeated = true;
+      held.add(id);
+    }
+    if (!repeated) return elements;
+    const seen = new Set<string>();
+    const places = new Map<string, number>();
+    return elements.map((el) => {
+      const id = idOf(el);
+      if (id === null) return el;
+      if (!seen.has(id)) {
+        seen.add(id);
+        return el;
+      }
+      let place = places.get(id) ?? 1;
+      let derived: string;
+      do {
+        place += 1;
+        derived = `${id}-${place}`;
+      } while (held.has(derived));
+      places.set(id, place);
+      held.add(derived);
+      return { ...el, id: derived };
+    });
+  }
 </script>
 
 <script lang="ts">
@@ -460,10 +504,15 @@
     return () => s.unbindCanvas(binding);
   });
 
+  /// The buffer as a scene for the library's restore, at its init and at
+  /// every seed, with the ids `distinctIds` gives its elements.
   function parseScene(json: string): ExcalidrawInitialDataState | null {
     if (!json.trim()) return null;
     try {
-      return JSON.parse(json) as ExcalidrawInitialDataState;
+      const scene = JSON.parse(json) as ExcalidrawInitialDataState | null;
+      return Array.isArray(scene?.elements)
+        ? { ...scene, elements: distinctIds(scene.elements) }
+        : scene;
     } catch {
       // A corrupt scene (a hand-edited source-mode typo the save gate
       // somehow let through) opens as an empty board rather than throwing.

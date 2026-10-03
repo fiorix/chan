@@ -3,7 +3,7 @@
 import { mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import ExcalidrawCanvas, { canonicalJson, noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
+import ExcalidrawCanvas, { canonicalJson, distinctIds, noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
 import { boardPropsFromRender } from "../__tests__/excalidrawLibrary";
 // Build-time contract: the offscreen shell is display: none (WKWebView leaks the island through visibility: hidden), and the island imports Excalidraw's stylesheet so it rides the island's chunk; vitest drops CSS.
 import canvasSrc from "./ExcalidrawCanvas.svelte?raw";
@@ -911,5 +911,33 @@ describe("the buffer the classic PUT would carry", () => {
       "drawn-during-outage",
     );
     vi.useRealTimers();
+  });
+});
+
+describe("distinctIds", () => {
+  const ids = (elements: readonly unknown[]) => distinctIds(elements).map((el) => (el as { id?: unknown } | null)?.id);
+
+  test("each element after the first of a repeated id takes the id and its place among the repeats", () => {
+    expect(distinctIds([{ id: "a", x: 0 }, { id: "b", x: 1 }, { id: "a", x: 2 }, { id: "a", x: 3 }])).toEqual([
+      { id: "a", x: 0 },
+      { id: "b", x: 1 },
+      { id: "a-2", x: 2 },
+      { id: "a-3", x: 3 },
+    ]);
+  });
+
+  test("a derived id passes over every id the scene holds, before the repeat or after it", () => {
+    expect(ids([{ id: "a-2" }, { id: "a" }, { id: "a" }, { id: "a" }, { id: "a-3" }])).toEqual([
+      "a-2",
+      "a",
+      "a-4",
+      "a-5",
+      "a-3",
+    ]);
+  });
+
+  test("an element whose id is not a string is left as it is and repeats nothing", () => {
+    const scene = [{ id: 7 }, { id: 7 }, { x: 1 }, { x: 2 }, null, { id: "a" }, { id: "a" }];
+    expect(distinctIds(scene)).toEqual([{ id: 7 }, { id: 7 }, { x: 1 }, { x: 2 }, null, { id: "a" }, { id: "a-2" }]);
   });
 });
