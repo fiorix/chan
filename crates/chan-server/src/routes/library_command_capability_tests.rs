@@ -488,6 +488,63 @@ async fn a_capability_counts_no_foreign_or_control_window() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+/// Every window of the snapshot says whether this host's window registry
+/// holds it. The visibility and close actions act on that registry alone, so
+/// a row that reached the snapshot through a connected devserver's feed,
+/// carrying this library's id, reads `managed: false`, and a window the
+/// capability itself opens reads `true`.
+#[tokio::test]
+async fn a_snapshot_marks_the_windows_its_registry_holds() {
+    let fixture = fixture_with_registry(true, true).await;
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+    let snapshot = send(
+        &router,
+        "GET",
+        &format!("/api/library/command-capabilities/{capability}"),
+        None,
+        None,
+    )
+    .await;
+    let (status, snapshot) = json(snapshot).await;
+    assert_eq!(status, StatusCode::OK, "fixture: the snapshot: {snapshot}");
+    let managed = |window_id: &str| {
+        snapshot["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["window_id"] == window_id)
+            .unwrap_or_else(|| panic!("fixture: the snapshot lacks {window_id}: {snapshot}"))
+            ["managed"]
+            .clone()
+    };
+    assert_eq!(
+        managed(&fixture.window_id),
+        true,
+        "a window this host's registry holds"
+    );
+    assert_eq!(
+        managed("feed-window"),
+        false,
+        "a window only a devserver's feed holds"
+    );
+
+    let action = send(
+        &router,
+        "POST",
+        &format!("/api/library/command-capabilities/{capability}/actions"),
+        None,
+        Some(serde_json::json!({ "action": "new_terminal" })),
+    )
+    .await;
+    let (status, action) = json(action).await;
+    assert_eq!(status, StatusCode::OK, "fixture: the action: {action}");
+    assert_eq!(
+        action["window"]["managed"], true,
+        "a window the capability opened"
+    );
+}
+
 /// The capability is the whole credential: an unknown one is refused before any
 /// window is read, so the route adds no unauthenticated view of the library.
 #[tokio::test]
@@ -741,15 +798,26 @@ mod refusal_envelopes {
 
     #[tokio::test]
     async fn control_visibility() {
-        control_refusal(true).await;
+        control_refusal(ControlRequest::Visibility).await;
+    }
+
+    #[tokio::test]
+    async fn control_close() {
+        control_refusal(ControlRequest::Close).await;
     }
 
     #[tokio::test]
     async fn control_count() {
-        control_refusal(false).await;
+        control_refusal(ControlRequest::Count).await;
     }
 
-    async fn control_refusal(visibility: bool) {
+    enum ControlRequest {
+        Visibility,
+        Close,
+        Count,
+    }
+
+    async fn control_refusal(request: ControlRequest) {
         let fixture = fixture().await;
         fixture
             .host
@@ -761,10 +829,17 @@ mod refusal_envelopes {
             .unwrap();
         let app = launcher_router(fixture.host.clone(), None, None);
         let cap = mint(&app, &fixture).await;
-        let response = if visibility {
-            send(&app, "POST", &format!("/api/library/command-capabilities/{cap}/actions"), None, Some(serde_json::json!({"action":"set_window_visibility", "window_id":"control-local", "hidden":true}))).await
-        } else {
-            send(&app, "GET", &count_path(&cap, "control-local"), None, None).await
+        let actions = format!("/api/library/command-capabilities/{cap}/actions");
+        let response = match request {
+            ControlRequest::Visibility => {
+                send(&app, "POST", &actions, None, Some(serde_json::json!({"action":"set_window_visibility", "window_id":"control-local", "hidden":true}))).await
+            }
+            ControlRequest::Close => {
+                send(&app, "POST", &actions, None, Some(serde_json::json!({"action":"close_window", "window_id":"control-local"}))).await
+            }
+            ControlRequest::Count => {
+                send(&app, "GET", &count_path(&cap, "control-local"), None, None).await
+            }
         };
         check(
             response,
