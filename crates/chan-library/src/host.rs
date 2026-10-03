@@ -1359,9 +1359,12 @@ impl WorkspaceHost {
     /// Wait at most the open's release budget for a registration or removal
     /// already writing this root, then answer [`ChanError::WorkspaceAlreadyOpen`]
     /// without changing its row. The blocking registration owns the permit
-    /// until it returns, including when its caller stops waiting. It holds
-    /// no lifecycle lock and releases the permit before any later open can
-    /// await one. Key resolution belongs inside the caller's request bound.
+    /// until it returns, including when its caller stops waiting, and holds
+    /// no lifecycle lock. A caller that awaits the registration to its end
+    /// finds the permit released, so its own open that follows does not wait
+    /// for it; an open of the root by anyone else waits for the permit while
+    /// the registration runs. Key resolution belongs inside the caller's
+    /// request bound.
     pub async fn register_workspace_keyed(
         &self,
         root: &Path,
