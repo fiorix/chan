@@ -11,3 +11,6 @@
 <img alt="contain" src="mark-violet.png" style="width:160px;height:80px;object-fit:contain">
 
 <div style="height:30px;overflow:hidden"><img alt="partial-clip" src="mark-amber.png" style="width:160px;height:80px"></div>
+
+<div style="visibility:hidden"><img alt="hidden-unsized" src="mark-rose.svg"></div>
+<img alt="hidden-marker" src="mark-blue.svg">

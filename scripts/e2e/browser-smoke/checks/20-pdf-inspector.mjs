@@ -265,7 +265,7 @@ function inspectDoc(rasters) {
 async function watchImageLift(page) {
   await page.evaluate(() => {
     const original = Element.prototype.setAttribute;
-    const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip"]);
+    const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker"]);
     const capture = { before: null, after: null };
     const read = (host) => Object.fromEntries(
       [...host.querySelectorAll("img[alt]")]
@@ -279,7 +279,7 @@ async function watchImageLift(page) {
     );
     Element.prototype.setAttribute = function (name, value) {
       if (!capture.before && name === "src" && this instanceof HTMLImageElement &&
-          this.hasAttribute("data-chan-export-image") && String(value).startsWith("data:image/svg+xml,")) {
+          String(value).startsWith("data:")) {
         let host = this.parentElement;
         while (host && host.style?.left !== "-10000px") host = host.parentElement;
         if (host && [...host.querySelectorAll("img[alt]")].some((img) => img.alt === "wide-table")) {
@@ -340,6 +340,15 @@ function inspectLayoutImages(rasters, capture) {
     faults.push("hidden images: the browser did not compose both source elements");
   }
   if (colourBox(page, ROSE)) faults.push("hidden images: rose pixels appeared in the PDF");
+  const marker = colourBox(page, BLUE);
+  const table = ink["wide-table"];
+  const markerTop = before["hidden-marker"]?.rect.top;
+  const tableTop = before["wide-table"]?.rect.top;
+  if (!marker || !table || markerTop === undefined || tableTop === undefined) {
+    faults.push("hidden marker: the PDF or prewrite page has no marker");
+  } else if (Math.abs((marker.y0 - table.y0) / scale - (markerTop - tableTop)) > 2) {
+    faults.push(`hidden marker: PDF top ${(marker.y0 - table.y0) / scale} CSS px below table, composed ${markerTop - tableTop}`);
+  }
   return { details: { capture, ink }, faults };
 }
 
