@@ -56,11 +56,11 @@ describe("a move onto a name that is taken", () => {
     expect(ui.status).toBe("move failed: 'taken.md' already exists");
   });
 
-  test("keeps the existing-directory refusal and its wording", async () => {
+  test("refuses an existing directory by name, as a move", async () => {
     await fileOps.moveTo("a.md", "dir");
 
     expect(moved.calls, "the server is not asked").toHaveLength(0);
-    expect(ui.status).toBe("rename failed: 'dir' is an existing directory");
+    expect(ui.status).toBe("move failed: 'dir' is an existing directory");
   });
 
   test("a free name still moves", async () => {

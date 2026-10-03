@@ -26,6 +26,7 @@ describe("backslashReason", () => {
     ["a rename of a directory that holds one", "x\\z", { source: "x\\y" }],
     ["a directory typed with a trailing slash", "x\\z/", { source: "x\\y" }],
     ["an entry that exists, with no source", "a\\b.md", { exists }],
+    ["a move onto an entry that holds one, which makes no name", "a\\b.md", { source: "notes.md", exists }],
     ["a new file in a listed directory that holds one", "x\\y/new.md", { exists }],
   ] as const)("%s passes", (_name, path, held) => {
     expect(backslashReason(path, held)).toBeNull();
@@ -34,7 +35,6 @@ describe("backslashReason", () => {
   test.each([
     ["a name that gains one", "a\\b.md", { source: "ab.md" }],
     ["a name that holds one more", "a\\b\\c.md", { source: "a\\b.md" }],
-    ["a move onto an entry that holds one", "a\\b.md", { source: "notes.md", exists }],
     ["a new name with no source", "p\\q.md", { exists }],
     ["a new directory on the way", "p\\q/a.md", { source: "a.md", exists }],
     ["a new directory under the source's own", "far/p\\q/n\\w/b.md", { source: "far/p\\q/a.md" }],

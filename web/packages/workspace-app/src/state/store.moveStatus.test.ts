@@ -55,10 +55,10 @@ describe("the status a move leaves", () => {
     vi.spyOn(api, "move").mockRejectedValue(new Error("permission denied"));
     await fileOps.moveTo("a.md", "b.md");
 
-    expect(ui.status).toBe("rename failed: permission denied");
+    expect(ui.status).toBe("move failed: permission denied");
     expect(ui.statusKind).not.toBe("transient");
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(ui.status).toBe("rename failed: permission denied");
+    expect(ui.status).toBe("move failed: permission denied");
   });
 });
 

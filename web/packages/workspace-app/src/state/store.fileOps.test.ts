@@ -15,6 +15,7 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
   browserSelection,
   fileOps,
+  loadTreeDir,
   pathPromptState,
   refreshTree,
   refreshWorkspace,
@@ -129,13 +130,56 @@ describe("a backslash in a moved name", () => {
     expect(disk.get("deep/x\\y/a.md")?.content).toBe("hello");
   });
 
-  test("a drop's move refuses a target whose name gains one, and sends nothing", async () => {
+  test("a drop's move refuses a target whose name gains one as a move, and sends nothing", async () => {
     const move = vi.spyOn(api, "move");
     await fileOps.moveTo("notes/a.md", "notes/a\\b.md");
 
     expect(move).not.toHaveBeenCalled();
-    expect(ui.status).toBe(REFUSED);
+    expect(ui.status).toBe("move failed: \\ cannot be added to a name");
     expect(disk.get("notes/a.md")?.content).toBe("hello");
+  });
+
+  test("a move into a directory that holds one waits for a listing of its parent that is in flight", async () => {
+    const list = api.list.bind(api);
+    let arrive: () => void = () => {};
+    const held = new Promise<void>((resolve) => (arrive = resolve));
+    vi.spyOn(api, "list").mockImplementation(async (dir) => {
+      if (dir === "deep") await held;
+      return list(dir);
+    });
+    // The tree lists an expanded directory by itself, and a move typed
+    // meanwhile finds that listing in flight.
+    const listing = loadTreeDir("deep");
+    expect(tree.loadingDirs.deep).toBe(true);
+    const move = fileOps.renameInPlace("notes/a.md", "deep/x\\y/a.md");
+    await settle(1);
+    arrive();
+    await listing;
+    await move;
+
+    expect(ui.status).toBeNull();
+    expect(disk.get("deep/x\\y/a.md")?.content).toBe("hello");
+  });
+
+  test("a move through a directory that cannot be listed is refused as that, by name, and sends nothing", async () => {
+    const list = api.list.bind(api);
+    vi.spyOn(api, "list").mockImplementation(async (dir) => {
+      if (dir === "deep") throw new Error("permission denied");
+      return list(dir);
+    });
+    const move = vi.spyOn(api, "move");
+    await fileOps.renameInPlace("notes/a.md", "deep/x\\y/a.md");
+
+    expect(move).not.toHaveBeenCalled();
+    expect(ui.status).toBe("rename failed: 'deep' could not be listed");
+  });
+
+  test("a move onto a name that exists says so, though the name holds one", async () => {
+    const move = vi.spyOn(api, "move");
+    await fileOps.renameInPlace("notes/a.md", "a\\b.md");
+
+    expect(move).not.toHaveBeenCalled();
+    expect(ui.status).toBe("move failed: 'a\\b.md' already exists");
   });
 
   test("a drop's move keeps the one a name holds", async () => {

@@ -286,7 +286,6 @@ describe("a backslash in a typed path", () => {
   test.each([
     ["a rename to a name that gains one", "move", "notes.md", "no\\tes.md"],
     ["a rename to a name that holds one more", "move", "a\\b.md", "a\\b\\c.md"],
-    ["a move onto a name that holds one", "move", "notes.md", "a\\b.md"],
     ["a new file whose name holds one", "create", undefined, "p\\q.md"],
     ["a new directory whose name holds one, on the way to a file", "create", undefined, "p\\q/new.md"],
     ["a path to open that would create a name that holds one", "open", undefined, "p\\q.md"],
@@ -295,6 +294,35 @@ describe("a backslash in a typed path", () => {
     await openDialog(target, { kind: "file", mode, sourcePath }, typed);
 
     expect(statusText(target)).toBe(REFUSED);
+    expect(okButton(target).disabled).toBe(true);
+  });
+
+  test("a move onto an existing name that holds one reads as a move onto any existing file", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "move", sourcePath: "notes.md" }, "a\\b.md");
+
+    expect(statusText(target)).toBe("\u26a0 overwrites existing file a\\b.md");
+  });
+
+  test("a path through a directory whose parent could not be listed says that, and not that a backslash cannot be added", async () => {
+    tree.entries = [...tree.entries, { path: "deep", is_dir: true, mtime: null, size: 0 }];
+    tree.dirErrors = { deep: "permission denied" };
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "deep/x\\y/new.md");
+    await settle();
+
+    expect(statusText(target)).toBe("\u26a0 cannot list deep: permission denied");
+    expect(okButton(target).disabled).toBe(true);
+  });
+
+  test("a path through a directory whose parent is being listed says so, and not that a backslash cannot be added", async () => {
+    tree.entries = [...tree.entries, { path: "deep", is_dir: true, mtime: null, size: 0 }];
+    tree.loadingDirs = { deep: true };
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "deep/x\\y/new.md");
+    await settle();
+
+    expect(statusText(target)).toBe("listing deep...");
     expect(okButton(target).disabled).toBe(true);
   });
 
