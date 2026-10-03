@@ -20,6 +20,8 @@
     TERMINAL_FONT_SIZE_MAX,
   } from "../../terminal/fontSize";
   import { normalizeHexColor, readStandardTerminalColors } from "../../state/paneColor";
+  import { ui } from "../../state/store.svelte";
+  import { windowModeSecretMaskingEnabled } from "../../state/windowMode";
   import type { CommitFn, CommitOptions, SaveStatus } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
@@ -42,7 +44,18 @@
   // These are the configured values, read by terminals at spawn:
   // already-open terminals keep the flag and suffixes they started
   // with.
-  const secretMaskingOn = $derived(prefs.terminal.secret_masking ?? false);
+  //
+  // The row reads what a new terminal of this window starts with: the
+  // stored choice, or with none stored the window's default, by the rule
+  // the terminal itself is seeded with. "Use default" is offered only
+  // while a choice is stored, and removes it with a write of `null`,
+  // which the config route takes as "clear"; a key left out of the
+  // terminal object keeps the stored choice. A cleared choice sits in the
+  // edit buffer as `null` until the server's view replaces it.
+  const secretMaskingStored = $derived(prefs.terminal.secret_masking ?? null);
+  const secretMaskingOn = $derived(
+    windowModeSecretMaskingEnabled(secretMaskingStored, { terminalControl: ui.terminalControl }),
+  );
   const secretMaskSuffixes = $derived(
     prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,
   );
@@ -51,6 +64,13 @@
     commit((p) => ({
       ...p,
       terminal: { ...p.terminal, secret_masking: on },
+    }));
+  }
+
+  function useDefaultSecretMasking(): void {
+    commit((p) => ({
+      ...p,
+      terminal: { ...p.terminal, secret_masking: null },
     }));
   }
 
@@ -275,13 +295,18 @@
 <SettingField
   label="Secret masking"
   pref="terminal.secret_masking"
-  hint="Masks secret-looking NAME=value values in xterm.js terminals only; under the ghostty backend (the Linux default) it does nothing. The buffer stays copyable. New terminals only. The terminal menu has an ephemeral per-tab toggle."
+  hint="Masks secret-looking NAME=value values in xterm.js terminals only; under the ghostty backend (the Linux default) it does nothing. The buffer stays copyable. New terminals only. With no choice stored it is on in a control terminal and off in every other window; Use default clears a stored choice. The terminal menu has an ephemeral per-tab toggle."
 >
   <PillToggle
     label="Mask secrets in new terminals"
     checked={secretMaskingOn}
     ontoggle={toggleSecretMasking}
   />
+  {#if secretMaskingStored !== null}
+    <button type="button" class="plain-button" onclick={useDefaultSecretMasking}>
+      Use default
+    </button>
+  {/if}
   <details class="suffixes">
     <summary>Suffixes ({secretMaskSuffixes.length})</summary>
     <ChipList names={secretMaskSuffixes} readonly ariaLabel="Secret mask suffixes" />
@@ -354,7 +379,7 @@
         oncommit={(hex) => (hex === null ? undefined : commitTerminalColor(row.key, hex))}
       />
     {/each}
-    <button type="button" class="reset-terminal-colours" onclick={resetTerminalColors}>
+    <button type="button" class="plain-button reset-terminal-colours" onclick={resetTerminalColors}>
       Reset to current standard
     </button>
   </div>
@@ -386,8 +411,7 @@
     padding: 12px 0 16px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
-  .reset-terminal-colours {
-    justify-self: start;
+  .plain-button {
     padding: 5px 10px;
     border: 1px solid var(--btn-border);
     border-radius: 4px;
@@ -396,7 +420,10 @@
     cursor: pointer;
     font: inherit;
   }
-  .reset-terminal-colours:hover {
+  .plain-button:hover {
     border-color: var(--btn-hover);
+  }
+  .reset-terminal-colours {
+    justify-self: start;
   }
 </style>
