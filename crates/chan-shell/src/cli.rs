@@ -78,7 +78,10 @@ Every chan-spawned terminal carries these. Read them; do not set them.
   CHAN_WORKSPACE_PATH   the served workspace root, or $HOME when there
                         is no workspace.
   CHAN_WORKSPACE_NAME   that path's basename.
-  CHAN_LIBRARY_ID       the spawning devserver's library, when set. A moved terminal rejects a same-root devserver of another named library; if either side has no id, the workspace-root rule still applies.
+  CHAN_LIBRARY_ID       the spawning devserver's library, when set. A
+                        moved terminal rejects a same-root devserver
+                        of another named library; if either side has
+                        no id, the workspace-root rule still applies.
 
 WORKSPACE ONLY:
 `graph`, `search`, `export`, every `session` action, `terminal team`

@@ -170,14 +170,18 @@ the source extension for the format: notes/doc.md -> notes/doc.pdf.
 
 The rendering happens in the window, not in the terminal running cs:
 the format-to-exporter registry lives in the frontend. The server
-sends the job to the caller's live window when $CHAN_WINDOW_ID is set; otherwise it uses the latest-joined live workspace window.
+sends the job to the caller's live window when $CHAN_WINDOW_ID is set;
+otherwise it uses the latest-joined live workspace window.
 
 What comes out depends on the source's frontmatter. A markdown file
 carrying `chan.kind: slides` exports as a deck: one slide per A4
 landscape page, split at every page break. Anything else exports as
 a document: A4 portrait, 0.65in margins, paginated at block
 boundaries and forced at every page break. Mermaid fences,
-Excalidraw embeds and document images render into the PDF the way the editor shows them. A deck lays each slide out at 1920 by 1080 (1440 by 1080 for 4:3) and scales an overflowing slide down whole to fit its page.
+Excalidraw embeds and document images render into the PDF the way
+the editor shows them. A deck lays each slide out at 1920 by 1080
+(1440 by 1080 for 4:3) and scales an overflowing slide down whole
+to fit its page.
 
 Authoring conventions the exporter honors:
   - a code fence tagged `mermaid` renders as a diagram; tag it
@@ -268,7 +272,12 @@ chosen window; that window does the reading, rendering and upload.
 The output path goes to stdout; the selected window and errors go to stderr.
 
 CAUTIONS:
-Blocks until the renderer replies. The server gives up after 90s without a completed page or after 15 minutes overall; either timeout exits 124 and names the renderer window. Inside the renderer each page has its own 30s render ceiling. Any failure exits nonzero with the renderer's own message. An existing output file is replaced without asking.
+Blocks until the renderer replies. The server gives up after 90s
+without a completed page or after 15 minutes overall; either timeout
+exits 124 and names the renderer window. Inside the renderer each page
+has its own 30s render ceiling. Any failure exits nonzero with the
+renderer's own message. An existing output file is replaced without
+asking.
 
 CAVEATS:
 Workspace windows only: a terminal-only session refuses with "cs
@@ -277,7 +286,9 @@ terminal.", pointing at the open window that would do the rendering.
 It also refuses when no window is connected -- there is no headless
 export. An unregistered --format value is rejected by the renderer,
 not by the server. With several windows open the latest-joined live
-one renders when the caller has no live $CHAN_WINDOW_ID, which may not be the one you are looking at. The selected window is named on stderr when export finishes.
+one renders when the caller has no live $CHAN_WINDOW_ID, which may
+not be the one you are looking at. The selected window is named on
+stderr when export finishes.
 
 SEE ALSO:
   cs open, cs search.
