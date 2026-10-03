@@ -1892,6 +1892,17 @@ fn mount_timed_out_refusal(root: &Path) -> Response {
     )
 }
 
+/// The sentence a launcher route answers when another chan process holds a
+/// workspace's writer lock.
+const WORKSPACE_OPEN_ELSEWHERE: &str =
+    "This workspace is open in another chan process. Quit it and try again.";
+
+/// The refusal of an add, an on or a delete of a workspace whose writer lock
+/// another process holds: 409 and one sentence, whichever of them asks.
+fn workspace_open_elsewhere() -> Response {
+    crate::error::err(StatusCode::CONFLICT, WORKSPACE_OPEN_ELSEWHERE.into())
+}
+
 /// `POST /api/library/workspaces` `{path}`: register the local folder in the host
 /// library and mount it (on), persisting its on-state. Returns the new row.
 /// Loopback-only.
@@ -1984,6 +1995,9 @@ async fn add_workspace(
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
         }
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
+            workspace_open_elsewhere()
+        }
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             workspace_still_releasing()
         }
@@ -2047,10 +2061,9 @@ async fn handle_workspace_on(
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
         }
-        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => crate::error::err(
-            StatusCode::CONFLICT,
-            "workspace is open in another Chan process".into(),
-        ),
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
+            workspace_open_elsewhere()
+        }
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             workspace_still_releasing()
         }
@@ -2099,7 +2112,8 @@ async fn handle_workspace_off(
 /// is required. 404 when no workspace maps to the id. A removal that meets an
 /// earlier call of this process on the root that has not let go answers as the
 /// add and the on do: 503, `Retry-After: 1` and the words `workspace is still
-/// releasing; retry`.
+/// releasing; retry`. One that meets another process's writer lock answers as
+/// they do too: 409 and the sentence of [`workspace_open_elsewhere`].
 ///
 /// A surface with a [`WorkspaceRemoval`] runs that in place of the host's
 /// removal, and answers what it returns the same way.
@@ -2130,6 +2144,9 @@ async fn handle_remove_workspace(
         }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
             live_terminals_refusal(active_terminals)
+        }
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
+            workspace_open_elsewhere()
         }
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             workspace_still_releasing()
