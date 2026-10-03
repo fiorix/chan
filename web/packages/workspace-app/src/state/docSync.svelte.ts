@@ -1370,6 +1370,9 @@ registerLiveSessionKind({
   fallbackSaved(tabId: string) {
     registry.get(tabId)?.healAfterFallbackSave();
   },
+  // A document session holds nothing of the buffer outside the editor,
+  // whose text the resolution's answer replaces.
+  tookDisk() {},
 });
 
 // Hybrid Nav settles by swapping the whole tree, which replaces the tab

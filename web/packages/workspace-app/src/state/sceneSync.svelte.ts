@@ -495,6 +495,20 @@ export class SceneSession {
     if (this.canvasAdopted) this.binding?.applyUpdate({ elements: [], appState: this.sceneAppState() });
   }
 
+  /// The tab took the disk's scene through a conflict's resolution, which
+  /// runs no load and leaves this session the tab's. A key picked on the
+  /// buffer that went is no change to the scene the tab holds, and the user
+  /// chose to drop it: the claim ends, as it does when a tab loads, and a
+  /// push still queued sends no appState. A push on the wire is the
+  /// authority's to answer.
+  tabTookDisk(): void {
+    this.appStateClaim = null;
+    if (this.queued !== null) {
+      this.queued.appState = null;
+      this.queued.claim = null;
+    }
+  }
+
   /// True when the session is degraded specifically by a CONNECTION-class
   /// outage that is still retrying; the save path suppresses the doomed
   /// classic PUT (same rationale and shape as DocSession.isOutagePaused).
@@ -1519,6 +1533,9 @@ registerLiveSessionKind({
   },
   fallbackSaved(tabId: string) {
     registry.get(tabId)?.healAfterFallbackSave();
+  },
+  tookDisk(tabId: string) {
+    registry.get(tabId)?.tabTookDisk();
   },
 });
 

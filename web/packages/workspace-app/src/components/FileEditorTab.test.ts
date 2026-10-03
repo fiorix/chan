@@ -1539,6 +1539,7 @@ describe("the not-saved line", () => {
     savePaused: () => false,
     unflushed: (tabId) => unflushedIds.has(tabId),
     fallbackSaved: () => {},
+    tookDisk: () => {},
   });
 
   beforeEach(() => {

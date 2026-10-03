@@ -5811,6 +5811,15 @@ function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
   for (const hook of docFallbackSavedHooks) hook(tab.id);
 }
 
+/// Adopt a resolution that took the disk's content, the answer to a
+/// "reload". The sessions are told before the answer is adopted: the adopt
+/// heals a degraded session, whose next snapshot must find nothing of the
+/// buffer that went.
+function adoptDiskResolution(tab: FileTab, response: FileResponse): void {
+  for (const hook of docTookDiskHooks) hook(tab.id);
+  adoptConflictResolution(tab, response);
+}
+
 /// Discard the in-memory buffer for the conflicted tab and re-fetch
 /// from disk. The user picked Reload: their unsaved edits go away,
 /// the disk version takes over.
@@ -5824,7 +5833,7 @@ export async function reloadConflictedTab(): Promise<void> {
   if (diskConflicted) {
     try {
       const response = await api.resolveSessionConflict(found.tab.path, "reload");
-      adoptConflictResolution(found.tab, response);
+      adoptDiskResolution(found.tab, response);
     } catch (e) {
       notify(`Reload failed: ${(e as Error).message}`);
     }
@@ -5932,6 +5941,12 @@ export type LiveSessionKind = {
   /// saves back, so there is one writer again instead of a session that
   /// stays degraded-classic for the rest of its life.
   fallbackSaved: (tabId: string) => void;
+  /// `tabId` took the disk's content through a conflict's resolution, which
+  /// runs no load: its buffer is the answer's, and the user discarded with
+  /// it whatever of this window's the session still held for the buffer
+  /// that went. A load tells a session the same by releasing it while the
+  /// tab loads.
+  tookDisk: (tabId: string) => void;
 };
 
 const docSaveDelegates: DocSaveDelegate[] = [];
@@ -5939,6 +5954,7 @@ const docReleaseHooks: ((tabId: string, immediate: boolean) => void)[] = [];
 const docSavePausedQueries: ((tabId: string) => boolean)[] = [];
 const docUnflushedQueries: ((tabId: string) => boolean)[] = [];
 const docFallbackSavedHooks: ((tabId: string) => void)[] = [];
+const docTookDiskHooks: ((tabId: string) => void)[] = [];
 
 /// Register a live-session kind, once per sync module at ITS module load.
 /// A kind answers for the tab ids it holds and defers on the rest, so the
@@ -5949,6 +5965,7 @@ export function registerLiveSessionKind(kind: LiveSessionKind): void {
   docSavePausedQueries.push(kind.savePaused);
   docUnflushedQueries.push(kind.unflushed);
   docFallbackSavedHooks.push(kind.fallbackSaved);
+  docTookDiskHooks.push(kind.tookDisk);
 }
 
 export function isDocUnflushed(tabId: string): boolean {
@@ -8354,7 +8371,7 @@ export async function forceReloadFromDisk(tabId: string): Promise<void> {
   if (isDocAttached(t) || t.diskConflicted) {
     try {
       const response = await api.resolveSessionConflict(t.path, "reload");
-      adoptConflictResolution(t, response);
+      adoptDiskResolution(t, response);
       return;
     } catch (e) {
       // 404 = no live session after all; the classic re-fetch below is

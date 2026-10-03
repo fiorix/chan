@@ -46,6 +46,7 @@ registerLiveSessionKind({
   savePaused: () => false,
   unflushed: (tabId) => unflushedIds.has(tabId),
   fallbackSaved: () => {},
+  tookDisk: () => {},
 });
 
 let nextTabId = 0;
