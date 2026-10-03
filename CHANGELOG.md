@@ -14,7 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The Files app's save route accepts a hash of what its writer loaded.** A save of a file outside a workspace (`PUT /api/fs/{path}`) can carry `expected_sha256`, the SHA-256 of the text its writer loaded, and is refused with the route's 409 conflict when the file's text hashes otherwise or the file is gone. The page does not send it yet.
 
-- **A node of a paged filesystem graph with more than one link carries `link_group`.** The nodes of one file share the value, so a client can join a hardlink pair that falls in two pages. The graph page does not join by it yet.
+- **A node of a paged filesystem graph with more than one link carries `link_group`.** The nodes of one file share the value, so a client can join a hardlink pair that falls in two pages.
 
 ### Changed
 
@@ -95,6 +95,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Reopening a draft drawing discarded with text that does not parse brings the text back as unsaved.** The reopened draft read clean and offered to save a file that does not parse; closing it now asks before the text is thrown away.
 
 - **The command deck offers no action on a window this host does not manage.** A window that reached the deck through a devserver's feed alone was offered Hide, Show and Close, which this host cannot carry out; it is no longer listed in the deck.
+
+- **The graph joins hardlinked paths that load in different pages.** In the filesystem graph and in the semantic graph's spine, two paths of one file that arrived in different pages of a load, or with different directory expansions, had no link between them. They are joined now: the hardlink chip counts them and its filter hides them.
 
 ### Security
 
