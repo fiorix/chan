@@ -5701,6 +5701,143 @@ mod tests {
         }
     }
 
+    fn commit_test_pdf(job: &Arc<crate::window_bus::ExportJob>) -> tempfile::TempDir {
+        let cfg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let mut permit = None;
+        workspace
+            .write_atomic_stream("a.pdf", chan_workspace::AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(b"%PDF-test")?;
+                permit = Some(job.begin_commit("a.pdf")?);
+                Ok(())
+            })
+            .unwrap();
+        permit.as_mut().unwrap().mark_committed();
+        drop(permit);
+        assert_eq!(
+            std::fs::read(root.path().join("a.pdf")).unwrap(),
+            b"%PDF-test"
+        );
+        root
+    }
+
+    #[tokio::test]
+    async fn committed_export_answers_success_after_a_failing_renderer_reply() {
+        let (events_tx, mut events) = broadcast::channel(4);
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (registry, _guard) = live_window("w-committed");
+        let task = tokio::spawn({
+            let bus = Arc::clone(&bus);
+            async move {
+                export_round_trip(
+                    "w-committed",
+                    "a.md".into(),
+                    "pdf".into(),
+                    "a.pdf".into(),
+                    &registry,
+                    &events_tx,
+                    &bus,
+                )
+                .await
+            }
+        });
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().unwrap();
+        let _root = commit_test_pdf(&bus.export_job(id).unwrap());
+        assert!(bus.complete(
+            id,
+            serde_json::json!({ "ok": false, "error": "upload retry refused" })
+        ));
+        assert!(matches!(
+            task.await.unwrap(),
+            ControlResponse::Export { out_path, window_id: Some(window_id) }
+                if out_path == "a.pdf" && window_id == "w-committed"
+        ));
+        assert!(bus.export_job(id).is_none(), "reply must retire the job");
+        assert!(
+            events.try_recv().is_err(),
+            "reply must not send another window command"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committed_export_answers_success_at_the_quiet_bound() {
+        let (events_tx, mut events) = broadcast::channel(4);
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (registry, _guard) = live_window("w-committed");
+        let task = tokio::spawn({
+            let bus = Arc::clone(&bus);
+            async move {
+                export_round_trip(
+                    "w-committed",
+                    "a.md".into(),
+                    "pdf".into(),
+                    "a.pdf".into(),
+                    &registry,
+                    &events_tx,
+                    &bus,
+                )
+                .await
+            }
+        });
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().unwrap();
+        let _root = commit_test_pdf(&bus.export_job(id).unwrap());
+        tokio::time::advance(crate::window_bus::EXPORT_QUIET_TIMEOUT).await;
+        assert!(matches!(
+            task.await.unwrap(),
+            ControlResponse::Export { out_path, window_id: Some(window_id) }
+                if out_path == "a.pdf" && window_id == "w-committed"
+        ));
+        assert!(bus.export_job(id).is_none(), "bound must retire the job");
+        assert_eq!(recv_command(&mut events, "export-stop").await["id"], id);
+        assert!(events.try_recv().is_err(), "bound sends one stop");
+    }
+
+    #[tokio::test]
+    async fn committed_export_answers_success_after_caller_eof() {
+        let (events_tx, mut events) = broadcast::channel(4);
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (registry, _guard) = live_window("w-committed");
+        let (eof_tx, eof_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn({
+            let bus = Arc::clone(&bus);
+            async move {
+                let mut eof = Box::pin(async move {
+                    let _ = eof_rx.await;
+                });
+                export_round_trip_until_client_eof(
+                    "w-committed",
+                    "a.md".into(),
+                    "pdf".into(),
+                    "a.pdf".into(),
+                    ExportRuntime {
+                        session_registry: &registry,
+                        events_tx: &events_tx,
+                        window_bus: &bus,
+                    },
+                    &mut eof,
+                )
+                .await
+            }
+        });
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().unwrap();
+        let _root = commit_test_pdf(&bus.export_job(id).unwrap());
+        eof_tx.send(()).unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            ControlResponse::Export { out_path, window_id: Some(window_id) }
+                if out_path == "a.pdf" && window_id == "w-committed"
+        ));
+        assert!(bus.export_job(id).is_none(), "EOF must retire the job");
+        assert_eq!(recv_command(&mut events, "export-stop").await["id"], id);
+        assert!(events.try_recv().is_err(), "EOF sends one stop");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn export_without_a_renderer_reply_has_a_typed_bound_naming_the_window() {
         let (events_tx, mut events_rx) = broadcast::channel(4);
