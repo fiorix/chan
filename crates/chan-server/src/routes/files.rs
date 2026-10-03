@@ -2417,11 +2417,13 @@ async fn workspace_upload_response(
                 &state.bulk_transfer,
                 Some(state.events_tx.clone()),
                 crate::routes::transfer::TransferTracking::from_headers(&headers),
-                workspace,
-                Arc::clone(&state.self_writes),
+                WorkspaceUploadWriter {
+                    workspace,
+                    self_writes: Arc::clone(&state.self_writes),
+                    export_job,
+                },
                 destination,
                 field,
-                export_job,
             )
             .await
         },
@@ -2630,17 +2632,22 @@ where
     }
 }
 
+/// State held by the workspace upload writer through the streamed body.
+struct WorkspaceUploadWriter {
+    workspace: Arc<chan_workspace::Workspace>,
+    self_writes: Arc<crate::self_writes::SelfWrites>,
+    export_job: Option<Arc<crate::window_bus::ExportJob>>,
+}
+
 /// The workspace lane on the shared upload job; the writer is
 /// `workspace_upload_stream_sync`.
 async fn stream_workspace_upload(
     bulk: &crate::bulk_transfer::BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
     tracking: Option<crate::routes::transfer::TransferTracking>,
-    workspace: Arc<chan_workspace::Workspace>,
-    self_writes: Arc<crate::self_writes::SelfWrites>,
+    writer: WorkspaceUploadWriter,
     destination: UploadDestination,
     field: Field<'_>,
-    export_job: Option<Arc<crate::window_bus::ExportJob>>,
 ) -> Response {
     stream_upload_tracked(
         bulk,
@@ -2649,12 +2656,12 @@ async fn stream_workspace_upload(
         field,
         move |cancel, mut rx| {
             workspace_upload_stream_sync(
-                &workspace,
-                &self_writes,
+                &writer.workspace,
+                &writer.self_writes,
                 &destination,
                 &mut rx,
                 cancel,
-                export_job.as_deref(),
+                writer.export_job.as_deref(),
             )
         },
         err_from,
@@ -4939,11 +4946,13 @@ mod write_tests {
                     &bulk,
                     None,
                     None,
-                    workspace,
-                    Arc::new(crate::self_writes::SelfWrites::new()),
+                    WorkspaceUploadWriter {
+                        workspace,
+                        self_writes: Arc::new(crate::self_writes::SelfWrites::new()),
+                        export_job: None,
+                    },
                     destination,
                     field,
-                    None,
                 ),
             )
             .await
