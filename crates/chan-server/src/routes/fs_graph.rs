@@ -2549,4 +2549,203 @@ mod tests {
         assert!(resp.cursor.is_none());
         assert!(resp.nodes.iter().any(|n| n.id == "dir0/file0.md"));
     }
+
+    // ---- Link groups ----------------------------------------------------
+
+    /// A workspace whose root sorts a hardlinked pair around forty single
+    /// files, so a walk of the smallest batch delivers the pair two batches
+    /// apart, and whose `pairs/` holds two more pairs that one batch
+    /// delivers whole.
+    #[cfg(unix)]
+    fn seed_linked_workspace() -> (TempDir, TempDir, std::sync::Arc<chan_workspace::Workspace>) {
+        let cfg = TempDir::new().unwrap();
+        let workspace_root = TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(workspace_root.path()).unwrap();
+        let ws = lib.open_workspace(workspace_root.path()).unwrap();
+        ws.write_text("a-first.md", "# split\n").unwrap();
+        for i in 0..40 {
+            ws.write_text(&format!("f{i:02}.md"), "# single\n").unwrap();
+        }
+        ws.write_text("pairs/one.md", "# one\n").unwrap();
+        ws.write_text("pairs/two.md", "# two\n").unwrap();
+        let root = workspace_root.path();
+        for (path, link) in [
+            ("a-first.md", "z-twin.md"),
+            ("pairs/one.md", "pairs/one-twin.md"),
+            ("pairs/two.md", "pairs/two-twin.md"),
+        ] {
+            fs::hard_link(root.join(path), root.join(link)).unwrap();
+        }
+        (cfg, workspace_root, ws)
+    }
+
+    /// Every batch of a paged directory walk, as the JSON a client reads.
+    #[cfg(unix)]
+    fn paged_json(
+        ws: &chan_workspace::Workspace,
+        path: &str,
+        depth: usize,
+        batch: usize,
+    ) -> Vec<serde_json::Value> {
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let resp = build_fs_graph_paged(
+                ws,
+                &FsGraphParams {
+                    scope: FsGraphScope::Directory,
+                    path: path.to_string(),
+                    depth,
+                    cursor: cursor.clone(),
+                    limit: Some(batch),
+                },
+            )
+            .expect("paged batch");
+            pages.push(serde_json::to_value(&resp).unwrap());
+            if resp.done {
+                return pages;
+            }
+            cursor = resp.cursor;
+            assert!(pages.len() < 10_000, "paged walk failed to terminate");
+        }
+    }
+
+    /// The batch that delivers `id`, and the node as delivered.
+    #[cfg(unix)]
+    fn delivered<'a>(pages: &'a [serde_json::Value], id: &str) -> (usize, &'a serde_json::Value) {
+        pages
+            .iter()
+            .enumerate()
+            .find_map(|(page, body)| {
+                body["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|node| node["id"] == id)
+                    .map(|node| (page, node))
+            })
+            .unwrap_or_else(|| panic!("no batch delivered {id}"))
+    }
+
+    #[cfg(unix)]
+    fn has_hardlink_edge(pages: &[serde_json::Value], source: &str, target: &str) -> bool {
+        pages.iter().any(|body| {
+            body["edges"].as_array().unwrap().iter().any(|edge| {
+                edge["kind"] == "hardlink" && edge["source"] == source && edge["target"] == target
+            })
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlink_pair_split_across_batches_carries_one_link_group() {
+        let (_cfg, _root, ws) = seed_linked_workspace();
+        let pages = paged_json(&ws, "", 1, BATCH_MIN_NODES);
+        let (first_page, first) = delivered(&pages, "a-first.md");
+        let (twin_page, twin) = delivered(&pages, "z-twin.md");
+        assert_ne!(
+            first_page, twin_page,
+            "the batch size did not split the pair"
+        );
+        assert!(
+            !has_hardlink_edge(&pages, "a-first.md", "z-twin.md"),
+            "a batch joined the split pair by an edge"
+        );
+        assert_eq!(first["link_count"], 2);
+        assert_eq!(twin["link_count"], 2);
+
+        let group = first["link_group"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a node with two links carries no link group: {first}"));
+        assert!(
+            group.len() == 16
+                && group
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "a link group is not 16 lowercase hex digits: {group}"
+        );
+        assert_eq!(
+            twin["link_group"], first["link_group"],
+            "the two paths of one file carry different link groups"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_groups_tell_files_apart_and_single_links_carry_none() {
+        let (_cfg, _root, ws) = seed_linked_workspace();
+        let pages = paged_json(&ws, "pairs", 1, BATCH_MIN_NODES);
+        let group = |id: &str| {
+            let (_, node) = delivered(&pages, id);
+            node["link_group"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a node with two links carries no link group: {node}"))
+                .to_string()
+        };
+        assert_eq!(group("pairs/one.md"), group("pairs/one-twin.md"));
+        assert_eq!(group("pairs/two.md"), group("pairs/two-twin.md"));
+        assert_ne!(
+            group("pairs/one.md"),
+            group("pairs/two.md"),
+            "two files carry one link group"
+        );
+        // A pair one batch delivers whole keeps its edge beside its group.
+        assert!(has_hardlink_edge(
+            &pages,
+            "pairs/one-twin.md",
+            "pairs/one.md"
+        ));
+        assert!(has_hardlink_edge(
+            &pages,
+            "pairs/two-twin.md",
+            "pairs/two.md"
+        ));
+
+        let pages = paged_json(&ws, "", 2, BATCH_MIN_NODES);
+        for id in ["f00.md", "pairs", ""] {
+            let (_, node) = delivered(&pages, id);
+            assert!(
+                node.get("link_group").is_none(),
+                "a node with one link carries a link group: {node}"
+            );
+        }
+    }
+
+    /// The group rides a paged directory walk alone: the whole-scope walk
+    /// and a file-scope answer join every pair by an edge and carry none.
+    #[cfg(unix)]
+    #[test]
+    fn the_whole_scope_and_file_scope_walks_carry_no_link_group() {
+        let (_cfg, _root, ws) = seed_linked_workspace();
+        let whole = build_fs_graph(&ws, FsGraphScope::Directory, "", 2).unwrap();
+        assert!(has_edge(&whole, "a-first.md", "z-twin.md", "hardlink"));
+        let file = build_fs_graph_paged(
+            &ws,
+            &FsGraphParams {
+                scope: FsGraphScope::File,
+                path: "a-first.md".to_string(),
+                depth: 0,
+                cursor: None,
+                limit: Some(BATCH_MIN_NODES),
+            },
+        )
+        .unwrap();
+        for (walk, resp) in [("whole-scope", whole), ("file-scope", file)] {
+            let body = serde_json::to_value(&resp).unwrap();
+            let linked = body["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["id"] == "a-first.md")
+                .unwrap_or_else(|| panic!("the {walk} walk delivered no a-first.md"));
+            assert_eq!(linked["link_count"], 2);
+            for node in body["nodes"].as_array().unwrap() {
+                assert!(
+                    node.get("link_group").is_none(),
+                    "the {walk} walk carries a link group: {node}"
+                );
+            }
+        }
+    }
 }
