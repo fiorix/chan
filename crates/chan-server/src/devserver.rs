@@ -5286,20 +5286,41 @@ mod tests {
                     path = "/api/devserver/workspaces/missing/on".into();
                     body = serde_json::json!({"on":true});
                 }
+                // A workspace whose writer lock another process holds: the
+                // add, the forget and the on answer it alike.
                 #[cfg(unix)]
-                "failed_forget" | "failed_on" => {
+                "locked_open" | "locked_forget" | "locked_on" => {
                     state.host.library().register_workspace(&root).unwrap();
                     foreign = Some(hold_foreign_lock(state.host.library(), &root));
-                    if case == "failed_forget" {
+                    if case == "locked_forget" {
                         method = "DELETE";
                         path = format!("/api/devserver/workspaces{prefix}");
-                        sentence = "chan-workspace: workspace is locked by another process".into();
-                    } else {
+                    } else if case == "locked_on" {
                         path = format!("/api/devserver/workspaces{prefix}/on");
                         body = serde_json::json!({"on":true});
-                        sentence = "chan-workspace: workspace is locked by another process".into();
                     }
+                    status = StatusCode::CONFLICT;
+                    sentence =
+                        "This workspace is open in another chan process. Quit it and try again."
+                            .into();
+                }
+                // An on that the host fails another way keeps its status and
+                // the error's own sentence: the workspace's root is gone.
+                "failed_on" => {
+                    let stored = state
+                        .host
+                        .library()
+                        .register_workspace(&root)
+                        .unwrap()
+                        .root_path;
+                    std::fs::remove_dir(&root).unwrap();
+                    path = format!("/api/devserver/workspaces{prefix}/on");
+                    body = serde_json::json!({"on":true});
                     status = StatusCode::INTERNAL_SERVER_ERROR;
+                    sentence = format!(
+                        "chan-workspace: workspace root does not exist: {}",
+                        stored.display()
+                    );
                 }
                 _ => panic!("unknown case"),
             }
@@ -5340,11 +5361,14 @@ mod tests {
         management_case!(management_stopping_open, "stopping_open");
         management_case!(management_missing_forget, "missing_forget");
         #[cfg(unix)]
-        management_case!(management_failed_forget, "failed_forget");
+        management_case!(management_locked_open, "locked_open");
+        #[cfg(unix)]
+        management_case!(management_locked_forget, "locked_forget");
         management_case!(management_invalid_suffix, "invalid_suffix");
         management_case!(management_missing_on, "missing_on");
         management_case!(management_stopping_on, "stopping_on");
         #[cfg(unix)]
+        management_case!(management_locked_on, "locked_on");
         management_case!(management_failed_on, "failed_on");
 
         /// Sends one request to the management routes and requires the

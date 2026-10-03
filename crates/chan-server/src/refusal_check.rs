@@ -770,6 +770,27 @@ mod tests {
             ),
             (
                 "POST",
+                "/api/devserver/workspaces",
+                409,
+                "This workspace is open in another chan process. Quit it and try again.",
+                None,
+            ),
+            (
+                "DELETE",
+                "/api/devserver/workspaces/notes",
+                409,
+                "This workspace is open in another chan process. Quit it and try again.",
+                None,
+            ),
+            (
+                "POST",
+                "/api/devserver/workspaces/notes/on",
+                409,
+                "This workspace is open in another chan process. Quit it and try again.",
+                None,
+            ),
+            (
+                "POST",
                 "/api/devserver/rotate-token",
                 401,
                 "missing or invalid devserver bearer token",
