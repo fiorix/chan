@@ -847,26 +847,37 @@ impl Drop for OpenAnswer {
             workspace,
             _permit: self.permit.take(),
         };
-        // A runtime that is shutting down starts no blocking work and drops
-        // the closure here, which releases the workspace on this thread.
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn_blocking(move || unreceived.release());
-            }
-            Err(_) => unreceived.release(),
+        // Outside a runtime there is no pool to hand the release to, and
+        // this thread makes it.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        // A runtime that is shutting down drops the closure unrun, here
+        // when it refuses the task and on a thread of its pool when it
+        // drains its queue, and that drop makes the same release. The pool
+        // panics when the OS gives it no thread and it has none, with the
+        // closure already queued for the first thread it gets. A drop does
+        // not unwind, so that is logged and nothing else.
+        let handed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            runtime.spawn_blocking(move || drop(unreceived));
+        }));
+        if handed.is_err() {
+            tracing::warn!("no blocking thread could start to release an unreceived open");
         }
     }
 }
 
-// An opened workspace nobody received. Fields drop in order: the workspace
-// releases its flock before the permit admits the next open.
+// An opened workspace nobody received. Its drop stops and joins the
+// workspace's startup recovery, whose worker holds the workspace while it
+// runs. The fields then drop in order, so the workspace releases its flock
+// before the permit admits the next open, on whichever thread drops this.
 struct UnreceivedOpen {
     workspace: Arc<Workspace>,
     _permit: Option<OwnedMutexGuard<()>>,
 }
 
-impl UnreceivedOpen {
-    fn release(self) {
+impl Drop for UnreceivedOpen {
+    fn drop(&mut self) {
         self.workspace.stop_open_recovery();
     }
 }
