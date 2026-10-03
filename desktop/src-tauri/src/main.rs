@@ -6476,12 +6476,32 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
     }
     // A fresh browser-affinity record for the same workspace: the browser tab
     // gets its own window_id and the desktop never opens a native twin for it.
-    let minted =
-        embedded.mint_browser_window(chan_server::WindowKind::Workspace, record.workspace_path)?;
+    let minted = mint_workspace_window_copy(embedded, &record, chan_server::WindowOrigin::Browser)?;
     let url = serve::browser_window_url(app, embedded.addr(), &minted)?;
     app.opener()
         .open_url(url.to_string(), None::<&str>)
         .map_err(|e| format!("opening the browser window URL: {e}"))
+}
+
+/// Mint a copy of the local workspace window `source`: a record of its own
+/// for the same workspace, stamped `origin`. New Window copies with a native
+/// origin, which the watcher opens as a window, and Open in Browser with a
+/// browser origin, which it gives no native twin. The copy stores the path
+/// `source` stores.
+fn mint_workspace_window_copy(
+    embedded: &embedded::EmbeddedServer,
+    source: &chan_server::WindowRecord,
+    origin: chan_server::WindowOrigin,
+) -> Result<chan_server::WindowRecord, String> {
+    let workspace_path = source.workspace_path.clone();
+    match origin {
+        chan_server::WindowOrigin::Native => {
+            embedded.mint_window(chan_server::WindowKind::Workspace, workspace_path)
+        }
+        chan_server::WindowOrigin::Browser => {
+            embedded.mint_browser_window(chan_server::WindowKind::Workspace, workspace_path)
+        }
+    }
 }
 
 /// Open a new window of the workspace that owns the currently
@@ -6532,11 +6552,14 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
                 spawn_terminal_window(app);
                 Ok(())
             }
-            Some(r) => state
-                .embedded()
-                .ok_or_else(|| "embedded local server is unavailable".to_string())?
-                .mint_window(chan_server::WindowKind::Workspace, r.workspace_path)
-                .map(|_| ()),
+            Some(r) => mint_workspace_window_copy(
+                state
+                    .embedded()
+                    .ok_or_else(|| "embedded local server is unavailable".to_string())?,
+                &r,
+                chan_server::WindowOrigin::Native,
+            )
+            .map(|_| ()),
             None => show_window(app, "main"),
         };
     }
