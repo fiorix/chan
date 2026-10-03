@@ -316,6 +316,7 @@ describe("createDemoFetch router", () => {
     const f = demoFetch(store());
     expect((await f("/api/nope")).status).toBe(404);
   });
+
 });
 
 describe("parseMarkdown", () => {
@@ -467,6 +468,16 @@ describe("graph endpoints", () => {
     const ok = (await (await f("/api/resolve-link?target=README")).json()) as { path: string };
     expect(ok.path).toBe("README.md");
     expect((await f("/api/resolve-link?target=nope-note")).status).toBe(404);
+  });
+
+  test("resolve-link answers a target nothing matches with the route's code", async () => {
+    const st = new MockWorkspaceStore(fixture());
+    const f = createDemoFetch(st, new DemoGraph(st), new MockReports([]));
+    const refusal = await f("/api/resolve-link?target=nope-note");
+    expect({ status: refusal.status, body: await refusal.json() }).toEqual({
+      status: 404,
+      body: { error: "link target not found", code: "link_not_found" },
+    });
   });
 });
 
