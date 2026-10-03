@@ -163,12 +163,14 @@ fn first_entry_no_directory_has<'a>(
 /// and a name whose directory has gone since must not refuse the next one.
 /// Where a `\` separates components (`backslash_separates`) no directory
 /// can have such a name, and the entry is a path. Elsewhere it is a name,
-/// taken when a directory of the tree has it by basename at any depth; the
-/// tree is walked, on the caller's blocking thread, only then.
+/// taken when one of `directories` is it: the names of the tree's
+/// directories at any depth, from a walk that is advanced, on the caller's
+/// blocking thread, only then.
 fn refused_backslash_entry(
     workspace: &chan_workspace::Workspace,
     entries: &[String],
     backslash_separates: bool,
+    directories: impl Iterator<Item = impl AsRef<str>>,
 ) -> Result<Option<BackslashRefusal>, chan_workspace::ChanError> {
     let stored = workspace.excluded_dirs()?;
     let asked: Vec<&String> = entries
@@ -186,10 +188,8 @@ fn refused_backslash_entry(
     if backslash_separates {
         return Ok(Some(BackslashRefusal::Path((*first).clone())));
     }
-    Ok(
-        first_entry_no_directory_has(&asked, directory_names(workspace.root()))
-            .map(|entry| BackslashRefusal::NoDirectory(entry.clone())),
-    )
+    Ok(first_entry_no_directory_has(&asked, directories)
+        .map(|entry| BackslashRefusal::NoDirectory(entry.clone())))
 }
 
 pub async fn api_excluded_dirs_put(
@@ -205,7 +205,13 @@ pub async fn api_excluded_dirs_put(
         Err(e) => return err_state(&e),
     };
     blocking_response("excluded directories", move || {
-        match refused_backslash_entry(&workspace, &body.workspace, BACKSLASH_SEPARATES) {
+        let directories = directory_names(workspace.root());
+        match refused_backslash_entry(
+            &workspace,
+            &body.workspace,
+            BACKSLASH_SEPARATES,
+            directories,
+        ) {
             Ok(None) => {}
             Ok(Some(refusal)) => return err(StatusCode::BAD_REQUEST, refusal.message()),
             Err(e) => return err_from(&e),
@@ -477,7 +483,12 @@ mod tests {
         #[cfg(unix)]
         std::fs::create_dir(app.root.path().join("src\\gen")).unwrap();
         let entries = vec!["vendor".to_string(), "Src\\Gen".to_string()];
-        let refusal = refused_backslash_entry(&workspace, &entries, true).unwrap();
+        let unlooked = || {
+            std::iter::from_fn(|| -> Option<String> {
+                panic!("the tree was looked at where a backslash separates")
+            })
+        };
+        let refusal = refused_backslash_entry(&workspace, &entries, true, unlooked()).unwrap();
         assert_eq!(
             refusal,
             Some(BackslashRefusal::Path("Src\\Gen".to_string())),
@@ -496,7 +507,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(
-            refused_backslash_entry(&workspace, &entries, true).unwrap(),
+            refused_backslash_entry(&workspace, &entries, true, unlooked()).unwrap(),
             None,
             "a stored name was refused where a backslash separates"
         );
