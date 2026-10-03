@@ -40,14 +40,16 @@ pub struct EnvControlSocket {
 }
 
 impl EnvControlSocket {
-    fn new(path: String, workspace_path: Option<String>) -> Self {
+    fn new(path: String, workspace_path: Option<String>, library_id: Option<String>) -> Self {
         Self {
             path: PathBuf::from(path),
             workspace_path: workspace_path
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
-            library_id: None,
+            library_id: library_id
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             #[cfg(all(test, unix))]
             announced: std::sync::Mutex::new(Vec::new()),
         }
@@ -194,7 +196,7 @@ pub(crate) fn open_env_from(
     window_id: Option<String>,
     control_socket: Option<String>,
     workspace_path: Option<String>,
-    _library_id: Option<String>,
+    library_id: Option<String>,
 ) -> Result<OpenEnv> {
     let window_id = window_id
         .map(|s| s.trim().to_string())
@@ -210,23 +212,19 @@ pub(crate) fn open_env_from(
         })?;
     Ok(OpenEnv {
         window_id,
-        control_socket: EnvControlSocket::new(control_socket, workspace_path),
+        control_socket: EnvControlSocket::new(control_socket, workspace_path, library_id),
     })
 }
 
 /// Resolve the full chan-terminal environment from the process env, for
 /// category-1 actions that target a specific window.
 pub(crate) fn open_env() -> Result<OpenEnv> {
-    let mut env = open_env_from(
+    open_env_from(
         std::env::var("CHAN_WINDOW_ID").ok(),
         std::env::var("CHAN_CONTROL_SOCKET").ok(),
         std::env::var("CHAN_WORKSPACE_PATH").ok(),
-        None,
-    )?;
-    env.control_socket.library_id = std::env::var("CHAN_LIBRARY_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
-    Ok(env)
+        std::env::var("CHAN_LIBRARY_ID").ok(),
+    )
 }
 
 /// Resolve just the control socket, for category-2 actions (`cs terminal
@@ -240,11 +238,11 @@ pub(crate) fn control_socket_env() -> Result<EnvControlSocket> {
         .ok_or_else(|| {
             anyhow::anyhow!("not running inside a chan terminal; this needs $CHAN_CONTROL_SOCKET")
         })?;
-    let mut env = EnvControlSocket::new(socket, std::env::var("CHAN_WORKSPACE_PATH").ok());
-    env.library_id = std::env::var("CHAN_LIBRARY_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
-    Ok(env)
+    Ok(EnvControlSocket::new(
+        socket,
+        std::env::var("CHAN_WORKSPACE_PATH").ok(),
+        std::env::var("CHAN_LIBRARY_ID").ok(),
+    ))
 }
 
 /// Make a path absolute against the shell's current working directory.
@@ -728,7 +726,8 @@ mod tests {
 
     #[test]
     fn open_env_requires_window_id_and_control_socket() {
-        let err = open_env_from(None, Some("/tmp/chan-control.sock".into()), None, None).unwrap_err();
+        let err =
+            open_env_from(None, Some("/tmp/chan-control.sock".into()), None, None).unwrap_err();
         assert!(err.to_string().contains("CHAN_WINDOW_ID"));
 
         let err = open_env_from(Some("win".into()), None, None, None).unwrap_err();
@@ -1318,6 +1317,7 @@ mod tests {
         EnvControlSocket::new(
             path.display().to_string(),
             workspace.map(|path| path.display().to_string()),
+            None,
         )
     }
 
