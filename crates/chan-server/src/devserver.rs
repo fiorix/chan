@@ -5366,9 +5366,54 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            #[cfg(unix)]
-            drop(foreign);
             assert_refusal(response, status, &sentence).await;
+            // A refused add or turn-on keeps what was asked and why it
+            // failed: the record stays desired on and failed with the
+            // error's own sentence, and the list shows its row off and in
+            // error, with that sentence and no token.
+            #[cfg(unix)]
+            {
+                if matches!(case, "locked_open" | "locked_on") {
+                    let reason = "chan-workspace: workspace is locked by another process";
+                    let record = state
+                        .workspaces
+                        .lock()
+                        .unwrap()
+                        .get(&prefix)
+                        .cloned()
+                        .expect("the refused request left no record");
+                    assert_eq!(
+                        record.desired,
+                        DesiredMount::On,
+                        "the refused request did not stay desired on"
+                    );
+                    assert_eq!(
+                        record.phase,
+                        MountPhase::Failed(reason.to_string()),
+                        "the refused request's record does not say why it failed"
+                    );
+                    let entries = state.workspace_entries();
+                    let row = entries
+                        .iter()
+                        .find(|entry| entry.prefix == prefix)
+                        .expect("the refused request left no listed row");
+                    assert!(
+                        !row.on && row.token.is_empty(),
+                        "the refused request's row reads on: {row:?}"
+                    );
+                    assert_eq!(
+                        row.status,
+                        WorkspaceStatus::Error,
+                        "the refused request's row is not in error: {row:?}"
+                    );
+                    assert_eq!(
+                        row.error.as_deref(),
+                        Some(reason),
+                        "the refused request's row does not say why it failed: {row:?}"
+                    );
+                }
+                drop(foreign);
+            }
         }
         macro_rules! management_case {
             ($name:ident, $case:literal) => {
