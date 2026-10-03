@@ -567,15 +567,16 @@ impl Workspace {
         self.workspace_search_cancelable(request, None)
     }
 
-    /// [`Workspace::workspace_search`] that stops once `cancel` is set: at the
-    /// next entry of its tree walk, the next file of a report rescan and the
-    /// next seed of its traversal, returning [`crate::ChanError::Cancelled`].
-    /// Each seed runs all its hops and closure work without another check.
-    /// Between the catalog walk and the first seed, only a report rescan
-    /// checks the flag: graph queries, report load or snapshot, content
-    /// retrieval, entity matching and seed resolution run to completion.
-    /// The final induced-relationship query and the write serialization lock
-    /// wait before a report rescan also run without a check.
+    /// [`Workspace::workspace_search`] that stops once `cancel` is set,
+    /// returning [`crate::ChanError::Cancelled`]. It reads the flag at each
+    /// entry of its tree walk and each file of a report rescan; after each
+    /// of the catalog's graph queries; before content retrieval, entity
+    /// matching and seed resolution; before each seed, at each hop of a
+    /// seed and before a seed's closure work; and before the final
+    /// induced-relationship query. One graph or search query, with the pass
+    /// over the rows it returns, runs to its end, as do the report's load or
+    /// snapshot and the write serialization lock wait before a report
+    /// rescan.
     pub fn workspace_search_cancelable(
         &self,
         request: &WorkspaceSearchRequest,
@@ -655,16 +656,19 @@ impl Workspace {
             }
         }
 
+        check_cancel(cancel)?;
         if normalized.domains.contains(&WorkspaceSearchDomain::Content)
             && normalized.query.is_some()
         {
             run_content_search(self, &normalized, &mut result, &mut warnings, &mut errors)?;
         }
+        check_cancel(cancel)?;
         let (entity_matches, observed) = match_entities(&catalog, &normalized);
         result.truncation.entity_matches_observed = observed as u32;
         result.truncation.entity_matches = observed > normalized.limit as usize;
         result.entity_matches = entity_matches;
 
+        check_cancel(cancel)?;
         let seeds = resolve_seeds(
             &catalog,
             &normalized,
@@ -680,13 +684,12 @@ impl Workspace {
             &mut warnings,
         );
         for seed in seeds {
-            if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
-                return Err(crate::ChanError::Cancelled);
-            }
+            check_cancel(cancel)?;
             #[cfg(test)]
             seed_turn_probe(self, &seed, cancel);
-            traverse_seed(&mut traversal, &normalized, seed)?;
+            traverse_seed(&mut traversal, &normalized, seed, cancel)?;
         }
+        check_cancel(cancel)?;
         traversal.retain_induced_relationships(&normalized.relationship_kinds, normalized.depth)?;
         let (nodes, relationships, profiles, traversal_truncation, spine_forced) =
             traversal.finish();
@@ -958,6 +961,14 @@ fn cancel_before_report(workspace: &Workspace, cancel: Option<&AtomicBool>) {
     }
 }
 
+/// Stops a search whose cancel flag is set.
+fn check_cancel(cancel: Option<&AtomicBool>) -> Result<()> {
+    if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(crate::ChanError::Cancelled);
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct Catalog {
     files: BTreeSet<String>,
@@ -984,6 +995,7 @@ impl Catalog {
         }
         let graph = workspace.graph()?;
         let contacts = graph.contacts()?;
+        check_cancel(cancel)?;
         let contact_by_path = contacts
             .iter()
             .cloned()
@@ -994,11 +1006,13 @@ impl Catalog {
             .into_iter()
             .map(|tag| (tag.name, tag.count as u64))
             .collect();
+        check_cancel(cancel)?;
         let mentions = graph
             .mentions()?
             .into_iter()
             .map(|mention| (mention.name, mention.count as u64))
             .collect();
+        check_cancel(cancel)?;
         let reports_enabled = workspace.reports_enabled()?;
         #[cfg(test)]
         cancel_before_report(workspace, cancel);
@@ -2005,7 +2019,7 @@ impl<'a> TraversalBuilder<'a> {
 
 /// Seeds a search took a turn for, per armed workspace root. The probe also
 /// sets the search's cancel flag at every turn it records, so a test can tell
-/// a traversal that stops at its next seed from one that runs on.
+/// a traversal that stops at its next read of the flag from one that runs on.
 #[cfg(test)]
 static SEED_TURNS: std::sync::OnceLock<
     std::sync::Mutex<BTreeMap<std::path::PathBuf, Vec<String>>>,
@@ -2044,6 +2058,7 @@ fn traverse_seed(
     builder: &mut TraversalBuilder<'_>,
     request: &NormalizedRequest,
     seed: ResolvedSeed,
+    cancel: Option<&AtomicBool>,
 ) -> Result<()> {
     builder.set_contains_selected(
         request
@@ -2076,7 +2091,7 @@ fn traverse_seed(
         return Ok(());
     }
     if seed.profile_kind == WorkspaceSelectorKind::Directory {
-        return traverse_directory(builder, request, &seed, direction, depth);
+        return traverse_directory(builder, request, &seed, direction, depth, cancel);
     }
 
     let mut visited = BTreeSet::from([seed.node_id.clone()]);
@@ -2085,6 +2100,7 @@ fn traverse_seed(
         if frontier.is_empty() {
             break;
         }
+        check_cancel(cancel)?;
         #[cfg(test)]
         hop_probe(builder.workspace, hop);
         let frontier_set: BTreeSet<&str> = frontier.iter().map(String::as_str).collect();
@@ -2123,6 +2139,7 @@ fn traverse_seed(
             })
             .cloned()
             .collect();
+        check_cancel(cancel)?;
         builder.closure_for_files(&files, &request.relationship_kinds, depth)?;
     }
     Ok(())
@@ -2134,6 +2151,7 @@ fn traverse_directory(
     seed: &ResolvedSeed,
     direction: WorkspaceTraversalDirection,
     depth: u8,
+    cancel: Option<&AtomicBool>,
 ) -> Result<()> {
     if direction == WorkspaceTraversalDirection::In {
         return Ok(());
@@ -2161,6 +2179,7 @@ fn traverse_directory(
             surfaced_files.push(id);
         }
     }
+    check_cancel(cancel)?;
     builder.closure_for_files(&surfaced_files, &request.relationship_kinds, depth)?;
     Ok(())
 }
