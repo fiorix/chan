@@ -2371,7 +2371,10 @@ pub async fn api_upload_file(
             return err(StatusCode::BAD_REQUEST, "invalid export job id".into());
         };
         let Some(job) = state.window_bus.export_job(id) else {
-            return err(StatusCode::NOT_FOUND, "export job is no longer active".into());
+            return err(
+                StatusCode::NOT_FOUND,
+                "export job is no longer active".into(),
+            );
         };
         Some(job)
     } else {
@@ -2379,7 +2382,10 @@ pub async fn api_upload_file(
     };
     if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
         if export_job.is_some() {
-            return err(StatusCode::BAD_REQUEST, "export uploads target the workspace".into());
+            return err(
+                StatusCode::BAD_REQUEST,
+                "export uploads target the workspace".into(),
+            );
         }
         return crate::routes::transfer::filesystem_upload_response(state, headers, multipart)
             .await;
@@ -2642,7 +2648,14 @@ async fn stream_workspace_upload(
         tracking,
         field,
         move |cancel, mut rx| {
-            workspace_upload_stream_sync(&workspace, &self_writes, &destination, &mut rx, cancel, export_job.as_deref())
+            workspace_upload_stream_sync(
+                &workspace,
+                &self_writes,
+                &destination,
+                &mut rx,
+                cancel,
+                export_job.as_deref(),
+            )
         },
         err_from,
     )
@@ -2689,7 +2702,10 @@ fn workspace_upload_stream_sync(
             if let Some(permit) = permit.as_mut() {
                 permit.mark_committed();
             }
-            Ok(UploadFileResponse { path: rel, size: stat.size })
+            Ok(UploadFileResponse {
+                path: rel,
+                size: stat.size,
+            })
         }
         Err(error) => {
             if let Some(reservation) = reservation {
@@ -3798,7 +3814,10 @@ mod write_tests {
         )
         .await;
         assert_eq!(accepted.status(), StatusCode::OK);
-        assert_eq!(std::fs::read(root.path().join("active.pdf")).unwrap(), b"%PDF-current");
+        assert_eq!(
+            std::fs::read(root.path().join("active.pdf")).unwrap(),
+            b"%PDF-current"
+        );
         assert!(state.window_bus.retire_export(&id));
         let late = super::api_upload_file(
             State(state),

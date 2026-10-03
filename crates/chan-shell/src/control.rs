@@ -221,7 +221,9 @@ pub(crate) fn open_env() -> Result<OpenEnv> {
         std::env::var("CHAN_CONTROL_SOCKET").ok(),
         std::env::var("CHAN_WORKSPACE_PATH").ok(),
     )?;
-    env.control_socket.library_id = std::env::var("CHAN_LIBRARY_ID").ok().filter(|s| !s.is_empty());
+    env.control_socket.library_id = std::env::var("CHAN_LIBRARY_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     Ok(env)
 }
 
@@ -236,11 +238,10 @@ pub(crate) fn control_socket_env() -> Result<EnvControlSocket> {
         .ok_or_else(|| {
             anyhow::anyhow!("not running inside a chan terminal; this needs $CHAN_CONTROL_SOCKET")
         })?;
-    let mut env = EnvControlSocket::new(
-        socket,
-        std::env::var("CHAN_WORKSPACE_PATH").ok(),
-    );
-    env.library_id = std::env::var("CHAN_LIBRARY_ID").ok().filter(|s| !s.is_empty());
+    let mut env = EnvControlSocket::new(socket, std::env::var("CHAN_WORKSPACE_PATH").ok());
+    env.library_id = std::env::var("CHAN_LIBRARY_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     Ok(env)
 }
 
@@ -586,9 +587,15 @@ pub async fn send_control_request_streaming<'a>(
     let (ack, export_window_id) = if let Some(window_id) = export_window {
         match tokio::time::timeout(std::time::Duration::from_secs(15 * 60 + 5), response).await {
             Ok(result) => result?,
-            Err(_) => return Err(crate::exit_code::ControlTimeout {
-                message: format!("export in window {} reached its 15m absolute client bound", window_id.as_deref().unwrap_or("chosen by the server")),
-            }.into()),
+            Err(_) => {
+                return Err(crate::exit_code::ControlTimeout {
+                    message: format!(
+                        "export in window {} reached its 15m absolute client bound",
+                        window_id.as_deref().unwrap_or("chosen by the server")
+                    ),
+                }
+                .into())
+            }
         }
     } else {
         response.await?

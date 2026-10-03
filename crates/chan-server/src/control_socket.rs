@@ -1742,7 +1742,17 @@ where
             window_id,
             cancel_on_eof: _,
         } => {
-            handle_export_until_client_eof(path, format, out, window_id, session_registry, events_tx, window_bus, client_eof).await
+            handle_export_until_client_eof(
+                path,
+                format,
+                out,
+                window_id,
+                session_registry,
+                events_tx,
+                window_bus,
+                client_eof,
+            )
+            .await
         }
         ControlRequest::TermSurvey {
             tab_name,
@@ -3028,7 +3038,11 @@ fn resolve_export_window(
 ) -> Result<String, String> {
     let snapshot = session_registry.snapshot(std::time::Instant::now());
     if let Some(preferred) = preferred {
-        if snapshot.participants.iter().any(|p| p.window_id == preferred && p.status == ParticipantState::Live) {
+        if snapshot
+            .participants
+            .iter()
+            .any(|p| p.window_id == preferred && p.status == ParticipantState::Live)
+        {
             return Ok(preferred.to_string());
         }
     }
@@ -3066,7 +3080,17 @@ async fn handle_export(
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
 ) -> ControlResponse {
-    handle_export_until_client_eof(path, format, out, preferred_window_id, session_registry, events_tx, window_bus, &mut std::future::pending()).await
+    handle_export_until_client_eof(
+        path,
+        format,
+        out,
+        preferred_window_id,
+        session_registry,
+        events_tx,
+        window_bus,
+        &mut std::future::pending(),
+    )
+    .await
 }
 
 async fn handle_export_until_client_eof<F>(
@@ -3079,7 +3103,8 @@ async fn handle_export_until_client_eof<F>(
     window_bus: &Arc<crate::window_bus::WindowBus>,
     client_eof: &mut F,
 ) -> ControlResponse
-where F: std::future::Future<Output = ()> + Unpin,
+where
+    F: std::future::Future<Output = ()> + Unpin,
 {
     let path = path.trim().to_string();
     if path.is_empty() {
@@ -3101,7 +3126,17 @@ where F: std::future::Future<Output = ()> + Unpin,
         Ok(target) => target,
         Err(message) => return ControlResponse::Error { message },
     };
-    export_round_trip_until_client_eof(&target, path, format, out, session_registry, events_tx, window_bus, client_eof).await
+    export_round_trip_until_client_eof(
+        &target,
+        path,
+        format,
+        out,
+        session_registry,
+        events_tx,
+        window_bus,
+        client_eof,
+    )
+    .await
 }
 
 /// The `cs export` round-trip, mirroring [`pane_round_trip`]: park the
@@ -3118,7 +3153,17 @@ async fn export_round_trip(
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
 ) -> ControlResponse {
-    export_round_trip_until_client_eof(window_id, path, format, out, _session_registry, events_tx, window_bus, &mut std::future::pending()).await
+    export_round_trip_until_client_eof(
+        window_id,
+        path,
+        format,
+        out,
+        _session_registry,
+        events_tx,
+        window_bus,
+        &mut std::future::pending(),
+    )
+    .await
 }
 
 async fn export_round_trip_until_client_eof<F>(
@@ -3131,9 +3176,11 @@ async fn export_round_trip_until_client_eof<F>(
     window_bus: &Arc<crate::window_bus::WindowBus>,
     client_eof: &mut F,
 ) -> ControlResponse
-where F: std::future::Future<Output = ()> + Unpin,
+where
+    F: std::future::Future<Output = ()> + Unpin,
 {
     let (request_id, mut rx, mut progress) = window_bus.register_export(out.clone());
+    let job = window_bus.export_job(&request_id).expect("new export job");
     let command = WindowCommand::ExportJob {
         id: request_id.clone(),
         path,
@@ -3141,7 +3188,9 @@ where F: std::future::Future<Output = ()> + Unpin,
         out: out.clone(),
         guarded_upload: true,
     };
-    if let Err(message) = send_window_command_if_live(session_registry, window_id, command, events_tx) {
+    if let Err(message) =
+        send_window_command_if_live(session_registry, window_id, command, events_tx)
+    {
         window_bus.retire_export(&request_id);
         return ControlResponse::Error { message };
     }
@@ -3161,19 +3210,24 @@ where F: std::future::Future<Output = ()> + Unpin,
                 return response;
             }
             () = &mut *client_eof => {
-                if window_bus.retire_export(&request_id) {
+                if window_bus.retire_export(&request_id) || job.committed() {
                     return ControlResponse::Export { out_path: out, window_id: Some(window_id.to_string()) };
                 }
                 let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
                 return ControlResponse::Error { message: format!("export in window {window_id} cancelled when its caller closed") };
             }
-            _ = tokio::time::sleep_until(absolute) => return retire_export_at_bound(window_id, &request_id, &out, "15m absolute", session_registry, events_tx, window_bus),
-            _ = tokio::time::sleep_until(quiet) => return retire_export_at_bound(window_id, &request_id, &out, "90s quiet", session_registry, events_tx, window_bus),
+            _ = tokio::time::sleep_until(absolute) => return retire_export_at_bound(window_id, &request_id, &out, "15m absolute", &job, session_registry, events_tx, window_bus),
             changed = progress.changed() => {
                 if changed.is_ok() {
-                    quiet = tokio::time::Instant::now() + EXPORT_REPLY_TIMEOUT;
+                    if let Some(at) = *progress.borrow_and_update() {
+                        if at > quiet {
+                            return retire_export_at_bound(window_id, &request_id, &out, "90s quiet", &job, session_registry, events_tx, window_bus);
+                        }
+                        quiet = at + EXPORT_REPLY_TIMEOUT;
+                    }
                 }
             }
+            _ = tokio::time::sleep_until(quiet) => return retire_export_at_bound(window_id, &request_id, &out, "90s quiet", &job, session_registry, events_tx, window_bus),
         }
     }
 }
@@ -3183,15 +3237,28 @@ fn retire_export_at_bound(
     request_id: &str,
     out: &str,
     bound: &str,
+    job: &crate::window_bus::ExportJob,
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
     window_bus: &crate::window_bus::WindowBus,
 ) -> ControlResponse {
-    if window_bus.retire_export(request_id) {
-        return ControlResponse::Export { out_path: out.to_string(), window_id: Some(window_id.to_string()) };
+    if window_bus.retire_export(request_id) || job.committed() {
+        return ControlResponse::Export {
+            out_path: out.to_string(),
+            window_id: Some(window_id.to_string()),
+        };
     }
-    let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id.to_string() }, events_tx);
-    ControlResponse::Timeout { message: format!("export in window {window_id} reached its {bound} bound") }
+    let _ = send_window_command_if_live(
+        session_registry,
+        window_id,
+        WindowCommand::ExportStop {
+            id: request_id.to_string(),
+        },
+        events_tx,
+    );
+    ControlResponse::Timeout {
+        message: format!("export in window {window_id} reached its {bound} bound"),
+    }
 }
 
 /// Interpret the renderer's export reply payload: `{ ok: true, out }` is
@@ -5697,7 +5764,16 @@ mod tests {
         let task = tokio::spawn({
             let bus = Arc::clone(&bus);
             async move {
-                export_round_trip("w-progress", "a.md".into(), "pdf".into(), "a.pdf".into(), &registry, &events_tx, &bus).await
+                export_round_trip(
+                    "w-progress",
+                    "a.md".into(),
+                    "pdf".into(),
+                    "a.pdf".into(),
+                    &registry,
+                    &events_tx,
+                    &bus,
+                )
+                .await
             }
         });
         let frame = recv_command(&mut events, "export-job").await;
@@ -5706,11 +5782,16 @@ mod tests {
         assert!(bus.page_finished(id));
         tokio::task::yield_now().await;
         tokio::time::advance(std::time::Duration::from_secs(80)).await;
-        assert!(!task.is_finished(), "completed page did not reset the quiet bound");
+        assert!(
+            !task.is_finished(),
+            "completed page did not reset the quiet bound"
+        );
         assert!(bus.page_finished(id));
         tokio::task::yield_now().await;
         tokio::time::advance(std::time::Duration::from_secs(91)).await;
-        assert!(matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("90s quiet")));
+        assert!(
+            matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("90s quiet"))
+        );
         assert!(!bus.page_finished(id));
     }
 
@@ -5722,7 +5803,16 @@ mod tests {
         let task = tokio::spawn({
             let bus = Arc::clone(&bus);
             async move {
-                export_round_trip("w-absolute", "a.md".into(), "pdf".into(), "a.pdf".into(), &registry, &events_tx, &bus).await
+                export_round_trip(
+                    "w-absolute",
+                    "a.md".into(),
+                    "pdf".into(),
+                    "a.pdf".into(),
+                    &registry,
+                    &events_tx,
+                    &bus,
+                )
+                .await
             }
         });
         let frame = recv_command(&mut events, "export-job").await;
@@ -5733,7 +5823,9 @@ mod tests {
             tokio::task::yield_now().await;
         }
         tokio::time::advance(std::time::Duration::from_secs(21)).await;
-        assert!(matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("15m absolute")));
+        assert!(
+            matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("15m absolute"))
+        );
     }
 
     #[test]
@@ -5955,8 +6047,20 @@ mod tests {
         let cell = Arc::new(RwLock::new(None));
 
         // Hosted tenant, no desktop window-ops channel => devserver.
-        let ctx = test_ctx(cell.clone(), ControlTenant::Workspace);
+        let mut ctx = test_ctx(cell.clone(), ControlTenant::Workspace);
+        ctx.library_id = Some("lib-devserver".into());
         assert_eq!(kind_of(&ctx).await, ServeKind::Devserver);
+        let ControlResponse::Ok { message } = handle_request(ControlRequest::Identify, &ctx).await
+        else {
+            panic!("identify did not answer");
+        };
+        assert_eq!(
+            serde_json::from_str::<Identity>(&message)
+                .unwrap()
+                .library_id
+                .as_deref(),
+            Some("lib-devserver")
+        );
 
         // A standalone `serve` (its own shutdown scope) => standalone.
         let mut ctx = test_ctx(cell.clone(), ControlTenant::Workspace);

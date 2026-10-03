@@ -50,14 +50,19 @@ impl ExportCommitPermit<'_> {
 pub(crate) struct ExportJob {
     out: String,
     state: Mutex<ExportState>,
-    progress: watch::Sender<u64>,
+    progress: watch::Sender<Option<tokio::time::Instant>>,
 }
 
 impl ExportJob {
-    pub(crate) fn begin_commit(&self, path: &str) -> chan_workspace::Result<ExportCommitPermit<'_>> {
+    pub(crate) fn begin_commit(
+        &self,
+        path: &str,
+    ) -> chan_workspace::Result<ExportCommitPermit<'_>> {
         let state = self.state.lock().expect("export job poisoned");
-        if !state.active || self.out != path {
-            return Err(chan_workspace::ChanError::Io("export job retired or upload path differs".into()));
+        if !state.active || state.committed || self.out != path {
+            return Err(chan_workspace::ChanError::Io(
+                "export job retired or upload path differs".into(),
+            ));
         }
         Ok(ExportCommitPermit(state))
     }
@@ -68,11 +73,17 @@ impl ExportJob {
         state.committed
     }
 
+    pub(crate) fn committed(&self) -> bool {
+        self.state.lock().expect("export job poisoned").committed
+    }
+
     fn page_finished(&self) -> bool {
-        if !self.state.lock().expect("export job poisoned").active {
+        let state = self.state.lock().expect("export job poisoned");
+        if !state.active {
             return false;
         }
-        self.progress.send_modify(|count| *count += 1);
+        self.progress
+            .send_replace(Some(tokio::time::Instant::now()));
         true
     }
 }
@@ -97,19 +108,36 @@ impl WindowBus {
         self.requests.register()
     }
 
-    pub fn register_export(&self, out: String) -> (String, oneshot::Receiver<Value>, watch::Receiver<u64>) {
+    pub fn register_export(
+        &self,
+        out: String,
+    ) -> (
+        String,
+        oneshot::Receiver<Value>,
+        watch::Receiver<Option<tokio::time::Instant>>,
+    ) {
         let (id, rx) = self.requests.register();
-        let (progress, updates) = watch::channel(0);
-        self.exports.lock().expect("export jobs poisoned").insert(id.clone(), Arc::new(ExportJob {
-            out,
-            state: Mutex::new(ExportState { active: true, committed: false }),
-            progress,
-        }));
+        let (progress, updates) = watch::channel(None);
+        self.exports.lock().expect("export jobs poisoned").insert(
+            id.clone(),
+            Arc::new(ExportJob {
+                out,
+                state: Mutex::new(ExportState {
+                    active: true,
+                    committed: false,
+                }),
+                progress,
+            }),
+        );
         (id, rx, updates)
     }
 
     pub(crate) fn export_job(&self, id: &str) -> Option<Arc<ExportJob>> {
-        self.exports.lock().expect("export jobs poisoned").get(id).cloned()
+        self.exports
+            .lock()
+            .expect("export jobs poisoned")
+            .get(id)
+            .cloned()
     }
 
     pub fn page_finished(&self, id: &str) -> bool {

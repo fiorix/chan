@@ -44,7 +44,8 @@ pub async fn api_window_reply(
     let completed = if progress {
         state.window_bus.page_finished(&req.request_id)
     } else {
-        req.payload.is_some_and(|payload| state.window_bus.complete(&req.request_id, payload))
+        req.payload
+            .is_some_and(|payload| state.window_bus.complete(&req.request_id, payload))
     };
     if progress && completed {
         StatusCode::NO_CONTENT.into_response()

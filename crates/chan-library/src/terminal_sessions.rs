@@ -10291,6 +10291,7 @@ mod tests {
             .env("CHAN_INHERITED_KEYS_CHILD", "1")
             .env("CHAN_WINDOW_ID", "w-the-server's-own")
             .env("CHAN_CONTROL_SOCKET", "/run/the-server's-own.sock")
+            .env("CHAN_LIBRARY_ID", "lib-the-server's-own")
             .env("CHAN_MCP_SOCKET", "/run/the-server's-own-mcp.sock")
             .arg("terminal_sessions::tests::session_spawn_does_not_inherit_chan_keys_it_leaves_unset_child")
             .arg("--exact")
@@ -10325,8 +10326,8 @@ mod tests {
                 mcp_env: false,
                 cwd: None,
                 command: Some(
-                    "sleep 0.1; printf 'KEYS=<%s|%s|%s>\\n' \"$CHAN_WINDOW_ID\" \
-                     \"$CHAN_CONTROL_SOCKET\" \"$CHAN_MCP_SOCKET\""
+                    "sleep 0.1; printf 'KEYS=<%s|%s|%s|%s>\\n' \"$CHAN_WINDOW_ID\" \
+                     \"$CHAN_CONTROL_SOCKET\" \"$CHAN_MCP_SOCKET\" \"$CHAN_LIBRARY_ID\""
                         .into(),
                 ),
                 env: Default::default(),
@@ -10334,11 +10335,37 @@ mod tests {
             })
             .unwrap();
 
-        let expected = "KEYS=<||>";
+        let expected = "KEYS=<|||>";
         let out = collect_until(&mut handle, expected, Duration::from_secs(5)).await;
         assert!(
             out.contains(expected),
             "the server's own chan keys reached the terminal: {out:?}"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn devserver_spawn_exports_its_library_id() {
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.install_library_id("lib-current".into());
+        let mut handle = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("printf 'LIB=<%s>\\n' \"$CHAN_LIBRARY_ID\"".into()),
+                env: Default::default(),
+                profile: None,
+            })
+            .unwrap();
+        let out = collect_until(&mut handle, "LIB=<lib-current>", Duration::from_secs(5)).await;
+        assert!(
+            out.contains("LIB=<lib-current>"),
+            "library id was not exported: {out:?}"
         );
         registry.close(handle.id(), CloseReason::Explicit);
     }

@@ -265,7 +265,7 @@ SIDE EFFECTS:
 Writes the output file into the workspace through the upload route,
 replacing an existing file at that path. Pushes an export job to the
 chosen window; that window does the reading, rendering and upload.
-The output path goes to stdout; errors go to stderr.
+The output path goes to stdout; the selected window and errors go to stderr.
 
 CAUTIONS:
 Blocks until the renderer replies. The server gives up after 90s without a completed page or after 15 minutes overall; either timeout exits 124 and names the renderer window. Inside the renderer each page has its own 30s render ceiling. Any failure exits nonzero with the renderer's own message. An existing output file is replaced without asking.

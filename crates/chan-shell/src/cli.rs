@@ -78,6 +78,7 @@ Every chan-spawned terminal carries these. Read them; do not set them.
   CHAN_WORKSPACE_PATH   the served workspace root, or $HOME when there
                         is no workspace.
   CHAN_WORKSPACE_NAME   that path's basename.
+  CHAN_LIBRARY_ID       the spawning devserver's library, when set. A moved terminal rejects a same-root devserver of another named library; if either side has no id, the workspace-root rule still applies.
 
 WORKSPACE ONLY:
 `graph`, `search`, `export`, every `session` action, `terminal team`
@@ -1504,18 +1505,19 @@ fn render_session_self_markdown(raw: &str) -> Result<String> {
 /// replies, then prints the final workspace-relative output path.
 async fn cmd_shell_export(path: String, format: String, out: Option<String>) -> Result<()> {
     let socket = control_socket_env()?;
-    let session =
-        send_control_request_streaming(
-            &socket,
-            ControlRequest::Export {
-                path,
-                format,
-                out,
-                window_id: std::env::var("CHAN_WINDOW_ID").ok().filter(|id| !id.is_empty()),
-                cancel_on_eof: true,
-            },
-        )
-        .await?;
+    let session = send_control_request_streaming(
+        &socket,
+        ControlRequest::Export {
+            path,
+            format,
+            out,
+            window_id: std::env::var("CHAN_WINDOW_ID")
+                .ok()
+                .filter(|id| !id.is_empty()),
+            cancel_on_eof: true,
+        },
+    )
+    .await?;
     if let Some(window_id) = &session.export_window_id {
         eprintln!("export rendered in window {window_id}");
     }
