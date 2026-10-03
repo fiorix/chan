@@ -8979,6 +8979,110 @@ mod tests {
         );
     }
 
+    /// A devserver whose workspace's record is starting, its attempt not yet
+    /// run, beside a registration of that workspace whose caller left while
+    /// it was held: that registration keeps the root's registry-write permit
+    /// until `stall` lets it go, and leaves the workspace registered.
+    /// Answers the state, the attempt, its prefix, the root the registry row
+    /// stores and the stall.
+    async fn starting_beside_an_abandoned_registration(
+        home: &Path,
+        root: &Path,
+    ) -> (
+        Arc<DevserverState>,
+        MountAttempt,
+        String,
+        PathBuf,
+        root_stall::RootStall,
+    ) {
+        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root).unwrap();
+        let attempt = state
+            .begin_mount(root, &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        let stall = root_stall::stall_matching(root, &[root_stall::REGISTER_WORKSPACE]);
+        let registering = Arc::clone(&state);
+        let requested = root.to_path_buf();
+        let first = tokio::spawn(async move { registering.register_workspace(&requested).await });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the registration was not held"
+        );
+        first.abort();
+        assert!(
+            first.await.unwrap_err().is_cancelled(),
+            "fixture: the registration answered"
+        );
+        (state, attempt, prefix, stored, stall)
+    }
+
+    /// An attempt whose mount completed on a forget's tombstone settles
+    /// after that forget was answered still releasing and the call it met
+    /// has let go, which is when a removal of the attempt's own would get
+    /// the root's registry-write permit. It unregisters nothing: the caller
+    /// was told to retry, and the workspace stays registered with its record
+    /// off. The attempt's read of the tombstone is taken here by hand, while
+    /// the forget waits on the host, and its settlement is run after the
+    /// forget's answer; the attempt's task is not run, so this cannot show
+    /// that the task reaches those steps in this sequence, only what the
+    /// settlement does when it does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_completion_on_a_refused_forgets_tombstone_unregisters_nothing() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, attempt, prefix, stored, stall) =
+            starting_beside_an_abandoned_registration(home.path(), root.path()).await;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
+        // The forget has tombstoned the record once it waits the release
+        // budget for the registration's permit.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while record_intent(&state, &prefix)
+                != Some((DesiredMount::Forgotten, MountPhase::Stopped))
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("fixture: the forget never tombstoned the record");
+        let read = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get_mut(&prefix)
+            .unwrap()
+            .complete_success(attempt.generation, String::new());
+        assert_eq!(
+            read,
+            MountCompletion::ForgetStale,
+            "fixture: the attempt did not read the tombstone"
+        );
+        let (status, _, body) = completes_beside(&stall, "a refused forget", async move {
+            forgetting.await.unwrap()
+        })
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        // The registration runs to its end once let go, and gives the permit
+        // back with the workspace registered.
+        drop(stall);
+        state.settle_forgotten_completion(&attempt).await;
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "an attempt unregistered a workspace whose forget was told to retry"
+        );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the record after the attempt settled"
+        );
+        state.persist_state();
+        assert_eq!(overlay_on(&state, &stored), Some(false));
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
