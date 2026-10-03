@@ -10625,6 +10625,191 @@ mod tests {
         }
     }
 
+    /// The bound on the task of a `chan serve` handoff that registers a path
+    /// and mounts it, pinned on a clock the test holds.
+    #[cfg(unix)]
+    mod handoff_bound {
+        use std::time::Duration;
+
+        use chan_workspace::paths::root_stall::{self, RootStall};
+        use tauri::Listener;
+
+        use super::*;
+        use crate::embedded::paused_clock::{held, on_a_paused_clock, settle};
+
+        /// The bound, written out so that moving it is a deliberate edit here.
+        const MOUNT_BOUND: Duration = Duration::from_secs(60);
+        const JUST_SHORT: Duration = Duration::from_millis(1);
+
+        /// A library with no workspace, the root a handoff names and their
+        /// directories.
+        fn unregistered_root() -> (chan_workspace::Library, PathBuf, [tempfile::TempDir; 2]) {
+            let config = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("root");
+            let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
+                .expect("library");
+            let requested = root.path().to_path_buf();
+            (library, requested, [config, root])
+        }
+
+        /// A desktop over `library`, built on the runtime that awaits it.
+        async fn desktop_over(library: chan_workspace::Library) -> Arc<AppState> {
+            let state = empty_state();
+            let embedded = embedded::EmbeddedServer::for_tests(library).await;
+            assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+            state
+        }
+
+        /// The message of every system notice `app` emits from here on.
+        fn notices_of(app: &tauri::App<tauri::test::MockRuntime>) -> Arc<Mutex<Vec<String>>> {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&seen);
+            app.listen(SYSTEM_NOTICE, move |event| {
+                let notice: serde_json::Value =
+                    serde_json::from_str(event.payload()).expect("a notice is JSON");
+                let message = notice["message"].as_str().expect("a notice has a message");
+                sink.lock().unwrap().push(message.to_string());
+            });
+            seen
+        }
+
+        fn seen(notices: &Mutex<Vec<String>>) -> Vec<String> {
+            notices.lock().unwrap().clone()
+        }
+
+        /// The notice of a handoff of `requested` given up at the bound.
+        fn timed_out(requested: &Path) -> String {
+            let path = requested.display();
+            format!(
+                "Could not open {path} from chan serve: mount timed out after 60 seconds: \
+                 {path} did not answer"
+            )
+        }
+
+        /// Let the calls `stall` holds go, one round at a time, until the call
+        /// it holds is the open's; false when none has come within ten seconds.
+        fn release_until_the_open_is_held(stall: &RootStall) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let entered = stall.entered();
+                if entered
+                    .last()
+                    .is_some_and(|chain| chain.contains("Library::open_workspace"))
+                {
+                    return true;
+                }
+                stall.release_held();
+                while stall.entered().len() == entered.len() {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+
+        /// A handoff whose registration hangs gives its notice at the mount
+        /// bound, naming the path as it was sent, and none before it.
+        #[test]
+        fn a_handoff_whose_registration_hangs_gives_its_notice_at_the_mount_bound() {
+            let (library, requested, _dirs) = unregistered_root();
+            let stall = Arc::new(root_stall::stall_matching(
+                &requested,
+                &[root_stall::REGISTER_WORKSPACE],
+            ));
+            let registration = Arc::clone(&stall);
+            let app = tauri::test::mock_app();
+            let notices = notices_of(&app);
+            let handle = app.handle().clone();
+            on_a_paused_clock(stall, "a handoff whose registration hangs", async move {
+                let state = desktop_over(library.clone()).await;
+                let handoff = tokio::spawn(register_and_open_from_handoff(
+                    handle,
+                    state,
+                    library,
+                    requested.clone(),
+                ));
+                held(&registration, "the handoff's registration").await;
+                tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
+                settle().await;
+                assert_eq!(
+                    seen(&notices),
+                    Vec::<String>::new(),
+                    "the handoff gave a notice before the mount bound"
+                );
+                tokio::time::advance(JUST_SHORT).await;
+                settle().await;
+                assert_eq!(
+                    seen(&notices),
+                    [timed_out(&requested)],
+                    "the handoff's notices at the mount bound"
+                );
+                assert!(
+                    handoff.is_finished(),
+                    "the handoff still waits on its registration after its notice"
+                );
+            });
+        }
+
+        /// The registration and the open share one bound, counted from the
+        /// start of the handoff's task: here half goes to the registration,
+        /// and the open, which hangs, is given up when the other half is spent.
+        #[test]
+        fn a_handoffs_open_gets_what_its_registration_left_of_the_bound() {
+            let (library, requested, _dirs) = unregistered_root();
+            let stall = Arc::new(root_stall::stall_matching(
+                &requested,
+                &[root_stall::REGISTER_WORKSPACE, root_stall::OPEN_WORKSPACE],
+            ));
+            let steps = Arc::clone(&stall);
+            let app = tauri::test::mock_app();
+            let notices = notices_of(&app);
+            let handle = app.handle().clone();
+            on_a_paused_clock(stall, "a handoff whose steps hang", async move {
+                let state = desktop_over(library.clone()).await;
+                let handoff = tokio::spawn(register_and_open_from_handoff(
+                    handle,
+                    state,
+                    library,
+                    requested.clone(),
+                ));
+                held(&steps, "the handoff's registration").await;
+                assert!(
+                    steps.entered()[0].contains("register_workspace_with_name"),
+                    "fixture: the first held call is not the registration: {:#?}",
+                    steps.entered()
+                );
+                tokio::time::advance(MOUNT_BOUND / 2).await;
+                let releasing = Arc::clone(&steps);
+                assert!(
+                    tokio::task::spawn_blocking(move || release_until_the_open_is_held(&releasing))
+                        .await
+                        .expect("release task"),
+                    "fixture: the handoff never reached its open: {:#?}",
+                    steps.entered()
+                );
+                tokio::time::advance(MOUNT_BOUND / 2 - JUST_SHORT).await;
+                settle().await;
+                assert_eq!(
+                    seen(&notices),
+                    Vec::<String>::new(),
+                    "the handoff gave a notice before the mount bound"
+                );
+                tokio::time::advance(JUST_SHORT).await;
+                settle().await;
+                assert_eq!(
+                    seen(&notices),
+                    [timed_out(&requested)],
+                    "the handoff's notices at one mount bound from its start"
+                );
+                assert!(
+                    handoff.is_finished(),
+                    "the handoff still waits on its open after its notice"
+                );
+            });
+        }
+    }
+
     /// What the on-set snapshot records beside the shared terminal tenant and
     /// after a normal shutdown has drained the tenants.
     mod on_set {
