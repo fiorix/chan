@@ -1427,7 +1427,11 @@ export function reopenClosedTab(): boolean {
 /// it with the closed buffer's content when that content is more than the
 /// default seed and was the file: a load that had not finished and a read
 /// that had failed (`readFailed`) each leave only the bytes that had
-/// arrived. Async: draft creation is a server round-trip, so reopenClosedTab
+/// arrived. A drawing's text that does not parse is text the save refuses,
+/// so no write carries it here either: it goes back as the new draft's
+/// unsaved buffer, and the save's own check then says on the save line why
+/// it is not written, so the draft's close asks before the text is thrown
+/// away. Async: draft creation is a server round-trip, so reopenClosedTab
 /// fires this and returns.
 async function recoverClosedDraft(
   paneId: string,
@@ -1442,7 +1446,9 @@ async function recoverClosedDraft(
       : await api.createDraft();
     const seed = diagram ? NEW_DIAGRAM_SEED : NEW_DRAFT_SEED;
     const wasFile = !closed.loading && !readFailed;
-    if (wasFile && closed.content.trim().length > 0 && closed.content !== seed) {
+    const carried = wasFile && closed.content.trim().length > 0 && closed.content !== seed;
+    const unsavable = carried && diagram && validateJsonBuffer(closed.content) !== null;
+    if (carried && !unsavable) {
       await api.write(path, closed.content);
     }
     // Lazy import to break the eager cyclic dependency with store.svelte
@@ -1454,6 +1460,16 @@ async function recoverClosedDraft(
     await openInPane(openPaneId, path, {
       side,
     });
+    if (unsavable) {
+      const at = tabsForPath(path)[0];
+      const reopened = at ? liveFileTabById(at.tabId) : null;
+      // Only over a load that gave the new draft's file: a tab that failed to
+      // load holds no buffer to put the text over.
+      if (reopened && !reopened.loading && !reopened.error) {
+        reopened.content = closed.content;
+        await performSave(reopened);
+      }
+    }
   } catch (err) {
     console.warn("[chan] reopen closed draft failed", err);
     notify(`Reopen draft failed: ${(err as Error).message}`);
