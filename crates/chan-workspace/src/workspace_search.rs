@@ -2650,6 +2650,179 @@ mod tests {
         }));
     }
 
+    /// The relationships a directory seed returns over a small tree, in
+    /// full: each directory among the kept nodes is joined to its direct
+    /// children and to nothing else of the tree.
+    #[test]
+    fn workspace_search_directory_seed_joins_each_kept_directory_to_its_direct_children() {
+        let (_config, _root, workspace) = open_workspace();
+        workspace.create_dir("notes/deep/deeper").unwrap();
+        workspace.create_dir("notes/other").unwrap();
+        workspace.create_dir("notes/empty").unwrap();
+        workspace.create_dir("notesx").unwrap();
+        for (path, body) in [
+            ("top.md", "# Top\n"),
+            ("notes/a.md", "[B](deep/b.md)\n"),
+            ("notes/deep/b.md", "# B\n"),
+            ("notes/deep/deeper/c.md", "# C\n"),
+            ("notes/other/d.md", "# D\n"),
+            ("notesx/e.md", "# E\n"),
+        ] {
+            workspace.write_text(path, body).unwrap();
+            workspace.index_file(path).unwrap();
+        }
+
+        let result = workspace
+            .workspace_search(&WorkspaceSearchRequest {
+                from: vec![WorkspaceSelector {
+                    kind: WorkspaceSelectorKind::Directory,
+                    value: "notes".into(),
+                }],
+                depth: Some(3),
+                relationship_kinds: vec![
+                    WorkspaceRelationshipKind::Contains,
+                    WorkspaceRelationshipKind::Link,
+                ],
+                ..WorkspaceSearchRequest::default()
+            })
+            .unwrap();
+
+        let listed: Vec<(WorkspaceRelationshipKind, &str, &str)> = result
+            .relationships
+            .iter()
+            .map(|relationship| {
+                (
+                    relationship.kind,
+                    relationship.source.as_str(),
+                    relationship.target.as_str(),
+                )
+            })
+            .collect();
+        let contains = WorkspaceRelationshipKind::Contains;
+        let mut expected = vec![
+            (contains, "", "directory:notes"),
+            (contains, "directory:notes", "notes/a.md"),
+            (contains, "directory:notes", "directory:notes/deep"),
+            (contains, "directory:notes", "directory:notes/empty"),
+            (contains, "directory:notes", "directory:notes/other"),
+            (contains, "directory:notes/deep", "notes/deep/b.md"),
+            (
+                contains,
+                "directory:notes/deep",
+                "directory:notes/deep/deeper",
+            ),
+            (
+                contains,
+                "directory:notes/deep/deeper",
+                "notes/deep/deeper/c.md",
+            ),
+            (contains, "directory:notes/other", "notes/other/d.md"),
+            (
+                WorkspaceRelationshipKind::Link,
+                "notes/a.md",
+                "notes/deep/b.md",
+            ),
+        ];
+        for relationship in &listed {
+            assert!(
+                expected.contains(relationship),
+                "a directory seed listed {relationship:?}, which the tree does not hold: {listed:?}"
+            );
+        }
+        expected.retain(|relationship| !listed.contains(relationship));
+        assert!(
+            expected.is_empty(),
+            "a directory seed left out {expected:?}: {listed:?}"
+        );
+        assert_eq!(
+            listed.len(),
+            10,
+            "a relationship is listed twice: {listed:?}"
+        );
+    }
+
+    fn contains_catalog() -> Catalog {
+        let owned = |paths: &[&str]| paths.iter().map(|path| path.to_string()).collect();
+        Catalog {
+            files: owned(&["a/b/y.md", "a/x.md", "ab/z.md", "top.md"]),
+            directories: owned(&["", "a", "a/b", "a/b/c", "ab"]),
+            contacts: Vec::new(),
+            contact_by_path: BTreeMap::new(),
+            tags: BTreeMap::new(),
+            mentions: BTreeMap::new(),
+            report: None,
+            reports_enabled: false,
+        }
+    }
+
+    fn contains_pairs(
+        frontier: &[&str],
+        direction: WorkspaceTraversalDirection,
+    ) -> Vec<(String, String)> {
+        let frontier: Vec<String> = frontier.iter().map(|id| id.to_string()).collect();
+        in_memory_relationships(
+            &frontier,
+            direction,
+            &[WorkspaceRelationshipKind::Contains],
+            &contains_catalog(),
+        )
+        .into_iter()
+        .map(|relationship| {
+            assert_eq!(relationship.kind, WorkspaceRelationshipKind::Contains);
+            (relationship.source, relationship.target)
+        })
+        .collect()
+    }
+
+    /// The containment pass answers each frontier entry in turn, a directory
+    /// by its direct children in order: a file, a directory with no child, a
+    /// directory the catalog does not hold and a sibling whose name starts
+    /// with a directory's add nothing to it, and an entry the frontier names
+    /// twice is answered twice.
+    #[test]
+    fn in_memory_contains_lists_each_frontier_directorys_direct_children() {
+        let pair = |source: &str, target: &str| (source.to_string(), target.to_string());
+        let frontier = [
+            "directory:a",
+            "",
+            "a/x.md",
+            "directory:a/b/c",
+            "directory:a",
+            "directory:gone",
+        ];
+        assert_eq!(
+            contains_pairs(&frontier, WorkspaceTraversalDirection::Out),
+            vec![
+                pair("directory:a", "a/x.md"),
+                pair("directory:a", "directory:a/b"),
+                pair("", "directory:a"),
+                pair("", "directory:ab"),
+                pair("", "top.md"),
+                pair("directory:a", "a/x.md"),
+                pair("directory:a", "directory:a/b"),
+            ]
+        );
+        assert_eq!(
+            contains_pairs(
+                &["directory:a/b", "a/x.md", ""],
+                WorkspaceTraversalDirection::Both
+            ),
+            vec![
+                pair("directory:a", "directory:a/b"),
+                pair("directory:a/b", "a/b/y.md"),
+                pair("directory:a/b", "directory:a/b/c"),
+                pair("directory:a", "a/x.md"),
+                pair("", "directory:a"),
+                pair("", "directory:ab"),
+                pair("", "top.md"),
+            ]
+        );
+        assert_eq!(
+            contains_pairs(&["directory:a/b"], WorkspaceTraversalDirection::In),
+            vec![pair("directory:a", "directory:a/b")]
+        );
+    }
+
     #[test]
     fn workspace_search_keeps_valid_seeds_when_another_selector_is_invalid() {
         let (_config, _root, workspace) = open_workspace();
