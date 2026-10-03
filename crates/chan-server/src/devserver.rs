@@ -2020,6 +2020,12 @@ impl DevserverState {
     /// blocking pool, every such row at once, within one mount bound: a
     /// persisted root that stopped answering is skipped with a note instead
     /// of holding up the restore of every row after it.
+    ///
+    /// Each registration resolves its root's key and goes through the
+    /// host's keyed registration, so it holds the root's registry-write
+    /// permit as a serve request's does. A restore that expires on a root
+    /// leaves that one registration behind, and a later registration of the
+    /// root waits for it instead of starting another.
     async fn register_restore_rows(
         &self,
         rows: Vec<PersistedWorkspace>,
@@ -2031,8 +2037,14 @@ impl DevserverState {
             .map(|row| {
                 let root = PathBuf::from(&row.path);
                 let task = (!registered.contains(&root)).then(|| {
-                    let library = self.host.library().clone();
-                    tokio::task::spawn_blocking(move || library.register_workspace(&root))
+                    let host = Arc::clone(&self.host);
+                    tokio::spawn(async move {
+                        tokio::time::timeout_at(deadline, async {
+                            let key = host.root_key(&root).await?;
+                            host.register_workspace_keyed(&root, &key, None).await
+                        })
+                        .await
+                    })
                 });
                 (row, task)
             })
@@ -2043,17 +2055,17 @@ impl DevserverState {
                 kept.push(row);
                 continue;
             };
-            let failure = match tokio::time::timeout_at(deadline, task).await {
+            let failure = match task.await {
                 Ok(Ok(Ok(_))) => {
                     kept.push(row);
                     continue;
                 }
                 Ok(Ok(Err(error))) => error.to_string(),
-                Ok(Err(error)) => format!("registration task failed: {error}"),
-                Err(_) => format!(
+                Ok(Err(_)) => format!(
                     "it did not answer within {} seconds",
                     whole_seconds(self.mount_timeout)
                 ),
+                Err(error) => format!("registration task failed: {error}"),
             };
             eprintln!(
                 "chan devserver: NOTE: could not register persisted workspace {}: {failure}",
