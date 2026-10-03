@@ -31,6 +31,7 @@ import { resetDocSyncForTests } from "./docSync.svelte";
 import {
   activeLayout,
   cancelPaneMode,
+  closePane,
   closeTab,
   commitPaneMode,
   enterPaneMode,
@@ -854,6 +855,20 @@ describe("lifecycle", () => {
     expect(sceneSessionFor(tab.id)).toBeUndefined();
     expect(sock.closedByClient).toBe(true);
     expect(tab.doc).toBeUndefined();
+  });
+
+  // A pane's close leaves each session to its host's lingering release, so a
+  // board torn down with the pane can still hand over what it commits. A
+  // forced one drops that, as a forced tab close does.
+  test.each([
+    ["a pane's close leaves its tab's session attached", undefined, false],
+    ["a forced pane close detaches its tab's session at once", { force: true }, true],
+  ])("%s", async (_what, opts, detached) => {
+    const [tab] = installTabs([sceneTab()]);
+    const { sock } = attached(tab!);
+    await closePane("pane-scene-test", opts);
+
+    expect({ gone: readTab(tab!.id) === undefined, detached: sock.closedByClient }).toEqual({ gone: true, detached });
   });
 });
 

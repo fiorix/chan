@@ -1382,25 +1382,14 @@ describe("a live drawing", () => {
     });
   });
 
-  test("a forced close_tab pushes nothing of a pending stroke", async () => {
-    const { pane, tab, board, socket } = await attachedDrawing();
-    vi.useFakeTimers();
-    board.stroke(STROKE);
-    const closed = await paneExec({ kind: "close_tab", pane_id: pane.id, tab_id: tab.id, force: true });
-    await vi.advanceTimersByTimeAsync(1000);
-
-    expect({ ok: closed.ok, gone: readTab(tab.id) === undefined, pushes: socket.pushes() })
-      .toEqual({ ok: true, gone: true, pushes: [] });
-  });
-
-  // A pane's close leaves the tab's scene session to linger, so the board,
-  // still mounted here, pushes the stroke when its wait ends; what these hold
-  // is that the forced arm itself commits nothing before it answers.
-  test.each(["close_pane", "close_all"])("a forced %s pushes nothing of a pending stroke before it answers", async (kind) => {
+  // The board stays mounted here after its tab is gone, so each close is read
+  // once the board's wait and a scene session's linger have both run out.
+  test.each(["close_tab", "close_pane", "close_all"])("a forced %s pushes nothing of a pending stroke", async (kind) => {
     const { pane, tab, board, socket } = await attachedDrawing();
     vi.useFakeTimers();
     board.stroke(STROKE);
     const closed = await paneExec({ kind, pane_id: pane.id, tab_id: tab.id, force: true });
+    await vi.advanceTimersByTimeAsync(1000);
 
     expect({ ok: closed.ok, gone: readTab(tab.id) === undefined, pushes: socket.pushes() })
       .toEqual({ ok: true, gone: true, pushes: [] });
