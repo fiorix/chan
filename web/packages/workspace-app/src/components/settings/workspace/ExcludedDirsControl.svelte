@@ -121,7 +121,7 @@
     return names.filter((name) => name.includes("\\") && !taken.includes(name));
   }
 
-  async function save(afterRefusal = false): Promise<void> {
+  async function save(): Promise<void> {
     saveTimer = null;
     saveStatus = "saving";
     const sentAfter = edits;
@@ -134,7 +134,7 @@
       saveStatus = "saved";
     } catch (e) {
       if (edits !== sentAfter) return;
-      const names = afterRefusal ? [] : refusable(sent);
+      const names = refusable(sent);
       if (e instanceof ApiError && e.status === 400 && names.length > 0) {
         takeBack(names, e.message);
         return;
@@ -147,15 +147,16 @@
   // so the names it can have been refused for leave the list. The server's
   // sentence says which one it refused; with one such name the page knows it
   // too and hands it back to a field its user is not typing in. The rest of
-  // the set is saved once when it differs from what the server holds: a save
-  // rebuilds the index, and a second refusal reads as any failed save.
+  // the set is saved when it differs from what the server holds, since a save
+  // rebuilds the index. That set holds nothing the server can refuse, so the
+  // save is the only one, and its failure reads as any failed save.
   function takeBack(names: string[], sentence: string): void {
     additions = additions.filter((name) => !names.includes(name));
     refused = sentence.charAt(0).toUpperCase() + sentence.slice(1);
     if (names.length === 1 && draft.trim() === "") draft = names[0];
     const taken = view?.workspace ?? [];
     const differs = additions.length !== taken.length || additions.some((name) => !taken.includes(name));
-    if (differs) void save(true);
+    if (differs) void save();
     else saveStatus = "idle";
   }
 
