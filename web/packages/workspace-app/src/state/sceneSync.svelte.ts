@@ -23,7 +23,7 @@
 /// `tab.saved` advances to `tab.content` whenever a `push-ok` lands with
 /// nothing left unpushed, and whenever the canvas mirrors its board into
 /// the buffer while attached with nothing of its own unconfirmed, as after a
-/// peer's edit,
+/// peer's edit, and again when Hybrid Nav settles on the tab that won,
 /// so dirty keeps meaning "unconfirmed local changes" for every existing
 /// consumer.
 ///
@@ -652,8 +652,21 @@ export class SceneSession {
   /// re-acquire only retains. A tab frozen at `attached` over a session
   /// that has stopped owning saves swallows the classic PUT, so this is a
   /// save loss and not a stale label.
+  ///
+  /// The saved mark needs the same. While the draft is up the board mirrors
+  /// into the draft's tab and this session marks the layout's, whose buffer
+  /// is the one the mode was entered with, so the commit puts the draft's
+  /// buffer over a saved text that mark never reached. The tab would read
+  /// unsaved, and refuse its close, until the next mirror or ack. The mark
+  /// is derived again here from what the session holds now, as a mirror
+  /// derives it. Only under a bound canvas: with none, nothing mirrors a
+  /// board into the buffer and the session cannot speak for it. The canvas's
+  /// own check for an appState it has not pushed is not run, and that state
+  /// lasts only from a reattach's snapshot to the board's next mirror, which
+  /// sets the mark itself.
   resyncMirror(): void {
     this.mirror();
+    if (this.binding !== null) this.bufferMirrored();
   }
 
   /// Tear the session down. `linger` keeps the socket + shadow alive for
