@@ -9083,6 +9083,181 @@ mod tests {
         assert_eq!(overlay_on(&state, &stored), Some(false));
     }
 
+    /// A launcher delete over the devserver's app: its status, its
+    /// `Retry-After` and its JSON body.
+    async fn launcher_delete_over_the_router(
+        app: Router,
+        prefix: String,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/library/workspaces{prefix}"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .map(|value| value.to_str().unwrap().to_string());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, retry_after, body)
+    }
+
+    /// The devserver's app with its launcher able to change workspaces, as
+    /// it is once the listener has bound.
+    fn devserver_app_with_a_mutable_launcher(state: &Arc<DevserverState>) -> Router {
+        let (app, serve_addr) = build_devserver_app(state.clone(), state.host.clone());
+        serve_addr.set("127.0.0.1:0".parse().unwrap()).unwrap();
+        app
+    }
+
+    /// A devserver whose workspace at `root` has a record desired on with no
+    /// tenant behind it: starting, its attempt not yet run, or failed
+    /// (`failed`). Answers the state, the record's prefix and the root the
+    /// registry row stores.
+    fn desired_on_and_unmounted(
+        home: &Path,
+        root: &Path,
+        failed: bool,
+    ) -> (Arc<DevserverState>, String, PathBuf) {
+        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root).unwrap();
+        let attempt = state
+            .begin_mount(root, &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        if failed {
+            state.finish_failed_attempt(&attempt, "the mount failed".into());
+        } else {
+            state.persist_state();
+        }
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(true),
+            "fixture: the record's row is on"
+        );
+        (state, prefix, stored)
+    }
+
+    /// What a launcher delete that the host answered still releasing left of
+    /// the record at `prefix`: off, in the record, at the next save and at a
+    /// restart, which mounts nothing.
+    async fn assert_a_refused_delete_left_the_record_off(
+        state: &DevserverState,
+        home: &Path,
+        prefix: &str,
+        stored: &Path,
+    ) {
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "fixture: a delete answered still releasing unregistered the workspace"
+        );
+        assert_eq!(
+            record_intent(state, prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "the record a launcher delete answered still releasing left"
+        );
+        state.persist_state();
+        assert_eq!(
+            overlay_on(state, stored),
+            Some(false),
+            "the overlay row at the next save"
+        );
+        let (restored, mounts) = restored_at(home, prefix).await;
+        assert_eq!(
+            (restored, mounts),
+            (Some((DesiredMount::Off, MountPhase::Stopped)), false),
+            "what a restart restores of a workspace whose delete must retry"
+        );
+    }
+
+    /// A launcher delete on a devserver whose unregister meets a handle of
+    /// the root this process holds is answered still releasing after the
+    /// removal has forgotten the workspace's overlay rows. The record
+    /// (`failed`, or starting) is left off as the devserver's own forget
+    /// leaves it, so a save and a restart mount nothing.
+    async fn a_launcher_delete_beside_a_held_handle_leaves_the_record_off(failed: bool) {
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, prefix, stored) = desired_on_and_unmounted(home.path(), root.path(), failed);
+        let handle = state
+            .host
+            .library()
+            .open_workspace(&stored)
+            .expect("fixture: hold a handle of the root");
+        let app = devserver_app_with_a_mutable_launcher(&state);
+        let (status, retry_after, body) =
+            launcher_delete_over_the_router(app, prefix.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "delete: {body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "delete: {body}");
+        assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
+        assert_a_refused_delete_left_the_record_off(&state, home.path(), &prefix, &stored).await;
+        drop(handle);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_launcher_delete_beside_a_held_handle_leaves_a_failed_record_off() {
+        a_launcher_delete_beside_a_held_handle_leaves_the_record_off(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_launcher_delete_beside_a_held_handle_leaves_a_starting_record_off() {
+        a_launcher_delete_beside_a_held_handle_leaves_the_record_off(false).await;
+    }
+
+    /// A launcher delete on a devserver beside a removal whose caller left
+    /// while its unregister was held is answered still releasing at the
+    /// registry-write permit, after its close has written a fresh off row
+    /// that no record takes. The record (`failed`, or starting) is left
+    /// off, so a save and a restart that come before the held unregister
+    /// returns mount nothing.
+    async fn a_launcher_delete_beside_an_abandoned_unregister_leaves_the_record_off(failed: bool) {
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (state, prefix, stored) = desired_on_and_unmounted(home.path(), root.path(), failed);
+        let stall = abandon_a_removal_at_its_unregister(&state, root.path(), &stored).await;
+        let app = devserver_app_with_a_mutable_launcher(&state);
+        let deleted = prefix.clone();
+        let (status, retry_after, body) = completes_beside(
+            &stall,
+            "a launcher delete beside an abandoned unregister",
+            async move { launcher_delete_over_the_router(app, deleted).await },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "delete: {body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "delete: {body}");
+        assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
+        // The held unregister has not returned: the restart comes before it.
+        assert_a_refused_delete_left_the_record_off(&state, home.path(), &prefix, &stored).await;
+        drop(stall);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_launcher_delete_beside_an_abandoned_unregister_leaves_a_failed_record_off() {
+        a_launcher_delete_beside_an_abandoned_unregister_leaves_the_record_off(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_launcher_delete_beside_an_abandoned_unregister_leaves_a_starting_record_off() {
+        a_launcher_delete_beside_an_abandoned_unregister_leaves_the_record_off(false).await;
+    }
+
     /// A serve of a root whose abandoned mount still holds its workspace
     /// answers that the workspace is already open well inside its own mount
     /// bound, and a close and a forget of that root finish after it.
