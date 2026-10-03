@@ -395,8 +395,7 @@ fn holder_answering_a_removal(
 
 /// `chan workspace forget` whose host answers that the workspace is still
 /// releasing: the host has forgotten nothing, so the command prints the
-/// host's words, exits 75 (retry) and leaves the registry as the host holds
-/// it.
+/// host's words, exits 75 and leaves the registry as the host holds it.
 #[test]
 fn forget_answered_still_releasing_keeps_the_workspace_registered() {
     let sandbox = Sandbox::new();

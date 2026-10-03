@@ -12,9 +12,9 @@ use crate::remote::{cmd_workspace_close_remote, cmd_workspace_forget_remote};
 use crate::Personality;
 
 /// Exit status of a `chan workspace forget` whose server answered that the
-/// workspace is still releasing: nothing was forgotten and the same command
-/// is to be run again. `EX_TEMPFAIL` of `sysexits.h`, which separates it
-/// from a refusal or a failure (exit 1).
+/// workspace is still releasing: nothing was forgotten, because the server
+/// has not let go of the workspace. `EX_TEMPFAIL` of `sysexits.h`, which
+/// separates it from a refusal or a failure (exit 1).
 const STILL_RELEASING_EXIT: i32 = 75;
 
 /// A `chan workspace forget` whose server answered that the workspace is

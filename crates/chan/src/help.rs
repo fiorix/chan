@@ -88,12 +88,17 @@ restart.
 
 A holder that refuses teardown because live terminals would die also
 stops the registry removal: close the terminals first. So does a host
-that answers that the workspace is still releasing, which means an
-earlier request of its own on that workspace has not finished: the
-command prints the host's answer, leaves the registry as it is and
-exits 75, and running it again is the remedy. An unreachable holder is
-treated as closed and the removal proceeds, as it does after any other
-error the holder answers, which is printed with the warning.
+that answers over its control socket that the workspace is still
+releasing, which means an earlier request of its own on that workspace
+has not finished: the command prints the host's answer, forgets
+nothing and exits 75. That exit means the host has not let go of the
+workspace. Running the command again asks the host again only while
+the host still serves the workspace. Once the host has taken it down
+nothing serves it, and a forget of a workspace nothing serves drops it
+from the registry on disk and asks no host, so that host's own library
+may keep it. An unreachable holder is treated as closed and the
+removal proceeds, as it does after any other error the holder answers,
+which is printed with the warning.
 
 With --on TARGET the verb reaches a workspace on a REGISTERED remote
 devserver through the desktop app: TARGET is the devserver's URL or
@@ -140,7 +145,11 @@ nonzero.
 
 A host that answers "workspace is still releasing; retry" has forgotten
 nothing, so the workspace stays registered here as well. That exit is
-75, not 1, so a script can tell "run it again" from a refusal.
+75, not 1, so a script can tell a host that has not let go from a
+refusal. A second run repeats the request only while the host still
+serves the workspace; once the host has taken it down, the second run
+finds nothing serving it, forgets it on disk and exits 0, and the
+host is not asked.
 
 SEE ALSO:
 `chan close` to stop serving without forgetting, `chan workspace add`
