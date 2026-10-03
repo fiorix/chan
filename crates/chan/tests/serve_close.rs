@@ -364,7 +364,7 @@ fn holder_answering_a_removal_at(
 ) -> std::thread::JoinHandle<Option<chan_shell::ControlRequest>> {
     use std::io::Write;
 
-    let lock = chan_workspace::lock::WorkspaceLock::acquire(&lock_dir, ws)
+    let lock = chan_workspace::lock::WorkspaceLock::acquire(lock_dir, ws)
         .expect("hold the workspace's writer lock");
     let socket = sandbox
         .sockdir
