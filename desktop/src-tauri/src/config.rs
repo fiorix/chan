@@ -416,6 +416,16 @@ impl ConfigStore {
         }
     }
 
+    /// Store a chosen embedded port without replacing an existing preference.
+    pub(crate) fn save_embedded_port_if_absent(&mut self, port: u16) -> io::Result<()> {
+        let mut cfg = self.get()?;
+        if cfg.embedded_port.is_none() || cfg.embedded_port == Some(0) {
+            cfg.embedded_port = Some(port);
+            self.save(&cfg)?;
+        }
+        Ok(())
+    }
+
     /// This file holds devserver bearer tokens and token-bearing URLs, so it
     /// is written like the token stores it sits beside: through
     /// chan-workspace's atomic_write (tempfile + fsync of the file AND the
@@ -1525,6 +1535,35 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: Config = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.devservers, cfg.devservers);
+    }
+
+    #[test]
+    fn embedded_port_defaults_and_survives_shared_config_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(path)));
+        assert_eq!(store.lock().unwrap().get().unwrap().embedded_port, None);
+        store
+            .lock()
+            .unwrap()
+            .save_embedded_port_if_absent(43210)
+            .unwrap();
+        let collapsed = CollapsedMachinesConfig::new(Arc::clone(&store));
+        chan_server::CollapsedMachinesStore::set(&collapsed, vec!["local".into()]).unwrap();
+        let config = store.lock().unwrap().get().unwrap();
+        assert_eq!(config.embedded_port, Some(43210));
+        assert_eq!(config.collapsed_machines, vec!["local"]);
+        drop(config);
+        store
+            .lock()
+            .unwrap()
+            .save_embedded_port_if_absent(43211)
+            .unwrap();
+        assert_eq!(
+            store.lock().unwrap().get().unwrap().embedded_port,
+            Some(43210)
+        );
     }
 
     #[test]

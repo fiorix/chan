@@ -64,7 +64,13 @@ pub struct RegistryDeps {
     pub devserver_feed: Arc<crate::DevserverFeed>,
 }
 
-fn bind_embedded_port(_saved_port: Option<u16>) -> std::io::Result<(TcpListener, bool)> {
+fn bind_embedded_port(saved_port: Option<u16>) -> std::io::Result<(TcpListener, bool)> {
+    if let Some(port) = saved_port.filter(|port| *port != 0) {
+        if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+            return Ok((listener, false));
+        }
+        return TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map(|listener| (listener, true));
+    }
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map(|listener| (listener, false))
 }
 
@@ -79,12 +85,14 @@ impl EmbeddedServer {
             devserver_connecting,
             devserver_feed,
         } = deps;
-        let saved_port = config_store
-            .lock()
-            .unwrap()
-            .get()
-            .ok()
-            .and_then(|cfg| cfg.embedded_port);
+        let port_store = Arc::clone(&config_store);
+        let saved_port = match config_store.lock().unwrap().get() {
+            Ok(cfg) => cfg.embedded_port.filter(|port| *port != 0),
+            Err(e) => {
+                tracing::warn!(error = %e, "reading saved embedded port failed");
+                None
+            }
+        };
         let library = chan_workspace::Library::open()
             .map_err(|e| format!("opening chan workspace registry for embedded server: {e}"))?;
         // Install the desktop bridge: a window-ops channel (the consumer
@@ -116,9 +124,9 @@ impl EmbeddedServer {
         // Every launcher store below is installed over the one shared desktop
         // `ConfigStore`, so the launcher's `/api/library/*` CRUD and the
         // desktop's own reads agree: devservers, gateways, the local pane
-        // colour, the launcher theme, and the collapsed machines (which
-        // survive a desktop restart; the per-launch loopback origin keeps
-        // localStorage from doing that). The headless devserver and plain
+        // colour, the launcher theme, the collapsed machines, and the
+        // embedded loopback port (so local storage can survive a restart).
+        // The headless devserver and plain
         // `chan serve` install no devserver or gateway registry (empty list,
         // 404 mutation).
         host.install_devserver_registry(Arc::new(DevserverConfigRegistry::new(
@@ -164,7 +172,7 @@ impl EmbeddedServer {
             Some(Arc::new(std::sync::RwLock::new(launcher_token.clone()))),
             Some(addr_cell.clone()),
         );
-        let (listener, _) = bind_embedded_port(saved_port)
+        let (listener, fell_back) = bind_embedded_port(saved_port)
             .map_err(|e| format!("binding embedded chan server: {e}"))?;
         listener
             .set_nonblocking(true)
@@ -172,6 +180,21 @@ impl EmbeddedServer {
         let addr = listener
             .local_addr()
             .map_err(|e| format!("reading embedded listener addr: {e}"))?;
+        if fell_back {
+            tracing::warn!(
+                saved_port = ?saved_port,
+                actual_port = addr.port(),
+                "saved embedded port unavailable; using fallback for this run"
+            );
+        } else if saved_port.is_none() {
+            if let Err(e) = port_store
+                .lock()
+                .unwrap()
+                .save_embedded_port_if_absent(addr.port())
+            {
+                tracing::warn!(error = %e, "saving embedded port failed");
+            }
+        }
         // The mount path can now resolve tenant URLs against this server.
         let _ = addr_cell.set(addr);
         let listener = tokio::net::TcpListener::from_std(listener)
