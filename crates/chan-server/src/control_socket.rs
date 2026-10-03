@@ -3074,7 +3074,7 @@ fn default_export_out(path: &str, format: &str) -> String {
 /// `cs export`: validate, resolve the FINAL output path (Contract: the
 /// frame never carries an unresolved default), pick the renderer window,
 /// and run the round-trip.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn handle_export(
     path: String,
     format: String,
@@ -3138,7 +3138,7 @@ where
 /// oneshot BEFORE pushing the `export-job` command so a fast reply cannot
 /// beat the registration, then await the renderer's `{ ok, out }` /
 /// `{ ok: false, error }` payload from `POST /api/window/reply`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn export_round_trip(
     window_id: &str,
     path: String,
