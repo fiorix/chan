@@ -53,11 +53,28 @@ export interface OpenSettings {
 
 let view: Record<string, unknown> | null = null;
 
+/// The `terminal` object a write leaves stored. The config route replaces the
+/// stored object with the one sent, except for the masking choice, which has
+/// a third state, no choice: an object that leaves the key out keeps the
+/// stored choice, `null` removes it, and `true` or `false` sets it.
+function storedTerminal(
+  stored: Record<string, unknown>,
+  sent: Record<string, unknown>,
+): Record<string, unknown> {
+  const { secret_masking: choice, ...rest } = sent;
+  if (!("secret_masking" in sent)) {
+    return "secret_masking" in stored ? { ...rest, secret_masking: stored.secret_masking } : rest;
+  }
+  return choice === null ? rest : { ...rest, secret_masking: choice };
+}
+
 /// Serve `preferences` as the global config, mount Settings, open it and
-/// switch to `section`.
+/// switch to `section`. A write `refuse` answers is recorded and stores
+/// nothing.
 export async function openSettings(
   section: string,
   preferences: Record<string, unknown> = settingsPreferences(),
+  refuse: (slice: Record<string, unknown>) => Response | null = () => null,
 ): Promise<OpenSettings> {
   let revision = 1;
   let prefs = preferences;
@@ -67,7 +84,13 @@ export async function openSettings(
     if (request.method === "PATCH") {
       const slice = (request.body as { preferences: Record<string, unknown> }).preferences;
       writes.push(slice);
+      const refusal = refuse(slice);
+      if (refusal) return refusal;
+      const terminal = prefs.terminal as Record<string, unknown> | undefined;
       prefs = { ...prefs, ...slice };
+      if (slice.terminal) {
+        prefs.terminal = storedTerminal(terminal ?? {}, slice.terminal as Record<string, unknown>);
+      }
       revision += 1;
     }
     return json({ revision, preferences: prefs, workspaces: [] });
