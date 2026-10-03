@@ -29,3 +29,11 @@ As suggestions: offer a live board's entry as the elements and appState it holds
 ## Acceptance
 
 1. Restore of an entry on a live board whose scene a peer changed after the entry's stamp pushes no appState older than the peer's and keeps the peer's elements on the board; pinned red first.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted after two repairs, on its reports, its status files and an independent review of each part. No browser was driven. This record was written that day from those.
+
+Restore on a drawing's recovery banner merges only on a board that adopted a snapshot of a session that can still reach its authority. There it adds what the recovered scene holds beyond the live one, its new elements and its newer copies, takes no grid or background and restores no deletion. The entry is cleared only when the board took something of it, and the merged buffer is stored in its place in the same turn. When the recovered scene holds nothing newer, or cannot be read as a drawing, Restore changes nothing, keeps the entry and says why in the banner. On any other board Restore puts the entry's scene back whole, as before.
+
+Left, as the owner's two limits state: Restore on a live board takes no appState and restores no delete. An entry whose only extra is a file the board lacks counts as applied.

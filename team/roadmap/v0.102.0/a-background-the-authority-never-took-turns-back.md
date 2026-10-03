@@ -43,3 +43,11 @@ As a suggestion, the lead's shape: the session keeps this window's appState clai
 2. The same for one refused between a new socket's opening and its snapshot, and for one refused while the session is degraded with its socket open.
 3. The tab reads unsaved until the authority confirms the change.
 4. `editor/design.md` no longer names it as open.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted after two repairs, on its reports, its status files and an independent review of each part. No browser was driven: every effect is read in mounted tests over the demo transport and the drawing library's stand-in. This record was written that day from those.
+
+The session keeps the appState keys this window changed as a claim, taken only from a board that adopted its session's scene and never from a seed (`web/packages/workspace-app/src/state/sceneSync.svelte.ts`). It lays the claim over the authority's appState on the board and in the push. So a grid or background picked while the window was reconnecting, as its connection dropped, or while its session had fallen back to plain saves stays on the board, is sent once the window has caught up, and stands over a change another window made to the same key, while a change to another key is kept. The claim ends at the ack of the push that carried it, at a stop, at any reload that takes the disk's scene and when the tab turns read only; it follows its tab through a rename.
+
+A push's appState is the authority's with the claim's keys over it, where it was the board's four serializer keys, so the file the authority writes keeps keys the old push dropped. Left: two pushes that cross on the wire still end with the later one's whole appState; a queued push built from a stale shadow can overwrite a peer's key, which is ordered; a pick on a board that has not adopted its scene is replaced by the next snapshot.
