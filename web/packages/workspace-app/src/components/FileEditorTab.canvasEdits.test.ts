@@ -2640,6 +2640,35 @@ describe("a live drawing", () => {
       }).toEqual({ board: ["mine"], background: "#fedcba", buffer: false, pushed: [], banner: null });
     });
 
+    test("on a board whose session's first frame was an error puts the entry's scene in place of the board's", async () => {
+      // The server answered the dial with an error and no snapshot, so the
+      // board holds the buffer's scene and nothing a peer made. The entry
+      // lacks the file's element and holds a background of its own, and
+      // Restore takes it whole.
+      strand([MINE], { viewBackgroundColor: "#fedcba" });
+      const { tab } = await loadedTab(PATH, DRAWING);
+      const { board } = await mountBoard(tab);
+      board.holdRenders();
+      await board.start();
+      await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+      const socket = sceneSockets[0]!;
+      socket.open();
+      socket.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
+      await board.render();
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({
+        board: shownIds(board),
+        background: board.appState.viewBackgroundColor,
+        buffer: tab.content.includes('"on-disk"'),
+        pushed: pushed(socket),
+        banner: bannerText(),
+      }).toEqual({ board: ["mine"], background: "#fedcba", buffer: false, pushed: [], banner: null });
+    });
+
     test("on a board whose session has had no frame puts the entry's scene in place of the board's", async () => {
       // The session dials and no authority has answered, so the board holds
       // the buffer's scene and nothing a peer made. The entry lacks the file's

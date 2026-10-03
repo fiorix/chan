@@ -711,28 +711,63 @@ describe("a session that has had no frame", () => {
     expect(isDocUnflushed(tab.id)).toBe(false);
   });
 
-  test("it has no authority to reach until a frame, and has one from its first", () => {
+  test("it has no authority to reach until a board has adopted a snapshot of it", () => {
     const tab = sceneTab();
     const session = acquireSceneSession(tab)!;
     const sock = lastSocket();
     sock.open();
-    expect(session.reachesAuthority()).toBe(false);
+    const dialing = session.reachesAuthority();
+    // A snapshot with no board bound is adopted by none.
     sock.frame(snap());
-    expect(session.reachesAuthority()).toBe(true);
+    const unbound = session.reachesAuthority();
+    const binding = new FakeBinding();
+    binding.session = session;
+    session.bindCanvas(binding);
+
+    expect({ dialing, unbound, adopted: session.reachesAuthority() }).toEqual({
+      dialing: false,
+      unbound: false,
+      adopted: true,
+    });
   });
 
-  test("any frame is its first: an error the server sends before it closes the socket counts", () => {
+  test("any frame is its first: an error the server sends before it closes the socket counts, and gives its board no authority", () => {
     const tab = sceneTab();
     const session = acquireSceneSession(tab)!;
+    const binding = new FakeBinding();
+    binding.session = session;
+    session.bindCanvas(binding);
     const sock = lastSocket();
     sock.open();
     sock.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
     sock.drop();
     expect({ state: tab.doc?.state, reaches: session.reachesAuthority(), owns: session.ownsSaves() }).toEqual({
       state: "connecting",
-      reaches: true,
+      reaches: false,
       owns: true,
     });
+  });
+});
+
+describe("a tab that took the disk through a conflict's resolution", () => {
+  test("a push queued behind one on the wire sends no appState once the tab took the disk", () => {
+    const tab = sceneTab();
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("a", 1)]);
+    // Picked while the first push waits for its ack, so it is queued.
+    session.pushScene([elem("b", 1)], { viewBackgroundColor: "#123456" });
+    session.tabTookDisk();
+    sock.frame({ type: "push-ok", version: 1 });
+
+    expect(
+      sock.frames("push").map((push) => ({
+        ids: (push.elements as WireElement[]).map((el) => el.id),
+        appState: push.appState,
+      })),
+    ).toEqual([
+      { ids: ["a"], appState: undefined },
+      { ids: ["b"], appState: undefined },
+    ]);
   });
 });
 
