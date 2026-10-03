@@ -63,7 +63,8 @@ struct ResetResponse {
 /// `Arc<Workspace>` clones (in-flight handlers and MCP tool bodies, the
 /// dropped indexer's detached tokio tasks) to drop, for the workspace's last
 /// owner once the route has dropped its own reference, for the writer lock
-/// that owner's drop releases, and for a reopen refused over that lock.
+/// that owner's drop releases, and for a reopen refused over the writer
+/// lock, which that drop or another process holds.
 /// Editor-side I/O is fast (markdown reads / writes), so the first wait
 /// ends in milliseconds and the other three find nothing to wait for; each
 /// lasts its whole bound only while its own rare state does, twenty seconds
@@ -172,8 +173,11 @@ fn err_from_reset(e: &ResetError) -> Response {
 /// reopen waits for the lock within a bound of its own
 /// ([`reopen_released`]), and the answer is Busy over the reopened
 /// workspace. A lock that the wait saw free and that chan-workspace then
-/// refuses the reset or the reopen over is another process's: no wait is
-/// spent on it, and the answer is that refusal.
+/// refuses the reset over is another process's, and the answer is that
+/// refusal. The reopen waits its bound for that lock too, since only a
+/// reopen that succeeds fills the cell: the refusal is answered over the
+/// workspace reopened once the other process has let go, and a reset that
+/// was done before that process took the lock answers success over it.
 fn perform_reset(
     state: &AppState,
     mode: ResetMode,
@@ -271,10 +275,8 @@ fn perform_reset_with(
     // repaired before the operation error is returned. A failed reopen is
     // itself one of the states this route has to recover from.
     let reset_result = ops.reset_workspace(state, mode);
-    let reopened = reopen_released(releasing.then_some(RESET_DRAIN_DEADLINE), || {
-        ops.open_workspace(state)
-    })
-    .map_err(ResetError::Core)?;
+    let reopened = reopen_released(RESET_DRAIN_DEADLINE, || ops.open_workspace(state))
+        .map_err(ResetError::Core)?;
     install_workspace_cell(
         state,
         &mut cell_guard,
@@ -287,7 +289,9 @@ fn perform_reset_with(
         // when chan-workspace refused the reset over it, and is free again by
         // the reopen: nothing was reset, and a retry finds it free. A lock
         // refusal after the wait saw the lock free is another process's, and
-        // answers as that.
+        // answers as that. A lock the reopen waited for is in neither
+        // answer: a reset that was done answers success over the workspace
+        // it reopened.
         (Err(error), _) if releasing && lock_still_held(&error) => Err(ResetError::Busy),
         (Err(error), _) | (Ok(_), Some(error)) => Err(ResetError::Core(error)),
         (Ok(report), None) => Ok(report),

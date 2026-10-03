@@ -303,10 +303,8 @@ fn perform_metadata_import_with(
     };
 
     let import_result = ops.import_archive(state, archive.path(), options);
-    let reopened = reopen_released(releasing.then_some(IMPORT_DRAIN_DEADLINE), || {
-        ops.open_workspace(state)
-    })
-    .map_err(MetadataImportError::Core)?;
+    let reopened = reopen_released(IMPORT_DRAIN_DEADLINE, || ops.open_workspace(state))
+        .map_err(MetadataImportError::Core)?;
     install_workspace_cell(
         state,
         &mut cell_guard,
@@ -318,7 +316,9 @@ fn perform_metadata_import_with(
         // The lock this route gave up waiting for was still on its way out
         // when chan-workspace refused the import over it, and is free again
         // by the reopen: a retry finds it free. A lock refusal after the wait
-        // saw the lock free is another process's, and answers as that.
+        // saw the lock free is another process's, and answers as that. A
+        // lock the reopen waited for is in neither answer: an import that
+        // was done answers success over the workspace it reopened.
         (Err(error), _) if releasing && lock_still_held(&error) => Err(MetadataImportError::Busy),
         (Err(error), _) | (Ok(_), Some(error)) => Err(MetadataImportError::Core(error)),
         (Ok(report), None) => Ok(report),
@@ -386,8 +386,8 @@ pub(super) enum Release {
     Held(Arc<Workspace>),
     /// No owner is left and the wait gave up on the writer lock at the end
     /// of the second bound: the drop this process started still holds it.
-    /// The caller's own call to chan-workspace is then refused over it, the
-    /// reopen waits for it, and the answer is busy.
+    /// The caller's own call to chan-workspace is then refused over it, and
+    /// the answer to that refusal is busy.
     LockNotFreed,
 }
 
@@ -406,7 +406,8 @@ pub(super) fn lock_still_held(error: &chan_workspace::ChanError) -> bool {
 }
 
 /// A workspace reopened for a route's cell, with the first failure of a
-/// reopen that a retry recovered from.
+/// reopen that a retry recovered from. A refusal over a held lock is a wait
+/// and is not such a failure.
 pub(super) struct Reopened {
     pub(super) workspace: Arc<Workspace>,
     pub(super) recovered_from: Option<chan_workspace::ChanError>,
@@ -417,18 +418,19 @@ pub(super) struct Reopened {
 /// is what an `Err` from here leaves: the route returns it with its cell
 /// empty, since no workspace is left to put back.
 ///
-/// `releasing` is the bound to wait in when the route gave up waiting for the
-/// writer lock ([`Release::LockNotFreed`]): the lock is then on its way out
-/// with the drop of the workspace the route let go, so a reopen refused over
-/// it is asked again until the bound has passed, and such a refusal is not
-/// reported once a reopen succeeds. Without it a lock refusal is another
-/// process's lock and no wait. Any other failure is retried once and kept for
-/// the caller's answer when the retry recovers.
+/// A reopen refused because the writer lock is held is asked again until
+/// `bound` has passed, whoever holds the lock: the drop of the workspace the
+/// route let go, which releases it last, or another process that took it
+/// since. The cell is filled only by a reopen that succeeds, so such a
+/// refusal is a wait, and it is not reported once a reopen succeeds: the
+/// route's answer rests on its operation and on what its wait for the
+/// release ended on. Any other failure is retried once and kept for the
+/// caller's answer when the retry recovers.
 pub(super) fn reopen_released(
-    releasing: Option<Duration>,
+    bound: Duration,
     mut open: impl FnMut() -> chan_workspace::Result<Arc<Workspace>>,
 ) -> chan_workspace::Result<Reopened> {
-    let deadline = releasing.map(|bound| Instant::now() + bound);
+    let deadline = Instant::now() + bound;
     let mut recovered_from = None;
     loop {
         match open() {
@@ -438,8 +440,8 @@ pub(super) fn reopen_released(
                     recovered_from,
                 })
             }
-            Err(error) if deadline.is_some() && lock_still_held(&error) => {
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Err(error) if lock_still_held(&error) => {
+                if Instant::now() >= deadline {
                     return Err(error);
                 }
                 std::thread::sleep(REOPEN_POLL);
