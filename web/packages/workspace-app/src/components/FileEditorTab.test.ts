@@ -686,6 +686,77 @@ describe("recovering unsaved work from an earlier page load", () => {
       "# Plan\n\nUnsaved edit.\n",
     );
   });
+
+  // When the earlier page load stamped its buffer, and the mtime of a file
+  // written a minute after that.
+  const STAMPED_MS = 1_700_000_000_000;
+  const WRITTEN_AFTER_NS = String((STAMPED_MS + 60_000) * 1_000_000);
+
+  /// A buffer an earlier page load stamped for `tab`'s path, before the file
+  /// the tab holds was written.
+  function strandBufferBeforeTheWrite(tab: FileTab, content: string): FileTab {
+    localStorage.setItem(
+      bufferKey(tab.path),
+      JSON.stringify({ content, updatedAt: STAMPED_MS, path: tab.path, sessionId: "an-earlier-load" }),
+    );
+    return { ...tab, savedMtimeNs: WRITTEN_AFTER_NS, savedMtime: Number(WRITTEN_AFTER_NS) / 1e9 };
+  }
+
+  /// What the tab's open offers and what stays stored for its path.
+  const offered = (target: HTMLElement, tab: FileTab) => ({
+    banner: banner(target) !== null,
+    stored: readEditorBuffer(tab.path)?.content ?? null,
+  });
+
+  // A drawing's file as a scene session's authority writes it, holding one
+  // stroke, and a board's serialization of the drawing with a second.
+  const FIRST_STROKE = { id: "first", isDeleted: false, type: "rectangle", version: 1, versionNonce: 1 };
+  const AUTHORITY_FILE = JSON.stringify(
+    { type: "excalidraw", version: 2, source: "chan", elements: [FIRST_STROKE], appState: {}, files: {} },
+    null,
+    2,
+  );
+  const BOARD_BUFFER = JSON.stringify(
+    {
+      type: "excalidraw",
+      version: 2,
+      source: "http://localhost",
+      elements: [FIRST_STROKE, { ...FIRST_STROKE, id: "last-stroke", versionNonce: 2 }],
+      appState: { gridSize: 20, gridStep: 5, gridModeEnabled: false, viewBackgroundColor: "#ffffff" },
+      files: {},
+    },
+    null,
+    2,
+  );
+  const drawing = (content: string) =>
+    fileTab({ path: "boards/b.excalidraw", fileKind: "text", mode: "canvas", content, saved: content });
+
+  test.each([
+    ["a text file", () => fileTab(), "# Plan\n\nThe first paragraph.\n\nTyped and never saved.\n"],
+    ["a drawing", () => drawing(AUTHORITY_FILE), BOARD_BUFFER],
+  ])("%s written after the buffer's stamp without the buffer's last change leaves the buffer offered", async (_kind, open, unsaved) => {
+    const tab = seat(strandBufferBeforeTheWrite(open(), unsaved));
+    const { target } = await render(tab);
+    const atOpen = offered(target, tab);
+    [...(banner(target)?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.trim() === "Restore")?.click();
+    await settle(2);
+
+    expect({ atOpen, restored: tab.content === unsaved }).toEqual({
+      atOpen: { banner: true, stored: unsaved },
+      restored: true,
+    });
+  });
+
+  test.each([
+    ["a text file", () => fileTab()],
+    ["a drawing", () => drawing(BOARD_BUFFER)],
+  ])("a buffer whose content %s holds is not offered and is dropped", async (_kind, open) => {
+    const held = open();
+    const tab = seat(strandBufferBeforeTheWrite(held, held.content));
+    const { target } = await render(tab);
+
+    expect(offered(target, tab)).toEqual({ banner: false, stored: null });
+  });
 });
 
 describe("the caret command", () => {
