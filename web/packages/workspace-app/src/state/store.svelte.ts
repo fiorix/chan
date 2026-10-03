@@ -135,6 +135,7 @@ import {
 import { respondClipboardRead, warnUnlessStaleReply } from "./pasteRequest.svelte";
 import {
   appendDefaultMd,
+  backslashReason,
   preserveExtension,
   proposeDefaultFilename,
 } from "./pathValidate";
@@ -5176,13 +5177,35 @@ export function resolvePathPrompt(value: string | null): void {
 /// affordances keeps the actions consistent regardless of which entry
 /// point the user reaches for.
 
+/// List each directory above `path`'s parent that the tree knows and has not
+/// listed, so that a check which reads the tree sees every directory on the
+/// way to `path` that exists. A directory that cannot be listed stays unknown.
+async function listKnownAncestors(path: string): Promise<void> {
+  let acc = "";
+  for (const name of path.split("/").slice(0, -2)) {
+    acc = acc ? `${acc}/${name}` : name;
+    if (!tree.entries.some((e) => e.is_dir && e.path === acc)) return;
+    if (tree.loadedDirs[acc]) continue;
+    try {
+      await loadTreeDir(acc);
+    } catch {
+      return;
+    }
+  }
+}
+
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style
-/// prompt) and drag-and-drop. No-ops if source == target. An occupied
+/// prompt), the editor's inline rename and drag-and-drop. No-ops if
+/// source == target. An occupied
 /// target is refused by name: `preflight_rename` in chan-workspace answers
 /// 409 for any destination that already exists and is not the same file, so
 /// there is nothing to offer the user beyond saying which path is taken.
 /// Refreshes the tree and re-keys open tabs so in-memory state follows
 /// the rename without a refetch round-trip.
+///
+/// A target that holds a `\` is held to `backslashReason`, the path prompt's
+/// rule, before anything is sent: the server takes a `\` as a character of a
+/// name on Unix, so nothing after this would refuse a name that gains one.
 ///
 /// The server runs the rename + link-rewrite pass synchronously. For a
 /// single-file rename with few backlinks this is sub-100ms; for a
@@ -5197,6 +5220,15 @@ async function performMove(path: string, target: string): Promise<void> {
     fileBrowserDraftsPathReason(path) ?? fileBrowserDraftsPathReason(target);
   if (draftsReason) {
     ui.status = `move failed: ${draftsReason}`;
+    return;
+  }
+  if (target.includes("\\")) await listKnownAncestors(target);
+  const backslash = backslashReason(target, {
+    source: path,
+    exists: (at) => tree.entries.some((e) => e.path === at),
+  });
+  if (backslash) {
+    ui.status = `rename failed: ${backslash}`;
     return;
   }
   const existing = tree.entries.find((e) => e.path === target);
