@@ -27,15 +27,20 @@ const TINY_PNG = Uint8Array.from(
   (c) => c.charCodeAt(0),
 );
 
-type RasterCall = { box: PageBoxPx; scale: number | undefined };
+type RasterCall = {
+  box: PageBoxPx;
+  scale: number | undefined;
+  /// Whether the page was in the document when it was rasterized.
+  attached: boolean;
+};
 
 function fakeRasterizer(calls: RasterCall[]) {
   return async (
-    _root: HTMLElement,
+    root: HTMLElement,
     box: PageBoxPx,
     opts?: { scale?: number },
   ): Promise<PageSnapshot> => {
-    calls.push({ box, scale: opts?.scale });
+    calls.push({ box, scale: opts?.scale, attached: root.isConnected });
     return { png: TINY_PNG, widthPx: 2, heightPx: 2 };
   };
 }
@@ -125,6 +130,10 @@ describe("exportMarkdownToPdf", () => {
     expect(Math.ceil(calls[0]!.box.widthPx * calls[0]!.scale!)).toBe(
       Math.ceil(DECK_PAGE_BOX_PX.widthPx * RASTER_SCALE),
     );
+    // A slide is measured for its fit before it is drawn, so it is in the
+    // document by then, and gone once the export is done.
+    expect(calls.map((call) => call.attached)).toEqual([true, true, true]);
+    expect(document.body.children).toHaveLength(0);
   });
 
   test("a document exports paginated A4 portrait pages", async () => {

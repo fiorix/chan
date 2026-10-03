@@ -161,11 +161,11 @@ describe("slideBoxFit", () => {
 
 describe("deckSlideLayoutBox", () => {
   // The other side of the mirror: slidePreview.ts pageStyle sizes a
-  // preview slide as width:min(86vw, <86*ratio>vh) with the height
-  // fixed by the aspect ratio and padding clamp(22px, 4vw, 54px). The
-  // preview must keep that CSS viewport-responsive, so the export
+  // playing slide as width:100vw capped at max-width:<100*ratio>vh, with
+  // the height fixed by the aspect ratio and padding clamp(22px, 4vw,
+  // 54px). Play must keep that CSS viewport-responsive, so the export
   // mirrors it as numbers at the reference viewport; this test spells
-  // the preview formula out so drift on either side fails here.
+  // play's formula out so drift on either side fails here.
   const vw = 1920;
   const vh = 1080;
 
@@ -173,26 +173,26 @@ describe("deckSlideLayoutBox", () => {
     ["16:9", 16 / 9],
     ["4:3", 4 / 3],
   ] as [SlideAspectRatio, number][])(
-    "%s mirrors the preview page box at the reference viewport",
+    "%s mirrors the box a slide plays in at the reference viewport",
     (aspect, ratio) => {
       expect(DECK_LAYOUT_VIEWPORT_PX).toEqual({ widthPx: vw, heightPx: vh });
       const box = deckSlideLayoutBox(aspect);
-      const previewWidth = Math.min((86 / 100) * vw, (86 / 100) * vh * ratio);
-      expect(box.widthPx).toBeCloseTo(previewWidth, 6);
-      expect(box.heightPx).toBeCloseTo(previewWidth / ratio, 6);
+      const playWidth = Math.min(vw, vh * ratio);
+      expect(box.widthPx).toBeCloseTo(playWidth, 6);
+      expect(box.heightPx).toBeCloseTo(playWidth / ratio, 6);
     },
   );
 
   test("pins the concrete reference boxes", () => {
     const wide = deckSlideLayoutBox("16:9");
-    expect(wide.widthPx).toBeCloseTo(1651.2, 4);
-    expect(wide.heightPx).toBeCloseTo(928.8, 4);
+    expect(wide.widthPx).toBeCloseTo(1920, 4);
+    expect(wide.heightPx).toBeCloseTo(1080, 4);
     const narrow = deckSlideLayoutBox("4:3");
-    expect(narrow.widthPx).toBeCloseTo(1238.4, 4);
-    expect(narrow.heightPx).toBeCloseTo(928.8, 4);
+    expect(narrow.widthPx).toBeCloseTo(1440, 4);
+    expect(narrow.heightPx).toBeCloseTo(1080, 4);
   });
 
-  test("the padding constant is the preview clamp at the reference viewport", () => {
+  test("the padding constant is play's clamp at the reference viewport", () => {
     expect(DECK_LAYOUT_PADDING_PX).toBe(Math.max(22, Math.min(54, 0.04 * vw)));
   });
 });
@@ -284,6 +284,26 @@ describe("buildSlidePageDom", () => {
     expect(
       slide.querySelector<HTMLElement>(".md-slide-preview-content"),
     ).not.toBeNull();
+  });
+
+  test("a code block of the page grows to its longest line instead of scrolling", async () => {
+    const dom = buildSlidePageDom({
+      markdown: "```sh\none long line\n```\n",
+      fromPath: null,
+      spec: { aspectRatio: "16:9", zoomFactor: 2 },
+      theme: "light",
+    });
+    await dom.completion;
+    document.body.append(dom.root);
+
+    const pre = dom.root.querySelector("pre")!;
+    const style = getComputedStyle(pre);
+    expect(style.overflow).toBe("visible");
+    expect(style.width).toBe("max-content");
+    // No narrower than the slide's content, padding included.
+    expect(style.minWidth).toBe("100%");
+    expect(style.boxSizing).toBe("border-box");
+    dom.root.remove();
   });
 });
 
