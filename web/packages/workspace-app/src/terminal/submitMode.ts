@@ -10,6 +10,7 @@ export type SubmitAgent =
   | "codex"
   | "gemini"
   | "kimi"
+  | "muse"
   | "opencode";
 
 /// Infer an agent from the keyboard protocol a running TUI announced. This is

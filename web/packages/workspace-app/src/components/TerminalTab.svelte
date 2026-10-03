@@ -1918,7 +1918,7 @@
   /// (the raw keystroke path bypasses the queue). Returns whether the WS was
   /// open so the orchestrator can retry a freshly-spawned lead. `agent` picks
   /// the encoding (claude CSI, codex/opencode bracketed paste + CR, gemini
-  /// split CR); omitted defaults to claude server-side. A Rich Prompt is its
+  /// and muse split CR); omitted defaults to claude server-side. A Rich Prompt is its
   /// own agent turn: the notification batcher never folds it into a batch.
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
