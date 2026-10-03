@@ -73,7 +73,7 @@ export function fenceLineTracker(): (line: string) => FenceLine {
         marker &&
         marker.run[0] === fence.run[0] &&
         marker.run.length >= fence.run.length &&
-        /^ *$/.test(marker.rest)
+        /^[ \t]*$/.test(marker.rest)
       ) {
         fence = null;
         return "fence";
