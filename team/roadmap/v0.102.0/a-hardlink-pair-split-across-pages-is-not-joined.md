@@ -30,3 +30,9 @@ Rule one of three. The server joins: the cursor carries what a later batch needs
 
 1. The ruling is recorded.
 2. If it changes the walk: two hardlinked paths that fall in different batches of a paged load are joined by one hardlink edge, pinned red first with a batch size that splits them; the unpaged walk's output is unchanged.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files, an independent review of its whole diff and the lead's own reading of what that review questioned. This record was written that day from those.
+
+The server's half is built, and the row stays open for the page's. A node of a paged directory walk whose link count is above one carries `link_group` beside `link_count` (`link_group_of`, `crates/chan-server/src/routes/fs_graph.rs`): 16 hexadecimal digits of a keyed hash of the file's device and inode, under a key drawn once in the server process and never logged. Only a regular file counts more than one link, so the group is on files alone, the set the walk joins by an edge. The unpaged walk's output, a file-scope answer and the paged walk's own edges are unchanged; pinned red first with a batch size that splits a pair. Acceptance 2 is met in the ruling's shape and not as it is written: the two nodes of a split pair carry one group, and the server adds no edge. Left: the page does not join by the group yet, which is ordered. The costs, as ruled: a load that spans a server restart reads two keys and does not join a pair split across it, and two files that are not linked share a group with a chance of 2^-64 a pair.
