@@ -808,3 +808,228 @@ describe("command rejection ownership", () => {
   });
 
 });
+
+describe("command success ownership", () => {
+  type Draft = import("../command-deck/model").DeckDraft;
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  function host(method: "open" | "close"): void {
+    (app[method] as () => void)();
+  }
+
+  function draft(): Draft {
+    return (app.currentDraft as () => Draft)();
+  }
+
+  /// Mount one awaited command and choose it. `card` picks the success that
+  /// shows a card for 260 ms over the one that dismisses at once.
+  function start(card: boolean, onChoose: (entry: DeckItem) => Promise<void>): {
+    entry: DeckItem;
+    onSuccess: ReturnType<typeof vi.fn>;
+  } {
+    const entry = { ...item(undefined), dismissImmediatelyOnSuccess: !card };
+    const onSuccess = vi.fn();
+    app = mount(CommandDeckHarness, { target, props: { items: [entry], onChoose, onSuccess } });
+    closeResult().click();
+    return { entry, onSuccess };
+  }
+
+  /// Carry an answered command past its success card's 260 ms.
+  async function settle(): Promise<void> {
+    await flush();
+    await vi.advanceTimersByTimeAsync(260);
+    await flush();
+  }
+
+  for (const card of [true, false]) {
+    const shape = card ? "with a success card" : "dismissing at once";
+
+    it(`a released command ${shape} leaves the list and closes nothing`, async () => {
+      const running = deferred<void>();
+      const { onSuccess } = start(card, () => running.promise);
+      await flush();
+      escape();
+      await flush();
+      running.resolve();
+      await flush();
+      expect(target.querySelector(".deck-operation"), "no card over the list").toBeNull();
+      await settle();
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(draft().operation).toBeNull();
+      expect(closeResult()).not.toBeNull();
+    });
+
+    it(`a released command ${shape} leaves a newer command's card`, async () => {
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const onChoose = vi.fn()
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise);
+      const { entry, onSuccess } = start(card, onChoose);
+      await flush();
+      escape();
+      await flush();
+      closeResult().click();
+      await flush();
+      const newer = draft().operation;
+      expect(newer?.kind).toBe("pending");
+      first.resolve();
+      await settle();
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(draft().operation).toBe(newer);
+      expect(target.querySelector(".deck-operation")?.textContent).toContain("Working");
+      // The newer run still owns its card, so its success is the one shown.
+      second.resolve();
+      await settle();
+      expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
+    });
+
+    for (const lazy of [false, true]) {
+      it(`a released command ${shape} leaves a ${lazy ? "preparation" : "question"}`, async () => {
+        const running = deferred<void>();
+        const preparing = deferred<DeckConfirm>();
+        const { entry, onSuccess } = start(card, () => running.promise);
+        await flush();
+        escape();
+        await flush();
+        (app.setItems as (entries: DeckItem[]) => void)([{
+          ...entry, confirm: lazy ? () => preparing.promise : confirmation("Current question"),
+        }]);
+        await flush();
+        closeResult().click();
+        await flush();
+        const question = draft().operation;
+        expect(question?.kind).toBe(lazy ? "preparing" : "confirm");
+        running.resolve();
+        await settle();
+        expect(onSuccess).not.toHaveBeenCalled();
+        expect(draft().operation).toBe(question);
+        preparing.resolve(confirmation("Current question"));
+        await flush();
+        expect(target.querySelector(".deck-operation")?.textContent).toContain("Current question");
+      });
+    }
+
+    it(`a command ${shape} that answers a hidden deck retires its card and closes nothing`, async () => {
+      const running = deferred<void>();
+      const { onSuccess } = start(card, () => running.promise);
+      await flush();
+      host("close");
+      await flush();
+      running.resolve();
+      await settle();
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(draft().operation).toBeNull();
+      host("open");
+      await flush();
+      expect(target.querySelector(".deck-operation")).toBeNull();
+      expect(closeResult()).not.toBeNull();
+    });
+
+    it(`a command ${shape} whose card the host cleared shows no success`, async () => {
+      const running = deferred<void>();
+      const { onSuccess } = start(card, () => running.promise);
+      await flush();
+      draft().operation = null;
+      await flush();
+      running.resolve();
+      await flush();
+      expect(target.querySelector(".deck-operation"), "no card over the list").toBeNull();
+      await settle();
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(closeResult()).not.toBeNull();
+    });
+
+    it(`a command ${shape} retires its own card on a replaced draft`, async () => {
+      const running = deferred<void>();
+      const { onSuccess } = start(card, () => running.promise);
+      await flush();
+      const original = draft();
+      (app.replaceDraft as () => void)();
+      await flush();
+      running.resolve();
+      await settle();
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(original.operation).toBeNull();
+      expect(draft().operation).toBeNull();
+    });
+
+    it(`a command ${shape} hidden and reopened under its own card still shows its success`, async () => {
+      const running = deferred<void>();
+      const { entry, onSuccess } = start(card, () => running.promise);
+      await flush();
+      host("close");
+      await flush();
+      host("open");
+      await flush();
+      expect(target.querySelector(".deck-operation")?.textContent).toContain("Working");
+      running.resolve();
+      await settle();
+      expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
+    });
+  }
+
+  it("a command that still owns its card shows its success, then runs the host's handler", async () => {
+    const running = deferred<void>();
+    const { entry, onSuccess } = start(true, () => running.promise);
+    await flush();
+    expect(draft().operation?.kind).toBe("pending");
+    running.resolve();
+    await flush();
+    expect(target.querySelectorAll(".deck-operation-icon.success")).toHaveLength(1);
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Done");
+    await vi.advanceTimersByTimeAsync(259);
+    expect(onSuccess).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
+  });
+
+  it("a command that dismisses at once runs the host's handler with no success card", async () => {
+    const running = deferred<void>();
+    const { entry, onSuccess } = start(false, () => running.promise);
+    await flush();
+    running.resolve();
+    await flush();
+    expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
+    expect(target.querySelector(".deck-operation-icon.success")).toBeNull();
+  });
+
+  it("a success card hidden inside its 260 ms closes nothing and leaves no card", async () => {
+    const { onSuccess } = start(true, async () => {});
+    await flush();
+    expect(draft().operation?.kind).toBe("success");
+    escape();
+    await flush();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    await settle();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(draft().operation).toBeNull();
+    host("open");
+    await flush();
+    expect(closeResult()).not.toBeNull();
+  });
+
+  it("a success card the host cleared inside its 260 ms closes nothing", async () => {
+    const { onSuccess } = start(true, async () => {});
+    await flush();
+    expect(draft().operation?.kind).toBe("success");
+    draft().operation = null;
+    await settle();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(closeResult()).not.toBeNull();
+  });
+
+  it("a success card retires on a draft replaced inside its 260 ms", async () => {
+    const { onSuccess } = start(true, async () => {});
+    await flush();
+    const original = draft();
+    expect(original.operation?.kind).toBe("success");
+    (app.replaceDraft as () => void)();
+    await settle();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(original.operation).toBeNull();
+  });
+});
