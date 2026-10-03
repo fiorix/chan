@@ -3,7 +3,8 @@
 // A file tab's save on the standalone Files surface, over the real request
 // layer: the PUT carries the hash of the text the tab's last load or accepted
 // save left it, so a write over bytes the tab did not load is refused though
-// the file's token did not move, and the write Overwrite frees carries none.
+// the file's token did not move, and a write under Overwrite's choice carries
+// none, from the click until that choice ends.
 // The fetch below answers as the standalone routes do: a read streams the
 // file's text under its token, and a write whose token differs, or whose hash
 // differs from the file's text, gets the route's conflict. A write the test
@@ -259,7 +260,7 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     expect(file.text).toBe("loaded and mine, again");
   });
 
-  test("the write Overwrite frees carries no hash when another save is on the wire at the click", async () => {
+  test("the write that follows a save on the wire at Overwrite's click carries no hash", async () => {
     const t = await loadedTab();
     file.text = "theirs";
     t.content = "loaded and mine";
@@ -358,7 +359,7 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     });
   });
 
-  test("an Overwrite whose run sent no write of its own frees none later", async () => {
+  test("a save on the wire at Overwrite's click that is accepted ends the choice with no write sent under it", async () => {
     const t = await loadedTab();
     file.text = "theirs";
     t.content = "loaded and mine";
