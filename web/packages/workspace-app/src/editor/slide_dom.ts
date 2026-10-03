@@ -723,6 +723,25 @@ ${scope} .md-slide-diagram-error-src {
 `;
 }
 
+/// On a slide page built for an export, beside the preview page class.
+export const SLIDE_EXPORT_CLASS = "md-slide-export";
+
+/// Rules a slide page takes only in an export, after `slidePreviewCss`.
+/// On screen a code block scrolls sideways; a raster has nothing to
+/// scroll, so the block grows to its longest line instead, never narrower
+/// than the slide's content, and the export scales a slide that this
+/// makes wider than its box.
+export function slideExportCss(): string {
+  return `
+.${SLIDE_EXPORT_CLASS} pre {
+  overflow: visible;
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+}
+`;
+}
+
 /// Typographic and rhythm rules for a slide page, scoped under the
 /// preview page class. Both the fullscreen preview and the export
 /// engine reuse the same class names so slides render identically.

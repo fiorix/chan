@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   DECK_LAYOUT_PADDING_PX,
   DECK_LAYOUT_VIEWPORT_PX,
@@ -11,8 +11,10 @@ import {
   deckPageLayout,
   deckSlideLayoutBox,
   docPageGeometry,
+  fitSlideContent,
   paginateDocBlocks,
   slideBoxFit,
+  slideFitScale,
   type DocBlockRect,
 } from "./pdf_pages";
 import { RASTER_SCALE } from "./pdf_snapshot";
@@ -304,6 +306,124 @@ describe("buildSlidePageDom", () => {
     expect(style.minWidth).toBe("100%");
     expect(style.boxSizing).toBe("border-box");
     dom.root.remove();
+  });
+});
+
+describe("slideFitScale", () => {
+  const BOX = { widthPx: 900, heightPx: 480 };
+
+  test("content that fits keeps its size", () => {
+    expect(slideFitScale({ widthPx: 900, heightPx: 300 }, BOX)).toBe(1);
+    expect(slideFitScale({ widthPx: 900, heightPx: 480 }, BOX)).toBe(1);
+  });
+
+  test("content taller than the box is scaled to the box's height", () => {
+    expect(slideFitScale({ widthPx: 900, heightPx: 600 }, BOX)).toBeCloseTo(
+      0.8,
+      10,
+    );
+  });
+
+  test("content wider than the box is scaled to the box's width", () => {
+    expect(slideFitScale({ widthPx: 1200, heightPx: 300 }, BOX)).toBeCloseTo(
+      0.75,
+      10,
+    );
+  });
+
+  test("the axis that overflows more decides", () => {
+    expect(slideFitScale({ widthPx: 1200, heightPx: 960 }, BOX)).toBeCloseTo(
+      0.5,
+      10,
+    );
+  });
+
+  test("a box or a content with no size scales nothing", () => {
+    const none = { widthPx: 0, heightPx: 0 };
+    expect(slideFitScale(none, none)).toBe(1);
+    expect(slideFitScale({ widthPx: 900, heightPx: 600 }, none)).toBe(1);
+  });
+});
+
+describe("fitSlideContent", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  /// A deck page whose content element answers with the sizes given:
+  /// jsdom lays out nothing, so the engine's answers are stood in.
+  function pageOf(sizes: {
+    box: [number, number];
+    extent: [number, number];
+  }): { root: HTMLElement; content: HTMLElement; heldAt: string[] } {
+    const dom = buildSlidePageDom({
+      markdown: "# Title\n\nbody\n",
+      fromPath: null,
+      spec: { aspectRatio: "16:9", zoomFactor: 2 },
+      theme: "light",
+    });
+    document.body.append(dom.root);
+    const content = dom.root.querySelector<HTMLElement>(
+      ".md-slide-preview-content",
+    )!;
+    // The height the content was held at for each reading.
+    const heldAt: string[] = [];
+    const answer = (value: number) =>
+      function (this: Element): number {
+        if (this === content) heldAt.push(content.style.height);
+        return this === content ? value : 0;
+      };
+    vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(
+      answer(sizes.box[0]),
+    );
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(
+      answer(sizes.box[1]),
+    );
+    vi.spyOn(Element.prototype, "scrollWidth", "get").mockImplementation(
+      answer(sizes.extent[0]),
+    );
+    vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(
+      answer(sizes.extent[1]),
+    );
+    return { root: dom.root, content, heldAt };
+  }
+
+  test("content that fits is left as it is", () => {
+    const { root, content } = pageOf({ box: [900, 480], extent: [900, 300] });
+    expect(fitSlideContent(root)).toBe(1);
+    expect(content.style.transform).toBe("");
+  });
+
+  test("content taller than the slide is scaled from its top and centered", () => {
+    const { root, content } = pageOf({ box: [900, 480], extent: [900, 600] });
+    expect(fitSlideContent(root)).toBeCloseTo(0.8, 10);
+    // 0.8 of the width is drawn, so a tenth of it is left on each side.
+    expect(content.style.transform).toBe("translateX(10%) scale(0.8)");
+    expect(content.style.transformOrigin).toBe("top left");
+  });
+
+  test("content wider than the slide is scaled to span it", () => {
+    const { root, content } = pageOf({ box: [900, 480], extent: [1200, 300] });
+    expect(fitSlideContent(root)).toBeCloseTo(0.75, 10);
+    expect(content.style.transform).toBe("translateX(0%) scale(0.75)");
+  });
+
+  test("an extent one px past the box is rounding, not an overflow", () => {
+    const { root, content } = pageOf({ box: [900, 480], extent: [901, 481] });
+    expect(fitSlideContent(root)).toBe(1);
+    expect(content.style.transform).toBe("");
+  });
+
+  test("every size is read with the content held at the slide's height", () => {
+    const { root, content, heldAt } = pageOf({
+      box: [900, 480],
+      extent: [900, 600],
+    });
+    fitSlideContent(root);
+    expect(heldAt.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(heldAt)).toEqual(new Set(["100%"]));
+    expect(content.style.height).toBe("");
   });
 });
 

@@ -120,7 +120,7 @@ describe("exportMarkdownToPdf", () => {
       expect(page.getHeight()).toBeCloseTo(595.28, 2);
     }
     expect(calls).toHaveLength(3);
-    // Slides raster from the preview-reference layout box at the
+    // Slides raster from the play box of the reference viewport at the
     // compensating per-page scale; the output bitmap stays the A4 box
     // at the default raster scale.
     const layout = deckPageLayout("16:9");

@@ -14,6 +14,7 @@ import {
   DOC_CONTENT_WIDTH_PX,
   DOC_MARGIN_PT,
   docPageGeometry,
+  fitSlideContent,
   measureDocBlocks,
   paginateDocBlocks,
 } from "./pdf_pages";
@@ -46,9 +47,9 @@ export type ExportMarkdownOptions = {
 
 /// Test seam: the orchestrator's page rasterizer. `box` is the CSS-px
 /// box `root` lays out at; deck pages also pass a per-page scale that
-/// maps their preview-reference layout box onto the fixed A4 bitmap
-/// (documents omit it and raster at the default RASTER_SCALE). A
-/// document's pages pass the images they share and say which is last.
+/// maps the play box they lay out at onto the fixed A4 bitmap (documents
+/// omit it and raster at the default RASTER_SCALE). A document's pages
+/// pass the images they share and say which is last.
 export type ExportSeams = {
   rasterize?: (
     root: HTMLElement,
@@ -240,33 +241,45 @@ export async function exportMarkdownToPdf(
 
   const spec = parseSlidesSpec(opts.markdown);
   if (spec) {
-    for (const page of splitSlidePages(opts.markdown)) {
-      const slide = buildSlidePageDom({
-        markdown: page.markdown,
-        fromPath: opts.path,
-        spec,
-        theme: opts.theme,
-        styleSource: opts.styleSource,
-      });
-      const snap = await withPageTimeout(
-        slide.completion.then(() =>
-          rasterize(slide.root, slide.box, { scale: slide.rasterScale }),
-        ),
-        `slide ${page.number} render`,
-      );
-      const png = await pdf.embedPng(snap.png);
-      const pdfPage = pdf.addPage([
-        A4_LANDSCAPE_PT.widthPt,
-        A4_LANDSCAPE_PT.heightPt,
-      ]);
-      pdfPage.drawImage(png, {
-        x: 0,
-        y: 0,
-        width: A4_LANDSCAPE_PT.widthPt,
-        height: A4_LANDSCAPE_PT.heightPt,
-      });
+    // Attach each slide offscreen: its fit measures final layout.
+    const host = document.createElement("div");
+    host.style.cssText = "position:fixed;left:-100000px;top:0;";
+    document.body.appendChild(host);
+    try {
+      for (const page of splitSlidePages(opts.markdown)) {
+        const slide = buildSlidePageDom({
+          markdown: page.markdown,
+          fromPath: opts.path,
+          spec,
+          theme: opts.theme,
+          styleSource: opts.styleSource,
+        });
+        host.replaceChildren(slide.root);
+        const snap = await withPageTimeout(
+          slide.completion.then(() => {
+            fitSlideContent(slide.root);
+            return rasterize(slide.root, slide.box, {
+              scale: slide.rasterScale,
+            });
+          }),
+          `slide ${page.number} render`,
+        );
+        const png = await pdf.embedPng(snap.png);
+        const pdfPage = pdf.addPage([
+          A4_LANDSCAPE_PT.widthPt,
+          A4_LANDSCAPE_PT.heightPt,
+        ]);
+        pdfPage.drawImage(png, {
+          x: 0,
+          y: 0,
+          width: A4_LANDSCAPE_PT.widthPt,
+          height: A4_LANDSCAPE_PT.heightPt,
+        });
+      }
+      return await pdf.save();
+    } finally {
+      host.remove();
     }
-    return await pdf.save();
   }
 
   const geometry = docPageGeometry();

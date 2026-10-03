@@ -11,17 +11,23 @@
 // out at a fixed printable width in CSS px, so pagination measures
 // final geometry. Decks render one slide per page, A4 landscape, the
 // slide box aspect-fit and centered on a page painted in the slide
-// theme background; the deck page DOM lays out at a preview-reference
-// pixel box and rasterizes at a compensating scale so px-sized media
-// keeps its on-screen fraction of the slide (see deckPageLayout).
+// theme background; the deck page DOM lays out at the box a slide plays
+// in on a reference screen and rasterizes at a compensating scale, so a
+// line breaks where it breaks in play and px-sized media keeps the
+// fraction of the slide it has there (see deckPageLayout). A slide whose
+// content is larger than that box is drawn whole and smaller (see
+// fitSlideContent).
 
 import {
   contentStyle,
+  cssNumber,
   editorTokens,
   prepareSlideImages,
   replaceEmbedsWithLinks,
   renderSlideDiagrams,
   renderSlideMarkdown,
+  SLIDE_EXPORT_CLASS,
+  slideExportCss,
   slidePageBoxStyle,
   slidePreviewCss,
   type SlideDomTheme,
@@ -196,25 +202,29 @@ export function slideBoxFit(
 }
 
 /// Reference viewport for the deck layout box: the common 1920x1080
-/// desktop screen the fullscreen preview is typically seen on.
+/// screen a deck plays on. A slide's text does not grow with the screen
+/// and its box does, so where a line breaks depends on the screen, and a
+/// PDF can hold one answer: the same deck gives the same PDF from any
+/// window, with the lines of play at this screen.
 export const DECK_LAYOUT_VIEWPORT_PX = { widthPx: 1920, heightPx: 1080 };
 
-/// The preview page padding at the reference viewport: the overlay's
+/// The slide page padding at the reference viewport: the overlay's
 /// clamp(22px, 4vw, 54px) resolves to 54px there (4vw = 76.8px).
 export const DECK_LAYOUT_PADDING_PX = 54;
 
-/// The preview overlay's page box evaluated at the reference viewport:
-/// slidePreview.ts pageStyle sizes a preview slide as
-/// width:min(86vw, <86*ratio>vh) with the height fixed by the aspect
-/// ratio. That CSS must stay viewport-responsive, so the formula is
-/// mirrored here as numbers; pdf_pages.test.ts pins both sides of the
-/// mirror so drift in either place fails the test.
+/// The box a slide plays in at the reference viewport: slidePreview.ts
+/// pageStyle sizes a playing slide as width:100vw capped at
+/// max-width:<100*ratio>vh, with the height fixed by the aspect ratio.
+/// That CSS must stay viewport-responsive, so the formula is mirrored
+/// here as numbers; pdf_pages.test.ts pins both sides of the mirror so
+/// drift in either place fails the test. The preview's own box is
+/// narrower (86 percent of the viewport) and is not what a PDF follows.
 export function deckSlideLayoutBox(aspectRatio: SlideAspectRatio): PageBoxPx {
   const [w, h] = aspectRatio.split(":").map(Number);
   const ratio = w! / h!;
   const widthPx = Math.min(
-    0.86 * DECK_LAYOUT_VIEWPORT_PX.widthPx,
-    0.86 * DECK_LAYOUT_VIEWPORT_PX.heightPx * ratio,
+    DECK_LAYOUT_VIEWPORT_PX.widthPx,
+    DECK_LAYOUT_VIEWPORT_PX.heightPx * ratio,
   );
   return { widthPx, heightPx: widthPx / ratio };
 }
@@ -232,12 +242,13 @@ export type DeckPageLayout = {
   rasterScale: number;
 };
 
-/// Deck page layout: diagrams and #w= images size at min(native px,
-/// container px), so a slide laid out directly in the A4-px box shows
-/// them at a different fraction of the slide than the on-screen
-/// preview. Deck pages therefore LAY OUT at the preview-reference box
-/// and rasterize at the compensating scale; the PDF page geometry and
-/// the raster pixel size are unchanged.
+/// Deck page layout: text is sized in px and diagrams and #w= images at
+/// min(native px, container px), so a slide laid out directly in the
+/// A4-px box breaks its lines elsewhere and shows its media at a
+/// different fraction of the slide than the deck does when it plays.
+/// Deck pages therefore LAY OUT at the play box of the reference
+/// viewport and rasterize at the compensating scale; the PDF page
+/// geometry and the raster pixel size do not depend on that box.
 export function deckPageLayout(aspectRatio: SlideAspectRatio): DeckPageLayout {
   const fit = slideBoxFit(aspectRatio, DECK_PAGE_BOX_PX);
   const layout = deckSlideLayoutBox(aspectRatio);
@@ -270,13 +281,65 @@ export type SlidePageDom = {
   completion: Promise<void>;
 };
 
+/// How much smaller a slide's content is drawn so that all of it fits
+/// its box: 1 when it fits, and for anything that cannot be measured.
+export function slideFitScale(
+  content: PageBoxPx,
+  box: PageBoxPx,
+): number {
+  const scale = Math.min(
+    1,
+    box.widthPx / content.widthPx,
+    box.heightPx / content.heightPx,
+  );
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
+/// Fit the content of an ATTACHED deck page into its slide, and return
+/// the scale it took. On screen a slide whose content is larger than its
+/// box scrolls; a page cannot, so its content is drawn whole and smaller.
+/// The scale is a transform, not a smaller zoom: every line still breaks
+/// where it breaks in play. The content keeps its top and is centered
+/// across the slide.
+///
+/// The box and the content's extent are both read off the content
+/// element, held at the slide's height for the reading. Engines disagree
+/// on what a size means under CSS zoom, and two readings of one element
+/// disagree the same way, so their ratio is the same in each.
+export function fitSlideContent(root: HTMLElement): number {
+  const content = root.querySelector<HTMLElement>(".md-slide-preview-content");
+  if (!content) return 1;
+  content.style.height = "100%";
+  const box = { widthPx: content.clientWidth, heightPx: content.clientHeight };
+  const extent = {
+    widthPx: Math.max(content.scrollWidth, box.widthPx),
+    heightPx: content.scrollHeight,
+  };
+  content.style.height = "";
+  // The sizes are whole px: an extent one px past the box is rounding.
+  if (
+    extent.widthPx <= box.widthPx + 1 &&
+    extent.heightPx <= box.heightPx + 1
+  ) {
+    return 1;
+  }
+  const scale = slideFitScale(extent, box);
+  if (scale === 1) return 1;
+  // Scaled from its top left corner, the content is `scale * extent`
+  // wide; the shift, a share of the box's width, centers that.
+  const shift = (50 * (box.widthPx - scale * extent.widthPx)) / box.widthPx;
+  content.style.transformOrigin = "top left";
+  content.style.transform = `translateX(${cssNumber(shift)}%) scale(${scale})`;
+  return scale;
+}
+
 /// Build a deck page: the page box painted in the slide theme
 /// background with the slide surface aspect-fit and centered, reusing
-/// the preview's page classes so slides render identically. The page
-/// lays out at deckPageLayout's preview-reference box (NOT the A4 box)
-/// with the preview's reference padding, so media keeps its preview
-/// fraction; the caller rasterizes at the returned scale to land on
-/// the unchanged A4 bitmap.
+/// the preview's page classes so slides render as they do on screen. The
+/// page lays out at deckPageLayout's play box (NOT the A4 box) with
+/// play's padding at the reference viewport; the caller attaches it,
+/// fits its content once `completion` resolves, and rasterizes at the
+/// returned scale to land on the A4 bitmap.
 export function buildSlidePageDom(opts: {
   markdown: string;
   fromPath: string | null;
@@ -297,11 +360,11 @@ export function buildSlidePageDom(opts: {
   ].join(";");
 
   const style = document.createElement("style");
-  style.textContent = slidePreviewCss();
+  style.textContent = slidePreviewCss() + slideExportCss();
   root.appendChild(style);
 
   const slide = document.createElement("article");
-  slide.className = "md-slide-preview-page";
+  slide.className = `md-slide-preview-page ${SLIDE_EXPORT_CLASS}`;
   slide.style.cssText =
     slidePageBoxStyle(
       { widthPx: layout.slide.widthPx, heightPx: layout.slide.heightPx },
