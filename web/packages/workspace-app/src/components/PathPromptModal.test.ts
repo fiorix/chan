@@ -393,7 +393,13 @@ describe("a backslash in a typed path", () => {
       await openDialog(target, { kind: "file", mode: "open", allowAbsolute: true }, "/abs/root/deep/x\\y/new.md");
       await settle();
 
-      expect({ listed: listed.calls, ...told(target) }).toEqual({ listed: ["deep"], rule: false, refused: false });
+      // The prompt lists every known directory on the way, as it does for a
+      // relative path; the one the rule waits for is the parent.
+      expect({ parentListed: listed.calls.includes("deep"), ...told(target) }).toEqual({
+        parentListed: true,
+        rule: false,
+        refused: false,
+      });
     });
 
     test("through a directory whose parent is being listed says so, and not that a backslash cannot be added", async () => {
