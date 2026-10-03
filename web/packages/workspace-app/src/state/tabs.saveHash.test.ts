@@ -417,3 +417,122 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     expect(puts).toEqual([{ token: "100", sha: null, body: "loaded and mine" }]);
   });
 });
+
+describe("Overwrite's choice lasts until a write of its tab is answered or the tab loads", () => {
+  /// A loaded tab whose save is refused: another writer left the file at
+  /// "theirs" under token 150, and the prompt is open with that token.
+  async function refusedTab(): Promise<FileTab> {
+    const t = await loadedTab();
+    Object.assign(file, { text: "theirs", token: "150" });
+    t.content = "loaded and mine";
+    await saveTab(t);
+    expect({ prompt: conflictDialog.open, current: conflictDialog.currentMtimeNs }).toEqual({
+      prompt: true,
+      current: "150",
+    });
+    return t;
+  }
+
+  test.each([
+    ["the network fails", "network"],
+    ["the server fails", "server"],
+  ] as const)("the save after an Overwrite write that met no answer because %s names no hash and is accepted", async (_why, how) => {
+    const t = await refusedTab();
+    failNextWrite = how;
+    await overwriteConflictedTab();
+    await saveTab(t);
+
+    expect(puts.slice(1)).toEqual([
+      { token: "150", sha: null, body: "loaded and mine" },
+      { token: "150", sha: null, body: "loaded and mine" },
+    ]);
+    expect({ prompt: conflictDialog.open, said: t.saveError ?? null, file: file.text, ...held(t) }).toEqual({
+      prompt: false,
+      said: null,
+      file: "loaded and mine",
+      content: "loaded and mine",
+      saved: "loaded and mine",
+      token: "151",
+    });
+  });
+
+  test("the save after an Overwrite that built no write, its drawing not parsing, names no hash and is accepted", async () => {
+    const scene = (label: string): string => JSON.stringify({ type: "excalidraw", elements: [], label });
+    file.text = scene("loaded");
+    const t = await loadedTab("boards/a.excalidraw");
+    Object.assign(file, { text: scene("theirs"), token: "150" });
+    t.content = scene("mine");
+    await saveTab(t);
+    expect(conflictDialog.open, "the first save is refused").toBe(true);
+
+    // The text stops parsing before the click, so the click's save is
+    // refused before it builds a write.
+    t.content = '{"type":"excalidraw",';
+    await overwriteConflictedTab();
+    expect({ writes: puts.length, unwritten: t.refusedUnwritten ?? false, file: file.text }).toEqual({
+      writes: 1,
+      unwritten: true,
+      file: scene("theirs"),
+    });
+
+    t.content = scene("mine");
+    await saveTab(t);
+    expect(puts.at(-1)).toEqual({ token: "150", sha: null, body: scene("mine") });
+    expect({ prompt: conflictDialog.open, file: file.text, ...held(t) }).toEqual({
+      prompt: false,
+      file: scene("mine"),
+      content: scene("mine"),
+      saved: scene("mine"),
+      token: "151",
+    });
+  });
+
+  test("a conflict answered to Overwrite's write ends the choice", async () => {
+    const t = await refusedTab();
+    // A third writer moves the file on before the click.
+    Object.assign(file, { text: "theirs again", token: "160" });
+    await overwriteConflictedTab();
+    expect({ prompt: conflictDialog.open, current: conflictDialog.currentMtimeNs }).toEqual({
+      prompt: true,
+      current: "160",
+    });
+
+    // The prompt is left unanswered, so the tab keeps the token of the click
+    // and its next save names the text it loaded again.
+    dismissConflict();
+    await saveTab(t);
+    expect(puts.slice(1)).toEqual([
+      { token: "150", sha: null, body: "loaded and mine" },
+      { token: "150", sha: SHA_LOADED, body: "loaded and mine" },
+    ]);
+    expect({ prompt: conflictDialog.open, file: file.text, ...held(t) }).toEqual({
+      prompt: true,
+      file: "theirs again",
+      content: "loaded and mine",
+      saved: "loaded",
+      token: "150",
+    });
+  });
+
+  test("a load ends the choice an unanswered Overwrite write left", async () => {
+    await refusedTab();
+    failNextWrite = "network";
+    await overwriteConflictedTab();
+    await reloadTabFromDisk(TAB);
+    const t = readTab(TAB)!;
+    expect(held(t)).toEqual({ content: "theirs", saved: "theirs", token: "150" });
+
+    // Another writer replaces the text again and the token stays.
+    file.text = "theirs again";
+    t.content = "theirs and mine";
+    await saveTab(t);
+    expect(puts.at(-1)).toEqual({ token: "150", sha: sha256("theirs"), body: "theirs and mine" });
+    expect({ prompt: conflictDialog.open, file: file.text, ...held(t) }).toEqual({
+      prompt: true,
+      file: "theirs again",
+      content: "theirs and mine",
+      saved: "theirs",
+      token: "150",
+    });
+  });
+});
