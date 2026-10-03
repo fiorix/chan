@@ -8202,6 +8202,107 @@ mod tests {
         );
     }
 
+    /// A row's cached canonical path is a key a removal can hold its permit
+    /// under: the removal of a runtime mounted while the root resolved
+    /// there. A registration that finds the root resolving elsewhere
+    /// replaces that cached path, and it can do so while an open waits
+    /// under the root's key. So the open waits under the keys its row had
+    /// before that wait as well as under those it has after it.
+    ///
+    /// The clock is paused and moves only while every task waits, so the
+    /// open is parked at the registration's permit when the test resumes.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn an_open_waits_under_a_cached_path_its_row_loses_during_its_first_wait() {
+        use std::os::unix::fs::symlink;
+        const BUDGET: Duration = Duration::from_secs(4);
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = library
+            .register_workspace(&parent.join("ws"))
+            .unwrap()
+            .root_path;
+        // The root resolves to a first folder, and a registration records
+        // it as the row's cached path.
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let first = canonical_key(&stored);
+        assert_ne!(first, stored, "fixture: the root did not relink");
+        library.register_workspace(&first).unwrap();
+        // Then it resolves to a second one, which no registration has seen.
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(elsewhere.path().join("ws")).unwrap();
+        relink(&stored, elsewhere.path());
+        let second = canonical_key(&stored);
+        assert!(
+            second != first && second != stored,
+            "fixture: the root did not relink a second time"
+        );
+        assert!(
+            library
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == stored && row.cached_canonical_path() == first),
+            "fixture: the row does not cache the first folder"
+        );
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        host.open_release_budget = BUDGET;
+        let host = Arc::new(host);
+        // A registration in flight under the key the root resolves to now,
+        // and a removal's unregister under the path the row caches.
+        let registration = host
+            .root_calls
+            .lock(&(second.clone(), RootCall::RegistryWrite))
+            .await;
+        let _removal = host
+            .root_calls
+            .lock(&(first.clone(), RootCall::RegistryWrite))
+            .await;
+        let (opened, opening) = std::sync::mpsc::channel();
+        *host.open_thread_probe.lock().unwrap() = Some(opened);
+        let mounting = Arc::clone(&host);
+        let mounting_root = stored.clone();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/ws"))
+                .await
+        });
+        tokio::time::sleep(BUDGET / 4).await;
+        assert!(
+            !mount.is_finished(),
+            "fixture: the open did not wait for the registration under its key"
+        );
+
+        // The registration replaces the row's cached path, then returns.
+        host.library.register_workspace(&second).unwrap();
+        assert!(
+            host.library
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == stored && row.cached_canonical_path() == second),
+            "fixture: the registration did not replace the row's cached path"
+        );
+        drop(registration);
+        let answer = tokio::time::timeout(BUDGET * 4, mount)
+            .await
+            .expect("the open never answered")
+            .unwrap();
+        assert!(
+            matches!(answer, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+            "an open did not wait for a registry write held under the cached path its row \
+             had when the open began: {answer:?}"
+        );
+        assert!(
+            opening.try_recv().is_err(),
+            "the open dispatched its filesystem open beside a registry write held under the \
+             cached path its row had when the open began"
+        );
+    }
+
     /// The open's wait for its mount permit and its wait for an outstanding
     /// registry write share one release budget: an open that got its mount
     /// permit halfway through the budget gives the write the other half,
