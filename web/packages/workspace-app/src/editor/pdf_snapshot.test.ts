@@ -1388,7 +1388,9 @@ describe("a document's images across its pages", () => {
     await liftPageImages(root, images);
 
     const first = standInCanvas({ x: 10, y: 68, w: 80, h: 12 });
-    await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, { images });
+    const firstPage = root.cloneNode(true) as HTMLElement;
+    firstPage.style.height = "40px";
+    await snapshotPage(firstPage, BOX, { images });
     expect(first.at(-1)!.args.slice(1)).toEqual([10, 68, 80, 40]);
 
     vi.restoreAllMocks();
@@ -1399,6 +1401,45 @@ describe("a document's images across its pages", () => {
       lastPage: true,
     });
     expect(second.at(-1)!.args.slice(1)).toEqual([10, -12, 80, 40]);
+  });
+
+  test.each([
+    ["at the top without earlier rows", { x: 10, y: 0, w: 80, h: 28 }],
+    ["inside the page without earlier rows", { x: 10, y: 60, w: 80, h: 28 }],
+  ])("a short marker %s leaves the image to the page document", async (_case, marker) => {
+    const root = page('<img src="/api/fs/shots/cut.png?t=tok">');
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    const drawn = standInCanvas(marker);
+    const first = root.cloneNode(true) as HTMLElement;
+    await snapshotPage(first, BOX, { images });
+
+    expect(first.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    expect(drawn.map((draw) => draw.what)).toEqual(["page", "markers", "page"]);
+  });
+
+  test("a continuation away from the page top stays in its document", async () => {
+    const root = page('<img src="/api/fs/shots/cut.png?t=tok">');
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    const firstDrawn = standInCanvas({ x: 10, y: 68, w: 80, h: 12 });
+    const first = root.cloneNode(true) as HTMLElement;
+    first.style.height = "40px";
+    await snapshotPage(first, BOX, { images });
+    expect(firstDrawn.map((draw) => draw.what)).toEqual(["page", "markers", "image"]);
+
+    vi.restoreAllMocks();
+    imagesHaveBoxes();
+    const secondDrawn = standInCanvas({ x: 10, y: 30, w: 80, h: 28 });
+    const second = root.cloneNode(true) as HTMLElement;
+    await snapshotPage(second, BOX, { images });
+
+    expect(second.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    expect(secondDrawn.map((draw) => draw.what)).toEqual(["page", "markers", "page"]);
   });
 
   test("a page that shows none of the document's images draws no marker raster twice over", async () => {
