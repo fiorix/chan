@@ -583,6 +583,11 @@ struct ScopedLibraryWindow {
     connected: bool,
     hidden: bool,
     control: bool,
+    /// Whether this host's window registry holds the window. The visibility
+    /// and close actions act on that registry alone, so a row that a
+    /// connected devserver's feed contributed under this library's id reads
+    /// `false`.
+    managed: bool,
     launch_path: String,
 }
 
@@ -667,6 +672,7 @@ fn scoped_launch_path(capability: &str, window_id: &str) -> String {
 fn scoped_window(
     capability: &LibraryCommandCapability,
     record: WindowRecord,
+    managed: bool,
 ) -> ScopedLibraryWindow {
     ScopedLibraryWindow {
         launch_path: scoped_launch_path(&capability.token, &record.window_id),
@@ -679,6 +685,7 @@ fn scoped_window(
         connected: record.connected,
         hidden: record.hidden,
         control: record.control,
+        managed,
     }
 }
 
@@ -687,11 +694,26 @@ fn scoped_local_windows(
     capability: &LibraryCommandCapability,
 ) -> Vec<ScopedLibraryWindow> {
     let library_id = host.library_id();
+    // The registry's own rows, by id. Every other row of the assembled set
+    // came from a connected devserver's feed.
+    let held: std::collections::HashSet<String> = host
+        .window_registry()
+        .map(|registry| {
+            registry
+                .snapshot()
+                .into_iter()
+                .map(|row| row.window_id)
+                .collect()
+        })
+        .unwrap_or_default();
     let mut rows: Vec<_> = host
         .assemble_window_records()
         .into_iter()
         .filter(|record| record.library_id == library_id)
-        .map(|record| scoped_window(capability, record))
+        .map(|record| {
+            let managed = held.contains(&record.window_id);
+            scoped_window(capability, record, managed)
+        })
         .collect();
     rows.sort_by(|a, b| {
         // The registry's display order (control first, then Terminal before
@@ -915,17 +937,21 @@ async fn handle_library_command_action(
             };
         }
         ScopedLibraryAction::CloseWindow { window_id } => {
-            let local = state
+            let Some(record) = state
                 .host
                 .assemble_window_records()
                 .into_iter()
-                .any(|record| {
-                    record.library_id == state.host.library_id()
-                        && record.window_id == window_id
-                        && !record.control
-                });
-            if !local {
+                .find(|record| {
+                    record.library_id == state.host.library_id() && record.window_id == window_id
+                })
+            else {
                 return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
+            };
+            if record.control {
+                return command_capability_error(
+                    StatusCode::FORBIDDEN,
+                    "control terminals are not managed by a browser capability",
+                );
             }
             return match state.host.discard_window(&window_id) {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -937,8 +963,9 @@ async fn handle_library_command_action(
         }
     };
     match record {
+        // Both actions that answer a window mint it in this host's registry.
         Ok(record) => Json(ScopedLibraryActionResult {
-            window: Some(scoped_window(&capability, record)),
+            window: Some(scoped_window(&capability, record, true)),
         })
         .into_response(),
         Err(error) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
