@@ -3621,10 +3621,10 @@ fn restart_desktop_after_update() -> Result<(), String> {
 }
 
 /// Result of a reachability probe for the connecting page or an open window
-/// retarget. Loopback targets wait on
-/// 503 while the devserver restores its tenants. Non-loopback targets also wait
-/// on gateway upstream failures (502 and 504). `detail` is a
-/// short ASCII reason shown in the per-attempt row; `status` is the HTTP code
+/// retarget. Loopback targets wait on 503 while the devserver restores its
+/// tenants. Non-loopback targets also wait on gateway upstream failures (502
+/// and 504) and their first 15 consecutive 404s per window and target.
+/// `detail` is a short ASCII reason shown in the per-attempt row; `status` is the HTTP code
 /// when a response arrived.
 #[derive(Debug, Clone, Serialize)]
 struct ProbeResult {
@@ -3638,6 +3638,7 @@ struct ProbeResult {
 /// hang the probe and stack up overlapping in-flight requests behind the
 /// page's retry loop.
 const PROBE_TIMEOUT_SECS: u64 = 5;
+const GATEWAY_404_PROBE_BOUND: u8 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeTargetKind {
@@ -3671,10 +3672,13 @@ fn probe_target_kind(raw_url: &str) -> ProbeTargetKind {
 fn probe_response_reachable(
     target: ProbeTargetKind,
     status: Option<reqwest::StatusCode>,
-    _gateway_404_count: u8,
+    gateway_404_count: u8,
 ) -> bool {
     status.is_some_and(|status| {
         status != reqwest::StatusCode::SERVICE_UNAVAILABLE
+            && !(target == ProbeTargetKind::Gateway
+                && status == reqwest::StatusCode::NOT_FOUND
+                && gateway_404_count <= GATEWAY_404_PROBE_BOUND)
             && (target == ProbeTargetKind::Loopback
                 || !matches!(
                     status,
@@ -3691,17 +3695,33 @@ fn probe_result_for(
     detail: String,
 ) -> ProbeResult {
     let target = probe_target_kind(url);
-    let count = counts
-        .lock()
-        .unwrap()
-        .get(&(label.to_owned(), url.to_owned()))
-        .copied()
-        .unwrap_or(0);
+    let mut counts = counts.lock().unwrap();
+    let key = (label.to_owned(), url.to_owned());
+    let count =
+        if target == ProbeTargetKind::Gateway && status == Some(reqwest::StatusCode::NOT_FOUND) {
+            let count = counts.entry(key).or_default();
+            *count = count.saturating_add(1).min(GATEWAY_404_PROBE_BOUND + 1);
+            *count
+        } else {
+            counts.remove(&key);
+            0
+        };
+    drop(counts);
     ProbeResult {
         reachable: probe_response_reachable(target, status, count),
         status: status.map(|status| status.as_u16()),
         detail,
     }
+}
+
+pub(crate) fn clear_gateway_404_counts_for_window(
+    counts: &Mutex<HashMap<(String, String), u8>>,
+    label: &str,
+) {
+    counts
+        .lock()
+        .unwrap()
+        .retain(|(window, _), _| window != label);
 }
 
 /// Reachability probe used by the connecting page and directly by Rust when
@@ -3711,7 +3731,8 @@ fn probe_result_for(
 /// Runs from Rust because the connecting page's CSP (`default-src 'self'`)
 /// blocks cross-origin `fetch`. Authentication cookies for the target origin
 /// are copied from the webview when available so the probe can distinguish a
-/// registered-but-not-answering gateway devserver from a live one.
+/// registered-but-not-answering gateway devserver from a live one. Gateway 404
+/// counts are shared with Rust retargets and cleared when the window is destroyed.
 #[tauri::command]
 async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     let state = window.state::<Arc<AppState>>();
@@ -8120,7 +8141,11 @@ mod tests {
         for code in 100..600 {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(
-                probe_response_reachable(ProbeTargetKind::Gateway, Some(status), 0),
+                probe_response_reachable(
+                    ProbeTargetKind::Gateway,
+                    Some(status),
+                    if code == 404 { 16 } else { 0 },
+                ),
                 !matches!(code, 502..=504),
                 "gateway HTTP {code}",
             );
@@ -8131,7 +8156,11 @@ mod tests {
             );
         }
         assert!(!probe_response_reachable(ProbeTargetKind::Gateway, None, 0));
-        assert!(!probe_response_reachable(ProbeTargetKind::Loopback, None, 0));
+        assert!(!probe_response_reachable(
+            ProbeTargetKind::Loopback,
+            None,
+            0
+        ));
     }
 
     #[test]
@@ -8148,6 +8177,134 @@ mod tests {
             Some(StatusCode::NOT_FOUND),
             16,
         ));
+    }
+
+    #[test]
+    fn other_probe_answers_keep_their_classification_at_any_count() {
+        use reqwest::StatusCode;
+
+        for count in [0, 1, 15, 16] {
+            assert!(probe_response_reachable(
+                ProbeTargetKind::Gateway,
+                Some(StatusCode::OK),
+                count,
+            ));
+            assert!(probe_response_reachable(
+                ProbeTargetKind::Loopback,
+                Some(StatusCode::NOT_FOUND),
+                count,
+            ));
+            for status in [
+                Some(StatusCode::BAD_GATEWAY),
+                Some(StatusCode::SERVICE_UNAVAILABLE),
+                Some(StatusCode::GATEWAY_TIMEOUT),
+                None,
+            ] {
+                assert!(!probe_response_reachable(
+                    ProbeTargetKind::Gateway,
+                    status,
+                    count,
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_404_counts_are_scoped_to_window_and_target() {
+        let counts = Mutex::new(HashMap::new());
+        let first = "https://owner--tenant.proxy.example/one";
+        let second = "https://owner--tenant.proxy.example/two";
+        let probe = |label, url| {
+            probe_result_for(
+                &counts,
+                label,
+                url,
+                Some(reqwest::StatusCode::NOT_FOUND),
+                "404 Not Found".to_string(),
+            )
+        };
+
+        for _ in 0..15 {
+            assert!(!probe("first-window", first).reachable);
+        }
+        assert!(!probe("second-window", first).reachable);
+        assert!(!probe("first-window", second).reachable);
+        assert!(probe("first-window", first).reachable);
+        assert_eq!(counts.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn gateway_404_count_resets_on_other_answers() {
+        let counts = Mutex::new(HashMap::new());
+        let gateway = "https://owner--tenant.proxy.example/workspace";
+        for _ in 0..15 {
+            assert!(
+                !probe_result_for(
+                    &counts,
+                    "window",
+                    gateway,
+                    Some(reqwest::StatusCode::NOT_FOUND),
+                    String::new(),
+                )
+                .reachable
+            );
+        }
+        for status in [Some(reqwest::StatusCode::OK), None] {
+            let result = probe_result_for(&counts, "window", gateway, status, String::new());
+            assert_eq!(result.reachable, status.is_some());
+            assert!(
+                !probe_result_for(
+                    &counts,
+                    "window",
+                    gateway,
+                    Some(reqwest::StatusCode::NOT_FOUND),
+                    String::new(),
+                )
+                .reachable
+            );
+        }
+        assert!(
+            probe_result_for(
+                &counts,
+                "window",
+                "http://127.0.0.1:4000/workspace",
+                Some(reqwest::StatusCode::NOT_FOUND),
+                String::new(),
+            )
+            .reachable
+        );
+        assert_eq!(counts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn destroyed_window_drops_its_gateway_404_counts() {
+        let counts = Mutex::new(HashMap::new());
+        let url = "https://owner--tenant.proxy.example/workspace";
+        for label in ["closed", "kept"] {
+            probe_result_for(
+                &counts,
+                label,
+                url,
+                Some(reqwest::StatusCode::NOT_FOUND),
+                String::new(),
+            );
+        }
+        clear_gateway_404_counts_for_window(&counts, "closed");
+        assert_eq!(counts.lock().unwrap().len(), 1);
+        assert!(
+            !probe_result_for(
+                &counts,
+                "closed",
+                url,
+                Some(reqwest::StatusCode::NOT_FOUND),
+                String::new(),
+            )
+            .reachable
+        );
+        assert_eq!(
+            counts.lock().unwrap().get(&("closed".into(), url.into())),
+            Some(&1)
+        );
     }
 
     #[test]

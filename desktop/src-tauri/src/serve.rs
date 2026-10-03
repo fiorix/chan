@@ -1177,6 +1177,7 @@ fn on_close_requested(
 fn on_destroyed(app: &AppHandle, label: &str) {
     let state = app.state::<Arc<AppState>>();
     state.retarget_tickets.cancel(label);
+    crate::clear_gateway_404_counts_for_window(&state.gateway_404_counts, label);
     state.release_window_number(label);
     // Drop the registered OS title so `cs window list`
     // stops showing one for a window that's gone. The
@@ -3530,6 +3531,18 @@ mod tests {
             .split_once("\n}\n")
             .expect("on_destroyed ends at a column-0 brace");
         assert!(arm.contains("drop_generated_downloads_for_window("));
+    }
+
+    #[test]
+    fn destroyed_window_drops_its_probe_counts() {
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let (_, rest) = SERVE_RS
+            .split_once("\nfn on_destroyed(")
+            .expect("on_destroyed exists");
+        let (arm, _) = rest
+            .split_once("\n}\n")
+            .expect("on_destroyed ends at a column-0 brace");
+        assert!(arm.contains("clear_gateway_404_counts_for_window("));
     }
 
     #[test]
