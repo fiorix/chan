@@ -3155,7 +3155,7 @@ async function loadTabContent(
         t.savedMtimeNs = meta.mtime_ns ?? null;
         t.authorityVersion = meta.authority_version ?? null;
         t.diskConflicted = meta.disk_conflicted ?? false;
-        t.fsWritable = meta.writable ?? true;
+        t.fsWritable = meta.writable;
         t.loadProgress = {
           loadedBytes: 0,
           totalBytes: meta.size ?? null,
@@ -3182,9 +3182,7 @@ async function loadTabContent(
       t.diskConflicted = r.disk_conflicted ?? false;
       t.error = null;
       t.fileMissing = null;
-      // Older servers omit `writable`; treat absent as writable so
-      // the lamp does not show a writable file as locked.
-      t.fsWritable = r.writable ?? true;
+      t.fsWritable = r.writable;
       // The buffer now matches disk; clear any pending external-change
       // banner (this load IS the reload the user opted into, or a
       // user-initiated replace).
@@ -5768,7 +5766,7 @@ function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
   tab.savedMtimeNs = response.mtime_ns ?? null;
   tab.authorityVersion = response.authority_version ?? null;
   tab.diskConflicted = response.disk_conflicted ?? false;
-  tab.fsWritable = response.writable ?? true;
+  tab.fsWritable = response.writable;
   tab.error = null;
   tab.saveError = null;
   tab.refusedUnwritten = false;

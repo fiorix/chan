@@ -379,7 +379,7 @@ describe("file read streaming", () => {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode(
-          '{"type":"meta","path":"a.md","size":1,"mtime":1}\n{"type":"error","error":"bad read"}\n',
+          '{"type":"meta","path":"a.md","size":1,"mtime":1,"writable":true}\n{"type":"error","error":"bad read"}\n',
         ));
         controller.close();
       },
@@ -387,6 +387,20 @@ describe("file read streaming", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
 
     await expect(api.readStream("a.md")).rejects.toThrow("bad read");
+  });
+
+  test("refuses a meta event that does not say whether the file is writable", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          '{"type":"meta","path":"a.md","size":1,"mtime":1}\n{"type":"chunk","content":"x","bytes":1}\n{"type":"done"}\n',
+        ));
+        controller.close();
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
+
+    await expect(api.readStream("a.md")).rejects.toThrow("file stream meta has no writable bit");
   });
 });
 

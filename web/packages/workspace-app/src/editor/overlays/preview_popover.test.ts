@@ -110,6 +110,7 @@ test("a previewed note loads images relative to its own path", async () => {
     path: "notes/a.md",
     content: "![](img.png)\n\n![](https://example.com/x.png)",
     mtime: null,
+    writable: true,
   });
   const anchor = document.createElement("span");
   document.body.append(anchor);

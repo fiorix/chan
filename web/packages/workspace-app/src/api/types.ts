@@ -541,9 +541,7 @@ export type FileResponse = {
   /// Filesystem-level writability: true when the underlying file
   /// has user-write bits set on disk, false otherwise. Workspaces the
   /// per-tab read-only lock that overrides the user's lamp toggle.
-  /// Optional for forward-compat with older servers; absent =
-  /// treat as writable to match prior behavior.
-  writable?: boolean;
+  writable: boolean;
 };
 
 export type FileWriteResponse = {

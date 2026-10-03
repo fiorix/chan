@@ -580,6 +580,9 @@ async function readFileStream(
     const event = recordValue(JSON.parse(trimmed));
     const type = event.type;
     if (type === "meta") {
+      if (typeof event.writable !== "boolean") {
+        throw new Error("file stream meta has no writable bit");
+      }
       const nextMeta: FileStreamMeta = {
         path: typeof event.path === "string" ? event.path : path,
         mtime: typeof event.mtime === "number" ? event.mtime : null,
@@ -589,7 +592,7 @@ async function readFileStream(
         disk_conflicted:
           typeof event.disk_conflicted === "boolean" ? event.disk_conflicted : false,
         path_class: event.path_class as FileResponse["path_class"],
-        writable: typeof event.writable === "boolean" ? event.writable : true,
+        writable: event.writable,
         size: typeof event.size === "number" ? event.size : undefined,
       };
       meta = nextMeta;
@@ -639,7 +642,7 @@ async function readFileStream(
     authority_version: meta.authority_version ?? null,
     disk_conflicted: meta.disk_conflicted ?? false,
     path_class: meta.path_class,
-    writable: meta.writable ?? true,
+    writable: meta.writable,
   };
 }
 

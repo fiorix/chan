@@ -118,7 +118,7 @@ function holdReads() {
   vi.spyOn(api, "readStream").mockImplementation((_path, o) => {
     options = o;
     return new Promise((resolve, reject) => {
-      complete = (content) => resolve({ content } as Awaited<ReturnType<typeof api.readStream>>);
+      complete = (content) => resolve({ content, writable: true } as Awaited<ReturnType<typeof api.readStream>>);
       o?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
     });
   });

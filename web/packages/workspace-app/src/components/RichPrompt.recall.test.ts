@@ -51,7 +51,7 @@ async function flush(): Promise<void> {
 
 async function recall(origin: Origin | "unacknowledged") {
   if (origin === "unacknowledged") {
-    vi.mocked(api.read).mockResolvedValueOnce({ path: ".Drafts/recall/draft.md", content: "", mtime: 0 });
+    vi.mocked(api.read).mockResolvedValueOnce({ path: ".Drafts/recall/draft.md", content: "", mtime: 0, writable: true });
   }
   const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: ".Drafts/recall/draft.md" })]);
   const { target } = await mountTerminal(TerminalTab, tab!);

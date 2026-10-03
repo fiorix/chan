@@ -55,6 +55,7 @@ beforeEach(() => {
     path: "notes/doc.md",
     content: "# Title\n\nbody\n",
     mtime: null,
+    writable: true,
   });
   vi.mocked(api.remove).mockResolvedValue(undefined);
   vi.mocked(api.replaceFile).mockResolvedValue({
