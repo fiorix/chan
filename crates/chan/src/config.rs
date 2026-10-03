@@ -642,7 +642,7 @@ fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Val
                 Value::Null
             } else {
                 Value::Bool(raw.parse::<bool>().with_context(|| {
-                    format!("{}: expected true|false|none, got `{raw}`", spec.key)
+                    format!("{}: expected true|false|none|null, got `{raw}`", spec.key)
                 })?)
             }
         }
