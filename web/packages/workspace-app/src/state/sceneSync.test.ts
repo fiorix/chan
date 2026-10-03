@@ -700,6 +700,16 @@ describe("a session that has had no frame", () => {
     expect(sockets).toHaveLength(dials + 3);
   });
 
+  test("it holds nothing the disk lacks, whatever its board has not handed over", () => {
+    const tab = sceneTab();
+    const session = acquireSceneSession(tab)!;
+    const binding = new FakeBinding();
+    binding.session = session;
+    session.bindCanvas(binding);
+    binding.pending = [elem("mine", 3)];
+    expect(isDocUnflushed(tab.id)).toBe(false);
+  });
+
   test("it has no authority to reach until a frame, and has one from its first", () => {
     const tab = sceneTab();
     const session = acquireSceneSession(tab)!;

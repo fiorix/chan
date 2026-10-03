@@ -285,6 +285,66 @@ describe("attach", () => {
     cleanup();
   });
 
+  test("a clean tab whose file changed under it takes the snapshot and pushes nothing", async () => {
+    // The tab loaded "hello" and holds nothing of its user's; the authority
+    // holds what another writer made of the file since, which the tab's
+    // banner says.
+    const tab = fileTab({ externalChange: true });
+    const { sock, view, cleanup } = await attached(tab, "hello there");
+    expect({
+      state: tab.doc?.state,
+      editor: view.state.doc.toString(),
+      buffer: tab.content,
+      saved: tab.saved,
+      pushes: sock.frames("push").length,
+      banner: tab.externalChange,
+    }).toEqual({
+      state: "attached",
+      editor: "hello there",
+      buffer: "hello there",
+      saved: "hello there",
+      pushes: 0,
+      banner: false,
+    });
+    cleanup();
+  });
+
+  test("a clean tab whose editor binds after the snapshot takes the snapshot then", async () => {
+    const tab = fileTab();
+    const session = acquireDocSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello there"));
+    await flushMicro();
+    const { view, cleanup } = mountEditor(tab, session);
+    await flushMicro();
+    expect({
+      editor: view.state.doc.toString(),
+      buffer: tab.content,
+      saved: tab.saved,
+      pushes: sock.frames("push").length,
+    }).toEqual({ editor: "hello there", buffer: "hello there", saved: "hello there", pushes: 0 });
+    cleanup();
+  });
+
+  test("a key typed between the snapshot and the attach is kept: the tab attaches as a dirty one", async () => {
+    const tab = fileTab();
+    const session = acquireDocSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello there"));
+    await flushMicro();
+    // The tab was clean when the snapshot landed and is not at the attach.
+    tab.content = "hello!";
+    const { view, cleanup } = mountEditor(tab, session);
+    await flushMicro();
+    expect(view.state.doc.toString()).toBe("hello!");
+    expect(sock.frames("push")).toHaveLength(1);
+    await ackLastPush(sock, 0);
+    expect({ buffer: tab.content, saved: tab.saved }).toEqual({ buffer: "hello!", saved: "hello!" });
+    cleanup();
+  });
+
   test("pre-attach local edits merge as a pending diff push, not a clobber", async () => {
     // The degraded-window shape: buffer is ahead of the authority.
     const tab = fileTab({ content: "hello world", saved: "hello" });
@@ -821,6 +881,12 @@ describe("a session that has had no frame", () => {
     // The third dial follows the third close by 2 s.
     await vi.advanceTimersByTimeAsync(1200);
     expect(sockets).toHaveLength(dials + 3);
+  });
+
+  test("it holds nothing the disk lacks, so a reload of its clean tab asks nothing", () => {
+    const tab = fileTab();
+    acquireDocSession(tab);
+    expect(isDocUnflushed(tab.id)).toBe(false);
   });
 
   test("its first snapshot attaches the tab over the classic save, and what the buffer holds beyond it is pushed", async () => {
