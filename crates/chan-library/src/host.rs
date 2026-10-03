@@ -90,6 +90,12 @@ enum RemovalHop {
 #[cfg(test)]
 type RemovalHopProbe = Arc<dyn Fn(RemovalHop) + Send + Sync>;
 
+/// Runs between a close's read of the registry row of a root no runtime
+/// holds and its write of the off, so a test can order a removal's
+/// unregister between the two.
+#[cfg(test)]
+type CloseOffProbe = Arc<dyn Fn() + Send + Sync>;
+
 /// One workspace mounted into a [`WorkspaceHost`].
 #[derive(Debug, Clone)]
 pub struct HostedWorkspace {
@@ -390,6 +396,8 @@ pub struct WorkspaceHost {
     root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
     #[cfg(test)]
     removal_hop_probe: std::sync::Mutex<Option<RemovalHopProbe>>,
+    #[cfg(test)]
+    close_off_probe: std::sync::Mutex<Option<CloseOffProbe>>,
     workspaces: RwLock<HashMap<String, HostedWorkspaceRuntime>>,
     /// Set by [`shutdown_all`](Self::shutdown_all) under the `workspaces`
     /// write guard it drains under, and read under that lock by every
@@ -968,6 +976,8 @@ impl WorkspaceHost {
             root_check_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             removal_hop_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            close_off_probe: std::sync::Mutex::new(None),
             builder,
             self_weak: OnceLock::new(),
             window_registry: OnceLock::new(),
@@ -3515,6 +3525,10 @@ impl WorkspaceHost {
                         .any(|key| matches!(states.get(key), Some(MountState::Starting)))
                 };
                 if record_off && registered {
+                    #[cfg(test)]
+                    if let Some(probe) = self.close_off_probe.lock().unwrap().clone() {
+                        probe();
+                    }
                     if let Some(overlay) = self.workspace_overlay() {
                         overlay.set_each(&overlay_spellings(target, stored), false);
                     }
@@ -7815,6 +7829,82 @@ mod tests {
             !states.contains_key(&canonical) && !states.contains_key(&stored),
             "the held unregister left a lifecycle row: {:?}",
             states.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A close by root of a root no runtime holds, beside an unregister
+    /// whose caller gave up, reads the registry's row and then records the
+    /// off. An unregister that returns between the two, having dropped the
+    /// row and forgotten the workspace's overlay rows, is followed by no
+    /// forget of its own, so the close forgets what it wrote: no overlay row
+    /// of the workspace is left under either spelling of a relinked root,
+    /// where a devserver's start would register the workspace again.
+    ///
+    /// The sequence is held, not raced: the unregister is let go, and waited
+    /// for, from the close's own step between its read and its write.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_that_read_the_row_before_a_held_unregister_returned_leaves_no_overlay_row() {
+        let (host, overlay, stored, canonical, _dirs) = relinked_host();
+        let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+        let first = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(&stored, false))
+            .await;
+        assert!(
+            first.is_none(),
+            "fixture: the removal did not reach its unregister"
+        );
+        assert_eq!(
+            overlay.entries(),
+            Vec::new(),
+            "fixture: the removal had not forgotten the overlay rows before its unregister"
+        );
+        let held = Mutex::new(Some(held));
+        let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&returned);
+        let asked = Arc::downgrade(&host);
+        let key = (canonical.clone(), RootCall::RegistryWrite);
+        *host.close_off_probe.lock().unwrap() = Some(Arc::new(move || {
+            let Some(held) = held.lock().unwrap().take() else {
+                return;
+            };
+            let host = asked.upgrade().expect("the host outlives its close");
+            assert_eq!(
+                host.library().list_workspaces().len(),
+                1,
+                "fixture: the close did not read the row before the unregister dropped it"
+            );
+            drop(held);
+            // The unregister's closure drops the permit last, after all of
+            // its bookkeeping, so taking it means that unregister has
+            // returned. It runs on the blocking pool and needs no runtime
+            // worker, so this thread can wait for it.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while host.root_calls.try_lock(&key).is_none() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture: the held unregister did not return"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        host.close_workspace_for_root(&stored, false)
+            .await
+            .expect("the close beside the unregister");
+        *host.close_off_probe.lock().unwrap() = None;
+        assert!(
+            returned.load(std::sync::atomic::Ordering::SeqCst),
+            "fixture: the close never reached its step between the read and the write"
+        );
+        assert!(
+            host.library().list_workspaces().is_empty(),
+            "fixture: the held unregister kept the registry's row"
+        );
+        assert_eq!(
+            overlay.entries(),
+            Vec::new(),
+            "a close left an off row for a workspace the registry no longer holds"
         );
     }
 
