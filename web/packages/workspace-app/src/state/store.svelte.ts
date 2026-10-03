@@ -2684,8 +2684,31 @@ export async function refreshTree(): Promise<void> {
   }
 }
 
-export async function loadTreeDir(dir: string): Promise<void> {
-  if (tree.loadedDirs[dir] || tree.loadingDirs[dir]) return;
+/// The listing in flight for each directory, so that a caller which needs a
+/// listing another caller asked for can wait for it (`treeDirListed`).
+const treeDirLoads = new Map<string, Promise<void>>();
+
+export function loadTreeDir(dir: string): Promise<void> {
+  if (tree.loadedDirs[dir] || tree.loadingDirs[dir]) return Promise.resolve();
+  const load = listTreeDir(dir).finally(() => {
+    if (treeDirLoads.get(dir) === load) treeDirLoads.delete(dir);
+  });
+  treeDirLoads.set(dir, load);
+  return load;
+}
+
+/// Whether the tree holds `dir`'s listing, after waiting for one in flight or
+/// asking for one that is missing. False when the listing failed.
+async function treeDirListed(dir: string): Promise<boolean> {
+  try {
+    await (treeDirLoads.get(dir) ?? loadTreeDir(dir));
+  } catch {
+    return false;
+  }
+  return tree.loadedDirs[dir] === true;
+}
+
+async function listTreeDir(dir: string): Promise<void> {
   tree.loadingDirs = { ...tree.loadingDirs, [dir]: true };
   const { [dir]: _oldError, ...restErrors } = tree.dirErrors;
   tree.dirErrors = restErrors;
@@ -5177,21 +5200,25 @@ export function resolvePathPrompt(value: string | null): void {
 /// affordances keeps the actions consistent regardless of which entry
 /// point the user reaches for.
 
-/// List each directory above `path`'s parent that the tree knows and has not
-/// listed, so that a check which reads the tree sees every directory on the
-/// way to `path` that exists. A directory that cannot be listed stays unknown.
-async function listKnownAncestors(path: string): Promise<void> {
+/// List what `backslashReason` reads from the tree to judge `path`: every
+/// directory above the deepest name that holds a `\`, so the tree says
+/// whether that name and each one that holds a `\` on the way to it is there.
+/// A listing in flight is waited for. Answers the directory that could not be
+/// listed, and null once the tree holds every listing or knows that a
+/// directory on the way is not there.
+async function listForBackslashRule(path: string): Promise<string | null> {
+  const names = path.split("/");
+  let deepest = 0;
+  names.forEach((name, i) => {
+    if (name.includes("\\")) deepest = i;
+  });
   let acc = "";
-  for (const name of path.split("/").slice(0, -2)) {
+  for (const name of names.slice(0, deepest)) {
     acc = acc ? `${acc}/${name}` : name;
-    if (!tree.entries.some((e) => e.is_dir && e.path === acc)) return;
-    if (tree.loadedDirs[acc]) continue;
-    try {
-      await loadTreeDir(acc);
-    } catch {
-      return;
-    }
+    if (!tree.entries.some((e) => e.is_dir && e.path === acc)) return null;
+    if (!(await treeDirListed(acc))) return acc;
   }
+  return null;
 }
 
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style
@@ -5222,7 +5249,11 @@ async function performMove(path: string, target: string): Promise<void> {
     ui.status = `move failed: ${draftsReason}`;
     return;
   }
-  if (target.includes("\\")) await listKnownAncestors(target);
+  const unlisted = await listForBackslashRule(target);
+  if (unlisted !== null) {
+    ui.status = `rename failed: '${unlisted}' could not be listed`;
+    return;
+  }
   const backslash = backslashReason(target, {
     source: path,
     exists: (at) => tree.entries.some((e) => e.path === at),

@@ -15,6 +15,7 @@
     tree,
   } from "../state/store.svelte";
   import {
+    BACKSLASH_REASON,
     DEFAULT_NEW_FILENAME_STEM,
     appendDefaultMd,
     preserveExtension,
@@ -349,6 +350,9 @@
     /// the tree, so this says the listing failed rather than reasoning from a
     /// tree that is missing a level.
     | { kind: "dir-unreadable"; path: string; reason: string }
+    /// An ancestor directory whose listing is in flight, while the backslash
+    /// rule waits for it.
+    | { kind: "dir-listing"; path: string }
     | { kind: "kind-mismatch"; reason: string }
     | { kind: "no-op" }
     | { kind: "overwrites"; path: string; isFolder: boolean }
@@ -366,18 +370,23 @@
         mode: PathPromptMode;
       };
 
-  /// The shallowest ancestor of `path` whose listing failed, or null. The
-  /// load effect skips a directory with a recorded failure, so this is what
-  /// the user is waiting on rather than a load still in flight.
-  function unreadableAncestor(path: string): string | null {
+  /// The shallowest ancestor of `path` that `is` answers true for, or null.
+  function firstAncestor(path: string, is: (dir: string) => boolean): string | null {
     const slash = path.lastIndexOf("/");
     if (slash <= 0) return null;
     let acc = "";
     for (const seg of path.slice(0, slash).split("/")) {
       acc = acc ? `${acc}/${seg}` : seg;
-      if (acc in tree.dirErrors) return acc;
+      if (is(acc)) return acc;
     }
     return null;
+  }
+
+  /// The shallowest ancestor of `path` whose listing failed, or null. The
+  /// load effect skips a directory with a recorded failure, so this is what
+  /// the user is waiting on rather than a load still in flight.
+  function unreadableAncestor(path: string): string | null {
+    return firstAncestor(path, (dir) => dir in tree.dirErrors);
   }
 
   const status = $derived.by<Status>(() => {
@@ -386,7 +395,25 @@
     // `effectiveValue` and is what `ok()` sends.
     const path = normalizedPath;
     if (path === "") return { kind: "empty" };
-    if (!validation.ok) return { kind: "invalid", reason: validation.reason };
+    if (!validation.ok) {
+      // The backslash rule reads the tree. While a directory on the way to
+      // the path could not be listed, or is being listed, the tree cannot say
+      // whether a name holds its `\` already, so the row says that and not
+      // the rule's sentence. The path stays refused either way.
+      if (validation.reason === BACKSLASH_REASON) {
+        const unlistable = unreadableAncestor(path);
+        if (unlistable) {
+          return {
+            kind: "dir-unreadable",
+            path: unlistable,
+            reason: tree.dirErrors[unlistable] ?? "cannot be listed",
+          };
+        }
+        const listing = firstAncestor(path, (dir) => tree.loadingDirs[dir] === true);
+        if (listing) return { kind: "dir-listing", path: listing };
+      }
+      return { kind: "invalid", reason: validation.reason };
+    }
     if (openGraphLink) return { kind: "opens-graph" };
 
     const unreadable = unreadableAncestor(path);
@@ -485,7 +512,8 @@
   });
 
   const submitDisabled = $derived(
-    status.kind === "empty" ||
+    !validation.ok ||
+      status.kind === "empty" ||
       status.kind === "invalid" ||
       status.kind === "kind-mismatch" ||
       status.kind === "no-op",
@@ -691,6 +719,8 @@
         ✗ {status.reason}
       {:else if status.kind === "dir-unreadable"}
         ⚠ cannot list <span class="mono">{status.path}</span>: {status.reason}
+      {:else if status.kind === "dir-listing"}
+        <span class="muted">listing <span class="mono">{status.path}</span>...</span>
       {:else if status.kind === "overwrites"}
         ⚠ overwrites existing {status.isFolder ? "directory" : "file"}
         <span class="mono">{status.path}{status.isFolder ? "/" : ""}</span>

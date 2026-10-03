@@ -33,7 +33,8 @@ export type HeldNames = {
   exists?: (path: string) => boolean;
 };
 
-const BACKSLASH_REASON = "\\ cannot be added to a name";
+/// What `backslashReason` answers when it refuses.
+export const BACKSLASH_REASON = "\\ cannot be added to a name";
 
 function backslashes(name: string): number {
   return name.split("\\").length - 1;
