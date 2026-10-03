@@ -238,6 +238,42 @@ mod tests {
         app.state.try_workspace().unwrap().excluded_dirs().unwrap()
     }
 
+    /// The additions as the workspace's index config file holds them.
+    #[cfg(unix)]
+    fn stored_on_disk(app: &RouteTestApp) -> Vec<String> {
+        fn config_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    config_files(&path, found);
+                } else if path.ends_with("index/config.toml") {
+                    found.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        config_files(app._cfg.path(), &mut found);
+        assert_eq!(found.len(), 1, "one workspace, one index config: {found:?}");
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&found[0]).unwrap()).unwrap();
+        config["excluded_dirs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// What the walk of the index and the graph skips for the workspace.
+    #[cfg(unix)]
+    fn effective(app: &RouteTestApp) -> Vec<String> {
+        app.state
+            .try_workspace()
+            .unwrap()
+            .effective_excluded_dirs()
+            .unwrap()
+    }
+
     /// A directory whose name holds a `\` can be excluded by that name, at
     /// any depth and in any case, as every other directory can.
     #[cfg(unix)]
@@ -253,11 +289,27 @@ mod tests {
         );
         assert_eq!(body["workspace"], serde_json::json!(["x\\y"]));
         assert_eq!(stored(&app), vec!["x\\y"]);
+        assert_eq!(
+            stored_on_disk(&app),
+            vec!["x\\y"],
+            "a taken name is not in the workspace's config file"
+        );
+        assert!(
+            effective(&app).iter().any(|name| name == "x\\y"),
+            "a taken name is not in what the walk skips: {:?}",
+            effective(&app)
+        );
+        assert_eq!(
+            body["effective"],
+            serde_json::json!(effective(&app)),
+            "the answer's effective set is not the workspace's"
+        );
     }
 
     /// A name that holds a `\` and that no directory of the workspace has
     /// is refused, in words that say so, and nothing is stored. A file of
-    /// that name is not a directory.
+    /// that name is not a directory. Where a `\` separates components no
+    /// directory can have such a name, and the entry is refused as a path.
     #[tokio::test]
     async fn a_name_with_a_backslash_that_no_directory_has_is_refused_as_that() {
         let app = route_test_app();
@@ -265,13 +317,41 @@ mod tests {
         std::fs::write(app.root.path().join("no\\such"), b"").unwrap();
         let (status, body) = put_names(&app, &["vendor", "no\\such"]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let refusal = if cfg!(windows) {
+            "excluded dir must be a bare name, not a path: \"no\\\\such\""
+        } else {
+            "no directory in this workspace is named \"no\\\\such\"; a name can hold a \
+             backslash only when a directory already has it"
+        };
         assert_eq!(
             body,
-            serde_json::json!({
-                "error": "no directory in this workspace is named no\\such; a name can hold a \
-                          backslash only when a directory already has it"
-            }),
+            serde_json::json!({ "error": refusal }),
             "a name with a backslash that no directory has was refused in other words"
+        );
+        assert!(
+            stored(&app).is_empty(),
+            "a refused set changed the stored names: {:?}",
+            stored(&app)
+        );
+    }
+
+    /// The refusal names the entry as it was sent, quoted, as the refusal
+    /// of a path does: not the lower-case name the set would have stored.
+    #[tokio::test]
+    async fn a_refused_name_is_echoed_as_it_was_sent() {
+        let app = route_test_app();
+        let (status, body) = put_names(&app, &["vendor", "Docs\\Old"]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let refusal = if cfg!(windows) {
+            "excluded dir must be a bare name, not a path: \"Docs\\\\Old\""
+        } else {
+            "no directory in this workspace is named \"Docs\\\\Old\"; a name can hold a \
+             backslash only when a directory already has it"
+        };
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": refusal }),
+            "a refused name was not echoed as it was sent"
         );
         assert!(
             stored(&app).is_empty(),
