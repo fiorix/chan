@@ -35,3 +35,9 @@ Resolve the row once and carry it through the removal: the close's lookup alread
 
 1. A forget of a relinked row beside a stalled root answers within the CLI's reply budget, pinned on the desktop's handoff.
 2. The forget still removes the row, its overlay rows under both spellings and its metadata.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. Nothing here ran on a real hung mount.
+
+Counted again first: the host's forget was already at one registry lookup at most (for an off row asked by the path a relinked root resolves to now) and its unregister at none, since the removal resolves its row in `closing_row`. The three lookups left were in the core's own path, which the CLI's forget of a workspace no process serves takes: `Library::unregister_workspace` and `reset_workspace_with` now match their root once and carry the match and the metadata key through the wipe (`reset_matched`, `crates/chan-workspace/src/library.rs`), pinned red first in that crate. The host's answer inside the CLI's reply budget, for a relinked row forgotten beside a stalled root, with the row, both overlay spellings and the state removed, is pinned in `crates/chan-server/src/devserver.rs`. A relinked root beside a root that does not answer now waits two seconds where it waited six. The row stays open for one assertion: the same pin on the desktop's handoff, which is ordered. Its residual, with a repair ordered: a reset's registry removal applies the match computed before the wipe, so a row registered in between whose cached path equals the match is removed with it, its state not wiped.

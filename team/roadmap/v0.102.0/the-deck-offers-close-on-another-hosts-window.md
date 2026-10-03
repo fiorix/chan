@@ -30,3 +30,9 @@ Decide the shape. The snapshot could mark the rows this host's registry does not
 
 1. A feed row that carries this host's library id is not offered Hide and Close, or those actions reach a host that can take them, or their refusal says that this host does not manage the window; pinned with the existing fixture.
 2. A control terminal's close through the capability answers as its sibling routes do.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. Nothing here ran on a real hung mount.
+
+The server's half is built, and the row stays open for the deck's. By the lead's ruling the snapshot marks what this host manages: each window of the command capability's snapshot, and the window an action answers, carries `managed` (`ScopedLibraryWindow`, `scoped_local_windows`, `crates/chan-server/src/routes/library.rs`), true when this host's window registry holds the window and false for a row that reached the snapshot through a devserver feed alone. A control terminal's close through the capability answers 403 with the sentence its sibling routes use; a row this library does not list keeps its 404. Pinned with the existing fixture (`a_snapshot_marks_the_windows_its_registry_holds`) and in the refusal table. Left: the deck offers Focus alone on a window whose `managed` is false, which is ordered; and the mark goes by window id against the registry's rows, so a feed row that carried an id the registry also holds would read managed; and the ids and the rows come from two reads of the registry, so a window minted between them reads unmanaged for one snapshot.

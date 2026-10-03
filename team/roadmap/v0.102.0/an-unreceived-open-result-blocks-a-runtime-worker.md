@@ -30,3 +30,9 @@ A later version, by the recommendation. As suggestions: dispose of the open's re
 
 1. An open's completed result that its caller did not receive is dropped with no runtime worker waiting on its recovery, pinned red first.
 2. The design says where such a result is dropped.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. Nothing here ran on a real hung mount.
+
+A blocking open's result and the mount permit it carried are owned by one value until the caller receives both (`OpenAnswer`, `crates/chan-library/src/host.rs`). Dropped unreceived with a workspace in it, it hands the workspace to the blocking pool (`UnreceivedOpen`), where the open-time recovery is stopped and joined and the workspace is released before the permit, so no runtime worker waits on the root's filesystem. A runtime that is shutting down starts no blocking work, so there the dropping thread releases it. Pinned red first with the stall seam holding a recovery pass (`an_unreceived_open_result_leaves_the_runtime_worker_free`, `crates/chan-server/src/devserver.rs`), with the order of release still held by the existing pin. `crates/chan-library/design.md` says where such a result is released. Its cost: the release needs a blocking thread, so with the pool exhausted it waits in the pool's queue, holding the mount permit and the writer lock until a thread is free. The row stays open for one path, read in the code by an independent review and by the lead: when the runtime is shutting down and drops the release unrun, nothing stops the recovery, so the permit is released while the workspace's writer lock is still held, and the design's sentence on that path is not what the code does. The repair is ordered.
