@@ -17,7 +17,6 @@ import {
   liveFileTabById,
   moveTab,
   overwriteConflictedTab,
-  registerClassicSaveWatch,
   reloadTabFromDisk,
   saveTab,
   type FileTab,
@@ -48,13 +47,6 @@ let puts: Put[] = [];
 /// Set by `holdNextWrite`: the next write waits on it once it is recorded.
 let gate: { arrived: () => void; released: Promise<void> } | null = null;
 let failNextRead = false;
-/// What the watch this file registers answers for the tab.
-let watchWaits = false;
-
-registerClassicSaveWatch({
-  waitsOnSave: (tabId) => watchWaits && tabId === TAB,
-  saveEnded: () => {},
-});
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -145,7 +137,6 @@ beforeEach(() => {
   puts = [];
   gate = null;
   failNextRead = false;
-  watchWaits = false;
   standaloneWindow(true);
   vi.stubGlobal("crypto", webcrypto);
   serveFile();
@@ -342,24 +333,6 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     });
   });
 
-  test("the refusal of a save that carried the loaded text opens the prompt though a watch waits on that save", async () => {
-    const t = await loadedTab();
-    file.text = "theirs";
-    t.content = "loaded and mine";
-    watchWaits = true;
-    await saveTab(t);
-
-    expect(puts).toEqual([{ token: "100", sha: SHA_LOADED, body: "loaded and mine" }]);
-    expect({ prompt: conflictDialog.open, promptTab: conflictDialog.tabId, file: file.text, ...held(t) }).toEqual({
-      prompt: true,
-      promptTab: TAB,
-      file: "theirs",
-      content: "loaded and mine",
-      saved: "loaded",
-      token: "100",
-    });
-  });
-
   // Guards: each holds with or without the hash.
   test("a tab whose load failed holds no token and sends no hash", async () => {
     failNextRead = true;
@@ -383,22 +356,5 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     t.content = "loaded and mine";
     await saveTab(t);
     expect(puts).toEqual([{ token: "100", sha: null, body: "loaded and mine" }]);
-  });
-
-  test("a workspace window's refused save opens no prompt while a watch waits on it", async () => {
-    const t = await loadedTab();
-    standaloneWindow(false);
-    Object.assign(file, { text: "theirs", token: "150" });
-    t.content = "loaded and mine";
-    watchWaits = true;
-    await saveTab(t);
-    expect(puts).toEqual([{ token: "100", sha: null, body: "loaded and mine" }]);
-    expect({ prompt: conflictDialog.open, file: file.text, ...held(t) }).toEqual({
-      prompt: false,
-      file: "theirs",
-      content: "loaded and mine",
-      saved: "loaded",
-      token: "100",
-    });
   });
 });

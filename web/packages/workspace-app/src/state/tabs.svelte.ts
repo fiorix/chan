@@ -5995,31 +5995,6 @@ export function isDocUnflushed(tabId: string): boolean {
   return docUnflushedQueries.some((q) => q(tabId));
 }
 
-/// A live session's watch on the classic saves of its tab.
-export type ClassicSaveWatch = {
-  /// Whether `tabId`'s session waits for the save that is running to end
-  /// before it reads its authority again. Such a session asks the user
-  /// itself where the file changed under the tab, so the save's conflict
-  /// answer opens no prompt: the server refuses a write that names no
-  /// authority version once a session exists, and it made this one while
-  /// the write was on the wire, on a file nobody else may have touched.
-  waitsOnSave: (tabId: string) => boolean;
-  /// The save of `tabId` ended, written or not.
-  saveEnded: (tabId: string) => void;
-};
-
-const classicSaveWatches: ClassicSaveWatch[] = [];
-
-export function registerClassicSaveWatch(watch: ClassicSaveWatch): void {
-  classicSaveWatches.push(watch);
-}
-
-/// Whether a classic save of `tabId` is running, from the moment it is asked:
-/// its write may be on the wire.
-export function isTabSaving(tabId: string): boolean {
-  return savingTabs.has(tabId);
-}
-
 /// Release a tab's live session, if any. Every registered hook runs (a
 /// session module ignores tab ids it does not own). `immediate` skips the
 /// remount linger: tab close, rename rekey, and file discard must detach
@@ -6096,7 +6071,6 @@ async function performSave(t: FileTab): Promise<void> {
     savingTabs.delete(t.id);
     saveAgainAfterCurrent.delete(t.id);
     overwritePending.delete(t.id);
-    for (const watch of classicSaveWatches) watch.saveEnded(t.id);
   }
 }
 
@@ -6225,15 +6199,6 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       (e.status === 409 || e.status === 428) &&
       apiErrorCode(e) === "write_conflict"
     ) {
-      // A watch quiets the refusal a session's first attach causes. A save
-      // that carried the loaded text may be refused for the file's bytes,
-      // which only the prompt says, so no watch is asked about it.
-      if (
-        loadedText === null &&
-        classicSaveWatches.some((watch) => watch.waitsOnSave(live.id))
-      ) {
-        return;
-      }
       const current = liveFileTabById(t.id) ?? live;
       if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) {
         current.saveError = null;

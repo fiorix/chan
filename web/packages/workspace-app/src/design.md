@@ -144,8 +144,6 @@ A file's token on the standalone Files surface is its modification time, which a
 
 A save carries no hash from a tab that holds no token (a file it never loaded, or a read that failed before the file's token arrived), in a page without `crypto.subtle`, and in a workspace window, whose route reads none. Nor does the one write that the prompt's Overwrite frees, which goes over bytes the tab did not load: it carries the token the refusal named and nothing else. Overwrite frees exactly one write. A save on the wire at the click keeps its hash, the write that follows it is Overwrite's, and the save after an accepted Overwrite names the hash of what Overwrite wrote; a click whose save run builds no write frees none later. The choice is held by tab id, so a move of the tab between the click and the write changes nothing.
 
-A save that carried the loaded text asks no save watch (`ClassicSaveWatch`), so its refusal always opens the prompt. The watch is a document session's, and document sessions are a workspace capability, so in a page as served the two do not meet.
-
 ## Backlinks after a rename
 
 The note status bar queries a path after 600 ms. On a path change it keeps the displayed count until a second query, scheduled 2.6 seconds after the change, answers. The filesystem watch notification and graph-cache invalidation precede indexing, so neither proves completion; the second query allows the longest configured debounce of two seconds and the 200 ms worker tick to pass. Replies and timers from an abandoned path are discarded. A busy indexer can still finish later than this delay; the bar does not poll indexing completion.
