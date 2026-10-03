@@ -328,6 +328,32 @@ describe("attach", () => {
     cleanup();
   });
 
+  test("a clean tab with no editor stays clean through a second socket's snapshot", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    const session = acquireDocSession(tab)!;
+    const first = lastSocket();
+    first.open();
+    first.frame(snap("hello there"));
+    await flushMicro();
+    first.drop();
+    await vi.advanceTimersByTimeAsync(500);
+    const second = lastSocket();
+    expect(second).not.toBe(first);
+    second.open();
+    second.frame(snap("hello there, again", 4));
+    await flushMicro();
+    const { view, cleanup } = mountEditor(tab, session);
+    await flushMicro();
+    expect({
+      editor: view.state.doc.toString(),
+      buffer: tab.content,
+      saved: tab.saved,
+      pushes: second.frames("push").length,
+    }).toEqual({ editor: "hello there, again", buffer: "hello there, again", saved: "hello there, again", pushes: 0 });
+    cleanup();
+  });
+
   test("a key typed between the snapshot and the attach is kept: the tab attaches as a dirty one", async () => {
     const tab = fileTab();
     const session = acquireDocSession(tab)!;
