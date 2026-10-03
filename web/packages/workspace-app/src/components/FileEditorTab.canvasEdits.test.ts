@@ -2240,6 +2240,9 @@ describe("a live drawing", () => {
       // background of its own, and Restore takes it whole.
       strand([MINE], { viewBackgroundColor: "#fedcba" });
       const { tab, board, socket } = await attachedDrawing();
+      // The library's render of the snapshot's appState comes first, or it
+      // shows that appState over the entry's.
+      await new Promise((resolve) => setTimeout(resolve, 10));
       socket.frame({ type: "closed" });
       expect(tab.doc?.state).toBe("off");
 
