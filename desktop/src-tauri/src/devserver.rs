@@ -2373,8 +2373,20 @@ const REMOTE_SERVE_HTTP_BUDGET: Duration = Duration::from_secs(70);
 /// WS --on TARGET` arm; the launcher's own add path rides the bridge instead.
 /// Answers the prefix the tenant is mounted at. The gateway arm goes through
 /// the library add route and reads the prefix off the launcher workspace it
-/// returns.
+/// returns. A 409 carries the server's refusal sentence without the usual
+/// operation and HTTP status prefix, as on turn-on and forget.
 pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, String> {
+    async fn conflict_message(resp: reqwest::Response) -> String {
+        match refusal_from_conflict(resp).await {
+            SetWorkspaceOnError::Refused { message } | SetWorkspaceOnError::Other { message } => {
+                message
+            }
+            SetWorkspaceOnError::ActiveTerminals { active_terminals } => {
+                format!("workspace add refused: {active_terminals} live terminal(s)")
+            }
+        }
+    }
+
     let request = async {
         if let Some(gw) = &conn.gateway {
             let body = serde_json::json!({ "path": path });
@@ -2387,6 +2399,9 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
             )
             .await?;
             let status = resp.status();
+            if status == reqwest::StatusCode::CONFLICT {
+                return Err(conflict_message(resp).await);
+            }
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 let fallback = format!("HTTP {status}: {}", body.trim());
@@ -2418,6 +2433,9 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
         )
         .await?;
         let status = resp.status();
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(conflict_message(resp).await);
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             let fallback = format!("HTTP {status}: {}", body.trim());
