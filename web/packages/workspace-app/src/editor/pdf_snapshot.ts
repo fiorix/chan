@@ -659,7 +659,11 @@ function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
   if (visibility === "hidden" || visibility === "collapse") return false;
   for (let el: HTMLElement | null = img; el; el = el.parentElement) {
     const style = getComputedStyle(el);
-    if (style.display === "none" || Number(style.opacity) === 0) return false;
+    // Outside a document no style resolves and the opacity reads as the
+    // empty string, which is not a zero.
+    if (style.display === "none" || parseFloat(style.opacity) === 0) {
+      return false;
+    }
     if (el === root) break;
   }
   return true;
