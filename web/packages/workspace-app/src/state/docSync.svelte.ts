@@ -73,8 +73,9 @@ import {
 } from "./tabs.svelte";
 
 /// Feature flag. Default ON (the server half is live); localStorage
-/// `chan.docsync = "0"` opts a browser out, and the capability probe
-/// below silently turns everything off against a pre-doc-sync server.
+/// `chan.docsync = "0"` opts a browser out. Nothing a socket does turns doc
+/// sync off for the page: a session whose dials get no frame keeps dialing
+/// and leaves its tab to the classic save.
 const DOCSYNC_FLAG_KEY = "chan.docsync";
 const DOCSYNC_DEFAULT_ON = true;
 
@@ -128,19 +129,12 @@ const DOC_CURSOR_THROTTLE_MS = 100;
 /// rejected loudly by the authority and the session degrades.
 const DOC_MAX_LEN = 2 * 1024 * 1024;
 
-/// Capability probe: the FIRST doc-ws connect that closes before any
-/// frame latches "unsupported" module-wide, so an old server costs one
-/// failed dial total instead of a per-tab retry storm. `null` = unknown.
-let serverSupportsDocSync: boolean | null = null;
-
 /// True when doc sync should even be attempted for this page load.
 export function docSyncEnabled(): boolean {
-  // Live sessions are a workspace-tenant capability. The gate must fire
-  // BEFORE any dial: on a standalone window the first failed connect would
-  // latch the module off, a silently-correct state that masks a real
-  // gating bug, so the window mode short-circuits it instead.
+  // Live sessions are a workspace-tenant capability: a standalone window
+  // has no doc route to dial, and a session there would dial for as long
+  // as its tab stays open.
   if (!windowCaps.workspace) return false;
-  if (serverSupportsDocSync === false) return false;
   if (typeof localStorage === "undefined") return false;
   try {
     const v = localStorage.getItem(DOCSYNC_FLAG_KEY);
@@ -291,13 +285,13 @@ export class DocSession {
     return liveFileTabById(this.tabId) ?? this.boundTab;
   }
 
-  private status: DocSyncStatus = "connecting";
+  /// `dialing` until the first frame on any socket of this session: no
+  /// authority has spoken for the document, nothing is stamped on the tab,
+  /// and every close or silent dial is answered with another dial on the
+  /// backoff.
+  private status: DocSyncStatus = "dialing";
   private ws: WebSocket | null = null;
   private sawFrameOnSocket = false;
-  /// The attach timer closed this socket itself (no frame in time).
-  /// Read once by onSocketClosed: a self-inflicted timeout close says
-  /// nothing about server capability, unlike a server-initiated close.
-  private attachDialTimedOut = false;
   private closedByUs = false;
   private retryStopped = false;
   private backoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
@@ -359,7 +353,9 @@ export class DocSession {
 
   /// True while this session owns saves: the classic autosave/PUT path
   /// must stay quiet in these states (see `isDocAttached` in
-  /// tabs.svelte.ts, which reads the mirrored `tab.doc`).
+  /// tabs.svelte.ts, which reads the mirrored `tab.doc`). A session that
+  /// has had no frame owns none: its tab saves the classic way with the
+  /// tokens of its load.
   ownsSaves(): boolean {
     return (
       this.status === "attached" ||
@@ -378,9 +374,11 @@ export class DocSession {
   /// live editor (and the localStorage editorBuffer) for the reattach
   /// diff-push. Deliberately FALSE when the socket is still open (a
   /// flush-timeout degrade can use classic CAS after its push is answered)
-  /// and for every permanent stop (CRLF, doc-too-large,
-  /// attach-failed, closed, capability-off - `retryStopped` true or a
-  /// self-close - where the server is alive and classic errors belong).
+  /// for every permanent stop (CRLF, doc-too-large, attach-failed,
+  /// closed - `retryStopped` true or a self-close - where the server is
+  /// alive and classic errors belong), and for a session that has had no
+  /// frame, which never degrades: the route may not answer this page at
+  /// all while the server writes its files.
   isOutagePaused(): boolean {
     if (this.retryStopped || this.closedByUs) return false;
     if (this.status !== "degraded") return false;
@@ -393,6 +391,9 @@ export class DocSession {
   /// on this: for an attached tab, `content === saved` only means
   /// "confirmed by the authority", not "safe on disk".
   hasUnflushedState(): boolean {
+    // Before a snapshot the session knows of no authority state, and the
+    // tab's own dirty check speaks for its buffer.
+    if (!this.haveSnapshot) return false;
     if (this.serverDirty || this.pushOutcomeUnresolved) return true;
     if (this.view && this.collabInstalled) {
       return sendableUpdates(this.view.state).length > 0;
@@ -813,12 +814,9 @@ export class DocSession {
     }
     this.ws = ws;
     this.attachTimer = setTimeout(() => {
-      // No frame within the window: count the dial as failed. Flag the
-      // close as self-inflicted first so the capability probe in
-      // onSocketClosed does not read a slow dial (high RTT, stalled
-      // proxy hop) as a server without doc sync.
+      // No frame within the window: count the dial as failed and take the
+      // close's path to the next one.
       if (!this.sawFrameOnSocket) {
-        this.attachDialTimedOut = true;
         this.closeSocket();
         this.onSocketClosed();
       }
@@ -843,9 +841,9 @@ export class DocSession {
       }
       if (!this.sawFrameOnSocket) {
         this.sawFrameOnSocket = true;
-        serverSupportsDocSync = true;
         this.clearAttachTimer();
         this.onChannelUp();
+        if (this.status === "dialing") this.setStatus("connecting");
       }
       this.onFrame(frame);
     };
@@ -863,25 +861,15 @@ export class DocSession {
 
   private onSocketClosed(): void {
     this.clearAttachTimer();
-    const dialTimedOut = this.attachDialTimedOut;
-    this.attachDialTimedOut = false;
     this.ws = null;
     this.clearPushInFlight("unresolved");
     this.staleLatch = null;
     if (this.closedByUs || this.retryStopped) return;
-    // Capability probe: the first doc-ws connect the SERVER closes
-    // before any frame means an old server; latch module-wide and go
-    // quiet. A close this client inflicted on itself (the attach
-    // timeout above) proves nothing about capability and must retry
-    // instead of latching doc sync off for the whole page load.
-    if (serverSupportsDocSync === null && !this.sawFrameOnSocket && !dialTimedOut) {
-      serverSupportsDocSync = false;
-    }
-    if (serverSupportsDocSync === false) {
-      this.setStatus("off");
-      this.retryStopped = true;
-      return;
-    }
+    // Every close is dialed again, a frameless first one too: a devserver
+    // that is starting or stopping, a proxy and a refused token all close a
+    // dial before any frame, and none of them says the route is absent. A
+    // `dialing` session keeps that state through the grace and past it,
+    // since it withholds nothing that a degrade would hand back.
     if (this.droppedAt === 0) this.droppedAt = Date.now();
     this.reconnectAttempts += 1;
     const inGrace =
@@ -1281,9 +1269,9 @@ export class DocSession {
 // ---- registry --------------------------------------------------------------
 
 /// Acquire (or re-acquire within the release linger) the doc session for
-/// `tab`. Returns null when doc sync is off, unsupported, or the content
-/// is over the size gate; the caller then simply has no session and the
-/// classic paths run.
+/// `tab`. Returns null when doc sync is off or the content is over the
+/// size gate; the caller then simply has no session and the classic paths
+/// run.
 export function acquireDocSession(tab: FileTab): DocSession | null {
   if (!docSyncEnabled()) return null;
   // Size gate read untracked on purpose: eligibility must not re-run
@@ -1323,12 +1311,10 @@ export function docSyncRosterChanged(): void {
   for (const s of registry.values()) s.restampPeerNames();
 }
 
-/// Test seam: drop every session and reset the module-wide capability
-/// latch. Never called in production.
+/// Test seam: drop every session. Never called in production.
 export function resetDocSyncForTests(): void {
   for (const s of [...registry.values()]) s.release({ immediate: true });
   registry.clear();
-  serverSupportsDocSync = null;
 }
 
 // ---- tabs.svelte.ts hooks ---------------------------------------------------

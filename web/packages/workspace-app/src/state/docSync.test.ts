@@ -2,7 +2,8 @@
 
 // docSync behavior pins: the pump (push / own-echo confirm / stale
 // rebase), the attach algorithm (pending-diff merge, hard-resync
-// rebase-by-diff), degradation + capability probe, the save funnel
+// rebase-by-diff), degradation and the redial of a dial that gets no
+// frame, the session before its first frame, the save funnel
 // (attached saves never PUT; flush failure degrades to classic), the
 // dirty/saved consumer audit rows, presence plumbing, and two-editor
 // convergence through a pure-TS authority. The wire shapes match the
@@ -638,14 +639,13 @@ describe("degradation", () => {
     acquireDocSession(tab);
     const sock = lastSocket();
     sock.open();
-    // The server refuses the attach with a frame BEFORE the close, so
-    // the capability probe never reads this as an old server.
+    // The server refuses the attach with a frame before the close.
     sock.frame({ type: "error", message: "no such file", reason: "attach-failed" });
     sock.drop();
     expect(tab.doc?.state).toBe("degraded");
     await vi.advanceTimersByTimeAsync(30_000);
     expect(sockets.length).toBe(1); // no redial of a permanently bad attach
-    // The module-wide latch is untouched: other tabs still attach.
+    // The stop is this session's alone: other tabs still attach.
     expect(acquireDocSession(fileTab())).not.toBeNull();
   });
 
@@ -714,7 +714,7 @@ describe("degradation", () => {
     expect(sockets, "the twelfth dial falls past the minute").toHaveLength(11);
   });
 
-  test("an attach TIMEOUT close does not latch capability off; the dial retries", async () => {
+  test("a dial with no frame inside the attach window is closed and dialed again", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
     acquireDocSession(tab);
@@ -723,8 +723,7 @@ describe("degradation", () => {
     // itself when the attach window runs out.
     await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS + 50);
     expect(first.closedByClient).toBe(true);
-    // A self-inflicted timeout close proves nothing about the server:
-    // the module latch must stay unknown and the session must redial.
+    // A dial that timed out is dialed again like one the server closed.
     expect(tab.doc?.state).not.toBe("off");
     await vi.advanceTimersByTimeAsync(600);
     expect(sockets.length).toBe(2);
@@ -733,7 +732,7 @@ describe("degradation", () => {
     retry.frame(snap("hello", 0));
     await flushMicro();
     expect(tab.doc?.state).toBe("attached");
-    // Other tabs still get sessions: nothing was latched module-wide.
+    // Other tabs still get sessions.
     expect(acquireDocSession(fileTab())).not.toBeNull();
   });
 
@@ -796,15 +795,14 @@ describe("degradation", () => {
     cleanup();
   });
 
-  test("a no-workspace error (dial racing a reset swap) retries, never latches", async () => {
+  test("a no-workspace error (dial racing a reset swap) is dialed again", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
     acquireDocSession(tab);
     const sock = lastSocket();
     sock.open();
-    // The server answers the race with a FRAME before closing, so the
-    // capability probe must not read this as a pre-doc-sync server and
-    // the session must redial once the cell swap settles.
+    // The server answers the race with a frame before closing, and the
+    // session redials once the cell swap settles.
     sock.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
     sock.drop();
     expect(tab.doc?.state).not.toBe("off");
@@ -1049,7 +1047,7 @@ describe("save funnel", () => {
     for (const s of ["attached", "connecting", "reconnecting"] as const) {
       expect(isDocAttached(fileTab({ doc: { state: s, peers: 0 } }))).toBe(true);
     }
-    for (const s of ["degraded", "off"] as const) {
+    for (const s of ["dialing", "degraded", "off"] as const) {
       expect(isDocAttached(fileTab({ doc: { state: s, peers: 0 } }))).toBe(false);
     }
     expect(isDocAttached(fileTab())).toBe(false);

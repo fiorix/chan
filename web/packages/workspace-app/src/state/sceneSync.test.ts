@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-// sceneSync behavior pins: the capability probe, the push pump
+// sceneSync behavior pins: the redial of a dial that gets no frame, the
+// session before its first frame, the push pump
 // (coalescing + ack-based saved), snapshot/update fan-in through the
 // canvas binding seam, presence, degrade-to-classic, the save funnel,
 // and the tabs.svelte.ts delegate-array coexistence with docSync. The
@@ -458,9 +459,9 @@ describe("presence", () => {
   });
 });
 
-// ---- capability probe + degrade ----------------------------------------------
+// ---- redial + degrade ---------------------------------------------------------
 
-describe("probe and degrade", () => {
+describe("redial and degrade", () => {
   test("a fallback redial keeps its own attach window", async () => {
     vi.useFakeTimers();
     const tab = sceneTab();
