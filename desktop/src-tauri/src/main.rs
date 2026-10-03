@@ -4625,11 +4625,9 @@ fn zoom_reset(window: tauri::WebviewWindow, state: State<Arc<AppState>>) -> Resu
     apply_zoom(&window, &state, 1.0)
 }
 
-/// The canonical form of `p`, by which the handoff's close finds the
-/// workspace runtime that the path it was sent names, and asks whether the
-/// root that runtime's registry row stores still resolves to where the
-/// runtime was mounted. `canonicalize` falls back to the input on error, so
-/// a path that does not exist still gives a stable key.
+/// The canonical form of `p`, by which a handoff close or a forget not named
+/// by an exact stored root finds a mounted workspace. `canonicalize` falls
+/// back to the input on error, so a missing path still gives a stable key.
 fn canonical_key(p: &Path) -> String {
     // The registry's own normalization: a Windows key never carries the
     // `\\?\` verbatim prefix into the SPA list, a window title, or a log.

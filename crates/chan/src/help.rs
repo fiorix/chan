@@ -88,7 +88,7 @@ restart.
 
 A holder that refuses teardown because live terminals would die also
 stops the registry removal: close the terminals first. So does a host
-that answers over its control socket that the workspace is still
+that answers over its control socket or the desktop handoff that it is still
 releasing, which means an earlier request of its own on that workspace
 has not finished: the command prints the host's answer, forgets
 nothing and exits 75. That exit means the host has not let go of the
@@ -99,6 +99,11 @@ from the registry on disk and asks no host, so that host's own library
 may keep it. An unreachable holder is treated as closed and the
 removal proceeds, as it does after any other error the holder answers,
 which is printed with the warning.
+
+When PATH names the root stored by a registry row, the command asks
+for and forgets that row even if its path now resolves into another
+workspace's folder. Other paths still name the workspace they resolve
+to. `chan close` keeps its resolved-path rule.
 
 With --on TARGET the verb reaches a workspace on a REGISTERED remote
 devserver through the desktop app: TARGET is the devserver's URL or

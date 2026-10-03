@@ -128,9 +128,10 @@ pub enum Request {
     CloseWorkspace {
         protocol: u32,
         cli_version: String,
-        /// The workspace root to stop serving. The desktop canonicalizes +
-        /// matches it the same way its own close path does. Sent as a string
-        /// for stable JSON across platforms.
+        /// The workspace root to stop serving. On a forget, a stored registry
+        /// root names its row before symlinks are resolved; other paths and
+        /// close use the desktop's resolved lookup. Sent as a string for
+        /// stable JSON across platforms.
         workspace_path: String,
         /// `chan workspace forget`: also unregister the workspace from the
         /// desktop's library + overlay, not just stop serving it.
@@ -305,8 +306,9 @@ pub enum Response {
     DevserverRegistered { desktop_version: String },
     /// The desktop tore down the workspace from a `CloseWorkspace` request
     /// (stopped serving it, and unregistered it when `remove`). The CLI prints
-    /// a note and exits. A skew / error / absent desktop instead falls back to
-    /// the per-pid control-socket teardown.
+    /// a note and exits. A skew or absent desktop falls back to the per-pid
+    /// control socket. A still-releasing error on a forget exits 75 without
+    /// local unregister; other errors fall back.
     Closed { desktop_version: String },
     /// The desktop refused a `CloseWorkspace`, `CloseRemoteWorkspace`, or
     /// `ForgetRemoteWorkspace` request because unmount/remove would kill live
