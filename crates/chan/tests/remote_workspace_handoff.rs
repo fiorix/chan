@@ -245,7 +245,10 @@ async fn forget_falls_through_after_an_unrelated_desktop_error() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("not served") && stdout.contains("unregistered"), "{stdout}");
+    assert!(
+        stdout.contains("not served") && stdout.contains("unregistered"),
+        "{stdout}"
+    );
     assert!(
         chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
             .unwrap()

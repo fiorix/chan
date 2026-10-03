@@ -502,12 +502,8 @@ fn forget_of_an_unregistered_alias_keeps_the_resolved_lookup() {
 fn close_of_a_relinked_stored_root_keeps_its_resolved_request_name() {
     let sandbox = Sandbox::new();
     let (saved, other, _saved_state, other_state) = relinked_rows(&sandbox);
-    let holder = holder_answering_a_removal_at(
-        &sandbox,
-        &other,
-        &other_state.join("locks"),
-        "other error",
-    );
+    let holder =
+        holder_answering_a_removal_at(&sandbox, &other, &other_state.join("locks"), "other error");
     let out = sandbox.command().arg("close").arg(&saved).output().unwrap();
     let request = holder.join().unwrap();
     assert!(

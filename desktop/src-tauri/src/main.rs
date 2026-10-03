@@ -9967,13 +9967,15 @@ mod tests {
                     cli_reply_bound(),
                     move || {
                         let started = std::time::Instant::now();
-                        let outcome = runtime.block_on(close_workspace_from_handoff(
-                            app, state, path, true,
-                        ));
+                        let outcome =
+                            runtime.block_on(close_workspace_from_handoff(app, state, path, true));
                         (outcome, started.elapsed())
                     },
                 );
-                assert_eq!(outcome, Ok(chan_server::WorkspaceLifecycleOutcome::Completed));
+                assert_eq!(
+                    outcome,
+                    Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+                );
                 assert!(elapsed < cli_reply_bound(), "handoff took {elapsed:?}");
                 assert!(
                     held.embedded()
