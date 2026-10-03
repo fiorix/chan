@@ -333,7 +333,7 @@ async function prepareVisibleImages(
         if (element.hasAttribute(LIFTED_ATTR) || element.hasAttribute(DOCUMENT_PAINT_ATTR)) return null;
         const img = element;
         const src = img.getAttribute("src") ?? "";
-        const selected = img.currentSrc || src;
+        const selected = img.hasAttribute("srcset") ? img.currentSrc || src : src;
         const name = sourceNames.get(img) ?? resourceName(selected);
         if (!htmlImageRecord(img, root).rendered) {
           return () => {
