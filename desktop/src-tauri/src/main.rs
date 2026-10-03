@@ -9936,6 +9936,61 @@ mod tests {
                 );
             }
 
+            /// A handoff forget of the moved root makes at most one bounded
+            /// registry lookup beside a stalled row, then removes both on
+            /// spellings, the selected row and its managed state.
+            #[test]
+            fn a_relinked_forget_answers_in_the_handoff_reply_budget() {
+                let held = HeldRestore::new();
+                let row = held
+                    .embedded()
+                    .library()
+                    .list_workspaces()
+                    .into_iter()
+                    .find(|row| row.root_path == Path::new(&held.relinked))
+                    .expect("the relinked row");
+                let state_file = held
+                    .embedded()
+                    .library()
+                    .workspace_paths_for_row(&row)
+                    .sessions
+                    .join("retire-this");
+                std::fs::write(&state_file, b"retired workspace state").expect("plant state");
+                held.embedded()
+                    .workspace_overlay()
+                    .expect("overlay")
+                    .set(&held.relinked_now.to_string_lossy(), true);
+                let app = held.app.handle().clone();
+                let state = Arc::clone(&held.state);
+                let runtime = held.runtime.handle().clone();
+                let path = held.relinked_now.clone();
+                let (outcome, elapsed) = held.stall.as_ref().expect("hung root").finishes_beside(
+                    "forgetting the relinked root",
+                    cli_reply_bound(),
+                    move || {
+                        let started = std::time::Instant::now();
+                        let outcome = runtime.block_on(close_workspace_from_handoff(
+                            app, state, path, true,
+                        ));
+                        (outcome, started.elapsed())
+                    },
+                );
+                assert_eq!(outcome, Ok(chan_server::WorkspaceLifecycleOutcome::Completed));
+                assert!(elapsed < cli_reply_bound(), "handoff took {elapsed:?}");
+                assert!(
+                    held.embedded()
+                        .library()
+                        .list_workspaces()
+                        .iter()
+                        .all(|row| row.root_path != Path::new(&held.relinked)),
+                    "the relinked row is still registered"
+                );
+                let on = held.quit();
+                assert!(!on.contains(&held.relinked));
+                assert!(!on.contains(&held.relinked_now.to_string_lossy().into_owned()));
+                assert!(!state_file.exists(), "the removed row kept managed state");
+            }
+
             /// A queued row turned off while the restore waited on an earlier
             /// root is not mounted when the restore reaches it.
             #[test]
