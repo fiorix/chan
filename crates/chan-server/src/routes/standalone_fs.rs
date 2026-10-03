@@ -1651,6 +1651,56 @@ mod tests {
         assert_eq!(adopted["mtime_ns"], current_ns.to_string());
     }
 
+    /// A write's token is the file's mtime and nothing of its bytes, so a
+    /// token that equals the current mtime is accepted over bytes its
+    /// writer never read. The test stamps the mtime back to the token, the
+    /// way a tool that restores timestamps does, so it does not wait for
+    /// the filesystem's clock to give two writes one timestamp.
+    #[tokio::test]
+    async fn a_token_equal_to_the_mtime_of_changed_bytes_is_accepted_over_them() {
+        let fx = files_fixture();
+        let response = raw_put(&fx, "/api/fs/note.md", "loaded").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let token = body_json(response).await["mtime_ns"]
+            .as_str()
+            .expect("the loaded bytes' token")
+            .to_string();
+        let token_ns: i64 = token.parse().expect("a nanosecond token");
+
+        let on_disk = fx.root.join("note.md");
+        std::fs::write(&on_disk, "another writer's").unwrap();
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(token_ns as u64);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&on_disk)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        let staged = fx
+            .state
+            .standalone_files
+            .as_ref()
+            .unwrap()
+            .fs
+            .stat("note.md")
+            .unwrap()
+            .mtime_ns;
+        assert_eq!(
+            staged,
+            Some(token_ns),
+            "the change that keeps the token did not stage"
+        );
+
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/note.md?expected_mtime_ns={token}"),
+            "mine",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(std::fs::read(&on_disk).unwrap(), b"mine");
+    }
+
     #[tokio::test]
     async fn create_answers_201_and_duplicates_conflict() {
         let fx = files_fixture();
