@@ -35,6 +35,7 @@ pub struct WindowBus {
 struct ExportState {
     active: bool,
     committed: bool,
+    pages_finished: u64,
 }
 
 /// The upload permit remains held through the atomic rename. Retirement
@@ -77,13 +78,16 @@ impl ExportJob {
         self.state.lock().expect("export job poisoned").committed
     }
 
-    fn page_finished(&self) -> bool {
-        let state = self.state.lock().expect("export job poisoned");
+    fn page_finished(&self, count: u64) -> bool {
+        let mut state = self.state.lock().expect("export job poisoned");
         if !state.active {
             return false;
         }
-        self.progress
-            .send_replace(Some(tokio::time::Instant::now()));
+        if count > state.pages_finished {
+            state.pages_finished = count;
+            self.progress
+                .send_replace(Some(tokio::time::Instant::now()));
+        }
         true
     }
 }
@@ -125,6 +129,7 @@ impl WindowBus {
                 state: Mutex::new(ExportState {
                     active: true,
                     committed: false,
+                    pages_finished: 0,
                 }),
                 progress,
             }),
@@ -140,8 +145,9 @@ impl WindowBus {
             .cloned()
     }
 
-    pub fn page_finished(&self, id: &str) -> bool {
-        self.export_job(id).is_some_and(|job| job.page_finished())
+    pub fn page_finished(&self, id: &str, count: u64) -> bool {
+        self.export_job(id)
+            .is_some_and(|job| job.page_finished(count))
     }
 
     /// Retire the job, returning whether its guarded upload already committed.

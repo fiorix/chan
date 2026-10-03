@@ -3830,6 +3830,46 @@ mod write_tests {
         assert!(!root.path().join("late.pdf").exists());
     }
 
+    #[tokio::test]
+    async fn an_inflight_export_upload_cannot_commit_after_retirement() {
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        let (id, _reply, _progress) = state.window_bus.register_export("late.pdf".into());
+        let job = state.window_bus.export_job(&id).unwrap();
+        let workspace = state.try_workspace().unwrap();
+        let writes = Arc::clone(&state.self_writes);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let worker = tokio::task::spawn_blocking(move || {
+            workspace_upload_stream_sync(
+                &workspace,
+                &writes,
+                &UploadDestination {
+                    dir: String::new(),
+                    replace_path: None,
+                    filename: "late.pdf".into(),
+                },
+                &mut rx,
+                &crate::bulk_transfer::test_support::uncancelled(),
+                Some(&job),
+            )
+        });
+        tx.send(super::RequestBodyMessage::Chunk(Bytes::from_static(
+            b"%PDF-",
+        )))
+        .await
+        .unwrap();
+        // Capacity one makes this send wait until the writer has consumed the
+        // first chunk, so retirement happens after this upload is underway.
+        tx.send(super::RequestBodyMessage::Chunk(Bytes::from_static(
+            b"late",
+        )))
+        .await
+        .unwrap();
+        assert!(!state.window_bus.retire_export(&id));
+        tx.send(super::RequestBodyMessage::Complete).await.unwrap();
+        assert!(worker.await.unwrap().is_err());
+        assert!(!root.path().join("late.pdf").exists());
+    }
+
     /// Both sides of the bound on the workspace upload: a saturated lane
     /// refuses it and nothing is written, and the same upload succeeds once the
     /// lane drains. Checking only the refusal would pass against a route that

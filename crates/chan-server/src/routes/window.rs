@@ -30,7 +30,7 @@ pub struct WindowReplyRequest {
     #[serde(default)]
     pub payload: Option<serde_json::Value>,
     #[serde(default)]
-    pub page_finished: Option<bool>,
+    pub page_finished: Option<u64>,
 }
 
 /// `POST /api/window/reply` - complete a parked `cs pane` round-trip with the
@@ -40,9 +40,9 @@ pub async fn api_window_reply(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WindowReplyRequest>,
 ) -> Response {
-    let progress = req.page_finished == Some(true);
-    let completed = if progress {
-        state.window_bus.page_finished(&req.request_id)
+    let progress = req.page_finished.is_some();
+    let completed = if let Some(count) = req.page_finished {
+        state.window_bus.page_finished(&req.request_id, count)
     } else {
         req.payload
             .is_some_and(|payload| state.window_bus.complete(&req.request_id, payload))
@@ -136,7 +136,7 @@ mod tests {
     #[tokio::test]
     async fn export_page_progress_keeps_the_final_reply_parked() {
         let (_cfg, _root, router, bus) = test_router();
-        let (id, rx) = bus.register();
+        let (id, rx, mut progress) = bus.register_export("notes/doc.pdf".into());
         let body = serde_json::json!({ "requestId": id.clone(), "pageFinished": 1 }).to_string();
         let response = router
             .oneshot(
@@ -151,6 +151,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(progress.has_changed().unwrap());
+        progress.borrow_and_update();
+        assert!(bus.page_finished(&id, 1));
+        assert!(
+            !progress.has_changed().unwrap(),
+            "a repeated page count reset the quiet wait"
+        );
         assert!(bus.complete(&id, serde_json::json!({ "ok": true })));
         assert_eq!(rx.await.unwrap()["ok"], true);
     }

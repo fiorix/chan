@@ -5779,20 +5779,20 @@ mod tests {
         let frame = recv_command(&mut events, "export-job").await;
         let id = frame["id"].as_str().unwrap();
         tokio::time::advance(std::time::Duration::from_secs(80)).await;
-        assert!(bus.page_finished(id));
+        assert!(bus.page_finished(id, 1));
         tokio::task::yield_now().await;
         tokio::time::advance(std::time::Duration::from_secs(80)).await;
         assert!(
             !task.is_finished(),
             "completed page did not reset the quiet bound"
         );
-        assert!(bus.page_finished(id));
+        assert!(bus.page_finished(id, 2));
         tokio::task::yield_now().await;
         tokio::time::advance(std::time::Duration::from_secs(91)).await;
         assert!(
             matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("90s quiet"))
         );
-        assert!(!bus.page_finished(id));
+        assert!(!bus.page_finished(id, 3));
     }
 
     #[tokio::test(start_paused = true)]
@@ -5817,9 +5817,9 @@ mod tests {
         });
         let frame = recv_command(&mut events, "export-job").await;
         let id = frame["id"].as_str().unwrap();
-        for _ in 0..11 {
+        for count in 1..=11 {
             tokio::time::advance(std::time::Duration::from_secs(80)).await;
-            assert!(bus.page_finished(id));
+            assert!(bus.page_finished(id, count));
             tokio::task::yield_now().await;
         }
         tokio::time::advance(std::time::Duration::from_secs(21)).await;
