@@ -306,9 +306,26 @@
     for (const n of fs.nodes) nodeById.set(n.id, n);
     fsNodes = [...nodeById.values()];
     const ekey = (e: FsGraphEdge): string =>
-      `${e.source}\0${e.target}\0${e.kind}`;
+      e.kind === "hardlink"
+        ? `${e.kind}\0${[e.source, e.target].sort().join("\0")}`
+        : `${e.kind}\0${e.source}\0${e.target}`;
     const edgeByKey = new Map(fsEdgesRaw.map((e) => [ekey(e), e]));
     for (const e of fs.edges) edgeByKey.set(ekey(e), e);
+    const groups = new Map<string, string[]>();
+    for (const node of fsNodes) {
+      if (node.kind !== "file" || !node.link_group) continue;
+      const members = groups.get(node.link_group) ?? [];
+      members.push(node.id);
+      groups.set(node.link_group, members);
+    }
+    for (const members of groups.values()) {
+      for (let i = 0; i < members.length; i++) {
+        for (let j = i + 1; j < members.length; j++) {
+          const edge: FsGraphEdge = { source: members[i]!, target: members[j]!, kind: "hardlink" };
+          if (!edgeByKey.has(ekey(edge))) edgeByKey.set(ekey(edge), edge);
+        }
+      }
+    }
     fsEdgesRaw = [...edgeByKey.values()];
     const merged: FsGraphResponse = {
       root: fs.root,

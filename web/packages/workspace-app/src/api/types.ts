@@ -727,6 +727,7 @@ export type FsGraphNode = {
   path_class?: PathClass | null;
   permission?: PathPermission | null;
   link_count?: number;
+  link_group?: string;
   mtime?: number | null;
   target?: string | null;
   outside?: boolean;
