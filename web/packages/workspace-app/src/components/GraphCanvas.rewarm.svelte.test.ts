@@ -142,3 +142,40 @@ describe("a visibility change without a new graph payload", () => {
     expect(alphas).toEqual([0.2]);
   });
 });
+
+describe("a change of the focal ids alone", () => {
+  function renderWithFocal(focalIds: string[]): { focalIds: string[] } {
+    const g = graph();
+    const p = $state({
+      open: true,
+      nodes: g.nodes,
+      edges: g.edges,
+      visibleNodeIds: new Set(g.nodes.map((node) => node.id)),
+      visibleEdges: g.edges,
+      focalIds,
+      selectedId: null as string | null,
+      onSelect: vi.fn(),
+    });
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(GraphCanvas, { target, props: p }) as Record<string, unknown>);
+    flushSync();
+    runFrames(2);
+    alphas.length = 0;
+    return p;
+  }
+
+  test("warms the layout gently, so the pin it moves is applied", () => {
+    const p = renderWithFocal(["notes/a.md"]);
+    p.focalIds = ["notes/b.md"];
+    flushSync();
+    expect(alphas).toEqual([0.05]);
+  });
+
+  test("the same focal ids handed over as a new array leave the layout still", () => {
+    const p = renderWithFocal(["notes/a.md"]);
+    p.focalIds = ["notes/a.md"];
+    flushSync();
+    expect(alphas).toEqual([]);
+  });
+});
