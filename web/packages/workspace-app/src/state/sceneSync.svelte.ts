@@ -232,8 +232,8 @@ export type SceneCanvasBinding = {
   /// included) into the canvas, adopt appState, register files. The
   /// appState is the authority's with the keys of this window's claim laid
   /// over it. It is left out while a push of this window's that sends an
-  /// appState is on the wire or queued: the authority holds that one once
-  /// it has applied the push, and the board already shows it.
+  /// appState is on the wire: the authority holds that one once it has
+  /// applied the push, and the board already shows it.
   applySnapshot(elements: WireElement[], appState: WireAppState | undefined, files: WireFiles): void;
   /// Accepted values fanned from the authority.
   applyUpdate(f: {
@@ -298,7 +298,9 @@ function takeHandedOnClaim(tabId: string): WireAppState | null {
 type QueuedPush = {
   elements: Map<string, WireElement>;
   /// The appState the push sends: the scene's whole, since the authority
-  /// replaces its own with a push's.
+  /// replaces its own with a push's. A push still queued has it built again
+  /// as it goes on the wire (`drainQueued`), over the authority's as it is
+  /// then; until then this says only that the push sends one.
   appState: WireAppState | null;
   /// This window's appState claim as it stood when that appState was built,
   /// which the push's ack confirms.
@@ -948,18 +950,20 @@ export class SceneSession {
     return this.appStateClaim === carried ? null : this.appStateClaim;
   }
 
-  /// The appState of this window's newest push on the wire or queued, which
-  /// the authority holds once it has applied that push, and null with none.
-  private outboundAppState(): WireAppState | null {
-    return this.queued?.appState ?? this.unacked?.appState ?? null;
+  /// The appState of this window's push on the wire, which the authority
+  /// holds once it has applied that push, and null with none. A queued push
+  /// is not on the wire: what the authority holds until it goes out is what
+  /// that push's appState is laid over.
+  private wireAppState(): WireAppState | null {
+    return this.unacked?.appState ?? null;
   }
 
   /// The scene's appState: the authority's, or the one it will hold for a
-  /// push of this window's on the wire or queued, with the keys of this
-  /// window's claim laid over it.
+  /// push of this window's on the wire, with the keys of the claim a queued
+  /// push carries and of this window's claim laid over it.
   private sceneAppState(): WireAppState {
-    const held = this.outboundAppState() ?? this.shadowAppState;
-    return this.appStateClaim === null ? held : { ...held, ...this.appStateClaim };
+    const held = this.wireAppState() ?? this.shadowAppState;
+    return { ...held, ...this.queued?.claim, ...this.appStateClaim };
   }
 
   /// Push this window's appState claim when no push carries it. Called once a
@@ -992,6 +996,11 @@ export class SceneSession {
     if (!q) return;
     this.queued = null;
     if (q.elements.size === 0 && q.appState === null && q.files === null) return;
+    // The authority replaces its appState with this push's, and a peer's
+    // change to another key may have reached it while the push waited. So
+    // the appState is built here, over the authority's as it is at this ack,
+    // with the claim the push carries laid over it.
+    if (q.appState !== null) q.appState = { ...this.shadowAppState, ...q.claim };
     this.pushInFlight = true;
     this.pushOutcomeUnresolved = true;
     this.unacked = q;
@@ -1206,12 +1215,13 @@ export class SceneSession {
     // stay in the scene over the snapshot's but for an element the authority
     // keeps against them.
     //
-    // The same holds for an appState such a push sends: the authority holds
-    // it once the push is applied, so the board keeps what it shows and is
-    // handed none. With no such push, the board is handed the snapshot's
-    // appState with the keys of this window's claim laid over it, whichever
-    // snapshot this is, and the claim is pushed once the snapshot has been
-    // applied.
+    // The same holds for an appState a push on the wire sends: the authority
+    // holds it once the push is applied, so the board keeps what it shows
+    // and is handed none. With none on the wire, the board is handed the
+    // snapshot's appState with the keys of this window's claim laid over it,
+    // whichever snapshot this is: a push still queued sends its appState
+    // over the snapshot's, and a claim no push carries is pushed once the
+    // snapshot has been applied.
     const later = this.ws !== null && this.snapshotSocket === this.ws;
     this.shadowElements = new Map();
     for (const el of f.elements) this.foldIntoShadow(el);
@@ -1254,7 +1264,7 @@ export class SceneSession {
       this.replayToBinding(
         this.binding,
         f.elements,
-        this.outboundAppState() !== null ? undefined : this.sceneAppState(),
+        this.wireAppState() !== null ? undefined : this.sceneAppState(),
         f.files,
       );
     }
@@ -1274,11 +1284,12 @@ export class SceneSession {
     this.tab.authorityVersion = f.version;
     // The authority applies a push after every update it fanned before the
     // push arrived, and replaces its appState with the push's. So while an
-    // appState of this window's is on the wire or queued, this update's
-    // stays out of the scene and off the board, which keeps its own. With
-    // none, the update's is the authority's, and the board is handed it with
-    // the keys of this window's claim laid over it.
-    const taken = f.appState !== undefined && this.outboundAppState() === null;
+    // appState of this window's is on the wire, this update's stays out of
+    // the scene and off the board, which keeps its own. With none on the
+    // wire, the update's is the authority's: the board is handed it with the
+    // keys of this window's claim laid over it, and a push still queued
+    // sends its appState over it.
+    const taken = f.appState !== undefined && this.wireAppState() === null;
     for (const el of f.elements) this.foldIntoShadow(el);
     if (taken) this.shadowAppState = f.appState!;
     if (f.files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...f.files };
