@@ -260,6 +260,89 @@ function inspectDoc(rasters) {
   };
 }
 
+/// Capture the browser's composed boxes immediately before the lift writes
+/// its first stand-in, then after all stand-ins have been written.
+async function watchImageLift(page) {
+  await page.evaluate(() => {
+    const original = Element.prototype.setAttribute;
+    const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip"]);
+    const capture = { before: null, after: null };
+    const read = (host) => Object.fromEntries(
+      [...host.querySelectorAll("img[alt]")]
+        .filter((img) => names.has(img.alt))
+        .map((img) => [img.alt, {
+          rect: img.getBoundingClientRect().toJSON(),
+          parent: img.parentElement?.getBoundingClientRect().toJSON(),
+          natural: [img.naturalWidth, img.naturalHeight],
+          style: [getComputedStyle(img).width, getComputedStyle(img).height],
+        }]),
+    );
+    Element.prototype.setAttribute = function (name, value) {
+      if (!capture.before && name === "src" && this instanceof HTMLImageElement &&
+          this.hasAttribute("data-chan-export-image") && String(value).startsWith("data:image/svg+xml,")) {
+        let host = this.parentElement;
+        while (host && host.style?.left !== "-10000px") host = host.parentElement;
+        if (host && [...host.querySelectorAll("img[alt]")].some((img) => img.alt === "wide-table")) {
+          capture.before = read(host);
+          queueMicrotask(() => { capture.after = read(host); });
+        }
+      }
+      return original.call(this, name, value);
+    };
+    window.__pdfImageLift = { capture, restore: () => { Element.prototype.setAttribute = original; } };
+  });
+}
+
+function inspectLayoutImages(rasters, capture) {
+  const faults = [];
+  const before = capture?.before ?? {};
+  const after = capture?.after ?? {};
+  const page = rasters[0];
+  const scale = page.width / 669;
+  for (const name of ["wide-table", "contain", "partial-clip"]) {
+    const a = before[name]?.rect;
+    const b = after[name]?.rect;
+    if (!a || !b) {
+      faults.push(`${name}: the browser did not capture both boxes`);
+      continue;
+    }
+    if (!(a.width > 0 && a.height > 0) || Math.abs(a.width - b.width) > 0.5 ||
+        Math.abs(a.height - b.height) > 0.5) {
+      faults.push(`${name}: its composed ${a.width}x${a.height} box became ${b.width}x${b.height}`);
+    }
+  }
+  const expected = [
+    ["wide-table", TEAL, before["wide-table"]?.rect.width, before["wide-table"]?.rect.height],
+    ["contain", VIOLET, 80, 80],
+    ["partial-clip", AMBER, before["partial-clip"]?.rect.width,
+      Math.max(0, Math.min(before["partial-clip"]?.rect.bottom ?? 0,
+        before["partial-clip"]?.parent?.bottom ?? 0) -
+        Math.max(before["partial-clip"]?.rect.top ?? 0,
+          before["partial-clip"]?.parent?.top ?? 0))],
+  ];
+  const ink = {};
+  for (const [name, colour, width, height] of expected) {
+    const box = colourBox(page, colour);
+    ink[name] = box;
+    if (!box || !(width > 0 && height > 0)) {
+      faults.push(`${name}: no measurable image colour or composed box`);
+      continue;
+    }
+    if (Math.abs(box.width - width * scale) > 4 || Math.abs(box.height - height * scale) > 4) {
+      faults.push(`${name}: PDF colour is ${box.width}x${box.height}, composed ${width}x${height} at ${scale.toFixed(3)} raster px per CSS px`);
+    }
+  }
+  if (!before["wide-table"] || before["wide-table"].natural[0] !== 900 ||
+      !(before["wide-table"].rect.width < 900)) {
+    faults.push("wide-table: the bitmap did not enter shrink-to-fit without its own width");
+  }
+  if (!before["closed-details"] || !before["zero-clip"]) {
+    faults.push("hidden images: the browser did not compose both source elements");
+  }
+  if (colourBox(page, ROSE)) faults.push("hidden images: rose pixels appeared in the PDF");
+  return { details: { capture, ink }, faults };
+}
+
 async function openFileBrowser(page) {
   const open = await page.$(".file-tree, [role=tree]");
   if (open) return;
@@ -331,6 +414,13 @@ export default {
         pages: 5,
         inspect: inspectBoxDeck,
       },
+      {
+        file: "layout-images.md",
+        pdf: "layout-images.pdf",
+        orientation: "portrait",
+        pages: 1,
+        inspect: inspectLayoutImages,
+      },
     ];
     const details = {};
     // What the pixel reads measured, for the message of a failed run.
@@ -341,9 +431,16 @@ export default {
       if (existsSync(target)) rmSync(target);
 
       await selectTreeFile(page, c.file);
+      if (c.file === "layout-images.md") await watchImageLift(page);
       await clickExportToPdf(page);
       const bytes = await ctx.pollFile(target, 90_000);
       await ctx.shot(`exported-${c.file}`);
+      const capture = c.file === "layout-images.md" ? await page.evaluate(() => {
+        const result = window.__pdfImageLift?.capture;
+        window.__pdfImageLift?.restore();
+        delete window.__pdfImageLift;
+        return result;
+      }) : undefined;
 
       if (c.pages !== undefined) {
         details[c.file] = await ctx.assertPdf(bytes, {
@@ -367,7 +464,7 @@ export default {
         details[`${c.file}:boundaries`] = await ctx.assertNoDuplicateBands(bytes);
       }
       if (c.inspect) {
-        const read = c.inspect(await pdfPageRasters(bytes));
+        const read = c.inspect(await pdfPageRasters(bytes), capture);
         details[`${c.file}:pixels`] = read.details;
         pixels[c.pdf] = read.details;
         faults.push(...read.faults.map((fault) => `${c.pdf} ${fault}`));
