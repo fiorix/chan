@@ -41,7 +41,7 @@
   } from "lucide-svelte";
   import type Wysiwyg from "../editor/Wysiwyg.svelte";
   import type { BlockKind } from "../editor/commands/format";
-  import { chordFor } from "../state/shortcuts";
+  import { SHORTCUTS, currentOS, currentPlatform, formatChord, osChord } from "../state/shortcuts";
 
   let {
     wysiwyg,
@@ -223,11 +223,15 @@
   }
 
   // The tooltip of a button whose action the editor binds to a chord: its
-  // label and the chord the registry gives the command on this platform,
-  // or the label alone where the registry gives none.
+  // label and the registry's built-in chord for the command on this
+  // platform, or the label alone where the registry gives none. The editor's
+  // keymap binds that chord whatever the user has assigned to the command,
+  // so an assignment is not what the tooltip names.
   function chordTitle(label: string, id: string): string {
-    const chord = chordFor(id);
-    return chord ? `${label} (${chord})` : label;
+    const os = currentOS();
+    const builtIn = SHORTCUTS.find((s) => s.id === id);
+    const chord = builtIn && osChord(builtIn, currentPlatform(), os);
+    return chord ? `${label} (${formatChord(chord, os)})` : label;
   }
 
   // Pin/unpin around the editor's preventDefault dance: holding the
