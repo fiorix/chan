@@ -137,31 +137,6 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-/// Settle as `work` does, or reject as soon as `stop` aborts. What is
-/// stopped this way is never what a failure reports.
-function untilStopped<T>(work: Promise<T>, stop?: AbortSignal): Promise<T> {
-  if (!stop) return work;
-  return new Promise<T>((resolve, reject) => {
-    const stopped = (): void => reject(new SnapshotError("stopped"));
-    if (stop.aborted) {
-      stopped();
-      return;
-    }
-    stop.addEventListener("abort", stopped, { once: true });
-    const settle = (): void => stop.removeEventListener("abort", stopped);
-    work.then(
-      (value) => {
-        settle();
-        resolve(value);
-      },
-      (err) => {
-        settle();
-        reject(err);
-      },
-    );
-  });
-}
-
 /// Fetch a same-origin resource and return it as a data: URL, bounded
 /// by `timeoutMs` and given up when `stop` aborts. Returns null on any
 /// failure; the audit names the leftover.
@@ -451,22 +426,18 @@ export class PageImages {
   }
 }
 
-/// Decode an image in the app's own document, bounded by `timeoutMs` and
-/// given up when `stop` aborts.
+/// Decode an image in the app's own document, bounded by `timeoutMs`. An
+/// engine offers no way to cancel a decode, so one whose batch has failed
+/// runs to its end or to its bound, and nothing waits for it.
 async function decodeImage(
   src: string,
   name: string,
   timeoutMs: number,
-  stop: AbortSignal,
 ): Promise<HTMLImageElement> {
   const image = new Image();
   image.src = src;
   try {
-    await withTimeout(
-      untilStopped(image.decode(), stop),
-      timeoutMs,
-      `decode of image ${name}`,
-    );
+    await withTimeout(image.decode(), timeoutMs, `decode of image ${name}`);
   } catch (err) {
     if (err instanceof SnapshotError) throw err;
     throw new SnapshotError(`image ${name} could not be decoded`);
@@ -687,12 +658,12 @@ export async function liftPageImages(
 ): Promise<void> {
   const decoded = await mapImageSteps(
     Array.from(root.querySelectorAll("img")),
-    async (img, stop) => {
+    async (img) => {
       if (img.hasAttribute(LIFTED_ATTR)) return null;
       const src = img.getAttribute("src") ?? "";
       if (!src.startsWith("data:")) return null;
       const name = sourceNames.get(img) ?? resourceName(src);
-      const bitmap = await decodeImage(src, name, timeoutMs, stop);
+      const bitmap = await decodeImage(src, name, timeoutMs);
       return { img, name, bitmap };
     },
   );
@@ -734,7 +705,7 @@ export async function liftPageImages(
   // here still proves its bytes are an image before any page is drawn.
   const svgImages = await mapImageSteps(
     Array.from(root.querySelectorAll("image")),
-    async (image, stop) => {
+    async (image) => {
       if (image.hasAttribute(DECODED_ATTR)) return null;
       let decoded = false;
       for (const attr of IMAGE_HREF_ATTRS) {
@@ -744,7 +715,6 @@ export async function liftPageImages(
           href,
           sourceNames.get(image) ?? resourceName(href),
           timeoutMs,
-          stop,
         );
         decoded = true;
       }
