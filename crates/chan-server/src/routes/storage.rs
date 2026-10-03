@@ -24,7 +24,7 @@ use crate::state::AppState;
 
 use super::metadata::{
     close_workspace_sessions, held_past_release, install_workspace_cell, lock_still_held,
-    reopen_released, workspace_search_aggression, WorkspaceCellInstallError,
+    reopen_released, workspace_search_aggression, Release, WorkspaceCellInstallError,
 };
 
 /// Body of `POST /api/storage/reset`. Two modes mirror the chan-
@@ -245,17 +245,23 @@ fn perform_reset_with(
     let released = Arc::downgrade(&workspace_strong);
     let lock_dir = workspace_strong.paths().lock.clone();
     drop(workspace_strong);
-    if let Some(workspace) = held_past_release(&released, &lock_dir, RESET_DRAIN_DEADLINE) {
-        install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
-        return Err(ResetError::Busy);
-    }
+    let releasing = match held_past_release(&released, &lock_dir, RESET_DRAIN_DEADLINE) {
+        Release::Held(workspace) => {
+            install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
+            return Err(ResetError::Busy);
+        }
+        Release::LetGo => false,
+        Release::LockNotFreed => true,
+    };
     // Compute the wipe and restoration independently. Even a partial wipe
     // must run through open_workspace so its lazily-created skeleton is
     // repaired before the operation error is returned. A failed reopen is
     // itself one of the states this route has to recover from.
     let reset_result = ops.reset_workspace(state, mode);
-    let reopened = reopen_released(RESET_DRAIN_DEADLINE, || ops.open_workspace(state))
-        .map_err(ResetError::Core)?;
+    let reopened = reopen_released(releasing.then_some(RESET_DRAIN_DEADLINE), || {
+        ops.open_workspace(state)
+    })
+    .map_err(ResetError::Core)?;
     install_workspace_cell(
         state,
         &mut cell_guard,
@@ -264,10 +270,12 @@ fn perform_reset_with(
     );
 
     match (reset_result, reopened.recovered_from) {
-        // chan-workspace refused the reset over a lock that was still held
-        // and is free again by the reopen: nothing was reset, and a retry
-        // finds the lock free.
-        (Err(error), _) if lock_still_held(&error) => Err(ResetError::Busy),
+        // The lock this route gave up waiting for was still on its way out
+        // when chan-workspace refused the reset over it, and is free again by
+        // the reopen: nothing was reset, and a retry finds it free. A lock
+        // refusal after the wait saw the lock free is another process's, and
+        // answers as that.
+        (Err(error), _) if releasing && lock_still_held(&error) => Err(ResetError::Busy),
         (Err(error), _) | (Ok(_), Some(error)) => Err(ResetError::Core(error)),
         (Ok(report), None) => Ok(report),
     }

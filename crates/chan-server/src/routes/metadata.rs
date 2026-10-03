@@ -292,14 +292,20 @@ fn perform_metadata_import_with(
     let released = Arc::downgrade(&workspace_strong);
     let lock_dir = workspace_strong.paths().lock.clone();
     drop(workspace_strong);
-    if let Some(workspace) = held_past_release(&released, &lock_dir, IMPORT_DRAIN_DEADLINE) {
-        install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
-        return Err(MetadataImportError::Busy);
-    }
+    let releasing = match held_past_release(&released, &lock_dir, IMPORT_DRAIN_DEADLINE) {
+        Release::Held(workspace) => {
+            install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
+            return Err(MetadataImportError::Busy);
+        }
+        Release::LetGo => false,
+        Release::LockNotFreed => true,
+    };
 
     let import_result = ops.import_archive(state, archive.path(), options);
-    let reopened = reopen_released(IMPORT_DRAIN_DEADLINE, || ops.open_workspace(state))
-        .map_err(MetadataImportError::Core)?;
+    let reopened = reopen_released(releasing.then_some(IMPORT_DRAIN_DEADLINE), || {
+        ops.open_workspace(state)
+    })
+    .map_err(MetadataImportError::Core)?;
     install_workspace_cell(
         state,
         &mut cell_guard,
@@ -308,10 +314,11 @@ fn perform_metadata_import_with(
     );
 
     match (import_result, reopened.recovered_from) {
-        // chan-workspace refused the import over a lock that was still held
-        // and is free again by the reopen: nothing was imported, and a retry
-        // finds the lock free.
-        (Err(error), _) if lock_still_held(&error) => Err(MetadataImportError::Busy),
+        // The lock this route gave up waiting for was still on its way out
+        // when chan-workspace refused the import over it, and is free again
+        // by the reopen: a retry finds it free. A lock refusal after the wait
+        // saw the lock free is another process's, and answers as that.
+        (Err(error), _) if releasing && lock_still_held(&error) => Err(MetadataImportError::Busy),
         (Err(error), _) | (Ok(_), Some(error)) => Err(MetadataImportError::Core(error)),
         (Ok(report), None) => Ok(report),
     }
@@ -339,38 +346,56 @@ const REOPEN_POLL: Duration = Duration::from_millis(25);
 /// way on its last owner's thread, and it releases the lock last, after it
 /// has joined the recovery worker and closed the index.
 ///
-/// Returns the workspace when an owner still holds it at the end of the first
-/// bound, for the caller to put back in its cell and answer busy. `None` means
-/// the workspace is let go, or that its lock was still held at the end of the
-/// second bound, which the caller's own call to chan-workspace then refuses.
+/// What the wait ended on is the caller's to act on: see [`Release`].
 pub(super) fn held_past_release(
     released: &Weak<Workspace>,
     lock_dir: &Path,
     bound: Duration,
-) -> Option<Arc<Workspace>> {
+) -> Release {
     let owners_deadline = Instant::now() + bound;
     while released.strong_count() > 0 {
         if Instant::now() >= owners_deadline {
             // An owner that lets go between the count and this upgrade leaves
             // nothing to put back, and its drop is under way.
             if let Some(workspace) = released.upgrade() {
-                return Some(workspace);
+                return Release::Held(workspace);
             }
             break;
         }
         std::thread::sleep(RELEASE_POLL);
     }
     let lock_deadline = Instant::now() + bound;
-    while !chan_workspace::lock::is_free(lock_dir) && Instant::now() < lock_deadline {
+    while !chan_workspace::lock::is_free(lock_dir) {
+        if Instant::now() >= lock_deadline {
+            return Release::LockNotFreed;
+        }
         std::thread::sleep(RELEASE_POLL);
     }
-    None
+    Release::LetGo
+}
+
+/// What [`held_past_release`] ended on.
+pub(super) enum Release {
+    /// No owner is left and the writer lock was seen free. A lock that
+    /// chan-workspace then refuses the caller over was taken since, by
+    /// another process.
+    LetGo,
+    /// An owner still holds the workspace at the end of the first bound. The
+    /// caller puts it back in its cell and answers busy.
+    Held(Arc<Workspace>),
+    /// No owner is left and the wait gave up on the writer lock at the end
+    /// of the second bound: the drop this process started still holds it.
+    /// The caller's own call to chan-workspace is then refused over it, the
+    /// reopen waits for it, and the answer is busy.
+    LockNotFreed,
 }
 
 /// True for chan-workspace's two refusals of a root whose writer lock is
 /// held. The drop of a workspace this process let go answers the first while
 /// the lock's record still names this process, and the second once the drop
-/// has cleared the record and not yet closed the lock.
+/// has cleared the record and not yet closed the lock. Another process that
+/// holds the lock answers the second too, so a caller reads a refusal as its
+/// own late release only after [`Release::LockNotFreed`].
 pub(super) fn lock_still_held(error: &chan_workspace::ChanError) -> bool {
     matches!(
         error,
@@ -389,16 +414,18 @@ pub(super) struct Reopened {
 /// Reopen the workspace a route let go, as restoration work for its cell: a
 /// cell left empty reads as a missing workspace to every later request.
 ///
-/// A reopen refused because the writer lock is still held is asked again
-/// until `bound` has passed. The lock is on its way out with the drop of the
-/// workspace the route let go, so such a refusal is a wait, and it is not
-/// reported once a reopen succeeds. Any other failure is retried once and
-/// kept for the caller's answer when the retry recovers.
+/// `releasing` is the bound to wait in when the route gave up waiting for the
+/// writer lock ([`Release::LockNotFreed`]): the lock is then on its way out
+/// with the drop of the workspace the route let go, so a reopen refused over
+/// it is asked again until the bound has passed, and such a refusal is not
+/// reported once a reopen succeeds. Without it a lock refusal is another
+/// process's lock and no wait. Any other failure is retried once and kept for
+/// the caller's answer when the retry recovers.
 pub(super) fn reopen_released(
-    bound: Duration,
+    releasing: Option<Duration>,
     mut open: impl FnMut() -> chan_workspace::Result<Arc<Workspace>>,
 ) -> chan_workspace::Result<Reopened> {
-    let deadline = Instant::now() + bound;
+    let deadline = releasing.map(|bound| Instant::now() + bound);
     let mut recovered_from = None;
     loop {
         match open() {
@@ -408,8 +435,8 @@ pub(super) fn reopen_released(
                     recovered_from,
                 })
             }
-            Err(error) if lock_still_held(&error) => {
-                if Instant::now() >= deadline {
+            Err(error) if deadline.is_some() && lock_still_held(&error) => {
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     return Err(error);
                 }
                 std::thread::sleep(REOPEN_POLL);
@@ -668,13 +695,13 @@ mod tests {
             }
         });
 
-        let still_held = held_past_release(&Weak::new(), &lock_dir, Duration::from_secs(30));
+        let release = held_past_release(&Weak::new(), &lock_dir, Duration::from_secs(30));
 
         assert!(
             freed.load(Ordering::SeqCst),
             "the wait ended while the writer lock was still held"
         );
-        assert!(still_held.is_none());
+        assert!(matches!(release, Release::LetGo));
         holder.join().unwrap();
     }
 
@@ -688,8 +715,9 @@ mod tests {
         let (ended, wait_ended) = std::sync::mpsc::channel();
         let started = Instant::now();
         let waiter = std::thread::spawn(move || {
-            let still_held = held_past_release(&Weak::new(), &lock_dir, bound);
-            let _ = ended.send((started.elapsed(), still_held.is_none()));
+            let release = held_past_release(&Weak::new(), &lock_dir, bound);
+            let gave_up_on_the_lock = matches!(release, Release::LockNotFreed);
+            let _ = ended.send((started.elapsed(), gave_up_on_the_lock));
         });
 
         let outcome = wait_ended.recv_timeout(bound + margin);
@@ -697,7 +725,7 @@ mod tests {
         drop(held);
         waiter.join().unwrap();
 
-        let (waited, no_owner_left) = outcome.unwrap_or_else(|_| {
+        let (waited, gave_up_on_the_lock) = outcome.unwrap_or_else(|_| {
             panic!(
                 "the wait for a held lock was still going {margin:?} past its bound of {bound:?}"
             )
@@ -706,7 +734,10 @@ mod tests {
             waited >= bound,
             "the wait for a held lock ended after {waited:?}, inside its bound of {bound:?}"
         );
-        assert!(no_owner_left);
+        assert!(
+            gave_up_on_the_lock,
+            "the wait did not say that it gave up on a lock still held at its bound"
+        );
     }
 
     #[test]
