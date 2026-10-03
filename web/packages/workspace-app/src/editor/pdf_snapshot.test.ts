@@ -167,6 +167,26 @@ describe("pageSvgDocument", () => {
     expect(doc).toContain('xmlns="http://www.w3.org/1999/xhtml"');
     expect(doc).toContain("<p>hi</p>");
   });
+
+  test("the document hides the scrollbar of anything that overflows", () => {
+    // A raster has nothing to scroll, and an element styled to scroll
+    // would still paint its scrollbar into it.
+    const root = page('<pre style="overflow:auto">one long line</pre>');
+    const doc = new DOMParser().parseFromString(
+      pageSvgDocument(root, { widthPx: 800, heightPx: 600 }),
+      "image/svg+xml",
+    );
+    expect(doc.querySelector("parsererror")).toBeNull();
+    const css = Array.from(doc.querySelectorAll("foreignObject > style"))
+      .map((style) => style.textContent ?? "")
+      .join("\n");
+    expect(css).toMatch(/\*\s*\{[^}]*scrollbar-width:\s*none/);
+    expect(css).toMatch(/\*::-webkit-scrollbar\s*\{[^}]*display:\s*none/);
+    // The page itself still follows the stylesheet.
+    expect(doc.querySelector("foreignObject > div > pre")?.textContent).toBe(
+      "one long line",
+    );
+  });
 });
 
 describe("snapshotPage", () => {
