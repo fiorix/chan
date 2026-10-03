@@ -1532,15 +1532,34 @@ impl DevserverState {
     /// registration entirely. Refusal leaves both the live mount and the
     /// registration intact. Distinct from on/off.
     ///
-    /// A removal the host fails has run its close first, whether it answers
-    /// still releasing or its unregister fails another way, so a workspace
-    /// still registered is off in the host, and its off row is a fresh row
-    /// behind an earlier removal's forget, or no row once the removal has
-    /// forgotten its rows: nothing in the overlay outranks a record left
-    /// desired on. The record is turned off
-    /// ([`stand_down_refused_forget`](Self::stand_down_refused_forget)), so the
-    /// forget's error leaves the workspace registered and its record as the
-    /// host left it. The launcher's delete on a devserver is this forget.
+    /// A removal the host fails leaves the workspace registered, and the
+    /// record is turned off whichever error it is
+    /// ([`stand_down_refused_forget`](Self::stand_down_refused_forget)).
+    ///
+    /// Most errors come after the removal's close: the registry-write permit
+    /// not granted within the release budget and the unregister meeting a
+    /// handle of the root this process holds, both answered still
+    /// releasing, and the unregister failing another way, on a writer lock
+    /// another process holds for one. The workspace is then off in the
+    /// host, and its off row can be a fresh row behind an earlier removal's
+    /// forget, or no row once the removal has forgotten its rows, and then
+    /// nothing in the overlay outranks a record left desired on.
+    ///
+    /// An error can also come before the close has changed anything: the
+    /// root's key resolution ending without an answer; for a root no
+    /// registry row goes by, the row's lookup failing, or finding an earlier
+    /// lookup still held, which is answered still releasing too; and a
+    /// poisoned lock of the host. For a registered root only the poisoned
+    /// lock can leave a tenant mounted, since a runtime opened at the root
+    /// gives its key without a resolution and the close takes it down
+    /// before anything else can fail. So the workspace is not mounted in
+    /// that case either, its user asked for its removal, a record left
+    /// desired on would mount it at the next start, and a tombstone left in
+    /// place would be dropped by its attempt with no row behind it: the
+    /// record is turned off there too. The record of a root the registry
+    /// has dropped goes at the save that follows, whatever is mounted.
+    ///
+    /// The launcher's delete on a devserver is this forget.
     async fn forget_workspace(
         &self,
         prefix: &str,
@@ -1639,21 +1658,24 @@ impl DevserverState {
     /// left of a starting record at `generation` (`tombstoned`), or a record
     /// it did not tombstone, still at the `generation` it read.
     ///
-    /// The host's removal ran its close before it failed, so the host holds
-    /// the workspace off. The tombstone goes back off at its own generation,
+    /// A removal that failed after its close left the workspace off in the
+    /// host, and one that failed before it left nothing of a registered
+    /// root mounted, short of a poisoned lock of the host;
+    /// [`forget_workspace`](Self::forget_workspace) names both kinds. The
+    /// tombstone goes back off at its own generation,
     /// which is past its attempt's: the attempt stands down at either of its
     /// reconciles if it has not read the tombstone, and one that has closes
     /// what it mounted and removes nothing
     /// ([`settle_forgotten_completion`](Self::settle_forgotten_completion)).
     /// The starting record as it was is desired on at its attempt's
-    /// generation: its next save would write the overlay row on over the
-    /// close's off, and its attempt would mount the workspace, or leave it
-    /// starting with nothing behind it once that attempt drops what it read
-    /// as a tombstone. Any other record turns off
-    /// at a newer generation whatever its phase, since a failed record stays
-    /// desired on and a mounted one keeps its desire at a save during a
-    /// stop. A record changed since, or another forget's tombstone, belongs
-    /// to a later change and is left alone.
+    /// generation: its next save would write the overlay row on, over an
+    /// off the close recorded, and its attempt would mount the workspace,
+    /// or leave it starting with nothing behind it once that attempt drops
+    /// what it read as a tombstone. Any other record turns off at a newer
+    /// generation whatever its phase, since a failed record stays desired
+    /// on and a mounted one keeps its desire at a save during a stop. A
+    /// record changed since, or another forget's tombstone, belongs to a
+    /// later change and is left alone.
     fn stand_down_refused_forget(&self, prefix: &str, generation: u64, tombstoned: bool) {
         let changed = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
