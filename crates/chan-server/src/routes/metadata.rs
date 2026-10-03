@@ -449,6 +449,36 @@ pub(crate) fn install_test_session_close_gate(
         .is_none());
 }
 
+/// Hold `root`'s writer lock the way another process does: the lock is taken
+/// and its record names a live process that is not this one, so chan-workspace
+/// refuses this process as it refuses any other and never as the lock's owner.
+#[cfg(all(test, unix))]
+pub(super) fn another_processes_lock(
+    library: &Library,
+    root: &Path,
+) -> chan_workspace::lock::WorkspaceLock {
+    let paths = library
+        .workspace_paths_for(root)
+        .expect("a registered workspace");
+    let lock =
+        chan_workspace::lock::WorkspaceLock::acquire(&paths.lock, root).expect("a free lock");
+    let record = chan_workspace::lock::LockRecord {
+        // Process 1 is alive on every unix and is never this process.
+        pid: 1,
+        path: std::fs::canonicalize(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        started_at: "2000-01-01T00:00:00Z".to_string(),
+    };
+    std::fs::write(
+        paths.lock.join("writer.lock"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    lock
+}
+
 /// Run only after the old workspace has drained, while its cell write guard
 /// still excludes new handlers. These callers run on the blocking pool; the
 /// flush futures use the retained workspace directly and never read the cell.
@@ -687,5 +717,172 @@ mod tests {
 
         assert!(download.filename.ends_with(".tar.zst"));
         assert!(!download.bytes.is_empty());
+    }
+
+    #[cfg(unix)]
+    struct ImportTestState {
+        _config: tempfile::TempDir,
+        _root: tempfile::TempDir,
+        state: Arc<AppState>,
+        archive: Vec<u8>,
+    }
+
+    /// A served workspace and an archive of its own metadata. Called inside a
+    /// runtime, where the state's indexer starts its tasks.
+    #[cfg(unix)]
+    fn import_test_state() -> ImportTestState {
+        let config = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let library = Library::open_at(config.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.write_text("note.md", "hello").unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            library,
+            root.path().to_path_buf(),
+            workspace,
+        ));
+        let exported = tempfile::TempDir::new().unwrap();
+        let path = exported.path().join("metadata.tar.zst");
+        state
+            .library
+            .export_metadata_archive(
+                &state.workspace_root,
+                &path,
+                MetadataExportOptions {
+                    chan_version: "test".into(),
+                },
+            )
+            .unwrap();
+        let archive = std::fs::read(path).unwrap();
+        ImportTestState {
+            _config: config,
+            _root: root,
+            state,
+            archive,
+        }
+    }
+
+    /// Stands in for another process that takes the workspace's writer lock
+    /// once the archive is imported, before the import reopens the workspace
+    /// for its rescan: the route has let its workspace go and seen the lock
+    /// free by then.
+    #[cfg(unix)]
+    struct BesideAnotherProcess {
+        lock: std::cell::RefCell<Option<chan_workspace::lock::WorkspaceLock>>,
+        lets_go_before_the_reopen: bool,
+        open_calls: std::cell::Cell<usize>,
+    }
+
+    #[cfg(unix)]
+    impl BesideAnotherProcess {
+        fn that_lets_go_before_the_reopen(lets_go_before_the_reopen: bool) -> Self {
+            Self {
+                lock: std::cell::RefCell::new(None),
+                lets_go_before_the_reopen,
+                open_calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl ImportWorkspaceOps for BesideAnotherProcess {
+        fn import_archive(
+            &self,
+            state: &AppState,
+            archive: &Path,
+            options: MetadataImportOptions,
+        ) -> chan_workspace::Result<MetadataImportReport> {
+            let report = state.library.import_metadata_archive(
+                &state.workspace_root,
+                archive,
+                MetadataImportOptions {
+                    rescan: false,
+                    ..options
+                },
+            )?;
+            *self.lock.borrow_mut() = Some(another_processes_lock(
+                &state.library,
+                &state.workspace_root,
+            ));
+            // The rescan's own reopen, which the other process's lock refuses.
+            state
+                .library
+                .open_workspace(&state.workspace_root)
+                .map(|_| report)
+        }
+
+        fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>> {
+            self.open_calls.set(self.open_calls.get() + 1);
+            if self.lets_go_before_the_reopen {
+                self.lock.borrow_mut().take();
+            }
+            state.library.open_workspace(&state.workspace_root)
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_whose_rescan_meets_another_processes_lock_answers_that_lock() {
+        let test = import_test_state();
+        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(true);
+
+        let result = perform_metadata_import_with(
+            &test.state,
+            test.archive.clone(),
+            MetadataImportOptions {
+                rescan: true,
+                force_scm: false,
+            },
+            &ops,
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(MetadataImportError::Core(
+                    chan_workspace::ChanError::WorkspaceLocked
+                ))
+            ),
+            "an import that completed and whose rescan met another process's lock \
+             must answer that lock: {:?}",
+            result.as_ref().err()
+        );
+        test.state
+            .try_workspace()
+            .expect("the reopen after the other process let go fills the cell");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_does_not_wait_at_its_reopen_for_another_processes_lock() {
+        let test = import_test_state();
+        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(false);
+
+        let result = perform_metadata_import_with(
+            &test.state,
+            test.archive.clone(),
+            MetadataImportOptions {
+                rescan: true,
+                force_scm: false,
+            },
+            &ops,
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(MetadataImportError::Core(
+                    chan_workspace::ChanError::WorkspaceLocked
+                ))
+            ),
+            "an import beside another process's lock must answer that lock: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(
+            ops.open_calls.get(),
+            2,
+            "the import asked again and again for a workspace another process holds"
+        );
     }
 }

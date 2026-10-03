@@ -280,6 +280,8 @@ mod tests {
 
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    use crate::routes::metadata::another_processes_lock;
     use crate::routes::metadata::inject_test_watch_registration_failure;
     #[cfg(unix)]
     use crate::routes::metadata::install_test_session_close_gate;
@@ -1066,6 +1068,94 @@ mod tests {
             answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(false)),
             "an import whose workspace is still dropping when its wait for the lock ends \
              must answer busy over a reopened workspace: {answer:?}"
+        );
+    }
+
+    /// Stands in for another process that takes the workspace's writer lock
+    /// as the reset asks chan-workspace for its wipe: the route has let its
+    /// workspace go and seen the lock free by then.
+    #[cfg(unix)]
+    struct BesideAnotherProcess {
+        lock: std::cell::RefCell<Option<chan_workspace::lock::WorkspaceLock>>,
+        lets_go_before_the_reopen: bool,
+        open_calls: Cell<usize>,
+    }
+
+    #[cfg(unix)]
+    impl BesideAnotherProcess {
+        fn that_lets_go_before_the_reopen(lets_go_before_the_reopen: bool) -> Self {
+            Self {
+                lock: std::cell::RefCell::new(None),
+                lets_go_before_the_reopen,
+                open_calls: Cell::new(0),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl ResetWorkspaceOps for BesideAnotherProcess {
+        fn reset_workspace(
+            &self,
+            state: &AppState,
+            mode: ResetMode,
+        ) -> chan_workspace::Result<ResetReport> {
+            *self.lock.borrow_mut() = Some(another_processes_lock(
+                &state.library,
+                &state.workspace_root,
+            ));
+            state.library.reset_workspace(&state.workspace_root, mode)
+        }
+
+        fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>> {
+            self.open_calls.set(self.open_calls.get() + 1);
+            if self.lets_go_before_the_reopen {
+                self.lock.borrow_mut().take();
+            }
+            state.library.open_workspace(&state.workspace_root)
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_refused_over_another_processes_lock_answers_that_lock() {
+        let test = reset_test_state();
+        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(true);
+
+        let result = perform_reset_with(&test.state, ResetMode::State, &ops);
+
+        assert!(
+            matches!(
+                result,
+                Err(ResetError::Core(chan_workspace::ChanError::WorkspaceLocked))
+            ),
+            "a reset refused over another process's lock must answer that lock: {:?}",
+            result.as_ref().err()
+        );
+        test.state
+            .try_workspace()
+            .expect("the reopen after the other process let go fills the cell");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_does_not_wait_at_its_reopen_for_another_processes_lock() {
+        let test = reset_test_state();
+        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(false);
+
+        let result = perform_reset_with(&test.state, ResetMode::State, &ops);
+
+        assert!(
+            matches!(
+                result,
+                Err(ResetError::Core(chan_workspace::ChanError::WorkspaceLocked))
+            ),
+            "a reset beside another process's lock must answer that lock: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(
+            ops.open_calls.get(),
+            2,
+            "the reset asked again and again for a workspace another process holds"
         );
     }
 }
