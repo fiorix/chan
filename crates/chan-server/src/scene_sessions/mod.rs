@@ -59,6 +59,7 @@ use crate::doc_sessions::recovery::{
     self, RecoveryAuthority, RecoveryBaseline, RecoveryConflict, RecoveryKind, RecoveryRecord,
     RecoveryState,
 };
+use crate::doc_sessions::{read_cell, read_cell_within, CellRead, CELL_RETRY, STOP_CELL_WAIT};
 use crate::routes::scene::{PeerSceneCursor, ServerFrame};
 use crate::self_writes::{
     check_write_preconditions, SelfWrites, WritePreconditionError, WritePreconditions,
@@ -1855,13 +1856,15 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
     session.merge_disk(disk_text, &disk_stat);
 }
 
-fn cell_workspace(cell: &Arc<RwLock<Option<WorkspaceCell>>>) -> Option<Arc<Workspace>> {
-    cell.read().ok()?.as_ref().map(|c| c.workspace.clone())
-}
-
 /// The background flusher: debounced dirty-session writes, detach
 /// flushes, the detach-grace reaper, and the flush-all on shutdown.
 /// Spawned once in build_app next to the doc-session tasks.
+///
+/// A tick that finds the workspace cell held does its flushes at a later
+/// tick. Told to stop beside a held cell, it waits up to `STOP_CELL_WAIT`
+/// for the cell and then leaves its sessions as they are: the reset or the
+/// import that holds the cell flushes and closes them once its drain ends,
+/// and closing them here would take them from the registry unflushed.
 pub fn spawn_flusher(
     registry: Arc<SceneRegistry>,
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
@@ -1875,7 +1878,19 @@ pub fn spawn_flusher(
                 _ = tokio::time::sleep(FLUSH_TICK) => {}
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
-                        let ws = cell_workspace(&workspace_cell);
+                        let ws = match read_cell_within(&workspace_cell, STOP_CELL_WAIT).await {
+                            CellRead::Workspace(ws) => Some(ws),
+                            CellRead::Empty => None,
+                            CellRead::Held => {
+                                tracing::warn!(
+                                    sessions = registry.sessions_snapshot().len(),
+                                    waited = ?STOP_CELL_WAIT,
+                                    "workspace cell held at shutdown; drawing sessions are \
+                                     left for its holder to flush"
+                                );
+                                return;
+                            }
+                        };
                         registry
                             .close_all("shutdown", ws.as_ref(), &self_writes)
                             .await;
@@ -1883,7 +1898,7 @@ pub fn spawn_flusher(
                     }
                 }
             }
-            if let Some(ws) = cell_workspace(&workspace_cell) {
+            if let CellRead::Workspace(ws) = read_cell(&workspace_cell) {
                 registry.flush_pass(&ws, &self_writes).await;
                 registry.reconcile_pending(&ws).await;
             }
@@ -1896,6 +1911,10 @@ pub fn spawn_flusher(
 /// sessions do their own precise mtime-token echo filtering instead of
 /// the coarse SelfWrites window) and folds external writes into live
 /// sessions. A lagged receiver or provider error reconciles everything.
+///
+/// So does an event that met a held workspace cell: the reconciler looks
+/// again every `CELL_RETRY` and reconciles every session once the cell
+/// can be read, so no event's effect is lost to the hold.
 pub fn spawn_reconciler(
     registry: Arc<SceneRegistry>,
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
@@ -1903,23 +1922,37 @@ pub fn spawn_reconciler(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // An event arrived whose effect is not applied yet: the receiver
+        // lagged, or the cell was held when the event was taken.
+        let mut owes_all = false;
         loop {
-            tokio::select! {
+            let event = tokio::select! {
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
                         return;
                     }
+                    continue;
                 }
-                received = events.recv() => {
-                    let Some(ws) = cell_workspace(&workspace_cell) else {
-                        continue;
-                    };
-                    match received {
-                        Ok(event) => registry.reconcile_event(&ws, event).await,
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            registry.reconcile_all(&ws).await;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => return,
+                received = events.recv() => match received {
+                    Ok(event) => Some(event),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        owes_all = true;
+                        None
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+                () = tokio::time::sleep(CELL_RETRY), if owes_all => None,
+            };
+            match read_cell(&workspace_cell) {
+                CellRead::Held => owes_all = true,
+                // The route that left the cell empty closed every session.
+                CellRead::Empty => owes_all = false,
+                CellRead::Workspace(ws) => {
+                    if owes_all {
+                        owes_all = false;
+                        registry.reconcile_all(&ws).await;
+                    } else if let Some(event) = event {
+                        registry.reconcile_event(&ws, event).await;
                     }
                 }
             }
