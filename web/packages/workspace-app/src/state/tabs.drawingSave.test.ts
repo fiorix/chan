@@ -237,31 +237,102 @@ describe("the close of a drawing whose save is refused", () => {
   });
 });
 
-describe("a refused drawing that does not close says why", () => {
-  test("a draft is not closed, and a notice says that it was not saved", async () => {
-    const path = ".Drafts/untitled/untitled.excalidraw";
+describe("the close of a draft drawing whose unsaved text does not parse", () => {
+  const path = ".Drafts/untitled/untitled.excalidraw";
+
+  /// The draft open with `BROKEN` typed over its saved text, and every
+  /// request its close can send recorded.
+  function brokenDraft() {
     const pane = resetLayout([drawingTab(path)]);
     const write = stubWrites();
     const notice = vi.spyOn(notifications, "notify");
-    const inspect = vi.spyOn(api, "inspectDraft");
+    const inspect = vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path,
+      name: "untitled",
+      file_count: 1,
+      dir_count: 0,
+      total_size: SAVED.length,
+      has_attachments: false,
+    });
+    const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+    const promote = vi.spyOn(api, "promoteDraft");
+    return { pane, write, notice, inspect, discard, promote };
+  }
 
-    await closeTab(pane.id, "board-1");
+  test("opens the draft's own dialog with nothing saved first and no notice", async () => {
+    const { pane, write, notice } = brokenDraft();
+
+    const close = closeTab(pane.id, "board-1");
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
 
     expect({
+      dialogFor: draftCloseState.path,
       notices: notice.mock.calls,
       content: readTab("board-1")?.content,
       written: written(write),
-      inspected: inspect.mock.calls.length,
-      draftDialog: draftCloseState.open,
+    }).toEqual({ dialogFor: path, notices: [], content: BROKEN, written: [] });
+    resolveDraftClose("cancel");
+    await close;
+  });
+
+  test("its Discard removes the draft with nothing written first", async () => {
+    const { pane, write, notice, discard, promote } = brokenDraft();
+
+    const close = closeTab(pane.id, "board-1");
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    resolveDraftClose("discard");
+    await close;
+
+    expect({
+      open: readTab("board-1") !== undefined,
+      discarded: discard.mock.calls,
+      written: written(write),
+      promoted: promote.mock.calls.length,
+      notices: notice.mock.calls,
     }).toEqual({
-      notices: [[`untitled.excalidraw was not saved because the drawing does not parse (${parseReason(BROKEN)}).`]],
-      content: BROKEN,
+      open: false,
+      discarded: [[path]],
       written: [],
-      inspected: 0,
-      draftDialog: false,
+      promoted: 0,
+      notices: [["Draft discarded"]],
     });
   });
 
+  test("its Cancel keeps the tab and the text as typed", async () => {
+    const { pane, write, notice, discard } = brokenDraft();
+
+    const close = closeTab(pane.id, "board-1");
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    resolveDraftClose("cancel");
+    await close;
+
+    const tab = readTab("board-1");
+    expect({
+      content: tab?.content,
+      dirty: tab ? isDirty(tab) : null,
+      discarded: discard.mock.calls.length,
+      written: written(write),
+      notices: notice.mock.calls,
+    }).toEqual({ content: BROKEN, dirty: true, discarded: 0, written: [], notices: [] });
+  });
+
+  test("a save answer, which its dialog does not offer, promotes nothing and keeps the tab", async () => {
+    const { pane, write, promote } = brokenDraft();
+
+    const close = closeTab(pane.id, "board-1");
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    resolveDraftClose("save");
+    await close;
+
+    expect({
+      content: readTab("board-1")?.content,
+      promoted: promote.mock.calls.length,
+      written: written(write),
+    }).toEqual({ content: BROKEN, promoted: 0, written: [] });
+  });
+});
+
+describe("a refused drawing that does not close says why", () => {
   test("a draft whose refused edits are undone closes through its own dialog, with no notice", async () => {
     const path = ".Drafts/untitled/untitled.excalidraw";
     const pane = resetLayout([drawingTab(path)]);
