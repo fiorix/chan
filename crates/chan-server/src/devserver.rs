@@ -10694,7 +10694,11 @@ mod tests {
 
     /// A relinked root turned off through the host, as the launcher's off
     /// route turns it off, reads off after a devserver restart: its on-row,
-    /// kept under the root its registry row stores, is written off too.
+    /// kept under the root its registry row stores, is written off too. The
+    /// host records the off under the path the root resolves to as well; the
+    /// restart makes one record of the two rows, under the stored root, and
+    /// its save leaves that record's one row, so the row under the resolved
+    /// path does not outlive it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_relinked_root_turned_off_reads_off_after_a_restart() {
@@ -10724,6 +10728,27 @@ mod tests {
             .close_workspace_for_root(&stored, false)
             .await
             .expect("turn off through the host");
+        let resolved = chan_workspace::paths::canonicalize_normalized(&stored);
+        assert_ne!(resolved, stored, "fixture: the root did not relink");
+        let recorded = |state: &DevserverState| {
+            let mut rows = state
+                .host
+                .workspace_overlay()
+                .expect("the overlay is installed")
+                .entries()
+                .into_iter()
+                .map(|row| (PathBuf::from(row.path), row.desired_on))
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+        let mut both = vec![(resolved.clone(), false), (stored.clone(), false)];
+        both.sort();
+        assert_eq!(
+            recorded(&state),
+            both,
+            "fixture: the off was not recorded under both spellings of the root"
+        );
 
         let restarted = devserver_with_windows(home.path()).await;
         let rows = restarted
@@ -10744,6 +10769,28 @@ mod tests {
         assert!(
             entries.iter().all(|entry| !entry.on),
             "the relinked root turned off is on after a restart: {entries:?}"
+        );
+        assert_eq!(
+            only_record(&restarted),
+            (
+                1,
+                Some((
+                    registered_workspace_prefix(&stored).expect("prefix"),
+                    stored.clone()
+                ))
+            ),
+            "the restart did not make one record under the stored root"
+        );
+        restarted.persist_state();
+        assert_eq!(
+            recorded(&restarted),
+            vec![(stored.clone(), false)],
+            "a save after the restart left a row other than the stored root's off"
+        );
+        let entries = restarted.workspace_entries();
+        assert!(
+            entries.len() == 1 && !entries[0].on,
+            "the relinked root does not read off after the save: {entries:?}"
         );
     }
 
@@ -11405,6 +11452,24 @@ mod tests {
         let entries = restarted.workspace_entries();
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert_on_row_of(&restarted, &entries[0], &stored, &prefix);
+        assert_eq!(
+            only_record(&restarted),
+            (1, Some((prefix.clone(), stored.clone()))),
+            "the restart did not restore one record under the stored root"
+        );
+        restarted.persist_state();
+        let rows = restarted
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.path.as_str(), row.desired_on))
+                .collect::<Vec<_>>(),
+            vec![(&*stored.to_string_lossy(), true)],
+            "a save after the restart wrote other rows"
+        );
         shut_down_hosted(&restarted, None).await.expect("shut down");
     }
 
