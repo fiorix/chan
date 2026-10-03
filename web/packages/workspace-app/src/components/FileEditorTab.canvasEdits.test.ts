@@ -1584,6 +1584,28 @@ describe("a live drawing", () => {
     expect({ board: shownIds(board), pushes: socket.pushes() }).toEqual({ board: ["on-disk"], pushes: [] });
   });
 
+  test("a bound board reseeded from another buffer offers nothing of the background it showed before, when a save asks at once", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    board.pickBackground(PICKED);
+    await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
+    socket.frame({ type: "push-ok", version: 2 });
+    await vi.waitFor(() => expect(tab.content).toContain(PICKED));
+    vi.useFakeTimers();
+    // A conflict's resolution writes the buffer without the board, and a
+    // save asks the session for what is local before the board's next flush.
+    const RESOLVED = JSON.stringify({ elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND }, files: {} });
+    tab.content = RESOLVED;
+    tab.saved = RESOLVED;
+    await tick();
+    void saveTab(tab);
+    await vi.advanceTimersByTimeAsync(100);
+    const offered = socket.pushes().slice(1).map((p) => p.appState);
+    vi.useRealTimers();
+
+    expect(offered).toEqual([]);
+  });
+
   /// The backgrounds the pushes on `socket` carried.
   const backgroundsPushed = (socket: SceneSocket) =>
     socket

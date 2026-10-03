@@ -216,17 +216,18 @@
   const unmarkedAtAuthority = new Set<string>();
   /// File ids the authority already knows (pushed by us or fanned in).
   const knownFiles = new Set<string>();
-  /// Cleaned appState from the latest serialize or adopt with its canonical
-  /// JSON, plus the canonical JSON of the appState the authority is known to
-  /// hold or the session holds as this window's claim (from our last offer OR
-  /// any adopted snapshot/update, taken as the serializer keeps it), and
-  /// until either, of the appState the board last seeded with. Only a
-  /// divergence from that baseline rides a push: adopting an incoming
-  /// appState must move the baseline too, or the echo would re-push forever
-  /// between two live canvases.
+  /// The board's appState as the serializer keeps it, from the latest seed,
+  /// serialize or adopt, and the appState this window's changes are counted
+  /// from: what the board took at its last seed or adopt, or held at its last
+  /// offer to the session, and null before the first seed. Only the keys
+  /// whose values differ between the two ride a push, as this window's
+  /// changes. A seed sets the baseline, so what a board seeded with is never
+  /// offered. An adopt moves it too, or the echo would re-push forever
+  /// between two live canvases, and so does an offer, taken or refused: the
+  /// session keeps the offered keys as this window's claim and offers them
+  /// again itself.
   let cleanedAppState: WireAppState = {};
-  let cleanedAppStateJson = "";
-  let lastAuthorityAppStateJson = "";
+  let appStateBaseline: WireAppState | null = null;
 
   /// Literal colors for the collaborator layer, resolved from the shared
   /// --peer-c0..7 vars so canvas pointers match editor carets; the
@@ -378,21 +379,31 @@
       for (const k of Object.keys(files)) knownFiles.add(k);
     }
     if (kept !== undefined) {
-      // Any adopted appState is the new authority baseline; only later
-      // local divergence should ride a push. The board shows it only at the
+      // Any adopted appState is the new baseline; only later local
+      // divergence should ride a push. The board shows it only at the
       // library's next render, so until the library shows it every
       // serialization lays it over the board's earlier one, as for a seed,
-      // and it is what the next push offers: a push made before that, from a
-      // timer, a close or the session right after this frame, sends nothing
-      // older over it.
-      cleanedAppState = kept;
-      cleanedAppStateJson = lastAuthorityAppStateJson = canonicalJson(kept);
+      // and it is what the next push is compared with: a push made before
+      // that, from a timer, a close or the session right after this frame,
+      // sends nothing older over it.
+      cleanedAppState = appStateBaseline = kept;
     }
   }
 
+  /// The keys of the board's appState whose values differ from the
+  /// baseline's, compared as JSON with sorted keys, and undefined with none.
+  function changedAppState(): WireAppState | undefined {
+    if (appStateBaseline === null) return undefined;
+    const changed: WireAppState = {};
+    for (const [key, value] of Object.entries(cleanedAppState)) {
+      if (canonicalJson(value) !== canonicalJson(appStateBaseline[key])) changed[key] = value;
+    }
+    return Object.keys(changed).length > 0 ? changed : undefined;
+  }
+
   /// Hand pending local deltas to the session: the elements `pendingDeltas`
-  /// answers, file entries the authority has not seen, and the cleaned
-  /// appState when it changed. A board that has not taken its first seed
+  /// answers, file entries the authority has not seen, and the appState keys
+  /// this window changed. A board that has not taken its first seed
   /// holds what the library's handover or init put there, none of it the
   /// user's, so it offers nothing, as it binds nothing.
   function pushDeltas(): void {
@@ -402,10 +413,7 @@
     for (const [k, v] of Object.entries(api.getFiles())) {
       if (!knownFiles.has(k)) newFiles[k] = v as WireFiles[string];
     }
-    const appState =
-      cleanedAppStateJson !== "" && cleanedAppStateJson !== lastAuthorityAppStateJson
-        ? cleanedAppState
-        : undefined;
+    const appState = changedAppState();
     const hasFiles = Object.keys(newFiles).length > 0;
     if (deltas.length === 0 && appState === undefined && !hasFiles) return;
     const taken = session.pushScene(
@@ -413,11 +421,11 @@
       appState,
       hasFiles ? newFiles : undefined,
     );
-    // The session keeps an offered appState as this window's claim whether
-    // or not it took the push, and offers it again itself after a reattach,
+    // The session keeps the offered keys as this window's claim whether or
+    // not it took the push, and offers them again itself after a reattach,
     // so the baseline moves at the offer: the board keeps no second copy to
-    // offer, and its next change is compared with what the session holds.
-    if (appState !== undefined) lastAuthorityAppStateJson = cleanedAppStateJson;
+    // offer, and its next change is compared with what it offered.
+    if (appState !== undefined) appStateBaseline = cleanedAppState;
     // What follows records "the authority has this", so it runs only when
     // the session took the push. A refused one leaves the elements and the
     // files unmarked for the next flush; marking them first is how a shape
@@ -607,7 +615,7 @@
     setBaseline(api, serializeScene(api, ex));
     // What a seed puts on the board is no change of this window's, so it is
     // the appState a later change is counted from and is never offered.
-    lastAuthorityAppStateJson = canonicalJson(appState);
+    cleanedAppState = appStateBaseline = appState;
     seeded = true;
     seededOnce = true;
   }
@@ -641,7 +649,6 @@
       try {
         const parsed = JSON.parse(json) as { appState?: WireAppState };
         cleanedAppState = parsed.appState ?? {};
-        cleanedAppStateJson = canonicalJson(cleanedAppState);
       } catch {
         // The buffer mirror below still runs; deltas push without
         // appState.

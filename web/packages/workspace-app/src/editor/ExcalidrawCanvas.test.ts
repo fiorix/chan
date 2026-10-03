@@ -798,7 +798,8 @@ describe("a live board's own appState change", () => {
       libraryChange();
       vi.advanceTimersByTime(300);
 
-      expect(pushedAppStates(session)).toEqual([{ ...boardAppState, ...change }]);
+      // The keys this window changed, and none of the others.
+      expect(pushedAppStates(session)).toEqual([change]);
     } finally {
       vi.useRealTimers();
     }
@@ -836,7 +837,7 @@ describe("the canvas's mirror and the session's saved mark", () => {
       }).toEqual({
         mirrored: expect.stringContaining('"gridModeEnabled":true'),
         reported: 1,
-        offered: [{ ...boardAppState, gridModeEnabled: true }],
+        offered: [{ gridModeEnabled: true }],
       });
     } finally {
       vi.useRealTimers();

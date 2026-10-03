@@ -174,9 +174,9 @@ class FakeBinding implements SceneCanvasBinding {
   collabCalls = 0;
   pending: WireElement[] = [];
   // The canvas's other two marks: `knownFiles` excludes a file from every
-  // later push once the session took it, and `lastAuthorityAppStateJson`
-  // does the same for the appState once it was offered. Here "still pending"
-  // stands for "not marked".
+  // later push once the session took it, and its appState baseline does the
+  // same for the keys this window changed once they were offered. Here
+  // "still pending" stands for "not marked".
   pendingFiles: WireFiles = {};
   pendingAppState: WireAppState | null = null;
   session: SceneSession | null = null;
@@ -1465,11 +1465,11 @@ describe("a push the authority never accepted", () => {
     vi.useRealTimers();
   });
 
-  test("keeps its appState over the reattach's snapshot and offers it again with its element", () => {
+  test("lays its appState over the reattach's snapshot and offers it again with its element", () => {
     // Same drop with an appState change riding the push. The session keeps
     // the change as this window's claim, hands the canvas the reattach's
-    // snapshot without its appState, and the push of the element the
-    // snapshot lacks carries the claim.
+    // snapshot with the claim laid over its appState, and the push of the
+    // element the snapshot lacks carries the claim.
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { binding } = attached(tab!);
@@ -1486,27 +1486,32 @@ describe("a push the authority never accepted", () => {
       appStates: back.frames("push").flatMap((f) => (f.appState === undefined ? [] : [f.appState])),
       adopted: binding.snapshots.at(-1)?.appState,
       pending: binding.pendingAppState,
-    }).toEqual({ elements: ["a"], appStates: [{ gridModeEnabled: true }], adopted: undefined, pending: null });
+    }).toEqual({ elements: ["a"], appStates: [{ gridModeEnabled: true }], adopted: { gridModeEnabled: true }, pending: null });
     vi.useRealTimers();
   });
 
-  test("keeps a peer's appState off the board across the drop and offers this window's again", () => {
-    // The claim that kept a peer's appState off the board is dropped with
-    // its socket before the authority reads it. It stands all the same, so
-    // the next socket's snapshot, which carries the peer's, is handed without
-    // its appState and the claim goes out alone once it is applied.
+  test("keeps the key it picked over a peer's across the drop, and the peer's other key with it", () => {
+    // The push that carried the claim is dropped with its socket before the
+    // authority reads it. The claim stands all the same, so the next
+    // socket's snapshot, which carries a peer's background and grid, is
+    // handed with this window's background laid over it, and the push that
+    // goes out once it is applied sends the same: the peer's grid stays.
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { binding, sock } = attached(tab!);
     binding.pendingAppState = { viewBackgroundColor: "#111111" };
     binding.flushPendingLocal();
-    sock.frame({ type: "update", version: 1, elements: [], appState: { viewBackgroundColor: "#222222" } });
+    const PEERS = { viewBackgroundColor: "#222222", gridModeEnabled: true };
+    sock.frame({ type: "update", version: 1, elements: [], appState: PEERS });
+    const whileOnTheWire = binding.updates.at(-1)?.appState;
 
-    const back = dropAndRedial(snap([], { appState: { viewBackgroundColor: "#222222" } }));
+    const back = dropAndRedial(snap([], { appState: PEERS }));
 
-    expect({ handed: binding.snapshots.at(-1)?.appState, pushed: back.frames("push") }).toEqual({
-      handed: undefined,
-      pushed: [{ type: "push", elements: [], appState: { viewBackgroundColor: "#111111" } }],
+    const BOTH = { viewBackgroundColor: "#111111", gridModeEnabled: true };
+    expect({ whileOnTheWire, handed: binding.snapshots.at(-1)?.appState, pushed: back.frames("push") }).toEqual({
+      whileOnTheWire: undefined,
+      handed: BOTH,
+      pushed: [{ type: "push", elements: [], appState: BOTH }],
     });
     vi.useRealTimers();
   });
@@ -1545,22 +1550,68 @@ describe("a push the authority never accepted", () => {
     }
     const refused = { pushes: on.frames("push").length, offeredAgain: binding.pendingAppState, unflushed: isDocUnflushed(tab!.id) };
     tab!.content = MIRRORED_CLAIM;
-    on.frame(snap([], { appState: { viewBackgroundColor: "#222222" } }));
+    // A peer changed the same key and another one meanwhile.
+    on.frame(snap([], { appState: { viewBackgroundColor: "#222222", gridModeEnabled: true } }));
     session.bufferMirrored();
     const waiting = { handed: binding.snapshots.at(-1)?.appState, pushed: on.frames("push"), saved: tab!.saved, state: tab!.doc?.state };
     on.frame({ type: "push-ok", version: 1 });
     vi.useRealTimers();
 
+    const BOTH = { ...MINE, gridModeEnabled: true };
     expect({ refused, waiting, saved: tab!.saved, unflushed: isDocUnflushed(tab!.id) }).toEqual({
       refused: { pushes: 0, offeredAgain: null, unflushed: true },
       waiting: {
-        handed: undefined,
-        pushed: [{ type: "push", elements: [], appState: MINE }],
+        handed: BOTH,
+        pushed: [{ type: "push", elements: [], appState: BOTH }],
         saved: SCENE_BUFFER,
         state: "attached",
       },
       saved: MIRRORED_CLAIM,
       unflushed: false,
+    });
+  });
+
+  test("a key picked after another joins the claim, and both go out over the authority's", () => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    sock.drop();
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+    binding.pendingAppState = { gridModeEnabled: true };
+    binding.flushPendingLocal();
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    const back = lastSocket();
+    back.open();
+    // The authority holds a key neither pick touched, and a peer's value for
+    // one of the two.
+    back.frame(snap([], { appState: { gridSize: 40, viewBackgroundColor: "#222222" } }));
+    vi.useRealTimers();
+
+    const ALL = { gridSize: 40, viewBackgroundColor: "#111111", gridModeEnabled: true };
+    expect({ handed: binding.snapshots.at(-1)?.appState, pushed: back.frames("push") }).toEqual({
+      handed: ALL,
+      pushed: [{ type: "push", elements: [], appState: ALL }],
+    });
+  });
+
+  test("the authority's appState after an ack is the one the push sent, which a later bind replays", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!, []);
+    sock.frame({ type: "update", version: 1, elements: [], appState: { gridSize: 40 } });
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+    sock.frame({ type: "push-ok", version: 2 });
+    // A peer's later appState is the authority's again: the claim ended at
+    // the ack, so nothing of it is laid over.
+    const acked = rebind(session, binding).snapshots[0]?.appState;
+    sock.frame({ type: "update", version: 3, elements: [], appState: { gridSize: 10 } });
+    const after = rebind(session, binding).snapshots[0]?.appState;
+
+    expect({ acked, after }).toEqual({
+      acked: { gridSize: 40, viewBackgroundColor: "#111111" },
+      after: { gridSize: 10 },
     });
   });
 
@@ -1699,10 +1750,12 @@ describe("a push the authority never accepted", () => {
 
 describe("an update that crosses this window's appState claim", () => {
   // The authority applies a push after every update it fanned before the
-  // push arrived, so while this window's appState claim is on the wire or
-  // queued, an update's appState is one the claim replaces.
+  // push arrived, and replaces its appState with the push's, so while an
+  // appState of this window's is on the wire or queued, an update's is one
+  // that push replaces. With none, the update's is the authority's, and a
+  // claim no push carries is laid over it.
   const MINE = { viewBackgroundColor: "#111111" };
-  const PEERS = { viewBackgroundColor: "#222222" };
+  const PEERS = { viewBackgroundColor: "#222222", gridModeEnabled: true };
   const LATER = { viewBackgroundColor: "#333333" };
   const handed = (binding: FakeBinding) =>
     binding.updates.map((u) => ({ ids: u.elements.map((e) => e.id), appState: u.appState, files: u.files }));
@@ -1738,7 +1791,7 @@ describe("an update that crosses this window's appState claim", () => {
     });
   });
 
-  test("withholds its appState while a claim the session refused stands", () => {
+  test("hands its appState with the claim's key laid over it while a claim the session refused stands", () => {
     const [tab] = installTabs([sceneTab()]);
     const { session, binding, sock } = attached(tab!);
     session.degrade();
@@ -1748,7 +1801,7 @@ describe("an update that crosses this window's appState claim", () => {
 
     expect({ pushes: sock.frames("push").length, handed: handed(binding) }).toEqual({
       pushes: 0,
-      handed: [{ ids: ["peer"], appState: undefined, files: undefined }],
+      handed: [{ ids: ["peer"], appState: { ...PEERS, ...MINE }, files: undefined }],
     });
   });
 
