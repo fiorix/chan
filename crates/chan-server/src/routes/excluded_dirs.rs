@@ -132,7 +132,7 @@ mod tests {
 
     struct RouteTestApp {
         _cfg: TempDir,
-        _root: TempDir,
+        root: TempDir,
         state: Arc<AppState>,
     }
 
@@ -150,9 +150,118 @@ mod tests {
 
         RouteTestApp {
             _cfg: cfg,
-            _root: root,
+            root,
             state,
         }
+    }
+
+    /// PUT `names` as the workspace's additions and return the answer's
+    /// status and JSON body.
+    async fn put_names(app: &RouteTestApp, names: &[&str]) -> (StatusCode, serde_json::Value) {
+        let router = axum::Router::new()
+            .route(
+                "/api/index/excluded-dirs",
+                axum::routing::put(api_excluded_dirs_put),
+            )
+            .with_state(app.state.clone());
+        let request = Request::put("/api/index/excluded-dirs")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "workspace": names }).to_string(),
+            ))
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// The names the workspace stores as its additions.
+    fn stored(app: &RouteTestApp) -> Vec<String> {
+        app.state.try_workspace().unwrap().excluded_dirs().unwrap()
+    }
+
+    /// A directory whose name holds a `\` can be excluded by that name, at
+    /// any depth and in any case, as every other directory can.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_name_with_a_backslash_is_taken_when_a_directory_has_it() {
+        let app = route_test_app();
+        std::fs::create_dir_all(app.root.path().join("notes").join("X\\y")).unwrap();
+        let (status, body) = put_names(&app, &["x\\Y"]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the name of a directory that holds a backslash was refused: {body}"
+        );
+        assert_eq!(body["workspace"], serde_json::json!(["x\\y"]));
+        assert_eq!(stored(&app), vec!["x\\y"]);
+    }
+
+    /// A name that holds a `\` and that no directory of the workspace has
+    /// is refused, in words that say so, and nothing is stored. A file of
+    /// that name is not a directory.
+    #[tokio::test]
+    async fn a_name_with_a_backslash_that_no_directory_has_is_refused_as_that() {
+        let app = route_test_app();
+        #[cfg(unix)]
+        std::fs::write(app.root.path().join("no\\such"), b"").unwrap();
+        let (status, body) = put_names(&app, &["vendor", "no\\such"]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "no directory in this workspace is named no\\such; a name can hold a \
+                          backslash only when a directory already has it"
+            }),
+            "a name with a backslash that no directory has was refused in other words"
+        );
+        assert!(
+            stored(&app).is_empty(),
+            "a refused set changed the stored names: {:?}",
+            stored(&app)
+        );
+    }
+
+    /// The set is sent whole at every change, so a name the workspace
+    /// already stores stays in it once its directory is gone: it keeps the
+    /// backslash it holds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stored_name_with_a_backslash_outlives_its_directory() {
+        let app = route_test_app();
+        let dir = app.root.path().join("x\\y");
+        std::fs::create_dir(&dir).unwrap();
+        let (status, body) = put_names(&app, &["x\\y"]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the name of a directory that holds a backslash was refused: {body}"
+        );
+        std::fs::remove_dir(&dir).unwrap();
+        let (status, body) = put_names(&app, &["x\\y", "vendor"]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a stored name was refused once its directory was gone: {body}"
+        );
+        assert_eq!(stored(&app), vec!["x\\y", "vendor"]);
+    }
+
+    /// A `/` makes a path, which no name is, whatever the tree holds.
+    #[tokio::test]
+    async fn a_path_is_refused_as_a_path() {
+        let app = route_test_app();
+        std::fs::create_dir_all(app.root.path().join("a").join("b")).unwrap();
+        let (status, body) = put_names(&app, &["a/b"]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "excluded dir must be a bare name, not a path: \"a/b\""
+            })
+        );
+        assert!(stored(&app).is_empty());
     }
 
     #[test]
@@ -202,8 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rejects_path_separators() {
+    fn normalize_rejects_a_path_and_keeps_a_backslash_for_the_workspace_to_decide() {
         assert!(normalize(&["a/b".to_string()]).is_err());
-        assert!(normalize(&["a\\b".to_string()]).is_err());
+        assert_eq!(
+            normalize(&["A\\b".to_string()]),
+            Ok(vec!["a\\b".to_string()]),
+            "a backslash is part of a name on Unix, so the names alone do not decide it"
+        );
     }
 }
