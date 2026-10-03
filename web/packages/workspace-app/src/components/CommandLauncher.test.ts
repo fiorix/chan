@@ -384,6 +384,7 @@ afterEach(() => {
   overlayStack.ids = [];
   vi.clearAllMocks();
   vi.restoreAllMocks();
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
 
 describe("contextual command deck", () => {
@@ -701,22 +702,29 @@ describe("contextual command deck", () => {
     expect(titles(target)).toEqual(["Focus", "Hide", "Close"]);
   });
 
-  for (const hidden of [false, true]) {
-    test(`a window from another host offers Focus alone when hidden is ${hidden}`, async () => {
-      scopedLibrary.load.mockResolvedValue({
-        ...librarySnapshot,
-        windows: [
-          librarySnapshot.windows[0],
-          { ...librarySnapshot.windows[1], hidden, managed: false },
-        ],
+  for (const native of [false, true]) {
+    for (const hidden of [false, true]) {
+      test(`a ${hidden ? "hidden" : "visible"} feed-only window has no deck action in ${native ? "desktop" : "browser"}`, async () => {
+        if (native) {
+          Object.defineProperty(window, "__TAURI_INTERNALS__", {
+            value: { invoke: vi.fn() },
+            configurable: true,
+          });
+        }
+        scopedLibrary.load.mockResolvedValue({
+          ...librarySnapshot,
+          windows: [
+            librarySnapshot.windows[0],
+            { ...librarySnapshot.windows[1], hidden, managed: false },
+          ],
+        });
+        const target = openLauncher();
+        await flush();
+        await openWindowList(target);
+        expect(titles(target)).toEqual(["Control terminal"]);
+        expect(target.textContent).not.toContain("Window 2 [release checks]");
       });
-      const target = openLauncher();
-      await flush();
-      await openWindowList(target);
-      row(target, "Window 2 [release checks]").click();
-      await tick();
-      expect(titles(target)).toEqual(["Focus"]);
-    });
+    }
   }
 
   test("the Close card names the live terminal count, read when it is raised", async () => {
