@@ -1087,6 +1087,12 @@ export type ImagePlacement = {
   done: boolean;
 };
 
+function shortImageMarker(box: MarkerBox, shape: ImageShape): boolean {
+  // The marker's integer width can change its expected height by one row.
+  const slack = 1.5 + 1.5 * shape.shownHeight;
+  return box.height < box.width * shape.shownHeight - slack;
+}
+
 /// Where a lifted image's bitmap goes, given the box its marker filled,
 /// which is what this page shows of the image. A box as tall as the
 /// image's shape says shows all the page composed of it, and the shape is
@@ -1106,10 +1112,8 @@ export function placeLiftedImage(
   // height. Scaling the whole bitmap into that marker would squeeze it.
   if (expectedWidthPx && box.width + 2 < expectedWidthPx) return null;
   const fullHeight = box.width * shape.shownHeight;
-  // The box is read in whole pixels, so its width is off by up to one
-  // and the height that follows from it by up to the shape's.
   const slack = 1.5 + 1.5 * shape.shownHeight;
-  const whole = shownPx === 0 && box.height >= fullHeight - slack;
+  const whole = shownPx === 0 && !shortImageMarker(box, shape);
   // Raster px for one unit of the shape, across and down.
   const unitY = whole ? box.height / shape.shownHeight : box.width;
   const shown = whole ? box.height : shownPx + box.height;
@@ -1333,6 +1337,8 @@ async function paintLiftedImages(
   opts: { scale?: number; timeoutMs?: number },
   lastPage: boolean,
 ): Promise<HTMLCanvasElement> {
+  const rootHeight = Number.parseFloat(root.style.height);
+  const pageBottom = rootHeight > 0 ? rootHeight * (opts.scale ?? RASTER_SCALE) : canvas.height;
   for (;;) {
     const pending: number[] = [];
     for (const img of Array.from(root.querySelectorAll(`img[${LIFTED_ATTR}]:not([${OFFPAGE_ATTR}])`))) {
@@ -1360,7 +1366,11 @@ async function paintLiftedImages(
         const image = images.lifted[id]!;
         const expectedWidth = image.shownWidthPx * (opts.scale ?? RASTER_SCALE);
         const place = placeLiftedImage(markerBox, image.shape, image.shownPx, expectedWidth);
-        if (!place || (lastPage && !place.done)) fallback.add(id);
+        const pageCut = image.shownPx === 0
+          ? markerBox.y + markerBox.height >= pageBottom - 2
+          : markerBox.y <= 2;
+        if (!place || (shortImageMarker(markerBox, image.shape) && !pageCut) ||
+            (lastPage && !place.done)) fallback.add(id);
         else placements.push({ id, box: markerBox, place });
       });
     }
