@@ -304,10 +304,12 @@
         };
         return;
       }
-      // A success shows only for the run whose card is still up. Any other
-      // run retires its own spinner, on a hidden or replaced draft too, and
-      // leaves what the draft shows by then.
-      if (!holdsDeck() || !ownsPending()) {
+      // A success shows only while the run holds the deck. It asks for the
+      // token and not the card: a host clears the card itself when the
+      // command's own effect changes what the deck lists, and that is not the
+      // user leaving the command. A run that lost the deck retires its own
+      // spinner, on a hidden or replaced draft too, and leaves the rest.
+      if (!holdsDeck()) {
         if (ownsPending()) executionDraft.operation = null;
         return;
       }
@@ -318,10 +320,10 @@
       executionDraft.operation = { kind: "success", itemId: item.id, title: item.title };
       const successOperation = executionDraft.operation;
       await new Promise((resolve) => setTimeout(resolve, 260));
-      // The card can be hidden, cleared or left on a replaced draft while it
-      // shows, and the host's handler closes the deck, so ownership is read
-      // again before it runs.
-      if (holdsDeck() && executionDraft.operation === successOperation) {
+      // The deck can be hidden or its draft replaced while the card shows,
+      // and the host's handler closes the deck, so the hold is read again
+      // before it runs.
+      if (holdsDeck()) {
         succeed(item);
       } else if (executionDraft.operation === successOperation) {
         executionDraft.operation = null;
