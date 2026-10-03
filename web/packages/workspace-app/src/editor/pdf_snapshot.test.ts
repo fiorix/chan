@@ -569,6 +569,30 @@ describe("a document's images across its pages", () => {
       }),
     ).rejects.toThrow("image has no place on the page: /api/fs/shots/lost.png");
   });
+
+  test("a deck page fails by name when it cuts the end of an image", async () => {
+    const root = page('<img src="/api/fs/shots/cut.png?t=tok">');
+    standInCanvas({ x: 10, y: 68, w: 40, h: 12 });
+
+    await expect(snapshotPage(root, BOX)).rejects.toThrow(
+      "image has no place on the page: /api/fs/shots/cut.png",
+    );
+  });
+
+  test("a document's last page fails when an image is still cut", async () => {
+    const root = page('<img src="/api/fs/shots/cut.png?t=tok">');
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+    standInCanvas({ x: 10, y: 68, w: 40, h: 12 });
+
+    await expect(
+      snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
+        images,
+        lastPage: true,
+      }),
+    ).rejects.toThrow("image has no place on the page: /api/fs/shots/cut.png");
+  });
 });
 
 describe("what an image's address answers with", () => {
