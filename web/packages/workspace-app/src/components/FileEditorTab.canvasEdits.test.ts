@@ -2060,7 +2060,10 @@ describe("a live drawing", () => {
       const atOnce = read();
       await vi.advanceTimersByTimeAsync(400);
       const afterTheWait = read();
+      // The ack moves the tab's saved text, which is when its open asks
+      // again whether an entry is stored for it.
       socket.frame({ type: "push-ok", version: 3 });
+      await vi.advanceTimersByTimeAsync(0);
       vi.useRealTimers();
 
       const RESTORED = {
@@ -2071,10 +2074,10 @@ describe("a live drawing", () => {
         dirty: true,
         banner: false,
       };
-      expect({ atOnce, afterTheWait, ackedDirty: isDirty(tab) }).toEqual({
+      expect({ atOnce, afterTheWait, acked: { dirty: isDirty(tab), banner: read().banner } }).toEqual({
         atOnce: RESTORED,
         afterTheWait: RESTORED,
-        ackedDirty: false,
+        acked: { dirty: false, banner: false },
       });
     });
 
@@ -2108,6 +2111,26 @@ describe("a live drawing", () => {
         shown: { "on-disk": 1, gone: "deleted", theirs: 2, ours: 3 },
         pushed: [{ elements: ["ours@3"], appState: undefined }],
       });
+    });
+
+    test("on a live board leaves an element the board holds at the entry's version, whichever nonce is lower", async () => {
+      // The library's reconcile alone would take the copy with the lower
+      // nonce, which no push would then offer.
+      const AUTHORITYS = { id: "tie", type: "rectangle", version: 2, versionNonce: 9, isDeleted: false, x: 9 };
+      strand([ON_DISK, { ...AUTHORITYS, versionNonce: 1, x: 1 }]);
+      const { board, socket } = await attachedDrawing();
+      socket.frame({ type: "update", version: 2, elements: [AUTHORITYS] });
+      await vi.waitFor(() => expect(shownIds(board)).toContain("tie"));
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({
+        tie: (board.elements as { id: string; x?: number }[]).find((e) => e.id === "tie")?.x,
+        pushed: pushed(socket),
+        banner: document.querySelector(".recovery-banner") !== null,
+      }).toEqual({ tie: 9, pushed: [], banner: false });
     });
 
     test("on a board with no live session puts the entry's scene in place of the board's", async () => {
