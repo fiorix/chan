@@ -4,7 +4,7 @@
 //!
 //! Queries read a filtered metadata-only tree, maintained graph rows, the ready search index, and available report snapshots. They do not initiate index rebuilds or initialize cold reports. A warm report whose scope generation changed is rescanned, which can read source bodies. File, directory, and contact nodes reserve their root containment spines before admission; metadata closure can add relationships without consuming another semantic hop. Returned graphs have stable ordering and explicitly report budget truncation.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path};
 use std::sync::atomic::AtomicBool;
 
@@ -2239,6 +2239,15 @@ fn in_memory_relationships(
 ) -> Vec<WorkspaceRelationship> {
     let mut relationships = Vec::new();
     if kinds.contains(&WorkspaceRelationshipKind::Contains) {
+        let outward = matches!(
+            direction,
+            WorkspaceTraversalDirection::Out | WorkspaceTraversalDirection::Both
+        );
+        let children = if outward {
+            children_by_directory(frontier, catalog)
+        } else {
+            HashMap::new()
+        };
         for id in frontier {
             if matches!(
                 direction,
@@ -2258,18 +2267,10 @@ fn in_memory_relationships(
                     ));
                 }
             }
-            if matches!(
-                direction,
-                WorkspaceTraversalDirection::Out | WorkspaceTraversalDirection::Both
-            ) {
-                let directory = if id.is_empty() {
-                    Some("")
-                } else {
-                    id.strip_prefix("directory:")
-                };
-                if let Some(directory) = directory {
-                    for child in direct_directory_children(directory, catalog) {
-                        relationships.push(contains_relationship(id, &child));
+            if outward {
+                if let Some(directory) = frontier_directory(id) {
+                    for child in children.get(directory).into_iter().flatten() {
+                        relationships.push(contains_relationship(id, child));
                     }
                 }
             }
@@ -2306,19 +2307,47 @@ fn in_memory_relationships(
     relationships
 }
 
-fn direct_directory_children(directory: &str, catalog: &Catalog) -> Vec<String> {
-    let mut children = BTreeSet::new();
+/// The directory a frontier entry names, when it names one. The root's id is
+/// empty.
+fn frontier_directory(id: &str) -> Option<&str> {
+    if id.is_empty() {
+        Some("")
+    } else {
+        id.strip_prefix("directory:")
+    }
+}
+
+/// The direct children of every directory the frontier names, each
+/// directory's in order, from one walk of the catalog. Listing them by a walk
+/// for each directory costs the size of the tree once for every directory in
+/// the frontier, which a search that kept a thousand directories pays a
+/// thousand times.
+fn children_by_directory<'a>(
+    frontier: &'a [String],
+    catalog: &Catalog,
+) -> HashMap<&'a str, BTreeSet<String>> {
+    let mut children: HashMap<&str, BTreeSet<String>> = frontier
+        .iter()
+        .filter_map(|id| frontier_directory(id.as_str()))
+        .map(|directory| (directory, BTreeSet::new()))
+        .collect();
+    if children.is_empty() {
+        return children;
+    }
     for child in &catalog.directories {
-        if !child.is_empty() && parent_directory(child) == directory {
-            children.insert(directory_id(child));
+        if child.is_empty() {
+            continue;
+        }
+        if let Some(listed) = children.get_mut(parent_directory(child)) {
+            listed.insert(directory_id(child));
         }
     }
     for child in &catalog.files {
-        if parent_directory(child) == directory {
-            children.insert(child.clone());
+        if let Some(listed) = children.get_mut(parent_directory(child)) {
+            listed.insert(child.clone());
         }
     }
-    children.into_iter().collect()
+    children
 }
 
 fn contains_relationship(source: &str, target: &str) -> WorkspaceRelationship {
