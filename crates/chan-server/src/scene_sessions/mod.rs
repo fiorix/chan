@@ -2880,6 +2880,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_ok_says_whether_the_push_changed_the_scene() {
+        let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 5, 10, "a1")])))]);
+        let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rxa);
+
+        // A newer element changes the authority's scene; an older one
+        // loses the merge and changes nothing.
+        ha.push(vec![elem("x", 6, 11, "a1")], None, None).unwrap();
+        ha.push(vec![elem("x", 4, 99, "a1")], None, None).unwrap();
+
+        let frames = drain(&mut rxa);
+        assert_eq!(types(&frames), ["push-ok", "push-ok"], "{frames:?}");
+        assert_eq!(
+            [frames[0].get("changed"), frames[1].get("changed")],
+            [Some(&json!(true)), Some(&json!(false))],
+            "each push-ok says whether its push changed the scene: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn discarded_push_acks_without_fan_or_dirt() {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 5, 10, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
