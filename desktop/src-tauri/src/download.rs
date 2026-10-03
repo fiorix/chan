@@ -773,12 +773,23 @@ mod tests {
         assert_eq!(sanitize_filename(".."), "download");
     }
 
+    /// A `\` in a name is replaced as the other characters a host cannot hold
+    /// are, so the name is saved whole: nothing is cut at it.
+    #[test]
+    fn sanitize_keeps_the_whole_name_around_a_backslash() {
+        assert_eq!(sanitize_filename(r"a\b.md"), "a_b.md");
+        assert_eq!(sanitize_filename(r"a\b\c.pdf"), "a_b_c.pdf");
+        assert_eq!(sanitize_filename(r"notes/a\b.md"), "a_b.md");
+    }
+
     const WINDOWS_FILENAME_CASES: &[(&str, &str)] = &[
         ("C:foo", "C_foo"),
         ("a:b", "a_b"),
         ("name:stream", "name_stream"),
-        (r"C:\x", "x"),
-        (r"\\server\share", "share"),
+        (r"C:\x", "C__x"),
+        (r"\\server\share", "__server_share"),
+        (r"..\..\evil.txt", ".._.._evil.txt"),
+        (r"sub\", "sub_"),
         ("<a>|b?.txt", "_a__b_.txt"),
         ("\"a*b\".txt", "_a_b_.txt"),
         ("CON", "CON_"),
