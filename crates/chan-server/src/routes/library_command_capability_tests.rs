@@ -523,6 +523,47 @@ async fn a_capability_counts_no_foreign_or_control_window() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+/// A row that reached the snapshot through a connected devserver's feed
+/// with no holders to give, from a server that does not count them, has no
+/// `holders` member: neither `null` nor the empty list of a window this
+/// host serves whose sockets name none.
+#[tokio::test]
+async fn a_snapshot_omits_the_holders_a_fed_record_does_not_carry() {
+    let fixture = fixture_with_registry(true, true).await;
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+    let snapshot = send(
+        &router,
+        "GET",
+        &format!("/api/library/command-capabilities/{capability}"),
+        None,
+        None,
+    )
+    .await;
+    let (status, snapshot) = json(snapshot).await;
+    assert_eq!(status, StatusCode::OK, "fixture: the snapshot: {snapshot}");
+    let row = |window_id: &str| {
+        snapshot["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["window_id"] == window_id)
+            .unwrap_or_else(|| panic!("fixture: the snapshot lacks {window_id}: {snapshot}"))
+            .as_object()
+            .expect("a window's row is an object")
+            .clone()
+    };
+    assert!(
+        !row("feed-window").contains_key("holders"),
+        "the row of a fed record with no holders carries the member: {snapshot}"
+    );
+    assert_eq!(
+        row(&fixture.window_id).get("holders"),
+        Some(&serde_json::json!([])),
+        "the row of a window this host serves does not list its holders: {snapshot}"
+    );
+}
+
 /// Every window of the snapshot says whether this host's window registry
 /// holds it. The visibility and close actions act on that registry alone, so
 /// a row that reached the snapshot through a connected devserver's feed,
@@ -1287,6 +1328,30 @@ mod window_holders {
         serde_json::json!(tags)
     }
 
+    /// The fixture window's row of the scoped snapshot, as the window is
+    /// now: no frame of the feed has to carry it.
+    async fn scoped_row(served: &Served) -> serde_json::Value {
+        let router = launcher_router(served.fixture.host.clone(), None, None);
+        let capability = mint(&router, &served.fixture).await;
+        let snapshot = send(
+            &router,
+            "GET",
+            &format!("/api/library/command-capabilities/{capability}"),
+            None,
+            None,
+        )
+        .await;
+        let (status, snapshot) = json(snapshot).await;
+        assert_eq!(status, StatusCode::OK, "fixture: the snapshot: {snapshot}");
+        snapshot["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["window_id"] == served.fixture.window_id)
+            .unwrap_or_else(|| panic!("fixture: the snapshot lacks the window: {snapshot}"))
+            .clone()
+    }
+
     /// Two clients hold one window, each with its own tag: the feed's row
     /// names both, sorted, so each can read whether its own socket is live.
     /// A row with no socket lists none, which is not the same as a row that
@@ -1321,24 +1386,7 @@ mod window_holders {
             .await;
         assert_eq!(row["connected"], true, "{row}");
 
-        let router = launcher_router(served.fixture.host.clone(), None, None);
-        let capability = mint(&router, &served.fixture).await;
-        let snapshot = send(
-            &router,
-            "GET",
-            &format!("/api/library/command-capabilities/{capability}"),
-            None,
-            None,
-        )
-        .await;
-        let (status, snapshot) = json(snapshot).await;
-        assert_eq!(status, StatusCode::OK, "fixture: the snapshot: {snapshot}");
-        let scoped = snapshot["windows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|window| window["window_id"] == served.fixture.window_id)
-            .unwrap_or_else(|| panic!("fixture: the snapshot lacks the window: {snapshot}"));
+        let scoped = scoped_row(&served).await;
         assert_eq!(
             scoped["holders"],
             holders(&["Tab_b-2", "desk-a"]),
@@ -1407,6 +1455,15 @@ mod window_holders {
             row["holders"],
             holders(&[]),
             "the holders of a window whose sockets name none well are not an empty list: {row}"
+        );
+        // That frame can be of the first socket alone, and the six after it
+        // change nothing a frame carries. Every one is counted by now, so
+        // the scoped snapshot reads the window with all seven.
+        let scoped = scoped_row(&served).await;
+        assert_eq!(
+            (&scoped["connected"], &scoped["holders"]),
+            (&serde_json::json!(true), &holders(&[])),
+            "a socket with a malformed holder was taken as a holder: {scoped}"
         );
 
         sockets.push(served.socket(&format!("&h={longest}")).await);
