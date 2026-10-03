@@ -12,7 +12,7 @@ import { resetSceneSyncForTests, sceneSessionFor } from "../state/sceneSync.svel
 import { applySessionRoster } from "../state/session.svelte";
 import { ApiError } from "../api/errors";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
-import { bufferKey } from "../state/editorBuffer";
+import { bufferKey, SESSION_ID } from "../state/editorBuffer";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -2338,6 +2338,39 @@ describe("a live drawing", () => {
         atOnce: RESTORED,
         afterTheWait: RESTORED,
         acked: { dirty: false, banner: false },
+      });
+    });
+
+    test.each([
+      ["between sockets", (socket: SceneSocket, _tabId: string) => socket.drop()],
+      ["degraded", (_socket: SceneSocket, tabId: string) => sceneSessionFor(tabId)!.degrade()],
+    ])("on a live board whose session is %s, the store holds the restored scene when Restore returns", async (_name, refuse) => {
+      // The session takes no push, so what Restore put on the board is in
+      // this page's memory and nowhere else unless the store holds it.
+      strand([ON_DISK, MINE]);
+      const { tab, board, socket } = await attachedDrawing();
+      refuse(socket, tab.id);
+
+      // Time is fake from the press on and is not advanced: this reads what
+      // the store holds before the recovery write's debounce can run.
+      await restore();
+      const raw = localStorage.getItem(bufferKey(PATH));
+      const held = raw === null ? null : (JSON.parse(raw) as { content: string; sessionId: string });
+      vi.useRealTimers();
+
+      expect({
+        board: shownIds(board),
+        pushed: pushed(socket),
+        buffer: tab.content.includes('"mine"'),
+        stored:
+          held === null
+            ? null
+            : { isTheBuffer: held.content === tab.content, load: held.sessionId === SESSION_ID ? "this" : "an earlier" },
+      }).toEqual({
+        board: ["mine", "on-disk"],
+        pushed: [],
+        buffer: true,
+        stored: { isTheBuffer: true, load: "this" },
       });
     });
 
