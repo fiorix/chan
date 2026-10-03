@@ -1808,6 +1808,11 @@
        glow rather than a darker tone (which would disappear
        into the background). */
     --pane-shadow: 0 1px 6px rgba(255, 255, 255, 0.08);
+    /* JSON tree value colours, in the syntax-highlight palette's hues.
+       Tokens, so a surface themed apart from the app takes its own. */
+    --json-string: #7ee787;
+    --json-number: #79c0ff;
+    --json-boolean: #ffa657;
   }
   :global([data-theme="light"]) {
     --bg: #ffffff;
@@ -1882,6 +1887,9 @@
     --pill-broken-bg: rgba(255, 59, 48, 0.12);
     /* Standard soft drop-shadow against the light canvas. */
     --pane-shadow: 0 1px 6px rgba(0, 0, 0, 0.14);
+    --json-string: #1a7f37;
+    --json-number: #0550ae;
+    --json-boolean: #953800;
   }
 
   /* CM6's drawSelection paints the highlight into .cm-selectionLayer

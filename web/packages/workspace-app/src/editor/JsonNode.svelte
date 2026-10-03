@@ -191,27 +191,18 @@
     border-left: 1px dotted var(--border);
     margin-left: 6px;
   }
-  /* Type-specific colors picked to read against both light and
-     dark themes without further per-theme overrides. Same hue
-     family the syntax-highlight palette already uses. */
+  /* Type-specific colours are theme tokens, so the nearest themed
+     ancestor decides them: a surface themed apart from the app, such as
+     a light editor in a dark app, colours its values by its own theme. */
   .string {
-    color: #1a7f37;
-  }
-  :global([data-theme="dark"]) .node .string {
-    color: #7ee787;
+    color: var(--json-string);
   }
   .number {
-    color: #0550ae;
-  }
-  :global([data-theme="dark"]) .node .number {
-    color: #79c0ff;
+    color: var(--json-number);
   }
   .boolean {
-    color: #953800;
+    color: var(--json-boolean);
     font-weight: 600;
-  }
-  :global([data-theme="dark"]) .node .boolean {
-    color: #ffa657;
   }
   .null {
     color: var(--text-secondary);
