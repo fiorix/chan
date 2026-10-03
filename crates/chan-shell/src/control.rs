@@ -33,7 +33,6 @@ pub struct EnvControlSocket {
     // Read by the search, which runs on unix only.
     #[cfg_attr(not(unix), allow(dead_code))]
     workspace_path: Option<PathBuf>,
-    #[allow(dead_code)]
     library_id: Option<String>,
     /// The lines this socket announced, for the tests to read.
     #[cfg(all(test, unix))]
@@ -111,6 +110,12 @@ impl EnvControlSocket {
                 continue;
             };
             if identity.kind != crate::wire::ServeKind::Devserver {
+                continue;
+            }
+            if matches!(
+                (self.library_id.as_deref(), identity.library_id.as_deref()),
+                (Some(ours), Some(theirs)) if ours != theirs
+            ) {
                 continue;
             }
             if let Some(root) = identity.workspace_root {
@@ -211,11 +216,13 @@ pub(crate) fn open_env_from(
 /// Resolve the full chan-terminal environment from the process env, for
 /// category-1 actions that target a specific window.
 pub(crate) fn open_env() -> Result<OpenEnv> {
-    open_env_from(
+    let mut env = open_env_from(
         std::env::var("CHAN_WINDOW_ID").ok(),
         std::env::var("CHAN_CONTROL_SOCKET").ok(),
         std::env::var("CHAN_WORKSPACE_PATH").ok(),
-    )
+    )?;
+    env.control_socket.library_id = std::env::var("CHAN_LIBRARY_ID").ok().filter(|s| !s.is_empty());
+    Ok(env)
 }
 
 /// Resolve just the control socket, for category-2 actions (`cs terminal
@@ -229,10 +236,12 @@ pub(crate) fn control_socket_env() -> Result<EnvControlSocket> {
         .ok_or_else(|| {
             anyhow::anyhow!("not running inside a chan terminal; this needs $CHAN_CONTROL_SOCKET")
         })?;
-    Ok(EnvControlSocket::new(
+    let mut env = EnvControlSocket::new(
         socket,
         std::env::var("CHAN_WORKSPACE_PATH").ok(),
-    ))
+    );
+    env.library_id = std::env::var("CHAN_LIBRARY_ID").ok().filter(|s| !s.is_empty());
+    Ok(env)
 }
 
 /// Make a path absolute against the shell's current working directory.
@@ -426,6 +435,13 @@ async fn read_first_response<R>(reader: &mut R) -> Result<String>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
+    Ok(read_first_response_with_window(reader).await?.0)
+}
+
+async fn read_first_response_with_window<R>(reader: &mut R) -> Result<(String, Option<String>)>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     use tokio::io::AsyncBufReadExt;
 
     let mut line = String::new();
@@ -438,7 +454,11 @@ where
     }
     let response: ControlResponse =
         serde_json::from_str(&line).context("decoding control response")?;
-    first_response_outcome(response)
+    let window_id = match &response {
+        ControlResponse::Export { window_id, .. } => window_id.clone(),
+        _ => None,
+    };
+    Ok((first_response_outcome(response)?, window_id))
 }
 
 /// Connect to the control socket, write one JSON request line, and return
@@ -497,6 +517,7 @@ pub struct TunnelSession {
     /// The server's acknowledgement, already unwrapped from its
     /// [`ControlResponse`] envelope.
     pub ack: String,
+    pub export_window_id: Option<String>,
     reader: tokio::io::BufReader<transport::ReadEnd>,
     // Held open, never written again. For a tunnel the server reads this
     // half's EOF as "the foreground command ended", so dropping the session
@@ -548,6 +569,10 @@ pub async fn send_control_request_streaming<'a>(
 ) -> Result<TunnelSession> {
     use tokio::io::{AsyncWriteExt, BufReader};
 
+    let export_window = match &request {
+        ControlRequest::Export { window_id, .. } => Some(window_id.clone()),
+        _ => None,
+    };
     let (read, mut write) = connect_control(socket.into()).await?;
     let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
     payload.push(b'\n');
@@ -557,9 +582,20 @@ pub async fn send_control_request_streaming<'a>(
         .context("writing control request")?;
 
     let mut reader = BufReader::new(read);
-    let ack = read_first_response(&mut reader).await?;
+    let response = read_first_response_with_window(&mut reader);
+    let (ack, export_window_id) = if let Some(window_id) = export_window {
+        match tokio::time::timeout(std::time::Duration::from_secs(15 * 60 + 5), response).await {
+            Ok(result) => result?,
+            Err(_) => return Err(crate::exit_code::ControlTimeout {
+                message: format!("export in window {} reached its 15m absolute client bound", window_id.as_deref().unwrap_or("chosen by the server")),
+            }.into()),
+        }
+    } else {
+        response.await?
+    };
     Ok(TunnelSession {
         ack,
+        export_window_id,
         reader,
         _write: write,
     })

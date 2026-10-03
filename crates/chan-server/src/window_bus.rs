@@ -17,8 +17,11 @@
 //! an opaque `serde_json::Value` so the QUERY (returns the layout) and the
 //! future EXEC ops (return a success/partial result) share one bus.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use serde_json::Value;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use crate::round_trip_bus::RoundTripBus;
 
@@ -26,6 +29,52 @@ use crate::round_trip_bus::RoundTripBus;
 /// [`RoundTripBus`] of `win-` ids over the opaque reply payload.
 pub struct WindowBus {
     requests: RoundTripBus<Value>,
+    exports: Mutex<HashMap<String, Arc<ExportJob>>>,
+}
+
+struct ExportState {
+    active: bool,
+    committed: bool,
+}
+
+/// The upload permit remains held through the atomic rename. Retirement
+/// cannot claim timeout after that rename has won the race.
+pub(crate) struct ExportCommitPermit<'a>(MutexGuard<'a, ExportState>);
+
+impl ExportCommitPermit<'_> {
+    pub(crate) fn mark_committed(&mut self) {
+        self.0.committed = true;
+    }
+}
+
+pub(crate) struct ExportJob {
+    out: String,
+    state: Mutex<ExportState>,
+    progress: watch::Sender<u64>,
+}
+
+impl ExportJob {
+    pub(crate) fn begin_commit(&self, path: &str) -> chan_workspace::Result<ExportCommitPermit<'_>> {
+        let state = self.state.lock().expect("export job poisoned");
+        if !state.active || self.out != path {
+            return Err(chan_workspace::ChanError::Io("export job retired or upload path differs".into()));
+        }
+        Ok(ExportCommitPermit(state))
+    }
+
+    fn retire(&self) -> bool {
+        let mut state = self.state.lock().expect("export job poisoned");
+        state.active = false;
+        state.committed
+    }
+
+    fn page_finished(&self) -> bool {
+        if !self.state.lock().expect("export job poisoned").active {
+            return false;
+        }
+        self.progress.send_modify(|count| *count += 1);
+        true
+    }
 }
 
 impl Default for WindowBus {
@@ -38,6 +87,7 @@ impl WindowBus {
     pub fn new() -> Self {
         Self {
             requests: RoundTripBus::new("win-"),
+            exports: Mutex::new(HashMap::new()),
         }
     }
 
@@ -45,6 +95,33 @@ impl WindowBus {
     /// id onto the outgoing window_command so the SPA echoes it back.
     pub fn register(&self) -> (String, oneshot::Receiver<Value>) {
         self.requests.register()
+    }
+
+    pub fn register_export(&self, out: String) -> (String, oneshot::Receiver<Value>, watch::Receiver<u64>) {
+        let (id, rx) = self.requests.register();
+        let (progress, updates) = watch::channel(0);
+        self.exports.lock().expect("export jobs poisoned").insert(id.clone(), Arc::new(ExportJob {
+            out,
+            state: Mutex::new(ExportState { active: true, committed: false }),
+            progress,
+        }));
+        (id, rx, updates)
+    }
+
+    pub(crate) fn export_job(&self, id: &str) -> Option<Arc<ExportJob>> {
+        self.exports.lock().expect("export jobs poisoned").get(id).cloned()
+    }
+
+    pub fn page_finished(&self, id: &str) -> bool {
+        self.export_job(id).is_some_and(|job| job.page_finished())
+    }
+
+    /// Retire the job, returning whether its guarded upload already committed.
+    pub fn retire_export(&self, id: &str) -> bool {
+        let mut exports = self.exports.lock().expect("export jobs poisoned");
+        let committed = exports.remove(id).is_some_and(|job| job.retire());
+        self.requests.cancel(id);
+        committed
     }
 
     /// Drop a parked request without firing it; see [`RoundTripBus::cancel`].
@@ -56,6 +133,10 @@ impl WindowBus {
     /// [`RoundTripBus::complete`]. `false` is what `/api/window/reply` maps
     /// to a 404.
     pub fn complete(&self, request_id: &str, payload: Value) -> bool {
+        let mut exports = self.exports.lock().expect("export jobs poisoned");
+        if let Some(job) = exports.remove(request_id) {
+            job.retire();
+        }
         self.requests.complete(request_id, payload)
     }
 }

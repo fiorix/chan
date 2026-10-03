@@ -12,6 +12,8 @@ When adding a new persisted field: extend the relevant section here in the same 
 
 Source: `crates/chan-server/src/config.rs`.
 
+`CHAN_LIBRARY_ID` is a spawn environment value, not persisted config: devserver terminals receive the library id of their serving process, and desktop and standalone serve terminals omit it. A moved terminal uses it only when both it and a candidate devserver identify a library; unequal ids reject that candidate even when the workspace root matches.
+
 The CLI serializes these under the canonical `server.*` namespace, so terminal fields are `server.terminal.*`. `chan config get` and `chan config set` also accept `terminal.*` as a shorthand alias. The HTTP aggregate keeps its existing owner-relative `terminal.*` spelling. Every scalar row below is reachable through `chan config get/set`. The suffix list uses a JSON string array on CLI set, with at most 100 unique values matching `[A-Za-z0-9_]+`.
 
 | Field | Type | Default | Reachability | Consumers |

@@ -382,6 +382,7 @@ pub struct RegistryConfig {
 #[derive(Debug)]
 pub struct Registry {
     config: RegistryConfig,
+    library_id: OnceLock<String>,
     /// Last known terminal-engine preference, sampled once for each PTY spawn.
     /// Workspace servers push config changes into this cell. A long-lived
     /// terminal-only tenant can additionally install `terminal_backend_resolver`
@@ -750,7 +751,7 @@ fn parse_terminal_ordinal(name: &str) -> Option<u64> {
 /// `LC_ALL` and `LC_CTYPE` are removed, a caller's included; and on Windows
 /// the profile's PATH needs and chan's bin dir are prepended to the caller's
 /// `PATH`.
-pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
+pub const CHAN_SPAWN_ENV_KEYS: [&str; 14] = [
     "CHAN",
     "CHAN_TERMINAL",
     // Accepted when it restates the request's own tab name, the value chan
@@ -760,6 +761,7 @@ pub const CHAN_SPAWN_ENV_KEYS: [&str; 13] = [
     "CHAN_TAB_GROUP",
     "CHAN_WINDOW_ID",
     "CHAN_CONTROL_SOCKET",
+    "CHAN_LIBRARY_ID",
     "CHAN_WORKSPACE_PATH",
     "CHAN_WORKSPACE_NAME",
     "CHAN_MCP_SERVER_NAME",
@@ -1691,6 +1693,7 @@ impl Registry {
         };
         Self {
             config,
+            library_id: OnceLock::new(),
             terminal_ghostty: AtomicBool::new(terminal_ghostty),
             terminal_backend_resolver: Mutex::new(None),
             terminal_profiles: Mutex::new(terminal_profiles),
@@ -1712,6 +1715,11 @@ impl Registry {
             #[cfg(test)]
             spawn_barrier: Mutex::new(None),
         }
+    }
+
+    /// Set the devserver library identity inherited by newly spawned PTYs.
+    pub fn install_library_id(&self, library_id: String) {
+        let _ = self.library_id.set(library_id);
     }
 
     /// Refresh the backend preference sampled by subsequent PTY spawns.
@@ -2219,6 +2227,7 @@ impl Registry {
         let session = Session::spawn(
             id.clone(),
             config,
+            self.library_id.get().cloned(),
             opts,
             announce_command,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
@@ -2317,6 +2326,7 @@ impl Registry {
         let session = Session::spawn(
             id.to_string(),
             config,
+            self.library_id.get().cloned(),
             opts,
             false,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
@@ -4014,6 +4024,7 @@ impl Session {
     fn spawn(
         id: String,
         config: RegistryConfig,
+        library_id: Option<String>,
         opts: CreateOptions,
         announce_command: bool,
         generation: u64,
@@ -4189,6 +4200,9 @@ impl Session {
             .and_then(|path| path.to_str())
         {
             chan_env.set("CHAN_CONTROL_SOCKET", socket);
+        }
+        if let Some(library_id) = library_id {
+            chan_env.set("CHAN_LIBRARY_ID", library_id);
         }
         // Served-workspace identity for the terminal and any agents it spawns.
         // No user-managed workspace name exists; the label derives from the root

@@ -235,6 +235,11 @@ enum WindowCommand {
         path: String,
         format: String,
         out: String,
+        guarded_upload: bool,
+    },
+    #[serde(rename = "export-stop")]
+    ExportStop {
+        id: String,
     },
     // `cs copy`: ask the window to write `data_b64` (base64 of the terminal's
     // stdin) onto the clipboard as `mime`. The SPA decodes it, writes via
@@ -771,6 +776,7 @@ use chan_library::UnserveScope;
 /// (every field is a cheap handle).
 #[derive(Clone)]
 pub struct ControlSocketCtx {
+    pub library_id: Option<String>,
     pub workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
     /// The tenant's `/ws` event broadcast, which window commands ride to the
     /// SPA window they target.
@@ -1095,6 +1101,9 @@ where
                     reject: false,
                     cancel_on_eof: true,
                     ..
+                } | ControlRequest::Export {
+                    cancel_on_eof: true,
+                    ..
                 }
             );
             if cancel_on_eof {
@@ -1272,6 +1281,7 @@ where
     F: std::future::Future<Output = ()> + Unpin,
 {
     let ControlSocketCtx {
+        library_id,
         workspace_cell,
         events_tx,
         self_writes,
@@ -1703,7 +1713,7 @@ where
                 // (stable devserver sockets carry no pid in the filename)
                 // confirm which process it landed on.
                 pid: std::process::id(),
-                library_id: None,
+                library_id: library_id.clone(),
                 workspace_root: workspace_identity.as_ref().map(|(root, _)| root.clone()),
                 metadata_key: workspace_identity.map(|(_, key)| key),
             };
@@ -1729,10 +1739,10 @@ where
             path,
             format,
             out,
-            window_id: _,
+            window_id,
             cancel_on_eof: _,
         } => {
-            handle_export(path, format, out, None, session_registry, events_tx, window_bus).await
+            handle_export_until_client_eof(path, format, out, window_id, session_registry, events_tx, window_bus, client_eof).await
         }
         ControlRequest::TermSurvey {
             tab_name,
@@ -3014,9 +3024,14 @@ const EXPORT_NO_RENDERER: &str = "no connected renderer: an open workspace windo
 /// open (the common case) that is simply the open window.
 fn resolve_export_window(
     session_registry: &SessionRegistry,
-    _preferred: Option<&str>,
+    preferred: Option<&str>,
 ) -> Result<String, String> {
     let snapshot = session_registry.snapshot(std::time::Instant::now());
+    if let Some(preferred) = preferred {
+        if snapshot.participants.iter().any(|p| p.window_id == preferred && p.status == ParticipantState::Live) {
+            return Ok(preferred.to_string());
+        }
+    }
     snapshot
         .participants
         .iter()
@@ -3041,6 +3056,7 @@ fn default_export_out(path: &str, format: &str) -> String {
 /// `cs export`: validate, resolve the FINAL output path (Contract: the
 /// frame never carries an unresolved default), pick the renderer window,
 /// and run the round-trip.
+#[cfg(test)]
 async fn handle_export(
     path: String,
     format: String,
@@ -3050,6 +3066,21 @@ async fn handle_export(
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
 ) -> ControlResponse {
+    handle_export_until_client_eof(path, format, out, preferred_window_id, session_registry, events_tx, window_bus, &mut std::future::pending()).await
+}
+
+async fn handle_export_until_client_eof<F>(
+    path: String,
+    format: String,
+    out: Option<String>,
+    preferred_window_id: Option<String>,
+    session_registry: &Arc<SessionRegistry>,
+    events_tx: &broadcast::Sender<String>,
+    window_bus: &Arc<crate::window_bus::WindowBus>,
+    client_eof: &mut F,
+) -> ControlResponse
+where F: std::future::Future<Output = ()> + Unpin,
+{
     let path = path.trim().to_string();
     if path.is_empty() {
         return ControlResponse::Error {
@@ -3070,13 +3101,14 @@ async fn handle_export(
         Ok(target) => target,
         Err(message) => return ControlResponse::Error { message },
     };
-    export_round_trip(&target, path, format, out, session_registry, events_tx, window_bus).await
+    export_round_trip_until_client_eof(&target, path, format, out, session_registry, events_tx, window_bus, client_eof).await
 }
 
 /// The `cs export` round-trip, mirroring [`pane_round_trip`]: park the
 /// oneshot BEFORE pushing the `export-job` command so a fast reply cannot
 /// beat the registration, then await the renderer's `{ ok, out }` /
 /// `{ ok: false, error }` payload from `POST /api/window/reply`.
+#[cfg(test)]
 async fn export_round_trip(
     window_id: &str,
     path: String,
@@ -3086,35 +3118,80 @@ async fn export_round_trip(
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
 ) -> ControlResponse {
-    let (request_id, rx) = window_bus.register();
+    export_round_trip_until_client_eof(window_id, path, format, out, _session_registry, events_tx, window_bus, &mut std::future::pending()).await
+}
+
+async fn export_round_trip_until_client_eof<F>(
+    window_id: &str,
+    path: String,
+    format: String,
+    out: String,
+    session_registry: &SessionRegistry,
+    events_tx: &broadcast::Sender<String>,
+    window_bus: &Arc<crate::window_bus::WindowBus>,
+    client_eof: &mut F,
+) -> ControlResponse
+where F: std::future::Future<Output = ()> + Unpin,
+{
+    let (request_id, mut rx, mut progress) = window_bus.register_export(out.clone());
     let command = WindowCommand::ExportJob {
         id: request_id.clone(),
         path,
         format,
-        out,
+        out: out.clone(),
+        guarded_upload: true,
     };
-    if let Err(message) = send_window_command(window_id, command, events_tx) {
-        window_bus.cancel(&request_id);
+    if let Err(message) = send_window_command_if_live(session_registry, window_id, command, events_tx) {
+        window_bus.retire_export(&request_id);
         return ControlResponse::Error { message };
     }
-    match tokio::time::timeout(EXPORT_REPLY_TIMEOUT, rx).await {
-        Ok(Ok(payload)) => export_reply_response(&payload),
-        Ok(Err(_)) => {
-            window_bus.cancel(&request_id);
-            ControlResponse::Error {
-                message: "export request cancelled before a reply".into(),
+    let absolute = tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    let mut quiet = tokio::time::Instant::now() + EXPORT_REPLY_TIMEOUT;
+    loop {
+        tokio::select! {
+            biased;
+            reply = &mut rx => {
+                let mut response = match reply {
+                    Ok(payload) => export_reply_response(&payload),
+                    Err(_) => ControlResponse::Error { message: "export request cancelled before a reply".into() },
+                };
+                if let ControlResponse::Export { window_id: actual, .. } = &mut response {
+                    *actual = Some(window_id.to_string());
+                }
+                return response;
             }
-        }
-        Err(_elapsed) => {
-            window_bus.cancel(&request_id);
-            ControlResponse::Error {
-                message: format!(
-                    "no reply from the renderer within {}s",
-                    EXPORT_REPLY_TIMEOUT.as_secs()
-                ),
+            () = &mut *client_eof => {
+                if window_bus.retire_export(&request_id) {
+                    return ControlResponse::Export { out_path: out, window_id: Some(window_id.to_string()) };
+                }
+                let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
+                return ControlResponse::Error { message: format!("export in window {window_id} cancelled when its caller closed") };
+            }
+            _ = tokio::time::sleep_until(absolute) => return retire_export_at_bound(window_id, &request_id, &out, "15m absolute", session_registry, events_tx, window_bus),
+            _ = tokio::time::sleep_until(quiet) => return retire_export_at_bound(window_id, &request_id, &out, "90s quiet", session_registry, events_tx, window_bus),
+            changed = progress.changed() => {
+                if changed.is_ok() {
+                    quiet = tokio::time::Instant::now() + EXPORT_REPLY_TIMEOUT;
+                }
             }
         }
     }
+}
+
+fn retire_export_at_bound(
+    window_id: &str,
+    request_id: &str,
+    out: &str,
+    bound: &str,
+    session_registry: &SessionRegistry,
+    events_tx: &broadcast::Sender<String>,
+    window_bus: &crate::window_bus::WindowBus,
+) -> ControlResponse {
+    if window_bus.retire_export(request_id) {
+        return ControlResponse::Export { out_path: out.to_string(), window_id: Some(window_id.to_string()) };
+    }
+    let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id.to_string() }, events_tx);
+    ControlResponse::Timeout { message: format!("export in window {window_id} reached its {bound} bound") }
 }
 
 /// Interpret the renderer's export reply payload: `{ ok: true, out }` is
@@ -5405,6 +5482,7 @@ mod tests {
                 path: "notes/doc.md".into(),
                 format: "pdf".into(),
                 out: "notes/doc.pdf".into(),
+                guarded_upload: true,
             },
         };
         let v = serde_json::to_value(&frame).unwrap();
@@ -5418,6 +5496,7 @@ mod tests {
                 "path": "notes/doc.md",
                 "format": "pdf",
                 "out": "notes/doc.pdf",
+                "guarded_upload": true,
             })
         );
     }
@@ -5610,6 +5689,53 @@ mod tests {
         assert!(events_rx.try_recv().is_err(), "no frame should be sent");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn export_page_progress_resets_the_quiet_bound() {
+        let (events_tx, mut events) = broadcast::channel(8);
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (registry, _guard) = live_window("w-progress");
+        let task = tokio::spawn({
+            let bus = Arc::clone(&bus);
+            async move {
+                export_round_trip("w-progress", "a.md".into(), "pdf".into(), "a.pdf".into(), &registry, &events_tx, &bus).await
+            }
+        });
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(80)).await;
+        assert!(bus.page_finished(id));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(80)).await;
+        assert!(!task.is_finished(), "completed page did not reset the quiet bound");
+        assert!(bus.page_finished(id));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(91)).await;
+        assert!(matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("90s quiet")));
+        assert!(!bus.page_finished(id));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn export_absolute_bound_wins_even_with_page_progress() {
+        let (events_tx, mut events) = broadcast::channel(8);
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (registry, _guard) = live_window("w-absolute");
+        let task = tokio::spawn({
+            let bus = Arc::clone(&bus);
+            async move {
+                export_round_trip("w-absolute", "a.md".into(), "pdf".into(), "a.pdf".into(), &registry, &events_tx, &bus).await
+            }
+        });
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().unwrap();
+        for _ in 0..11 {
+            tokio::time::advance(std::time::Duration::from_secs(80)).await;
+            assert!(bus.page_finished(id));
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(21)).await;
+        assert!(matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("15m absolute")));
+    }
+
     #[test]
     fn export_reply_maps_failures_to_errors() {
         // The renderer's own message wins when it sent one.
@@ -5639,6 +5765,7 @@ mod tests {
     ) -> ControlSocketCtx {
         let (events_tx, _) = broadcast::channel(1);
         ControlSocketCtx {
+            library_id: None,
             workspace_cell,
             events_tx,
             self_writes: Arc::new(crate::self_writes::SelfWrites::new()),

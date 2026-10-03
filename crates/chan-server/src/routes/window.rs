@@ -27,7 +27,10 @@ use crate::state::AppState;
 #[serde(rename_all = "camelCase")]
 pub struct WindowReplyRequest {
     pub request_id: String,
-    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
+    #[serde(default)]
+    pub page_finished: Option<bool>,
 }
 
 /// `POST /api/window/reply` - complete a parked `cs pane` round-trip with the
@@ -37,7 +40,15 @@ pub async fn api_window_reply(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WindowReplyRequest>,
 ) -> Response {
-    if state.window_bus.complete(&req.request_id, req.payload) {
+    let progress = req.page_finished == Some(true);
+    let completed = if progress {
+        state.window_bus.page_finished(&req.request_id)
+    } else {
+        req.payload.is_some_and(|payload| state.window_bus.complete(&req.request_id, payload))
+    };
+    if progress && completed {
+        StatusCode::NO_CONTENT.into_response()
+    } else if completed {
         Json(serde_json::json!({})).into_response()
     } else {
         err(
@@ -65,8 +76,8 @@ mod tests {
         let json = r#"{"requestId":"win-3","payload":{"activePaneId":"p1","panes":[]}}"#;
         let req: WindowReplyRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.request_id, "win-3");
-        assert_eq!(req.payload["activePaneId"], "p1");
-        assert!(req.payload["panes"].is_array());
+        assert_eq!(req.payload.as_ref().unwrap()["activePaneId"], "p1");
+        assert!(req.payload.as_ref().unwrap()["panes"].is_array());
     }
 
     // The real router with a test AppState, so the assertion below exercises

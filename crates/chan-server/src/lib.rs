@@ -818,6 +818,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         control_identity.as_deref(),
         &config.prefix,
         control_socket::ControlSocketCtx {
+            library_id: control_identity.clone(),
             workspace_cell: workspace_cell.clone(),
             events_tx: events_tx.clone(),
             self_writes: self_writes.clone(),
@@ -844,6 +845,9 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         control_socket_path: control_socket_path.clone(),
         terminal: server_config.terminal.clone(),
     }));
+    if let Some(library_id) = control_identity {
+        terminal_sessions.install_library_id(library_id);
+    }
     if matches!(tenant, TenantKind::Terminal { .. }) {
         // A terminal-only tenant is long-lived but has neither the workspace
         // settings route nor its config-change push path. Pull the preference at

@@ -1499,24 +1499,27 @@ fn render_session_self_markdown(raw: &str) -> Result<String> {
 
 /// `cs export <path>`: render a workspace file to `format` in a live
 /// renderer window (the SPA owns the format registry) and write the bytes
-/// back into the workspace. Session-scoped like `cs search` (no window id:
-/// the server picks the renderer window); blocks until the renderer
+/// back into the workspace. The caller's live window takes precedence;
+/// otherwise the server picks the latest live renderer. Blocks until it
 /// replies, then prints the final workspace-relative output path.
 async fn cmd_shell_export(path: String, format: String, out: Option<String>) -> Result<()> {
     let socket = control_socket_env()?;
-    let out_path =
-        send_control_request(
+    let session =
+        send_control_request_streaming(
             &socket,
             ControlRequest::Export {
                 path,
                 format,
                 out,
-                window_id: None,
-                cancel_on_eof: false,
+                window_id: std::env::var("CHAN_WINDOW_ID").ok().filter(|id| !id.is_empty()),
+                cancel_on_eof: true,
             },
         )
         .await?;
-    println!("{out_path}");
+    if let Some(window_id) = &session.export_window_id {
+        eprintln!("export rendered in window {window_id}");
+    }
+    println!("{}", session.ack);
     Ok(())
 }
 

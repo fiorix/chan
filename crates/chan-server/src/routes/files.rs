@@ -2366,11 +2366,25 @@ pub async fn api_upload_file(
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Response {
+    let export_job = if let Some(id) = headers.get("X-Chan-Export-Job") {
+        let Ok(id) = id.to_str() else {
+            return err(StatusCode::BAD_REQUEST, "invalid export job id".into());
+        };
+        let Some(job) = state.window_bus.export_job(id) else {
+            return err(StatusCode::NOT_FOUND, "export job is no longer active".into());
+        };
+        Some(job)
+    } else {
+        None
+    };
     if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
+        if export_job.is_some() {
+            return err(StatusCode::BAD_REQUEST, "export uploads target the workspace".into());
+        }
         return crate::routes::transfer::filesystem_upload_response(state, headers, multipart)
             .await;
     }
-    workspace_upload_response(state, headers, multipart).await
+    workspace_upload_response(state, headers, multipart, export_job).await
 }
 
 #[derive(Default, Deserialize)]
@@ -2383,6 +2397,7 @@ async fn workspace_upload_response(
     state: Arc<AppState>,
     headers: HeaderMap,
     mut multipart: Multipart,
+    export_job: Option<Arc<crate::window_bus::ExportJob>>,
 ) -> Response {
     with_upload_destination(
         &mut multipart,
@@ -2400,6 +2415,7 @@ async fn workspace_upload_response(
                 Arc::clone(&state.self_writes),
                 destination,
                 field,
+                export_job,
             )
             .await
         },
@@ -2618,6 +2634,7 @@ async fn stream_workspace_upload(
     self_writes: Arc<crate::self_writes::SelfWrites>,
     destination: UploadDestination,
     field: Field<'_>,
+    export_job: Option<Arc<crate::window_bus::ExportJob>>,
 ) -> Response {
     stream_upload_tracked(
         bulk,
@@ -2625,7 +2642,7 @@ async fn stream_workspace_upload(
         tracking,
         field,
         move |cancel, mut rx| {
-            workspace_upload_stream_sync(&workspace, &self_writes, &destination, &mut rx, cancel)
+            workspace_upload_stream_sync(&workspace, &self_writes, &destination, &mut rx, cancel, export_job.as_deref())
         },
         err_from,
     )
@@ -2638,6 +2655,7 @@ fn workspace_upload_stream_sync(
     destination: &UploadDestination,
     rx: &mut mpsc::Receiver<RequestBodyMessage>,
     cancel: &crate::bulk_transfer::BulkCancel,
+    export_job: Option<&crate::window_bus::ExportJob>,
 ) -> chan_workspace::Result<UploadFileResponse> {
     let rel = workspace_upload_target(
         workspace,
@@ -2646,6 +2664,7 @@ fn workspace_upload_stream_sync(
         &destination.filename,
     )?;
     let mut reservation = None;
+    let mut permit = None;
     let result = workspace.write_atomic_stream(&rel, AtomicWriteKind::Bytes, |sink| {
         // Checked per chunk rather than once, so an abandoned upload returns
         // its admission slot within one chunk's work. The atomic writer's temp
@@ -2659,14 +2678,19 @@ fn workspace_upload_stream_sync(
             }
             sink.write_chunk(chunk)
         })?;
+        if let Some(job) = export_job {
+            permit = Some(job.begin_commit(&rel)?);
+        }
         reservation = Some(self_writes.reserve_after_preflight(&rel));
         Ok(())
     });
     match result {
-        Ok(stat) => Ok(UploadFileResponse {
-            path: rel,
-            size: stat.size,
-        }),
+        Ok(stat) => {
+            if let Some(permit) = permit.as_mut() {
+                permit.mark_committed();
+            }
+            Ok(UploadFileResponse { path: rel, size: stat.size })
+        }
         Err(error) => {
             if let Some(reservation) = reservation {
                 self_writes.cancel(reservation);
@@ -2762,6 +2786,7 @@ mod file_browser_listing_tests {
             },
             &mut rx,
             &crate::bulk_transfer::test_support::uncancelled(),
+            None,
         )
     }
 
@@ -3759,6 +3784,33 @@ mod write_tests {
         assert!(!root.path().join("late.pdf").exists());
     }
 
+    #[tokio::test]
+    async fn a_guarded_export_upload_commits_only_while_its_job_is_active() {
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        let (id, _reply, _progress) = state.window_bus.register_export("active.pdf".into());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-chan-export-job", id.parse().unwrap());
+        let accepted = super::api_upload_file(
+            State(Arc::clone(&state)),
+            Query(super::UploadRootQuery::default()),
+            headers.clone(),
+            upload_multipart("active-export", "", "active.pdf", "%PDF-current").await,
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(std::fs::read(root.path().join("active.pdf")).unwrap(), b"%PDF-current");
+        assert!(state.window_bus.retire_export(&id));
+        let late = super::api_upload_file(
+            State(state),
+            Query(super::UploadRootQuery::default()),
+            headers,
+            upload_multipart("late-export", "", "late.pdf", "%PDF-late").await,
+        )
+        .await;
+        assert_eq!(late.status(), StatusCode::NOT_FOUND);
+        assert!(!root.path().join("late.pdf").exists());
+    }
+
     /// Both sides of the bound on the workspace upload: a saturated lane
     /// refuses it and nothing is written, and the same upload succeeds once the
     /// lane drains. Checking only the refusal would pass against a route that
@@ -4026,6 +4078,7 @@ mod write_tests {
                 },
                 &mut rx,
                 &crate::bulk_transfer::test_support::uncancelled(),
+                None,
             )
         });
         let chunk = Bytes::from(vec![0x5a; 1024 * 1024]);
@@ -4079,6 +4132,7 @@ mod write_tests {
                 },
                 &mut rx,
                 &crate::bulk_transfer::test_support::uncancelled(),
+                None,
             )
         });
         tx.send(RequestBodyMessage::Chunk(Bytes::from_static(b"new")))
@@ -4789,6 +4843,7 @@ mod write_tests {
                 &destination,
                 &mut rx,
                 &cancel,
+                None,
             );
             let _ = done_tx.send(result);
         });
@@ -4829,6 +4884,7 @@ mod write_tests {
                     Arc::new(crate::self_writes::SelfWrites::new()),
                     destination,
                     field,
+                    None,
                 ),
             )
             .await
