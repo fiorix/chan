@@ -3059,7 +3059,7 @@ async fn handle_export(
         Ok(target) => target,
         Err(message) => return ControlResponse::Error { message },
     };
-    export_round_trip(&target, path, format, out, events_tx, window_bus).await
+    export_round_trip(&target, path, format, out, session_registry, events_tx, window_bus).await
 }
 
 /// The `cs export` round-trip, mirroring [`pane_round_trip`]: park the
@@ -3071,6 +3071,7 @@ async fn export_round_trip(
     path: String,
     format: String,
     out: String,
+    _session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
 ) -> ControlResponse {
@@ -5459,12 +5460,14 @@ mod tests {
         let (events_tx, mut events_rx) = broadcast::channel(4);
         let window_bus = Arc::new(crate::window_bus::WindowBus::new());
         let bus = Arc::clone(&window_bus);
+        let (session_registry, _guard) = live_window("w-1");
         let round_trip = tokio::spawn(async move {
             export_round_trip(
                 "w-1",
                 "notes/doc.md".into(),
                 "pdf".into(),
                 "notes/doc.pdf".into(),
+                &session_registry,
                 &events_tx,
                 &bus,
             )
@@ -5487,6 +5490,63 @@ mod tests {
             ControlResponse::Export { out_path } => assert_eq!(out_path, "notes/doc.pdf"),
             other => panic!("expected Export, got {other:?}"),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn export_without_a_renderer_reply_has_a_typed_bound_naming_the_window() {
+        let (events_tx, mut events_rx) = broadcast::channel(4);
+        let window_bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (session_registry, _guard) = live_window("w-stalled");
+        let response = export_round_trip(
+            "w-stalled",
+            "notes/doc.md".into(),
+            "pdf".into(),
+            "notes/doc.pdf".into(),
+            &session_registry,
+            &events_tx,
+            &window_bus,
+        )
+        .await;
+        match response {
+            ControlResponse::Timeout { message } => {
+                assert!(message.contains("w-stalled"), "{message}");
+                assert!(message.contains("90s"), "{message}");
+            }
+            other => panic!("expected typed Timeout, got {other:?}"),
+        }
+        let frame: Value = serde_json::from_str(&events_rx.try_recv().expect("export frame"))
+            .expect("export frame JSON");
+        assert_eq!(frame["command"], "export-job");
+        assert!(!window_bus.complete(
+            frame["id"].as_str().expect("job id"),
+            serde_json::json!({ "ok": true, "out": "notes/doc.pdf" }),
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn export_refuses_a_window_whose_last_socket_closed_before_dispatch() {
+        let (events_tx, mut events_rx) = broadcast::channel(4);
+        let window_bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (session_registry, guard) = live_window("w-gone");
+        drop(guard);
+        let response = export_round_trip(
+            "w-gone",
+            "notes/doc.md".into(),
+            "pdf".into(),
+            "notes/doc.pdf".into(),
+            &session_registry,
+            &events_tx,
+            &window_bus,
+        )
+        .await;
+        match response {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("w-gone"), "{message}");
+                assert!(message.contains("not connected"), "{message}");
+            }
+            other => panic!("expected immediate refusal, got {other:?}"),
+        }
+        assert!(events_rx.try_recv().is_err(), "no frame should be sent");
     }
 
     #[test]
