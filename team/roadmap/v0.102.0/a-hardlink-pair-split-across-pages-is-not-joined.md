@@ -1,6 +1,10 @@
 # A hardlink pair split across two pages of the filesystem graph is not joined
 
-Status: raised for a decision on 2026-10-03 by the builder of the open rows of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md), from its row on the graph's hardlink chip; the owner has not ruled on it. Read in the code on the v0.102.0 integration branch; not reproduced.
+Status: raised for a decision on 2026-10-03 by the builder of the open rows of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md), from its row on the graph's hardlink chip; the owner had not ruled on it then. Read in the code on the v0.102.0 integration branch; not reproduced. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: accepted for a build. A node with more than one link carries an opaque group value, and the page joins the nodes that share one.
 
 ## What was seen
 

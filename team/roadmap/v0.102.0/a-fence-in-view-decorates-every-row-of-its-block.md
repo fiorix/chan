@@ -1,6 +1,10 @@
 # A fence in view decorates every row of its block at each recompute
 
-Status: raised for a decision on 2026-10-03 by the builder of the open rows of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md), whose row "a viewport-bounded fence handler" ended as a plan and not a build; the owner has not ruled on it. Read in the code on the v0.102.0 integration branch; nothing was measured.
+Status: raised for a decision on 2026-10-03 by the builder of the open rows of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md), whose row "a viewport-bounded fence handler" ended as a plan and not a build; the owner had not ruled on it then. Read in the code on the v0.102.0 integration branch; nothing was measured. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: the measurement is accepted, on a fence of 20,000 lines; a build is ruled after it.
 
 ## What was seen
 

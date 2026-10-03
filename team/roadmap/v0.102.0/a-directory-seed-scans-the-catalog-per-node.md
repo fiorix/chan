@@ -1,6 +1,10 @@
 # A search with directory nodes scans the whole catalog once for each of them
 
-Status: raised for a decision on 2026-10-03 by the builder of [a-workspace-search-stops-only-between-seeds](a-workspace-search-stops-only-between-seeds.md), from the measurement that item asked for; the owner has not ruled on it. Measured in a release build on a generated workspace; read in the code on the v0.102.0 integration branch.
+Status: raised for a decision on 2026-10-03 by the builder of [a-workspace-search-stops-only-between-seeds](a-workspace-search-stops-only-between-seeds.md), from the measurement that item asked for; the owner had not ruled on it then. Measured in a release build on a generated workspace; read in the code on the v0.102.0 integration branch. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: accepted for a build. The index of children by directory is built inside the pass, by the one search that needs it, and the pass is measured again.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # An open dispatched before a removal can recreate the removed workspace's metadata directories
 
-Status: raised for a decision on 2026-10-03 by the builder of the open's barrier in [a-hung-root-takes-a-thread-per-expired-caller](a-hung-root-takes-a-thread-per-expired-caller.md), as what that barrier leaves; the owner has not ruled on it. Read in the code on the v0.102.0 integration branch; not run.
+Status: raised for a decision on 2026-10-03 by the builder of the open's barrier in [a-hung-root-takes-a-thread-per-expired-caller](a-hung-root-takes-a-thread-per-expired-caller.md), as what that barrier leaves; the owner had not ruled on it then. Read in the code on the v0.102.0 integration branch; not run. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: it stays a written cost, in the design beside the barrier's rule, and nothing is built; the row closes with no build.
 
 ## What was seen
 

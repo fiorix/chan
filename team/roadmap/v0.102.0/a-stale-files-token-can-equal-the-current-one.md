@@ -4,7 +4,7 @@ Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the o
 
 ## Owner ruling
 
-On 2026-10-03 the owner ruled, as the lead recommended: the reading and a probe are accepted; what a write must answer is ruled after them.
+On 2026-10-03 the owner ruled, as the lead recommended: the reading and a probe are accepted; what a write must answer is ruled after them. With the reading below before them, the owner ruled later that day, as the lead recommended: accepted for a build. A standalone save carries a hash of what its writer loaded, optional on the wire, and the route answers its conflict when the file's bytes differ from it.
 
 ## What was seen
 
