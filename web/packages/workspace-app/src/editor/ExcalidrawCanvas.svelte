@@ -219,7 +219,8 @@
   /// Cleaned appState from the latest serialize or adopt with its canonical
   /// JSON, plus the canonical JSON of the appState the authority is known to
   /// hold or the session holds as this window's claim (from our last offer OR
-  /// any adopted snapshot/update, taken as the serializer keeps it). Only a
+  /// any adopted snapshot/update, taken as the serializer keeps it), and
+  /// until either, of the appState the board last seeded with. Only a
   /// divergence from that baseline rides a push: adopting an incoming
   /// appState must move the baseline too, or the echo would re-push forever
   /// between two live canvases.
@@ -604,6 +605,9 @@
     const files = Object.values(scene.files);
     if (files.length > 0) api.addFiles(files);
     setBaseline(api, serializeScene(api, ex));
+    // What a seed puts on the board is no change of this window's, so it is
+    // the appState a later change is counted from and is never offered.
+    lastAuthorityAppStateJson = canonicalJson(appState);
     seeded = true;
     seededOnce = true;
   }

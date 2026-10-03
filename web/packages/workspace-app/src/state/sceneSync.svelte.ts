@@ -331,6 +331,11 @@ export class SceneSession {
   private releaseTimer: ReturnType<typeof setTimeout> | null = null;
 
   private binding: SceneCanvasBinding | null = null;
+  /// Whether the canvas bound last has adopted this session's scene, at its
+  /// bind's replay or at a snapshot applied since. One bound before the
+  /// current socket's snapshot shows the buffer it seeded from until that
+  /// snapshot lands, and no appState it offers is a change to this scene.
+  private canvasAdopted = false;
 
   /// The scene replayed into a canvas that binds after the frames landed:
   /// snapshot and update frames, plus this window's own pushes, each with
@@ -488,6 +493,7 @@ export class SceneSession {
   bindCanvas(binding: SceneCanvasBinding): void {
     if (this.releaseTimer !== null) this.retain();
     this.binding = binding;
+    this.canvasAdopted = false;
     this.retireUnboundRefusal();
     if (this.haveSnapshot) {
       const recoveringClaims = this.unboundClaims !== null;
@@ -522,12 +528,12 @@ export class SceneSession {
   /// An appState is the exception: the session keeps it as this window's
   /// claim from this call on, whether or not it takes the push, so the
   /// caller marks an appState as handed over on either answer. Three
-  /// sessions keep none. One that has had no snapshot yet has no scene for a
-  /// claim to stand over: its canvas has adopted nothing, so what it offers
-  /// is the appState its board loaded and no change, and the first snapshot
-  /// replaces it. One that has stopped retrying, or whose tab is read only,
-  /// has no authority to confirm a claim. A push the session takes carries
-  /// the claim when none on the wire or queued does.
+  /// sessions keep none. One whose canvas has not adopted its scene, bound
+  /// before the first snapshot or between two sockets, is offered a change
+  /// to the buffer that board seeded from and not to this scene, and the
+  /// next snapshot replaces it. One that has stopped retrying, or whose tab
+  /// is read only, has no authority to confirm a claim. A push the session
+  /// takes carries the claim when none on the wire or queued does.
   pushScene(elements: WireElement[], appState?: WireAppState, files?: WireFiles): boolean {
     if (appState !== undefined && this.keepsAppStateClaim()) {
       this.appStateClaim = appState;
@@ -803,6 +809,7 @@ export class SceneSession {
     files: WireFiles,
   ): void {
     const claims = this.unboundClaims;
+    this.canvasAdopted = true;
     if (claims === null) {
       binding.applySnapshot(elements, appState, files);
       binding.collaboratorsChanged();
@@ -861,7 +868,7 @@ export class SceneSession {
   }
 
   private keepsAppStateClaim(): boolean {
-    return this.snapshotSocket !== null && !this.retryStopped && !this.isReadOnlyAttach();
+    return this.canvasAdopted && !this.retryStopped && !this.isReadOnlyAttach();
   }
 
   /// A session that stops retrying has no authority left to confirm a claim.
