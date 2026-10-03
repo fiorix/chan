@@ -317,6 +317,71 @@ describe("createDemoFetch router", () => {
     expect((await f("/api/nope")).status).toBe(404);
   });
 
+  const transfer = (f: ReturnType<typeof demoFetch>, op: string, sources: string[], dest_dir: string) =>
+    f("/api/fs/transfer", { method: "POST", body: JSON.stringify({ op, sources, dest_dir }) });
+
+  test("a copy carries a folder created empty, alone or inside a copied tree", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    await f("/api/fs", { method: "POST", body: JSON.stringify({ path: "empty", is_dir: true }) });
+    await f("/api/fs", { method: "POST", body: JSON.stringify({ path: "src/vendor", is_dir: true }) });
+
+    const response = await transfer(f, "copy", ["empty", "src"], "docs");
+    expect(await response.json()).toEqual({
+      moved: [
+        { from: "empty", to: "docs/empty" },
+        { from: "src", to: "docs/src" },
+      ],
+      skipped: [],
+      conflicts: [],
+    });
+    expect({
+      copied: st.isDir("docs/empty"),
+      nested: st.isDir("docs/src/vendor"),
+      sources: [st.isDir("empty"), st.isDir("src/vendor")],
+    }).toEqual({ copied: true, nested: true, sources: [true, true] });
+  });
+
+  test("a move into the source's own directory is listed as skipped", async () => {
+    const st = store();
+    const response = await transfer(demoFetch(st), "move", ["docs/a.md", "src"], "docs");
+    expect(await response.json()).toEqual({
+      moved: [{ from: "src", to: "docs/src" }],
+      skipped: ["docs/a.md"],
+      conflicts: [],
+    });
+    expect(st.read("docs/a.md")?.content).toBe(A_MD);
+  });
+
+  test("a copy into the source's own directory takes a free name, and overwrites nothing", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    const first = await transfer(f, "copy", ["docs/a.md", "src"], "docs");
+    const second = await transfer(f, "copy", ["docs/a.md", "src"], "");
+    const third = await transfer(f, "copy", ["docs/a.md", "docs/a.md"], "docs");
+
+    expect([await first.json(), await second.json(), await third.json()].map((body) => body.moved)).toEqual([
+      [
+        { from: "docs/a.md", to: "docs/a copy.md" },
+        { from: "src", to: "docs/src" },
+      ],
+      [
+        { from: "docs/a.md", to: "a.md" },
+        { from: "src", to: "src copy" },
+      ],
+      [
+        { from: "docs/a.md", to: "docs/a copy 2.md" },
+        { from: "docs/a.md", to: "docs/a copy 3.md" },
+      ],
+    ]);
+    expect({
+      source: st.read("docs/a.md")?.content,
+      copy: st.read("docs/a copy.md")?.content,
+      folder: st.read("src copy/main.rs")?.content,
+      original: st.read("src/main.rs")?.content,
+    }).toEqual({ source: A_MD, copy: A_MD, folder: "fn()", original: "fn()" });
+  });
+
 });
 
 describe("parseMarkdown", () => {
