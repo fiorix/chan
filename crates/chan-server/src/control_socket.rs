@@ -3181,6 +3181,7 @@ where
     } = runtime;
     let (request_id, mut rx, mut progress) = window_bus.register_export(out.clone());
     let job = window_bus.export_job(&request_id).expect("new export job");
+    let mut commits = job.commit_changes();
     let command = WindowCommand::ExportJob {
         id: request_id.clone(),
         path,
@@ -3199,7 +3200,12 @@ where
         tokio::select! {
             biased;
             reply = &mut rx => {
-                let mut response = if job.retire().await {
+                let committed = job.retire().await;
+                if let Some(error) = job.failure() {
+                    let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
+                    return failed_export_response(&out, error);
+                }
+                let mut response = if committed {
                     ControlResponse::Export {
                         out_path: out.clone(),
                         window_id: None,
@@ -3218,6 +3224,9 @@ where
             () = &mut *client_eof => {
                 let committed = window_bus.retire_export(&request_id).await || job.retire().await;
                 let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
+                if let Some(error) = job.failure() {
+                    return failed_export_response(&out, error);
+                }
                 if committed {
                     return ControlResponse::Export { out_path: out, window_id: Some(window_id.to_string()) };
                 }
@@ -3225,7 +3234,17 @@ where
             }
             _ = tokio::time::sleep_until(absolute) => {
                 let committed = window_bus.retire_export(&request_id).await || job.retire().await;
-                return finish_export_at_bound(window_id, &request_id, &out, "15m absolute", committed, runtime);
+                return finish_export_at_bound(window_id, &request_id, &out, "15m absolute", committed, job.failure(), runtime);
+            }
+            changed = commits.changed() => {
+                if changed.is_ok() {
+                    commits.borrow_and_update();
+                    if let Some(error) = job.failure() {
+                        window_bus.retire_export(&request_id).await;
+                        let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
+                        return failed_export_response(&out, error);
+                    }
+                }
             }
             changed = progress.changed() => {
                 if changed.is_ok() {
@@ -3235,11 +3254,17 @@ where
             }
             _ = tokio::time::sleep_until(quiet) => {
                 match window_bus.retire_export_if_quiet_elapsed(&request_id, tokio::time::Instant::now()).await {
-                    Ok(committed) => return finish_export_at_bound(window_id, &request_id, &out, "90s quiet", committed || job.retire().await, runtime),
+                    Ok(committed) => return finish_export_at_bound(window_id, &request_id, &out, "90s quiet", committed || job.retire().await, job.failure(), runtime),
                     Err(next_deadline) => quiet = next_deadline,
                 }
             }
         }
+    }
+}
+
+fn failed_export_response(out: &str, error: String) -> ControlResponse {
+    ControlResponse::Error {
+        message: format!("export write failed: {error}; output path {out} may hold the file"),
     }
 }
 
@@ -3249,6 +3274,7 @@ fn finish_export_at_bound(
     out: &str,
     bound: &str,
     committed: bool,
+    failure: Option<String>,
     runtime: ExportRuntime<'_>,
 ) -> ControlResponse {
     let _ = send_window_command_if_live(
@@ -3259,6 +3285,9 @@ fn finish_export_at_bound(
         },
         runtime.events_tx,
     );
+    if let Some(error) = failure {
+        return failed_export_response(out, error);
+    }
     if committed {
         return ControlResponse::Export {
             out_path: out.to_string(),
@@ -5854,9 +5883,15 @@ mod tests {
             let bus = Arc::clone(&bus);
             async move {
                 export_round_trip(
-                    "w-failed", "a.md".into(), "pdf".into(), "a.pdf".into(),
-                    &registry, &events_tx, &bus,
-                ).await
+                    "w-failed",
+                    "a.md".into(),
+                    "pdf".into(),
+                    "a.pdf".into(),
+                    &registry,
+                    &events_tx,
+                    &bus,
+                )
+                .await
             }
         });
         let frame = recv_command(&mut events, "export-job").await;
@@ -5869,24 +5904,38 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         let mut permit = None;
         let result = workspace.write_atomic_stream(
-            "a.pdf", chan_workspace::AtomicWriteKind::Bytes, |sink| {
+            "a.pdf",
+            chan_workspace::AtomicWriteKind::Bytes,
+            |sink| {
                 sink.write_chunk(b"%PDF-test")?;
                 permit = Some(job.begin_commit("a.pdf")?);
-                Err(chan_workspace::ChanError::Io("injected commit failure".into()))
+                Err(chan_workspace::ChanError::Io(
+                    "injected commit failure".into(),
+                ))
             },
         );
         assert!(result.is_err(), "upload must keep its write error");
+        permit
+            .as_mut()
+            .unwrap()
+            .mark_failed(result.unwrap_err().to_string());
         drop(permit);
         let response = tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await;
         assert!(response.is_ok(), "failed commit kept export parked");
         match response.unwrap().unwrap() {
             ControlResponse::Error { message } => {
-                assert!(message.contains("commit"), "{message}");
-                assert!(message.contains("a.pdf") && message.contains("may hold the file"), "{message}");
+                assert!(message.contains("injected commit failure"), "{message}");
+                assert!(
+                    message.contains("a.pdf") && message.contains("may hold the file"),
+                    "{message}"
+                );
             }
             other => panic!("expected failed export error, got {other:?}"),
         }
-        assert!(job.begin_commit("a.pdf").is_err(), "second commit must be refused");
+        assert!(
+            job.begin_commit("a.pdf").is_err(),
+            "second commit must be refused"
+        );
         assert!(bus.export_job(id).is_none(), "failed export must retire");
         assert_eq!(recv_command(&mut events, "export-stop").await["id"], id);
         assert!(events.try_recv().is_err(), "failed export sends one stop");
@@ -6043,6 +6092,7 @@ mod tests {
             "a.pdf",
             "90s quiet",
             committed,
+            job.failure(),
             ExportRuntime {
                 session_registry: &registry,
                 events_tx: &events_tx,

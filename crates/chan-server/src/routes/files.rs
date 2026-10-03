@@ -2715,6 +2715,9 @@ fn workspace_upload_stream_sync(
             })
         }
         Err(error) => {
+            if let Some(permit) = permit.as_mut() {
+                permit.mark_failed(error.to_string());
+            }
             if let Some(reservation) = reservation {
                 self_writes.cancel(reservation);
             }

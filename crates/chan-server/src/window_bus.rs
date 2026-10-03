@@ -30,25 +30,43 @@ struct ExportState {
     active: bool,
     committing: bool,
     committed: bool,
+    failure: Option<String>,
     pages_finished: u64,
     quiet_deadline: tokio::time::Instant,
     absolute_deadline: tokio::time::Instant,
 }
 
 /// Records a guarded upload in flight without holding a lock during I/O.
-/// Retirement awaits its drop and then observes whether it committed.
-pub(crate) struct ExportCommitPermit<'a>(&'a ExportJob);
+/// Retirement awaits its drop and then observes its success or failure.
+pub(crate) struct ExportCommitPermit<'a> {
+    job: &'a ExportJob,
+    settled: bool,
+}
 
 impl ExportCommitPermit<'_> {
     pub(crate) fn mark_committed(&mut self) {
-        self.0.lock_state().committed = true;
+        self.job.lock_state().committed = true;
+        self.settled = true;
+    }
+
+    pub(crate) fn mark_failed(&mut self, error: String) {
+        let mut state = self.job.lock_state();
+        state.failure = Some(error);
+        state.active = false;
+        self.settled = true;
     }
 }
 
 impl Drop for ExportCommitPermit<'_> {
     fn drop(&mut self) {
-        self.0.lock_state().committing = false;
-        self.0.commit_changes.send_replace(());
+        let mut state = self.job.lock_state();
+        if !self.settled {
+            state.failure = Some("guarded upload commit did not complete".into());
+            state.active = false;
+        }
+        state.committing = false;
+        drop(state);
+        self.job.commit_changes.send_replace(());
     }
 }
 
@@ -84,7 +102,10 @@ impl ExportJob {
             ));
         }
         state.committing = true;
-        Ok(ExportCommitPermit(self))
+        Ok(ExportCommitPermit {
+            job: self,
+            settled: false,
+        })
     }
 
     pub(crate) async fn retire(&self) -> bool {
@@ -108,6 +129,14 @@ impl ExportJob {
 
     pub(crate) fn committed(&self) -> bool {
         self.lock_state().committed
+    }
+
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.lock_state().failure.clone()
+    }
+
+    pub(crate) fn commit_changes(&self) -> watch::Receiver<()> {
+        self.commit_changes.subscribe()
     }
 
     pub(crate) fn deadlines(&self) -> (tokio::time::Instant, tokio::time::Instant) {
@@ -180,6 +209,7 @@ impl WindowBus {
                     active: true,
                     committing: false,
                     committed: false,
+                    failure: None,
                     pages_finished: 0,
                     quiet_deadline: now + EXPORT_QUIET_TIMEOUT,
                     absolute_deadline: now + EXPORT_ABSOLUTE_TIMEOUT,
@@ -374,7 +404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_atomic_write_releases_the_export_commit() {
+    async fn a_failed_atomic_write_fails_the_export_commit() {
         let cfg = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -400,9 +430,10 @@ mod tests {
         assert!(!root.path().join("a.pdf").exists());
         assert!(!job.committed());
         assert!(
-            job.begin_commit("a.pdf").is_ok(),
-            "failed write must leave the job active"
+            job.begin_commit("a.pdf").is_err(),
+            "failed write must leave the job terminal"
         );
+        assert!(job.failure().unwrap().contains("did not complete"));
     }
 
     #[test]
