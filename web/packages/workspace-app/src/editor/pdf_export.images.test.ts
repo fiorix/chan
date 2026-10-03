@@ -2,8 +2,8 @@
 //
 // The images of an export, through the export's own rasterizer: a page is
 // drawn only once each of its images has decoded, an image that does not
-// decode fails the export by its name, and the image's own bitmap is what
-// lands on the page. The engine's `Image` and canvas are stand-ins, since
+// decode fails the export by its name, and an image without a marker stays
+// in the page document. The engine's `Image` and canvas are stand-ins, since
 // jsdom decodes and paints nothing.
 
 import { PDFDocument } from "pdf-lib";
@@ -74,7 +74,7 @@ beforeEach(() => {
   // An image of the composition has arrived: the export waits for that
   // before it measures, and no image of a jsdom page ever loads.
   imagesHaveBoxes();
-  drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 }, TINY_PNG);
+  drawn = standInCanvas({ x: 10, y: 20, w: 80, h: 40 }, TINY_PNG);
 });
 
 afterEach(() => {
@@ -122,18 +122,18 @@ describe.each([
     expect(drawn).toEqual([]);
   });
 
-  test("fails by the image's name when no page gives the image a place", async () => {
+  test("keeps the prepared image in the page document when no marker returns", async () => {
     vi.restoreAllMocks();
     imagesHaveBoxes();
     // This canvas answers a marker read with no marker at all.
-    standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
+    const drawn = standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
     decodesSettleAtOnce();
 
-    await expect(
-      exportMarkdownToPdf({ path, markdown, theme: "light" }),
-    ).rejects.toThrow(
-      "image has no place on the page: /api/fs/notes/shots/photo.png",
+    const pdf = await PDFDocument.load(
+      await exportMarkdownToPdf({ path, markdown, theme: "light" }),
     );
+    expect(pdf.getPageCount()).toBe(1);
+    expect(drawn.map((item) => item.what)).toEqual(["page", "markers", "page"]);
   });
 });
 
