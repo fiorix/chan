@@ -281,4 +281,64 @@ mod tests {
         tokio::time::advance(EXPORT_QUIET_TIMEOUT).await;
         assert!(job.begin_commit("a.pdf").is_err());
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bound_during_commit_does_not_delay_a_pane_reply() {
+        let bus = Arc::new(WindowBus::new());
+        let (export_id, _export_reply, _progress) = bus.register_export("a.pdf".into());
+        let job = bus.export_job(&export_id).unwrap();
+        let mut permit = job.begin_commit("a.pdf").unwrap();
+        let (pane_id, pane_reply) = bus.register();
+        let bound_bus = Arc::clone(&bus);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let bound = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            bound_bus.retire_export_if_quiet_elapsed(
+                &export_id,
+                tokio::time::Instant::now() + EXPORT_QUIET_TIMEOUT,
+            )
+        });
+        started_rx.await.unwrap();
+        let start = std::time::Instant::now();
+        while bus.exports.try_lock().is_ok()
+            && start.elapsed() < std::time::Duration::from_millis(100)
+        {
+            tokio::task::yield_now().await;
+        }
+        let pane_bus = Arc::clone(&bus);
+        let mut pane = tokio::task::spawn_blocking(move || {
+            pane_bus.complete(&pane_id, serde_json::json!({ "activePaneId": "p1" }))
+        });
+        let prompt = tokio::time::timeout(std::time::Duration::from_secs(2), &mut pane).await;
+        permit.mark_committed();
+        drop(permit);
+        let prompt_in_time = prompt.is_ok();
+        let pane_completed = match prompt {
+            Ok(result) => result.unwrap(),
+            Err(_) => pane.await.unwrap(),
+        };
+        assert!(pane_completed);
+        assert!(prompt_in_time, "pane reply waited for an export commit");
+        assert_eq!(pane_reply.await.unwrap()["activePaneId"], "p1");
+        assert_eq!(bound.await.unwrap(), Ok(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retirement_during_failed_commit_answers_uncommitted() {
+        let bus = Arc::new(WindowBus::new());
+        let (id, _reply, _progress) = bus.register_export("a.pdf".into());
+        let job = bus.export_job(&id).unwrap();
+        let permit = job.begin_commit("a.pdf").unwrap();
+        let retiring_bus = Arc::clone(&bus);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let retired = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            retiring_bus.retire_export(&id)
+        });
+        started_rx.await.unwrap();
+        drop(permit);
+        assert!(!retired.await.unwrap());
+        assert!(!job.committed());
+        assert!(job.begin_commit("a.pdf").is_err());
+    }
 }
