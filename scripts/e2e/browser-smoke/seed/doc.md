@@ -21,6 +21,8 @@ flowchart LR
 
 ![](photo.png#w=200)
 
+![](mark-violet.png#w=120)
+
 ## Section one
 
 Paragraph one of the filler stream. The quick brown fox jumps over the lazy dog while the pagination engine measures block rectangles.

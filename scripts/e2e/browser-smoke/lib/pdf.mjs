@@ -2,7 +2,10 @@
 // per-page nonzero raster ink. The export engine embeds each page as
 // one FlateDecode image XObject (raw pixels), so ink is measured by
 // inflating the stream and counting pixels that differ from the page's
-// corner pixel - no canvas or native decoder needed.
+// corner pixel - no canvas or native decoder needed. The same pixels
+// answer where a known colour is on a page (`pdfPageRasters`,
+// `colourBox`, `longestRun`), which is how a check reads an image, a
+// cut or a scrollbar out of a PDF.
 
 import { inflateSync } from "node:zlib";
 import { PDFDocument, PDFName, PDFRawStream } from "pdf-lib";
@@ -55,6 +58,114 @@ function pageImageInk(page) {
       ratio: Math.max(best.ratio, ratio),
       images: best.images + 1,
     };
+  }
+  return best;
+}
+
+/// A page's raster as its raw pixels: `{ width, height, channels, raw }`,
+/// `raw` holding `channels` bytes per pixel in rows, red, green and blue
+/// first. A transparent pixel reads as black here: its alpha lives in the
+/// image's soft mask, which this does not read.
+function pageRaster(page) {
+  const resources = page.node.Resources();
+  const xobjects = resources?.lookup(PDFName.of("XObject"));
+  if (!xobjects) return null;
+  for (const key of xobjects.keys()) {
+    const stream = xobjects.lookup(key);
+    if (!(stream instanceof PDFRawStream)) continue;
+    const dict = stream.dict;
+    const width = dict.lookup(PDFName.of("Width"))?.asNumber?.() ?? 0;
+    const height = dict.lookup(PDFName.of("Height"))?.asNumber?.() ?? 0;
+    let raw;
+    try {
+      raw = inflateSync(Buffer.from(stream.contents));
+    } catch {
+      continue;
+    }
+    const channels = Math.round(raw.length / (width * height));
+    if (channels < 3) continue;
+    return { width, height, channels, raw };
+  }
+  return null;
+}
+
+/// Every page's raster, in page order (see `pageRaster`). Throws for a
+/// page that carries none, so a caller never reads a missing page as an
+/// empty one.
+export async function pdfPageRasters(bytes) {
+  const doc = await PDFDocument.load(bytes);
+  return doc.getPages().map((page, i) => {
+    const raster = pageRaster(page);
+    if (!raster) throw new Error(`page ${i + 1}: no raster image content`);
+    return raster;
+  });
+}
+
+/// The colour of one pixel of a raster, as `[r, g, b]`.
+export function pixelAt(raster, x, y) {
+  const at = (y * raster.width + x) * raster.channels;
+  return [raster.raw[at], raster.raw[at + 1], raster.raw[at + 2]];
+}
+
+/// Whether two colours differ by at most `tol` on every channel.
+export function sameColour(a, b, tol) {
+  return (
+    Math.abs(a[0] - b[0]) <= tol &&
+    Math.abs(a[1] - b[1]) <= tol &&
+    Math.abs(a[2] - b[2]) <= tol
+  );
+}
+
+/// Where a colour is on a raster: the box of the pixels within `tol` of
+/// `rgb` on every channel and how many they are, `{ x0, y0, x1, y1, width,
+/// height, count }`, or null when no pixel is. A solid block of the colour
+/// has `count` equal to `width * height`.
+export function colourBox(raster, rgb, tol = 10) {
+  const { width, height, channels, raw } = raster;
+  let x0 = width;
+  let y0 = height;
+  let x1 = -1;
+  let y1 = -1;
+  let count = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const at = (y * width + x) * channels;
+      if (
+        Math.abs(raw[at] - rgb[0]) > tol ||
+        Math.abs(raw[at + 1] - rgb[1]) > tol ||
+        Math.abs(raw[at + 2] - rgb[2]) > tol
+      ) {
+        continue;
+      }
+      count++;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (count === 0) return null;
+  return { x0, y0, x1, y1, width: x1 - x0 + 1, height: y1 - y0 + 1, count };
+}
+
+/// The longest run of one colour in a row, among the pixels `counts`
+/// accepts: `{ x, length, colour }`. A run is pixels within `tol` of its
+/// first one.
+export function longestRun(raster, y, counts, tol = 3) {
+  let best = { x: 0, length: 0, colour: [0, 0, 0] };
+  let x = 0;
+  while (x < raster.width) {
+    const colour = pixelAt(raster, x, y);
+    if (!counts(colour)) {
+      x++;
+      continue;
+    }
+    let end = x + 1;
+    while (end < raster.width && sameColour(pixelAt(raster, end, y), colour, tol)) {
+      end++;
+    }
+    if (end - x > best.length) best = { x, length: end - x, colour };
+    x = end;
   }
   return best;
 }
