@@ -176,7 +176,10 @@ type ServerFrame =
       appState?: WireAppState;
       files?: WireFiles;
     }
-  | { type: "push-ok"; version: number }
+  /// `changed` says whether the push changed the authority's scene. The
+  /// authority acks a push that changed nothing the same way and writes
+  /// nothing after it, so only a true leaves the file behind the scene.
+  | { type: "push-ok"; version: number; changed?: boolean }
   | ({ type: "cursor" } & ScenePeerCursorFrame)
   | { type: "cursor-gone"; id: number }
   | { type: "flush"; dirty: boolean; mtime_ns?: string | null; error?: string }
@@ -344,7 +347,8 @@ export class SceneSession {
     return this.ws !== null && this.snapshotSocket === this.ws;
   }
   /// Authority-side dirty flag, tracked from snapshot/update/flush
-  /// frames so `flush()` can resolve immediately when there is nothing
+  /// frames and from the ack of a push of this window's that changed the
+  /// scene, so `flush()` can resolve immediately when there is nothing
   /// unflushed.
   private serverDirty = false;
   /// The save error this session wrote for a flush the server could not
@@ -910,6 +914,12 @@ export class SceneSession {
         return;
       case "push-ok":
         this.tab.authorityVersion = f.version;
+        // The authority writes the file after its debounce, so a push that
+        // changed the scene leaves it dirty until the next flush frame. A
+        // frame that says the push changed nothing, or does not say, leaves
+        // the flag as it was: nothing is written after it, and a save held
+        // on it would wait out its bound and fall back to the classic PUT.
+        if (f.changed === true) this.serverDirty = true;
         this.pushInFlight = false;
         this.unacked = null;
         this.drainQueued();
