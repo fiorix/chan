@@ -680,18 +680,33 @@ mod tests {
 
     #[test]
     fn the_wait_for_a_released_workspace_gives_up_on_its_lock_at_its_bound() {
-        let (_dir, lock_dir, _held) = a_held_lock();
+        let (_dir, lock_dir, held) = a_held_lock();
         let bound = Duration::from_millis(100);
+        // A wait that has no bound never returns, so it runs on a thread of
+        // its own and the pin gives it this long past its bound.
+        let margin = Duration::from_secs(5);
+        let (ended, wait_ended) = std::sync::mpsc::channel();
         let started = Instant::now();
+        let waiter = std::thread::spawn(move || {
+            let still_held = held_past_release(&Weak::new(), &lock_dir, bound);
+            let _ = ended.send((started.elapsed(), still_held.is_none()));
+        });
 
-        let still_held = held_past_release(&Weak::new(), &lock_dir, bound);
+        let outcome = wait_ended.recv_timeout(bound + margin);
+        // Free the lock, so a wait that outlasted its bound can end.
+        drop(held);
+        waiter.join().unwrap();
 
-        let waited = started.elapsed();
+        let (waited, no_owner_left) = outcome.unwrap_or_else(|_| {
+            panic!(
+                "the wait for a held lock was still going {margin:?} past its bound of {bound:?}"
+            )
+        });
         assert!(
             waited >= bound,
             "the wait for a held lock ended after {waited:?}, inside its bound of {bound:?}"
         );
-        assert!(still_held.is_none());
+        assert!(no_owner_left);
     }
 
     #[test]
