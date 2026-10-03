@@ -16,15 +16,27 @@
 // stubbed, so the state the close reads is the one a load leaves behind. The
 // draft routes answer as a server would, which is what lets a close that
 // wrongly inspects or discards go through with it and be seen.
+//
+// A close that runs no draft flow leaves the file too: a scripted close of the
+// tab, of its pane or of every pane. Its reopen opens that draft by its path,
+// with the buffer the tab held when that buffer was the file and with a new
+// load when it was not. A draft that moved to another window was not closed,
+// so this window has nothing of it to reopen. Only a draft whose path was
+// deleted has no file left, and its reopen mints a new draft, seeded with the
+// closed buffer when that buffer was the file.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { api } from "../api/client";
+import { api, sessionWindowId } from "../api/client";
 import { ApiError } from "../api/errors";
+import { confirmState, resolveConfirm } from "./confirm.svelte";
 import * as notifications from "./notify.svelte";
+import { fileOps, onWatchEvent } from "./store.svelte";
 import {
   activePane,
+  canReopenClosedTab,
   clearRecentlyClosedTabsForTest,
+  closeFileTabAfterMove,
   closeTab,
   draftCloseState,
   layout,
@@ -339,5 +351,201 @@ describe("a draft whose buffer is its file, or holds typing, closes as before", 
 
     expect(routes.discard, "a pristine seed that loaded is discarded").toHaveBeenCalledWith(DRAFT_PATH);
     expect(liveTab(tabId)).toBeUndefined();
+  });
+});
+
+/// The draft open with `content` over `saved`, as a load that finished and
+/// the typing after it leave a tab.
+function openWhole(content = WHOLE, saved = WHOLE): string {
+  resetLayout([fileTab({ id: "draft-whole", path: DRAFT_PATH, content, saved, savedMtime: 10 })], {
+    id: PANE_ID,
+  });
+  return "draft-whole";
+}
+
+/// Run a `cs pane` operation as the window does: the command the server
+/// relays, answered through the window's reply.
+async function paneExec(op: Record<string, unknown>): Promise<{ ok: boolean; summary: string }> {
+  const reply = vi.spyOn(api, "windowReply").mockResolvedValue(undefined);
+  onWatchEvent({
+    type: "window_command",
+    window_id: sessionWindowId(),
+    command: "pane_exec",
+    request_id: "pane-exec",
+    op,
+  });
+  await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+  const { ok, summary } = reply.mock.calls[0]![0].payload as { ok: boolean; summary: string };
+  return { ok, summary };
+}
+
+/// Delete the draft's directory as the Files tree does, behind its confirm.
+/// The tree refresh after it fails, which closes the tabs all the same.
+async function deleteDraftDirectory(): Promise<void> {
+  vi.spyOn(api, "remove").mockResolvedValue(undefined);
+  vi.spyOn(api, "list").mockRejectedValue(new Error("listing down"));
+  vi.spyOn(api, "workspace").mockRejectedValue(new Error("workspace down"));
+  const removed = fileOps.remove(".Drafts/untitled-9", true);
+  await vi.waitFor(() => expect(confirmState.open).toBe(true));
+  resolveConfirm(true);
+  expect(await removed).toBe(true);
+  expect(openDraftPaths(), "the delete closes the draft's tab").toEqual([]);
+}
+
+function openDraftPaths(): string[] {
+  const paths: string[] = [];
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of [...node.tabs, ...(node.bTabs ?? [])] as Tab[]) {
+      if (t.kind === "file") paths.push(t.path);
+    }
+  }
+  return paths;
+}
+
+const NEW_DRAFT_PATH = ".Drafts/untitled-10/draft.md";
+
+/// The routes a reopen that mints goes through, answered: the new draft is
+/// created, takes a write, and loads as `content`.
+function mintRoutes(content: string) {
+  const createDraft = vi
+    .spyOn(api, "createDraft")
+    .mockResolvedValue({ path: NEW_DRAFT_PATH, name: "untitled-10" });
+  const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 12, mtime_ns: "12" });
+  vi.spyOn(api, "readStream").mockResolvedValue({ ...meta(), path: NEW_DRAFT_PATH, content });
+  return { createDraft, write };
+}
+
+describe("the reopen of a draft whose close ran no draft flow opens that draft", () => {
+  test.each([
+    { route: "its tab", op: (tabId: string) => ({ kind: "close_tab", pane_id: PANE_ID, tab_id: tabId }) },
+    { route: "its pane", op: () => ({ kind: "close_pane", pane_id: PANE_ID }) },
+    { route: "every pane", op: () => ({ kind: "close_all" }) },
+  ])("after a scripted close of $route, with the buffer it held and no read", async ({ op }) => {
+    const routes = draftRoutes();
+    const read = vi.spyOn(api, "readStream").mockResolvedValue({ ...meta(), content: "read again\n" });
+    const tabId = openWhole();
+    expect((await paneExec(op(tabId))).ok, "the scripted close closes it").toBe(true);
+    expect(openDraftPaths()).toEqual([]);
+
+    expect(reopenClosedTab()).toBe(true);
+
+    expect({
+      minted: routes.createDraft.mock.calls.length,
+      open: openDraftPaths(),
+      content: liveTab(tabId)?.content,
+      reads: read.mock.calls.length,
+      written: routes.write.mock.calls.length,
+      discarded: routes.discard.mock.calls.length,
+    }).toEqual({ minted: 0, open: [DRAFT_PATH], content: WHOLE, reads: 0, written: 0, discarded: 0 });
+  });
+
+  test("after a forced scripted close, with its unsaved text", async () => {
+    const routes = draftRoutes();
+    vi.spyOn(api, "readStream").mockResolvedValue({ ...meta(), content: "read again\n" });
+    const tabId = openWhole(WHOLE + "typed\n");
+    const closed = await paneExec({ kind: "close_tab", pane_id: PANE_ID, tab_id: tabId, force: true });
+    expect(closed.ok, "the forced close closes an unsaved draft").toBe(true);
+
+    expect(reopenClosedTab()).toBe(true);
+
+    const reopened = liveTab(tabId);
+    expect({
+      minted: routes.createDraft.mock.calls.length,
+      open: openDraftPaths(),
+      content: reopened?.content,
+      saved: reopened?.saved,
+      written: routes.write.mock.calls.length,
+    }).toEqual({ minted: 0, open: [DRAFT_PATH], content: WHOLE + "typed\n", saved: WHOLE, written: 0 });
+  });
+
+  test("after a read that failed with some bytes, it loads the draft again and seeds no new one", async () => {
+    const routes = draftRoutes();
+    const tabId = await openFailed("# Draft\n\nwor");
+    expect((await paneExec({ kind: "close_tab", pane_id: PANE_ID, tab_id: tabId })).ok).toBe(true);
+
+    const again = parkedRead();
+    expect(reopenClosedTab()).toBe(true);
+
+    try {
+      expect({
+        minted: routes.createDraft.mock.calls.length,
+        open: openDraftPaths(),
+        loading: liveTab(tabId)?.loading,
+        error: liveTab(tabId)?.error,
+      }).toEqual({ minted: 0, open: [DRAFT_PATH], loading: true, error: null });
+    } finally {
+      again.release();
+    }
+    await vi.waitFor(() => expect(liveTab(tabId)?.loading).toBe(false));
+    expect(liveTab(tabId)?.content).toBe(WHOLE);
+    expect(routes.write, "and nothing is written").not.toHaveBeenCalled();
+  });
+});
+
+describe("a draft moved to another window", () => {
+  test("is not this window's to reopen", async () => {
+    const routes = draftRoutes();
+    const tabId = openWhole();
+
+    await closeFileTabAfterMove(PANE_ID, tabId);
+    expect(openDraftPaths(), "the move takes the tab out of this window").toEqual([]);
+
+    expect({
+      canReopen: canReopenClosedTab(),
+      reopened: reopenClosedTab(),
+      minted: routes.createDraft.mock.calls.length,
+      open: openDraftPaths(),
+    }).toEqual({ canReopen: false, reopened: false, minted: 0, open: [] });
+  });
+});
+
+describe("the reopen of a draft whose path was deleted mints a new draft", () => {
+  test("seeded with the closed buffer when that buffer was the file", async () => {
+    openWhole();
+    await deleteDraftDirectory();
+    const { createDraft, write } = mintRoutes(WHOLE);
+
+    expect(reopenClosedTab()).toBe(true);
+    await vi.waitFor(() => expect(openDraftPaths()).toEqual([NEW_DRAFT_PATH]));
+
+    expect({ minted: createDraft.mock.calls.length, written: write.mock.calls }).toEqual({
+      minted: 1,
+      written: [[NEW_DRAFT_PATH, WHOLE]],
+    });
+  });
+
+  test("and writes none of the bytes of a read that had failed", async () => {
+    await openFailed("# Draft\n\nwor");
+    await deleteDraftDirectory();
+    const { createDraft, write } = mintRoutes(DRAFT_SEED);
+
+    expect(reopenClosedTab()).toBe(true);
+    await vi.waitFor(() => expect(openDraftPaths()).toEqual([NEW_DRAFT_PATH]));
+
+    expect({ minted: createDraft.mock.calls.length, written: write.mock.calls }).toEqual({
+      minted: 1,
+      written: [],
+    });
+  });
+
+  test("nor the bytes of a load that was running", async () => {
+    const read = parkedRead();
+    resetLayout([], { id: PANE_ID });
+    const opened = openInPane(PANE_ID, DRAFT_PATH);
+    const tabId = activePane().tabs[0]!.id;
+    await vi.waitFor(() => expect(liveTab(tabId)?.loadProgress?.totalBytes).toBe(WHOLE.length));
+    await deleteDraftDirectory();
+    read.release();
+    await opened;
+    const { createDraft, write } = mintRoutes(DRAFT_SEED);
+
+    expect(reopenClosedTab()).toBe(true);
+    await vi.waitFor(() => expect(openDraftPaths()).toEqual([NEW_DRAFT_PATH]));
+
+    expect({ minted: createDraft.mock.calls.length, written: write.mock.calls }).toEqual({
+      minted: 1,
+      written: [],
+    });
   });
 });

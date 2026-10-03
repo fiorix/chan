@@ -591,15 +591,24 @@ describe("tab close confirmation", () => {
     expect(activePane().activeTabId).toBe(reopened.id);
   });
 
-  test("reopening a closed draft mints a fresh draft, not the deleted path", async () => {
-    // A closed draft's backing file is always gone after close (discarded,
-    // promoted, or missing), so reopen must not re-add the dead path.
+  test("reopening a discarded draft mints a fresh draft, not the deleted path", async () => {
+    // A draft its close discarded has no file left at its path, so the
+    // reopen must not re-add the dead path.
     const tab = fileTab({
       path: ".Drafts/untitled-1/draft.md",
       content: "# my recovered note\n",
       saved: "# my recovered note\n",
     });
     const pane = resetLayout([tab]);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path: ".Drafts/untitled-1/draft.md",
+      name: "untitled-1",
+      file_count: 1,
+      dir_count: 0,
+      total_size: 20,
+      has_attachments: false,
+    });
+    vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
     const createDraft = vi.spyOn(api, "createDraft").mockResolvedValue({
       path: ".Drafts/untitled-2/draft.md",
       name: "untitled-2",
@@ -614,7 +623,10 @@ describe("tab close confirmation", () => {
       writable: true,
     });
 
-    await closeTab(pane.id, tab.id, { force: true });
+    const close = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    resolveDraftClose("discard");
+    await close;
     expect(canReopenClosedTab()).toBe(true);
 
     expect(reopenClosedTab()).toBe(true);

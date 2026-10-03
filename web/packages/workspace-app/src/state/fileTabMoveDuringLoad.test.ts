@@ -380,10 +380,11 @@ describe("a load whose tab is closed leaves nothing behind", () => {
     expect(activePane().tabs).toHaveLength(0);
   });
 
-  test("a draft closed during its load reopens without its partial bytes", async () => {
-    // A closed draft reopens as a fresh draft seeded with the closed buffer,
-    // and a buffer whose load never finished holds only the bytes that had
-    // arrived: carrying them would write a partial file as the new draft.
+  test("a draft closed with force during its load reopens as that draft, without its partial bytes", async () => {
+    // A forced close runs no draft flow, so the draft's file is where it was
+    // and the reopen opens it. A buffer whose load never finished holds only
+    // the bytes that had arrived: the reopen reads the file again, and
+    // neither mints a draft nor writes those bytes anywhere.
     const { release } = pausedRead();
     const pane = resetLayout();
     const opened = openInPane(pane.id, DRAFT_PATH);
@@ -395,10 +396,17 @@ describe("a load whose tab is closed leaves nothing behind", () => {
 
     const created = vi.spyOn(api, "createDraft").mockResolvedValue({ path: ".Drafts/fresh/draft.md", name: "fresh" });
     const write = vi.spyOn(api, "write").mockResolvedValue({} as Awaited<ReturnType<typeof api.write>>);
+    const again = pausedRead("after-first-chunk", ["# re", "loaded"]);
     expect(reopenClosedTab()).toBe(true);
-    await vi.waitFor(() => expect(created).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
+    expect(created, "the reopen mints no draft").not.toHaveBeenCalled();
+    expect({ path: liveTab(tabId).path, loading: liveTab(tabId).loading }).toEqual({
+      path: DRAFT_PATH,
+      loading: true,
+    });
+    again.release();
+    await vi.waitFor(() => expect(liveTab(tabId).loading).toBe(false));
+    expect(liveTab(tabId).content).toBe("# reloaded");
     expect(write).not.toHaveBeenCalled();
   });
 
