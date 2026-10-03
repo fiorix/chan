@@ -370,14 +370,28 @@ async function prepareVisibleImages(
         if (element.hasAttribute(LIFTED_ATTR)) return null;
         const img = element;
         const src = img.getAttribute("src") ?? "";
-        if (!src || src.startsWith("#")) return null;
         const name = sourceNames.get(img) ?? resourceName(src);
         if (!imageIsRendered(img, root)) {
           return () => {
             sourceNames.set(img, name);
+            // The stand-in also replaces resource offers that would outlive
+            // the hidden image's src and reach the page audit.
+            img.removeAttribute("srcset");
+            if (img.parentElement?.tagName === "PICTURE") {
+              for (const source of Array.from(img.parentElement.children)) {
+                if (source.tagName === "SOURCE") source.remove();
+              }
+            }
+            for (let at = img.style.length - 1; at >= 0; at--) {
+              const property = img.style.item(at);
+              if (externalUrlTokens(img.style.getPropertyValue(property)).length) {
+                img.style.removeProperty(property);
+              }
+            }
             img.setAttribute("src", standInSrc(1, 1));
           };
         }
+        if (!src || src.startsWith("#")) return null;
         const data = src.startsWith("data:") ? src :
           await fetchImageAsDataUrl(src, timeoutMs, imageStop);
         if (!data) throw new SnapshotError(`image ${name} could not be fetched`);
