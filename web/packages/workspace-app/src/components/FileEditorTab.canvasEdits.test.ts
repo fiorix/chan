@@ -1877,4 +1877,22 @@ describe("a live drawing", () => {
       socket.pushes().map((push) => (push.elements as Array<Record<string, unknown>>).map((el) => [el.id, el.x, el.status])),
     ).toEqual([[["image", 40, "error"]], [["image", 80, "error"]]]);
   });
+
+  test("an image the library marks before the socket's snapshot, inside the debounce, is not pushed at the snapshot", async () => {
+    const { tab, board, socket } = await openingPicture();
+    vi.useFakeTimers();
+    board.failImageDecode("picture");
+    // The session pushes what the board holds as soon as it has adopted the
+    // snapshot, before the board's flush has run.
+    socket.frame(pictureSnapshot(tab, [IMAGE]));
+    const atSnapshot = idsPushed(socket);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect({ shown: shownMarks(board), atSnapshot, pushed: idsPushed(socket), dirty: isDirty(tab) }).toEqual({
+      shown: [["image", "error", 2]],
+      atSnapshot: [],
+      pushed: [],
+      dirty: false,
+    });
+  });
 });
