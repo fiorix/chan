@@ -207,6 +207,52 @@ fn perform_metadata_import(
     rescan: bool,
     force_scm: bool,
 ) -> Result<MetadataImportReport, MetadataImportError> {
+    perform_metadata_import_with(
+        state,
+        archive_bytes,
+        MetadataImportOptions { rescan, force_scm },
+        &LiveImportWorkspaceOps,
+    )
+}
+
+/// The two calls an import makes to chan-workspace once it has let its
+/// workspace go, so a test can stand in for either.
+trait ImportWorkspaceOps {
+    fn import_archive(
+        &self,
+        state: &AppState,
+        archive: &Path,
+        options: MetadataImportOptions,
+    ) -> chan_workspace::Result<MetadataImportReport>;
+
+    fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>>;
+}
+
+struct LiveImportWorkspaceOps;
+
+impl ImportWorkspaceOps for LiveImportWorkspaceOps {
+    fn import_archive(
+        &self,
+        state: &AppState,
+        archive: &Path,
+        options: MetadataImportOptions,
+    ) -> chan_workspace::Result<MetadataImportReport> {
+        state
+            .library
+            .import_metadata_archive(&state.workspace_root, archive, options)
+    }
+
+    fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>> {
+        state.library.open_workspace(&state.workspace_root)
+    }
+}
+
+fn perform_metadata_import_with(
+    state: &AppState,
+    archive_bytes: Vec<u8>,
+    options: MetadataImportOptions,
+    ops: &impl ImportWorkspaceOps,
+) -> Result<MetadataImportReport, MetadataImportError> {
     let archive = tempfile::Builder::new()
         .prefix("chan-metadata-import-")
         .suffix(".tar.zst")
@@ -251,15 +297,9 @@ fn perform_metadata_import(
         return Err(MetadataImportError::Busy);
     }
 
-    let import_result = state.library.import_metadata_archive(
-        &state.workspace_root,
-        archive.path(),
-        MetadataImportOptions { rescan, force_scm },
-    );
-    let reopened = reopen_released(IMPORT_DRAIN_DEADLINE, || {
-        state.library.open_workspace(&state.workspace_root)
-    })
-    .map_err(MetadataImportError::Core)?;
+    let import_result = ops.import_archive(state, archive.path(), options);
+    let reopened = reopen_released(IMPORT_DRAIN_DEADLINE, || ops.open_workspace(state))
+        .map_err(MetadataImportError::Core)?;
     install_workspace_cell(
         state,
         &mut cell_guard,
