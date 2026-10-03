@@ -182,8 +182,9 @@ export type TerminalPreferences = {
   /// Whether xterm.js terminals visually obscure values whose assignment
   /// names end in a configured secret suffix. When absent, control terminals
   /// seed masking on and other windows seed it off. Per-tab toggles do not
-  /// persist this field.
-  secret_masking?: boolean;
+  /// persist this field. A read carries `true`, `false` or no key; `null`
+  /// is a write's alone, and clears the stored choice.
+  secret_masking?: boolean | null;
   /// Literal, case-insensitive assignment-name suffixes for visual masking.
   /// The server validates `[A-Za-z0-9_]+` entries and caps the list at 100.
   secret_mask_suffixes?: string[];
