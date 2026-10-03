@@ -150,6 +150,22 @@ describe("session_changed frame filter", () => {
 });
 
 describe("session sync apply pipeline", () => {
+  test("a body that is a bare layout tree and not the session's payload applies nothing", async () => {
+    // The app writes its layout under the payload's `layout` member, and the
+    // server stores the body as it came.
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue({ k: "l", t: [{ p: "notes/a.md", m: "wysiwyg" }], wc: "g" });
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect({ fetched: getSession.mock.calls.length, focusColor: layout.focusColor }).toEqual({
+      fetched: 1,
+      focusColor: "blue",
+    });
+  });
+
   test("queues only the newest Pane Mode conflict without save-back", async () => {
     enterPaneMode();
     const first = {
