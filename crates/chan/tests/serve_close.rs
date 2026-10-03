@@ -328,3 +328,113 @@ fn forget_forgets_an_unserved_workspace() {
         String::from_utf8_lossy(&ls.stdout),
     );
 }
+
+/// The words a host answers a removal with while an earlier call of its own
+/// on the same root has not let go.
+const STILL_RELEASING: &str = "workspace is still releasing; retry";
+
+/// Stand in for a host that holds `ws`: take its writer lock, which records
+/// this process as the holder, and serve one request on a control socket named
+/// for this pid. The host answers a removal `removing <path>: <words>` after
+/// its close has run, so the lock is released before the answer is written.
+/// Returns the request it was sent, or `None` when none arrived in time.
+fn holder_answering_a_removal(
+    sandbox: &Sandbox,
+    ws: &Path,
+    words: &'static str,
+) -> std::thread::JoinHandle<Option<chan_shell::ControlRequest>> {
+    use std::io::Write;
+
+    let lock_dir = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .expect("open the sandbox registry")
+        .workspace_paths_for(ws)
+        .expect("the workspace is registered")
+        .lock;
+    let lock = chan_workspace::lock::WorkspaceLock::acquire(&lock_dir, ws)
+        .expect("hold the workspace's writer lock");
+    let socket = sandbox
+        .sockdir
+        .path()
+        .join(format!("chan-control-{}-holder.sock", std::process::id()));
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind the holder socket");
+    listener
+        .set_nonblocking(true)
+        .expect("poll the holder socket");
+    std::thread::spawn(move || {
+        let mut accepted = None;
+        poll(EXIT_BUDGET, || {
+            accepted = listener.accept().ok();
+            accepted.is_some()
+        });
+        let (mut stream, _) = accepted?;
+        stream.set_nonblocking(false).ok()?;
+        stream.set_read_timeout(Some(EXIT_BUDGET)).ok()?;
+        let mut line = String::new();
+        std::io::BufReader::new(stream.try_clone().ok()?)
+            .read_line(&mut line)
+            .ok()?;
+        let request: chan_shell::ControlRequest = serde_json::from_str(&line).ok()?;
+        let chan_shell::ControlRequest::Close { path, .. } = &request else {
+            return Some(request);
+        };
+        drop(lock);
+        let answer = chan_shell::ControlResponse::Error {
+            message: format!("removing {}: {words}", path.display()),
+        };
+        let mut reply = serde_json::to_vec(&answer).ok()?;
+        reply.push(b'\n');
+        stream.write_all(&reply).ok()?;
+        Some(request)
+    })
+}
+
+/// `chan workspace forget` whose host answers that the workspace is still
+/// releasing: the host has forgotten nothing, so the command prints the
+/// host's words, exits 75 (retry) and leaves the registry as the host holds
+/// it.
+#[test]
+fn forget_answered_still_releasing_keeps_the_workspace_registered() {
+    let sandbox = Sandbox::new();
+    let ws = sandbox.workspace();
+    let add = sandbox
+        .command()
+        .args(["workspace", "add"])
+        .arg(&ws)
+        .output()
+        .expect("run chan workspace add");
+    assert!(
+        add.status.success(),
+        "workspace add failed: {}",
+        String::from_utf8_lossy(&add.stderr),
+    );
+
+    let holder = holder_answering_a_removal(&sandbox, &ws, STILL_RELEASING);
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&ws)
+        .output()
+        .expect("run chan workspace forget");
+    let request = holder.join().expect("the holder thread");
+    let Some(chan_shell::ControlRequest::Close { path, remove: true }) = request else {
+        panic!("the holder was not asked to remove the workspace: {request:?}");
+    };
+    let answer = format!("removing {}: {STILL_RELEASING}", path.display());
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let still_registered =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+            .expect("reopen the sandbox registry")
+            .workspace_paths_for(&ws)
+            .is_some();
+    assert_eq!(
+        (
+            stderr.contains(&answer),
+            out.status.code(),
+            still_registered,
+        ),
+        (true, Some(75), true),
+        "(printed the host's words, exit code, still registered)\nstdout={stdout}\nstderr={stderr}"
+    );
+}
