@@ -6,7 +6,9 @@ import {
   beginPromptRecall,
   failPendingPrompt,
   resolvePendingPrompt,
+  resolvePromptCancelled,
   setTerminalQueueDepth,
+  type TerminalTab,
 } from "./tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 
@@ -115,5 +117,72 @@ describe("pending prompt state machine", () => {
     failPendingPrompt(tab);
     beginPendingPrompt(tab, "new");
     expect(tab.pendingPrompt).toEqual({ id: "new", phase: "sent" });
+  });
+
+  // The bubble consumes a terminal phase only once its draft is loaded, so
+  // one can stand on the tab when the cancellation's answer arrives.
+  const TERMINAL: [what: string, phase: string, settle: (tab: TerminalTab) => void][] = [
+    [
+      "a refusal of a recalled prompt",
+      "rejected",
+      (tab) => {
+        beginPromptRecall(tab, "msg-1", "keep this refused prompt");
+        resolvePendingPrompt(tab, "msg-1", "rejected", 100);
+      },
+    ],
+    [
+      "a failed recall",
+      "failed",
+      (tab) => {
+        beginPromptRecall(tab, "msg-1", "keep this prompt");
+        failPendingPrompt(tab);
+      },
+    ],
+    [
+      "a delivery",
+      "delivered",
+      (tab) => {
+        resolvePendingPrompt(tab, "msg-1", "queued", 1);
+        resolvePendingPrompt(tab, "msg-1", "delivered", 0);
+      },
+    ],
+  ];
+
+  test.each(TERMINAL)("a cancellation's answer leaves %s the bubble has not consumed", (_what, phase, settle) => {
+    const tab = terminalTab();
+    beginPendingPrompt(tab, "msg-1");
+    settle(tab);
+    const settled = { ...tab.pendingPrompt };
+    resolvePromptCancelled(tab, "msg-1", false);
+    const afterNotRemoved = tab.pendingPrompt?.phase;
+    resolvePromptCancelled(tab, "msg-1", true);
+
+    expect({ afterNotRemoved, afterRemoved: tab.pendingPrompt?.phase }).toEqual({
+      afterNotRemoved: phase,
+      afterRemoved: phase,
+    });
+    expect(tab.pendingPrompt).toEqual(settled);
+  });
+
+  const IN_FLIGHT: [phase: string, reach: (tab: TerminalTab) => void][] = [
+    ["sent", () => {}],
+    ["queued", (tab) => resolvePendingPrompt(tab, "msg-1", "queued", 1)],
+    ["recalling", (tab) => beginPromptRecall(tab, "msg-1", "take this back")],
+  ];
+
+  test.each(IN_FLIGHT)("a cancellation's answer settles a prompt still %s", (phase, reach) => {
+    const answered = [true, false].map((removed) => {
+      const tab = terminalTab();
+      beginPendingPrompt(tab, "msg-1");
+      reach(tab);
+      const before = tab.pendingPrompt?.phase;
+      resolvePromptCancelled(tab, "msg-1", removed);
+      return { before, after: tab.pendingPrompt?.phase };
+    });
+
+    expect(answered).toEqual([
+      { before: phase, after: "recalled" },
+      { before: phase, after: "drained" },
+    ]);
   });
 });

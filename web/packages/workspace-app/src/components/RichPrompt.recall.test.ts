@@ -20,7 +20,7 @@ vi.mock("../api/client", async (importOriginal) => {
 
 import TerminalTab from "./TerminalTab.svelte";
 import { api } from "../api/client";
-import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import { hideRichPromptForTab, richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { installEditorDom, press } from "../__tests__/wysiwyg";
 import { attach, installTerminalDom, mountTerminal, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TerminalSocket } from "../__tests__/terminalTab";
 
@@ -128,6 +128,27 @@ describe("recall before prompt acknowledgement", () => {
     expect(target.querySelector(".rp-text")?.textContent).toBe("already sent");
     expect(tab.pendingPrompt).toBeUndefined();
     expect(api.write).toHaveBeenLastCalledWith(".Drafts/recall/draft.md", "");
+  });
+
+  test("a refusal that lands while the composer is hidden keeps its text through the cancellation reply", async () => {
+    const { tab, socket, id, target } = await recall("unacknowledged");
+    hideRichPromptForTab(tab.id);
+    await flush();
+    expect(target.querySelector(".cm-content")).toBeNull();
+    // Nothing consumes the refusal: the composer is gone when it arrives.
+    await receive(socket, { type: "prompt-ack", id, queued: false, depth: 100 });
+    await receive(socket, { type: "prompt-cancelled", id, removed: false });
+    await flush();
+    showRichPromptForTab(tab.id);
+    await flush();
+    const view = EditorView.findFromDOM(target.querySelector<HTMLElement>(".cm-content")!)!;
+    await flush();
+
+    expect({ text: view.state.doc.toString(), note: target.querySelector(".rp-text")?.textContent }).toEqual({
+      text: TEXT,
+      note: "queue full, try again",
+    });
+    expect({ pending: tab.pendingPrompt, locked: view.state.readOnly }).toEqual({ pending: undefined, locked: false });
   });
 });
 
