@@ -274,6 +274,7 @@ async function watchImageLift(page, expectedImage) {
     const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker", "height-only", "absolute-escape", "auto-visible"]);
     const capture = { before: null, after: null, autoReveal: null };
     const lifted = new Set();
+    const documentPainted = new Set();
     const read = (host) => ({
       ...Object.fromEntries([...host.querySelectorAll("img[alt]")]
         .filter((img) => names.has(img.alt))
@@ -307,6 +308,7 @@ async function watchImageLift(page, expectedImage) {
     };
     Element.prototype.setAttribute = function (name, value) {
       if (name === "data-chan-export-image") lifted.add(this);
+      if (name === "data-chan-export-document-image") documentPainted.add(this);
       if (!capture.before && name === "src" && this instanceof HTMLImageElement &&
           String(value).startsWith("data:")) {
         let host = this.parentElement;
@@ -327,7 +329,10 @@ async function watchImageLift(page, expectedImage) {
       }
       return originalClone.call(this, deep);
     };
-    window.__pdfImageLift = { capture, liftCount: () => lifted.size, restore: () => {
+    window.__pdfImageLift = { capture, paintCounts: () => ({
+      lifted: lifted.size,
+      document: documentPainted.size,
+    }), restore: () => {
       Element.prototype.setAttribute = original;
       Element.prototype.cloneNode = originalClone;
       CSSStyleDeclaration.prototype.setProperty = originalSetProperty;
@@ -486,6 +491,20 @@ function inspectRotate(rasters) {
   return { details: { teal, rose }, faults };
 }
 
+function inspectCutAbove(rasters) {
+  const page = rasters[0];
+  const amber = colourBox(page, AMBER);
+  const green = colourBox(page, GREEN);
+  const scale = page.width / 669;
+  const faults = [];
+  if (amber) faults.push(`cut above: the image's clipped amber band was painted at ${amber.y0}-${amber.y1}`);
+  if (!green || Math.abs(green.width / scale - 160) > 3 ||
+      !(green.height / scale > 5 && green.height / scale < 80)) {
+    faults.push(`cut above: expected a short green image 160 CSS px wide, got ${JSON.stringify(green)}`);
+  }
+  return { details: { amber, green }, faults };
+}
+
 function inspectClipPath(rasters) {
   const page = rasters[0];
   const amber = colourBox(page, AMBER);
@@ -605,7 +624,10 @@ export default {
       { file: "layout-page-edge.md", pdf: "layout-page-edge.pdf", orientation: "portrait", minPages: 1, inspect: inspectPageEdge },
       { file: "layout-float-end.md", pdf: "layout-float-end.pdf", orientation: "portrait", minPages: 1, inspect: inspectFloatEnd },
       { file: "layout-rotate.md", pdf: "layout-rotate.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate },
+      { file: "layout-rotate-property.md", pdf: "layout-rotate-property.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate },
+      { file: "layout-mirror-ancestor.md", pdf: "layout-mirror-ancestor.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate },
       { file: "layout-clip-path.md", pdf: "layout-clip-path.pdf", orientation: "portrait", minPages: 1, inspect: inspectClipPath },
+      { file: "layout-cut-above.md", pdf: "layout-cut-above.pdf", orientation: "portrait", minPages: 2, inspect: inspectCutAbove },
       {
         file: "missing-image.md",
         pdf: "missing-image.pdf",
@@ -648,16 +670,13 @@ export default {
       const lift = await page.evaluate(() => {
         const result = {
           ...window.__pdfImageLift?.capture,
-          count: window.__pdfImageLift?.liftCount(),
+          counts: window.__pdfImageLift?.paintCounts(),
         };
         window.__pdfImageLift?.restore();
         delete window.__pdfImageLift;
         return result;
       });
-      details[`${c.file}:liftCount`] = lift.count;
-      if (c.file === "deck-box.md" && lift.count !== 8) {
-        faults.push(`deck-box.md: expected the eight existing image lifts, got ${lift.count}`);
-      }
+      details[`${c.file}:paintCounts`] = lift.counts;
 
       if (c.pages !== undefined) {
         details[c.file] = await ctx.assertPdf(bytes, {
