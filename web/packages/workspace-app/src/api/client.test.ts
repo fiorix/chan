@@ -7,14 +7,18 @@ import {
   dragScopeMimeToken,
   filesMutationSuffix,
   fileUrl,
+  openWatchSocket,
   sessionPath,
   sessionWindowId,
   windowDragScope,
   windowLibraryId,
   withTokenQuery,
 } from "./client";
+import { setSocketFactory, WS_RECONNECT_BACKOFF_MIN_MS } from "./transport";
 
 afterEach(() => {
+  setSocketFactory(null);
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   document.head.querySelector('meta[name="chan-files"]')?.remove();
@@ -135,6 +139,95 @@ describe("clientNonce", () => {
     const url = new URLSearchParams(sessionPath().split("?")[1]);
     expect(url.get("client")).toBe(clientNonce());
     expect(url.get("w")).toBe("w-1");
+  });
+});
+
+describe("the watch socket's window id and holder tag", () => {
+  /// A socket that records the URL it dialed and can be dropped by its far end.
+  class DialedSocket {
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onmessage: ((m: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(readonly url: string) {}
+    send(): void {}
+    close(): void {
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+
+  function recordDials(install = setSocketFactory): DialedSocket[] {
+    const dialed: DialedSocket[] = [];
+    install((url) => {
+      const socket = new DialedSocket(url);
+      dialed.push(socket);
+      return socket as unknown as WebSocket;
+    });
+    return dialed;
+  }
+
+  function query(socket: DialedSocket): URLSearchParams {
+    const url = new URL(socket.url);
+    expect(url.pathname).toBe("/ws");
+    return url.searchParams;
+  }
+
+  test("dials with the id and the tag of the page's URL, and redials with both", () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", "/?t=token&w=w-1&h=tag_1");
+    const dialed = recordDials();
+
+    const watch = openWatchSocket(() => {});
+
+    expect(dialed).toHaveLength(1);
+    expect(query(dialed[0]).getAll("w")).toEqual(["w-1"]);
+    expect(query(dialed[0]).getAll("h")).toEqual(["tag_1"]);
+
+    dialed[0].close();
+    vi.advanceTimersByTime(WS_RECONNECT_BACKOFF_MIN_MS);
+
+    expect(dialed).toHaveLength(2);
+    expect(query(dialed[1]).getAll("w")).toEqual(["w-1"]);
+    expect(query(dialed[1]).getAll("h")).toEqual(["tag_1"]);
+    watch.close();
+  });
+
+  test.each([
+    ["no h", "/?t=token&w=w-1"],
+    ["an h the server would not count", "/?t=token&w=w-1&h=not.a.tag"],
+    ["two of them", "/?t=token&w=w-1&h=mine&h=theirs"],
+  ])("names no holder at a URL with %s", (_what, url) => {
+    window.history.replaceState(null, "", url);
+    const dialed = recordDials();
+
+    const watch = openWatchSocket(() => {});
+
+    expect(query(dialed[0]).getAll("w")).toEqual(["w-1"]);
+    expect(query(dialed[0]).has("h")).toBe(false);
+    watch.close();
+  });
+
+  test("a reload of the page dials with the tag again", async () => {
+    // What the launch redirect hands a window: its token, its id and the tag.
+    window.history.replaceState(null, "", "/?t=token&w=w-1&h=tag_1");
+    for (const load of ["the first load", "the reload"]) {
+      vi.resetModules();
+      const transport = await import("./transport");
+      const client = await import("./client");
+      const dialed = recordDials(transport.setSocketFactory);
+
+      const watch = client.openWatchSocket(() => {});
+
+      // The page takes its token out of the URL and leaves the tag there, so
+      // the URL a reload asks for still names it.
+      expect(window.location.search, load).toBe("?w=w-1&h=tag_1");
+      expect(query(dialed[0]).get("t"), load).toBe("token");
+      expect(query(dialed[0]).getAll("h"), load).toEqual(["tag_1"]);
+      watch.close();
+      transport.setSocketFactory(null);
+    }
   });
 });
 
