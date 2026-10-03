@@ -246,32 +246,42 @@ fn perform_metadata_import(
     let released = Arc::downgrade(&workspace_strong);
     let lock_dir = workspace_strong.paths().lock.clone();
     drop(workspace_strong);
-    if let Some(workspace) =
-        held_past_release(&released, &lock_dir, Instant::now() + IMPORT_DRAIN_DEADLINE)
-    {
+    if let Some(workspace) = held_past_release(&released, &lock_dir, IMPORT_DRAIN_DEADLINE) {
         install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
         return Err(MetadataImportError::Busy);
     }
 
-    let import_result = state
-        .library
-        .import_metadata_archive(
-            &state.workspace_root,
-            archive.path(),
-            MetadataImportOptions { rescan, force_scm },
-        )
-        .map_err(MetadataImportError::Core);
-    let restore_result = state
-        .library
-        .open_workspace(&state.workspace_root)
-        .map_err(MetadataImportError::Core)
-        .map(|workspace| {
-            install_workspace_cell(state, &mut cell_guard, workspace, search_aggression)
-        });
+    let import_result = state.library.import_metadata_archive(
+        &state.workspace_root,
+        archive.path(),
+        MetadataImportOptions { rescan, force_scm },
+    );
+    let reopened = reopen_released(IMPORT_DRAIN_DEADLINE, || {
+        state.library.open_workspace(&state.workspace_root)
+    })
+    .map_err(MetadataImportError::Core)?;
+    install_workspace_cell(
+        state,
+        &mut cell_guard,
+        reopened.workspace,
+        search_aggression,
+    );
 
-    restore_result?;
-    import_result
+    match (import_result, reopened.recovered_from) {
+        // chan-workspace refused the import over a lock that was still held
+        // and is free again by the reopen: nothing was imported, and a retry
+        // finds the lock free.
+        (Err(error), _) if lock_still_held(&error) => Err(MetadataImportError::Busy),
+        (Err(error), _) | (Ok(_), Some(error)) => Err(MetadataImportError::Core(error)),
+        (Ok(report), None) => Ok(report),
+    }
 }
+
+/// How often a route looks again for the workspace it let go.
+const RELEASE_POLL: Duration = Duration::from_millis(2);
+
+/// How often a route asks again for a workspace whose lock is still held.
+const REOPEN_POLL: Duration = Duration::from_millis(25);
 
 /// Wait, once a route has dropped its own reference, until the workspace is
 /// let go: no strong reference left and its writer lock free, the two facts
@@ -284,22 +294,94 @@ fn perform_metadata_import(
 /// chan-workspace refuses a reset or an import as a workspace still open in
 /// this process.
 ///
-/// Returns the workspace when an owner still holds it at `deadline`, for the
-/// caller to put back in its cell and answer busy. `None` means the workspace
-/// is let go, or that at the deadline only its lock was still on its way out,
-/// which the caller's own call to chan-workspace then reports.
+/// The wait has two bounds of `bound` each. The first is for that owner. The
+/// second starts when no owner is left: the workspace's drop is then under
+/// way on its last owner's thread, and it releases the lock last, after it
+/// has joined the recovery worker and closed the index.
+///
+/// Returns the workspace when an owner still holds it at the end of the first
+/// bound, for the caller to put back in its cell and answer busy. `None` means
+/// the workspace is let go, or that its lock was still held at the end of the
+/// second bound, which the caller's own call to chan-workspace then refuses.
 pub(super) fn held_past_release(
     released: &Weak<Workspace>,
     lock_dir: &Path,
-    deadline: Instant,
+    bound: Duration,
 ) -> Option<Arc<Workspace>> {
-    while released.strong_count() > 0 || !chan_workspace::lock::is_free(lock_dir) {
-        if Instant::now() >= deadline {
-            return released.upgrade();
+    let owners_deadline = Instant::now() + bound;
+    while released.strong_count() > 0 {
+        if Instant::now() >= owners_deadline {
+            // An owner that lets go between the count and this upgrade leaves
+            // nothing to put back, and its drop is under way.
+            if let Some(workspace) = released.upgrade() {
+                return Some(workspace);
+            }
+            break;
         }
-        std::thread::sleep(Duration::from_millis(2));
+        std::thread::sleep(RELEASE_POLL);
+    }
+    let lock_deadline = Instant::now() + bound;
+    while !chan_workspace::lock::is_free(lock_dir) && Instant::now() < lock_deadline {
+        std::thread::sleep(RELEASE_POLL);
     }
     None
+}
+
+/// True for chan-workspace's two refusals of a root whose writer lock is
+/// held. The drop of a workspace this process let go answers the first while
+/// the lock's record still names this process, and the second once the drop
+/// has cleared the record and not yet closed the lock.
+pub(super) fn lock_still_held(error: &chan_workspace::ChanError) -> bool {
+    matches!(
+        error,
+        chan_workspace::ChanError::WorkspaceAlreadyOpen
+            | chan_workspace::ChanError::WorkspaceLocked
+    )
+}
+
+/// A workspace reopened for a route's cell, with the first failure of a
+/// reopen that a retry recovered from.
+pub(super) struct Reopened {
+    pub(super) workspace: Arc<Workspace>,
+    pub(super) recovered_from: Option<chan_workspace::ChanError>,
+}
+
+/// Reopen the workspace a route let go, as restoration work for its cell: a
+/// cell left empty reads as a missing workspace to every later request.
+///
+/// A reopen refused because the writer lock is still held is asked again
+/// until `bound` has passed. The lock is on its way out with the drop of the
+/// workspace the route let go, so such a refusal is a wait, and it is not
+/// reported once a reopen succeeds. Any other failure is retried once and
+/// kept for the caller's answer when the retry recovers.
+pub(super) fn reopen_released(
+    bound: Duration,
+    mut open: impl FnMut() -> chan_workspace::Result<Arc<Workspace>>,
+) -> chan_workspace::Result<Reopened> {
+    let deadline = Instant::now() + bound;
+    let mut recovered_from = None;
+    loop {
+        match open() {
+            Ok(workspace) => {
+                return Ok(Reopened {
+                    workspace,
+                    recovered_from,
+                })
+            }
+            Err(error) if lock_still_held(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(REOPEN_POLL);
+            }
+            Err(error) => {
+                if recovered_from.is_some() {
+                    return Err(error);
+                }
+                recovered_from = Some(error);
+            }
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -330,8 +412,9 @@ pub(crate) fn install_test_session_close_gate(
 /// Run only after the old workspace has drained, while its cell write guard
 /// still excludes new handlers. These callers run on the blocking pool; the
 /// flush futures use the retained workspace directly and never read the cell.
-/// The sessions stay closed when the caller then answers busy because
-/// [`held_past_release`] found the workspace still held.
+/// The sessions stay closed when the caller then answers busy, whether
+/// [`held_past_release`] found the workspace still held or chan-workspace
+/// refused the operation over a lock still held.
 pub(super) fn close_workspace_sessions(
     state: &AppState,
     workspace: &Arc<Workspace>,
@@ -486,6 +569,60 @@ fn safe_filename_fragment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A writer lock held with no owner left, which is what the drop of a
+    /// workspace looks like from outside: its last reference is gone and
+    /// its lock goes last.
+    fn a_held_lock() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        chan_workspace::lock::WorkspaceLock,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let lock_dir = dir.path().join("lock");
+        let held = chan_workspace::lock::WorkspaceLock::acquire(&lock_dir, dir.path()).unwrap();
+        (dir, lock_dir, held)
+    }
+
+    #[test]
+    fn the_wait_for_a_released_workspace_ends_only_once_its_lock_is_free() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, lock_dir, held) = a_held_lock();
+        let freed = Arc::new(AtomicBool::new(false));
+        let holder = std::thread::spawn({
+            let freed = freed.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(100));
+                freed.store(true, Ordering::SeqCst);
+                drop(held);
+            }
+        });
+
+        let still_held = held_past_release(&Weak::new(), &lock_dir, Duration::from_secs(30));
+
+        assert!(
+            freed.load(Ordering::SeqCst),
+            "the wait ended while the writer lock was still held"
+        );
+        assert!(still_held.is_none());
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn the_wait_for_a_released_workspace_gives_up_on_its_lock_at_its_bound() {
+        let (_dir, lock_dir, _held) = a_held_lock();
+        let bound = Duration::from_millis(100);
+        let started = Instant::now();
+
+        let still_held = held_past_release(&Weak::new(), &lock_dir, bound);
+
+        let waited = started.elapsed();
+        assert!(
+            waited >= bound,
+            "the wait for a held lock ended after {waited:?}, inside its bound of {bound:?}"
+        );
+        assert!(still_held.is_none());
+    }
 
     #[test]
     fn safe_filename_fragment_strips_path_characters() {

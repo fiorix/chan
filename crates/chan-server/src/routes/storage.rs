@@ -23,8 +23,8 @@ use crate::routes::run_blocking;
 use crate::state::AppState;
 
 use super::metadata::{
-    close_workspace_sessions, held_past_release, install_workspace_cell,
-    workspace_search_aggression, WorkspaceCellInstallError,
+    close_workspace_sessions, held_past_release, install_workspace_cell, lock_still_held,
+    reopen_released, workspace_search_aggression, WorkspaceCellInstallError,
 };
 
 /// Body of `POST /api/storage/reset`. Two modes mirror the chan-
@@ -144,15 +144,23 @@ fn err_from_reset(e: &ResetError) -> Response {
 ///
 /// The count does not see a weak reference, which an indexer task or a
 /// chan-workspace check can upgrade after the count reads one. So once our
-/// copy is dropped we wait, within the same bound, for the workspace to be
-/// let go by whichever owner lets it go last ([`held_past_release`]), and
-/// only then ask chan-workspace for the reset.
+/// copy is dropped we wait for the workspace to be let go by whichever owner
+/// lets it go last ([`held_past_release`]): within a bound of its own for
+/// that owner, and within another, from the moment no owner is left, for the
+/// drop that owner started to release the writer lock. Only then do we ask
+/// chan-workspace for the reset.
 ///
 /// On Busy we restore the workspace we started with as the cell (with
 /// fresh watcher + indexer). This avoids reopening through chan-workspace,
 /// which would race the lingering Arc on the per-workspace flock and fail
 /// with `WorkspaceLocked`. A Busy after our copy is dropped has already
 /// closed the workspace's sessions; a Busy before it has not.
+///
+/// A workspace that no owner holds cannot be put back. When its lock is
+/// still held at the end of that wait, chan-workspace refuses the reset, the
+/// reopen waits for the lock within a bound of its own
+/// ([`reopen_released`]), and the answer is Busy over the reopened
+/// workspace.
 fn perform_reset(
     state: &AppState,
     mode: ResetMode,
@@ -237,29 +245,29 @@ fn perform_reset_with(
     let released = Arc::downgrade(&workspace_strong);
     let lock_dir = workspace_strong.paths().lock.clone();
     drop(workspace_strong);
-    if let Some(workspace) =
-        held_past_release(&released, &lock_dir, Instant::now() + RESET_DRAIN_DEADLINE)
-    {
+    if let Some(workspace) = held_past_release(&released, &lock_dir, RESET_DRAIN_DEADLINE) {
         install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
         return Err(ResetError::Busy);
     }
     // Compute the wipe and restoration independently. Even a partial wipe
     // must run through open_workspace so its lazily-created skeleton is
-    // repaired before the operation error is returned.
+    // repaired before the operation error is returned. A failed reopen is
+    // itself one of the states this route has to recover from.
     let reset_result = ops.reset_workspace(state, mode);
-    let (workspace, reopen_error) = match ops.open_workspace(state) {
-        Ok(workspace) => (workspace, None),
-        Err(error) => {
-            // A failed reopen is itself one of the states this route has to
-            // recover from. Retry once as restoration work, while preserving
-            // the first error for the response if recovery succeeds.
-            let workspace = ops.open_workspace(state).map_err(ResetError::Core)?;
-            (workspace, Some(error))
-        }
-    };
-    install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
+    let reopened = reopen_released(RESET_DRAIN_DEADLINE, || ops.open_workspace(state))
+        .map_err(ResetError::Core)?;
+    install_workspace_cell(
+        state,
+        &mut cell_guard,
+        reopened.workspace,
+        search_aggression,
+    );
 
-    match (reset_result, reopen_error) {
+    match (reset_result, reopened.recovered_from) {
+        // chan-workspace refused the reset over a lock that was still held
+        // and is free again by the reopen: nothing was reset, and a retry
+        // finds the lock free.
+        (Err(error), _) if lock_still_held(&error) => Err(ResetError::Busy),
         (Err(error), _) | (Ok(_), Some(error)) => Err(ResetError::Core(error)),
         (Ok(report), None) => Ok(report),
     }
