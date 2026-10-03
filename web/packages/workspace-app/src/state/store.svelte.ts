@@ -5509,8 +5509,10 @@ async function settleDeleted(paths: readonly string[]): Promise<void> {
         }
       }
     }
+    // The file is gone, which is what a draft's reopen has to know: it mints
+    // a new draft rather than open the deleted path.
     for (const [paneId, tabId] of toClose) {
-      await closeTab(paneId, tabId, { force: true });
+      await closeTab(paneId, tabId, { force: true, file: "gone" });
     }
   }
 }

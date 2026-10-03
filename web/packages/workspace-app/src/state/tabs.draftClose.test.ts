@@ -529,6 +529,34 @@ describe("the reopen of a draft whose path was deleted mints a new draft", () =>
     });
   });
 
+  test.each([
+    { route: "its tab", op: { kind: "close_tab", pane_id: PANE_ID, tab_id: "draft-missing" } },
+    { route: "its pane", op: { kind: "close_pane", pane_id: PANE_ID } },
+  ])("as does a draft whose file was already found missing, after a scripted close of $route", async ({ op }) => {
+    resetLayout(
+      [
+        fileTab({
+          id: "draft-missing",
+          path: DRAFT_PATH,
+          content: WHOLE,
+          saved: WHOLE,
+          fileMissing: { path: DRAFT_PATH, fragment: "words on disk" },
+        }),
+      ],
+      { id: PANE_ID },
+    );
+    expect((await paneExec(op)).ok).toBe(true);
+    const { createDraft, write } = mintRoutes(WHOLE);
+
+    expect(reopenClosedTab()).toBe(true);
+    await vi.waitFor(() => expect(openDraftPaths()).toEqual([NEW_DRAFT_PATH]));
+
+    expect({ minted: createDraft.mock.calls.length, written: write.mock.calls }).toEqual({
+      minted: 1,
+      written: [[NEW_DRAFT_PATH, WHOLE]],
+    });
+  });
+
   test("nor the bytes of a load that was running", async () => {
     const read = parkedRead();
     resetLayout([], { id: PANE_ID });
