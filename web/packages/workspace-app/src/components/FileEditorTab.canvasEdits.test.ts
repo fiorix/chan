@@ -1705,6 +1705,28 @@ describe("a live drawing", () => {
     },
   );
 
+  test("a background picked while the socket is down leaves a peer's grid on the board and in the push that offers it", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    socket.drop();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    const next = await nextSocket();
+    // A peer turned the grid on while this window was away.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { gridModeEnabled: true } }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      board: { grid: board.appState.gridModeEnabled, background: board.appState.viewBackgroundColor },
+      pushed: next.pushes().map((p) => p.appState),
+    }).toEqual({
+      board: { grid: true, background: PICKED },
+      pushed: [{ gridModeEnabled: true, viewBackgroundColor: PICKED }],
+    });
+  });
+
   test("a background on the wire at a drop with no board bound ends as it does with one", async () => {
     const { tab, board, socket } = await attachedDrawing();
     await new Promise((resolve) => setTimeout(resolve, 10));
