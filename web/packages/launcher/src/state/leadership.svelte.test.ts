@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const { hasWindowHandle } = vi.hoisted(() => ({ hasWindowHandle: vi.fn() }));
 vi.mock("./windowManager.svelte", () => ({ hasWindowHandle }));
 
-import { canActOnTenant, ownsTenantLeader, tenantLeader } from "./leadership.svelte";
+import { actingFor, canActOnTenant, ownsTenantLeader, tenantLeader } from "./leadership.svelte";
 import { library } from "./library.svelte";
 
 beforeEach(() => {
@@ -57,5 +57,15 @@ describe("canActOnTenant", () => {
     library.leaders = { "proj-1": "w-other" };
     hasWindowHandle.mockReturnValue(false);
     expect(canActOnTenant("proj-1")).toBe(false);
+  });
+});
+
+describe("actingFor", () => {
+  it("claims only the leader window this launcher holds", () => {
+    library.leaders = { owned: "w-owned", foreign: "w-foreign" };
+    hasWindowHandle.mockImplementation((id: string) => id === "w-owned");
+    expect(actingFor("owned")).toBe("w-owned");
+    expect(actingFor("foreign")).toBeUndefined();
+    expect(actingFor("leaderless")).toBeUndefined();
   });
 });
