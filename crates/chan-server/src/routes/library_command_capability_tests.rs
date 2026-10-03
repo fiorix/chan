@@ -29,6 +29,7 @@ impl DevserverFeedSource for RemoteFeed {
             token: "remote-tenant-secret".into(),
             persisted: true,
             connected: true,
+            holders: None,
             active_transfer: false,
             control: false,
             hidden: false,

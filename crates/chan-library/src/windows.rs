@@ -13,9 +13,10 @@
 //! Durable vs wire split. [`PersistedWindow`] is the durable on-disk row (id,
 //! kind, title, ordinal, workspace path). [`WindowRecord`] is what the HTTP feed
 //! serves: the durable row plus live state assembled at read time (the owning
-//! library's id, the serving tenant's `prefix`/`token`, and the `connected`
-//! presence flag, see [`PersistedWindow::to_record`]). So the registry owns
-//! durability plus the mint; the route layer assembles the live view.
+//! library's id, the serving tenant's `prefix`/`token`, the `connected`
+//! presence flag and the `holders` of the window's sockets, see
+//! [`PersistedWindow::to_record`]). So the registry owns durability plus the
+//! mint; the route layer assembles the live view.
 //!
 //! Id scope. `window_id` is unique within its minting library only: libraries
 //! mint independently, with no global authority. The globally-unique key is the
@@ -130,6 +131,17 @@ pub struct WindowRecord {
     /// A `/ws` socket tagged with `window_id` is live right now: some client has
     /// it open (visible OR buried; the server cannot tell those apart).
     pub connected: bool,
+    /// The clients that hold a live `/ws` socket for `window_id`: the tags
+    /// those sockets came with (`/ws?w=<id>&h=<holder>`), each once and
+    /// sorted. A client that put its own tag on its socket reads here whether
+    /// that socket is live, which `connected` cannot say when another client
+    /// holds the same window. A socket with no tag counts toward `connected`
+    /// and is in no list, so a connected window can list none. `None`,
+    /// omitted from the wire, is a record whose sender cannot say, a server
+    /// that does not count holders, and is not an empty list: this library
+    /// always sends the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holders: Option<Vec<String>>,
     /// A file transfer (upload or download) is in flight for this window right
     /// now. Volatile per-push state (the whole set is re-assembled each push), so
     /// a client with no `/ws` view of the serving tenant -- the desktop onto a
@@ -175,6 +187,7 @@ impl std::fmt::Debug for WindowRecord {
             .field("token", &"[REDACTED]")
             .field("persisted", &self.persisted)
             .field("connected", &self.connected)
+            .field("holders", &self.holders)
             .field("active_transfer", &self.active_transfer)
             .field("control", &self.control)
             .field("hidden", &self.hidden)
@@ -229,8 +242,8 @@ pub struct CreateWindow {
 // ---------------------------------------------------------------------------
 
 /// The durable on-disk row for one window: everything that survives a library
-/// restart. The live `prefix`/`token`/`connected` are NOT here; they are
-/// assembled at read time (see [`Self::to_record`]). Field names are the
+/// restart. The live `prefix`/`token`/`connected`/`holders` are NOT here; they
+/// are assembled at read time (see [`Self::to_record`]). Field names are the
 /// persisted contract, pinned by `persisted_window_pins_field_names`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedWindow {
@@ -278,15 +291,17 @@ pub struct PersistedWindow {
 impl PersistedWindow {
     /// Assemble the wire [`WindowRecord`] from this durable row plus the live
     /// state the route layer holds: the owning `library_id`, the serving
-    /// tenant's `prefix` + `token` (empty when the tenant is off), and whether
-    /// a `/ws` socket is currently `connected`. `persisted` is always true for
-    /// a row that exists in the registry.
+    /// tenant's `prefix` + `token` (empty when the tenant is off), whether
+    /// a `/ws` socket is currently `connected`, and the `holders` of the
+    /// window's sockets, empty when none is tagged or none is live.
+    /// `persisted` is always true for a row that exists in the registry.
     pub fn to_record(
         &self,
         library_id: String,
         prefix: String,
         token: String,
         connected: bool,
+        holders: Vec<String>,
     ) -> WindowRecord {
         WindowRecord {
             window_id: self.window_id.clone(),
@@ -302,6 +317,7 @@ impl PersistedWindow {
             // is NOT persisted; every other registry row is durable.
             persisted: !self.control,
             connected,
+            holders: Some(holders),
             // The live transfer bit is overlaid by the feed assembly
             // (`assemble_window_records`), the one place that holds tenant
             // transfer state; a freshly assembled/minted record defaults off.
@@ -1154,6 +1170,7 @@ mod tests {
             token: "tok_term".into(),
             persisted: true,
             connected: true,
+            holders: None,
             active_transfer: false,
             control: false,
             hidden: false,
@@ -1197,6 +1214,7 @@ mod tests {
             token: String::new(),
             persisted: true,
             connected: false,
+            holders: None,
             active_transfer: false,
             control: false,
             hidden: false,
@@ -1266,6 +1284,13 @@ mod tests {
             bare,
             "a record without holders gained or lost a field"
         );
+        assert_eq!(
+            serde_json::from_value::<WindowRecord>(bare.clone())
+                .unwrap()
+                .holders,
+            None,
+            "a record without the field does not read as one whose sender cannot say"
+        );
         for holders in [json!([]), json!(["desk-a", "tab-b"])] {
             let mut wire = bare.clone();
             wire["holders"] = holders;
@@ -1275,6 +1300,15 @@ mod tests {
                 "a record's holders did not survive a decode and an encode"
             );
         }
+        let mut none = bare.clone();
+        none["holders"] = json!([]);
+        assert_eq!(
+            serde_json::from_value::<WindowRecord>(none)
+                .unwrap()
+                .holders,
+            Some(Vec::new()),
+            "an empty list does not read as no holder"
+        );
     }
 
     #[test]
@@ -1292,6 +1326,7 @@ mod tests {
                 token: "tok_term".into(),
                 persisted: true,
                 connected: true,
+                holders: None,
                 active_transfer: true,
                 control: false,
                 hidden: false,
@@ -1347,6 +1382,7 @@ mod tests {
             "/control-0".into(),
             "tok_ctl".into(),
             true,
+            Vec::new(),
         );
         assert_eq!(rec.kind, WindowKind::Terminal);
         assert_eq!(rec.library_id, "lib-0f1e2d3c4b5a6978");
@@ -1431,7 +1467,13 @@ mod tests {
             hidden: false,
             origin: WindowOrigin::Browser,
         }
-        .to_record("local".into(), "/api/n-0".into(), "tok".into(), true);
+        .to_record(
+            "local".into(),
+            "/api/n-0".into(),
+            "tok".into(),
+            true,
+            Vec::new(),
+        );
         assert_eq!(rec.origin, WindowOrigin::Browser);
         let v = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["origin"], "browser");
@@ -2089,7 +2131,13 @@ mod tests {
             hidden: false,
             origin: WindowOrigin::Native,
         };
-        let rec = p.to_record("local".into(), "/api/n-0".into(), String::new(), false);
+        let rec = p.to_record(
+            "local".into(),
+            "/api/n-0".into(),
+            String::new(),
+            false,
+            Vec::new(),
+        );
         assert_eq!(rec.window_id, "w-abc");
         assert_eq!(rec.library_id, "local");
         assert_eq!(rec.prefix, "/api/n-0");
@@ -2099,6 +2147,11 @@ mod tests {
         assert!(!rec.connected);
         // `to_record` leaves the transfer bit off; the feed assembly overlays it.
         assert!(!rec.active_transfer);
+        assert_eq!(
+            rec.holders,
+            Some(Vec::new()),
+            "a record this library assembles says its holders, none here"
+        );
         // The durable fields carry through unchanged.
         assert_eq!(rec.kind, WindowKind::Workspace);
         assert_eq!(rec.ordinal, 1);
@@ -2119,12 +2172,19 @@ mod tests {
             hidden: false,
             origin: WindowOrigin::Native,
         };
-        let crec = c.to_record("lib-remote".into(), "/control-0".into(), "tok".into(), true);
+        let crec = c.to_record(
+            "lib-remote".into(),
+            "/control-0".into(),
+            "tok".into(),
+            true,
+            vec!["desk-a".into()],
+        );
         assert!(crec.control);
         assert!(!crec.persisted, "a control row is transient, not persisted");
         assert_eq!(crec.library_id, "lib-remote");
         assert_eq!(crec.prefix, "/control-0");
         assert!(crec.connected);
+        assert_eq!(crec.holders, Some(vec!["desk-a".to_string()]));
     }
 
     #[test]

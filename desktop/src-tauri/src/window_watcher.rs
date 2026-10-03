@@ -570,6 +570,7 @@ mod tests {
             token: "tok".into(),
             persisted: true,
             connected: false,
+            holders: None,
             active_transfer: false,
             control: false,
             hidden: false,

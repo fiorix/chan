@@ -1191,6 +1191,7 @@ mod tests {
             token: "tok".into(),
             persisted: true,
             connected: true,
+            holders: None,
             active_transfer: false,
             control: false,
             hidden: false,

@@ -7978,6 +7978,7 @@ mod tests {
             token: String::new(),
             persisted: true,
             connected,
+            holders: None,
             active_transfer: false,
             control,
             hidden: false,

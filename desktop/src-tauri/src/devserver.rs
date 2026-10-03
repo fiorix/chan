@@ -3585,6 +3585,7 @@ mod tests {
             token: token.into(),
             persisted: true,
             connected: false,
+            holders: None,
             active_transfer: false,
             control: false,
             hidden: false,

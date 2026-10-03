@@ -2656,7 +2656,7 @@ impl WorkspaceHost {
                 .get(&prefix)?
                 .artifacts
                 .window_presence
-                .connect(window_id),
+                .connect(window_id, None),
         )
     }
 
@@ -2714,7 +2714,7 @@ impl WorkspaceHost {
             // not show as ghosts pointing at an unmounted workspace.
             .filter(|row| self.window_in_live_feed(row))
             .map(|row| {
-                let (prefix, token, connected) = self.window_live_state(&row);
+                let (prefix, token, connected, holders) = self.window_live_state(&row);
                 // Overlay the volatile transfer bit from the serving tenant: the
                 // remote feed is the only channel a desktop webview onto a
                 // devserver has to learn a window is mid-transfer.
@@ -2725,7 +2725,7 @@ impl WorkspaceHost {
                     .library_id
                     .clone()
                     .unwrap_or_else(|| library_id.to_string());
-                let mut record = row.to_record(row_library_id, prefix, token, connected);
+                let mut record = row.to_record(row_library_id, prefix, token, connected, holders);
                 record.active_transfer = active_transfer;
                 record
             })
@@ -2839,8 +2839,8 @@ impl WorkspaceHost {
         }
         self.notify_window_change();
         let library_id = self.library_id().to_string();
-        let (prefix, token, connected) = self.window_live_state(&row);
-        Ok(row.to_record(library_id, prefix, token, connected))
+        let (prefix, token, connected, holders) = self.window_live_state(&row);
+        Ok(row.to_record(library_id, prefix, token, connected, holders))
     }
 
     /// Mint a workspace window for the workspace runtime `key` names, by its
@@ -2900,8 +2900,8 @@ impl WorkspaceHost {
             map.insert(window_id.clone(), control_tenant_prefix);
         }
         self.notify_window_change();
-        let (prefix, token, connected) = self.control_window_live(&window_id);
-        Ok(row.to_record(devserver_library_id, prefix, token, connected))
+        let (prefix, token, connected, holders) = self.control_window_live(&window_id);
+        Ok(row.to_record(devserver_library_id, prefix, token, connected, holders))
     }
 
     /// Set a window's persisted visibility: `hidden=true` buries it,
@@ -3372,12 +3372,12 @@ impl WorkspaceHost {
             .sum()
     }
 
-    /// Resolve a persisted window's live `(prefix, token, connected)` from its
+    /// Resolve a persisted window's live state, its [`WindowLive`], from its
     /// serving tenant. A terminal window resolves to the library's shared
     /// terminal tenant (via [`terminal_window_live`](Self::terminal_window_live)),
     /// a workspace window through
     /// [`workspace_window_live`](Self::workspace_window_live).
-    fn window_live_state(&self, row: &PersistedWindow) -> (String, String, bool) {
+    fn window_live_state(&self, row: &PersistedWindow) -> WindowLive {
         // A control row's session is its OWN command tenant, not the shared
         // terminal tenant -- resolve it through the control-tenant map. (`kind` is
         // still Terminal, so this must precede the kind match.)
@@ -3392,98 +3392,65 @@ impl WorkspaceHost {
         }
     }
 
-    /// The `(prefix, token, connected)` for a devserver CONTROL window: its LOCAL
+    /// The [`WindowLive`] for a devserver CONTROL window: its LOCAL
     /// command tenant (the connect script), looked up by the window_id → prefix
     /// map [`mint_control_window`](Self::mint_control_window) populated. Mirrors
     /// [`terminal_window_live`](Self::terminal_window_live) but per-control-tenant
     /// (each control window has its own tenant, vs the one shared terminal
     /// tenant). Empty when the mapping or tenant is gone (e.g. mid-reap).
-    fn control_window_live(&self, window_id: &str) -> (String, String, bool) {
+    fn control_window_live(&self, window_id: &str) -> WindowLive {
         let Some(prefix) = self
             .control_tenants
             .read()
             .ok()
             .and_then(|map| map.get(window_id).cloned())
         else {
-            return (String::new(), String::new(), false);
+            return WindowLive::default();
         };
         if let Ok(workspaces) = self.workspaces.read() {
             if let Some(runtime) = workspaces.get(&prefix) {
-                let connected = runtime
-                    .artifacts
-                    .window_presence
-                    .connected_ids()
-                    .iter()
-                    .any(|id| id == window_id);
-                return (
-                    runtime.handle.prefix.clone(),
-                    runtime.handle.token.clone().unwrap_or_default(),
-                    connected,
-                );
+                return window_live_on(runtime, window_id);
             }
         }
-        (String::new(), String::new(), false)
+        WindowLive::default()
     }
 
-    /// The `(prefix, token, connected)` for a terminal window: the library's
-    /// shared terminal tenant, once mounted. Every terminal window attaches to
-    /// the one tenant, so they all share its prefix+token; `connected` reflects
-    /// this `window_id`'s live `/ws` presence. Empty until the tenant is mounted
+    /// The [`WindowLive`] for a terminal window: the library's shared
+    /// terminal tenant, once mounted. Every terminal window attaches to the
+    /// one tenant, so they all share its prefix+token; `connected` and the
+    /// holders reflect this `window_id`'s live `/ws` presence. Empty until
+    /// the tenant is mounted
     /// -- boot ordering mounts it before the watcher reconciles persisted
     /// terminal windows, so they resolve and reopen on relaunch.
-    fn terminal_window_live(&self, window_id: &str) -> (String, String, bool) {
+    fn terminal_window_live(&self, window_id: &str) -> WindowLive {
         let Some(prefix) = self.terminal_tenant_prefix.get() else {
-            return (String::new(), String::new(), false);
+            return WindowLive::default();
         };
         if let Ok(workspaces) = self.workspaces.read() {
             if let Some(runtime) = workspaces.get(prefix) {
-                let connected = runtime
-                    .artifacts
-                    .window_presence
-                    .connected_ids()
-                    .iter()
-                    .any(|id| id == window_id);
-                return (
-                    runtime.handle.prefix.clone(),
-                    runtime.handle.token.clone().unwrap_or_default(),
-                    connected,
-                );
+                return window_live_on(runtime, window_id);
             }
         }
-        (String::new(), String::new(), false)
+        WindowLive::default()
     }
 
-    /// The `(prefix, token, connected)` for a workspace window. A mounted
+    /// The [`WindowLive`] for a workspace window. A mounted
     /// workspace carries its live tenant's prefix and token plus the window's
     /// `/ws` presence; an off workspace carries its stable derived prefix with
     /// no token, since the client turns it on before attaching.
-    fn workspace_window_live(
-        &self,
-        workspace_path: Option<&str>,
-        window_id: &str,
-    ) -> (String, String, bool) {
+    fn workspace_window_live(&self, workspace_path: Option<&str>, window_id: &str) -> WindowLive {
         let Some(path) = workspace_path else {
-            return (String::new(), String::new(), false);
+            return WindowLive::default();
         };
         let path = Path::new(path);
         let target = stored_window_key(path);
         if let Ok(workspaces) = self.workspaces.read() {
             if let Some((_, runtime)) = window_path_runtimes(&workspaces, path).next() {
-                let connected = runtime
-                    .artifacts
-                    .window_presence
-                    .connected_ids()
-                    .iter()
-                    .any(|id| id == window_id);
-                return (
-                    runtime.handle.prefix.clone(),
-                    runtime.handle.token.clone().unwrap_or_default(),
-                    connected,
-                );
+                return window_live_on(runtime, window_id);
             }
         }
         let prefix = workspace_prefix_for(path, &target).unwrap_or_default();
-        (prefix, String::new(), false)
+        (prefix, String::new(), false, Vec::new())
     }
 
     /// Raw replay-ring PTY bytes for the terminal tenant mounted at
@@ -5189,6 +5156,23 @@ pub fn registry_row_keys(row: &chan_workspace::KnownWorkspace) -> [&Path; 2] {
 /// root's filesystem, which the window feed must not do for every record.
 fn stored_window_key(path: &Path) -> PathBuf {
     chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(path))
+}
+
+/// A window's live state on the tenant that serves it: the tenant's prefix
+/// and token, whether a `/ws` socket is live for the window, and the holders
+/// of its sockets. Empty and `false` for a window no mounted tenant serves.
+type WindowLive = (String, String, bool, Vec<String>);
+
+/// `window_id`'s [`WindowLive`] on `runtime`. The flag and the holders come
+/// from one read of the tenant's presence, so they are of the same instant.
+fn window_live_on(runtime: &HostedWorkspaceRuntime, window_id: &str) -> WindowLive {
+    let holders = runtime.artifacts.window_presence.holders(window_id);
+    (
+        runtime.handle.prefix.clone(),
+        runtime.handle.token.clone().unwrap_or_default(),
+        holders.is_some(),
+        holders.unwrap_or_default(),
+    )
 }
 
 /// The workspace runtimes a window record's stored `workspace_path` goes by,

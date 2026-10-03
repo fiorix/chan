@@ -161,7 +161,7 @@ pub async fn ws_upgrade(
     ws.on_upgrade(move |mut socket| async move {
         // RAII presence ref: held across the pump so EVERY exit path
         // (clean close, network drop, shutdown) deregisters the window.
-        let _presence = window_id.as_ref().map(|id| presence.connect(id));
+        let _presence = window_id.as_ref().map(|id| presence.connect(id, None));
         // RAII transfer guard for the same `?w=` window: the pump calls
         // `set` on each `transfers` frame, and Drop clears this socket's
         // contribution on every exit path (so a reload reads inactive).
