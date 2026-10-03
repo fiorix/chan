@@ -10862,7 +10862,7 @@ mod tests {
                 let state = desktop_over(library.clone()).await;
                 let handoff = tokio::spawn(register_and_open_from_handoff(
                     handle,
-                    state,
+                    Arc::clone(&state),
                     library,
                     requested.clone(),
                 ));
@@ -10885,6 +10885,17 @@ mod tests {
                     handoff.is_finished(),
                     "the handoff still waits on its registration after its notice"
                 );
+                let embedded = state.embedded().expect("embedded host");
+                assert_eq!(
+                    embedded.close_workspace_root(&requested, false).await,
+                    Ok(chan_server::WorkspaceLifecycleOutcome::NotFound),
+                    "the close waited for a registration the handoff gave up"
+                );
+                assert_eq!(
+                    embedded.remove_workspace_root(&requested, false).await,
+                    Ok(chan_server::WorkspaceLifecycleOutcome::NotFound),
+                    "the removal waited for a registration the handoff gave up"
+                );
             });
         }
 
@@ -10906,7 +10917,7 @@ mod tests {
                 let state = desktop_over(library.clone()).await;
                 let handoff = tokio::spawn(register_and_open_from_handoff(
                     handle,
-                    state,
+                    Arc::clone(&state),
                     library,
                     requested.clone(),
                 ));
@@ -10942,6 +10953,17 @@ mod tests {
                 assert!(
                     handoff.is_finished(),
                     "the handoff still waits on its open after its notice"
+                );
+                let embedded = state.embedded().expect("embedded host");
+                assert_eq!(
+                    embedded.close_workspace_root(&requested, false).await,
+                    Ok(chan_server::WorkspaceLifecycleOutcome::Completed),
+                    "the close waited for an open the handoff gave up"
+                );
+                assert_eq!(
+                    embedded.remove_workspace_root(&requested, false).await,
+                    Ok(chan_server::WorkspaceLifecycleOutcome::Completed),
+                    "the removal waited for an open the handoff gave up"
                 );
             });
         }
