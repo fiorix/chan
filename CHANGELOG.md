@@ -24,6 +24,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A window's saved session is read in one shape.** A session saved as a bare pane tree, the shape from before the session payload, restores no layout.
 
+- **An open of a workspace waits for a registration or a removal of the same root that has not returned.** It waits up to one second, inside the open's one budget, then answers `workspace is still releasing; retry` (the launcher's on: 503 with `Retry-After: 1`).
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
@@ -71,6 +73,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A drawing whose file repeats an element id no longer gains a copy at a reload.** A drawing another program wrote with one id on two elements had its second element put on the board under a new random id at every load, and a live session took each as a new element. The element now gets one id derived from the file, the same at every load and in every window.
 
 - **A later write of a file no longer discards the unsaved changes kept for it.** The next open of a file dropped the changes a closed or crashed window had kept whenever the file was written after them, by anyone: a drawing's last stroke that never left the window was lost when the server wrote what did arrive. The offer to restore now stays until the file holds those changes or the offer is answered. A live drawing closed within a moment of a stroke may offer a restore of what the file already holds.
+
+- **A workspace open that completed after its caller left is released off the runtime.** No runtime worker of a server waits on a root's filesystem through the workspace's open-time recovery.
+
+- **The command capability's snapshot says which windows this host manages.** Each window carries `managed`, and the capability's close of a control terminal answers 403 as its visibility route does.
+
+- **`chan workspace forget` on a workspace no process serves, and a workspace reset, look the root up once.** A relinked root beside a root that does not answer waits two seconds instead of six.
+
+- **Startup restore registers a persisted root under the root's registry-write permit.** A restore that gives up on a root that stopped answering leaves one registration behind, and a later serve of that root waits for it.
 
 ### Security
 
