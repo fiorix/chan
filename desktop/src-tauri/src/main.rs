@@ -2964,9 +2964,10 @@ fn register_devserver_from_handoff(
 /// [`register_and_open_from_handoff`], so the callback returns promptly and
 /// the CLI doesn't block on the handshake. The synchronous return therefore
 /// reports only that the request was accepted, not that the window is fully
-/// up; on a genuine mount failure the desktop emits a system notice rather
-/// than blocking the CLI. Generic over the Tauri runtime so a test can drive
-/// it with the mock app.
+/// up; on a genuine mount failure, or a path that has not answered within
+/// the task's bound, the desktop emits a system notice rather than blocking
+/// the CLI. Generic over the Tauri runtime so a test can drive it with the
+/// mock app.
 #[cfg(any(unix, windows))]
 fn open_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -2989,6 +2990,15 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
 /// filesystem: register `path` through `library`, then mount the workspace
 /// and mint its window, with a system notice for whichever of the two fails.
 /// A function of its own so a test can run it on a clock it holds.
+///
+/// The registration and the open share one bound, the devserver mount's
+/// ([`chan_server::WORKSPACE_MOUNT_TIMEOUT`]), counted from the start of
+/// this task, so the open gets what the registration left of it. A path that
+/// stops answering in either is given up at the bound with a notice in
+/// [`chan_server::mount_timed_out`]'s words, naming the path as it was sent.
+/// The registration's blocking call is not cancelled there and ends when the
+/// path answers; an open dropped there gives the root's lock back to a close
+/// or a removal.
 #[cfg(any(unix, windows))]
 async fn register_and_open_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -2996,43 +3006,33 @@ async fn register_and_open_from_handoff<R: tauri::Runtime>(
     library: chan_workspace::Library,
     path: PathBuf,
 ) {
+    let deadline = tokio::time::Instant::now() + chan_server::WORKSPACE_MOUNT_TIMEOUT;
     let requested = path.display().to_string();
-    let registered =
-        tokio::task::spawn_blocking(move || register_workspace_path(&library, &path)).await;
-    let key = match registered {
-        Ok(Ok(root)) => root.to_string_lossy().into_owned(),
-        Ok(Err(e)) => {
-            emit_system_notice(
-                &app,
-                "warning",
-                format!("Could not open {requested} from chan serve: {e}"),
-            );
-            return;
-        }
-        Err(e) => {
-            emit_system_notice(
-                &app,
-                "warning",
-                format!("Opening {requested} from chan serve panicked: {e}"),
-            );
-            return;
-        }
+    let timed_out = chan_server::mount_timed_out(&path);
+    let steps = async {
+        let registered =
+            tokio::task::spawn_blocking(move || register_workspace_path(&library, &path)).await;
+        let key = match registered {
+            Ok(Ok(root)) => root.to_string_lossy().into_owned(),
+            Ok(Err(e)) => return Err(format!("Could not open {requested} from chan serve: {e}")),
+            Err(e) => return Err(format!("Opening {requested} from chan serve panicked: {e}")),
+        };
+        // The handoff is an explicit open, so mint after mounting and restoring.
+        serve::start(
+            app.clone(),
+            Arc::clone(&state),
+            key.clone(),
+            serve::WorkspaceOpenMode::OpenWindow,
+        )
+        .await
+        .map_err(|e| format!("Could not open {key} from chan serve: {e}"))
     };
-    // The handoff is an explicit open, so mint after mounting and restoring.
-    if let Err(e) = serve::start(
-        app.clone(),
-        Arc::clone(&state),
-        key.clone(),
-        serve::WorkspaceOpenMode::OpenWindow,
-    )
-    .await
-    {
-        emit_system_notice(
-            &app,
-            "warning",
-            format!("Could not open {key} from chan serve: {e}"),
-        );
-    }
+    let notice = match tokio::time::timeout_at(deadline, steps).await {
+        Ok(Ok(())) => return,
+        Ok(Err(notice)) => notice,
+        Err(_) => format!("Could not open {requested} from chan serve: {timed_out}"),
+    };
+    emit_system_notice(&app, "warning", notice);
 }
 
 /// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
