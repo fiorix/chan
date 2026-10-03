@@ -429,6 +429,14 @@ export class SceneSession {
     );
   }
 
+  /// Whether this session still has an authority to reach: it has not been
+  /// released and has not stopped retrying, as it does when the server lacks
+  /// scene sync, closes the session for good or answers a permanent error. A
+  /// degraded session that keeps redialing has one.
+  reachesAuthority(): boolean {
+    return !this.closedByUs && !this.retryStopped;
+  }
+
   /// True when the session is degraded specifically by a CONNECTION-class
   /// outage that is still retrying; the save path suppresses the doomed
   /// classic PUT (same rationale and shape as DocSession.isOutagePaused).
