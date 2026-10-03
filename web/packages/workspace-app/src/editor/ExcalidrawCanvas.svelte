@@ -123,6 +123,10 @@
   // a write we did not make. Mirrors CsvTable's lastSerialized guard.
   let lastSerialized: string | null = null;
 
+  // The image elements of the scene `lastSerialized` holds, by id, as copies,
+  // since the library changes an element in place. `decodeMarks` reads them.
+  let baselineImages = new Map<string, Record<string, unknown>>();
+
   // The appState the canvas has handed to the board and the library does
   // not show yet. `updateScene` shows an appState only at the library's next
   // render, so every serialization, the baseline's and the flush's alike,
@@ -144,9 +148,9 @@
   // baseline rather than an edit, so a board nobody drew on writes nothing:
   // neither the empty or partial scene of a load in flight nor the library's
   // rewrite of a file it did not write (its indentation, its `source`, the
-  // fields it restores). The one exception is an image whose file fails to
-  // decode: the library marks it after the load, and that change is
-  // published. Set by `seed`; cleared when a load starts or the buffer
+  // fields it restores), nor its mark on an image whose file fails to decode,
+  // which it sets after the load and which joins the baseline unpublished.
+  // Set by `seed`; cleared when a load starts or the buffer
   // changes without the board (a reload, a conflict's resolution, a sibling
   // pane's mirror).
   let seeded = false;
@@ -436,16 +440,59 @@
     serializeTimer = setTimeout(flushSerialize, 200);
   }
 
+  type SceneElements = ReturnType<ExcalidrawImperativeAPI["getSceneElements"]>;
+
   function serializeScene(
     a: ExcalidrawImperativeAPI,
     e: typeof import("@excalidraw/excalidraw"),
+    elements: SceneElements = a.getSceneElements(),
   ): string {
     return e.serializeAsJSON(
-      a.getSceneElements(),
+      elements,
       { ...a.getAppState(), ...(handedAppState ?? {}) },
       a.getFiles(),
       "local",
     );
+  }
+
+  /// Take `json`, the board's serialization, as the scene the board and the
+  /// buffer agree on.
+  function setBaseline(a: ExcalidrawImperativeAPI, json: string): void {
+    lastSerialized = json;
+    baselineImages = new Map();
+    for (const element of a.getSceneElements()) {
+      if (element.type === "image") baselineImages.set(element.id, { ...element });
+    }
+  }
+
+  /// The images the library has marked since the baseline as failing to
+  /// decode, when `json` differs from the baseline by those marks alone, and
+  /// null when it differs by anything else or by nothing. The library sets
+  /// the mark by itself after a load, in a copy of the image whose version
+  /// is one past the baseline's, so such a scene is no edit of the user's.
+  function decodeMarks(
+    a: ExcalidrawImperativeAPI,
+    e: typeof import("@excalidraw/excalidraw"),
+    json: string,
+  ): Record<string, unknown>[] | null {
+    if (json === lastSerialized) return null;
+    const marks: Record<string, unknown>[] = [];
+    const unmarked = a.getSceneElements().map((element) => {
+      const before = baselineImages.get(element.id);
+      if (
+        element.type !== "image" ||
+        element.status !== "error" ||
+        !before ||
+        before.status === "error" ||
+        element.version !== Number(before.version) + 1
+      ) {
+        return element;
+      }
+      marks.push(element as unknown as Record<string, unknown>);
+      return before as unknown as typeof element;
+    });
+    if (marks.length === 0) return null;
+    return serializeScene(a, e, unmarked) === lastSerialized ? marks : null;
   }
 
   /// Put the buffer of a finished load on the board, restored as the
@@ -478,7 +525,7 @@
     } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
     const files = Object.values(scene.files);
     if (files.length > 0) api.addFiles(files);
-    lastSerialized = serializeScene(api, ex);
+    setBaseline(api, serializeScene(api, ex));
     seeded = true;
     seededOnce = true;
   }
@@ -500,6 +547,12 @@
     serializeTimer = null;
     if (!api || !ex) return;
     const json = serializeScene(api, ex);
+    // A scene that differs from the baseline only by the library's marks on
+    // images that failed to decode is no edit: the marks are recorded as
+    // sent, so a push offers nothing of them, and the scene joins the
+    // baseline below with nothing published.
+    const marks = seeded ? decodeMarks(api, ex, json) : null;
+    if (marks) noteVersions(lastBroadcast, marks);
     if (session) {
       // The serialized envelope already carries the cleaned appState
       // (the exact object the classic save would persist); reuse it as
@@ -518,7 +571,8 @@
     // the user's to publish.
     if (!seeded || !loaded) return;
     if (json === lastSerialized) return;
-    lastSerialized = json;
+    setBaseline(api, json);
+    if (marks) return;
     onSceneChange(json);
     // A peer's edit reaches the buffer only here, and no push-ok follows
     // it. The session knows what of the elements is still this board's; an
