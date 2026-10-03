@@ -759,6 +759,68 @@ describe("contextual command deck", () => {
     });
   }
 
+  test("a window the registry holds keeps Focus, Hide, and Close", async () => {
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      windows: [librarySnapshot.windows[0], { ...librarySnapshot.windows[1], managed: true }],
+    });
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    expect(titles(target)).toEqual(["Control terminal", "Window 2 [release checks]"]);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    expect(titles(target)).toEqual(["Focus", "Hide", "Close"]);
+  });
+
+  /// What typed search lists for the captioned window, sorted: its own row and
+  /// the actions filed under it.
+  function captionedWindowHits(target: HTMLElement): string[] {
+    return [...target.querySelectorAll(".deck-result")]
+      .map((node) => ({
+        title: node.querySelector(".deck-result-title")?.textContent ?? "",
+        path: node.querySelector(".deck-result-path")?.textContent ?? "",
+      }))
+      .filter(
+        (hit) =>
+          hit.title === "Window 2 [release checks]" ||
+          hit.path === "Computers › Windows › Window 2 [release checks]",
+      )
+      .map((hit) => hit.title)
+      .sort();
+  }
+
+  // Typed search builds its own list of every window's actions, apart from
+  // the Windows branch, so the rule is pinned there too.
+  test("typed search lists a window's row and each of its actions", async () => {
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "release checks");
+    expect(captionedWindowHits(target)).toEqual([
+      "Close",
+      "Focus",
+      "Hide",
+      "Window 2 [release checks]",
+    ]);
+  });
+
+  test("typed search lists nothing for a visible unmanaged window in a browser", async () => {
+    scopedLibrary.load.mockResolvedValue(unmanagedRoster(false));
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "release checks");
+    expect(captionedWindowHits(target)).toEqual([]);
+  });
+
+  test("typed search lists a visible unmanaged window with Focus alone in the desktop", async () => {
+    enterDesktop();
+    scopedLibrary.load.mockResolvedValue(unmanagedRoster(false));
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "release checks");
+    expect(captionedWindowHits(target)).toEqual(["Focus", "Window 2 [release checks]"]);
+  });
+
   test("the Close card names the live terminal count, read when it is raised", async () => {
     scopedLibrary.liveTerminals.mockResolvedValue(3);
     const target = openLauncher();
