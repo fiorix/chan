@@ -1713,6 +1713,26 @@ describe("a push the authority never accepted", () => {
     });
   });
 
+  test("a tab that turns read only with its claim queued behind a push keeps the pick on its board, and the push sends it", () => {
+    // The queued push goes out at the ack whatever the tab's mode, so the
+    // scene's appState is the one that push sends.
+    const MINE = { viewBackgroundColor: "#111111" };
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pending.push(elem("mine", 2));
+    binding.flushPendingLocal();
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    tab!.readMode = true;
+    session.tabTurnedReadOnly();
+    sock.frame({ type: "push-ok", version: 1 });
+
+    expect({ handed: binding.updates.map((u) => u.appState), drained: sock.frames("push")[1] }).toEqual({
+      handed: [MINE],
+      drained: { type: "push", elements: [], appState: MINE },
+    });
+  });
+
   test("an appState offered by a canvas that binds between two sockets is no claim", () => {
     // A canvas mounted while the socket is down gets no replay, so it has
     // adopted nothing of this session's scene: what it offers is the buffer
@@ -1849,9 +1869,10 @@ describe("a push the authority never accepted", () => {
 describe("an update that crosses this window's appState claim", () => {
   // The authority applies a push after every update it fanned before the
   // push arrived, and replaces its appState with the push's, so while an
-  // appState of this window's is on the wire or queued, an update's is one
-  // that push replaces. With none, the update's is the authority's, and a
-  // claim no push carries is laid over it.
+  // appState of this window's is on the wire, an update's is one that push
+  // replaces. With none on the wire, the update's is the authority's: this
+  // window's claim is laid over it, and a push still queued sends its
+  // appState over it too.
   const MINE = { viewBackgroundColor: "#111111" };
   const PEERS = { viewBackgroundColor: "#222222", gridModeEnabled: true };
   const LATER = { viewBackgroundColor: "#333333" };
@@ -1874,7 +1895,7 @@ describe("an update that crosses this window's appState claim", () => {
     ]);
   });
 
-  test("withholds its appState while the claim waits behind a push on the wire", () => {
+  test("hands its appState with the claim's key laid over it while the claim waits behind a push that sends none", () => {
     const [tab] = installTabs([sceneTab()]);
     const { binding, sock } = attached(tab!);
     binding.pending.push(elem("mine", 2));
@@ -1885,7 +1906,48 @@ describe("an update that crosses this window's appState claim", () => {
 
     expect({ pushes: sock.frames("push").length, handed: handed(binding) }).toEqual({
       pushes: 1,
+      handed: [{ ids: [], appState: { ...PEERS, ...MINE }, files: undefined }],
+    });
+  });
+
+  test("is in the appState a queued push sends, under the claim's key, once the push before it is acked", () => {
+    // The pick is queued behind a push of elements alone. A peer's grid,
+    // which the authority took before it read that push, is the authority's
+    // still when the queued push goes out, and that push's appState replaces
+    // the authority's whole.
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pending.push(elem("mine", 2));
+    binding.flushPendingLocal();
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    sock.frame({ type: "update", version: 1, elements: [], appState: PEERS });
+    sock.frame({ type: "push-ok", version: 2 });
+    const drained = sock.frames("push")[1];
+    sock.frame({ type: "push-ok", version: 3 });
+
+    const BOTH = { ...PEERS, ...MINE };
+    expect({ drained, replayed: rebind(session, binding).snapshots[0]?.appState }).toEqual({
+      drained: { type: "push", elements: [], appState: BOTH },
+      replayed: BOTH,
+    });
+  });
+
+  test("stays out of the appState a queued push sends while an appState of this window's is on the wire", () => {
+    // The push on the wire replaces the authority's appState, the peer's
+    // grid with it, so the queued one is laid over what that push sent.
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    binding.pendingAppState = { gridSize: 40 };
+    binding.flushPendingLocal();
+    sock.frame({ type: "update", version: 1, elements: [], appState: PEERS });
+    sock.frame({ type: "push-ok", version: 2 });
+
+    expect({ handed: handed(binding), drained: sock.frames("push")[1] }).toEqual({
       handed: [{ ids: [], appState: undefined, files: undefined }],
+      drained: { type: "push", elements: [], appState: { ...MINE, gridSize: 40 } },
     });
   });
 
@@ -2201,6 +2263,25 @@ describe("a snapshot the server fans on a socket that had its own", () => {
     expect({ handed, replayed: rebind(session, binding).snapshots[0]?.appState }).toEqual({
       handed: undefined,
       replayed: QUEUED,
+    });
+  });
+
+  test("hands its appState under a claim queued behind a push that sends none, and the queued push sends both", () => {
+    const FANNED = { ...PEERS, gridModeEnabled: true };
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    binding.pending.push(elem("x", 2));
+    binding.flushPendingLocal();
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    sock.frame(snap([], { appState: FANNED }));
+    const handed = binding.snapshots.at(-1)?.appState;
+    sock.frame({ type: "push-ok", version: 1 });
+
+    const BOTH = { ...FANNED, ...MINE };
+    expect({ handed, drained: sock.frames("push")[1] }).toEqual({
+      handed: BOTH,
+      drained: { type: "push", elements: [], appState: BOTH },
     });
   });
 
