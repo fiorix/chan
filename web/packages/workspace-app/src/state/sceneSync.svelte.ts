@@ -473,14 +473,17 @@ export class SceneSession {
     );
   }
 
-  /// Whether this session has an authority to reach: one has framed on some
-  /// socket of it, and the session has not been released and has not stopped
-  /// retrying, as it does when the server closes it for good or answers a
-  /// permanent error. A degraded session that keeps redialing has one. A
-  /// session that has had no frame has none yet: its board holds the
-  /// buffer's scene and nothing a peer made.
+  /// Whether the bound board holds this session's scene and its authority
+  /// can still be reached: the board has adopted a snapshot of the session,
+  /// and the session has not been released and has not stopped retrying, as
+  /// it does when the server closes it for good or answers a permanent
+  /// error. A degraded session that keeps redialing has one. A board that
+  /// has adopted nothing has none: before any frame, after a frame that is
+  /// no snapshot (an error the server sends before it closes the socket),
+  /// and when it bound before its socket's snapshot, it holds the buffer's
+  /// scene and nothing a peer made.
   reachesAuthority(): boolean {
-    return this.status !== "dialing" && !this.closedByUs && !this.retryStopped;
+    return this.canvasAdopted && !this.closedByUs && !this.retryStopped;
   }
 
   /// The tab turned read only, which its host reports. A read-only tab
