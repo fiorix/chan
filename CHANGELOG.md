@@ -68,6 +68,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **An upload refused with 503 shows the server's reason.** The transfer's row and the status line said `server busy` for every 503. They now show what the server answered, `the devserver is stopping` for one.
 
+- **A drawing whose file repeats an element id no longer gains a copy at a reload.** A drawing another program wrote with one id on two elements had its second element put on the board under a new random id at every load, and a live session took each as a new element. The element now gets one id derived from the file, the same at every load and in every window.
+
+- **A later write of a file no longer discards the unsaved changes kept for it.** The next open of a file dropped the changes a closed or crashed window had kept whenever the file was written after them, by anyone: a drawing's last stroke that never left the window was lost when the server wrote what did arrive. The offer to restore now stays until the file holds those changes or the offer is answered. A live drawing closed within a moment of a stroke may offer a restore of what the file already holds.
+
 ### Security
 
 - **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print on stdout, as `devserver-terminal-replay.sh` did, and both suites also mask it on stderr, where a restart whose unit does not come up prints the unit's recent journal with the devserver's launch URL and token line in it. `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
