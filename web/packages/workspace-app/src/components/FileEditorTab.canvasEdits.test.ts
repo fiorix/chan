@@ -1585,7 +1585,7 @@ describe("a live drawing", () => {
     expect({ board: shownIds(board), pushes: socket.pushes() }).toEqual({ board: ["on-disk"], pushes: [] });
   });
 
-  test("a bound board reseeded from another buffer offers nothing of the background it showed before, when a save asks at once", async () => {
+  test("a bound board reseeded from another buffer offers neither the background it showed before, when a save asks at once, nor the buffer's at its flush", async () => {
     const { tab, board, socket } = await attachedDrawing();
     await new Promise((resolve) => setTimeout(resolve, 10));
     board.pickBackground(PICKED);
@@ -1601,10 +1601,17 @@ describe("a live drawing", () => {
     await tick();
     void saveTab(tab);
     await vi.advanceTimersByTimeAsync(100);
-    const offered = socket.pushes().slice(1).map((p) => p.appState);
+    const atTheSave = socket.pushes().slice(1).map((p) => p.appState);
+    // The board's own flush follows: what it seeded with is no change.
+    await vi.advanceTimersByTimeAsync(400);
+    const atTheFlush = socket.pushes().slice(1).map((p) => p.appState);
     vi.useRealTimers();
 
-    expect(offered).toEqual([]);
+    expect({ atTheSave, atTheFlush, shown: board.appState.viewBackgroundColor }).toEqual({
+      atTheSave: [],
+      atTheFlush: [],
+      shown: BACKGROUND,
+    });
   });
 
   /// The backgrounds the pushes on `socket` carried.
