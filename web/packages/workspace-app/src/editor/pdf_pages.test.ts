@@ -17,7 +17,7 @@ import {
   slideFitScale,
   type DocBlockRect,
 } from "./pdf_pages";
-import { RASTER_SCALE } from "./pdf_snapshot";
+import { PAGE_BOX_ATTR, RASTER_SCALE } from "./pdf_snapshot";
 import { type SlideAspectRatio } from "./slides";
 
 function block(
@@ -286,6 +286,23 @@ describe("buildSlidePageDom", () => {
     expect(
       slide.querySelector<HTMLElement>(".md-slide-preview-content"),
     ).not.toBeNull();
+  });
+
+  test("marks the slide, which hides what overflows it, as the page's own box", async () => {
+    const dom = buildSlidePageDom({
+      markdown: "# Title\n\nbody\n",
+      fromPath: null,
+      spec: { aspectRatio: "16:9", zoomFactor: 2 },
+      theme: "light",
+    });
+    await dom.completion;
+
+    // What the slide hides of an image is the page's cut, and the
+    // snapshot tells it from an author's by this mark.
+    const slide = dom.root.querySelector<HTMLElement>(".md-slide-preview-page")!;
+    expect(slide.style.overflow).toBe("hidden");
+    expect(slide.hasAttribute(PAGE_BOX_ATTR)).toBe(true);
+    expect(slide.querySelectorAll(`[${PAGE_BOX_ATTR}]`)).toHaveLength(0);
   });
 
   test("a code block of the page grows to its longest line instead of scrolling", async () => {

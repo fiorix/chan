@@ -35,7 +35,13 @@ import {
 import { buildDocDom, type DocDom } from "./doc_dom";
 import { PAGE_BREAK_ATTR } from "./page_break";
 import { type SlideAspectRatio, type SlidesSpec } from "./slides";
-import { LIFTED_ATTR, OFFPAGE_ATTR, RASTER_SCALE, type PageBoxPx } from "./pdf_snapshot";
+import {
+  LIFTED_ATTR,
+  OFFPAGE_ATTR,
+  PAGE_BOX_ATTR,
+  RASTER_SCALE,
+  type PageBoxPx,
+} from "./pdf_snapshot";
 
 /// A4 in PDF points.
 export const A4_PORTRAIT_PT = { widthPt: 595.28, heightPt: 841.89 };
@@ -398,6 +404,9 @@ export function buildSlidePageDom(opts: {
       DECK_LAYOUT_PADDING_PX,
     ) +
     `;position:absolute;left:${layout.slide.leftPx}px;top:${layout.slide.topPx}px`;
+  // The slide hides what overflows it, and that is the page cutting its
+  // content, not the author shaping an image.
+  slide.setAttribute(PAGE_BOX_ATTR, "");
   root.appendChild(slide);
 
   const content = document.createElement("div");

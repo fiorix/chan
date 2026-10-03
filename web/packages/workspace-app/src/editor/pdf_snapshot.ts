@@ -299,6 +299,10 @@ export const LIFTED_ATTR = "data-chan-export-image";
 /// whose composed box is outside that page's window.
 export const OFFPAGE_ATTR = "data-chan-export-offpage";
 
+/// Marks an element inside a page whose box is the page's own, as a deck's
+/// slide is: what it hides of an image, the page cut.
+export const PAGE_BOX_ATTR = "data-chan-export-page-box";
+
 /// Marks an SVG <image> whose bytes have decoded, so a page cloned from a
 /// lifted document does not decode it again.
 const DECODED_ATTR = "data-chan-export-decoded";
@@ -310,12 +314,23 @@ const MARKER_ATTR = "data-chan-export-markers";
 /// images to place draws more marker rasters.
 const MARKER_SLOTS = 30;
 
+type Box = { x: number; y: number; width: number; height: number };
+
+/// How a page shows an image, in units of the width of the part of the
+/// image's box that shows when no page cuts the image. That part is the
+/// whole box unless an ancestor hides some of it.
+export type ImageShape = {
+  /// The height of that part.
+  shownHeight: number;
+  /// Where the whole bitmap lies, from that part's top left corner.
+  bitmap: Box;
+};
+
 type LiftedImage = {
   name: string;
   /// The image, decoded in the app's own document.
   bitmap: HTMLImageElement;
-  widthPx: number;
-  heightPx: number;
+  shape: ImageShape;
   /// Whether the image had a box where the page was composed. One with
   /// none (inside a closed <details>, say) has nothing to paint, and
   /// that is not a failure.
@@ -376,6 +391,145 @@ function standInSrc(widthPx: number, heightPx: number): string {
   );
 }
 
+/// The shape of an image that fills a box of its own proportions, all of
+/// which shows.
+function plainShape(ratio: number): ImageShape {
+  return { shownHeight: ratio, bitmap: { x: 0, y: 0, width: 1, height: ratio } };
+}
+
+/// Where `object-fit` puts a bitmap of a natural size in the box of its
+/// image. The bitmap is centered, which is where the initial
+/// `object-position` puts it; another position is not followed. A bitmap
+/// with no natural size fills the box.
+export function fitBitmap(
+  fit: string,
+  box: Box,
+  natural: { width: number; height: number },
+): Box {
+  if (!(natural.width > 0 && natural.height > 0)) return box;
+  const contain = Math.min(
+    box.width / natural.width,
+    box.height / natural.height,
+  );
+  let scale: number;
+  if (fit === "contain") scale = contain;
+  else if (fit === "cover") {
+    scale = Math.max(box.width / natural.width, box.height / natural.height);
+  } else if (fit === "none") scale = 1;
+  else if (fit === "scale-down") scale = Math.min(1, contain);
+  else return box;
+  const width = natural.width * scale;
+  const height = natural.height * scale;
+  return {
+    x: box.x + (box.width - width) / 2,
+    y: box.y + (box.height - height) / 2,
+    width,
+    height,
+  };
+}
+
+function cssPx(value: string): number {
+  const px = parseFloat(value);
+  return Number.isFinite(px) ? px : 0;
+}
+
+/// How many px of an element's rect one px of its layout takes. A
+/// transform or a zoom around the element changes what its rect measures
+/// and not what its style resolves to.
+function rectScale(el: Element, rect: DOMRect): { x: number; y: number } {
+  const { offsetWidth, offsetHeight } = el as HTMLElement;
+  return {
+    x: offsetWidth > 0 ? rect.width / offsetWidth : 1,
+    y: offsetHeight > 0 ? rect.height / offsetHeight : 1,
+  };
+}
+
+function hidesOverflow(overflow: string): boolean {
+  return overflow !== "" && overflow !== "visible";
+}
+
+/// What an ancestor leaves visible of `box`: an element that does not
+/// show what overflows it cuts its content at its padding box.
+function clipToAncestor(box: Box, el: Element): Box {
+  const style = getComputedStyle(el);
+  const cutsX = hidesOverflow(style.overflowX);
+  const cutsY = hidesOverflow(style.overflowY);
+  // `overflow` does not apply to an inline box.
+  if ((!cutsX && !cutsY) || style.display === "inline") return box;
+  const rect = el.getBoundingClientRect();
+  const scale = rectScale(el, rect);
+  let { x, y, width, height } = box;
+  if (cutsX) {
+    const left = rect.left + cssPx(style.borderLeftWidth) * scale.x;
+    const right =
+      rect.left + rect.width - cssPx(style.borderRightWidth) * scale.x;
+    const from = Math.max(x, left);
+    width = Math.min(x + width, right) - from;
+    x = from;
+  }
+  if (cutsY) {
+    const top = rect.top + cssPx(style.borderTopWidth) * scale.y;
+    const bottom =
+      rect.top + rect.height - cssPx(style.borderBottomWidth) * scale.y;
+    const from = Math.max(y, top);
+    height = Math.min(y + height, bottom) - from;
+    y = from;
+  }
+  return { x, y, width, height };
+}
+
+/// How the page composed an image, read where layout answers: in the
+/// app's own document, before the image is taken out of the page. Null
+/// when the image has no box there.
+///
+/// A page's marker raster cannot tell an image a page cuts from one its
+/// own page shows in part or in a box of another shape, and only the
+/// first has more to paint. What the image's ancestors show of its box
+/// is known here, the page's own boxes aside, so a marker that fills
+/// less than that is a page's cut.
+function composedShape(
+  img: HTMLImageElement,
+  root: HTMLElement,
+  natural: { width: number; height: number },
+): ImageShape | null {
+  const rect = img.getBoundingClientRect();
+  if (!(rect.width > 0 && rect.height > 0)) return null;
+  const style = getComputedStyle(img);
+  const scale = rectScale(img, rect);
+  const left =
+    (cssPx(style.borderLeftWidth) + cssPx(style.paddingLeft)) * scale.x;
+  const right =
+    (cssPx(style.borderRightWidth) + cssPx(style.paddingRight)) * scale.x;
+  const top = (cssPx(style.borderTopWidth) + cssPx(style.paddingTop)) * scale.y;
+  const bottom =
+    (cssPx(style.borderBottomWidth) + cssPx(style.paddingBottom)) * scale.y;
+  // An image is painted in its content box, which is what its marker fills.
+  const box = {
+    x: rect.left + left,
+    y: rect.top + top,
+    width: rect.width - left - right,
+    height: rect.height - top - bottom,
+  };
+  let shown = box;
+  for (let el = img.parentElement; el && el !== root; el = el.parentElement) {
+    if (!el.hasAttribute(PAGE_BOX_ATTR)) shown = clipToAncestor(shown, el);
+  }
+  if (!(shown.width > 0 && shown.height > 0)) return null;
+  const bitmap = fitBitmap(style.objectFit, box, {
+    width: natural.width * scale.x,
+    height: natural.height * scale.y,
+  });
+  return {
+    shownHeight: shown.height / shown.width,
+    bitmap: {
+      x: (bitmap.x - shown.x) / shown.width,
+      y: (bitmap.y - shown.y) / shown.width,
+      width: bitmap.width / shown.width,
+      height: bitmap.height / shown.width,
+    },
+  };
+}
+
 function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
   if (root.isConnected && img.getClientRects().length === 0) return false;
   const visibility = getComputedStyle(img).visibility;
@@ -417,8 +571,9 @@ export async function liftPageImages(
     if (!result) continue;
     const { img, name, bitmap } = result;
     const rendered = imageIsRendered(img, root);
-    let widthPx = bitmap.naturalWidth;
-    let heightPx = bitmap.naturalHeight;
+    const natural = { width: bitmap.naturalWidth, height: bitmap.naturalHeight };
+    let widthPx = natural.width;
+    let heightPx = natural.height;
     // A decoded SVG can have no intrinsic dimensions while CSS gives it
     // a box. Use that composed box so it still follows the lifted path.
     if (!(widthPx > 0 && heightPx > 0)) {
@@ -438,8 +593,9 @@ export async function liftPageImages(
     images.lifted.push({
       name,
       bitmap,
-      widthPx,
-      heightPx,
+      shape:
+        (rendered ? composedShape(img, root, natural) : null) ??
+        plainShape(heightPx / widthPx),
       rendered,
       shownPx: 0,
       done: false,
@@ -557,32 +713,33 @@ export type ImagePlacement = {
 };
 
 /// Where a lifted image's bitmap goes, given the box its marker filled,
-/// which is the part of the image this page shows. A box of the image's
-/// own proportions shows all of it and the bitmap fills it. A shorter
-/// box is an image the page cuts: the bitmap keeps its proportions at
-/// the box's width and starts `shownPx` rows above the box, where the
-/// page before left off. The caller clips the draw to the box.
+/// which is what this page shows of the image. A box as tall as the
+/// image's shape says shows all the page composed of it, and the shape is
+/// laid over the box exactly: the bitmap fills it, or lies in it as
+/// `object-fit` or a parent's cut put it. A shorter box is an image the
+/// page cuts: the shape keeps its proportions at the box's width and
+/// starts `shownPx` rows above the box, where the page before left off.
+/// The caller clips the draw to the box.
 export function placeLiftedImage(
   box: MarkerBox,
-  natural: { widthPx: number; heightPx: number },
+  shape: ImageShape,
   shownPx: number,
 ): ImagePlacement {
-  const ratio = natural.heightPx / natural.widthPx;
-  const fullHeight = box.width * ratio;
+  const fullHeight = box.width * shape.shownHeight;
   // The box is read in whole pixels, so its width is off by up to one
-  // and the height that follows from it by up to `ratio`.
-  const slack = 1.5 + 1.5 * ratio;
-  if (shownPx === 0 && box.height >= fullHeight - slack) {
-    return { ...box, shownPx: box.height, done: true };
-  }
-  const shown = shownPx + box.height;
+  // and the height that follows from it by up to the shape's.
+  const slack = 1.5 + 1.5 * shape.shownHeight;
+  const whole = shownPx === 0 && box.height >= fullHeight - slack;
+  // Raster px for one unit of the shape, across and down.
+  const unitY = whole ? box.height / shape.shownHeight : box.width;
+  const shown = whole ? box.height : shownPx + box.height;
   return {
-    x: box.x,
-    y: box.y - shownPx,
-    width: box.width,
-    height: fullHeight,
+    x: box.x + shape.bitmap.x * box.width,
+    y: box.y - (whole ? 0 : shownPx) + shape.bitmap.y * unitY,
+    width: shape.bitmap.width * box.width,
+    height: shape.bitmap.height * unitY,
     shownPx: shown,
-    done: shown >= fullHeight - slack,
+    done: whole || shown >= fullHeight - slack,
   };
 }
 
@@ -793,7 +950,7 @@ async function paintLiftedImages(
     boxes.forEach((markerBox, slot) => {
       if (!markerBox) return;
       const image = images.lifted[ids[slot]!]!;
-      const place = placeLiftedImage(markerBox, image, image.shownPx);
+      const place = placeLiftedImage(markerBox, image.shape, image.shownPx);
       ctx.save();
       ctx.beginPath();
       ctx.rect(markerBox.x, markerBox.y, markerBox.width, markerBox.height);

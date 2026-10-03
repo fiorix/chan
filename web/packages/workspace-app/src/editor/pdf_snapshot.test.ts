@@ -3,9 +3,11 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   auditSelfContained,
+  fitBitmap,
   inlinePageResources,
   liftPageImages,
   markerRgb,
+  PAGE_BOX_ATTR,
   PageImages,
   pageSvgDocument,
   placeLiftedImage,
@@ -383,8 +385,7 @@ describe("liftPageImages", () => {
     expect(images.lifted).toHaveLength(1);
     expect(images.lifted[0]).toMatchObject({
       name: "/api/fs/viewbox.svg",
-      widthPx: 40,
-      heightPx: 20,
+      shape: { shownHeight: 0.5 },
     });
     expect(decodeURIComponent(root.querySelector("img")!.getAttribute("src")!)).toContain(
       'width="40" height="20"',
@@ -527,7 +528,11 @@ describe("readMarkerBoxes", () => {
 });
 
 describe("placeLiftedImage", () => {
-  const NATURAL = { widthPx: 400, heightPx: 200 };
+  // An image half as tall as wide that fills a box of its own proportions.
+  const NATURAL = {
+    shownHeight: 0.5,
+    bitmap: { x: 0, y: 0, width: 1, height: 0.5 },
+  };
 
   test("a box of the image's proportions is filled with the whole image", () => {
     expect(
@@ -561,6 +566,78 @@ describe("placeLiftedImage", () => {
     expect(
       placeLiftedImage({ x: 0, y: 0, width: 100, height: 80 }, NATURAL, 0),
     ).toEqual({ x: 0, y: 0, width: 100, height: 80, shownPx: 80, done: true });
+  });
+
+  // A parent shows the top quarter of the image's box: 100 by 12.5 of a
+  // box 100 by 50.
+  const TOP_QUARTER = {
+    shownHeight: 0.125,
+    bitmap: { x: 0, y: 0, width: 1, height: 0.5 },
+  };
+
+  test("a box of the shape the page composed is whole, though the bitmap is taller", () => {
+    expect(
+      placeLiftedImage({ x: 30, y: 50, width: 200, height: 25 }, TOP_QUARTER, 0),
+    ).toEqual({ x: 30, y: 50, width: 200, height: 100, shownPx: 25, done: true });
+  });
+
+  test("a box shorter than the shape the page composed is a page's cut", () => {
+    const first = placeLiftedImage(
+      { x: 30, y: 50, width: 200, height: 10 },
+      TOP_QUARTER,
+      0,
+    );
+    expect(first).toEqual({
+      x: 30,
+      y: 50,
+      width: 200,
+      height: 100,
+      shownPx: 10,
+      done: false,
+    });
+    // The next page shows the 15 rows that were left.
+    expect(
+      placeLiftedImage({ x: 30, y: 0, width: 200, height: 15 }, TOP_QUARTER, 10),
+    ).toEqual({ x: 30, y: -10, width: 200, height: 100, shownPx: 25, done: true });
+  });
+
+  test("a bitmap that lies inside its box keeps its place when the box is cut", () => {
+    // The bitmap takes the middle half of a box as tall as wide.
+    const inside = {
+      shownHeight: 1,
+      bitmap: { x: 0.25, y: 0.25, width: 0.5, height: 0.5 },
+    };
+    expect(
+      placeLiftedImage({ x: 0, y: 0, width: 100, height: 40 }, inside, 30),
+    ).toEqual({ x: 25, y: -5, width: 50, height: 50, shownPx: 70, done: false });
+  });
+});
+
+describe("fitBitmap", () => {
+  const BOX = { x: 10, y: 20, width: 200, height: 50 };
+  const NATURAL = { width: 100, height: 100 };
+
+  test.each([
+    ["fill", { x: 10, y: 20, width: 200, height: 50 }],
+    ["contain", { x: 85, y: 20, width: 50, height: 50 }],
+    ["cover", { x: 10, y: -55, width: 200, height: 200 }],
+    ["none", { x: 60, y: -5, width: 100, height: 100 }],
+    ["scale-down", { x: 85, y: 20, width: 50, height: 50 }],
+  ])("%s", (fit, place) => {
+    expect(fitBitmap(fit, BOX, NATURAL)).toEqual(place);
+  });
+
+  test("scale-down leaves a bitmap smaller than its box at its own size", () => {
+    expect(fitBitmap("scale-down", BOX, { width: 40, height: 20 })).toEqual({
+      x: 90,
+      y: 35,
+      width: 40,
+      height: 20,
+    });
+  });
+
+  test("a bitmap with no natural size fills the box whatever the fit", () => {
+    expect(fitBitmap("contain", BOX, { width: 0, height: 0 })).toEqual(BOX);
   });
 });
 
@@ -718,6 +795,32 @@ describe("an image the page shows in a box of another shape than its own", () =>
     MARKER = { x: 10, y: 20, w: 80, h: 20 };
 
     expect(await drawnAt(root)).toEqual(place);
+  });
+
+  test("the box is the image's content box, inside its border and padding", async () => {
+    // A border box 60 by 40 around a content box 40 by 20: read as one
+    // shape, the marker of the content box would be short of it.
+    const root = page(
+      '<img src="/api/fs/shots/wide.png" style="border:4px solid;padding:6px">',
+    );
+    laidOut(root.querySelector("img")!, { left: 0, top: 0, width: 60, height: 40 });
+    MARKER = { x: 10, y: 20, w: 80, h: 40 };
+
+    expect(await drawnAt(root)).toEqual([10, 20, 80, 40]);
+  });
+
+  test("a box of the page's own that hides the image's end is a page cutting it", async () => {
+    const root = page(
+      `<article ${PAGE_BOX_ATTR} style="height:6px;overflow-x:hidden;overflow-y:hidden">` +
+        '<img src="/api/fs/shots/cut.png?t=tok"></article>',
+    );
+    laidOut(root.querySelector("article")!, { left: 0, top: 0, width: 100, height: 6 });
+    laidOut(root.querySelector("img")!, { left: 0, top: 0, width: 40, height: 20 });
+    standInCanvas({ x: 10, y: 68, w: 80, h: 12 });
+
+    await expect(snapshotPage(root, BOX)).rejects.toThrow(
+      "image has no place on the page: /api/fs/shots/cut.png",
+    );
   });
 
   test("a parent that hides what overflows it shows its top: it is whole there", async () => {
