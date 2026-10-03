@@ -5897,7 +5897,15 @@ export async function overwriteConflictedTab(): Promise<void> {
   found.tab.authorityVersion = currentAuthorityVersion;
   found.tab.diskConflicted = diskConflicted;
   overwritePending.add(tabId);
-  await performSave(found.tab);
+  try {
+    await performSave(found.tab);
+  } catch (e) {
+    // The modal awaits nothing of the click, so a failed write is said on
+    // the tab's save line, as a failed autosave is. The write took a turn
+    // or more: the layout may hold another object for the tab by then.
+    const live = liveFileTabById(tabId) ?? found.tab;
+    live.saveError = classicSaveFailure(e);
+  }
 }
 
 // ---- live session integration (docSync / sceneSync .svelte.ts) ------------
