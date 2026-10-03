@@ -18,6 +18,7 @@
     "./theme.css": "./src/styles/theme.css",
     "./Topbar.svelte": "./src/components/Topbar.svelte",
     "./window-page": "./src/window-page.ts",
+    "./window-holder": "./src/window-holder.ts",
     "./window-label": "./src/window-label.ts"
   }
 }
