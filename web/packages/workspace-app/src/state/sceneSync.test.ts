@@ -834,6 +834,9 @@ describe("a save that waits on this window's own push", () => {
 // on the tab, so a classic write of it would pass the server's check and
 // delete every element a peer drew since.
 describe("a save of a drawing whose session has no canvas", () => {
+  /// What the save line says of a save refused for want of a board.
+  const NO_BOARD_SAID = "the server has not written it, and this tab has no board open to save it from";
+
   /// A tab attached with no canvas bound, over an authority a peer has
   /// drawn on since the tab's load and has not written.
   function unboundOverPeerEdit() {
@@ -873,7 +876,7 @@ describe("a save of a drawing whose session has no canvas", () => {
     await saving;
     expect({ writes: write.mock.calls.length, said: tab.saveError }).toEqual({
       writes: 0,
-      said: "the server has not written it, and this tab has no board open to save it from",
+      said: NO_BOARD_SAID,
     });
 
     sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
@@ -892,6 +895,110 @@ describe("a save of a drawing whose session has no canvas", () => {
     await flushMicro();
 
     expect({ writes: write.mock.calls.length, owns: session.ownsSaves() }).toEqual({ writes: 1, owns: true });
+  });
+
+  // The buffer is no more the session's to write once the session stops
+  // owning saves: nothing has mirrored a board into it either way.
+  test("writes nothing at the save after one its session degraded under", async () => {
+    vi.useFakeTimers();
+    const { tab, sock, write } = unboundOverPeerEdit();
+    const saving = saveTab(tab);
+    // Past the reconnect grace, inside the flush's wait.
+    sock.drop();
+    vi.advanceTimersByTime(600);
+    lastSocket().drop();
+    vi.advanceTimersByTime(1200);
+    lastSocket().drop();
+    await saving;
+    const first = write.mock.calls.length;
+    // The redial's socket is open and has sent no snapshot, so no outage
+    // pauses a classic write.
+    await vi.advanceTimersByTimeAsync(2000);
+    lastSocket().open();
+    const before = { state: tab.doc?.state, paused: isDocSavePaused(tab) };
+    await saveTab(tab);
+
+    expect({ before, first, second: write.mock.calls.length - first, said: tab.saveError ?? null }).toEqual({
+      before: { state: "degraded", paused: false },
+      first: 0,
+      second: 0,
+      said: NO_BOARD_SAID,
+    });
+  });
+
+  test.each([
+    ["a permanent error", { type: "error", message: "scene too big", reason: "doc-too-large" }, "degraded"],
+    ["a closed frame", { type: "closed", reason: "reset" }, "off"],
+  ])("writes nothing after %s inside the wait, at that save or the next", async (_what, frame, state) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { tab, sock, write } = unboundOverPeerEdit();
+    const saving = saveTab(tab);
+    sock.frame(frame);
+    await saving;
+    const first = write.mock.calls.length;
+    await saveTab(tab);
+    await flushMicro();
+
+    expect({ state: tab.doc?.state, first, second: write.mock.calls.length - first, said: tab.saveError ?? null }).toEqual({
+      state,
+      first: 0,
+      second: 0,
+      said: NO_BOARD_SAID,
+    });
+  });
+
+  // A release resolves the wait, and whatever released the session owns the
+  // tab from there: a switch to Source, a rename, a reload, a close.
+  test.each([
+    ["nothing of this window's unresolved", false, null],
+    ["a push of this window's on the wire", true, "the previous live push has not been confirmed"],
+  ])("a session released inside the wait, with %s, leaves the tab as its release did", async (_what, pushing, said) => {
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
+    if (pushing) session.pushScene([elem("mine", 2)]);
+    const saving = saveTab(tab!);
+    session.release({ immediate: true });
+    await saving;
+    await flushMicro();
+
+    expect({ writes: write.mock.calls.length, said: tab!.saveError ?? null, status: tab!.doc }).toEqual({
+      writes: 0,
+      said,
+      status: undefined,
+    });
+  });
+
+  test.each<[string, (at: { session: SceneSession; sock: FakeSocket }) => void]>([
+    [
+      "a board binds",
+      ({ session }) => {
+        const binding = new FakeBinding();
+        binding.session = session;
+        session.bindCanvas(binding);
+      },
+    ],
+    ["the session is released", ({ session }) => session.release({ immediate: true })],
+    [
+      "a new socket's snapshot says the file holds the scene",
+      ({ sock }) => {
+        sock.drop();
+        vi.advanceTimersByTime(600);
+        lastSocket().open();
+        lastSocket().frame(snap([elem("peer", 2)]));
+      },
+    ],
+  ])("the refusal's reason goes when %s", async (_what, then) => {
+    vi.useFakeTimers();
+    const { tab, session, sock } = unboundOverPeerEdit();
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + 1);
+    await saving;
+    const refused = tab.saveError ?? null;
+    then({ session, sock });
+
+    expect({ refused, after: tab.saveError ?? null }).toEqual({ refused: NO_BOARD_SAID, after: null });
   });
 });
 
