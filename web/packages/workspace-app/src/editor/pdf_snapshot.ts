@@ -349,6 +349,18 @@ function standInSrc(widthPx: number, heightPx: number): string {
   );
 }
 
+function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
+  if (root.isConnected && img.getClientRects().length === 0) return false;
+  const visibility = getComputedStyle(img).visibility;
+  if (visibility === "hidden" || visibility === "collapse") return false;
+  for (let el: HTMLElement | null = img; el; el = el.parentElement) {
+    const style = getComputedStyle(el);
+    if (style.display === "none" || Number(style.opacity) === 0) return false;
+    if (el === root) break;
+  }
+  return true;
+}
+
 /// Take every inlined <img> out of the page's own painting: decode it
 /// here, record it in `images`, and leave a stand-in of its size in its
 /// place. Runs after `inlinePageResources`; an image already lifted is
@@ -387,7 +399,7 @@ export async function liftPageImages(
       bitmap,
       widthPx,
       heightPx,
-      rendered: !root.isConnected || img.getClientRects().length > 0,
+      rendered: imageIsRendered(img, root),
       shownPx: 0,
       done: false,
     });
