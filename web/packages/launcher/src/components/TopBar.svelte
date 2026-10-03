@@ -62,7 +62,7 @@
     {#if !readOnly}
       <button
         class="icon-btn select"
-        class:active={selection.selectMode}
+        class:on={selection.selectMode}
         type="button"
         aria-label={selection.selectMode ? "Exit select mode" : "Select"}
         title={selection.selectMode ? "Exit select" : "Select"}
@@ -129,13 +129,6 @@
     display: flex;
     gap: 0.5rem;
     flex-shrink: 0;
-  }
-
-  /* Select mode active: the toggle holds the accent so it reads as engaged. */
-  .icon-btn.select.active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
   .icon-btn.command.active {
