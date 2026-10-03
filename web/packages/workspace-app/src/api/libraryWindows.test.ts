@@ -468,7 +468,7 @@ describe("browser library windows still use window.open", () => {
     expect(open).toHaveBeenCalledWith("", "_blank");
     expect(host.runAction).toHaveBeenCalledWith({ action: "new_terminal" });
     expect(popup.name).toBe("w-other");
-    expect(popup.location.href).toBe("/api/library/command-capabilities/cap/windows/w-other/launch");
+    expect(popup.location.href).toBe(launchUrl());
     expect(popup.focus).toHaveBeenCalled();
   });
 
@@ -498,7 +498,7 @@ describe("browser library windows still use window.open", () => {
       window_id: "w-other",
       hidden: false,
     });
-    expect(popup.location.href).toBe("/api/library/command-capabilities/cap/windows/w-other/launch");
+    expect(popup.location.href).toBe(launchUrl());
     expect(popup.focus).toHaveBeenCalled();
   });
 
@@ -620,7 +620,7 @@ describe("creating a capability popup", () => {
     await vi.advanceTimersByTimeAsync(1);
     await pending;
     expect(calls).toEqual(["open", "action", "503", "200"]);
-    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(popup.location.href).toBe(launchUrl());
     expect(popup.name).toBe("w-other");
     expect(popup.close).not.toHaveBeenCalled();
     expect(popup.focus).toHaveBeenCalled();
@@ -683,7 +683,7 @@ describe("creating a capability popup", () => {
 
     await expect(createLibraryWindow(host, { action: "new_terminal" })).rejects.toThrow("Snapshot refused.");
 
-    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(popup.location.href).toBe(launchUrl());
     expect(host.runAction).toHaveBeenCalledTimes(1);
   });
 
@@ -814,7 +814,7 @@ describe("creating a capability popup", () => {
 
     await expect(createLibraryWindow(host, { action: "new_terminal" })).rejects.toThrow("Snapshot refused.");
 
-    expect(navigate).toHaveBeenCalledExactlyOnceWith(scopedWindow().launch_path);
+    expect(navigate).toHaveBeenCalledExactlyOnceWith(launchUrl());
     expect(popup.close).not.toHaveBeenCalled();
   });
 });
@@ -847,7 +847,7 @@ describe("focusing a capability popup", () => {
     expect(host.runAction).toHaveBeenCalledExactlyOnceWith({
       action: "set_window_visibility", window_id: "w-other", hidden: false,
     });
-    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(popup.location.href).toBe(launchUrl());
     expect(popup.focus).toHaveBeenCalled();
   });
 
@@ -1100,7 +1100,7 @@ describe("record-based window repair", () => {
         await pending;
         expect(failed).not.toHaveBeenCalled();
         expect(navigate).toHaveBeenCalledTimes(needsRepair ? 1 : 0);
-        if (needsRepair) expect(navigate).toHaveBeenCalledWith(rec.launch_path);
+        if (needsRepair) expect(navigate).toHaveBeenCalledWith(launchUrl(rec));
         expect(child.close).not.toHaveBeenCalled();
         expect(child.focus).toHaveBeenCalled();
       });
@@ -1166,7 +1166,7 @@ describe("the snapshot read before a repair", () => {
 
     await focusLibraryWindow(host, scopedWindow({ connected: false, hidden: true }));
 
-    expect(popup.location.href).toBe(scopedWindow().launch_path);
+    expect(popup.location.href).toBe(launchUrl());
     expect(host.runAction).toHaveBeenCalledExactlyOnceWith({
       action: "set_window_visibility", window_id: "w-other", hidden: false,
     });

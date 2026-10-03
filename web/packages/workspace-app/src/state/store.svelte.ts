@@ -20,6 +20,7 @@ import {
   saveSessionDeckDraft,
   type DeckDraft,
 } from "@chan/web-shared/command-deck";
+import { openerHolderTag } from "@chan/web-shared/window-holder";
 import {
   ApiError,
   api,
@@ -2544,6 +2545,9 @@ async function openRoutedWindowTab(frame: {
   // routed open, so it must not seed a default terminal -- the tab it is about
   // to be handed IS its content.
   url.searchParams.set("seed", "0");
+  // The tab's page presents this tag on its socket, so a later Focus can tell
+  // its socket from another's on the same window.
+  url.searchParams.set("h", openerHolderTag());
   const target = url.toString();
   if (window.open(target, windowId)) return;
   const confirmed = await uiConfirm({

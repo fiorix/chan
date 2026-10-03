@@ -12,6 +12,7 @@
 // the popup dance stays exactly as it was. This module owns that split so it
 // can be driven directly by tests, rather than only through the deck UI.
 
+import { openerHolderTag } from "@chan/web-shared/window-holder";
 import {
   isBlankWindow,
   isUnmarkedBlankWindow,
@@ -129,6 +130,15 @@ function snapshotConnection(snapshot: ScopedLibrarySnapshot, windowId: string): 
   return current.connected ? "connected" : "disconnected";
 }
 
+/// Where a window is sent to reach its page: its launch path, with the tag
+/// this page gives the pages it opens. The launch route copies the tag into
+/// the tenant URL it redirects to and the page presents it on its socket, so
+/// the window's record says whether that page is on the window.
+function launchUrl(window: ScopedLibraryWindow): string {
+  const sep = window.launch_path.includes("?") ? "&" : "?";
+  return `${window.launch_path}${sep}h=${openerHolderTag()}`;
+}
+
 function popupFor(window: ScopedLibraryWindow, bridge: LibraryWindowBridge): Window {
   if (window.window_id === bridge.currentWindowId()) return globalThis.window;
   const popup = globalThis.window.open("", window.window_id);
@@ -182,7 +192,7 @@ export async function createLibraryWindow(
     if (!isBlankWindow(popup)) throw await movedPopupError(bridge, created);
     unshown = created;
     popup.name = created;
-    if (!(await navigateWindowWhenReady(popup, result.window.launch_path, bridge.checkPage))) {
+    if (!(await navigateWindowWhenReady(popup, launchUrl(result.window), bridge.checkPage))) {
       discardCreated(bridge, unshown);
       return;
     }
@@ -240,7 +250,7 @@ export async function focusLibraryWindow(
   const opened = popup !== globalThis.window && isUnmarkedBlankWindow(popup);
   if (popup !== globalThis.window && (blank || !window.connected)) {
     try {
-      const ready = await navigateWindowWhenReady(popup, window.launch_path, bridge.checkPage, {
+      const ready = await navigateWindowWhenReady(popup, launchUrl(window), bridge.checkPage, {
         readConnection: async (signal) =>
           snapshotConnection(await bridge.readSnapshot(signal), window.window_id),
       });
