@@ -257,6 +257,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::routes::metadata::inject_test_watch_registration_failure;
+    #[cfg(unix)]
+    use crate::routes::metadata::install_test_session_close_gate;
     use crate::state::test_support::workspace_app_state;
 
     struct ResetTestState {
@@ -778,5 +780,128 @@ mod tests {
             "the successful retry must replace the old workspace generation"
         );
         state.try_workspace().expect("new workspace generation");
+    }
+
+    /// How long a reference upgraded beside a route's drop is kept when it is
+    /// let go soon after: longer than the route takes to reach chan-workspace
+    /// once it has dropped its own, and well inside the route's bound.
+    #[cfg(unix)]
+    const LATE_REFERENCE_HOLD: Duration = Duration::from_millis(150);
+
+    /// What a route answered beside a late reference, and what its cell holds
+    /// once it has answered: whether that is the workspace the route started
+    /// with, or why it holds none.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct BesideALateReference {
+        status: StatusCode,
+        same_workspace: Result<bool, crate::state::StateAccessError>,
+    }
+
+    /// Answers a reset or an import beside a reference that another owner
+    /// upgrades once the route has counted its own down to one and before it
+    /// drops it. Another thread lets that reference go `LATE_REFERENCE_HOLD`
+    /// after the route goes on, or only once the route has answered when
+    /// `outlasts_the_route`.
+    #[cfg(unix)]
+    async fn answer_beside_a_late_reference(
+        import: bool,
+        outlasts_the_route: bool,
+    ) -> BesideALateReference {
+        let test = reset_test_state();
+        let state = test.state.clone();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive = import.then(|| {
+            let path = archive_dir.path().join("metadata.tar.zst");
+            state
+                .library
+                .export_metadata_archive(
+                    &state.workspace_root,
+                    &path,
+                    chan_workspace::MetadataExportOptions {
+                        chan_version: "test".into(),
+                    },
+                )
+                .unwrap();
+            std::fs::read(path).unwrap()
+        });
+        let started_with = Arc::downgrade(&state.try_workspace().unwrap());
+        // The session close runs between the route's count and its drop.
+        let (counted, at_the_close) = tokio::sync::oneshot::channel();
+        let (go_on, gone_on) = std::sync::mpsc::channel();
+        install_test_session_close_gate(&state.workspace_root, counted, gone_on);
+        let route = tokio::spawn({
+            let state = state.clone();
+            async move { session_operation(state, archive.as_deref()).await }
+        });
+        at_the_close.await.unwrap();
+        let late = started_with
+            .upgrade()
+            .expect("the route holds its reference at the session close");
+        let (answered, route_answered) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            if outlasts_the_route {
+                // Returns when the sender is dropped, after the answer.
+                let _ = route_answered.recv();
+            } else {
+                std::thread::sleep(LATE_REFERENCE_HOLD);
+            }
+            drop(late);
+        });
+        go_on.send(()).unwrap();
+        let status = route.await.unwrap().status();
+        let same_workspace = state
+            .try_workspace()
+            .map(|workspace| std::sync::Weak::ptr_eq(&started_with, &Arc::downgrade(&workspace)));
+        drop(answered);
+        holder.join().unwrap();
+        BesideALateReference {
+            status,
+            same_workspace,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_beside_a_reference_let_go_after_its_drop_completes() {
+        let answer = answer_beside_a_late_reference(false, false).await;
+        assert!(
+            answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
+            "a reset beside a reference let go soon after its drop must complete \
+             over a new workspace: {answer:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_beside_a_reference_let_go_after_its_drop_completes() {
+        let answer = answer_beside_a_late_reference(true, false).await;
+        assert!(
+            answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
+            "an import beside a reference let go soon after its drop must complete \
+             over a new workspace: {answer:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_beside_a_reference_kept_past_its_bound_answers_busy_over_its_workspace() {
+        let answer = answer_beside_a_late_reference(false, true).await;
+        assert!(
+            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(true)),
+            "a reset beside a reference kept past its bound must answer busy \
+             over the workspace it started with: {answer:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_beside_a_reference_kept_past_its_bound_answers_busy_over_its_workspace() {
+        let answer = answer_beside_a_late_reference(true, true).await;
+        assert!(
+            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(true)),
+            "an import beside a reference kept past its bound must answer busy \
+             over the workspace it started with: {answer:?}"
+        );
     }
 }
