@@ -1733,6 +1733,43 @@ describe("a push the authority never accepted", () => {
     });
   });
 
+  test("a pick offered after its tab turned read only and back joins the keys a queued push carries, and the drain sends both", () => {
+    const FIRST = { viewBackgroundColor: "#111111" };
+    const SECOND = { gridModeEnabled: true };
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pending.push(elem("mine", 2));
+    binding.flushPendingLocal();
+    // The first pick queues behind the push on the wire.
+    binding.pendingAppState = FIRST;
+    binding.flushPendingLocal();
+    // Read only and back ends the session's claim; the queued push still
+    // carries the pick, and the board is handed it.
+    tab!.readMode = true;
+    session.tabTurnedReadOnly();
+    tab!.readMode = false;
+    binding.pendingAppState = SECOND;
+    binding.flushPendingLocal();
+    sock.frame({ type: "push-ok", version: 1 });
+    const drained = sock.frames("push")[1];
+    const waiting = isDocUnflushed(tab!.id);
+    sock.frame({ type: "push-ok", version: 2 });
+
+    expect({
+      handed: binding.updates.map((u) => u.appState),
+      drained,
+      waiting,
+      pushes: sock.frames("push").length,
+      unflushed: isDocUnflushed(tab!.id),
+    }).toEqual({
+      handed: [FIRST],
+      drained: { type: "push", elements: [], appState: { ...FIRST, ...SECOND } },
+      waiting: true,
+      pushes: 2,
+      unflushed: false,
+    });
+  });
+
   test("an appState offered by a canvas that binds between two sockets is no claim", () => {
     // A canvas mounted while the socket is down gets no replay, so it has
     // adopted nothing of this session's scene: what it offers is the buffer
