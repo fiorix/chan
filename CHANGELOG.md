@@ -12,6 +12,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The scene socket's `push-ok` frame says whether the push changed the drawing.** It carries `changed`: true when the authority's scene took anything from the push, false when it changed nothing.
 
+- **The Files app's save route accepts a hash of what its writer loaded.** A save of a file outside a workspace (`PUT /api/fs/{path}`) can carry `expected_sha256`, the SHA-256 of the text its writer loaded, and is refused with the route's 409 conflict when the file's text hashes otherwise or the file is gone. The page does not send it yet.
+
+- **A node of a paged filesystem graph with more than one link carries `link_group`.** The nodes of one file share the value, so a client can join a hardlink pair that falls in two pages. The graph page does not join by it yet.
+
 ### Changed
 
 - **`chan workspace forget` stops when its host says the workspace is still releasing.** When the process that holds a workspace answers a forget over its control socket with `workspace is still releasing; retry`, the command prints that answer, leaves the workspace registered and exits 75, so a script can tell a host that has not let go from a refusal. In v0.101.0 it printed that it could not reach the server, unregistered the workspace on disk and exited 0, which left the host holding a workspace its registry file no longer had. The change covers the request the command sends to the holder's control socket: the desktop app's own `chan` asks the desktop over its handoff socket first, and an answer there is not read this way. Running the command again repeats the request only while the host still serves the workspace; once the host has taken it down, the second run finds nothing serving it and forgets it on disk without asking the host. Any other error a holder answers to `chan close` or `chan workspace forget` is now printed with the "could not reach the server" warning, where only the command's own context was.
@@ -25,6 +29,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A window's saved session is read in one shape.** A session saved as a bare pane tree, the shape from before the session payload, restores no layout.
 
 - **An open of a workspace waits for a registration or a removal of the same root that has not returned.** It waits up to one second, inside the open's one budget, then answers `workspace is still releasing; retry` (the launcher's on: 503 with `Retry-After: 1`).
+
+- **A workspace search that keeps many directories lists their children in one walk of the tree.** It walked the whole tree once for each directory it kept. On 200,000 notes its last pass over 1,000 directories went from 3.3 seconds to 50 milliseconds.
 
 ### Fixed
 
