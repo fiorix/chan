@@ -1028,11 +1028,16 @@ mod tests {
     async fn an_import_beside_a_lock_held_past_its_reopens_bound_answers_that_lock_with_no_cell() {
         let test = import_test_state();
         let ops = BesideAnotherProcess::that_refuses_the_rescan(LetsGo::PastTheBound);
-        let started = Instant::now();
 
         let result = ops.import(&test.state, &test.archive);
 
-        let took = started.elapsed();
+        // Timed from the route's first ask for its workspace: the waits it
+        // makes before its reopen are no part of the reopen's bound.
+        let took = ops
+            .first_open
+            .get()
+            .expect("the import asked for its workspace")
+            .elapsed();
         assert!(
             matches!(
                 result,
