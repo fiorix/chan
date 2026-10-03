@@ -96,7 +96,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Reopening a draft drawing discarded with text that does not parse brings the text back as unsaved.** The reopened draft read clean and offered to save a file that does not parse; closing it now asks before the text is thrown away.
 
-- **The command deck offers no action on a window this host does not manage.** A window that reached the deck through a devserver's feed alone was offered Hide, Show and Close, which this host cannot carry out; it is no longer listed in the deck.
+- **The command deck offers a window this host does not manage only what it can carry out.** A window that reached the deck through a devserver's feed alone was offered Hide, Show and Close, which this host cannot carry out. In the desktop app a visible one is listed with Focus alone; a hidden one, and either in a browser, is not listed.
 
 - **The graph joins hardlinked paths that load in different pages.** In the filesystem graph and in the semantic graph's spine, two paths of one file that arrived in different pages of a load, or with different directory expansions, had no link between them. They are joined now: the hardlink chip counts them and its filter hides them.
 
