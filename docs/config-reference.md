@@ -122,11 +122,14 @@ template = '{}\r'
 [kimi]
 template = '\e[200~{}\e[201~\r'
 
+[muse]
+template = '{}\r'
+
 [opencode]
 template = '\e[200~{}\e[201~\r'
 ```
 
-The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, and `CHAN_SUBMIT_OPENCODE`. Gemini alone splits its normalized body and submit chord into two ordered PTY writes; overriding its template does not change that write-splitting contract. `agy` is Google Antigravity, gemini's successor, and submits in one write.
+The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. Gemini and muse alone split their normalized body and submit chord into two ordered PTY writes; overriding either template does not change that write-splitting contract. `agy` is Google Antigravity, gemini's successor, and submits in one write.
 
 ### `~/.chan/preferences.toml` -- `EditorPrefs`
 
@@ -269,7 +272,7 @@ Source: `crates/chan-workspace/src/teams.rs`.
 | `created_at` | `String` (ISO 8601) | required | (set at create time) | sort + display |
 | `members[]` | `Vec<Member>` | empty | (future Settings) | team roster + position grid |
 
-`Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `agy`, `claude`, `codex`, `gemini`, `kimi`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
+`Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `agy`, `claude`, `codex`, `gemini`, `kimi`, `muse`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
 
 `Position`: `row: u32`, `col: u32` (airplane-grid coordinate). Consumed by both team surfaces: the Team Work dialog carves its split layout from it, and `cs terminal team new|load` passes it through the `team_spawned` push so the SPA carves the same grid (`--tabs` opts out). Validation caps the derived grid at 9 panes.
 
