@@ -31,3 +31,9 @@ As suggestions: the push-ok says whether the push changed the authority's scene,
 1. A save that waits on this window's own push answers after the authority's flush frame; pinned red first.
 2. A push that changed nothing still lets a waiting save answer at once.
 3. The force-reload prompt reads the authority's unwritten push as unflushed state.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files, an independent review of its whole diff and the lead's own reading of the parts that review questioned. This record was written that day from those.
+
+The server's half is built, and the row stays open for the page's. The scene socket's push-ok frame carries `changed` (`ServerFrame::PushOk`, `crates/chan-server/src/routes/scene.rs`): true when the push's merge accepted anything, false when it changed nothing, and always sent. Pinned in the session's tests for both values (`push_ok_says_whether_the_push_changed_the_scene`). Left: the workspace app's half, which reads the flag so that a save waits for the write, and the sentence on `push-ok` in the editor's design.

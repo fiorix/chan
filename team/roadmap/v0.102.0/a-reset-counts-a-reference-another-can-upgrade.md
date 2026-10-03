@@ -30,3 +30,9 @@ Show it by a run first: a probe that holds an upgraded reference on another thre
 
 1. A reset and an import beside a reference upgraded on another thread between the count and the drop complete or answer busy, pinned red first, 200 runs as they are and 200 on one CPU.
 2. In that case neither route leaves the workspace's cell empty, pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files, an independent review of its whole diff and the lead's own reading of the parts that review questioned. This record was written that day from those.
+
+Built in part, and the row stays open. The fault was shown by a run before the fix: with a reference upgraded between a reset's or an import's count and its drop, both routes answered 500 and left their cell empty. After their drop the routes wait, within a drain bound, for the two facts the host's teardown waits for, no strong reference and a free writer lock (`held_past_release`, `crates/chan-server/src/routes/metadata.rs`, called by `perform_reset` and `perform_metadata_import`); when an owner still holds the workspace at the bound the route puts it back in its cell and answers busy. That busy has already closed the workspace's sessions. Pinned for both routes with an owner that lets go inside the bound and one that keeps the workspace past it; 200 runs and 200 on one CPU, none red. Left, read in the code and not run: when the last owner lets go just before the bound, the count is zero while the workspace's drop still holds the lock, the wait answers that nothing is held, and the route goes on to the same 500 with an empty cell; the wait's lock half has no pin; and the new pins wait at their gate with no bound of their own. Ordered as a later row.

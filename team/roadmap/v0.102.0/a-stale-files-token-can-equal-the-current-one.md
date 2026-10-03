@@ -32,3 +32,7 @@ By the order's citations: `standalone_write_sync` and `check_write_preconditions
 
 1. A reading and a probe say what a write answers when the bytes on disk changed and the file's token did not.
 2. The owner's decision on it is recorded.
+
+## Reading of 2026-10-03
+
+Read and probed on the v0.102.0 integration branch, as the owner accepted. `standalone_write_sync` (`crates/chan-server/src/routes/standalone_fs.rs`) compares a request's token with the file's current mtime and nothing else of what its writer loaded; equal bytes pass whatever the token. The probe (`a_token_equal_to_the_mtime_of_changed_bytes_is_accepted_over_them`, in that file's tests) writes through the route, changes the bytes on disk and stamps the mtime back to the token: the next save with that token answers 200 and the file holds the saver's bytes. The probe restores a timestamp the filesystem itself reported, so it does not depend on the filesystem's granularity; how often two writes share one timestamp without a tool was not measured. The committed test states today's answer, and a fix turns its last two assertions around. What the write must answer is the owner's to rule: the route keeps nothing of what its writer loaded, so a refusal needs the client to send a hash or a length of it.
