@@ -338,14 +338,19 @@
   function restoreFromBuffer(): void {
     if (!recoveredBuffer) return;
     // A live session's board takes the entry as a local change over the
-    // authority's scene and writes the result into the buffer itself. Any
-    // other tab takes the entry as its buffer.
-    if (!canvasRef?.restoreOverScene(recoveredBuffer.content)) {
+    // authority's scene and writes the result into the buffer itself. That
+    // result is the board's serialization and never the entry's bytes, so
+    // no save can retire the stored entry by holding its content, and it is
+    // retired here: the recovery effect would offer it again as soon as the
+    // tab's saved text moves. Any other tab takes the entry as its buffer.
+    if (canvasRef?.restoreOverScene(recoveredBuffer.content)) {
+      clearEditorBuffer(tab.path);
+    } else {
       setTabContent(tab, recoveredBuffer.content);
     }
     recoveredBuffer = null;
-    // The restored content now diverges from disk, so the persistence
-    // effect re-persists it under the current session on the next tick.
+    // Restored content that diverges from disk is persisted again under the
+    // current session by the persistence effect on the next tick.
   }
 
   function discardBuffer(): void {
