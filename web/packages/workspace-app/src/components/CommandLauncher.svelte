@@ -688,11 +688,14 @@
   // The roster is polled while the deck is open, so a window can close from
   // somewhere else while its own actions are on screen. Fall back to the list
   // rather than an empty body; the recovery below only fires once a selection
-  // is lost, which leaves an unselected submenu blank.
+  // is lost, which leaves an unselected submenu blank. A window that stays in
+  // the roster and offers no action, as a restored draft can name, has no row
+  // in the list either, so its path returns to the root.
   $effect(() => {
     if (!launcherDraft.visible || !scopedLibrarySettled || !windowMode) return;
-    if (scopedLibrary?.windows.some((window) => window.window_id === windowMode)) return;
-    launcherDraft.path = ["windows"];
+    const window = scopedLibrary?.windows.find((candidate) => candidate.window_id === windowMode);
+    if (window && scopedWindowActions(window).length > 0) return;
+    launcherDraft.path = window ? [] : ["windows"];
     launcherDraft.selectedId = null;
     launcherDraft.operation = null;
     flashContextChanged();
