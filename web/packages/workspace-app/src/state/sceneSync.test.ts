@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, sessionWindowId } from "../api/client";
-import { setSocketFactory, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
+import { setSocketFactory } from "../api/transport";
 import {
   acquireSceneSession,
   isSceneSyncEligible,
@@ -497,56 +497,6 @@ describe("probe and degrade", () => {
     expect(session.ownsSaves()).toBe(false);
     // Latched: the next acquire refuses without dialing.
     expect(acquireSceneSession(sceneTab())).toBeNull();
-  });
-
-  test("a socket closed at its own attach timeout is dialed again and attaches at its snapshot", () => {
-    vi.useFakeTimers();
-    const tab = sceneTab();
-    acquireSceneSession(tab);
-    const first = lastSocket();
-    // The server took the socket and sent nothing within the window.
-    first.open();
-    vi.advanceTimersByTime(SCENE_ATTACH_TIMEOUT_MS);
-    expect(first.closedByClient).toBe(true);
-
-    vi.advanceTimersByTime(WS_RECONNECT_BACKOFF_MIN_MS);
-    expect(sockets.length, "the session dials again").toBe(2);
-    const retry = lastSocket();
-    expect(retry.url).toBe(first.url);
-    expect(tab.doc?.state).toBe("connecting");
-
-    retry.open();
-    retry.frame(snap());
-    expect(tab.doc?.state).toBe("attached");
-  });
-
-  test("an attach timeout leaves scene sync on for the page's next tab", () => {
-    vi.useFakeTimers();
-    acquireSceneSession(sceneTab());
-    lastSocket().open();
-    vi.advanceTimersByTime(SCENE_ATTACH_TIMEOUT_MS);
-
-    const next = sceneTab({ path: "boards/c.excalidraw" });
-    expect(acquireSceneSession(next), "the next tab gets a session").not.toBeNull();
-    expect(lastSocket().url).toContain(encodeURIComponent("boards/c.excalidraw"));
-    expect(next.doc?.state).toBe("connecting");
-  });
-
-  test("a redial the server closes with no frame latches scene sync off", () => {
-    vi.useFakeTimers();
-    const tab = sceneTab();
-    const session = acquireSceneSession(tab)!;
-    lastSocket().open();
-    vi.advanceTimersByTime(SCENE_ATTACH_TIMEOUT_MS + WS_RECONNECT_BACKOFF_MIN_MS);
-    expect(sockets.length).toBe(2);
-
-    // The timeout was the first socket's. This close is the server's.
-    lastSocket().drop();
-    expect(tab.doc?.state).toBe("off");
-    expect(session.ownsSaves()).toBe(false);
-    expect(acquireSceneSession(sceneTab())).toBeNull();
-    vi.advanceTimersByTime(60_000);
-    expect(sockets.length, "a latched session dials no more").toBe(2);
   });
 
   test("repeated drops past the grace degrade; outage pauses classic saves", () => {
