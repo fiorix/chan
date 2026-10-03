@@ -3947,6 +3947,26 @@ mod tests {
     }
 
     #[test]
+    fn terminal_write_accepts_muse_as_a_submit_agent() {
+        let submit = CsCli::try_parse_from([
+            "cs",
+            "terminal",
+            "write",
+            "hello",
+            "--submit=muse",
+            "--tab-name=@@Lead",
+        ])
+        .map(|cli| match cli.action {
+            ShellAction::Terminal {
+                action: TerminalAction::Write { submit, .. },
+            } => submit.map(SubmitAgent::name),
+            other => panic!("unexpected parse: {other:?}"),
+        })
+        .map_err(|err| err.kind());
+        assert_eq!(submit, Ok(Some("muse")));
+    }
+
+    #[test]
     fn parses_terminal_team_new_with_config_and_script() {
         let cli = CsCli::parse_from([
             "cs",

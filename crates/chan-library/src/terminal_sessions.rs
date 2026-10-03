@@ -8277,6 +8277,93 @@ mod tests {
         assert_eq!(session.queue_depth(), 0);
     }
 
+    /// The entries `bodies` occupy as `cs terminal write` messages under
+    /// `submit`, their message depth, and the PTY writes they drain to, one
+    /// per idle opportunity.
+    fn queued_entries_depth_and_writes(
+        submit: ResolvedSubmit,
+        bodies: &[&str],
+    ) -> (usize, usize, Vec<Vec<u8>>) {
+        let (session, commands) = test_session_with_commands(1024);
+        for body in bodies {
+            session.enqueue_cs_write((*body).into(), Some(submit.clone()));
+        }
+        let entries = session.write_queue.lock().expect("queue").len();
+        let depth = session.queue_depth();
+        let mut now = now_unix_millis();
+        let mut writes = Vec::new();
+        for _ in 0..entries {
+            // The agent echoes the previous entry, which clears the
+            // generation-start wait, then goes quiet again.
+            now += 1;
+            session.last_output_at.store(now, Ordering::Relaxed);
+            now += WRITE_QUEUE_QUIET_MS + 10;
+            session.try_drain_batch(now);
+            let PtyCommand::Input(data) = commands.try_recv().expect("one write per drain") else {
+                panic!("an entry of its own never drains as a sequence");
+            };
+            writes.push(data);
+        }
+        assert_eq!(session.queue_depth(), 0, "every entry drained");
+        (entries, depth, writes)
+    }
+
+    #[test]
+    fn a_muse_message_takes_the_entries_and_bytes_a_gemini_one_does() {
+        assert_eq!(
+            SubmitAgent::from_agent_name("muse").map(SubmitAgent::name),
+            Some("muse")
+        );
+        let muse = SubmitAgent::from_agent_name("muse").expect("muse is a submit agent");
+        let at_the_cap = "x".repeat(MAX_TERMINAL_WRITE_BYTES);
+        let bodies = ["poke", "one\ntwo\n\nthree", at_the_cap.as_str()];
+        let as_muse = queued_entries_depth_and_writes(built_in_submit(muse), &bodies);
+        let as_gemini =
+            queued_entries_depth_and_writes(built_in_submit(SubmitAgent::Gemini), &bodies);
+        assert_eq!(
+            (as_gemini.0, as_gemini.1),
+            (6, 3),
+            "a body entry and a chord entry for each of three messages"
+        );
+        assert_eq!(as_muse, as_gemini);
+    }
+
+    #[test]
+    fn a_muse_session_is_listed_as_muse() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (by_command, _rx) = test_agent_session(
+            1024,
+            "s-muse",
+            Some("@@Muse"),
+            None,
+            Some("/usr/local/bin/muse --resume"),
+            &[],
+        );
+        register_session(&registry, &by_command);
+        let (by_env, _rx) = test_agent_session(
+            1024,
+            "s-wrapped",
+            Some("@@Wrapped"),
+            None,
+            Some("./run-my-agent.sh"),
+            &[("CHAN_AGENT", "muse")],
+        );
+        register_session(&registry, &by_env);
+        let mut listed: Vec<_> = registry
+            .session_summaries()
+            .into_iter()
+            .map(|summary| (summary.session_id, summary.agent.map(SubmitAgent::name)))
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                ("s-muse".to_string(), Some("muse")),
+                ("s-wrapped".to_string(), Some("muse")),
+            ]
+        );
+    }
+
     #[test]
     fn enqueue_broadcasts_queue_depth_on_both_paths() {
         let session = test_session_with_ring(1024);

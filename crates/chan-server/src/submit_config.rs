@@ -133,4 +133,19 @@ template = "\\e[200~{}\\e[201~\\r"
             Some("\\e[200~{}\\e[201~\\r")
         );
     }
+
+    #[test]
+    fn muse_table_deserializes() {
+        let file: SubmitOverridesFile = toml::from_str(
+            r#"
+[muse]
+template = "{}\\r"
+"#,
+        )
+        .expect("valid submit config");
+        assert_eq!(
+            file.into_map().get("muse").map(String::as_str),
+            Some("{}\\r")
+        );
+    }
 }

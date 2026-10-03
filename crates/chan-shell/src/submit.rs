@@ -1021,4 +1021,146 @@ mod tests {
         }
         assert_eq!(SubmitAgent::from_agent_name("turbo"), None);
     }
+
+    /// Muse has a name of its own and gemini's encoding: the same template,
+    /// and the same split of a body from its chord, for every body shape.
+    #[test]
+    fn muse_is_a_submit_agent_that_encodes_as_gemini_does() {
+        assert_eq!(
+            SubmitAgent::from_agent_name("muse").map(SubmitAgent::name),
+            Some("muse")
+        );
+        let muse = SubmitAgent::from_agent_name("muse").expect("muse is a submit agent");
+        let gemini = SubmitAgent::Gemini;
+        assert_ne!(muse, gemini, "muse is its own agent, not gemini's alias");
+        assert_eq!(serde_json::to_string(&muse).unwrap(), r#""muse""#);
+        assert_eq!(
+            serde_json::from_str::<SubmitAgent>(r#""muse""#).unwrap(),
+            muse
+        );
+        assert_eq!(muse.default_template(), gemini.default_template());
+        assert!(!built_in(muse).is_batchable());
+
+        assert_eq!(
+            submit_writes("poke".into(), Some(muse)),
+            vec!["poke\n".to_string(), "\r".to_string()]
+        );
+        let paste_sized = "paste ".repeat(6 * 1024);
+        for body in [
+            "poke",
+            "poke\n",
+            "one\ntwo\n\nthree",
+            paste_sized.as_str(),
+            "",
+        ] {
+            assert_eq!(
+                apply_submit_chord(body.into(), Some(muse)),
+                apply_submit_chord(body.into(), Some(gemini)),
+                "one coalesced write of {} bytes",
+                body.len()
+            );
+            assert_eq!(
+                submit_writes(body.into(), Some(muse)),
+                submit_writes(body.into(), Some(gemini)),
+                "the ordered writes of {} bytes",
+                body.len()
+            );
+            assert_eq!(
+                splits_submit_chord(body, &built_in(muse)),
+                splits_submit_chord(body, &built_in(gemini)),
+                "the split of {} bytes",
+                body.len()
+            );
+            for batched in [false, true] {
+                assert_eq!(
+                    plan_submitted_input(body.into(), Some(&built_in(muse)), batched),
+                    plan_submitted_input(body.into(), Some(&built_in(gemini)), batched),
+                    "the input plan of {} bytes, batched {batched}",
+                    body.len()
+                );
+            }
+        }
+    }
+
+    /// Muse's template is overridden under its own name, by its own variable
+    /// and its own config section, and an override keeps the split.
+    #[test]
+    fn a_muse_override_has_its_own_name_and_keeps_the_split() {
+        let muse = SubmitAgent::from_agent_name("muse").expect("muse is a submit agent");
+        let env = |key: &str| (key == "CHAN_SUBMIT_MUSE").then(|| "{}\\n\\r".to_string());
+        let (template, source) = resolve_template_with_source(muse, env, None);
+        assert_eq!(
+            (template.as_str(), source),
+            ("{}\n\r", SubmitTemplateSource::Override)
+        );
+        let overridden = ResolvedSubmit {
+            agent: muse,
+            template,
+            source,
+        };
+        assert!(splits_submit_chord("body", &overridden));
+        assert_eq!(
+            plan_submitted_input("body".into(), Some(&overridden), false).parts,
+            vec![b"body\n".to_vec(), b"\n\r".to_vec()]
+        );
+
+        let mut file = HashMap::new();
+        file.insert("muse".to_string(), "\\r\\r".to_string());
+        assert_eq!(resolve_template(muse, |_| None, Some(&file)), "\r\r");
+
+        // Gemini's variable and section are gemini's alone.
+        let gemini_env = |key: &str| (key == "CHAN_SUBMIT_GEMINI").then(|| "{}\\n\\r".to_string());
+        let mut gemini_file = HashMap::new();
+        gemini_file.insert("gemini".to_string(), "\\r\\r".to_string());
+        assert_eq!(
+            resolve_template_with_source(muse, gemini_env, Some(&gemini_file)),
+            ("{}\r".to_string(), SubmitTemplateSource::BuiltIn)
+        );
+    }
+
+    /// Muse is derived as the other agents are: a whole word anywhere in the
+    /// command, or `CHAN_AGENT`, which wins over the command. A command that
+    /// names two agents derives the one tested first, in alphabetical order.
+    #[test]
+    fn derive_names_muse_by_whole_word_and_by_chan_agent() {
+        let derived = |command: &str, chan_agent: Option<&str>| {
+            SubmitAgent::derive(command, chan_agent).map(SubmitAgent::name)
+        };
+        let rows: [(&str, Option<&str>, Option<&str>); 14] = [
+            ("muse", None, Some("muse")),
+            ("my-muse.sh", None, Some("muse")),
+            ("/usr/local/bin/muse --resume", None, Some("muse")),
+            ("env FOO=1 muse chat", None, Some("muse")),
+            ("MUSE", None, Some("muse")),
+            ("musette", None, None),
+            ("amuse", None, None),
+            ("muse_cli", None, None),
+            ("claude", Some("muse"), Some("muse")),
+            ("bash", Some("  Muse "), Some("muse")),
+            ("muse", Some("codex"), Some("codex")),
+            ("muse", Some("shell"), None),
+            ("muse --profile opencode", None, Some("muse")),
+            ("kimi muse", None, Some("kimi")),
+        ];
+        let wrong: Vec<_> = rows
+            .iter()
+            .filter_map(|&(command, chan_agent, want)| {
+                let got = derived(command, chan_agent);
+                (got != want).then_some((command, chan_agent, got, want))
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "(command, CHAN_AGENT, derived, wanted): {wrong:#?}"
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn submit_agent_value_enum_parses_muse() {
+        assert_eq!(
+            SubmitAgent::from_str("muse", true).map(SubmitAgent::name),
+            Ok("muse")
+        );
+    }
 }

@@ -1485,6 +1485,18 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_derives_muse_and_documents_its_submit_encoding() {
+        let mut config = sample_config();
+        config.members[1].command = "/usr/local/bin/muse --resume".into();
+        let bootstrap = generate_bootstrap_md("new-team-1", &config, None);
+        assert_eq!(member_agent(&config.members[1]), Some("muse"));
+        assert!(
+            bootstrap.contains("- muse: --submit=muse (chord \\r)"),
+            "a muse member's chord line names muse and the bare CR:\n{bootstrap}"
+        );
+    }
+
+    #[test]
     fn bootstrap_derives_kimi_and_documents_its_submit_encoding() {
         let mut config = sample_config();
         config.members[1].command = "/home/fiorix/.kimi-code/bin/kimi".into();

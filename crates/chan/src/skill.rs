@@ -859,6 +859,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dumped_terminal_help_names_muse_as_a_submit_agent() {
+        let omitting: Vec<&str> = ["cs-terminal-list", "cs-terminal-team", "cs-terminal-write"]
+            .into_iter()
+            .filter(|topic| {
+                !render_topic(topic)
+                    .expect("terminal help topic")
+                    .contains("muse")
+            })
+            .collect();
+        assert!(
+            omitting.is_empty(),
+            "help topics omitting muse: {omitting:?}"
+        );
+    }
+
     /// Column budget for hand-wrapped help text. Leaves room inside an
     /// 80-column terminal for the two-space indent clap puts in front of
     /// nested help.
