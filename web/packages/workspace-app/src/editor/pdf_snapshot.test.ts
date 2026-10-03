@@ -676,6 +676,68 @@ describe("liftPageImages", () => {
     expect(img.getAttribute("width")).toBe("40");
   });
 
+  test("a height-sized image restores both measured style lengths after the hint moves it", async () => {
+    imagesHaveBoxes();
+    decodesSettleAtOnce();
+    const root = page('<img src="/api/fs/height.png" style="height:30px">');
+    const img = root.querySelector("img")!;
+    vi.spyOn(img, "getBoundingClientRect").mockReturnValue({
+      left: 0, top: 0, width: 225, height: 30,
+    } as DOMRect);
+    const originalStyle = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = originalStyle(el, pseudo);
+      if (el !== img) return style;
+      return new Proxy(style, {
+        get(target, property) {
+          if (property === "width") {
+            return img.style.maxWidth === "225px" || !img.hasAttribute("width")
+              ? "225px" : "669px";
+          }
+          if (property === "height") return "30px";
+          return Reflect.get(target, property);
+        },
+      });
+    });
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await liftPageImages(root, images);
+    for (const property of ["width", "min-width", "max-width"]) {
+      expect(img.style.getPropertyValue(property)).toBe("225px");
+    }
+    for (const property of ["height", "min-height", "max-height"]) {
+      expect(img.style.getPropertyValue(property)).toBe("30px");
+    }
+    expect(images.lifted[0]!.shape.shownHeight).toBeCloseTo(30 / 225);
+  });
+
+  test("a shown image whose style cannot regain its measured box fails by name", async () => {
+    imagesHaveBoxes();
+    decodesSettleAtOnce();
+    const root = page('<img src="/api/fs/unstable.png" style="height:30px">');
+    const img = root.querySelector("img")!;
+    vi.spyOn(img, "getBoundingClientRect").mockReturnValue({
+      left: 0, top: 0, width: 225, height: 30,
+    } as DOMRect);
+    const originalStyle = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = originalStyle(el, pseudo);
+      if (el !== img) return style;
+      return new Proxy(style, {
+        get(target, property) {
+          if (property === "width") return img.hasAttribute("width") ? "669px" : "225px";
+          if (property === "height") return "30px";
+          return Reflect.get(target, property);
+        },
+      });
+    });
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await expect(liftPageImages(root, images)).rejects.toThrow(
+      "image /api/fs/unstable.png did not keep its measured box",
+    );
+  });
+
   test("a closed details image with a box is not painted", async () => {
     imagesHaveBoxes();
     Object.defineProperty(HTMLImageElement.prototype, "checkVisibility", {

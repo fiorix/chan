@@ -11,7 +11,7 @@
 // play does not break in the PDF, and an image with no size of its own is
 // as wide as play lays it out.
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -28,6 +28,7 @@ const AMBER = [255, 176, 0];
 const BLUE = [20, 90, 200];
 const ORANGE = [230, 60, 20];
 const ROSE = [220, 20, 120];
+const GREEN = [0, 150, 80];
 
 /// A deck page of the export: A4 landscape, the 16:9 slide fitted to the
 /// page's width and centred on it, laid out as play lays it out on a
@@ -262,10 +263,11 @@ function inspectDoc(rasters) {
 
 /// Capture the browser's composed boxes immediately before the lift writes
 /// its first stand-in, then after all stand-ins have been written.
-async function watchImageLift(page) {
-  await page.evaluate(() => {
+async function watchImageLift(page, expectedImage) {
+  await page.evaluate((expected) => {
     const original = Element.prototype.setAttribute;
-    const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker"]);
+    const originalClone = Element.prototype.cloneNode;
+    const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker", "height-only"]);
     const capture = { before: null, after: null };
     const read = (host) => Object.fromEntries(
       [...host.querySelectorAll("img[alt]")]
@@ -282,15 +284,51 @@ async function watchImageLift(page) {
           String(value).startsWith("data:")) {
         let host = this.parentElement;
         while (host && host.style?.left !== "-10000px") host = host.parentElement;
-        if (host && [...host.querySelectorAll("img[alt]")].some((img) => img.alt === "wide-table")) {
+        if (host && [...host.querySelectorAll("img[alt]")].some((img) => img.alt === expected)) {
           capture.before = read(host);
-          queueMicrotask(() => { capture.after = read(host); });
         }
       }
       return original.call(this, name, value);
     };
-    window.__pdfImageLift = { capture, restore: () => { Element.prototype.setAttribute = original; } };
-  });
+    Element.prototype.cloneNode = function (deep) {
+      if (capture.before && !capture.after) {
+        let host = this.parentElement;
+        while (host && host.style?.left !== "-10000px") host = host.parentElement;
+        if (host && [...host.querySelectorAll("img[alt]")].some((img) => img.alt === expected)) {
+          capture.after = read(host);
+        }
+      }
+      return originalClone.call(this, deep);
+    };
+    window.__pdfImageLift = { capture, restore: () => {
+      Element.prototype.setAttribute = original;
+      Element.prototype.cloneNode = originalClone;
+    } };
+  }, expectedImage);
+}
+
+function inspectHeightImage(rasters, capture) {
+  const page = rasters[0];
+  const before = capture?.before?.["height-only"];
+  const after = capture?.after?.["height-only"];
+  const box = colourBox(page, GREEN);
+  const scale = page.width / 669;
+  const faults = [];
+  if (!before || !after || !box) {
+    faults.push("height-only: the image, final box, or PDF colour is missing");
+  } else {
+    for (const index of [0, 1]) {
+      if (Math.abs(parseFloat(before.style[index]) - parseFloat(after.style[index])) > 0.5) {
+        faults.push(`height-only: style ${before.style.join("x")} became ${after.style.join("x")}`);
+        break;
+      }
+    }
+    if (Math.abs(box.width / scale - before.rect.width) > 2 ||
+        Math.abs(box.height / scale - before.rect.height) > 2) {
+      faults.push(`height-only: PDF colour ${box.width / scale}x${box.height / scale} CSS px, composed ${before.rect.width}x${before.rect.height}`);
+    }
+  }
+  return { details: { capture, box }, faults };
 }
 
 function inspectLayoutImages(rasters, capture) {
@@ -390,6 +428,24 @@ async function clickExportToPdf(page) {
   if (!clicked) throw new Error("Export to PDF menu item not found");
 }
 
+async function pdfOrFailure(page, path) {
+  const started = Date.now();
+  let lastSize = -1;
+  for (;;) {
+    if (existsSync(path)) {
+      const size = statSync(path).size;
+      if (size > 0 && size === lastSize) return readFileSync(path);
+      lastSize = size;
+    }
+    const notice = await page.evaluate(() =>
+      document.querySelector('[aria-label="status message"]')?.textContent?.trim() ?? "",
+    );
+    if (notice.startsWith("PDF export failed:")) throw new Error(notice);
+    if (Date.now() - started > 90_000) throw new Error(`file did not settle: ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+}
+
 export default {
   name: "pdf-inspector",
   async run(ctx) {
@@ -430,6 +486,13 @@ export default {
         pages: 1,
         inspect: inspectLayoutImages,
       },
+      {
+        file: "layout-height.md",
+        pdf: "layout-height.pdf",
+        orientation: "portrait",
+        pages: 1,
+        inspect: inspectHeightImage,
+      },
     ];
     const details = {};
     // What the pixel reads measured, for the message of a failed run.
@@ -440,11 +503,13 @@ export default {
       if (existsSync(target)) rmSync(target);
 
       await selectTreeFile(page, c.file);
-      if (c.file === "layout-images.md") await watchImageLift(page);
+      if (c.file === "layout-images.md" || c.file === "layout-height.md") {
+        await watchImageLift(page, c.file === "layout-images.md" ? "wide-table" : "height-only");
+      }
       await clickExportToPdf(page);
-      const bytes = await ctx.pollFile(target, 90_000);
+      const bytes = await pdfOrFailure(page, target);
       await ctx.shot(`exported-${c.file}`);
-      const capture = c.file === "layout-images.md" ? await page.evaluate(() => {
+      const capture = (c.file === "layout-images.md" || c.file === "layout-height.md") ? await page.evaluate(() => {
         const result = window.__pdfImageLift?.capture;
         window.__pdfImageLift?.restore();
         delete window.__pdfImageLift;
