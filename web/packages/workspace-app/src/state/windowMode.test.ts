@@ -3,8 +3,8 @@ import {
   TERMINAL_ONLY_COMMANDS,
   windowModeAllowsCommand,
   windowModeAllowsSnapshot,
+  windowModeSecretMaskingEnabled,
 } from "./windowMode";
-import * as windowMode from "./windowMode";
 
 describe("terminal secret masking seed", () => {
   test.each([
@@ -15,11 +15,7 @@ describe("terminal secret masking seed", () => {
     [false, false, false],
     [false, true, false],
   ] as const)("preference %s in control mode %s seeds %s", (preference, terminalControl, expected) => {
-    const rule = (windowMode as unknown as {
-      windowModeSecretMaskingEnabled?: (preference: boolean | undefined, mode: { terminalControl: boolean }) => boolean;
-    }).windowModeSecretMaskingEnabled;
-    expect(typeof rule).toBe("function");
-    expect(rule!(preference, { terminalControl })).toBe(expected);
+    expect(windowModeSecretMaskingEnabled(preference, { terminalControl })).toBe(expected);
   });
 });
 

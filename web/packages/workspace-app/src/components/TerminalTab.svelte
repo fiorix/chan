@@ -102,7 +102,7 @@
     ui,
   } from "../state/store.svelte";
   import { terminalWsPath } from "../terminal/session";
-  import { windowModeAllowsSnapshot } from "../state/windowMode";
+  import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
   import {
     readTerminalSnapshot,
@@ -966,9 +966,11 @@
     mouseFilter = (terminalPrefs?.mouse_capture ?? true)
       ? null
       : new MouseModeFilter();
-    // The persisted flag seeds each fresh tab. The menu/launcher toggle only
-    // changes this component instance, so a respawn returns to the config.
-    secretMaskingEnabled = terminalPrefs?.secret_masking ?? false;
+    // The preference and window kind seed each fresh tab. The menu/launcher
+    // toggle changes only this instance, so a respawn uses the rule again.
+    secretMaskingEnabled = windowModeSecretMaskingEnabled(terminalPrefs?.secret_masking, {
+      terminalControl: ui.terminalControl,
+    });
     const secretMaskSuffixes =
       terminalPrefs?.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES;
     const fontPref = terminalPrefs?.font ?? "os-default";

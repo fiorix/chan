@@ -180,8 +180,9 @@ export type TerminalPreferences = {
   /// `undefined` as false. Applies to newly opened terminals.
   ghostty?: boolean;
   /// Whether xterm.js terminals visually obscure values whose assignment
-  /// names end in a configured secret suffix. Optional for older servers;
-  /// absent means disabled. Per-tab toggles do not persist this field.
+  /// names end in a configured secret suffix. When absent, control terminals
+  /// seed masking on and other windows seed it off. Per-tab toggles do not
+  /// persist this field.
   secret_masking?: boolean;
   /// Literal, case-insensitive assignment-name suffixes for visual masking.
   /// The server validates `[A-Za-z0-9_]+` entries and caps the list at 100.

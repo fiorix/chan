@@ -81,3 +81,11 @@ export function windowModeAllowsSnapshot(mode: {
 }): boolean {
   return !mode.terminalControl;
 }
+
+/// A configured masking preference wins; an unset one follows the window kind.
+export function windowModeSecretMaskingEnabled(
+  preference: boolean | undefined,
+  mode: { terminalControl: boolean },
+): boolean {
+  return preference ?? mode.terminalControl;
+}
