@@ -4240,7 +4240,8 @@ mod tests {
                 .read_text("b.excalidraw")
                 .unwrap()
                 .contains("#00ff00"),
-            "the flusher told to stop gave up on a cell that was let go inside its wait"
+            "the flusher told to stop ended beside a cell that was let go and left an \
+             edit unflushed"
         );
     }
 }

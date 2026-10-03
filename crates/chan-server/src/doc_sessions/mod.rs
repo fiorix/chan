@@ -5114,7 +5114,8 @@ mod tests {
         assert_eq!(
             fx.workspace.read_text("a.md").unwrap(),
             "unflushed",
-            "the flusher told to stop gave up on a cell that was let go inside its wait"
+            "the flusher told to stop ended beside a cell that was let go and left an \
+             edit unflushed"
         );
     }
 
