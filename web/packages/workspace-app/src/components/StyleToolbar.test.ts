@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import StyleToolbar from "./StyleToolbar.svelte";
 import type Wysiwyg from "../editor/Wysiwyg.svelte";
 import type { BlockKind } from "../editor/commands/format";
+import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 
 type MockFn = ReturnType<typeof vi.fn>;
@@ -203,6 +204,24 @@ describe("StyleToolbar", () => {
       strikethrough: "strikethrough",
       "inline code": "inline code",
     });
+  });
+
+  test("a chord the user assigned to bold or italic leaves the tooltip on the chord the editor binds", async () => {
+    const bound = { bold: chordFor("app.editor.bold"), italic: chordFor("app.editor.italic") };
+    assignOverride("app.editor.bold", "Mod+Alt+B");
+    assignOverride("app.editor.italic", "Mod+Alt+I");
+    try {
+      expect(chordFor("app.editor.bold"), "the registry answers with the assignment").not.toBe(bound.bold);
+      const { target } = await renderToolbar();
+
+      expect({ bold: button(target, "bold").title, italic: button(target, "italic").title }).toEqual({
+        bold: `bold (${bound.bold})`,
+        italic: `italic (${bound.italic})`,
+      });
+    } finally {
+      clearOverride("app.editor.bold");
+      clearOverride("app.editor.italic");
+    }
   });
 
   test("the formatting pill opens the row by focus and preserves editor mouse focus", async () => {
