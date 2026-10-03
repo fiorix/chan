@@ -20,11 +20,11 @@ import {
   waitForTransferSlot,
 } from "./transfers.svelte";
 import { api, sessionWindowId } from "../api/client";
-import { ApiError } from "../api/errors";
+import { ApiError, apiErrorCode } from "../api/errors";
 import { setXhrFactory } from "../api/transport";
 import { demoData } from "../__tests__/app";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
-import { fileOps, loadTreeDir, onWatchEvent, tree } from "./store.svelte";
+import { fileOps, loadTreeDir, onWatchEvent, tree, ui } from "./store.svelte";
 
 function resetTransfers(): void {
   transfers.items = [];
@@ -137,7 +137,8 @@ describe("transfer ids cannot collide across windows", () => {
 });
 
 /// An upload request that answers with `status` (and `retryAfter`, when set)
-/// as soon as it is sent, recording the headers the client set.
+/// as soon as it is sent, recording the headers the client set. A `body`
+/// stands for what a refusal answers in place of the upload's result.
 class AnsweringXhr {
   static sent: AnsweringXhr[] = [];
   headers: Record<string, string> = {};
@@ -153,6 +154,7 @@ class AnsweringXhr {
   constructor(
     private readonly answer: number,
     private readonly retryAfter: string | null,
+    private readonly body: string | null,
   ) {
     AnsweringXhr.sent.push(this);
   }
@@ -168,7 +170,8 @@ class AnsweringXhr {
     const file = body.get("file") as File;
     const dir = body.get("dir");
     this.status = this.answer;
-    this.responseText = JSON.stringify({ path: `${dir ? `${dir}/` : ""}${file.name}`, size: file.size });
+    this.responseText =
+      this.body ?? JSON.stringify({ path: `${dir ? `${dir}/` : ""}${file.name}`, size: file.size });
     queueMicrotask(() => {
       this.onload?.();
       this.onloadend?.();
@@ -177,9 +180,9 @@ class AnsweringXhr {
   abort(): void {}
 }
 
-function answerUploads(status = 200, retryAfter: string | null = null): void {
+function answerUploads(status = 200, retryAfter: string | null = null, body: string | null = null): void {
   AnsweringXhr.sent = [];
-  setXhrFactory(() => new AnsweringXhr(status, retryAfter) as unknown as XMLHttpRequest);
+  setXhrFactory(() => new AnsweringXhr(status, retryAfter, body) as unknown as XMLHttpRequest);
 }
 
 describe("the frame on the watch stream", () => {
@@ -238,16 +241,52 @@ describe("the tracking headers on an upload", () => {
   });
 });
 
-describe("the admission refusal is not a failure", () => {
+describe("an upload the server refuses with 503", () => {
   afterEach(() => setXhrFactory(null));
 
-  test("a 503 is raised as busy with its retry interval", async () => {
-    answerUploads(503, "7");
+  // Each body is what its sender answers: the server's transfer bound, a
+  // stopping devserver, and the gateway's proxy, whose 503 is plain text.
+  const STOPPING = `{"error":"the devserver is stopping","code":"devserver_stopping"}`;
+  const REFUSALS: [whose: string, body: string, sentence: string, code: string | null][] = [
+    [
+      "the transfer bound's",
+      `{"error":"too many transfers in progress; retry shortly"}`,
+      "too many transfers in progress; retry shortly",
+      null,
+    ],
+    ["a stopping devserver's", STOPPING, "the devserver is stopping", "devserver_stopping"],
+    ["a proxy's plain", "entry capacity reached", "entry capacity reached", null],
+  ];
+
+  test.each(REFUSALS)("fails with %s sentence and code", async (_whose, body, sentence, code) => {
+    answerUploads(503, "1", body);
 
     const refused = await api.uploadFile(new File(["x"], "a.md"), "").catch((error: unknown) => error);
 
     expect(refused).toBeInstanceOf(ApiError);
-    expect(refused).toMatchObject({ status: 503, message: "server busy", data: { retryAfterSeconds: 7 } });
+    expect({ message: (refused as ApiError).message, code: apiErrorCode(refused) }).toEqual({ message: sentence, code });
+  });
+
+  test("shows the server's sentence on the transfer's row and in the status line", async () => {
+    installDemoWorkspace(demoData([]));
+    try {
+      tree.entries = [];
+      tree.loadedDirs = {};
+      await loadTreeDir("");
+      answerUploads(503, null, STOPPING);
+      resetTransfers();
+
+      await fileOps.uploadFilesTo("", [new File(["new"], "b.md")]);
+
+      expect({ row: transfers.items[0]?.error, status: ui.status }).toEqual({
+        row: "the devserver is stopping",
+        status: "upload failed: the devserver is stopping",
+      });
+      expect(transfers.items[0]?.state).toBe("failed");
+    } finally {
+      uninstallDemoWorkspace();
+      tree.entries = [];
+    }
   });
 
   test("a missing or blank Retry-After stays absent rather than becoming zero", async () => {
