@@ -1891,4 +1891,57 @@ describe("a live drawing", () => {
       dirty: false,
     });
   });
+
+  describe("a drawing whose file holds one id on two elements", () => {
+    const FIRST = { id: "twice", type: "rectangle", version: 1, versionNonce: 1, isDeleted: false, x: 0 };
+    const SECOND = { ...FIRST, versionNonce: 2, x: 40 };
+    const TWICE = JSON.stringify({ elements: [FIRST, SECOND], appState: {}, files: {} });
+
+    /// Load the tab again from its file, which nothing has written since it
+    /// was opened, and let the board's flush after the seed run.
+    async function reloadTheSameFile(tab: FileTab, reads: ReturnType<typeof holdReads>) {
+      vi.useFakeTimers();
+      const loading = reloadTabFromDisk(tab.id);
+      await vi.advanceTimersByTimeAsync(0);
+      await reads.finish(TWICE);
+      await loading;
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+    }
+
+    test("two seeds of its buffer put the same ids on the board", async () => {
+      scene.live = false;
+      const { tab, reads } = await loadedTab("notes/twice.excalidraw", TWICE);
+      const { board } = await mountBoard(tab);
+      await board.start();
+      const first = shownIds(board);
+      await reloadTheSameFile(tab, reads);
+
+      expect({ distinct: new Set(first).size, second: shownIds(board) }).toEqual({ distinct: 2, second: first });
+    });
+
+    test("a reload pushes no element, and the authority holds as many after it as before", async () => {
+      const { tab, reads } = await loadedTab("notes/twice.excalidraw", TWICE);
+      const { board } = await mountBoard(tab);
+      await board.start();
+      await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+      const socket = sceneSockets[0]!;
+      socket.open();
+      // The authority keeps the first element of a repeated id, so the board
+      // holds one element its snapshot lacks and offers it once.
+      socket.frame(snapshotOf(tab, { elements: [FIRST], appState: {} }));
+      await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
+      socket.frame({ type: "push-ok", version: 2 });
+      // What the authority holds: its snapshot's element and each one pushed.
+      const held = () => new Set([FIRST.id, ...idsPushed(socket).flat()]).size;
+      const before = { pushes: socket.pushes().length, held: held() };
+      await reloadTheSameFile(tab, reads);
+
+      expect({ before, after: { pushes: socket.pushes().length, held: held() }, board: shownIds(board).length }).toEqual({
+        before: { pushes: 1, held: 2 },
+        after: { pushes: 1, held: 2 },
+        board: 2,
+      });
+    });
+  });
 });

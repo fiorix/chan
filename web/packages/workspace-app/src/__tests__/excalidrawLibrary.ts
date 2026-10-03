@@ -75,9 +75,15 @@ const VIEW_APP_STATE: Record<string, unknown> = {
   activeTool: { type: "selection" },
 };
 
+/// The library's `randomId` (chunk:15370): an id no earlier call answered.
+let randomIds = 0;
+const randomId = (): string => `random-${(randomIds += 1)}`;
+
 /// The library's `restore` (chunk:20669-20851), reduced to what a test can
 /// see: it drops `selection` elements (:20674), gives an element without a
-/// version the version 1 (:20454), and answers every appState key it knows,
+/// version the version 1 (:20454), gives an element without an id a random
+/// one (:20458) and each element after the first of a repeated id another
+/// (:20684-20686), at every call, and answers every appState key it knows,
 /// each one the scene lacks at its default (chunk:20793-20843).
 function restore(data: Scene | null): { elements: Element[]; appState: AppState; files: Files } {
   const supplied = data?.appState ?? {};
@@ -85,10 +91,16 @@ function restore(data: Scene | null): { elements: Element[]; appState: AppState;
   for (const [key, fallback] of Object.entries({ ...SERIALIZED_APP_STATE, ...VIEW_APP_STATE })) {
     appState[key] = supplied[key] !== undefined ? supplied[key] : fallback;
   }
+  const existingIds = new Set<unknown>();
   return {
     elements: (data?.elements ?? [])
       .filter((element) => element.type !== "selection")
-      .map((element) => ({ ...element, version: element.version || 1 })),
+      .map((element) => {
+        const restored = { ...element, id: element.id || randomId(), version: element.version || 1 };
+        if (existingIds.has(restored.id)) restored.id = randomId();
+        existingIds.add(restored.id);
+        return restored;
+      }),
     appState,
     files: data?.files ?? {},
   };
