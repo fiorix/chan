@@ -4147,11 +4147,19 @@ mod tests {
         );
     }
 
+    /// A reset or an import whose first wait ends busy holds the cell for
+    /// that wait and lets it go with its workspace in it and every session
+    /// as it was, so the flusher is the only one left to flush them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_flusher_told_to_stop_ends_beside_a_held_cell_and_leaves_its_sessions() {
+    async fn a_flusher_told_to_stop_flushes_after_a_long_hold_that_ends_busy() {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))]);
         let (ha, _frames) = attach(&fx, "b.excalidraw", "w1").await;
-        ha.push(vec![elem("x", 2, 2, "a1")], None, None).unwrap();
+        let mut moved = elem("x", 2, 2, "a1");
+        moved
+            .as_object_mut()
+            .unwrap()
+            .insert("strokeColor".into(), "#0000ff".into());
+        ha.push(vec![moved], None, None).unwrap();
         let (stop, stopped) = watch::channel(false);
         let cell = held_cell::cell_of(&fx.workspace);
         let flusher = spawn_flusher(
@@ -4161,19 +4169,25 @@ mod tests {
             stopped,
         );
 
-        let ended = held_cell::while_held(&cell, || {
+        held_cell::while_held(&cell, || {
             stop.send(true).expect("the flusher listens");
-            held_cell::within(held_cell::MUST_HAPPEN, || flusher.is_finished())
+            std::thread::sleep(held_cell::A_LONG_HOLD);
         });
 
         assert!(
-            ended,
-            "the drawing flusher told to stop was still waiting for a held workspace cell after {:?}",
-            held_cell::MUST_HAPPEN
+            held_cell::within(held_cell::MUST_HAPPEN, || flusher.is_finished()),
+            "the drawing flusher told to stop never ended once the cell was let go"
         );
         assert!(
-            fx.registry.get("b.excalidraw").is_some(),
-            "the flusher closed a session it could not flush, which the cell's holder flushes and closes"
+            fx.workspace
+                .read_text("b.excalidraw")
+                .unwrap()
+                .contains("#0000ff"),
+            "the flusher told to stop left an edit unflushed beside a hold that ended busy"
+        );
+        assert!(
+            fx.registry.get("b.excalidraw").is_none(),
+            "the flusher told to stop left a session open"
         );
     }
 
