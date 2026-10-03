@@ -40,6 +40,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The excluded-directories route takes a name that holds a backslash when a directory of the workspace has it.** `PUT /api/index/excluded-dirs` refused every such name as a path. It now takes one that a directory of the workspace has, or that the stored set already holds, and refuses any other with a sentence that says no directory has that name. Settings does not offer such a directory yet.
 
+- **`terminal.secret_masking` can be unset.** Unset is no longer the same as `false`: the key is left out of `server.toml` and of `/api/config`, and a terminal's masking then starts by its window, on in a control terminal and off elsewhere. `chan config get` reads an unset key as `null`; `chan config set terminal.secret_masking none` (or `null`), or `"secret_masking": null` in a `PATCH /api/config`, clears a choice and removes the key from the file. A `server.toml` that already holds `secret_masking = false` keeps reading as a choice of `false`: v0.101.0 wrote that line on every save, so clear the key or delete the line to get the default.
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
@@ -119,6 +121,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A drawing's grid and background survive a change reported right after it loads.** The canvas dropped the grid and background it had handed the drawing library at the library's next reported change of any kind, so a click or a key press before the render that shows them could let a flush, or a push to a live session, carry the board's earlier values over the drawing's. A handed value now stays until the library shows it.
 
 - **A terminal whose devserver moved does not adopt another library's devserver for the same folder.** When a terminal's control socket is gone, `cs` searches the sibling devservers for the one that serves its workspace's root. It now skips one that names another library, where a match on the root alone adopted it; when either side names no library, the root decides as before. Only a devserver names its library and only its terminals carry the name.
+
+- **A storage reset or a metadata import no longer stalls the server while it waits.** The document and drawing session tasks waited for the workspace on the server's worker threads for as long as a reset or an import held it, so on a host of one or two CPUs every request stopped until it ended. They now look without waiting and catch up once it has ended, and a server told to stop during one still writes its open documents and drawings once the workspace is back.
 
 ### Security
 
