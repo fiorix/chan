@@ -60,6 +60,12 @@ finish_success() {
     rm -rf "$WORK"
 }
 
+# Every `chan devserver restart` of the suite. Extra arguments go to the
+# restart.
+restart_devserver() {
+    "$CHAN" devserver restart --service=systemd "$@" --bind=127.0.0.1 --port="$PORT"
+}
+
 # Self-test seam for the ordering above (systemd is never touched):
 #   CHAN_FDSTORE_E2E_SELFTEST=cleanup-order scripts/e2e/devserver-fdstore.sh
 if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "cleanup-order" ]; then
@@ -88,6 +94,47 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "cleanup-order" ]; then
     fi
     log "selftest cleanup-order OK"
     trap - EXIT INT TERM
+    exit 0
+fi
+
+# Self-test seam for what a restart prints (systemd is never touched: the
+# chan it runs is a stub that prints what a restart prints):
+#   CHAN_FDSTORE_E2E_SELFTEST=token-mask scripts/e2e/devserver-fdstore.sh
+if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "token-mask" ]; then
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/chan-fdstore-selftest.XXXXXX")"
+    TOKEN="selftest-token-$$"
+    CHAN="$WORK/chan"
+    PORT=1
+    cat > "$CHAN" <<EOF
+#!/usr/bin/env bash
+printf 'CHAN_DEVSERVER_TOKEN=%s\n' '$TOKEN'
+printf 'http://127.0.0.1:1/?w=1&t=%s&x=2\n' '$TOKEN'
+exit "\${STUB_EXIT:-0}"
+EOF
+    chmod +x "$CHAN"
+    selftest_fail() {
+        log "SELFTEST FAIL: $*"
+        rm -rf "$WORK"
+        exit 1
+    }
+    case "$("$CHAN")" in
+        *"$TOKEN"*) ;;
+        *) selftest_fail "the stub printed no token, so nothing below can fail" ;;
+    esac
+    PRINTED="$(restart_devserver --force)" \
+        || selftest_fail "a restart that succeeded read as a failure"
+    case "$PRINTED" in
+        *"$TOKEN"*) selftest_fail "a restart printed the devserver's token" ;;
+    esac
+    case "$PRINTED" in
+        *'CHAN_DEVSERVER_TOKEN=<redacted>'*'&t=<redacted>&x=2'*) ;;
+        *) selftest_fail "a restart's marker line or launch URL is gone, not masked" ;;
+    esac
+    if STUB_EXIT=3 restart_devserver > /dev/null; then
+        selftest_fail "a restart that failed read as a success"
+    fi
+    rm -rf "$WORK"
+    log "selftest token-mask OK"
     exit 0
 fi
 
@@ -494,7 +541,7 @@ EOF
 systemctl --user daemon-reload
 
 log "starting the devserver unit"
-"$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
+restart_devserver
 wait_until 60 "first readiness" ready
 assert_store 0 "fresh boot, nothing parked"
 
@@ -544,7 +591,7 @@ assert_store 2 "adoption after bare restart must not grow the store"
 
 # ---- case 2: chan devserver restart ----
 log "case 2: chan devserver restart"
-"$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
+restart_devserver
 wait_until 60 "readiness after CLI restart" ready
 child_alive "$PID1" || fail "child died across CLI restart"
 child_alive "$WS_PID1" || fail "workspace child died across CLI restart"
@@ -716,12 +763,12 @@ assert_store 0 "stop released the store"
 
 # ---- case 8: restart --force kills sessions and restarts ----
 log "case 8: restart --force"
-"$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
+restart_devserver
 wait_until 60 "readiness before force" ready
 read -r SID3 PID3 WID3 <<<"$(spawn_windowed_sleep 86313)"
 log "session3 $SID3 child $PID3 window $WID3"
 assert_store 1 "session parked before force"
-"$CHAN" devserver restart --service=systemd --force --bind=127.0.0.1 --port="$PORT"
+restart_devserver --force
 wait_until 60 "readiness after force" ready
 child_alive "$PID3" && fail "child survived restart --force"
 assert_store 0 "force restart cleared the store"
