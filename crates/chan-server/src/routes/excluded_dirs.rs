@@ -11,11 +11,14 @@
 //! (no globs, no paths). A name keeps a `\` it already holds and gains none
 //! here: PUT takes a name that holds one when a directory of the workspace
 //! has that name, or when the stored set already holds it, and refuses any
-//! other. PUT persists the set and refreshes a warm report on the blocking
-//! pool; that refresh walks and parses the workspace. It also queues the
-//! indexer's rebuild to apply the same policy to search and graph.
+//! other. Where a `\` separates path components no directory has such a
+//! name, so there a name that is not stored is refused as a path. PUT
+//! persists the set and refreshes a warm report on the blocking pool; that
+//! refresh walks and parses the workspace. It also queues the indexer's
+//! rebuild to apply the same policy to search and graph.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -66,10 +69,42 @@ pub async fn api_excluded_dirs_get(State(state): State<Arc<AppState>>) -> Respon
     }
 }
 
+/// Whether a `\` separates path components on this platform, so that no
+/// directory's name can hold one.
+const BACKSLASH_SEPARATES: bool = cfg!(windows);
+
+/// The refusal of an entry that is a path, where the set holds names.
+fn not_a_bare_name(entry: &str) -> String {
+    format!("excluded dir must be a bare name, not a path: {entry:?}")
+}
+
+/// Why a set is refused for an entry that holds a `\`. Each carries the
+/// entry as it was sent.
+#[derive(Debug, PartialEq, Eq)]
+enum BackslashRefusal {
+    /// A `\` separates components on this platform, so the entry is a path.
+    Path(String),
+    /// A `\` is part of a name on this platform, and no directory of the
+    /// workspace has this one.
+    NoDirectory(String),
+}
+
+impl BackslashRefusal {
+    fn message(&self) -> String {
+        match self {
+            Self::Path(entry) => not_a_bare_name(entry),
+            Self::NoDirectory(entry) => format!(
+                "no directory in this workspace is named {entry:?}; a name can hold a \
+                 backslash only when a directory already has it"
+            ),
+        }
+    }
+}
+
 /// Normalize the requested set: trim, drop blanks, reject a `/` (a name, not
 /// a path), lower-case (matching is case-insensitive), dedupe. A `\` stays:
-/// on Unix it is part of a name, so the names alone do not decide it and
-/// [`unknown_backslash_name`] asks the workspace.
+/// the names alone do not decide it, and [`refused_backslash_entry`] asks
+/// the platform and the workspace.
 /// Returns the clean set, or the offending raw entry on a hard reject.
 fn normalize(raw: &[String]) -> Result<Vec<String>, String> {
     let mut seen = HashSet::new();
@@ -90,43 +125,71 @@ fn normalize(raw: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// The first of `names` that holds a `\` and that the workspace does not
-/// know: neither one of its stored additions, nor the name of a directory of
-/// its tree, compared as the walk compares a name, by basename at any depth
-/// and ignoring ASCII case.
+/// The name of every directory under `root`, one at each step of a walk in
+/// progress: `.git` and `.chan` are not entered, no listing of the tree is
+/// built and no entry is counted. A name that is not Unicode is spelled as
+/// the walk's own filter spells it.
+fn directory_names(root: &Path) -> impl Iterator<Item = String> {
+    chan_workspace::fs_ops::walk_workspace(root)
+        .filter(|entry| entry.file_type().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+}
+
+/// The first of `entries` that none of `directories` is named, compared as
+/// the walk compares a name: trimmed, and ignoring ASCII case.
 ///
-/// A name keeps a backslash it already holds and no request creates one. On
-/// Unix a directory can have a `\` in its name; on Windows, where `\`
-/// separates components, none can, so there every such name is unknown
-/// unless it is stored. A stored name is not looked for: the set is sent
-/// whole at every change, and a name whose directory has gone since must
-/// not refuse the next one. The tree is walked, on the caller's blocking
-/// thread, only when some name with a `\` is not stored.
-fn unknown_backslash_name(
-    workspace: &chan_workspace::Workspace,
-    names: &[String],
-) -> Result<Option<String>, chan_workspace::ChanError> {
-    let stored = workspace.excluded_dirs()?;
-    let asked: Vec<&String> = names
-        .iter()
-        .filter(|name| name.contains('\\'))
-        .filter(|name| !stored.iter().any(|kept| kept.eq_ignore_ascii_case(name)))
-        .collect();
-    if asked.is_empty() {
-        return Ok(None);
+/// `directories` is advanced one name at a time and left where the last
+/// entry met its name, so a tree of any size costs no more than the walk to
+/// that directory, and only a set that is refused costs the whole walk.
+fn first_entry_no_directory_has<'a>(
+    entries: &[&'a String],
+    mut directories: impl Iterator<Item = impl AsRef<str>>,
+) -> Option<&'a String> {
+    let mut missing = entries.to_vec();
+    while !missing.is_empty() {
+        let Some(directory) = directories.next() else {
+            break;
+        };
+        missing.retain(|entry| !entry.trim().eq_ignore_ascii_case(directory.as_ref()));
     }
-    let tree = workspace.list_tree()?;
-    let named = |name: &str| {
-        tree.iter().any(|entry| {
-            entry.is_dir
-                && entry
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|basename| basename.eq_ignore_ascii_case(name))
+    missing.first().copied()
+}
+
+/// The refusal of the first of `entries` that holds a `\`, is not one of the
+/// workspace's stored additions, and cannot be taken.
+///
+/// A name keeps a backslash it already holds and no request creates one, so
+/// a stored name is not looked for: the set is sent whole at every change,
+/// and a name whose directory has gone since must not refuse the next one.
+/// Where a `\` separates components (`backslash_separates`) no directory
+/// can have such a name, and the entry is a path. Elsewhere it is a name,
+/// taken when a directory of the tree has it by basename at any depth; the
+/// tree is walked, on the caller's blocking thread, only then.
+fn refused_backslash_entry(
+    workspace: &chan_workspace::Workspace,
+    entries: &[String],
+    backslash_separates: bool,
+) -> Result<Option<BackslashRefusal>, chan_workspace::ChanError> {
+    let stored = workspace.excluded_dirs()?;
+    let asked: Vec<&String> = entries
+        .iter()
+        .filter(|entry| entry.contains('\\'))
+        .filter(|entry| {
+            !stored
+                .iter()
+                .any(|kept| kept.eq_ignore_ascii_case(entry.trim()))
         })
+        .collect();
+    let Some(first) = asked.first() else {
+        return Ok(None);
     };
-    Ok(asked.into_iter().find(|name| !named(name)).cloned())
+    if backslash_separates {
+        return Ok(Some(BackslashRefusal::Path((*first).clone())));
+    }
+    Ok(
+        first_entry_no_directory_has(&asked, directory_names(workspace.root()))
+            .map(|entry| BackslashRefusal::NoDirectory(entry.clone())),
+    )
 }
 
 pub async fn api_excluded_dirs_put(
@@ -135,29 +198,16 @@ pub async fn api_excluded_dirs_put(
 ) -> Response {
     let dirs = match normalize(&body.workspace) {
         Ok(d) => d,
-        Err(bad) => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                format!("excluded dir must be a bare name, not a path: {bad:?}"),
-            )
-        }
+        Err(bad) => return err(StatusCode::BAD_REQUEST, not_a_bare_name(&bad)),
     };
     let workspace = match state.try_workspace() {
         Ok(w) => w,
         Err(e) => return err_state(&e),
     };
     blocking_response("excluded directories", move || {
-        match unknown_backslash_name(&workspace, &dirs) {
+        match refused_backslash_entry(&workspace, &body.workspace, BACKSLASH_SEPARATES) {
             Ok(None) => {}
-            Ok(Some(name)) => {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "no directory in this workspace is named {name}; a name can hold a \
-                         backslash only when a directory already has it"
-                    ),
-                )
-            }
+            Ok(Some(refusal)) => return err(StatusCode::BAD_REQUEST, refusal.message()),
             Err(e) => return err_from(&e),
         }
         if let Err(e) = workspace.set_excluded_dirs(dirs) {
@@ -357,6 +407,98 @@ mod tests {
             stored(&app).is_empty(),
             "a refused set changed the stored names: {:?}",
             stored(&app)
+        );
+    }
+
+    /// The look is no listing of the tree: it takes a name a directory has
+    /// after more directories than a listing holds, goes no further than
+    /// that directory, and refuses the first sent of the names that none
+    /// has.
+    #[test]
+    fn the_look_takes_a_name_past_a_listings_limit_and_goes_no_further() {
+        let taken = "X\\y".to_string();
+        let mut later = 0usize;
+        let directories = std::iter::repeat_n("other", chan_workspace::fs_ops::LIST_TREE_LIMIT + 1)
+            .chain(std::iter::once("x\\Y"))
+            .chain(std::iter::repeat_n("later", 3).inspect(|_| later += 1));
+        assert_eq!(
+            first_entry_no_directory_has(&[&taken], directories),
+            None,
+            "a name was refused that a directory past a listing's limit has"
+        );
+        assert_eq!(
+            later, 0,
+            "the look went on past the directory that has the name"
+        );
+
+        let first = "no\\such".to_string();
+        let second = "nor\\this".to_string();
+        assert_eq!(
+            first_entry_no_directory_has(&[&taken, &first, &second], ["other", "x\\y"].iter()),
+            Some(&first),
+            "the refused name is not the first that no directory has"
+        );
+    }
+
+    /// The names come from a walk in progress and not from a listing built
+    /// ahead of it: a directory made under one the walk has named and not
+    /// yet read is met by the same walk.
+    #[test]
+    fn the_look_walks_the_tree_as_it_goes() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("a").join("b")).unwrap();
+        let late = root.path().join("a").join("b").join("Late");
+        let asked = "late".to_string();
+        let names = directory_names(root.path()).inspect(|name| {
+            if name == "a" {
+                std::fs::create_dir(&late).unwrap();
+            }
+        });
+        assert_eq!(
+            first_entry_no_directory_has(&[&asked], names),
+            None,
+            "a directory made while the walk was under way was not met, so the names were \
+             listed ahead of the look"
+        );
+        assert!(
+            late.is_dir(),
+            "fixture: the walk never named the first directory"
+        );
+    }
+
+    /// Where a `\` separates path components no directory's name holds
+    /// one, so a name that is not stored is refused as a path, in the
+    /// path's words and with no look at the tree: a directory that has the
+    /// name, where one can, does not take it. A stored name still passes.
+    #[tokio::test]
+    async fn where_a_backslash_separates_a_new_name_that_holds_one_is_a_path() {
+        let app = route_test_app();
+        let workspace = app.state.try_workspace().unwrap();
+        #[cfg(unix)]
+        std::fs::create_dir(app.root.path().join("src\\gen")).unwrap();
+        let entries = vec!["vendor".to_string(), "Src\\Gen".to_string()];
+        let refusal = refused_backslash_entry(&workspace, &entries, true).unwrap();
+        assert_eq!(
+            refusal,
+            Some(BackslashRefusal::Path("Src\\Gen".to_string())),
+            "a new name that holds a backslash was not refused as a path"
+        );
+        assert_eq!(
+            refusal.unwrap().message(),
+            "excluded dir must be a bare name, not a path: \"Src\\\\Gen\""
+        );
+
+        let storing = workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            storing.set_excluded_dirs(vec!["src\\gen".to_string()])
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            refused_backslash_entry(&workspace, &entries, true).unwrap(),
+            None,
+            "a stored name was refused where a backslash separates"
         );
     }
 
