@@ -22,7 +22,9 @@
 // pill renders without a kind (default file styling). On resolve we
 // dispatch a kindResolvedEffect on every active editor view so the
 // decoration walker re-runs and the pill re-renders with the right
-// data-refkind.
+// data-refkind. Only an answer is cached: a match, or the route's own
+// not-found, which is "broken". A resolve that fails any other way
+// leaves the pill without a kind and is asked again by a later scan.
 //
 // Cache lives at module scope, so multiple files / multiple editor
 // mounts share resolved kinds. Targets are canonicalized via
@@ -44,6 +46,7 @@ import { selectionInRange } from "../decorations/selection";
 import { decodePercent, isInternalHref, normalizeHref } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
+import { ApiError, apiErrorCode } from "../../api/errors";
 import { parentDir } from "../../state/format";
 import { openPreviewPopover } from "../overlays/preview_popover";
 import { resolvePreviewTarget } from "../link_preview";
@@ -167,6 +170,20 @@ const kindCache = new Map<string, LinkKind>();
 const inflight = new Set<string>();
 const watchedViews = new Set<EditorView>();
 
+/// When a target whose resolve failed with no answer may be asked again.
+const retryNotBefore = new Map<string, number>();
+
+/// How long such a target waits. A scan runs on every keystroke and caret
+/// move, so without the wait a server that is refusing would be asked once
+/// per pill each time.
+const RESOLVE_RETRY_FLOOR_MS = 5_000;
+
+/// The resolve route's own answer that nothing matches the target. A 404
+/// without its code comes from something in front of the route.
+function isLinkNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && apiErrorCode(error) === "link_not_found";
+}
+
 /// State effect dispatched after a kind resolves so each registered
 /// view's decoration walker re-runs and picks up the new kind. Module-
 /// scoped so cross-mount resolves still propagate. Exported so the bubble
@@ -206,9 +223,17 @@ function scheduleKindRepaint(): void {
   }, 0);
 }
 
+/// Keep the resolver's answer for a target and repaint the pills with it.
+function cacheKind(target: string, kind: LinkKind): void {
+  kindCache.set(target, kind);
+  retryNotBefore.delete(target);
+  scheduleKindRepaint();
+}
+
 /// Look up a target's kind. Returns the cached kind synchronously, or
-/// undefined while an async resolve is in flight (the pill renders
-/// uncolored until the resolve lands and schedules a re-render).
+/// undefined while the target has no answer: a resolve is in flight (the
+/// pill renders uncolored until it lands and schedules a re-render), or the
+/// last one failed and a later scan asks again.
 function getKind(target: string): LinkKind | undefined {
   const cached = kindCache.get(target);
   if (cached !== undefined) return cached;
@@ -217,27 +242,30 @@ function getKind(target: string): LinkKind | undefined {
     kindCache.set(target, "image");
     return "image";
   }
-  // Without a workspace there is no resolver behind the probe; a failed
-  // request would cache "broken" and paint every pill red. Pills stay
-  // neutral (undefined kind, uncolored) and clicks still navigate via
-  // the raw-path fallback.
+  // Without a workspace there is no resolver behind the probe, so every
+  // request would fail. Pills stay neutral (undefined kind, uncolored)
+  // and clicks still navigate via the raw-path fallback.
   if (!windowCaps.workspace) return undefined;
   // Async resolve - only one in-flight request per target.
   if (inflight.has(target)) return undefined;
+  if ((retryNotBefore.get(target) ?? 0) > Date.now()) return undefined;
   inflight.add(target);
   api
     .resolveLink(target)
     .then((res) => {
       // A link to a directory resolves (not broken); it opens the file
       // browser at that folder on click rather than the text editor.
-      kindCache.set(target, res.is_dir ? "directory" : res.kind);
+      cacheKind(target, res.is_dir ? "directory" : res.kind);
     })
-    .catch(() => {
-      kindCache.set(target, "broken");
+    .catch((error: unknown) => {
+      // Only the route's not-found says the target is broken. Any other
+      // failure says nothing about the target, so the pill keeps no kind
+      // and is already painted that way.
+      if (isLinkNotFound(error)) cacheKind(target, "broken");
+      else retryNotBefore.set(target, Date.now() + RESOLVE_RETRY_FLOOR_MS);
     })
     .finally(() => {
       inflight.delete(target);
-      scheduleKindRepaint();
     });
   return undefined;
 }
