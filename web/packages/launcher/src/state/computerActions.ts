@@ -21,7 +21,7 @@ import {
 } from "./library.svelte";
 import { requestConfirm } from "./confirm.svelte";
 import { hasDesktopBridge, selfManagedWindows } from "./capabilities";
-import { canActOnTenant, ownsTenantLeader, tenantLeader } from "./leadership.svelte";
+import { actingFor, canActOnTenant } from "./leadership.svelte";
 import {
   mintWindow,
   openWindowRecord,
@@ -30,10 +30,6 @@ import {
 
 const NATIVE_TRUST_MESSAGE =
   "This shared devserver controls the web content in its Chan windows. Native access can read and write your clipboard, read files you select, save downloads, control Chan windows, and open links in your system browser. Grant access only if you trust its owner.";
-
-export function actingFor(prefix: string): string | undefined {
-  return ownsTenantLeader(prefix) ? (tenantLeader(prefix) ?? undefined) : undefined;
-}
 
 async function runAndReport(action: Promise<void>): Promise<void> {
   try {
