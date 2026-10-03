@@ -1687,20 +1687,10 @@ pub async fn serve(
         spawn_idle_watcher(timeout, last_activity.clone(), signal_tx.clone());
     }
 
-    // Side task: when the shutdown signal fires, cancel any in-flight
-    // reindex. The flag is checked at per-file boundaries inside
-    // `Workspace::reindex`, so the blocking task lands within at most one
-    // file's worth of work and the runtime drop can return cleanly.
-    let cancel_workspace_cell = workspace_cell.clone();
-    let mut cancel_rx = signal_tx.subscribe();
-    tokio::spawn(async move {
-        let _ = cancel_rx.changed().await;
-        if let Ok(cell) = cancel_workspace_cell.read() {
-            if let Some(cell) = cell.as_ref() {
-                cell.indexer.cancel();
-            }
-        }
-    });
+    tokio::spawn(cancel_reindex_at_shutdown(
+        workspace_cell,
+        signal_tx.subscribe(),
+    ));
 
     // Shared drain: spawns the SIGINT/SIGTERM watcher, hands axum the
     // graceful-shutdown receiver, and force-exits after the grace window so
@@ -1710,6 +1700,23 @@ pub async fn serve(
     extension_runtime.shutdown().await;
     serve_result?;
     Ok(())
+}
+
+/// The standalone serve's side task: once the shutdown signal fires,
+/// cancel any in-flight reindex of the indexer the cell holds. The flag is
+/// checked at per-file boundaries inside `Workspace::reindex`, so the
+/// blocking task lands within at most one file's worth of work and the
+/// runtime drop can return cleanly.
+async fn cancel_reindex_at_shutdown(
+    workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let _ = shutdown.changed().await;
+    if let Ok(cell) = workspace_cell.read() {
+        if let Some(cell) = cell.as_ref() {
+            cell.indexer.cancel();
+        }
+    }
 }
 
 #[cfg(test)]
