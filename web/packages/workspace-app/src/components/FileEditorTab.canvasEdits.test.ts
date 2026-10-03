@@ -1601,13 +1601,16 @@ describe("a live drawing", () => {
 
   const PICKED = "#123456";
   type Attached = Awaited<ReturnType<typeof attachedDrawing>>;
-  /// Each way a background this window picked misses the authority. A way
-  /// picks the background on fake time, lets the board's flush offer it, and
-  /// answers the socket the next snapshot lands on.
-  const MISSES: [string, unknown[], (at: Attached) => Promise<SceneSocket>][] = [
+  /// Each way a background this window picked misses the authority: the
+  /// backgrounds pushed before the next snapshot, whether a push whose
+  /// outcome nobody knows keeps the tab unsaved past the ack, and the way
+  /// itself, which picks the background on fake time, lets the board's flush
+  /// offer it, and answers the socket the next snapshot lands on.
+  const MISSES: [string, unknown[], boolean, (at: Attached) => Promise<SceneSocket>][] = [
     [
       "refused while the socket is down",
       [],
+      false,
       async ({ board, socket }) => {
         socket.drop();
         board.pickBackground(PICKED);
@@ -1618,6 +1621,7 @@ describe("a live drawing", () => {
     [
       "on the wire when the socket drops",
       [PICKED],
+      true,
       async ({ board, socket }) => {
         board.pickBackground(PICKED);
         await vi.advanceTimersByTimeAsync(250);
@@ -1628,6 +1632,7 @@ describe("a live drawing", () => {
     [
       "refused between a new socket's opening and its snapshot",
       [],
+      false,
       async ({ board, socket }) => {
         socket.drop();
         const next = await nextSocket();
@@ -1639,6 +1644,7 @@ describe("a live drawing", () => {
     [
       "refused while the session is degraded with its socket open",
       [],
+      false,
       async ({ tab, board, socket }) => {
         sceneSessionFor(tab.id)!.degrade();
         board.pickBackground(PICKED);
@@ -1649,42 +1655,52 @@ describe("a live drawing", () => {
   ];
 
   /// What a pick that no authority confirmed reads as once the next snapshot
-  /// has been applied, and again once the authority has acked the push that
-  /// offers it. The snapshot holds a peer's background, picked meanwhile.
-  async function throughSnapshot(tab: FileTab, board: ReturnType<typeof excalidrawBoard>, on: SceneSocket) {
-    const before = backgroundsPushed(on).length;
-    on.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
-    await vi.advanceTimersByTimeAsync(400);
-    const read = () => ({
-      background: board.appState.viewBackgroundColor,
-      buffer: tab.content.includes(PICKED),
-      offered: backgroundsPushed(on).slice(before),
-      dirty: isDirty(tab),
-      state: tab.doc?.state,
-    });
+  /// has been applied, whether the tab reads unsaved once the authority has
+  /// acked the push that offers it, and what it reads as once the authority
+  /// has written the file. The snapshot holds a peer's background, picked
+  /// meanwhile. A push that was on the wire at a drop has no known outcome,
+  /// so its tab reads unsaved until that write.
+  async function throughSnapshot(read: () => Record<string, unknown>, tab: FileTab, on: SceneSocket) {
     const waiting = read();
     on.frame({ type: "push-ok", version: 2, changed: true });
     await vi.advanceTimersByTimeAsync(0);
-    const confirmed = read();
+    const ackedDirty = isDirty(tab);
+    on.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    await vi.advanceTimersByTimeAsync(0);
+    const written = read();
     vi.useRealTimers();
-    return { waiting, confirmed };
+    return { waiting, ackedDirty, written };
   }
+  const reading = (tab: FileTab, board: ReturnType<typeof excalidrawBoard>, on: SceneSocket, from = 0) => () => ({
+    background: board.appState.viewBackgroundColor,
+    buffer: tab.content.includes(PICKED),
+    offered: backgroundsPushed(on).slice(from),
+    dirty: isDirty(tab),
+    state: tab.doc?.state,
+  });
   const KEEPS_THE_PICK = {
     waiting: { background: PICKED, buffer: true, offered: [PICKED], dirty: true, state: "attached" },
-    confirmed: { background: PICKED, buffer: true, offered: [PICKED], dirty: false, state: "attached" },
+    written: { background: PICKED, buffer: true, offered: [PICKED], dirty: false, state: "attached" },
   };
 
   test.each(MISSES)(
-    "a background %s stays over the next snapshot, is offered after it and reads unsaved until its ack",
-    async (_way, sentBefore, miss) => {
+    "a background %s stays over the next snapshot, is offered after it and reads unsaved until the authority has it",
+    async (_way, sentBefore, unknownOutcome, miss) => {
       const at = await attachedDrawing();
       // The library's render of the snapshot's appState comes first.
       await new Promise((resolve) => setTimeout(resolve, 10));
       vi.useFakeTimers();
       const on = await miss(at);
       const before = sceneSockets.flatMap((socket) => backgroundsPushed(socket));
+      const read = reading(at.tab, at.board, on, backgroundsPushed(on).length);
+      on.frame(snapshotOf(at.tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+      await vi.advanceTimersByTimeAsync(400);
 
-      expect({ before, ...(await throughSnapshot(at.tab, at.board, on)) }).toEqual({ before: sentBefore, ...KEEPS_THE_PICK });
+      expect({ before, ...(await throughSnapshot(read, at.tab, on)) }).toEqual({
+        before: sentBefore,
+        ackedDirty: unknownOutcome,
+        ...KEEPS_THE_PICK,
+      });
     },
   );
 
@@ -1703,20 +1719,12 @@ describe("a live drawing", () => {
     next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
     await rebound.start();
     await vi.advanceTimersByTimeAsync(400);
-    const read = () => ({
-      background: rebound.appState.viewBackgroundColor,
-      buffer: tab.content.includes(PICKED),
-      offered: backgroundsPushed(next),
-      dirty: isDirty(tab),
-      state: tab.doc?.state,
-    });
-    const waiting = read();
-    next.frame({ type: "push-ok", version: 2, changed: true });
-    await vi.advanceTimersByTimeAsync(0);
-    const confirmed = read();
-    vi.useRealTimers();
 
-    expect({ before, waiting, confirmed }).toEqual({ before: [PICKED], ...KEEPS_THE_PICK });
+    expect({ before, ...(await throughSnapshot(reading(tab, rebound, next), tab, next)) }).toEqual({
+      before: [PICKED],
+      ackedDirty: true,
+      ...KEEPS_THE_PICK,
+    });
   });
 
   /// The element ids of each push on `socket`.
