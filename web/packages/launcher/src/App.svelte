@@ -258,5 +258,6 @@
     justify-content: center;
     gap: 0.4rem;
     min-height: 2.1rem;
+    font-family: inherit;
   }
 </style>
