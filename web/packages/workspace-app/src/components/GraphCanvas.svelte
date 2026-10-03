@@ -1926,6 +1926,9 @@
     });
   });
 
+  /// The focal ids the effect below last ran with, as their JSON.
+  let prevFocalKey: string | undefined;
+
   /// Visibility change without a full data swap: scope / depth /
   /// chip filters moved. Incremental rebuild that preserves existing
   /// node positions, seeds new arrivals near a visible neighbour, and
@@ -1934,7 +1937,11 @@
   $effect(() => {
     void visibleNodeIds;
     void visibleEdges;
-    void focalIds;
+    // The focal ids arrive as a new array whenever the panel derives them
+    // again, so a change is read from their content.
+    const focalKey = JSON.stringify(focalIds);
+    const focalMoved = prevFocalKey !== undefined && focalKey !== prevFocalKey;
+    prevFocalKey = focalKey;
     if (!sim) return;
     const { added, removed } = rebuildWorkingSet();
     // The Dashboard indexing slide re-derives its `visibleNodeIds`
@@ -1957,6 +1964,10 @@
         links(ls: DEdge[]): unknown;
       } | undefined;
       if (link && typeof link.links === "function") link.links(dEdges);
+      // A change of the focal ids alone pins and releases nodes of the same
+      // set, and a settled simulation applies a pin only on a tick: warm it
+      // as a content refresh does, with no refit.
+      if (focalMoved) sim.alpha(0.05).restart();
       return;
     }
     const alpha = added.length > 0 ? 0.35 : 0.2;
