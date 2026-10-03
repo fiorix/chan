@@ -12612,6 +12612,11 @@ mod tests {
         assert!(rec.control);
         assert!(!rec.persisted, "control window is transient");
         assert_eq!(
+            rec.holders,
+            Some(Vec::new()),
+            "a minted control window does not list its holders, none yet"
+        );
+        assert_eq!(
             rec.library_id, "lib-remote",
             "grouped under the FOREIGN devserver id, not the host's local id"
         );
@@ -12705,6 +12710,11 @@ mod tests {
         assert_eq!(term.kind, WindowKind::Terminal);
         assert_eq!(term.library_id, "lib-mint");
         assert!(term.persisted);
+        assert_eq!(
+            term.holders,
+            Some(Vec::new()),
+            "a minted window does not list its holders, none yet"
+        );
         let ws = host
             .mint_window(WindowKind::Workspace, Some("/tmp/notes".into()))
             .expect("mint workspace");
