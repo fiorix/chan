@@ -614,6 +614,83 @@ describe("contextual command deck", () => {
     expect(paths[1]).toContain("Computers › Windows › Hidden");
   });
 
+  function workspaceWindow(window_id: string, ordinal: number, workspace_path: string) {
+    return { ...librarySnapshot.windows[1], window_id, ordinal, label: "", workspace_path };
+  }
+
+  function workspaceRow(workspace_id: string, path: string, label: string) {
+    return { ...librarySnapshot.workspaces[0], workspace_id, prefix: workspace_id, path, label };
+  }
+
+  function windowPaths(target: HTMLElement): string[] {
+    return [...target.querySelectorAll(".deck-result-path")].map((node) => node.textContent ?? "");
+  }
+
+  // A root is spelled as its host spells it, so the deck does not cut a
+  // window's path where a row already names that workspace.
+  test("a window is named by the row that lists its workspace, on a Windows host too", async () => {
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      windows: [
+        workspaceWindow("w-windows", 1, "C:\\work\\project-a"),
+        workspaceWindow("w-unix", 2, "/work/project-b"),
+      ],
+      workspaces: [
+        workspaceRow("other", "D:\\other", "Other"),
+        workspaceRow("project-a", "C:\\work\\project-a", "Project A"),
+        workspaceRow("project-b", "/work/project-b", "Project B"),
+      ],
+    });
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    expect(windowPaths(target)).toEqual([
+      "Computers › Windows › Open › Project A",
+      "Computers › Windows › Open › Project B",
+    ]);
+  });
+
+  test("a window whose row has no label is named by that row's root, cut at / alone", async () => {
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      windows: [
+        workspaceWindow("w-windows", 1, "C:\\work\\project-a"),
+        workspaceWindow("w-unix", 2, "/work/project-b"),
+      ],
+      workspaces: [
+        workspaceRow("project-a", "C:\\work\\project-a", ""),
+        workspaceRow("project-b", "/work/project-b", ""),
+      ],
+    });
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    expect(windowPaths(target)).toEqual([
+      "Computers › Windows › Open › C:\\work\\project-a",
+      "Computers › Windows › Open › project-b",
+    ]);
+  });
+
+  test("a window whose workspace no row lists is named by its own path, cut at / alone", async () => {
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      windows: [
+        workspaceWindow("w-backslash", 1, "/srv/back\\slash/"),
+        workspaceWindow("w-windows", 2, "C:\\work\\project-c"),
+        workspaceWindow("w-root", 3, "/"),
+      ],
+      workspaces: [workspaceRow("other", "/srv/other", "Other")],
+    });
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    expect(windowPaths(target)).toEqual([
+      "Computers › Windows › Open › back\\slash",
+      "Computers › Windows › Open › C:\\work\\project-c",
+      "Computers › Windows › Open › Workspace",
+    ]);
+  });
+
   test("a visible window offers Focus, Hide, and Close", async () => {
     const target = openLauncher();
     await flush();
