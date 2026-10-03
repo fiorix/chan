@@ -52,7 +52,6 @@
   // CSS. See ../editor/ExcalidrawCanvas source-pin test.
   import { onDestroy, onMount, untrack } from "svelte";
   import type {
-    AppState,
     ExcalidrawImperativeAPI,
     ExcalidrawInitialDataState,
   } from "@excalidraw/excalidraw/types";
@@ -127,12 +126,14 @@
   // The appState the canvas has handed to the board and the library does
   // not show yet. `updateScene` shows an appState only at the library's next
   // render, so every serialization, the baseline's and the flush's alike,
-  // lays this over what the library reports, until the library's next
-  // reported change drops it. That change is normally the one the render
-  // reports, but a discrete event's render can report one first, which
-  // design.md names as open. It holds what came out of the serializer, so it
-  // names no key.
-  let handedAppState: Partial<AppState> | null = null;
+  // lays this over what the library reports. A key leaves it once the
+  // library shows another value for it than `shownAtHand` holds, which is
+  // what the library showed when the key was handed: the handed value by
+  // then, or one the user picked after it. A change the library reports
+  // before that, as a click's or a key's own render does, leaves the key
+  // here. It holds what came out of the serializer, so it names no key.
+  let handedAppState: Record<string, unknown> | null = null;
+  let shownAtHand: Record<string, unknown> | null = null;
 
   // Seeded: the library, past its own init (whose apply replaces every
   // element set before it), holds the whole buffer of a finished load as
@@ -202,6 +203,35 @@
     return { background: c, stroke: c };
   }
 
+  /// Keep `appState` as handed to the board, with what the library shows for
+  /// each of its keys now. Called before the `updateScene` that hands it. A
+  /// key the library already shows as handed has nothing to wait for, and a
+  /// key handed again keeps what the library showed the first time.
+  function hand(a: ExcalidrawImperativeAPI, appState: Record<string, unknown>): void {
+    const shown = a.getAppState() as unknown as Record<string, unknown>;
+    for (const [key, value] of Object.entries(appState)) {
+      if (handedAppState && key in handedAppState) {
+        handedAppState[key] = value;
+      } else if (canonicalJson(shown[key]) !== canonicalJson(value)) {
+        (handedAppState ??= {})[key] = value;
+        (shownAtHand ??= {})[key] = shown[key];
+      }
+    }
+  }
+
+  /// Drop each handed key the library now shows another value for than it
+  /// showed when the key was handed.
+  function dropShownAppState(a: ExcalidrawImperativeAPI): void {
+    if (!handedAppState || !shownAtHand) return;
+    const shown = a.getAppState() as unknown as Record<string, unknown>;
+    for (const key of Object.keys(handedAppState)) {
+      if (canonicalJson(shown[key]) === canonicalJson(shownAtHand[key])) continue;
+      delete handedAppState[key];
+      delete shownAtHand[key];
+    }
+    if (Object.keys(handedAppState).length === 0) handedAppState = shownAtHand = null;
+  }
+
   function allElements(): Record<string, unknown>[] {
     if (!api) return [];
     return api.getSceneElementsIncludingDeleted() as unknown as Record<string, unknown>[];
@@ -244,6 +274,7 @@
       api.getAppState(),
     );
     const kept = appState !== undefined ? keptAppState(ex, appState) : undefined;
+    if (kept !== undefined) hand(api, kept);
     api.updateScene({
       elements: reconciled,
       ...(kept !== undefined ? { appState: kept } : {}),
@@ -263,12 +294,11 @@
     if (kept !== undefined) {
       // Any adopted appState is the new authority baseline; only later
       // local divergence should ride a push. The board shows it only at the
-      // library's next render, so until the library's next reported change
-      // every serialization lays it over the board's earlier one, as for a
-      // seed, and it is what the next push offers: a push made before that,
-      // from a timer, a close or the session right after this frame, sends
-      // nothing older over it.
-      handedAppState = { ...(handedAppState ?? {}), ...kept };
+      // library's next render, so until the library shows it every
+      // serialization lays it over the board's earlier one, as for a seed,
+      // and it is what the next push offers: a push made before that, from a
+      // timer, a close or the session right after this frame, sends nothing
+      // older over it.
       cleanedAppState = kept;
       cleanedAppStateJson = lastAuthorityAppStateJson = canonicalJson(kept);
     }
@@ -438,14 +468,14 @@
     const scene = ex.restore(parseScene(content), null, null, { repairBindings: true });
     // The serializer's appState is a function of the appState alone.
     const { appState } = JSON.parse(ex.serializeAsJSON([], scene.appState, {}, "local")) as {
-      appState: Partial<AppState>;
+      appState: Record<string, unknown>;
     };
+    hand(api, appState);
     api.updateScene({
       elements: scene.elements,
       appState,
       captureUpdate: ex.CaptureUpdateAction.NEVER,
     } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
-    handedAppState = { ...(handedAppState ?? {}), ...appState };
     const files = Object.values(scene.files);
     if (files.length > 0) api.addFiles(files);
     lastSerialized = serializeScene(api, ex);
@@ -456,12 +486,12 @@
   /// Every change the library reports. The first comes from its init, and
   /// none comes before it, so it is where a board whose buffer was loaded
   /// before the init finished is seeded. A change normally follows the render
-  /// that shows what was handed before it, so that is dropped first (a
-  /// discrete event's render can report before it, which design.md names as
-  /// open); a seed here hands its own after the drop, and it lasts until the
-  /// next change.
+  /// that shows what was handed before it, so what the library now shows is
+  /// dropped first; a click's or a key's own render can report a change
+  /// before that render, and what it does not show yet stays handed. A seed
+  /// here hands its own after the drop.
   function onLibraryChange(): void {
-    handedAppState = null;
+    if (api) dropShownAppState(api);
     seed();
     scheduleSerialize();
   }
