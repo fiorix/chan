@@ -5765,7 +5765,8 @@ let pendingMissingFileReopen: { tabId: string; by: "pick" | "open" } | null = nu
 /// conflict (an external edit landed, or a live authority requires explicit
 /// preconditions). Mounted by
 /// ConflictModal.svelte; closed via reloadConflictedTab,
-/// overwriteConflictedTab, or dismissConflict.
+/// overwriteConflictedTab, or dismissConflict, and by an accepted write of
+/// its tab.
 export const conflictDialog = $state<{
   open: boolean;
   /// Tab the conflict is for. Null when the dialog is closed.
@@ -6210,6 +6211,10 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     done.fileMissing = null;
     // The saved text is the file's again, whichever write this is.
     overwritePending.delete(done.id);
+    // So a prompt for this tab has nothing left to ask. One can be open
+    // here: the refusal of a save that left before the user answered opens
+    // it again after the answer closed it.
+    if (conflictDialog.tabId === done.id) dismissConflict();
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
   } catch (e) {
