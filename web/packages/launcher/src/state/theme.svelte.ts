@@ -1,6 +1,8 @@
 // Dark/light theme, applied as `data-theme` on the document element (the CSS
 // tokens key off it) and persisted so a reload keeps the user's choice.
 
+import { authToken } from "./authToken";
+
 export type Theme = "dark" | "light";
 
 const STORAGE_KEY = "chan-launcher-theme";
@@ -42,17 +44,6 @@ function adoptLocalTheme(theme: string | null): void {
   themeState.theme = theme;
   cacheTheme(theme);
   applyTheme();
-}
-
-// The bearer the launcher is served with (loopback `?t=<token>`), mirroring
-// library.ts. Empty means same-origin with no bearer. Guarded for non-browser
-// (test) contexts where `location` may be absent.
-function authToken(): string {
-  try {
-    return new URLSearchParams(location.search).get("t") ?? "";
-  } catch {
-    return "";
-  }
 }
 
 /// Mirror the launcher's light/dark choice to the desktop config so a local

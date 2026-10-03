@@ -14,6 +14,8 @@
 // expanded; only collapsed keys are stored. Stale ids are harmless and left
 // unpruned.
 
+import { authToken } from "./authToken";
+
 const STORAGE_KEY = "chan-launcher-collapsed-machines";
 
 function initialCollapsed(): string[] {
@@ -39,17 +41,6 @@ function cacheCollapsed(keys: string[]): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(keys));
   } catch {
     // Best-effort persistence; the in-memory toggle still works without it.
-  }
-}
-
-// The bearer the launcher is served with (loopback `?t=<token>`), mirroring
-// theme.svelte.ts. Empty means same-origin with no bearer. Guarded for
-// non-browser (test) contexts where `location` may be absent.
-function authToken(): string {
-  try {
-    return new URLSearchParams(location.search).get("t") ?? "";
-  } catch {
-    return "";
   }
 }
 
