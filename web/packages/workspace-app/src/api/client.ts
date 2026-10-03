@@ -186,6 +186,12 @@ export function usesStandaloneFiles(): boolean {
   }
 }
 
+/// Digest the exact UTF-8 text a file writer loaded for the standalone write precondition.
+export async function sha256Text(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 /// Query suffix a mutating call needs on the standalone filesystem surface,
 /// and nothing at all in a workspace. `w` names the writing window so the
 /// server attributes the change back to it (a window must not read its own
@@ -832,6 +838,7 @@ export const api = {
     expectedMtimeNs?: string | null,
     expectedMtime?: number | null,
     authorityVersion?: number | null,
+    loadedText?: string | null,
   ): Promise<FileWriteResponse> => {
     const params = new URLSearchParams();
     if (expectedMtimeNs !== undefined && expectedMtimeNs !== null) {
@@ -842,7 +849,11 @@ export const api = {
     if (authorityVersion !== undefined && authorityVersion !== null) {
       params.set("authority_version", String(authorityVersion));
     }
-    if (usesStandaloneFiles()) params.set("w", sessionWindowId());
+    const standalone = usesStandaloneFiles();
+    if (standalone) params.set("w", sessionWindowId());
+    if (standalone && loadedText != null && typeof crypto !== "undefined" && crypto.subtle) {
+      params.set("expected_sha256", await sha256Text(loadedText));
+    }
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     const headers = {
       ...directAuthHeaders(),
