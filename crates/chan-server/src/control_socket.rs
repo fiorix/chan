@@ -8471,6 +8471,39 @@ is_lead = false
         );
     }
 
+    #[test]
+    fn spawn_team_muse_lead_gets_its_body_then_a_bare_cr() {
+        let (root, registry) = empty_registry();
+        let mut config = spawnable_config();
+        let lead = config
+            .members
+            .iter_mut()
+            .find(|member| member.is_lead)
+            .expect("lead member");
+        lead.env.insert("CHAN_AGENT".into(), "muse".into());
+
+        let spawn = spawn_team(&registry, root.path(), "new-team-1", &config, false, None);
+        let writes: Vec<&str> = spawn
+            .pokes
+            .iter()
+            .filter(|poke| poke.member == "@@Lead")
+            .flat_map(|poke| poke.writes.iter().map(String::as_str))
+            .collect();
+        assert_eq!(
+            writes.len(),
+            2,
+            "a muse lead's identity poke is a body write, then a chord write: {writes:?}"
+        );
+        assert!(
+            writes[0].starts_with("# Team work")
+                && writes[0].contains("You are @@Lead")
+                && writes[0].ends_with('\n')
+                && !writes[0].contains('\r'),
+            "the body write carries the prompt and no chord: {writes:?}"
+        );
+        assert_eq!(writes[1], "\r", "the chord write is the bare CR");
+    }
+
     // The open_survey frame must carry the target tab as camelCase
     // `tabName`. A green compile alone would not catch a snake_case
     // drift, so pin the wire string here.
