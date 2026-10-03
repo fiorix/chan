@@ -880,6 +880,19 @@ describe("a save of a drawing whose session has no canvas", () => {
     await saveTab(tab);
     expect({ writes: write.mock.calls.length, said: tab.saveError ?? null }).toEqual({ writes: 0, said: null });
   });
+
+  test("with a canvas bound, the same failed flush falls back to the classic write", async () => {
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
+    const saving = saveTab(tab!);
+    sock.frame({ type: "flush", dirty: true, error: "disk full" });
+    await saving;
+    await flushMicro();
+
+    expect({ writes: write.mock.calls.length, owns: session.ownsSaves() }).toEqual({ writes: 1, owns: true });
+  });
 });
 
 // ---- lifecycle ----------------------------------------------------------------
