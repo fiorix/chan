@@ -5178,6 +5178,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_workspace_reads_a_foreign_lock_as_a_refusal_per_arm() {
+        use axum::http::StatusCode;
+
+        const SENTENCE: &str =
+            "This workspace is open in another chan process. Quit it and try again.";
+        for gateway in [false, true] {
+            for (status, expected) in [
+                (StatusCode::CONFLICT, SENTENCE.to_string()),
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{} returned HTTP 400 Bad Request: {SENTENCE}",
+                        if gateway {
+                            "gateway workspace add"
+                        } else {
+                            "devserver workspace mount"
+                        }
+                    ),
+                ),
+            ] {
+                let body = serde_json::json!({ "error": SENTENCE }).to_string();
+                let server = MockManagementServer::start(vec![mock_response(status, &body)]).await;
+                let conn = if gateway {
+                    server.gateway_conn()
+                } else {
+                    server.raw_conn()
+                };
+                let answer = add_workspace(&conn, "/repo/notes").await.unwrap_err();
+                assert_eq!(answer, expected, "gateway={gateway} status={status}");
+                server.assert_responses_drained();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn add_workspace_status_request_contract_per_arm() {
         use axum::http::{Method, StatusCode};
 
