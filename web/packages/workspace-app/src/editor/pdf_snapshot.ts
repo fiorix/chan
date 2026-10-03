@@ -556,9 +556,11 @@ function composedShape(
   img: HTMLImageElement,
   root: HTMLElement,
   natural: { width: number; height: number },
-): ImageShape | null {
+): ImageShape | "hidden" | null {
   const rect = img.getBoundingClientRect();
-  if (!(rect.width > 0 && rect.height > 0)) return null;
+  if (!(rect.width > 0 && rect.height > 0)) {
+    return root.isConnected ? "hidden" : null;
+  }
   const style = getComputedStyle(img);
   const scale = rectScale(img, rect);
   const left =
@@ -579,7 +581,7 @@ function composedShape(
   for (let el = img.parentElement; el && el !== root; el = el.parentElement) {
     if (!el.hasAttribute(PAGE_BOX_ATTR)) shown = clipToAncestor(shown, el);
   }
-  if (!(shown.width > 0 && shown.height > 0)) return null;
+  if (!(shown.width > 0 && shown.height > 0)) return "hidden";
   const bitmap = fitBitmap(style.objectFit, box, {
     width: natural.width * scale.x,
     height: natural.height * scale.y,
@@ -614,7 +616,7 @@ function standInSize(
   const width = style.width.endsWith("px") ? parseFloat(style.width) : NaN;
   const height = style.height.endsWith("px") ? parseFloat(style.height) : NaN;
   if (natural.width > 0 && natural.height > 0) {
-    const widthPx = width > 0 ? width : natural.width;
+    const widthPx = width > natural.width ? width : natural.width;
     return {
       widthPx,
       heightPx: (widthPx * natural.height) / natural.width,
@@ -626,6 +628,11 @@ function standInSize(
 }
 
 function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
+  if (root.isConnected && img.checkVisibility?.({
+    contentVisibilityAuto: true,
+    opacityProperty: true,
+    visibilityProperty: true,
+  }) === false) return false;
   if (root.isConnected && img.getClientRects().length === 0) return false;
   const visibility = getComputedStyle(img).visibility;
   if (visibility === "hidden" || visibility === "collapse") return false;
@@ -667,11 +674,13 @@ export async function liftPageImages(
       return { img, name, bitmap };
     },
   );
-  for (const result of decoded) {
-    if (!result) continue;
+  const prepared = decoded.flatMap((result) => {
+    if (!result) return [];
     const { img, name, bitmap } = result;
-    const rendered = imageIsRendered(img, root);
     const natural = { width: bitmap.naturalWidth, height: bitmap.naturalHeight };
+    const measured = imageIsRendered(img, root)
+      ? composedShape(img, root, natural) : "hidden";
+    const rendered = measured !== "hidden";
     const size = standInSize(img, natural);
     // An image the page does not show has nothing to paint, so one with
     // no size to stand in at is not a failure either: its stand-in is a
@@ -679,13 +688,16 @@ export async function liftPageImages(
     if (!size && rendered) {
       throw new SnapshotError(`image ${name} has no measurable size`);
     }
+    return [{ img, name, bitmap, rendered, size,
+      shape: measured && measured !== "hidden" ? measured :
+        plainShape(size ? size.heightPx / size.widthPx : 1) }];
+  });
+  for (const { img, name, bitmap, rendered, size, shape } of prepared) {
     img.setAttribute(LIFTED_ATTR, String(images.lifted.length));
     images.lifted.push({
       name,
       bitmap,
-      shape:
-        (rendered ? composedShape(img, root, natural) : null) ??
-        plainShape(size ? size.heightPx / size.widthPx : 1),
+      shape,
       rendered,
       shownPx: 0,
       done: false,

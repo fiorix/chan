@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   decodesSettleAtOnce,
   heldDecodes,
-  imagesHaveBoxes,
+  imagesHaveBoxes as mockImageBoxes,
   settled,
   standInCanvas,
   StandInImage,
@@ -35,6 +35,13 @@ const TINY_PNG = Uint8Array.from(
   ),
   (c) => c.charCodeAt(0),
 );
+
+function imagesHaveBoxes(): void {
+  mockImageBoxes();
+  vi.spyOn(HTMLImageElement.prototype, "getBoundingClientRect").mockReturnValue({
+    left: 0, top: 0, width: 40, height: 20,
+  } as DOMRect);
+}
 
 const DOCUMENT = "# Notes\n\n![](shots/photo.png)\n\ntail\n";
 

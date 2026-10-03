@@ -18,13 +18,20 @@ import {
 import {
   decodesSettleAtOnce,
   heldDecodes,
-  imagesHaveBoxes,
+  imagesHaveBoxes as mockImageBoxes,
   settled,
   standInCanvas,
   StandInImage,
 } from "../__tests__/snapshotStandIns";
 
 const PNG_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+
+function imagesHaveBoxes(): void {
+  mockImageBoxes();
+  vi.spyOn(HTMLImageElement.prototype, "getBoundingClientRect").mockReturnValue({
+    left: 0, top: 0, width: 40, height: 20,
+  } as DOMRect);
+}
 
 function fetchOk(body: BlobPart, type: string) {
   return {
@@ -412,6 +419,7 @@ describe("liftPageImages", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    delete (HTMLImageElement.prototype as { checkVisibility?: () => boolean }).checkVisibility;
   });
 
   async function lifted(html: string): Promise<{
@@ -547,14 +555,13 @@ describe("liftPageImages", () => {
     );
     expect(images.lifted[0]!.rendered).toBe(false);
     expect(() => images.assertPainted()).not.toThrow();
-    delete (HTMLImageElement.prototype as { checkVisibility?: () => boolean }).checkVisibility;
   });
 
   test("an ancestor that clips the whole image records it as not shown", async () => {
     imagesHaveBoxes();
     decodesSettleAtOnce();
     const root = page(
-      '<div style="height:0;overflow:hidden"><img src="/api/fs/covered.png"></div>',
+      '<div style="height:0;overflow-x:hidden;overflow-y:hidden"><img src="/api/fs/covered.png"></div>',
     );
     vi.spyOn(root.querySelector("div")!, "getBoundingClientRect").mockReturnValue(
       { left: 0, top: 0, width: 100, height: 0 } as DOMRect,
