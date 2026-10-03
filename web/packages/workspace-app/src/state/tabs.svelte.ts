@@ -3166,7 +3166,8 @@ async function loadTabContent(
   tabLoadControllers.set(tabId, controller);
   tabLoadFailures.delete(tabId);
   // The load replaces the token an Overwrite adopted and the text it would
-  // have written over.
+  // have written over, so a choice made before it ends here. One made while
+  // it runs ends where the load does.
   overwritePending.delete(tabId);
   // Resolve by id across the whole layout, the way the close path does, so a
   // tab finishes its load wherever it now is.
@@ -3267,6 +3268,12 @@ async function loadTabContent(
   } finally {
     if (tabLoadVersions.get(tabId) === loadVersion) {
       tabLoadControllers.delete(tabId);
+      // An Overwrite clicked while the load ran marked a tab whose save
+      // builds no write, and the text it chose to write over is not what the
+      // tab holds: the file's text, what arrived of it before the read
+      // failed, or a missing file. However the load ended, the tab's next
+      // save names what the load left.
+      overwritePending.delete(tabId);
       const t = live();
       if (t) {
         t.loading = false;
@@ -5758,12 +5765,13 @@ const saveAgainAfterCurrent = new Set<string>();
 /// bytes the tab did not load and names no hash of that text. The mark ends
 /// where the token and the loaded text agree again or the user is asked
 /// again: at an accepted write of the tab, at a conflict answered to a write
-/// built under it, and at a load. A write that meets no answer and a save
-/// that builds no write leave it, or the next save would name the hash the
-/// user chose to write over and be refused for a file nobody changed since
-/// the click. It goes with the adopted token and so outlives a close: a
-/// reopened tab replays that token. It is kept by tab id: a move replaces the
-/// tab object between the click and the write.
+/// built under it, and at a load, where it starts and where it ends, so a
+/// click made while the tab loads marks nothing past that load. A write that
+/// meets no answer and a save that builds no write leave it, or the next
+/// save would name the hash the user chose to write over and be refused for
+/// a file nobody changed since the click. It goes with the adopted token and
+/// so outlives a close: a reopened tab replays that token. It is kept by tab
+/// id: a move replaces the tab object between the click and the write.
 const overwritePending = new Set<string>();
 /// The missing-file tab the next file opened into its pane replaces, and how
 /// that re-open ends (see `beginMissingFileReopen`).
