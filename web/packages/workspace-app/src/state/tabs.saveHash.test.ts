@@ -398,6 +398,28 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     });
   });
 
+  test("an accepted save of a tab closes the prompt that names it", async () => {
+    const t = await loadedTab();
+    file.text = "theirs";
+    t.content = "loaded and mine";
+    await saveTab(t);
+    expect({ prompt: conflictDialog.open, promptTab: conflictDialog.tabId }).toEqual({ prompt: true, promptTab: TAB });
+
+    // The prompt is left unanswered and the other writer puts the loaded
+    // text back, so the tab's next save is accepted.
+    file.text = "loaded";
+    await saveTab(t);
+    expect(puts.slice(1)).toEqual([{ token: "100", sha: SHA_LOADED, body: "loaded and mine" }]);
+    expect({ prompt: conflictDialog.open, promptTab: conflictDialog.tabId, file: file.text, ...held(t) }).toEqual({
+      prompt: false,
+      promptTab: null,
+      file: "loaded and mine",
+      content: "loaded and mine",
+      saved: "loaded and mine",
+      token: "101",
+    });
+  });
+
   test("an accepted save of another tab leaves a tab's prompt open", async () => {
     const t = await loadedTab();
     file.text = "theirs";
@@ -587,6 +609,113 @@ describe("Overwrite's choice lasts until a write of its tab is answered or the t
       content: "loaded and mine",
       saved: "loaded",
       token: "150",
+    });
+  });
+
+  /// A refused tab with a save on the wire at Overwrite's click, and the
+  /// write that follows that save held as well. Answers with how each of the
+  /// two promises ends and with the two releases, the second of which
+  /// resolves once the write that follows is on the wire.
+  async function clickedOverAWireSave(t: FileTab): Promise<{
+    ended: Promise<string[]>;
+    releaseWireSave: () => void;
+    followingWrite: Promise<() => void>;
+  }> {
+    const how = (run: Promise<void>): Promise<string> =>
+      run.then(
+        () => "settled",
+        (e: Error) => `rejected: ${e.message}`,
+      );
+    const first = holdNextWrite();
+    const wireSave = how(saveTab(t));
+    const releaseWireSave = await first;
+    const followingWrite = holdNextWrite();
+    const click = how(overwriteConflictedTab());
+    return { ended: Promise.all([wireSave, click]), releaseWireSave, followingWrite };
+  }
+
+  test("the refusal of a save on the wire at the click opens no prompt, nor does Overwrite's write when it meets no answer", async () => {
+    const t = await refusedTab();
+    const { ended, releaseWireSave, followingWrite } = await clickedOverAWireSave(t);
+    releaseWireSave();
+    const releaseFollowing = await followingWrite;
+    failNextWrite = "network";
+    releaseFollowing();
+
+    // The failure reaches the caller of the save that was on the wire: the
+    // click's own save found one running and returned.
+    expect(await ended).toEqual(["rejected: Failed to fetch", "settled"]);
+    expect(puts.slice(1)).toEqual([
+      { token: "100", sha: SHA_LOADED, body: "loaded and mine" },
+      { token: "150", sha: null, body: "loaded and mine" },
+    ]);
+    expect({
+      prompt: conflictDialog.open,
+      promptTab: conflictDialog.tabId,
+      said: t.saveError ?? null,
+      file: file.text,
+      ...held(t),
+    }).toEqual({
+      prompt: false,
+      promptTab: null,
+      said: null,
+      file: "theirs",
+      content: "loaded and mine",
+      saved: "loaded",
+      token: "150",
+    });
+
+    // The choice stands, so the save after it names no hash and is accepted.
+    await saveTab(t);
+    expect(puts.slice(3)).toEqual([{ token: "150", sha: null, body: "loaded and mine" }]);
+    expect({ prompt: conflictDialog.open, file: file.text, ...held(t) }).toEqual({
+      prompt: false,
+      file: "loaded and mine",
+      content: "loaded and mine",
+      saved: "loaded and mine",
+      token: "151",
+    });
+  });
+
+  test("a conflict answered to the write that follows a save on the wire at the click opens the prompt and ends the choice", async () => {
+    const t = await refusedTab();
+    const { ended, releaseWireSave, followingWrite } = await clickedOverAWireSave(t);
+    releaseWireSave();
+    const releaseFollowing = await followingWrite;
+    // A third writer moves the file on while Overwrite's write is on the wire.
+    Object.assign(file, { text: "theirs again", token: "160" });
+    releaseFollowing();
+
+    expect(await ended).toEqual(["settled", "settled"]);
+    expect(puts.slice(1)).toEqual([
+      { token: "100", sha: SHA_LOADED, body: "loaded and mine" },
+      { token: "150", sha: null, body: "loaded and mine" },
+    ]);
+    expect({
+      prompt: conflictDialog.open,
+      promptTab: conflictDialog.tabId,
+      current: conflictDialog.currentMtimeNs,
+      file: file.text,
+      ...held(t),
+    }).toEqual({
+      prompt: true,
+      promptTab: TAB,
+      current: "160",
+      file: "theirs again",
+      content: "loaded and mine",
+      saved: "loaded",
+      token: "150",
+    });
+
+    // The prompt is left unanswered, so the next save names the text the tab
+    // loaded again.
+    dismissConflict();
+    await saveTab(t);
+    expect(puts.slice(3)).toEqual([{ token: "150", sha: SHA_LOADED, body: "loaded and mine" }]);
+    expect({ prompt: conflictDialog.open, current: conflictDialog.currentMtimeNs, file: file.text }).toEqual({
+      prompt: true,
+      current: "160",
+      file: "theirs again",
     });
   });
 
