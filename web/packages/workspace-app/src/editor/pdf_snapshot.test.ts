@@ -579,6 +579,30 @@ describe("liftPageImages", () => {
     expect(() => images.assertPainted()).not.toThrow();
   });
 
+  test("an image under a root outside the document is one the page must paint", async () => {
+    // An engine resolves no style for an element outside a document:
+    // every property reads as the empty string, and that is not an
+    // opacity of zero.
+    const resolved = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) =>
+      el.isConnected
+        ? resolved(el, pseudo)
+        : (new Proxy({}, { get: () => "" }) as CSSStyleDeclaration),
+    );
+    decodesSettleAtOnce();
+    const root = document.createElement("div");
+    root.innerHTML = '<img src="/api/fs/shots/loose.png?t=tok">';
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    expect(images.lifted).toHaveLength(1);
+    expect(images.lifted[0]!.rendered).toBe(true);
+    expect(() => images.assertPainted()).toThrow(
+      "image has no place on the page: /api/fs/shots/loose.png",
+    );
+  });
+
   test("an image with a box that no page painted fails by name", async () => {
     imagesHaveBoxes();
     const { images } = await lifted('<img src="/api/fs/shots/a.png?t=tok">');
