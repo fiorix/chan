@@ -1509,12 +1509,15 @@ impl DevserverState {
     /// registration entirely. Refusal leaves both the live mount and the
     /// registration intact. Distinct from on/off.
     ///
-    /// A removal the host answers still releasing has run its close first,
-    /// so a workspace still registered is off in the host, and its off row
-    /// is a fresh row behind an earlier removal's forget, or no row after
-    /// the unregister's own conflict: nothing in the overlay outranks a
-    /// record left desired on. The record is turned off
-    /// ([`stand_down_refused_forget`](Self::stand_down_refused_forget)).
+    /// A removal the host fails has run its close first, whether it answers
+    /// still releasing or its unregister fails another way, so a workspace
+    /// still registered is off in the host, and its off row is a fresh row
+    /// behind an earlier removal's forget, or no row once the removal has
+    /// forgotten its rows: nothing in the overlay outranks a record left
+    /// desired on. The record is turned off
+    /// ([`stand_down_refused_forget`](Self::stand_down_refused_forget)), so the
+    /// forget's error leaves the workspace registered and its record as the
+    /// host left it.
     async fn forget_workspace(
         &self,
         prefix: &str,
@@ -1562,7 +1565,7 @@ impl DevserverState {
         }
         let removed = match self.host.remove_workspace_for_root(&root, force).await {
             Ok(removed) => removed,
-            Err(error @ Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            Err(error) => {
                 let left = match &pending {
                     Some((_, tombstone)) => Some((*tombstone, true)),
                     None => read.map(|generation| (generation, false)),
@@ -1572,7 +1575,6 @@ impl DevserverState {
                 }
                 return Err(error);
             }
-            Err(error) => return Err(error),
         };
         match removed {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
@@ -1609,12 +1611,12 @@ impl DevserverState {
         Ok(WorkspaceLifecycleOutcome::Completed)
     }
 
-    /// Turn off the record at `prefix` once the host has answered its
-    /// forget still releasing: the tombstone this forget left of a starting
-    /// record at `generation` (`tombstoned`), or a record it did not
-    /// tombstone, still at the `generation` it read.
+    /// Turn off the record at `prefix` once the host has failed its forget's
+    /// removal, still releasing or another way: the tombstone this forget
+    /// left of a starting record at `generation` (`tombstoned`), or a record
+    /// it did not tombstone, still at the `generation` it read.
     ///
-    /// The host's removal ran its close before it answered, so the host holds
+    /// The host's removal ran its close before it failed, so the host holds
     /// the workspace off. The tombstone goes back off at its own generation,
     /// which is past its attempt's: the attempt stands down at either of its
     /// reconciles if it has not read the tombstone, and one that has runs a
