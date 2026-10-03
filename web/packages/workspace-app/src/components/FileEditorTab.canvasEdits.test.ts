@@ -1309,14 +1309,21 @@ describe("a live drawing", () => {
     const { tab, board, socket } = await attachedDrawing();
     board.stroke(STROKE);
     // The save hands the stroke over at once, and its ack lands before the
-    // flush writes the stroke into the buffer.
-    const saving = saveTab(tab);
+    // board's flush writes the stroke into the buffer. The save itself ends
+    // at the authority's write of the stroke, not at that ack.
+    let saved = false;
+    const saving = saveTab(tab).then(() => {
+      saved = true;
+    });
     await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
-    socket.frame({ type: "push-ok", version: 2 });
+    socket.frame({ type: "push-ok", version: 2, changed: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const atAck = saved;
+    socket.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
     await saving;
     await vi.waitFor(() => expect(tab.content).toContain('"stroke"'));
 
-    expect(isDirty(tab)).toBe(false);
+    expect({ atAck, dirty: isDirty(tab) }).toEqual({ atAck: false, dirty: false });
   });
 
   test("a stroke on the wire keeps the drawing unsaved through a peer's edit until its ack", async () => {

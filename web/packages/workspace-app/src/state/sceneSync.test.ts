@@ -766,6 +766,65 @@ describe("save funnel", () => {
   });
 });
 
+// The authority acks a push at once and writes the file after its debounce,
+// and it acks a push that changed nothing and writes nothing after it. So the
+// ack says which it was, and a save that waited on the push answers saved only
+// once the file holds it.
+describe("a save that waits on this window's own push", () => {
+  /// A save waiting on the session's flush, and what it has answered so far:
+  /// null until it answers.
+  function waitingSave(session: SceneSession): () => boolean | null {
+    let answer: boolean | null = null;
+    void session.flush().then((ok) => {
+      answer = ok;
+    });
+    return () => answer;
+  }
+
+  test("answers at the authority's flush frame when the push changed the scene, not at its ack", async () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    session.pushScene([elem("mine", 2)]);
+    const answer = waitingSave(session);
+    sock.frame({ type: "push-ok", version: 1, changed: true });
+    await flushMicro();
+    const atAck = answer();
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    await flushMicro();
+
+    expect({ atAck, atFlush: answer() }).toEqual({ atAck: null, atFlush: true });
+  });
+
+  test.each([
+    ["changed nothing", { changed: false }],
+    ["does not say whether it changed anything", {}],
+  ])("answers at the ack of a push that %s", async (_what, said) => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    session.pushScene([elem("mine", 2)]);
+    const answer = waitingSave(session);
+    sock.frame({ type: "push-ok", version: 0, ...said });
+    await flushMicro();
+
+    expect(answer()).toBe(true);
+  });
+
+  test("still waits for the flush frame of a peer's edit when its own push changed nothing", async () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
+    session.pushScene([elem("mine", 2)]);
+    const answer = waitingSave(session);
+    sock.frame({ type: "push-ok", version: 1, changed: false });
+    await flushMicro();
+    const atAck = answer();
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    await flushMicro();
+
+    expect({ atAck, atFlush: answer() }).toEqual({ atAck: null, atFlush: true });
+  });
+});
+
 // ---- lifecycle ----------------------------------------------------------------
 
 describe("lifecycle", () => {
@@ -887,6 +946,26 @@ describe("the force-reload prompt can see unflushed scene state", () => {
 
     // No push-ok has landed, so the authority holds state the disk does not.
     expect(isDocUnflushed(tab.id)).toBe(true);
+  });
+
+  test("a push the authority took and has not written reports unflushed until its flush frame", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    session.pushScene([elem("a", 2)]);
+    sock.frame({ type: "push-ok", version: 1, changed: true });
+    const acked = isDocUnflushed(tab!.id);
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+
+    expect({ acked, written: isDocUnflushed(tab!.id) }).toEqual({ acked: true, written: false });
+  });
+
+  test("a push that changed nothing reports nothing unflushed once it is acked", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    session.pushScene([elem("a", 2)]);
+    sock.frame({ type: "push-ok", version: 0, changed: false });
+
+    expect(isDocUnflushed(tab!.id)).toBe(false);
   });
 });
 
