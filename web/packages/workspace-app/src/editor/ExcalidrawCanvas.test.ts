@@ -352,6 +352,10 @@ type SessionStub = {
   bindCanvas: ReturnType<typeof vi.fn>;
   unbindCanvas: ReturnType<typeof vi.fn>;
   pushScene: ReturnType<typeof vi.fn>;
+  /// Whether the session keeps a key the board offers as a claim, which the
+  /// canvas asks at an adopt. These stubs stand for an attached session on a
+  /// writable tab whose board has adopted its scene, which does.
+  keepsAppStateClaim: () => boolean;
   sendCursor: ReturnType<typeof vi.fn>;
   bufferMirrored: ReturnType<typeof vi.fn>;
   peerCursorSnapshot: () => Map<number, { w: string; x: number; y: number }>;
@@ -373,6 +377,7 @@ async function mountBound(
     }),
     unbindCanvas: vi.fn(),
     pushScene: vi.fn(() => true),
+    keepsAppStateClaim: () => true,
     sendCursor: vi.fn(),
     bufferMirrored: vi.fn(),
     peerCursorSnapshot: () => new Map([[7, { w: "win-peer", x: 1.5, y: 2 }]]),
@@ -417,6 +422,7 @@ describe("a board that has not taken its first seed", () => {
       bindCanvas: vi.fn(),
       unbindCanvas: vi.fn(),
       pushScene: vi.fn(() => true),
+      keepsAppStateClaim: () => true,
       sendCursor: vi.fn(),
       bufferMirrored: vi.fn(),
       peerCursorSnapshot: () => new Map(),
