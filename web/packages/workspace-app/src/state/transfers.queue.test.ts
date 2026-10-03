@@ -136,16 +136,15 @@ describe("transfer ids cannot collide across windows", () => {
   });
 });
 
-/// An upload request that answers with `status` (and `retryAfter`, when set)
-/// as soon as it is sent, recording the headers the client set. A `body`
-/// stands for what a refusal answers in place of the upload's result.
+/// An upload request that answers with `status` as soon as it is sent,
+/// recording the headers the client set. A `body` stands for what a refusal
+/// answers in place of the upload's result.
 class AnsweringXhr {
   static sent: AnsweringXhr[] = [];
   headers: Record<string, string> = {};
   status = 0;
   statusText = "";
   responseText = "";
-  headerReads = 0;
   upload: { onprogress: (() => void) | null } = { onprogress: null };
   onload: (() => void) | null = null;
   onerror: (() => void) | null = null;
@@ -153,7 +152,6 @@ class AnsweringXhr {
   onloadend: (() => void) | null = null;
   constructor(
     private readonly answer: number,
-    private readonly retryAfter: string | null,
     private readonly body: string | null,
   ) {
     AnsweringXhr.sent.push(this);
@@ -161,10 +159,6 @@ class AnsweringXhr {
   open(): void {}
   setRequestHeader(name: string, value: string): void {
     this.headers[name] = value;
-  }
-  getResponseHeader(name: string): string | null {
-    this.headerReads += 1;
-    return name === "retry-after" ? this.retryAfter : null;
   }
   send(body: FormData): void {
     const file = body.get("file") as File;
@@ -180,9 +174,9 @@ class AnsweringXhr {
   abort(): void {}
 }
 
-function answerUploads(status = 200, retryAfter: string | null = null, body: string | null = null): void {
+function answerUploads(status = 200, body: string | null = null): void {
   AnsweringXhr.sent = [];
-  setXhrFactory(() => new AnsweringXhr(status, retryAfter, body) as unknown as XMLHttpRequest);
+  setXhrFactory(() => new AnsweringXhr(status, body) as unknown as XMLHttpRequest);
 }
 
 describe("the frame on the watch stream", () => {
@@ -259,7 +253,7 @@ describe("an upload the server refuses with 503", () => {
   ];
 
   test.each(REFUSALS)("fails with %s sentence and code", async (_whose, body, sentence, code) => {
-    answerUploads(503, "1", body);
+    answerUploads(503, body);
 
     const refused = await api.uploadFile(new File(["x"], "a.md"), "").catch((error: unknown) => error);
 
@@ -273,7 +267,7 @@ describe("an upload the server refuses with 503", () => {
       tree.entries = [];
       tree.loadedDirs = {};
       await loadTreeDir("");
-      answerUploads(503, null, STOPPING);
+      answerUploads(503, STOPPING);
       resetTransfers();
 
       await fileOps.uploadFilesTo("", [new File(["new"], "b.md")]);
@@ -287,21 +281,6 @@ describe("an upload the server refuses with 503", () => {
       uninstallDemoWorkspace();
       tree.entries = [];
     }
-  });
-
-  test("a missing or blank Retry-After stays absent rather than becoming zero", async () => {
-    for (const header of [null, "", "  ", "soon"]) {
-      answerUploads(503, header);
-      const refused = await api.uploadFile(new File(["x"], "a.md"), "").catch((error: unknown) => error);
-      expect(refused).toMatchObject({ data: { retryAfterSeconds: null } });
-    }
-  });
-
-  test("a success reads no header, so a response without them still settles", async () => {
-    answerUploads(200);
-
-    await expect(api.uploadFile(new File(["x"], "a.md"), "")).resolves.toMatchObject({ path: "a.md" });
-    expect(AnsweringXhr.sent[0]!.headerReads).toBe(0);
   });
 });
 

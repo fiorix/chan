@@ -355,48 +355,6 @@ interface XhrResponse {
   status: number;
   statusText: string;
   responseText: string;
-  /// `Retry-After` in seconds when the server sent one, else null. Only the
-  /// admission refusal below reads it.
-  retryAfterSeconds: number | null;
-}
-
-/// Detail carried on the admission refusal, reachable through `ApiError.data`.
-export interface TransferBusyDetail {
-  retryAfterSeconds: number | null;
-}
-
-/// `Retry-After` in seconds, or null when it is absent or unusable. A missing
-/// header must stay null rather than becoming 0: `Number(null)` and
-/// `Number("")` are both 0, which would read as "retry immediately" instead of
-/// "not stated".
-function parseRetryAfterSeconds(raw: string | null): number | null {
-  const trimmed = raw?.trim();
-  if (!trimmed) return null;
-  const seconds = Number(trimmed);
-  return Number.isFinite(seconds) ? seconds : null;
-}
-
-/// True when the server refused a transfer at its admission bound rather than
-/// failing one. Nothing was read and nothing was written, so this is not a
-/// transfer failure and must not be reported to the user as one: the correct
-/// response is to wait the stated interval and try again, and the correct
-/// wording is that the server is busy.
-export function isTransferBusyError(error: unknown): error is ApiError {
-  return (
-    error instanceof ApiError &&
-    error.status === 503 &&
-    typeof (error.data as TransferBusyDetail | null)?.retryAfterSeconds !== "undefined"
-  );
-}
-
-/// Seconds to wait before retrying a refused transfer. Falls back to 1, the
-/// value the server sends today, when the header is missing or unparseable.
-export function transferRetryAfterSeconds(error: unknown): number {
-  const detail = error instanceof ApiError ? (error.data as TransferBusyDetail | null) : null;
-  const seconds = detail?.retryAfterSeconds;
-  return typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0
-    ? seconds
-    : 1;
 }
 
 function uploadXhrAttempt(
@@ -434,14 +392,6 @@ function uploadXhrAttempt(
         status: xhr.status,
         statusText: xhr.statusText,
         responseText: xhr.responseText,
-        // Read only on the admission refusal, which is the only status that
-        // carries it. The optional call keeps a response object that does not
-        // model headers from throwing in here, where a throw would strand the
-        // promise instead of failing the request.
-        retryAfterSeconds:
-          xhr.status === 503
-            ? parseRetryAfterSeconds(xhr.getResponseHeader?.("retry-after") ?? null)
-            : null,
       });
     };
     xhr.onerror = () => reject(new ApiError(xhr.status || 0, "upload failed"));
@@ -468,13 +418,9 @@ async function uploadMultipart(
   const response = await withGatewayCsrfRetry("POST", (csrfHeaders) =>
     uploadXhrAttempt(form, opts, csrfHeaders),
   );
-  if (response.status === 503) {
-    // The admission bound, not a failure: refused before any body was read, so
-    // nothing was transferred and no admission was consumed.
-    throw new ApiError(503, "server busy", {
-      retryAfterSeconds: response.retryAfterSeconds,
-    } satisfies TransferBusyDetail);
-  }
+  // A refusal fails with its sender's own sentence and code, a 503 included:
+  // the transfer bound, a stopping or restoring devserver and a proxy in
+  // front of either each answer one, and each says something different.
   if (response.status < 200 || response.status >= 300) {
     xhrTextError(response.status, response.statusText, response.responseText);
   }
