@@ -37,3 +37,11 @@ By the report's citations: `crates/chan/src/lib.rs` (`unserve_running`, `cmd_clo
 1. The owner's decision is recorded, with which item holds each of the three.
 2. If it is built: `chan workspace forget` of a registered path that resolves into another registered workspace's folder leaves that other workspace registered, with the state chan keeps for it; pinned red first.
 3. If it is built: the launcher's off of such a row leaves the other workspace on; pinned red first.
+
+## What shipped
+
+Built in part on 2026-10-03 on the v0.102.0 integration branch and not on `main`: the command's and the desktop's parts, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those.
+
+For a forget, a path that a registry row stores, made absolute against the working directory and lexically normalized, names that row (`stored_row_named_by`, `crates/chan/src/close.rs`). That row's stored name goes to the desktop or to the holder's control socket, its paths supply the holder's lock and the metadata directory (`workspace_paths_for_row`), and the local unregister removes that row alone (`unregister_workspace_row`). The desktop's handoff chooses the stored row before its resolved lookup (`close_workspace_from_handoff`, `desktop/src-tauri/src/main.rs`). A path no row stores keeps the resolved lookup, and `chan close` keeps its canonical request. Both halves must be of this version: a new command with an older desktop, or the reverse, does what v0.101.0 did and can remove the other workspace.
+
+The row stays open. Left: the launcher's off of such a row (acceptance 3). And four rows the review left: a typed path whose `..` follows a symlink names the row its lexical form stores, where the kernel resolves to another directory, and the match is to abstain there; the six tests of this part type raw temporary paths and compare them with canonical stored roots, so they fail wherever the temporary directory's spelling is not canonical, which is every macOS run, and no check of the Linux gate covers the command's tests under such a directory; the design documents do not say what an old and a new half do together; a relative forget from a working directory that cannot be read now exits 1, which stands.
