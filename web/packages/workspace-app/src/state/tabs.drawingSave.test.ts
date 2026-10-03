@@ -255,7 +255,9 @@ describe("the close of a draft drawing whose unsaved text does not parse", () =>
       has_attachments: false,
     });
     const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
-    const promote = vi.spyOn(api, "promoteDraft");
+    const promote = vi
+      .spyOn(api, "promoteDraft")
+      .mockResolvedValue({ path: "untitled.excalidraw", name: "untitled", mode: "file" });
     return { pane, write, notice, inspect, discard, promote };
   }
 
