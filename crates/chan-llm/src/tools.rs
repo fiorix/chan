@@ -622,6 +622,25 @@ mod tests {
     }
 
     #[test]
+    fn read_file_offset_answers_the_next_page() {
+        let (_cfg, root, ctx) = fixture();
+        let text = format!("{}tail", "x".repeat(READ_FILE_CAP_BYTES));
+        std::fs::write(root.path().join("paged.md"), &text).unwrap();
+        let first = execute("read_file", &serde_json::json!({"path": "paged.md"}), &ctx).unwrap();
+        assert_eq!(
+            first["content"].as_str().unwrap().len(),
+            READ_FILE_CAP_BYTES
+        );
+        let second = execute(
+            "read_file",
+            &serde_json::json!({"path": "paged.md", "offset": READ_FILE_CAP_BYTES}),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(second["content"], "tail");
+    }
+
+    #[test]
     fn write_file_applies_immediately() {
         let (_cfg, _root, ctx) = fixture();
         let v = execute(

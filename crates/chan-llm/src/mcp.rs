@@ -1390,6 +1390,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_offset_survives_the_mcp_wire() {
+        let (_cfg, root, server) = fixture();
+        std::fs::write(root.path().join("a.md"), "abcdef").unwrap();
+        let (client, peer) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(peer);
+        let session = tokio::spawn(server.serve_io(read, write));
+        let (read, mut write) = tokio::io::split(client);
+        let mut read = BufReader::new(read);
+        initialize(&mut read, &mut write).await;
+        write_rpc(
+            &mut write,
+            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "read_file", "arguments": {"path": "a.md", "offset": 3}}}),
+        )
+        .await;
+        let reply = read_rpc(&mut read).await;
+        let page: serde_json::Value =
+            serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(page["content"], "def");
+        session.abort();
+    }
+
+    #[tokio::test]
     async fn write_file_applies_immediately() {
         let (_cfg, root, server) = fixture();
         let out = server
