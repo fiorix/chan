@@ -105,7 +105,10 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "cleanup-order" ]; then
 fi
 
 # Self-test seam for what a restart prints (systemd is never touched: the
-# chan it runs is a stub that prints what a restart prints):
+# chan it runs is a stub that prints what a restart prints, and what a
+# restart whose unit did not come up prints on stderr: its error, then the
+# unit's recent journal, where each line of the devserver's banner follows
+# the journal's own columns):
 #   CHAN_FDSTORE_E2E_SELFTEST=token-mask scripts/e2e/devserver-fdstore.sh
 if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "token-mask" ]; then
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/chan-fdstore-selftest.XXXXXX")"
@@ -116,6 +119,11 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "token-mask" ]; then
 #!/usr/bin/env bash
 printf 'CHAN_DEVSERVER_TOKEN=%s\n' '$TOKEN'
 printf 'http://127.0.0.1:1/?w=1&t=%s&x=2\n' '$TOKEN'
+if [ "\${STUB_EXIT:-0}" != 0 ]; then
+    printf 'Error: systemd unit activation failed\n' >&2
+    printf 'Jan 01 00:00:00 host chan[1]: chan devserver: listening on http://127.0.0.1:1/?t=%s\n' '$TOKEN' >&2
+    printf 'Jan 01 00:00:00 host chan[1]: CHAN_DEVSERVER_TOKEN=%s\n' '$TOKEN' >&2
+fi
 exit "\${STUB_EXIT:-0}"
 EOF
     chmod +x "$CHAN"
@@ -128,6 +136,10 @@ EOF
         *"$TOKEN"*) ;;
         *) selftest_fail "the stub printed no token, so nothing below can fail" ;;
     esac
+    case "$(STUB_EXIT=3 "$CHAN" 2>&1 >/dev/null)" in
+        *"$TOKEN"*) ;;
+        *) selftest_fail "the failing stub printed no token on stderr, so nothing below can fail" ;;
+    esac
     PRINTED="$(restart_devserver --force)" \
         || selftest_fail "a restart that succeeded read as a failure"
     case "$PRINTED" in
@@ -137,9 +149,28 @@ EOF
         *'CHAN_DEVSERVER_TOKEN=<redacted>'*'&t=<redacted>&x=2'*) ;;
         *) selftest_fail "a restart's marker line or launch URL is gone, not masked" ;;
     esac
-    if STUB_EXIT=3 restart_devserver > /dev/null; then
+    if STUB_EXIT=3 restart_devserver > "$WORK/stdout" 2> "$WORK/stderr"; then
         selftest_fail "a restart that failed read as a success"
     fi
+    PRINTED="$(cat "$WORK/stdout")"
+    FAILED="$(cat "$WORK/stderr")"
+    case "$FAILED" in
+        *"$TOKEN"*) selftest_fail "a failed restart printed the devserver's token on stderr" ;;
+    esac
+    case "$FAILED" in
+        *'activation failed'*'/?t=<redacted>'*'chan[1]: CHAN_DEVSERVER_TOKEN=<redacted>'*) ;;
+        *) selftest_fail "a failed restart's error or journal is gone from stderr, not masked" ;;
+    esac
+    case "$PRINTED" in
+        *'activation failed'*) selftest_fail "a failed restart's stderr reached its stdout" ;;
+    esac
+    case "$FAILED" in
+        *'&x=2'*) selftest_fail "a failed restart's stdout reached its stderr" ;;
+    esac
+    case "$PRINTED" in
+        *'CHAN_DEVSERVER_TOKEN=<redacted>'*'&t=<redacted>&x=2'*) ;;
+        *) selftest_fail "a failed restart's stdout is gone, not masked" ;;
+    esac
     rm -rf "$WORK"
     log "selftest token-mask OK"
     exit 0
