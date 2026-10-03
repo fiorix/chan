@@ -58,9 +58,8 @@ import {
 } from "./tabs.svelte";
 
 /// Feature flag. Default ON; localStorage `chan.scenesync = "0"` opts a
-/// browser out. Nothing a socket does turns scene sync off for the page: a
-/// session whose dials get no frame keeps dialing and leaves its tab to the
-/// classic save.
+/// browser out, and the capability probe below silently turns everything
+/// off against a pre-scene-sync server.
 const SCENESYNC_FLAG_KEY = "chan.scenesync";
 const SCENESYNC_DEFAULT_ON = true;
 
@@ -100,11 +99,17 @@ const SCENE_CURSOR_THROTTLE_MS = 100;
 /// the authority and the session degrades.
 const SCENE_MAX_LEN = 2 * 1024 * 1024;
 
+/// Capability probe: the FIRST scene-ws connect that closes before any
+/// frame latches "unsupported" module-wide. `null` = unknown.
+let serverSupportsSceneSync: boolean | null = null;
+
 export function sceneSyncEnabled(): boolean {
-  // Live sessions are a workspace-tenant capability: a standalone window
-  // has no scene route to dial, and a session there would dial for as long
-  // as its tab stays open.
+  // Live sessions are a workspace-tenant capability. The gate must fire
+  // BEFORE any dial: on a standalone window the first failed connect would
+  // latch the module off, a silently-correct state that masks a real
+  // gating bug, so the window mode short-circuits it instead.
   if (!windowCaps.workspace) return false;
+  if (serverSupportsSceneSync === false) return false;
   if (typeof localStorage === "undefined") return false;
   try {
     const v = localStorage.getItem(SCENESYNC_FLAG_KEY);
@@ -347,11 +352,7 @@ export class SceneSession {
     return liveFileTabById(this.tabId) ?? this.boundTab;
   }
 
-  /// `dialing` until the first frame on any socket of this session: no
-  /// authority has spoken for the scene, nothing is stamped on the tab, and
-  /// every close or silent dial is answered with another dial on the
-  /// backoff.
-  private status: DocSyncStatus = "dialing";
+  private status: DocSyncStatus = "connecting";
   private ws: WebSocket | null = null;
   private sawFrameOnSocket = false;
   private closedByUs = false;
@@ -462,9 +463,7 @@ export class SceneSession {
 
   /// True while this session owns saves: the classic autosave/PUT path
   /// must stay quiet in these states (see `isDocAttached` in
-  /// tabs.svelte.ts, which reads the mirrored `tab.doc`). A session that
-  /// has had no frame owns none: its tab saves the classic way with the
-  /// tokens of its load.
+  /// tabs.svelte.ts, which reads the mirrored `tab.doc`).
   ownsSaves(): boolean {
     return (
       this.status === "attached" ||
@@ -476,12 +475,12 @@ export class SceneSession {
   /// Whether the bound board holds this session's scene and its authority
   /// can still be reached: the board has adopted a snapshot of the session,
   /// and the session has not been released and has not stopped retrying, as
-  /// it does when the server closes it for good or answers a permanent
-  /// error. A degraded session that keeps redialing has one. A board that
-  /// has adopted nothing has none: before any frame, after a frame that is
-  /// no snapshot (an error the server sends before it closes the socket),
-  /// and when it bound before its socket's snapshot, it holds the buffer's
-  /// scene and nothing a peer made.
+  /// it does when the server lacks scene sync, closes the session for good
+  /// or answers a permanent error. A degraded session that keeps redialing
+  /// has one. A board that has adopted nothing has none: before any frame,
+  /// after a frame that is no snapshot (an error the server sends before it
+  /// closes the socket), and when it bound before its socket's snapshot, it
+  /// holds the buffer's scene and nothing a peer made.
   reachesAuthority(): boolean {
     return this.canvasAdopted && !this.closedByUs && !this.retryStopped;
   }
@@ -536,11 +535,6 @@ export class SceneSession {
   /// from here to learn which of the two wrote last.
   hasUnflushedState(): boolean {
     if (this.serverDirty || this.pushOutcomeUnresolved || !this.nothingClaimed()) return true;
-    // Before its first frame the session knows of no authority state: what
-    // its board has not handed over is the buffer, and the tab's own dirty
-    // check speaks for that. A claim handed on from the tab's last session
-    // is counted above.
-    if (this.status === "dialing") return false;
     return this.binding?.hasPendingLocal() ?? false;
   }
 
@@ -752,13 +746,10 @@ export class SceneSession {
   ///
   /// A push of this window's with no known outcome is not this case: a
   /// canvas made it, and the settle wait and its withheld fallback own it.
-  /// Neither is a session that has had no frame: it has stamped nothing, so
-  /// the buffer's tokens are its load's and the server's check stands as it
-  /// does with no session.
   ///
   /// Only a registered session is asked: a released one speaks for no tab.
   refusesFallback(): boolean {
-    if (this.status === "dialing" || this.binding !== null || this.pushOutcomeUnresolved) return false;
+    if (this.binding !== null || this.pushOutcomeUnresolved) return false;
     if (this.flushError === null) {
       this.flushError = UNBOUND_FALLBACK_REASON;
       this.tab.saveError = this.flushError;
@@ -1054,9 +1045,9 @@ export class SceneSession {
       }
       if (!this.sawFrameOnSocket) {
         this.sawFrameOnSocket = true;
+        serverSupportsSceneSync = true;
         this.clearAttachTimer();
         this.onChannelUp();
-        if (this.status === "dialing") this.setStatus("connecting");
       }
       this.onFrame(frame);
     };
@@ -1079,12 +1070,16 @@ export class SceneSession {
     this.clearPushInFlight("unresolved");
     this.queued = null;
     if (this.closedByUs || this.retryStopped) return;
-    // Every close is dialed again, a frameless first one and the attach
-    // window's own among them: a devserver that is starting or stopping, a
-    // proxy and a refused token all end a dial before any frame, and none
-    // of them says the route is absent. A `dialing` session keeps that
-    // state through the grace and past it, since it withholds nothing that
-    // a degrade would hand back.
+    // Capability probe: the first scene-ws connect that closes before
+    // any frame means an old server; latch module-wide and go quiet.
+    if (serverSupportsSceneSync === null && !this.sawFrameOnSocket) {
+      serverSupportsSceneSync = false;
+    }
+    if (serverSupportsSceneSync === false) {
+      this.setStatus("off");
+      this.stopRetrying();
+      return;
+    }
     if (this.droppedAt === 0) this.droppedAt = Date.now();
     this.reconnectAttempts += 1;
     const inGrace =
@@ -1451,9 +1446,9 @@ export class SceneSession {
 // ---- registry --------------------------------------------------------------
 
 /// Acquire (or re-acquire within the release linger) the scene session
-/// for `tab`. Returns null when scene sync is off or the buffer is over
-/// the size gate; the caller then simply has no session and the classic
-/// paths run.
+/// for `tab`. Returns null when scene sync is off, unsupported, or the
+/// buffer is over the size gate; the caller then simply has no session
+/// and the classic paths run.
 export function acquireSceneSession(tab: FileTab): SceneSession | null {
   if (!sceneSyncEnabled()) return null;
   // Size gate read untracked on purpose: eligibility must not re-run
@@ -1492,12 +1487,13 @@ export function sceneSyncRosterChanged(): void {
   for (const s of registry.values()) s.notifyRosterChanged();
 }
 
-/// Test seam: drop every session and every claim handed on. Never called
-/// in production.
+/// Test seam: drop every session and reset the module-wide capability
+/// latch. Never called in production.
 export function resetSceneSyncForTests(): void {
   for (const s of [...registry.values()]) s.release({ immediate: true });
   registry.clear();
   for (const tabId of [...handedOnClaims.keys()]) takeHandedOnClaim(tabId);
+  serverSupportsSceneSync = null;
 }
 
 // ---- tabs.svelte.ts hooks ---------------------------------------------------

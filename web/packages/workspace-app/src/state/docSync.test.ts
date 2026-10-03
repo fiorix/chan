@@ -2,8 +2,7 @@
 
 // docSync behavior pins: the pump (push / own-echo confirm / stale
 // rebase), the attach algorithm (pending-diff merge, hard-resync
-// rebase-by-diff), degradation and the redial of a dial that gets no
-// frame, the session before its first frame, the save funnel
+// rebase-by-diff), degradation + capability probe, the save funnel
 // (attached saves never PUT; flush failure degrades to classic), the
 // dirty/saved consumer audit rows, presence plumbing, and two-editor
 // convergence through a pure-TS authority. The wire shapes match the
@@ -283,92 +282,6 @@ describe("attach", () => {
     expect(tab.authorityVersion).toBe(0);
     expect(view.state.doc.toString()).toBe("hello");
     expect(sock.frames("push")).toHaveLength(0);
-    cleanup();
-  });
-
-  test("a clean tab whose file changed under it takes the snapshot and pushes nothing", async () => {
-    // The tab loaded "hello" and holds nothing of its user's; the authority
-    // holds what another writer made of the file since, which the tab's
-    // banner says.
-    const tab = fileTab({ externalChange: true });
-    const { sock, view, cleanup } = await attached(tab, "hello there");
-    expect({
-      state: tab.doc?.state,
-      editor: view.state.doc.toString(),
-      buffer: tab.content,
-      saved: tab.saved,
-      pushes: sock.frames("push").length,
-      banner: tab.externalChange,
-    }).toEqual({
-      state: "attached",
-      editor: "hello there",
-      buffer: "hello there",
-      saved: "hello there",
-      pushes: 0,
-      banner: false,
-    });
-    cleanup();
-  });
-
-  test("a clean tab whose editor binds after the snapshot takes the snapshot then", async () => {
-    const tab = fileTab();
-    const session = acquireDocSession(tab)!;
-    const sock = lastSocket();
-    sock.open();
-    sock.frame(snap("hello there"));
-    await flushMicro();
-    const { view, cleanup } = mountEditor(tab, session);
-    await flushMicro();
-    expect({
-      editor: view.state.doc.toString(),
-      buffer: tab.content,
-      saved: tab.saved,
-      pushes: sock.frames("push").length,
-    }).toEqual({ editor: "hello there", buffer: "hello there", saved: "hello there", pushes: 0 });
-    cleanup();
-  });
-
-  test("a clean tab with no editor stays clean through a second socket's snapshot", async () => {
-    vi.useFakeTimers();
-    const tab = fileTab();
-    const session = acquireDocSession(tab)!;
-    const first = lastSocket();
-    first.open();
-    first.frame(snap("hello there"));
-    await flushMicro();
-    first.drop();
-    await vi.advanceTimersByTimeAsync(500);
-    const second = lastSocket();
-    expect(second).not.toBe(first);
-    second.open();
-    second.frame(snap("hello there, again", 4));
-    await flushMicro();
-    const { view, cleanup } = mountEditor(tab, session);
-    await flushMicro();
-    expect({
-      editor: view.state.doc.toString(),
-      buffer: tab.content,
-      saved: tab.saved,
-      pushes: second.frames("push").length,
-    }).toEqual({ editor: "hello there, again", buffer: "hello there, again", saved: "hello there, again", pushes: 0 });
-    cleanup();
-  });
-
-  test("a key typed between the snapshot and the attach is kept: the tab attaches as a dirty one", async () => {
-    const tab = fileTab();
-    const session = acquireDocSession(tab)!;
-    const sock = lastSocket();
-    sock.open();
-    sock.frame(snap("hello there"));
-    await flushMicro();
-    // The tab was clean when the snapshot landed and is not at the attach.
-    tab.content = "hello!";
-    const { view, cleanup } = mountEditor(tab, session);
-    await flushMicro();
-    expect(view.state.doc.toString()).toBe("hello!");
-    expect(sock.frames("push")).toHaveLength(1);
-    await ackLastPush(sock, 0);
-    expect({ buffer: tab.content, saved: tab.saved }).toEqual({ buffer: "hello!", saved: "hello!" });
     cleanup();
   });
 
@@ -665,82 +578,28 @@ describe("degradation", () => {
     acquireDocSession(tab);
     const sock = lastSocket();
     sock.open();
-    // The server refuses the attach with a frame before the close.
+    // The server refuses the attach with a frame BEFORE the close, so
+    // the capability probe never reads this as an old server.
     sock.frame({ type: "error", message: "no such file", reason: "attach-failed" });
     sock.drop();
     expect(tab.doc?.state).toBe("degraded");
     await vi.advanceTimersByTimeAsync(30_000);
     expect(sockets.length).toBe(1); // no redial of a permanently bad attach
-    // The stop is this session's alone: other tabs still attach.
+    // The module-wide latch is untouched: other tabs still attach.
     expect(acquireDocSession(fileTab())).not.toBeNull();
   });
 
-  test("a first dial closed before any frame is dialed again after the backoff and attaches when one frames", async () => {
-    vi.useFakeTimers();
+  test("capability probe: first close before any frame latches doc sync off", async () => {
     const tab = fileTab();
-    const session = acquireDocSession(tab)!;
-    const { view, cleanup } = mountEditor(tab, session);
-    await flushMicro();
-    lastSocket().drop();
-    expect(tab.doc?.state).not.toBe("off");
-    await vi.advanceTimersByTimeAsync(499);
-    expect(sockets).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(sockets).toHaveLength(2);
-    const retry = lastSocket();
-    retry.open();
-    retry.frame(snap("hello", 0));
-    await flushMicro();
-    expect(tab.doc?.state).toBe("attached");
-    // A peer's change sent after the snapshot is in the tab's text.
-    retry.frame({
-      type: "updates",
-      version: 0,
-      updates: [{ clientID: "peer", changes: changesJSON(5, 5, 5, " there") }],
-    });
-    await flushMicro();
-    expect({ editor: view.state.doc.toString(), buffer: tab.content }).toEqual({
-      editor: "hello there",
-      buffer: "hello there",
-    });
-    cleanup();
-  });
-
-  test("a first dial closed before any frame refuses no other tab a session", async () => {
-    acquireDocSession(fileTab());
-    lastSocket().drop();
-    const other = fileTab({ path: "notes/b.md" });
-    expect(isDocSyncEligible(other)).toBe(true);
-    const session = acquireDocSession(other);
+    const session = acquireDocSession(tab);
     expect(session).not.toBeNull();
-    const sock = lastSocket();
-    expect(new URL(sock.url).searchParams.get("path")).toBe("notes/b.md");
-    sock.open();
-    sock.frame(snap("hello", 0));
-    await flushMicro();
-    expect(other.doc?.state).toBe("attached");
-  });
-
-  test("frameless closes are dialed again on the backoff and no faster: eleven dials in a minute", async () => {
-    vi.useFakeTimers();
-    acquireDocSession(fileTab());
-    // The dial after each close waits 500 ms doubling to 8 s, so the dials
-    // of the first minute are made at 0, 0.5, 1.5, 3.5, 7.5 and then every
-    // 8 s up to 55.5 s.
-    const delays = [500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000];
-    for (const [i, delay] of delays.entries()) {
-      lastSocket().drop();
-      await vi.advanceTimersByTimeAsync(delay - 1);
-      expect(sockets, `dial ${i + 2} is not made before its delay`).toHaveLength(i + 1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(sockets, `dial ${i + 2} is made at its delay`).toHaveLength(i + 2);
-    }
     lastSocket().drop();
-    await vi.advanceTimersByTimeAsync(4500);
-    expect(sockets, "the twelfth dial falls past the minute").toHaveLength(11);
+    expect(tab.doc?.state).toBe("off");
+    // Module-wide latch: further acquires are refused outright.
+    expect(acquireDocSession(fileTab())).toBeNull();
   });
 
-  test("a dial with no frame inside the attach window is closed and dialed again", async () => {
+  test("an attach TIMEOUT close does not latch capability off; the dial retries", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
     acquireDocSession(tab);
@@ -749,7 +608,8 @@ describe("degradation", () => {
     // itself when the attach window runs out.
     await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS + 50);
     expect(first.closedByClient).toBe(true);
-    // A dial that timed out is dialed again like one the server closed.
+    // A self-inflicted timeout close proves nothing about the server:
+    // the module latch must stay unknown and the session must redial.
     expect(tab.doc?.state).not.toBe("off");
     await vi.advanceTimersByTimeAsync(600);
     expect(sockets.length).toBe(2);
@@ -758,7 +618,7 @@ describe("degradation", () => {
     retry.frame(snap("hello", 0));
     await flushMicro();
     expect(tab.doc?.state).toBe("attached");
-    // Other tabs still get sessions.
+    // Other tabs still get sessions: nothing was latched module-wide.
     expect(acquireDocSession(fileTab())).not.toBeNull();
   });
 
@@ -821,14 +681,15 @@ describe("degradation", () => {
     cleanup();
   });
 
-  test("a no-workspace error (dial racing a reset swap) is dialed again", async () => {
+  test("a no-workspace error (dial racing a reset swap) retries, never latches", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
     acquireDocSession(tab);
     const sock = lastSocket();
     sock.open();
-    // The server answers the race with a frame before closing, and the
-    // session redials once the cell swap settles.
+    // The server answers the race with a FRAME before closing, so the
+    // capability probe must not read this as a pre-doc-sync server and
+    // the session must redial once the cell swap settles.
     sock.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
     sock.drop();
     expect(tab.doc?.state).not.toBe("off");
@@ -839,108 +700,6 @@ describe("degradation", () => {
     retry.frame(snap("hello", 0));
     await flushMicro();
     expect(tab.doc?.state).toBe("attached");
-  });
-});
-
-// ---- a session before its first frame -----------------------------------------
-
-// No authority has spoken for the document yet, so the tab's text and tokens
-// are those of its load and the classic save writes them.
-describe("a session that has had no frame", () => {
-  /// A dirty tab in the layout whose session has dialed and heard nothing,
-  /// on a page where another tab's session has attached.
-  function unframed() {
-    const attachedElsewhere = fileTab({ path: "notes/b.md" });
-    acquireDocSession(attachedElsewhere);
-    lastSocket().open();
-    lastSocket().frame(snap("hello", 0));
-    const tab = fileTab({ content: "hello!", saved: "hello" });
-    const pane = resetLayout([tab]);
-    const t = readTab(tab.id)!;
-    const write = vi
-      .spyOn(api, "write")
-      .mockResolvedValue({ mtime: 2, mtime_ns: "2000000000" });
-    acquireDocSession(t);
-    return { t, pane, write };
-  }
-
-  test("an asked save is written the classic way with the token of the tab's load", async () => {
-    vi.useFakeTimers();
-    const { t, write } = unframed();
-    expect({ attached: isDocAttached(t), paused: isDocSavePaused(t) }).toEqual({
-      attached: false,
-      paused: false,
-    });
-    await saveTab(t);
-    expect(write).toHaveBeenCalledTimes(1);
-    expect(write.mock.calls[0]!.slice(0, 3)).toEqual(["notes/a.md", "hello!", "1000000000"]);
-    expect({ saved: t.saved, token: t.savedMtimeNs, error: t.error }).toEqual({
-      saved: "hello!",
-      token: "2000000000",
-      error: null,
-    });
-  });
-
-  test("past the reconnect grace it still saves, asked or by autosave, and still dials", async () => {
-    vi.useFakeTimers();
-    const { t, pane, write } = unframed();
-    const dials = sockets.length;
-    lastSocket().drop();
-    await vi.advanceTimersByTimeAsync(500);
-    lastSocket().drop();
-    await vi.advanceTimersByTimeAsync(1000);
-    lastSocket().drop();
-    expect(sockets).toHaveLength(dials + 2);
-    expect({ attached: isDocAttached(t), paused: isDocSavePaused(t) }).toEqual({
-      attached: false,
-      paused: false,
-    });
-    await saveTab(t);
-    expect(write).toHaveBeenCalledTimes(1);
-    t.content = "hello!!";
-    scheduleAutosave(pane.id, t.id);
-    await vi.advanceTimersByTimeAsync(800);
-    expect(write).toHaveBeenCalledTimes(2);
-    expect(write.mock.calls[1]!.slice(0, 3)).toEqual(["notes/a.md", "hello!!", "2000000000"]);
-    // The third dial follows the third close by 2 s.
-    await vi.advanceTimersByTimeAsync(1200);
-    expect(sockets).toHaveLength(dials + 3);
-  });
-
-  test("it holds nothing the disk lacks, so a reload of its clean tab asks nothing", () => {
-    const tab = fileTab();
-    acquireDocSession(tab);
-    expect(isDocUnflushed(tab.id)).toBe(false);
-  });
-
-  test("its first snapshot attaches the tab over the classic save, and what the buffer holds beyond it is pushed", async () => {
-    vi.useFakeTimers();
-    const { t, write } = unframed();
-    const session = docSessionFor(t.id)!;
-    const sock = lastSocket();
-    const { view, cleanup } = mountEditor(t, session);
-    await flushMicro();
-    expect(isDocSavePaused(t), "the session withholds the classic save").toBe(false);
-    await saveTab(t);
-    expect(write).toHaveBeenCalledTimes(1);
-    type(view, "?");
-    await flushMicro();
-    // The authority read the file the classic save wrote.
-    sock.open();
-    sock.frame(snap("hello!", 0));
-    await flushMicro();
-    expect({ state: t.doc?.state, saved: t.saved, token: t.savedMtimeNs, buffer: t.content }).toEqual({
-      state: "attached",
-      saved: "hello!",
-      token: MTIME,
-      buffer: "hello!?",
-    });
-    const pushes = sock.frames("push");
-    expect(pushes).toHaveLength(1);
-    await ackLastPush(sock, 0);
-    expect({ saved: t.saved, buffer: t.content }).toEqual({ saved: "hello!?", buffer: "hello!?" });
-    expect(write).toHaveBeenCalledTimes(1);
-    cleanup();
   });
 });
 
@@ -1073,7 +832,7 @@ describe("save funnel", () => {
     for (const s of ["attached", "connecting", "reconnecting"] as const) {
       expect(isDocAttached(fileTab({ doc: { state: s, peers: 0 } }))).toBe(true);
     }
-    for (const s of ["dialing", "degraded", "off"] as const) {
+    for (const s of ["degraded", "off"] as const) {
       expect(isDocAttached(fileTab({ doc: { state: s, peers: 0 } }))).toBe(false);
     }
     expect(isDocAttached(fileTab())).toBe(false);

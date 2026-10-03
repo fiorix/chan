@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 
-// sceneSync behavior pins: the redial of a dial that gets no frame, the
-// session before its first frame, the push pump
+// sceneSync behavior pins: the capability probe, the push pump
 // (coalescing + ack-based saved), snapshot/update fan-in through the
 // canvas binding seam, presence, degrade-to-classic, the save funnel,
 // and the tabs.svelte.ts delegate-array coexistence with docSync. The
@@ -459,9 +458,9 @@ describe("presence", () => {
   });
 });
 
-// ---- redial + degrade ---------------------------------------------------------
+// ---- capability probe + degrade ----------------------------------------------
 
-describe("redial and degrade", () => {
+describe("probe and degrade", () => {
   test("a fallback redial keeps its own attach window", async () => {
     vi.useFakeTimers();
     const tab = sceneTab();
@@ -488,98 +487,16 @@ describe("redial and degrade", () => {
     expect(healed.closedByClient, "the new dial must still time out on its own deadline").toBe(true);
   });
 
-  /// A session with a canvas bound that holds one element drawn before any
-  /// frame, which the session cannot take yet.
-  function boundBeforeAnyFrame(tab: FileTab): { session: SceneSession; binding: FakeBinding } {
+  test("a close before any frame latches scene sync off module-wide", () => {
+    const tab = sceneTab();
     const session = acquireSceneSession(tab)!;
-    const binding = new FakeBinding();
-    binding.session = session;
-    session.bindCanvas(binding);
-    binding.pending = [elem("mine", 3)];
-    return { session, binding };
-  }
-
-  /// The redial's snapshot attaches the tab and reaches the board, the
-  /// element the board held goes out, and a peer's later change reaches it.
-  function attachesOn(retry: FakeSocket, tab: FileTab, binding: FakeBinding): void {
-    retry.open();
-    retry.frame(snap([elem("a")]));
-    expect(tab.doc?.state).toBe("attached");
-    expect(binding.snapshots.map((s) => s.elements)).toEqual([[elem("a")]]);
-    expect(retry.frames("push").map((f) => f.elements)).toEqual([[elem("mine", 3)]]);
-    retry.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
-    expect(binding.updates.map((u) => u.elements)).toEqual([[elem("peer", 2)]]);
-  }
-
-  test("a first dial closed before any frame is dialed again after the backoff and attaches when one frames", () => {
-    vi.useFakeTimers();
-    const tab = sceneTab();
-    const { binding } = boundBeforeAnyFrame(tab);
-    const first = lastSocket();
-    first.open();
-    first.drop();
-    expect(tab.doc?.state).not.toBe("off");
-    vi.advanceTimersByTime(499);
-    expect(sockets).toHaveLength(1);
-    vi.advanceTimersByTime(1);
-    expect(sockets).toHaveLength(2);
-    attachesOn(lastSocket(), tab, binding);
-  });
-
-  test("a first dial with no frame inside the attach window is dialed again and attaches when one frames", () => {
-    vi.useFakeTimers();
-    const tab = sceneTab();
-    const { binding } = boundBeforeAnyFrame(tab);
-    const first = lastSocket();
-    first.open();
-    vi.advanceTimersByTime(SCENE_ATTACH_TIMEOUT_MS);
-    expect(first.closedByClient).toBe(true);
-    expect(tab.doc?.state).not.toBe("off");
-    vi.advanceTimersByTime(499);
-    expect(sockets).toHaveLength(1);
-    vi.advanceTimersByTime(1);
-    expect(sockets).toHaveLength(2);
-    attachesOn(lastSocket(), tab, binding);
-  });
-
-  test("a first dial that ends with no frame, closed or timed out, refuses no other tab a session", () => {
-    vi.useFakeTimers();
-    acquireSceneSession(sceneTab());
-    lastSocket().drop();
-    const second = sceneTab({ path: "boards/c.excalidraw" });
-    expect(isSceneSyncEligible(second)).toBe(true);
-    expect(acquireSceneSession(second)).not.toBeNull();
-    const hung = lastSocket();
-    expect(new URL(hung.url).searchParams.get("path")).toBe("boards/c.excalidraw");
-    hung.open();
-    vi.advanceTimersByTime(SCENE_ATTACH_TIMEOUT_MS);
-    expect(hung.closedByClient).toBe(true);
-    const third = sceneTab({ path: "boards/d.excalidraw" });
-    expect(acquireSceneSession(third)).not.toBeNull();
     const sock = lastSocket();
-    expect(new URL(sock.url).searchParams.get("path")).toBe("boards/d.excalidraw");
     sock.open();
-    sock.frame(snap());
-    expect(third.doc?.state).toBe("attached");
-  });
-
-  test("frameless closes are dialed again on the backoff and no faster: eleven dials in a minute", () => {
-    vi.useFakeTimers();
-    acquireSceneSession(sceneTab());
-    // The dial after each close waits 500 ms doubling to 8 s, so the dials
-    // of the first minute are made at 0, 0.5, 1.5, 3.5, 7.5 and then every
-    // 8 s up to 55.5 s.
-    const delays = [500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000];
-    for (const [i, delay] of delays.entries()) {
-      lastSocket().drop();
-      vi.advanceTimersByTime(delay - 1);
-      expect(sockets, `dial ${i + 2} is not made before its delay`).toHaveLength(i + 1);
-      vi.advanceTimersByTime(1);
-      expect(sockets, `dial ${i + 2} is made at its delay`).toHaveLength(i + 2);
-    }
-    lastSocket().drop();
-    vi.advanceTimersByTime(4500);
-    expect(sockets, "the twelfth dial falls past the minute").toHaveLength(11);
+    sock.drop();
+    expect(tab.doc?.state).toBe("off");
+    expect(session.ownsSaves()).toBe(false);
+    // Latched: the next acquire refuses without dialing.
+    expect(acquireSceneSession(sceneTab())).toBeNull();
   });
 
   test("repeated drops past the grace degrade; outage pauses classic saves", () => {
@@ -635,88 +552,15 @@ describe("redial and degrade", () => {
   });
 });
 
-// ---- a session before its first frame ------------------------------------------
+// ---- a board's authority -------------------------------------------------------
 
-// No authority has spoken for the scene yet: the session has stamped nothing
-// on the tab, so the tab's text and tokens are those of its load and the
-// classic save writes them, with a board bound or with none.
-describe("a session that has had no frame", () => {
-  /// A dirty drawing tab in the layout whose session has dialed and heard
-  /// nothing, on a page where another tab's session has attached.
-  function unframed() {
-    const attachedElsewhere = sceneTab({ path: "boards/c.excalidraw" });
-    acquireSceneSession(attachedElsewhere);
-    lastSocket().open();
-    lastSocket().frame(snap());
-    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2000000000" });
-    const [tab] = installTabs([sceneTab({ content: SCENE_BUFFER + "\n" })]);
-    const session = acquireSceneSession(tab!)!;
-    return { tab: tab!, session, write };
-  }
-
-  test("an asked save is written the classic way with the token of the tab's load, with no board bound", async () => {
-    vi.useFakeTimers();
-    const { tab, session, write } = unframed();
-    expect({ owns: session.ownsSaves(), attached: isDocAttached(tab), paused: isDocSavePaused(tab) }).toEqual({
-      owns: false,
-      attached: false,
-      paused: false,
-    });
-    await saveTab(tab);
-    expect(write).toHaveBeenCalledTimes(1);
-    expect(write.mock.calls[0]!.slice(0, 3)).toEqual(["boards/b.excalidraw", SCENE_BUFFER + "\n", "1000000000"]);
-    expect({ saved: tab.saved, token: tab.savedMtimeNs, said: tab.saveError ?? null }).toEqual({
-      saved: SCENE_BUFFER + "\n",
-      token: "2000000000",
-      said: null,
-    });
-  });
-
-  test("past the reconnect grace it still saves, asked or by autosave, with a board bound, and still dials", async () => {
-    vi.useFakeTimers();
-    const { tab, session, write } = unframed();
-    const binding = new FakeBinding();
-    binding.session = session;
-    session.bindCanvas(binding);
-    const dials = sockets.length;
-    lastSocket().drop();
-    await vi.advanceTimersByTimeAsync(500);
-    lastSocket().drop();
-    await vi.advanceTimersByTimeAsync(1000);
-    lastSocket().drop();
-    expect(sockets).toHaveLength(dials + 2);
-    expect({ attached: isDocAttached(tab), paused: isDocSavePaused(tab) }).toEqual({
-      attached: false,
-      paused: false,
-    });
-    await saveTab(tab);
-    expect(write).toHaveBeenCalledTimes(1);
-    tab.content = SCENE_BUFFER + "\n\n";
-    scheduleAutosave("pane-scene-test", tab.id);
-    await vi.advanceTimersByTimeAsync(800);
-    expect(write).toHaveBeenCalledTimes(2);
-    expect(write.mock.calls[1]!.slice(0, 3)).toEqual(["boards/b.excalidraw", SCENE_BUFFER + "\n\n", "2000000000"]);
-    // The third dial follows the third close by 2 s.
-    await vi.advanceTimersByTimeAsync(1200);
-    expect(sockets).toHaveLength(dials + 3);
-  });
-
-  test("it holds nothing the disk lacks, whatever its board has not handed over", () => {
-    const tab = sceneTab();
-    const session = acquireSceneSession(tab)!;
-    const binding = new FakeBinding();
-    binding.session = session;
-    session.bindCanvas(binding);
-    binding.pending = [elem("mine", 3)];
-    expect(isDocUnflushed(tab.id)).toBe(false);
-  });
-
-  test("it has no authority to reach until a board has adopted a snapshot of it", () => {
+describe("a session's authority, for its board", () => {
+  test("it has none to reach until a board has adopted a snapshot of it", () => {
     const tab = sceneTab();
     const session = acquireSceneSession(tab)!;
     const sock = lastSocket();
     sock.open();
-    const dialing = session.reachesAuthority();
+    const noFrame = session.reachesAuthority();
     // A snapshot with no board bound is adopted by none.
     sock.frame(snap());
     const unbound = session.reachesAuthority();
@@ -724,27 +568,10 @@ describe("a session that has had no frame", () => {
     binding.session = session;
     session.bindCanvas(binding);
 
-    expect({ dialing, unbound, adopted: session.reachesAuthority() }).toEqual({
-      dialing: false,
+    expect({ noFrame, unbound, adopted: session.reachesAuthority() }).toEqual({
+      noFrame: false,
       unbound: false,
       adopted: true,
-    });
-  });
-
-  test("any frame is its first: an error the server sends before it closes the socket counts, and gives its board no authority", () => {
-    const tab = sceneTab();
-    const session = acquireSceneSession(tab)!;
-    const binding = new FakeBinding();
-    binding.session = session;
-    session.bindCanvas(binding);
-    const sock = lastSocket();
-    sock.open();
-    sock.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
-    sock.drop();
-    expect({ state: tab.doc?.state, reaches: session.reachesAuthority(), owns: session.ownsSaves() }).toEqual({
-      state: "connecting",
-      reaches: false,
-      owns: true,
     });
   });
 });

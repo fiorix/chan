@@ -182,26 +182,20 @@ export type SlidePreviewTabState = {
   mode: SlidePreviewMode;
 };
 
-/// Connection state of a tab's live document or scene session (see
-/// state/docSync.svelte.ts and state/sceneSync.svelte.ts):
-///   - `dialing`: no socket of the session has had a frame. Nothing is
-///     withheld: the tab saves the classic way with the tokens of its
-///     load, and the session dials again on the backoff after every
-///     close or silent dial, for as long as it lives.
-///   - `connecting`: an authority has framed and the tab is not attached
-///     yet; the classic save stands down.
+/// Connection state of a tab's live document session (see
+/// state/docSync.svelte.ts):
+///   - `connecting`: first socket dial in progress; classic autosave
+///     stays active until `attached`.
 ///   - `attached`: the server authority owns the document; saves flush
 ///     through the session and the classic PUT path is suppressed.
 ///   - `reconnecting`: transient socket loss inside the grace window;
 ///     autosave stays suppressed so a blip cannot race the authority's
 ///     flush with a CAS PUT.
-///   - `degraded`: reconnect grace exhausted, or a permanent stop. The
-///     classic autosave+CAS resumes against the last authority-flushed
-///     mtime token, except while a still-retrying outage has the socket
-///     down, when the save waits for the reattach.
-///   - `off`: the server closed the session for good.
+///   - `degraded`: reconnect grace exhausted; classic autosave+CAS has
+///     resumed against the last authority-flushed mtime token.
+///   - `off`: doc sync disabled, unsupported by the server, or the tab
+///     is ineligible.
 export type DocSyncStatus =
-  | "dialing"
   | "connecting"
   | "attached"
   | "reconnecting"
@@ -6003,13 +5997,11 @@ export function releaseDocSessionForTab(tabId: string, immediate = false): void 
   for (const hook of docReleaseHooks) hook(tabId, immediate);
 }
 
-/// True while a live session owns this tab's saves: attached, or in a
-/// window (an authority has framed and the attach is not done, or the
-/// reconnect grace) where a classic CAS PUT could race the authority's own
-/// flush. Autosave, the sibling mirror, and the external-change banner
-/// stay quiet in these states; `degraded` and `off` defer to the
-/// outstanding-push and outage guards below, and `dialing` to the classic
-/// path whole.
+/// True while a live doc session owns this tab's saves: attached, or in
+/// a window (first connect / reconnect grace) where a classic CAS PUT
+/// could race the authority's own flush. Autosave, the sibling mirror,
+/// and the external-change banner stay quiet in these states; `degraded`
+/// and `off` defer to the outstanding-push and outage guards below.
 export function isDocAttached(t: FileTab): boolean {
   const s = t.doc?.state;
   return s === "attached" || s === "connecting" || s === "reconnecting";
