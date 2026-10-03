@@ -13,6 +13,7 @@ const ghostty = vi.hoisted(() => {
   const record = {
     events: [] as string[],
     kitFails: false,
+    kitLoads: 0,
     alignOk: true,
     hostOwned: false,
     terminals: [] as Array<Record<string, any>>,
@@ -82,6 +83,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 vi.mock("../terminal/backend", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../terminal/backend")>()),
   loadGhosttyKit: vi.fn(async () => {
+    ghostty.record.kitLoads += 1;
     if (ghostty.record.kitFails) throw new Error("wasm fetch failed");
     return { ghostty: { kit: true }, Terminal: ghostty.FakeGhosttyTerminal };
   }),
@@ -165,6 +167,7 @@ beforeEach(() => {
   Object.assign(ghostty.record, {
     events: [],
     kitFails: false,
+    kitLoads: 0,
     alignOk: true,
     hostOwned: false,
     terminals: [],
@@ -180,6 +183,7 @@ afterEach(() => {
   __testSetStandalonePreferences(null);
   clipboard.writeText.mockClear();
   ui.status = null;
+  ui.terminalControl = false;
   vi.restoreAllMocks();
 });
 
@@ -213,6 +217,57 @@ function key(term: Record<string, any>, init: KeyboardEventInit): { event: Keybo
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
   return { event, claimed: term.keyHandler(event) };
 }
+
+/// What the open body menu says of the terminal: its engine and its masking
+/// row, with how many times the ghostty kit was asked for.
+async function spawned(target: HTMLElement): Promise<{ engine: string; masking: string; kitLoads: number }> {
+  await openBodyMenu(target);
+  const labels = [...document.body.querySelectorAll(".mbtn-label")].map((el) => el.textContent?.trim() ?? "");
+  return {
+    engine: document.body.querySelector(".terminal-backend-value")?.textContent ?? "",
+    masking: labels.find((label) => label.startsWith("Secret masking")) ?? "",
+    kitLoads: ghostty.record.kitLoads,
+  };
+}
+
+describe("a control terminal whose masking starts on", () => {
+  test.each([
+    ["unset", {}],
+    ["on", { secret_masking: true }],
+  ] as const)("with the preference %s it spawns on xterm, masked, and the ghostty kit is not loaded", async (_name, masking) => {
+    ui.terminalControl = true;
+    __testSetStandalonePreferences({ terminal: { ghostty: true, font_size: 15, ...masking } } as unknown as Preferences);
+    const { target } = await mountGhostty();
+    expect(await spawned(target)).toEqual({ engine: "xterm", masking: "Secret masking: on", kitLoads: 0 });
+    expect(ghostty.record.terminals, "no ghostty terminal built").toHaveLength(0);
+  });
+
+  test("its own toggle turns masking off and leaves it on xterm", async () => {
+    ui.terminalControl = true;
+    const { target } = await mountGhostty();
+    expect(await spawned(target)).toEqual({ engine: "xterm", masking: "Secret masking: on", kitLoads: 0 });
+    menuRow("Secret masking: on").click();
+    await tick();
+    expect(await spawned(target)).toEqual({ engine: "xterm", masking: "Secret masking: off", kitLoads: 0 });
+  });
+
+  test("with the preference off it keeps the configured backend", async () => {
+    ui.terminalControl = true;
+    __testSetStandalonePreferences({
+      terminal: { ghostty: true, font_size: 15, secret_masking: false },
+    } as unknown as Preferences);
+    const { target } = await mountGhostty();
+    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking unavailable", kitLoads: 1 });
+  });
+
+  test("a terminal of any other window keeps the configured backend, with the preference on too", async () => {
+    __testSetStandalonePreferences({
+      terminal: { ghostty: true, font_size: 15, secret_masking: true },
+    } as unknown as Preferences);
+    const { target } = await mountGhostty();
+    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking unavailable", kitLoads: 1 });
+  });
+});
 
 describe("choosing the backend", () => {
   test("the ghostty setting spawns the terminal on ghostty with chan's options", async () => {
