@@ -488,11 +488,11 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
 ];
 
-// Editor strikethrough / inline-code chords are not in this registry:
-// strike (Cmd+Shift+S) is owned by the editor keymap directly and
-// inline code remains a click-only target in StyleToolbar.svelte.
-// Bold (Cmd+B) + Italic (Cmd+I) are in the registry above because
-// the editor keymap binds them and tooltips need to discover them.
+// Editor strikethrough and inline code are not in this registry:
+// neither has a chord, and both are click-only targets in
+// StyleToolbar.svelte. Bold (Mod+B) + Italic (Mod+I) are in the
+// registry above because the editor keymap binds them, and the
+// toolbar reads their tooltips' chords from it.
 
 const MOD_LABEL: Record<OS, string> = {
   mac: "Cmd",

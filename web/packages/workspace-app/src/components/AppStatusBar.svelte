@@ -12,8 +12,7 @@
   //   - transfers: a launcher for the transfer bubble -- file uploads
   //                and downloads (progress + cancel) live in the bubble,
   //                not as inline status text.
-  //   - status   : transient `ui.status` messages (move/rename/delete
-  //                failures, etc).
+  //   - status   : action confirmations, progress and errors.
   //
   // Hide model: bar disappears entirely when no section has
   // content, and collapses to a pill on click. No idle fade and no
@@ -31,6 +30,7 @@
     openWorkspaceWarningsDialog,
     paneWidths,
     dismissStatus,
+    isTransientStatus,
     ui,
   } from "../state/store.svelte";
   import { transfers, toggleTransfers } from "../state/transfers.svelte";
@@ -72,12 +72,10 @@
       ui.statusAction?.kind === "workspace-warnings" &&
       ui.statusAction.label === ui.status,
   );
-  // Persistent statuses with no typed action are the one-shot error pills
-  // (create / rename / upload failures). They have no lifecycle owner, so
-  // give them a click-to-dismiss. Transient statuses auto-clear and the
-  // workspace-warnings action opens its dialog instead.
+  // Only the live timer's text auto-clears. Bare replacement text offers
+  // Dismiss; the workspace-warnings action opens its dialog instead.
   const statusDismissable = $derived(
-    statusVisible && !statusActionVisible && ui.statusKind === "persistent",
+    statusVisible && !statusActionVisible && !isTransientStatus(),
   );
   const paneModeVisible = $derived(paneMode.active);
   // Session role: shown only when the roster is genuinely SPLIT by origin --
@@ -159,8 +157,8 @@
                    background (preflight already unlocked). Passive chip:
                    the dot is static (no `working` pulse) so this reads as
                    quiet progress, not the active reindexing pill. The
-                   done/total here are real chunk counts, not the building
-                   phase's misleading EmbedBatch sentinel. -->
+                   done/total here count files from IndexFile ticks, while
+                   EmbedBatch counts pending chunks against a batch budget. -->
               embedding
               <span class="num">{s.embedding.done}/{s.embedding.total}</span>
             {/if}
@@ -217,7 +215,7 @@
             </span>
           {/if}
         {/if}
-        {#if (indexVisible || importVisible || statusVisible) && paneModeVisible}
+        {#if (indexVisible || importVisible || transfersBubbleVisible || statusVisible) && paneModeVisible}
           <span class="sep"> - </span>
         {/if}
         {#if paneModeVisible}

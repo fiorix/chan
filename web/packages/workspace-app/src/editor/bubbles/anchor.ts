@@ -56,10 +56,9 @@ function reposition(view: EditorView, el: HTMLElement, pos: number): void {
   if (!coords) return;
   // Anchor spans the full caret-line height so positionPopover's
   // flip-above branch lands the popover above the line's TOP, not
-  // straddling the line. Previously the anchor was 1px tall at
-  // `coords.bottom` - the flip math then placed the popover so its
-  // bottom edge sat AT the line bottom, overlaying the text the
-  // user was typing.
+  // straddling the line. With an anchor 1px tall at `coords.bottom`
+  // the flip math would place the popover with its bottom edge AT
+  // the line bottom, overlaying the text the user is typing.
   el.style.left = `${Math.round(coords.left + window.scrollX)}px`;
   el.style.top = `${Math.round(coords.top + window.scrollY)}px`;
   el.style.height = `${Math.max(1, Math.round(coords.bottom - coords.top))}px`;

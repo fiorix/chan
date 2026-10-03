@@ -14,6 +14,7 @@
 
   import { onMount, onDestroy } from "svelte";
   import { api } from "../api/client";
+  import { ApiError, apiErrorCode } from "../api/errors";
   import { setCoverBlocking, workspace } from "../state/store.svelte";
   import type { PreflightSnapshot } from "../api/types";
 
@@ -75,7 +76,7 @@
   // data (indexed content, semantic, or reports) the nudge never shows again,
   // on any client or boot. The fields are server-derived, so the gate holds
   // identically for local and devserver workspaces. The localStorage dismiss
-  // stays as a secondary per-session hide, no longer the primary gate.
+  // is a secondary per-session hide, not the primary gate.
   const workspaceHasData = $derived.by(() => {
     const s = summary;
     return !!s && (s.indexed_docs > 0 || s.semantic_enabled || s.reports_enabled);
@@ -136,8 +137,11 @@
       const state = await api.semanticEnable();
       semanticOverride = state.semantic_enabled;
     } catch (e) {
-      // Model missing: surface the download affordance instead of failing.
-      semanticNeedsModel = true;
+      // Only a missing model is answered by a download, so only its refusal
+      // offers one; any other leaves the next toggle to enable again.
+      if (e instanceof ApiError && e.status === 409 && apiErrorCode(e) === "model_not_downloaded") {
+        semanticNeedsModel = true;
+      }
       semanticError = errText(e);
     } finally {
       semanticBusy = false;
@@ -187,14 +191,14 @@
   }
 
   function schedule(ms = POLL_MS): void {
-    if (stopped) return;
+    if (stopped || deciding) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(poll, ms);
   }
 
   // Keep polling until the workspace has SETTLED, not merely until it
-  // unlocks. Those parted company when the boot stopped locking behind a
-  // recovery pass: `phase === "ready"` now arrives while an index rebuild is
+  // unlocks. The two differ because the boot does not lock behind a
+  // recovery pass: `phase === "ready"` arrives while an index rebuild is
   // still running. Stopping there would freeze the last snapshot mid-rebuild,
   // and the server attaches `summary` only once settled -- so the first-run
   // onboarding nudge would never arrive at all for a workspace that booted
@@ -208,13 +212,22 @@
     return snap.phase === "ready" && snap.readiness?.state !== "recovering";
   }
 
+  // Poll and decide both write the snapshot after an await, and only the
+  // latest request's answer may: a poll in flight when the user answers
+  // would land after the answer and bring the answered step back.
+  let snapshotSeq = 0;
+
   async function poll(): Promise<void> {
-    if (stopped) return;
+    if (stopped || deciding) return;
+    const seq = ++snapshotSeq;
     try {
-      snapshot = await api.preflight();
+      const next = await api.preflight();
+      if (stopped || seq !== snapshotSeq) return;
+      snapshot = next;
       errorStreak = 0;
       if (!settled(snapshot)) schedule();
     } catch {
+      if (stopped || seq !== snapshotSeq) return;
       errorStreak += 1;
       if (errorStreak < MAX_ERROR_STREAK) {
         schedule(POLL_MS * 2);
@@ -230,15 +243,23 @@
   }
 
   async function decide(step: string, choice: string): Promise<void> {
-    if (deciding) return;
+    if (stopped || deciding) return;
     deciding = true;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    const seq = ++snapshotSeq;
+    let resumePolling = false;
     try {
-      snapshot = await api.preflightDecision({ step, choice });
-      if (!settled(snapshot)) schedule();
+      const next = await api.preflightDecision({ step, choice });
+      if (stopped || seq !== snapshotSeq) return;
+      snapshot = next;
+      resumePolling = !settled(next);
     } catch {
-      schedule();
+      if (stopped || seq !== snapshotSeq) return;
+      resumePolling = true;
     } finally {
       deciding = false;
+      if (!stopped && seq === snapshotSeq && resumePolling) schedule();
     }
   }
 
@@ -247,7 +268,9 @@
   });
   onDestroy(() => {
     stopped = true;
-    if (timer) clearTimeout(timer);
+    snapshotSeq += 1;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
     setCoverBlocking("preflight", false);
   });
 </script>
@@ -537,8 +560,8 @@
     flex-direction: column;
     gap: 0.2rem;
   }
-  /* One checkmark toggle per layer (replaces the old on/off label + Turn
-     on/off button). The whole row is a button (role=checkbox) so a click or
+  /* One checkmark toggle per layer.
+     The whole row is a button (role=checkbox) so a click or
      Space/Enter toggles it. */
   .onboard-switch {
     display: flex;

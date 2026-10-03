@@ -4,7 +4,7 @@
   // and a title bar; the body is supplied by the caller via
   // children. Used by:
   //   - FileEditorTab (right: file info; left: outline)
-  //   - FileBrowserTab (right: file/directory metadata for the current
+  //   - FileBrowserSurface (right: file/directory metadata for the current
   //     selection)
   //
   // Width is bound by the caller so each surface can persist into

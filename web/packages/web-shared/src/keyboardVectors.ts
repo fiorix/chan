@@ -1,11 +1,7 @@
-// Keydowns taken from published keyboard layouts, shared by every test of a
-// shortcut matcher: the TypeScript helper here and the injected JavaScript
-// bridges that cannot import it. One table holds each implementation to the
-// same layout facts.
-//
-// Layouts: Colemak, US Dvorak, French AZERTY (PC), German QWERTZ (PC), and US
-// QWERTY including macOS Option glyphs. `key` is what the browser reports,
-// `code` the physical position.
+// Published keyboard layouts supply one fixture table for the TypeScript
+// matchers and injected JavaScript bridges. Layouts: Colemak, US Dvorak,
+// French AZERTY (PC), German QWERTZ (PC), and US QWERTY with macOS Option.
+// `key` is the browser-reported value; `code` is the physical position.
 
 export type KeyVectorEvent = {
   key: string;
@@ -22,10 +18,9 @@ export type KeyVectorEvent = {
 export type KeyVector = {
   name: string;
   event: KeyVectorEvent;
-  /// Resolve as macOS, where Option is Alt and never AltGr.
+  /// Resolve using macOS Option semantics.
   mac?: boolean;
-  /// The key token the matcher names, or null for a keydown no shortcut may
-  /// claim.
+  /// The resolved shortcut token, with null identifying a text-entry event.
   key: string | null;
   /// The token names Shift+key by itself (a US shifted glyph such as `?`).
   shifted?: boolean;
@@ -247,7 +242,7 @@ export const KEY_VECTORS: readonly KeyVector[] = [
     key: "K",
   },
 
-  // Keydowns no shortcut may claim.
+  // Text-entry and composition events.
   { name: "IME composition", event: { key: "a", code: "KeyA", isComposing: true }, key: null },
   { name: "IME Process key", event: { key: "Process", code: "KeyA" }, key: null },
   { name: "lone Shift", event: { key: "Shift", code: "ShiftLeft", shiftKey: true }, key: null },

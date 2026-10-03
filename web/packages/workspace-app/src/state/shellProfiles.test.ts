@@ -78,3 +78,47 @@ describe("shell profile store", () => {
     expect(terminalShells).toHaveBeenCalledTimes(2);
   });
 });
+
+
+test("reload owns profiles and loading state across stale settlements", async () => {
+  for (const fail of [false, true]) {
+    for (const staleFinishesLast of [false, true]) {
+      terminalShells.mockReset();
+      const store = await freshStore();
+      let resolveOld!: (value: unknown) => void;
+      let rejectOld!: (error: Error) => void;
+      let resolveCurrent!: (value: unknown) => void;
+      const oldResponse = new Promise((resolve, reject) => {
+        resolveOld = resolve;
+        rejectOld = reject;
+      });
+      const currentResponse = new Promise((resolve) => { resolveCurrent = resolve; });
+      terminalShells.mockReturnValueOnce(oldResponse).mockReturnValueOnce(currentResponse);
+      const oldRequest = store.ensureShellProfiles();
+      const currentRequest = store.reloadShellProfiles();
+      const current = {
+        profiles: [{ id: "current", name: "Current shell", program: "/bin/sh", kind: "posix", source: "discovered" }],
+        default_profile: "current",
+      };
+      if (staleFinishesLast) {
+        resolveCurrent(current);
+        await currentRequest;
+      }
+      if (fail) rejectOld(new Error("old request failed"));
+      else resolveOld({ profiles: [{ id: "old", name: "Old shell", program: "/bin/sh", kind: "posix", source: "discovered" }], default_profile: "old" });
+      await oldRequest;
+
+      expect(store.shellProfilesLoaded()).toBe(staleFinishesLast);
+      expect(store.shellProfiles().map((p) => p.id)).toEqual(staleFinishesLast ? ["current"] : []);
+      expect(store.defaultShellProfileId()).toBe(staleFinishesLast ? "current" : null);
+      if (!staleFinishesLast) {
+        expect(store.ensureShellProfiles()).toBe(currentRequest);
+        resolveCurrent(current);
+        await currentRequest;
+      }
+      expect(store.shellProfiles().map((p) => p.id)).toEqual(["current"]);
+      expect(store.defaultShellProfileId()).toBe("current");
+      expect(terminalShells).toHaveBeenCalledTimes(2);
+    }
+  }
+});

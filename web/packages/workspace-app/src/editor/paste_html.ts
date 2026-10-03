@@ -61,6 +61,18 @@ export function pasteHandler(ctx?: ChanClipboardContext): Extension {
         }
       }
       const html = cd.getData("text/html");
+      // Clipboard data is only readable during the paste event.
+      const text = cd.getData("text/plain");
+      const pastePlainTextOnFailure = (error: unknown) => {
+        console.warn("chan paste: rich paste failed", error);
+        if (!text) return;
+        const sel = view.state.selection.main;
+        const insert = dedentListPaste(view.state, sel.from, text);
+        view.dispatch({
+          changes: { from: sel.from, to: sel.to, insert },
+          selection: { anchor: sel.from + insert.length },
+        });
+      };
       // Chan-to-chan rich paste: a wrapper carrying the exact source
       // markdown + inlined images. Parse it and apply (same-workspace
       // rebase or foreign upload). Missing / malformed attrs fall through
@@ -69,7 +81,7 @@ export function pasteHandler(ctx?: ChanClipboardContext): Extension {
         const parsed = parseChanWrapper(html);
         if (parsed) {
           event.preventDefault();
-          void applyChanHtmlPaste(parsed, view, ctx);
+          void applyChanHtmlPaste(parsed, view, ctx).catch(pastePlainTextOnFailure);
           return true;
         }
       }
@@ -90,7 +102,7 @@ export function pasteHandler(ctx?: ChanClipboardContext): Extension {
             changes: { from: sel.from, to: sel.to, insert },
             selection: { anchor: sel.from + insert.length },
           });
-        })();
+        })().catch(pastePlainTextOnFailure);
         return true;
       }
       // Plain-text paste of a list item INTO a list line: strip the pasted
@@ -99,7 +111,6 @@ export function pasteHandler(ctx?: ChanClipboardContext): Extension {
       // rich path, but for the common chan-to-chan copy, which is plain text
       // (navigator.clipboard.writeText). Only intercept when the dedent
       // actually changes the text; every other paste defers to CM6's default.
-      const text = cd.getData("text/plain");
       if (text) {
         const sel = view.state.selection.main;
         const insert = dedentListPaste(view.state, sel.from, text);

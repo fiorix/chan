@@ -53,7 +53,7 @@
     layout,
     allPaneTabs,
     attemptInPlaceReopen,
-    beginMissingFileReopen,
+    beginMissingFileReopen, endMissingFileReopen, MISSING_FILE_REOPEN_STATUS, missingFileReopenInstructionShows,
     closeTab,
     dismissExternalChange,
     forceReloadFromDisk,
@@ -102,6 +102,7 @@
   } from "../state/store.svelte";
   import {
     openInActivePane,
+    isDocUnflushed,
     registerPendingEditFlush,
     openLinkTarget,
     saveDraftTabToWorkspace,
@@ -358,8 +359,12 @@
       ? `loading ${formatBytes(tab.loadProgress.loadedBytes)} / ${formatBytes(tab.loadProgress.totalBytes)}`
       : "loading...",
   );
-  /// Why the buffer was not saved, while it differs from the file.
-  const notSaved = $derived(tab.saveError && isDirty(tab) ? tab.saveError : null);
+  /// Why the buffer was not saved, while the file lacks it: the tab differs
+  /// from what it last saved, or a live session holds what it could not
+  /// write (its confirmed text counts as saved, so the tab is clean).
+  const notSaved = $derived(
+    tab.saveError && (isDirty(tab) || isDocUnflushed(tab.id)) ? tab.saveError : null,
+  );
 
   /// 0-indexed source line under the caret. Workspaces the outline's
   /// active-heading marker (Google-Docs-style "you are here" bar
@@ -565,7 +570,7 @@
 
   // Find-on-page adapter for whichever editor is mounted. Both
   // editors expose `findAdapter` (see editor/find.ts FindAdapter)
-  // with the same shape; FindBar.svelte workspaces it. We re-derive
+  // with the same shape; FindBar.svelte drives it. We re-derive
   // on mode flip so a Wysiwyg <-> Source toggle while the bar is
   // open re-paints highlights against the new view.
   const findAdapter = $derived(
@@ -581,10 +586,6 @@
     revealPathInBrowser(tab.path, { inspectorOpen: true });
     closeTabMenu();
   }
-
-  // In-tab find was removed; the browser's native ⌘F applies. The
-  // editor's selectable text (WYSIWYG and source) is plain DOM, so
-  // browser find lights up matches the way users already expect.
 
   /// True while the popover for THIS tab is open. The tab-menu state
   /// is shared so the trigger button (in Pane.svelte's tab strip) can
@@ -911,16 +912,11 @@
     searchPanel.open = true;
   }
 
-  // The "choose the moved file" reopen instruction (set in
-  // doReopenMissing) is a deliberately persistent status (see
-  // FileEditorTab.test.ts, "re-opening a moved file asks the user to pick
-  // it in Files, until the tab goes"). Clear it when this tab unmounts, so an
-  // abandoned reopen (the user closes the tab instead of picking the
-  // moved file) does not leave the status stuck in the bar. The literal
-  // must match the one set below.
+  // Among editor teardowns, only the armed editor may clear the pick request
+  // and displayed instruction, so unrelated hosts can unmount during a pick.
   onDestroy(() => {
     slidePreviewHandle?.close({ notify: false });
-    if (ui.status === "Choose the moved file in Files to re-open this tab") {
+    if (endMissingFileReopen(tab.id) && missingFileReopenInstructionShows()) {
       ui.status = null;
     }
   });
@@ -933,16 +929,16 @@
     // manually.
     if (await attemptInPlaceReopen(tab.id)) return;
     const parent = parentDir(tab.path);
-    beginMissingFileReopen(tab.id);
+    beginMissingFileReopen(tab.id, "pick");
     revealPathInBrowser(parent || tab.path, { inspectorOpen: true });
-    ui.status = "Choose the moved file in Files to re-open this tab";
+    ui.status = MISSING_FILE_REOPEN_STATUS;
   }
 
   function doReopenAtSuggested(): void {
     const suggested = tab.fileMissing?.suggestedPath;
     if (!suggested) return;
-    beginMissingFileReopen(tab.id);
-    void openInActivePane(suggested);
+    beginMissingFileReopen(tab.id, "open");
+    void openInActivePane(suggested).finally(() => endMissingFileReopen(tab.id));
   }
 
   function doFindMissing(): void {
@@ -1068,7 +1064,7 @@
   {#if menuOpen}
     <!-- Tab menu bubble. Anchored to the tab title in the pane's
          tab strip; rendered here so it has direct access to the
-         live Wysiwyg ref + selVer signal that workspaces the
+         live Wysiwyg ref + selVer signal that drives the
          formatting buttons' "on" states. -->
     <div
       class="tab-menu-bubble"
@@ -1327,11 +1323,11 @@
     </div>
   {:else if tab.error}
     <div class="placeholder error-placeholder">{tab.error}</div>
-  {:else if notSaved && tab.mode === "canvas"}
-    <!-- The board opens a text that does not parse as an empty scene, and
-         its first change would replace the text the user is fixing. -->
+  {:else if tab.refusedUnwritten && tab.mode === "canvas"}
+    <!-- Keep the board away from a refused buffer until it is written or
+         undone; its first change could replace that buffer. -->
     <div class="placeholder refused-placeholder">
-      This drawing does not parse, so the board cannot show it. Use Show source code ({sourceChord}) to fix it.
+      This drawing has not been saved. Use Show source code ({sourceChord}) to review it.
     </div>
   {:else}
     <div class="editor-inspector-row">
@@ -1382,7 +1378,6 @@
           initialCaret={tab.caret ?? null}
           onCaretChange={(from, to) => setTabCaret(tab, from, to)}
           onSelectionChange={() => (selVer = selVer + 1)}
-          wikiPickerPrefix={tab.repoRoot}
           currentPath={tab.path}
           onWikiClick={(args) => {
             // Navigation: click on a wikilink pill opens the

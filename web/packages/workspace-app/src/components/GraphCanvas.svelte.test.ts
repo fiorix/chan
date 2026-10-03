@@ -23,7 +23,7 @@ import { colorVarForBucket, type FileBucket } from "../state/kinds";
 import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
 
 type CanvasNode = Extract<GraphViewNode, { kind: "file" | "tag" | "mention" | "language" | "folder" }>;
-type CanvasEdge = GraphViewEdge & { kind: "link" | "tag" | "mention" | "contains" | "language" | "group" };
+type CanvasEdge = GraphViewEdge & { kind: "link" | "tag" | "mention" | "contains" | "language" };
 type Circle = { x: number; y: number; r: number };
 type CanvasApi = { nodeScreenCircle(id: string): Circle | null };
 
@@ -78,6 +78,7 @@ const mounted: Array<Record<string, unknown>> = [];
 type Props = {
   open: boolean;
   paused?: boolean;
+  scopeKey?: string;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   visibleNodeIds: Set<string>;
@@ -426,6 +427,36 @@ describe("fitting the view", () => {
     return c.x > 0 && c.x < canvasHost.width && c.y > 0 && c.y < canvasHost.height;
   }
 
+  function rescopeAfterPan(scopeKey: string): { api: CanvasApi; ids: string[] } {
+    const p = props(tree(), { scopeKey: "semantic:workspace" });
+    const { api, canvas } = render(p);
+    mouse(canvas, "mousedown", 5, 5);
+    mouse(canvas, "mousemove", 605, 5);
+    mouse(canvas, "mouseup", 605, 5);
+    expect(inView(api, "notes/a.md"), "the pan moved the original graph away").toBe(false);
+
+    const subtree = tree();
+    const ids = ["directory:notes", "notes/a.md", "notes/b.md"];
+    p.nodes = subtree.nodes.filter((node) => ids.includes(node.id));
+    p.edges = subtree.edges.filter((edge) => ids.includes(edge.source) && ids.includes(edge.target));
+    p.visibleNodeIds = new Set(ids);
+    p.visibleEdges = p.edges;
+    p.scopeKey = scopeKey;
+    flushSync();
+    runFrames(60);
+    return { api, ids };
+  }
+
+  test("a new scope frames its nodes after a user pan", () => {
+    const { api, ids } = rescopeAfterPan("semantic:dir:notes");
+    for (const id of ids) expect(inView(api, id), id).toBe(true);
+  });
+
+  test("a node swap under the same scope preserves the user's pan", () => {
+    const { api, ids } = rescopeAfterPan("semantic:workspace");
+    for (const id of ids) expect(inView(api, id), id).toBe(false);
+  });
+
   test("a canvas mounted into a zero-size host fits once the host has a size", () => {
     canvasHost.width = 0;
     canvasHost.height = 0;
@@ -701,5 +732,30 @@ describe("pausing", () => {
     runFrames(2);
     expect(ctx.frames.length).toBeGreaterThan(painted);
     expect(circle(api, "notes/a.md"), "no restart, no re-fit").toEqual(before);
+  });
+});
+
+describe("the cursor", () => {
+  test("a node being dragged shows the grabbing hand", () => {
+    const { api, canvas } = render(props());
+    const a0 = circle(api, "notes/a.md");
+    mouse(canvas, "mousedown", a0.x, a0.y);
+    mouse(canvas, "mousemove", a0.x + 40, a0.y);
+    flushSync();
+    const dragging = canvas.style.cursor;
+    mouse(canvas, "mouseup", a0.x + 40, a0.y);
+    expect(dragging).toBe("grabbing");
+  });
+
+  test("the pointer leaving the canvas from a node drops the hover", () => {
+    const p = props();
+    const { api, canvas } = render(p);
+    const at = outside(api, p.nodes.map((x) => x.id), "src/c.rs", 8);
+    mouse(canvas, "mousemove", at.x, at.y);
+    flushSync();
+    const hovering = canvas.style.cursor;
+    mouse(canvas, "mouseleave", at.x, at.y);
+    flushSync();
+    expect({ hovering, left: canvas.style.cursor }).toEqual({ hovering: "pointer", left: "grab" });
   });
 });

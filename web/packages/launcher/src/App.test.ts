@@ -102,8 +102,8 @@ describe("launcher root", () => {
     expect(command?.querySelector("svg")?.getAttribute("stroke-width")).toBe("1.75");
     // The Gmail-style Select-mode toggle (reveals the row checkboxes).
     expect(topbar.querySelector("button.select")).not.toBeNull();
-    // The add-workspace / add-devserver / open-terminal entry points all moved
-    // into the library tree, so the top bar carries no [+] or terminal action.
+    // The library tree owns workspace, devserver and terminal creation;
+    // the top bar carries no [+] or terminal action.
     expect(topbar.querySelector('[aria-label="New workspace"]')).toBeNull();
     expect(topbar.querySelector('[aria-label="New local workspace"]')).toBeNull();
     expect(topbar.querySelector('[aria-label="Open terminal"]')).toBeNull();

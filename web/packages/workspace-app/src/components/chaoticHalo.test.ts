@@ -110,3 +110,40 @@ describe("Chaotic Halo", () => {
     });
   });
 });
+
+test("scales the virtual-clock cap once at accelerated speed", () => {
+  const { run, callbacks } = startAnimation(ChaoticHalo, recordingContext2d().ctx);
+  run.canvas.parentElement!.style.setProperty("--canvas-animation-speed", "4");
+  callbacks.resize(400, 400, false, 100);
+  const build = vi.mocked(buildChaoticHaloPoints);
+  build.mockClear();
+  callbacks.frame(200);
+  callbacks.frame(400);
+  const [before, after] = build.mock.calls.map(([phase]) => phase);
+  expect(after! - before!, "accelerated virtual delta is not clipped or multiplied twice").toBeCloseTo(0.2 * 0.003, 9);
+});
+
+test("caps a stalled accelerated virtual clock", () => {
+  const { run, callbacks } = startAnimation(ChaoticHalo, recordingContext2d().ctx);
+  run.canvas.parentElement!.style.setProperty("--canvas-animation-speed", "4");
+  callbacks.resize(400, 400, false, 100);
+  const build = vi.mocked(buildChaoticHaloPoints);
+  build.mockClear();
+  callbacks.frame(200);
+  callbacks.frame(5200);
+  const [before, after] = build.mock.calls.map(([phase]) => phase);
+  expect(after! - before!, "stall cap follows speed").toBeCloseTo((4 / 15) * 0.003, 9);
+});
+
+test("reduced motion keeps a fixed phase at accelerated speed", () => {
+  const { run, callbacks } = startAnimation(ChaoticHalo, recordingContext2d().ctx);
+  run.canvas.parentElement!.style.setProperty("--canvas-animation-speed", "4");
+  const build = vi.mocked(buildChaoticHaloPoints);
+  build.mockClear();
+  callbacks.resize(400, 400, true, 100);
+  const initial = build.mock.calls.map(([phase]) => phase);
+  expect(initial.length).toBeGreaterThan(0);
+  build.mockClear();
+  callbacks.reducedMotion?.();
+  expect(build.mock.calls.map(([phase]) => phase)).toEqual(initial);
+});

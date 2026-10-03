@@ -38,7 +38,7 @@ use chan_workspace::{
 };
 
 use crate::bulk_transfer::{BulkCancel, BulkOutcome};
-use crate::error::{err, err_from};
+use crate::error::{err, err_code, err_from};
 use crate::extract::{Json, Multipart, Path as AxumPath, Query};
 use crate::routes::run_blocking;
 use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
@@ -78,22 +78,20 @@ fn files_not_served() -> Response {
 /// crate-wide mapping.
 fn standalone_err(e: &chan_workspace::ChanError) -> Response {
     match e {
-        chan_workspace::ChanError::DirectoryNotEmpty(path) => {
-            structured_conflict("directory_not_empty", path)
-        }
-        chan_workspace::ChanError::ProtectedPath(path) => {
-            structured_conflict("protected_path", path)
-        }
+        chan_workspace::ChanError::DirectoryNotEmpty(path) => err_code(
+            StatusCode::CONFLICT,
+            e.to_string(),
+            "directory_not_empty",
+            serde_json::json!({ "path": path }),
+        ),
+        chan_workspace::ChanError::ProtectedPath(path) => err_code(
+            StatusCode::CONFLICT,
+            e.to_string(),
+            "protected_path",
+            serde_json::json!({ "path": path }),
+        ),
         _ => err_from(e),
     }
-}
-
-fn structured_conflict(error: &'static str, path: &str) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({ "error": error, "path": path })),
-    )
-        .into_response()
 }
 
 /// Open a mutation ticket when the caller identified its window. An absent
@@ -1531,6 +1529,14 @@ mod tests {
             .unwrap()
     }
 
+    fn mismatching_mtime_ns(current: i64) -> String {
+        if current == i64::MAX {
+            (current - 1).to_string()
+        } else {
+            (current + 1).to_string()
+        }
+    }
+
     #[tokio::test]
     async fn cas_write_succeeds_fresh_and_answers_409_with_the_current_token() {
         let fx = files_fixture();
@@ -1554,22 +1560,38 @@ mod tests {
             .expect("second token")
             .to_string();
 
+        let current_ns = fx
+            .state
+            .standalone_files
+            .as_ref()
+            .unwrap()
+            .fs
+            .stat("new.md")
+            .unwrap()
+            .mtime_ns
+            .expect("current disk token");
+        assert_eq!(t2, current_ns.to_string());
+        let stale = mismatching_mtime_ns(current_ns);
+        assert_ne!(stale, t2);
+
         // The stale token conflicts and reports the CURRENT token.
-        let response = raw_put(&fx, &format!("/api/fs/new.md?expected_mtime_ns={t1}"), "v3").await;
+        let response = raw_put(
+            &fx,
+            &format!("/api/fs/new.md?expected_mtime_ns={stale}"),
+            "v3",
+        )
+        .await;
+        assert_eq!(std::fs::read(fx.root.join("new.md")).unwrap(), b"v2");
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        let t2_ns: i64 = t2.parse().unwrap();
         assert_eq!(
             body_json(response).await,
             json!({
-                "current_mtime": t2_ns / 1_000_000_000,
+                "error": "file changed on disk since it was read",
+                "code": "write_conflict",
+                "current_mtime": current_ns / 1_000_000_000,
                 "current_mtime_ns": t2,
                 "disk_conflicted": false,
             })
-        );
-        assert_eq!(
-            std::fs::read_to_string(fx.root.join("new.md")).unwrap(),
-            "v2",
-            "the conflicting write must not land"
         );
 
         // A garbage token is a 400, not a treated-as-absent write.
@@ -1585,12 +1607,24 @@ mod tests {
     async fn stale_token_with_identical_bytes_adopts_instead_of_conflicting() {
         let fx = files_fixture();
         let response = raw_put(&fx, "/api/fs/same.md", "body").await;
-        let stale = body_json(response).await["mtime_ns"]
+        assert_eq!(response.status(), StatusCode::OK);
+        let written = body_json(response).await["mtime_ns"]
             .as_str()
             .expect("first token")
             .to_string();
-        // A second write moves the token while leaving the same bytes.
-        raw_put(&fx, "/api/fs/same.md", "body").await;
+        let current_ns = fx
+            .state
+            .standalone_files
+            .as_ref()
+            .unwrap()
+            .fs
+            .stat("same.md")
+            .unwrap()
+            .mtime_ns
+            .expect("current disk token");
+        assert_eq!(written, current_ns.to_string());
+        let stale = mismatching_mtime_ns(current_ns);
+        assert_ne!(stale, written);
 
         // Equal bytes cannot lose an update, so the shared CAS matrix's
         // content-equal arm answers 200 rather than raising a conflict
@@ -1601,11 +1635,20 @@ mod tests {
             "body",
         )
         .await;
+        assert_eq!(std::fs::read(fx.root.join("same.md")).unwrap(), b"body");
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            std::fs::read_to_string(fx.root.join("same.md")).unwrap(),
-            "body"
-        );
+        let adopted = body_json(response).await;
+        let current_ns = fx
+            .state
+            .standalone_files
+            .as_ref()
+            .unwrap()
+            .fs
+            .stat("same.md")
+            .unwrap()
+            .mtime_ns
+            .expect("adopted disk token");
+        assert_eq!(adopted["mtime_ns"], current_ns.to_string());
     }
 
     #[tokio::test]
@@ -1674,7 +1717,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "directory_not_empty", "path": "full"})
+            json!({"error": "directory is not empty: full", "code": "directory_not_empty", "path": "full"})
         );
         assert!(fx.root.join("full/inner.txt").exists(), "nothing mutated");
 
@@ -1682,7 +1725,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "protected_path", "path": "home/user"})
+            json!({"error": "path is protected: home/user", "code": "protected_path", "path": "home/user"})
         );
     }
 
@@ -2041,7 +2084,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "protected_path", "path": "home/user"})
+            json!({"error": "path is protected: home/user", "code": "protected_path", "path": "home/user"})
         );
     }
 

@@ -15,6 +15,7 @@ import {
   setTransferProgress,
   finishTransfer,
   cancelTransfer,
+  failTransfer,
   restoreTransfers,
   showTransfers,
   setTransferSignalSink,
@@ -110,6 +111,47 @@ describe("TransferBubble", () => {
     flushSync();
     expect(el.textContent).toContain("Uploaded a.md");
     expect((el.querySelector(".tb-action") as HTMLButtonElement).textContent).toBe("Dismiss");
+  });
+
+  function failedDownload(retry: () => void): HTMLElement {
+    const id = beginTransfer({
+      kind: "download",
+      filename: "dump.sql",
+      cancel: vi.fn(),
+      source: { path: "dump.sql", isDir: false },
+    });
+    failTransfer(id, "server restarted", retry);
+    transfers.shown = true;
+    const el = render();
+    flushSync();
+    return el;
+  }
+
+  function actions(el: HTMLElement): HTMLButtonElement[] {
+    return [...el.querySelectorAll<HTMLButtonElement>(".tb-action")];
+  }
+
+  test("a failed download with a Retry can be dismissed", () => {
+    const retry = vi.fn();
+    const el = failedDownload(retry);
+    expect(actions(el).map((b) => b.textContent), "both answers to a failure").toEqual(["Retry", "Dismiss"]);
+
+    actions(el)[1]!.click();
+    flushSync();
+
+    expect(transfers.items, "the row is gone").toEqual([]);
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  test("a failed download's Retry runs once and takes its failed row with it", () => {
+    const retry = vi.fn();
+    const el = failedDownload(retry);
+
+    actions(el).find((b) => b.textContent === "Retry")!.click();
+    flushSync();
+
+    expect(retry).toHaveBeenCalledOnce();
+    expect(transfers.items.map((t) => t.state), "no failed row left behind").toEqual([]);
   });
 
   test("restore turns an in-flight transfer into INTERRUPTED, never a frozen bar", () => {

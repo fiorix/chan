@@ -80,6 +80,164 @@ function escape(): void {
 }
 
 describe("CommandDeck lazy confirmation", () => {
+  it("answers navigation and execution after focus falls to the page", async () => {
+    const onChoose = vi.fn();
+    const first = { ...item(undefined), id: "first", awaitResult: false };
+    const second = { ...first, id: "second" };
+    mountDeck(first, onChoose);
+    (app.setItems as (items: DeckItem[]) => void)([first, second]);
+    await flush();
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+
+    expect(onChoose, "page focus still executes the selected command").toHaveBeenCalledExactlyOnceWith(second);
+  });
+
+  it("closes from page focus and leaves keys alone while closed", async () => {
+    const onChoose = vi.fn();
+    mountDeck({ ...item(undefined), awaitResult: false }, onChoose);
+    await flush();
+    (document.activeElement as HTMLElement).blur();
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(escape);
+    await flush();
+    expect(target.querySelector(".deck-shell"), "Escape closes the deck from the page").toBeNull();
+    expect(escape.defaultPrevented).toBe(true);
+
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(enter);
+    await flush();
+    expect(enter.defaultPrevented, "a closed deck leaves page keys alone").toBe(false);
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
+  it("leaves other controls and modal dialogs in charge of their keys", async () => {
+    const onChoose = vi.fn();
+    mountDeck({ ...item(undefined), awaitResult: false }, onChoose);
+    await flush();
+    const outside = document.createElement("div");
+    outside.innerHTML = '<input><textarea class="xterm-helper-textarea"></textarea><div contenteditable="true"></div><div role="dialog" aria-modal="true" tabindex="-1"></div>';
+    document.body.append(outside);
+    try {
+      const modal = outside.querySelector<HTMLElement>('[role="dialog"]')!;
+      modal.hidden = true;
+      for (const control of outside.querySelectorAll<HTMLElement>("input, textarea, [contenteditable]")) {
+        control.focus();
+        const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+        control.dispatchEvent(event);
+        expect(event.defaultPrevented, "an outside control keeps Enter").toBe(false);
+        expect(onChoose).not.toHaveBeenCalled();
+      }
+      modal.hidden = false;
+      modal.focus();
+      modal.blur();
+      const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      await flush();
+      expect(event.defaultPrevented, "the modal keeps page keys").toBe(false);
+      expect(target.querySelector(".deck-shell")).not.toBeNull();
+    } finally {
+      outside.remove();
+    }
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+    expect(target.querySelector(".deck-shell"), "the deck resumes after the modal closes").toBeNull();
+  });
+
+  it("ignores a hidden dialog while answering page keys", async () => {
+    mountDeck(item(undefined));
+    await flush();
+    const hidden = document.createElement("div");
+    hidden.style.display = "none";
+    hidden.innerHTML = '<div role="dialog" aria-modal="true"></div>';
+    document.body.append(hidden);
+    try {
+      (document.activeElement as HTMLElement).blur();
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flush();
+      expect(target.querySelector(".deck-shell"), "a hidden dialog does not own the page").toBeNull();
+    } finally {
+      hidden.remove();
+    }
+  });
+
+  it("accepts the first Enter to cancel a pointer-opened confirmation", async () => {
+    const onChoose = vi.fn();
+    mountDeck(item(confirmation("Pointer confirmation")), onChoose);
+    await flush();
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-decisions button.chosen")?.textContent).toBe("Cancel");
+
+    target.querySelector(".deck-input")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    await flush();
+
+    expect(target.querySelector(".deck-operation"), "the first Enter chooses Cancel").toBeNull();
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
+  it("accepts the first Enter after a pointer starts lazy confirmation", async () => {
+    const preparing = deferred<DeckConfirm>();
+    const onChoose = vi.fn();
+    mountDeck({ ...item(() => preparing.promise), awaitResult: false }, onChoose);
+    await flush();
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Checking...");
+    preparing.resolve(confirmation("Pointer confirmation"));
+    await flush();
+
+    const input = target.querySelector(".deck-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+
+    expect(onChoose, "the first Enter chooses the selected action").toHaveBeenCalledOnce();
+  });
+
+  it("requires an Enter release before a keyboard-opened confirmation can act", async () => {
+    const onChoose = vi.fn();
+    mountDeck({ ...item(confirmation("Keyboard confirmation")), awaitResult: false }, onChoose);
+    await flush();
+    const input = target.querySelector(".deck-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(onChoose, "a held opening Enter cannot execute the action").not.toHaveBeenCalled();
+
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(onChoose).toHaveBeenCalledOnce();
+  });
+
+  it("retains an Enter release that arrives during confirmation preparation", async () => {
+    const preparing = deferred<DeckConfirm>();
+    mountDeck(item(() => preparing.promise));
+    await flush();
+    const input = target.querySelector(".deck-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    preparing.resolve(confirmation("Keyboard confirmation"));
+    await flush();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(target.querySelector(".deck-operation")).toBeNull();
+  });
+
   it("re-prepares a confirmation when preparation failed and Retry is chosen", async () => {
     const confirm = vi
       .fn<() => Promise<DeckConfirm>>()
@@ -193,8 +351,7 @@ describe("CommandDeck lazy confirmation", () => {
     await tick();
     expect(target.querySelector(".deck-operation")?.textContent).toContain("Working");
 
-    // Escape hands the card back to the list. The command keeps running, but
-    // its answer is to a question the deck has stopped asking.
+    // Escape returns to the results while the pending command settles.
     escape();
     await tick();
     running.resolve(confirmation("Dismissed confirmation"));

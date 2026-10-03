@@ -41,7 +41,7 @@ import {
 import { syntaxTree } from "@codemirror/language";
 import { type Extension, StateEffect } from "@codemirror/state";
 import { selectionInRange } from "../decorations/selection";
-import { decodePercent, normalizeHref } from "../links";
+import { decodePercent, isInternalHref, normalizeHref } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
 import { parentDir } from "../../state/format";
@@ -138,11 +138,7 @@ export function parseInternalLink(
   label: string,
   fromPath: string | null,
 ): ParsedWikiLink | null {
-  if (!url) return null;
-  // Bail on scheme-prefixed URLs (http://, https://, mailto:, etc.)
-  // and intra-doc fragments (`#section` alone).
-  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return null;
-  if (url.startsWith("#")) return null;
+  if (!isInternalHref(url)) return null;
   // Split anchor (everything after the first `#` in the URL portion).
   const hashIdx = url.indexOf("#");
   const rawPath = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
@@ -183,10 +179,6 @@ function registerView(view: EditorView): void {
   watchedViews.add(view);
 }
 
-function unregisterView(view: EditorView): void {
-  watchedViews.delete(view);
-}
-
 function broadcastKindResolved(): void {
   for (const v of watchedViews) {
     if (!v.dom.isConnected) {
@@ -197,9 +189,26 @@ function broadcastKindResolved(): void {
   }
 }
 
+/// Whether a repaint is waiting on its timer.
+let repaintScheduled = false;
+
+/// Repaint every registered view from a zero-delay timer. Resolves that
+/// settle before the timer fires share it, so a note whose links resolve in
+/// a burst costs each view one transaction, not one per link. Timers of
+/// equal delay run as they were set, so a timer set after a resolve settles
+/// runs after that resolve's repaint.
+function scheduleKindRepaint(): void {
+  if (repaintScheduled) return;
+  repaintScheduled = true;
+  setTimeout(() => {
+    repaintScheduled = false;
+    broadcastKindResolved();
+  }, 0);
+}
+
 /// Look up a target's kind. Returns the cached kind synchronously, or
 /// undefined while an async resolve is in flight (the pill renders
-/// uncolored until the resolve lands and broadcasts a re-render).
+/// uncolored until the resolve lands and schedules a re-render).
 function getKind(target: string): LinkKind | undefined {
   const cached = kindCache.get(target);
   if (cached !== undefined) return cached;
@@ -228,7 +237,7 @@ function getKind(target: string): LinkKind | undefined {
     })
     .finally(() => {
       inflight.delete(target);
-      broadcastKindResolved();
+      scheduleKindRepaint();
     });
   return undefined;
 }
@@ -241,6 +250,7 @@ class WikiLinkWidget extends WidgetType {
     readonly kind: LinkKind | undefined,
     readonly sourceLen: number,
     readonly onClick: (args: WikiLinkClickArgs) => void,
+    readonly unresolvable = false,
   ) {
     super();
   }
@@ -251,6 +261,7 @@ class WikiLinkWidget extends WidgetType {
       this.parsed.label === other.parsed.label &&
       this.parsed.anchor === other.parsed.anchor &&
       this.kind === other.kind &&
+      this.unresolvable === other.unresolvable &&
       this.sourceLen === other.sourceLen
     );
   }
@@ -268,9 +279,11 @@ class WikiLinkWidget extends WidgetType {
     const tgt = this.parsed.anchor
       ? `${this.parsed.target}#${this.parsed.anchor}`
       : this.parsed.target;
-    el.title = view.state.facet(EditorView.editable)
-      ? `${tgt} - Cmd-click to open`
-      : `${tgt} - click to preview`;
+    el.title = this.unresolvable
+      ? `${tgt} - outside workspace`
+      : view.state.facet(EditorView.editable)
+        ? `${tgt} - Cmd-click to open`
+        : `${tgt} - click to preview`;
     if (this.kind === "image") {
       // Image-kind wikilinks render the actual file as an inline
       // thumbnail rather than a text pill - a `[[Recipes/photo.jpg]]`
@@ -299,6 +312,7 @@ class WikiLinkWidget extends WidgetType {
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
+      if (this.unresolvable) return;
       // Read-only mode (chat replies, user-toggled read mode, an
       // fs-locked file) replaces the source-reveal-and-edit path
       // with a non-destructive preview: click pops a popover with
@@ -480,17 +494,25 @@ function scanWikiLinks(
         const label = state.doc.sliceString(labelFrom, labelTo);
         const url = state.doc.sliceString(urlFrom, urlTo);
         const parsed = parseInternalLink(url, label, fromPath);
-        if (!parsed) return; // external - handled by decorations/marks.ts
-        const kind = getKind(parsed.target);
+        if (!parsed && !isInternalHref(url)) return; // external link
+        const unresolvable = !parsed;
+        const pill = parsed ?? {
+          target: url,
+          label: label.trim() || url,
+          anchor: "",
+          wasAbs: url.startsWith("/"),
+        };
+        const kind = unresolvable ? "broken" : getKind(pill.target);
         decos.push({
           from: outerFrom,
           to: outerTo,
           deco: Decoration.replace({
             widget: new WikiLinkWidget(
-              parsed,
+              pill,
               kind,
               outerTo - outerFrom,
               opts.onWikiClick,
+              unresolvable,
             ),
           }),
         });
@@ -504,18 +526,6 @@ function scanWikiLinks(
     true,
   );
 }
-
-// Cleanup: prune disconnected views. Called periodically by the
-// broadcaster anyway, but exported for tests.
-export function _pruneWatchedViews(): void {
-  for (const v of watchedViews) {
-    if (!v.dom.isConnected) watchedViews.delete(v);
-  }
-}
-
-// Expose unregister for symmetry, though current call sites rely on
-// the prune-on-broadcast path.
-export const _internal = { unregisterView };
 
 // ---- inline-code local-file links ---------------------------------------
 

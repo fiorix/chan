@@ -30,6 +30,7 @@
     moveTab,
     openExtensionInPane,
     openInPane,
+    type Mode,
     openTerminalInPane,
     reattachTerminalInPane,
     paneMode,
@@ -826,7 +827,7 @@
     e.dataTransfer.effectAllowed = "move";
     // `fromWindow` is what actually separates an intra-window move from a
     // cross-window one: pane IDs are a per-window counter (tabs.svelte.ts
-    // makeId) and COLLIDE across Tauri windows, so a stranger pane id can
+    // `id`) and COLLIDE across Tauri windows, so a stranger pane id can
     // match a same-id local pane. See isIntraWindowDrag.
     e.dataTransfer.setData(
       TAB_DRAG_MIME,
@@ -900,7 +901,7 @@
         return { kind: t.kind, ser: crossWindowTabSnapshot(t) };
       default: {
         // Exhaustiveness, deliberately not a fallback: a NEW tab kind must
-        // decide HERE how it crosses a window. The old catch-all let one
+        // decide HERE how it crosses a window. A catch-all would let one
         // inherit the terminal mislabel in silence.
         const unhandled: never = t;
         return unhandled;
@@ -960,6 +961,8 @@
       group?: string;
       cwd?: string;
       ser?: SerTab;
+      mode?: string;
+      inspectorOpen?: boolean;
     };
     try {
       parsed = JSON.parse(payload);
@@ -1011,7 +1014,12 @@
       );
     }
     if (!parsed.path) return false;
-    void openInPane(pane.id, parsed.path);
+    // The source's view of the file comes with it; a mode this build does
+    // not pair with the path falls back to the default there.
+    void openInPane(pane.id, parsed.path, {
+      mode: parsed.mode as Mode | undefined,
+      inspectorOpen: parsed.inspectorOpen === true,
+    });
     return true;
   }
 
@@ -1092,11 +1100,11 @@
 
   /// True when a tab-drag originated in THIS window. The discriminator is
   /// the originating window, NOT the pane id: pane ids are a per-window
-  /// counter (tabs.svelte.ts makeId), so a cross-window drag's stranger
+  /// counter (tabs.svelte.ts `id`), so a cross-window drag's stranger
   /// pane id can collide with a same-id pane that happens to exist here.
-  /// Relying on pane-id presence made cross-window drops take the intra
+  /// Relying on pane-id presence would send a cross-window drop down the intra
   /// moveTab path, which no-ops on the foreign tab while the source still
-  /// closes on dragend, so the tab vanished instead of moving.
+  /// closes on dragend, so the tab would vanish instead of moving.
   function isIntraWindowDrag(fromWindow: string | undefined): boolean {
     return fromWindow === sessionWindowId();
   }
@@ -1145,7 +1153,7 @@
     bodyDropEdge = null;
     // Cross-window split-edge drops are not supported (acceptCrossWindowTab
     // adds a tab to the strip, not a split), so an intra-window check
-    // both fixes the id-collision false-positive and keeps the boundary.
+    // both avoids the id-collision false-positive and keeps the boundary.
     if (
       !payload ||
       !isIntraWindowDrag(payload.fromWindow) ||
@@ -1926,12 +1934,12 @@
         <!--
           Dashboard tabs join the keep-alive family for the same reason as
           graphs: the Indexing carousel slide hosts a GraphCanvas whose force
-          layout + 3s indexer poll were torn down and rebuilt on every tab
-          switch when DashboardTab rendered inside the active-tab if-chain, so
-          the graph visibly reloaded/re-laid-out each time it was re-shown.
+          layout + 3s indexer poll would be torn down and rebuilt on every tab
+          switch if DashboardTab rendered inside the active-tab if-chain, and
+          the graph would visibly reload and re-lay-out each time it was re-shown.
           Kept mounted + hidden via the same visibility contract, the graph
           keeps its layout across switches and only refreshes in place; a
-          reload is now an explicit user action (Cmd+R or the right-click
+          reload is an explicit user action (Cmd+R or the right-click
           Reload row). The `active` gate also pauses the carousel + poll while
           the tab is hidden. No `focused` prop: a dashboard owns no
           keyboard caret.

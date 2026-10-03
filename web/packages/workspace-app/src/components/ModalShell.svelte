@@ -6,6 +6,7 @@
 
   import { onMount, type Snippet } from "svelte";
   import { createModalFocus } from "@chan/web-shared/modal-focus";
+  import { registerModalShell } from "./modalStack";
 
   let {
     labelledby,
@@ -30,16 +31,34 @@
   } = $props();
 
   let panel: HTMLElement | undefined = $state();
+  let layer: HTMLElement | undefined = $state();
+  let registration: ReturnType<typeof registerModalShell> | undefined;
+  const active = document.activeElement;
+  const opener = active instanceof HTMLElement && active !== document.body ? active : null;
 
   const focus = createModalFocus({
+    restoreFocus: false,
     onClose: () => onClose(),
-    onKeydown: (event) => onKeydown?.(event),
+    onKeydown: (event) => {
+      onKeydown?.(event);
+      if (!registration?.isTop()) event.preventDefault();
+    },
   });
-  onMount(() => focus.mount(panel!));
+  onMount(() => {
+    registration = registerModalShell({ layer: layer!, panel: panel!, opener, onKeydown: focus.onKeydown });
+    const cleanup = focus.mount(panel!);
+    return () => { cleanup(); registration?.destroy(); };
+  });
+
+  function panelKeydown(event: KeyboardEvent): void {
+    if (!registration?.isTop()) return;
+    focus.onKeydown(event);
+    if (event.key === "Tab") event.stopPropagation();
+  }
 
 </script>
 
-<div class="overlay">
+<div class="overlay" bind:this={layer}>
   <!-- A pointer target only: Escape and the dialog's own buttons are the
        keyboard's way out, so the backdrop stays out of the tab order. A
        press on it takes no focus either: focus held here would carry Escape
@@ -51,14 +70,14 @@
     aria-label="Close"
     tabindex="-1"
     onmousedown={(e) => e.preventDefault()}
-    onclick={onClose}
+    onclick={() => { if (registration?.isTop()) onClose(); }}
   ></button>
   <div
     bind:this={panel}
     class="modal"
     style:min-width={minWidth}
     style:gap
-    onkeydown={focus.onKeydown}
+    onkeydown={panelKeydown}
     role="dialog"
     aria-modal="true"
     aria-labelledby={labelledby}

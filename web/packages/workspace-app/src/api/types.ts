@@ -87,7 +87,8 @@ export type ConfigPatchRequest = {
 };
 
 export type ConfigConflict = {
-  error: "config_conflict";
+  error: string;
+  code: "config_conflict";
   current: GlobalConfig;
 };
 
@@ -539,8 +540,8 @@ export type FileResponse = {
   path_class?: PathClass;
   /// Path of the enclosing git repo, relative to the workspace root.
   /// Absent when the file is not inside a git repo (or when the
-  /// repo coincides with the workspace root). Workspaces the per-file
-  /// scope indicator in the overlay picker.
+  /// repo coincides with the workspace root). The server sends it;
+  /// nothing in the app reads it.
   repo_root?: string | null;
   /// Filesystem-level writability: true when the underlying file
   /// has user-write bits set on disk, false otherwise. Workspaces the
@@ -1122,7 +1123,7 @@ export type BuildInfo = {
   };
 };
 
-/// One process-ready local extension. `entry_path` is a capability-scoped path
+/// One local extension. `entry_path` is a capability-scoped path
 /// under the current workspace tenant; callers must never persist or log it.
 export type ExtensionInfo = {
   id: string;
@@ -1130,6 +1131,7 @@ export type ExtensionInfo = {
   entry_path: string;
   capabilities?: ("session-context" | "presentation")[];
   singleton?: boolean;
+  running?: boolean;
   commands?: ExtensionCommandInfo[];
 };
 

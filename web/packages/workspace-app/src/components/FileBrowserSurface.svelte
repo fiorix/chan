@@ -3,16 +3,10 @@
   import {
     FolderOpen,
     HardDrive,
-    Maximize2,
-    Minimize2,
     PanelLeftOpen,
     PanelRightOpen,
     X,
   } from "lucide-svelte";
-  import {
-    overlayMaximized,
-    setOverlayMaximized,
-  } from "../state/pageWidth.svelte";
   import FileTree from "./FileTree.svelte";
   import Inspector from "./Inspector.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";
@@ -56,31 +50,29 @@
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
 
-  type Variant = "overlay" | "dock" | "tab";
+  type Variant = "dock" | "tab";
   type Side = "left" | "right";
 
   let {
-    variant = "overlay",
+    variant,
     side,
     tab,
     onClose,
     onFlip,
   }: {
-    variant?: Variant;
+    variant: Variant;
     side?: Side;
     tab?: BrowserTab;
     onClose?: () => void;
     // Parent (Pane.svelte) supplies the flip callback for the tab
     // variant, forwarded to FileTree whose row menu carries the
-    // Settings (flip) entry. Dock + overlay variants pass none.
+    // Settings (flip) entry. Dock variants pass none.
     onFlip?: () => void;
   } = $props();
 
-  const isOverlay = $derived(variant === "overlay");
   const isTab = $derived(variant === "tab");
   const isDock = $derived(variant === "dock");
-  const isWideSurface = $derived(isOverlay || isTab);
-  /// The dock variant does NOT render the inspector (`isWideSurface` is
+  /// The dock variant does NOT render the inspector (`isTab` is
   /// false for docks), so its inspectorOpen / inspectorWidth are
   /// write-only and unread; it uses this minimal local state. The tab
   /// variant uses its tab. Non-tab surfaces fall back to the local
@@ -94,7 +86,7 @@
   //
   // Each File Browser surface is one watcher-scope instance. A stable id
   // keys its subscription bookkeeping in the `fbTreeInstances` registry:
-  // the tab variant uses its tab id; the overlay and the two dock sides
+  // the tab variant uses its tab id; the two dock sides
   // are singletons. On mount the instance subscribes to the workspace root
   // (so root-level fs changes broadcast to it); as directories expand /
   // collapse it subscribes / unsubscribes the matching dir scopes, with
@@ -104,7 +96,7 @@
   // subscription bookkeeping share one per-instance map, so expanding
   // a dir in one surface does not fan out to the others.
   const instanceId = $derived(
-    isTab && tab ? `fb-tab-${tab.id}` : isDock ? `fb-dock-${side ?? "left"}` : "fb-overlay",
+    isTab && tab ? `fb-tab-${tab.id}` : `fb-dock-${side ?? "left"}`,
   );
 
   $effect(() => {
@@ -113,7 +105,7 @@
     return () => untrack(() => fbWatchDispose(id));
   });
 
-  // Seed the dock / overlay expansion from its per-instance reload snapshot.
+  // Seed the dock expansion from its per-instance reload snapshot.
   // These surfaces have no layout home, so the sessionStorage snapshot is
   // their only restore path. The snapshot key is scoped by the workspace
   // root, which is NOT known on raw mount (`workspace.info` loads async);
@@ -167,7 +159,7 @@
   /// disposes the tab's instance; on (re)activation we snapshot the live
   /// state onto the tab record and restore it back, so the activating
   /// tab's expansion is reseeded from `tab.expanded` into a fresh
-  /// instance. The dock + overlay variants own their own instance maps
+  /// instance. The dock variants own their own instance maps
   /// independently.
   function snapshotIntoTab(target: BrowserTab): void {
     // Selection is NOT resnapshotted here, for the same reason as scroll
@@ -306,8 +298,8 @@
   // `Pane.svelte` sets `tabMenu.openForTabId` + `tabMenu.anchor`;
   // this effect mirrors that signal back into `menu.openAtCursor()`
   // so the FB-specific menu items still render at the cursor for
-  // active Files tabs. Dock + overlay variants ignore the effect
-  // (they have on-surface headers).
+  // active Files tabs. Docks open the menu from the body
+  // context-menu handler.
   $effect(() => {
     if (!isTab || !tab) return;
     const open = tabMenu.openForTabId;
@@ -324,10 +316,6 @@
       void tick().then(() => treeRef?.focusTree());
     }
   });
-
-  function closeSurface(): void {
-    onClose?.();
-  }
 
   function openFind(): void {
     findOpen = true;
@@ -380,7 +368,6 @@
     if (entry && !entry.is_dir && isOpenableTextKind(classifyEntry(entry))) {
       // Explicit user open (File Browser open-selection): land at top.
       void openInActivePane(entry.path, { landAtTop: true });
-      if (isOverlay) closeSurface();
     }
   }
 
@@ -401,16 +388,11 @@
     menu?.openAtCursor(x, y);
   }
 
-  // Tab + overlay variants auto-open the DETAILS inspector on row
+  // Tabs auto-open the DETAILS inspector on row
   // click; dock variants do not (the dock has no inspector pane
-  // anyway, and `isWideSurface` is false there).
+  // anyway, and `isTab` is false there).
   function onRowClicked(_path: string): void {
-    if (isTab || isOverlay) browserState.inspectorOpen = true;
-  }
-
-  function doToggleOverlayMaximized(): void {
-    setOverlayMaximized(!overlayMaximized.on);
-    menu?.close();
+    if (isTab) browserState.inspectorOpen = true;
   }
 
   function toggleStick(target: Side): void {
@@ -477,50 +459,23 @@
   onkeydown={onBrowserKeydown}
   role="presentation"
 >
-  {#if isOverlay}
-    <header>
-      <button
-        type="button"
-        class="chrome-btn"
-        onclick={doToggleOverlayMaximized}
-        title={overlayMaximized.on ? "Restore size" : "Maximize"}
-        aria-label={overlayMaximized.on ? "Restore size" : "Maximize"}
-      >
-        {#if overlayMaximized.on}
-          <Minimize2 size={14} strokeWidth={1.75} aria-hidden="true" />
-        {:else}
-          <Maximize2 size={14} strokeWidth={1.75} aria-hidden="true" />
-        {/if}
-      </button>
-      <span class="header-spacer" aria-hidden="true"></span>
-      <HamburgerMenu
-        bind:this={menu}
-        bind:open={menuOpen}
-        width={POPOVER_WIDTH}
-        height={POPOVER_HEIGHT}
-      >
-        {@render menuItems()}
-      </HamburgerMenu>
-    </header>
-  {:else}
-    <!-- Tab + dock variants have no on-surface header. Tab variant
-         relies on the pane Hybrid kebab (right-click on the Files
-         tab → tabMenu state → menu.openAtCursor via the $effect
-         above). Dock variant relies on the
-         `oncontextmenu={onBrowserContextMenu}` handler on the
-         `.browser` root, which calls `menu.openAtCursor` directly.
-         Both share the same triggerless HamburgerMenu mounted
-         here. -->
-    <HamburgerMenu
-      bind:this={menu}
-      bind:open={menuOpen}
-      showTrigger={false}
-      width={POPOVER_WIDTH}
-      height={POPOVER_HEIGHT}
-    >
-      {@render menuItems()}
-    </HamburgerMenu>
-  {/if}
+  <!-- Tab + dock variants have no on-surface header. Tab variant
+       relies on the pane Hybrid kebab (right-click on the Files
+       tab → tabMenu state → menu.openAtCursor via the $effect
+       above). Dock variant relies on the
+       `oncontextmenu={onBrowserContextMenu}` handler on the
+       `.browser` root, which calls `menu.openAtCursor` directly.
+       Both share the same triggerless HamburgerMenu mounted
+       here. -->
+  <HamburgerMenu
+    bind:this={menu}
+    bind:open={menuOpen}
+    showTrigger={false}
+    width={POPOVER_WIDTH}
+    height={POPOVER_HEIGHT}
+  >
+    {@render menuItems()}
+  </HamburgerMenu>
   <div class="body">
     <div class="tree-wrap" bind:this={treeWrapEl} onscroll={onTreeWrapScroll}>
       {#if findOpen}
@@ -579,7 +534,7 @@
         onFlip={isTab ? onFlip : undefined}
       />
     </div>
-    {#if isWideSurface && browserState.inspectorOpen}
+    {#if isTab && browserState.inspectorOpen}
       <Inspector
         title="Details"
         bind:width={
@@ -611,7 +566,6 @@
             showRefs
             onNavigate={(p) => {
               void openInActivePane(p);
-              if (isOverlay) closeSurface();
             }}
           />
         {/if}
@@ -696,41 +650,6 @@
   }
   .dock {
     border-inline: 1px solid var(--border);
-  }
-  header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.6rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-card);
-    font-weight: 600;
-    font-size: 15px;
-    color: var(--text-heading);
-    flex-shrink: 0;
-  }
-  .dock header {
-    padding-inline: 0.45rem;
-  }
-  .header-spacer { flex: 1; }
-  .chrome-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 24px;
-    padding: 0;
-    background: var(--bg);
-    color: var(--text-secondary);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: pointer;
-    transition: color 0.15s ease, border-color 0.15s ease;
-    flex-shrink: 0;
-  }
-  .chrome-btn:hover {
-    color: var(--text);
-    border-color: var(--btn-hover);
   }
   /* Workspace label + path row at the head of the FB tab right-click
      menu.

@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use chan_server::{WindowKind, WindowRecord, WorkspaceLifecycleOutcome};
 
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::config::{self, WindowGeometry};
@@ -702,26 +702,36 @@ pub fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), String> 
 
 /// The live window's OS title, else its label (a window whose webview is gone
 /// or whose title cannot be read).
-fn window_title_or_label(app: &AppHandle, label: &str) -> String {
+fn window_title_or_label(app: &AppHandle<impl Runtime>, label: &str) -> String {
     app.get_webview_window(label)
         .and_then(|w| w.title().ok())
         .unwrap_or_else(|| label.to_string())
 }
 
-/// True when the webview is still showing the bundled connecting/retry
-/// screen (`connecting.html`, the remote pre-navigation page). Such a
-/// window has no per-window session, no shells, and nothing to restore,
-/// so close affordances treat it as cancel-and-really-close instead of
-/// burying. Guard the URL read because a dead webview's `url()` can panic on a
-/// nil URL; any failure reads as "not the connecting screen".
-pub fn window_on_connecting_screen(app: &AppHandle, label: &str) -> bool {
-    webview_url(app, label).is_some_and(|url| on_connecting_page(&url))
+/// What the webview of a window shows, as a close of that window reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageReading {
+    /// The bundled connecting page, `connecting.html`.
+    Connecting,
+    /// A page that was read and is not the connecting page.
+    Other,
+    /// No page was read: no window has the label, or its URL cannot be read.
+    Unread,
+}
+
+/// Read the page that the webview of the window under `label` shows.
+pub(crate) fn read_page(app: &AppHandle<impl Runtime>, label: &str) -> PageReading {
+    match webview_url(app, label) {
+        Some(url) if on_connecting_page(&url) => PageReading::Connecting,
+        Some(_) => PageReading::Other,
+        None => PageReading::Unread,
+    }
 }
 
 /// What a window's webview reports as its own URL, or `None` when there is
 /// no such window or its URL cannot be read. A dead webview's `url()` can
 /// panic on a nil URL.
-pub(crate) fn webview_url(app: &AppHandle, label: &str) -> Option<tauri::Url> {
+pub(crate) fn webview_url(app: &AppHandle<impl Runtime>, label: &str) -> Option<tauri::Url> {
     let window = app.get_webview_window(label)?;
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.url()))
         .ok()?
@@ -1002,9 +1012,10 @@ fn build_workspace_window_with_completion(
 /// where the SPA shows a Hide / Close / Cancel overlay and
 /// calls back (`hide_window_from_close_confirm` for Hide,
 /// `request_close_window` for Close). No bury happens here
-/// until the SPA decides. A few cases REAL-close with no
-/// prompt when there is no live SPA to ask, such as a control terminal
-/// still connecting or a window still on the pre-SPA connecting screen.
+/// until the SPA decides. With no live SPA to ask, a control
+/// terminal still connecting REAL-closes with no prompt, and a
+/// devserver window still on the pre-SPA connecting screen is
+/// hidden with no prompt, as `request_close_window` hides it.
 /// Programmatic closes (the SPA's empty-window cascade,
 /// workspace-off teardown) call `destroy()`
 /// and never reach this handler.
@@ -1065,16 +1076,20 @@ fn on_close_requested(
         return;
     }
     // A devserver window still on the connecting page has no
-    // SPA command handler to answer a prompt. Route its OS
-    // close through the same pending-delete path as the
-    // page's close chords and Disconnect button.
-    let on_connecting = window_on_connecting_screen(app, label);
+    // SPA command handler to answer a prompt. Close it as the
+    // page's chords and Disconnect button close it through
+    // `request_close_window`, which hides it and keeps its
+    // record. The close is handed the page read here and does
+    // not read it again, so a navigation to the live page
+    // before the close runs does not discard the record.
+    let page = read_page(app, label);
+    let on_connecting = page == PageReading::Connecting;
     if on_connecting && label.starts_with("lib-") {
         api.prevent_close();
         if let Some(window) = app.get_webview_window(label) {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = crate::request_close_window(app, window).await {
+                if let Err(e) = crate::close_window_with_page(app, window, Some(page)).await {
                     tracing::warn!(error = %e, "closing connecting devserver window failed");
                 }
             });
@@ -1083,7 +1098,7 @@ fn on_close_requested(
     }
     // Decide whether there is a live workspace SPA to ASK. A
     // `local::` or connected `lib-` watcher window has one. A
-    // `control-terminal-` still connecting and any window
+    // `control-terminal-` still connecting and any other window
     // still on the pre-SPA connecting screen have nothing to
     // keep or no SPA to ask, so they real-close (return without
     // prevent_close; the Destroyed branch cleans up).
@@ -1344,11 +1359,12 @@ const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('c
 ///   - a connected `control-terminal-`: hide the webview in place and persist
 ///     hidden=true for its registry row.
 ///
-/// Two callers reach here: an explicit hide gesture (`cs window hide` / the
-/// launcher Hide action) and the SPA's Hide choice from the close-confirm
-/// overlay. Close is the sibling choice and rides the existing
-/// `request_close_window` discard/destroy cascade.
-pub(crate) fn bury_window_now(app: &AppHandle, state: &Arc<AppState>, label: &str) {
+/// Three callers reach here: an explicit hide gesture (`cs window hide` / the
+/// launcher Hide action), the SPA's Hide choice from the close-confirm
+/// overlay, and the close of a devserver window on its connecting page
+/// (`close_devserver_window`). Close is the live page's sibling choice and
+/// rides the `request_close_window` discard/destroy cascade.
+pub(crate) fn bury_window_now(app: &AppHandle<impl Runtime>, state: &Arc<AppState>, label: &str) {
     // A watcher-managed local window (`local::<id>`): bury it through the
     // watcher view state (should_show false -> the reconcile closes the native
     // window; the record stays, reopenable from the Window menu). Mirror into
@@ -1512,7 +1528,7 @@ fn prompt_devserver_transfer_close(app: &AppHandle, state: &Arc<AppState>, label
 /// for the signature; work area for the clamp). Empty on a monitor-query error,
 /// which yields the degenerate `"0|"` signature -- a window then restores
 /// size-only (no off-screen position) rather than crashing the open.
-fn current_monitors(app: &AppHandle) -> Vec<config::MonitorDesc> {
+fn current_monitors(app: &AppHandle<impl Runtime>) -> Vec<config::MonitorDesc> {
     app.available_monitors()
         .unwrap_or_default()
         .iter()
@@ -1682,7 +1698,7 @@ fn reveal_window(window: &tauri::WebviewWindow, label: &str) {
 /// size; geometry is desktop-owned, so this runs for local and devserver windows
 /// alike. Logs a `WINGEO capture` line (signature + points + scale +
 /// monitors) for the host.
-pub(crate) fn capture_window_geometry(app: &AppHandle, label: &str) {
+pub(crate) fn capture_window_geometry(app: &AppHandle<impl Runtime>, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
@@ -3388,15 +3404,16 @@ mod tests {
     #[test]
     fn close_requested_arm_prompts_a_buryable_window_and_real_closes_the_rest() {
         const SERVE_RS: &str = include_str!("serve.rs");
-        // bury_window_now is the one bury body the two callers (the silent-hide
-        // gesture, the SPA Hide callback) share. Its definition is searched in
+        // bury_window_now is the one bury body its three callers (the
+        // silent-hide gesture, the SPA Hide callback, the close of a devserver
+        // window on its connecting page) share. Its definition is searched in
         // the production half, since this test spells it.
         let (production, _) = SERVE_RS
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("the test module separates the production code");
         assert!(
             production.contains("pub(crate) fn bury_window_now("),
-            "bury_window_now must exist for the silent-hide + Hide-callback paths",
+            "bury_window_now must exist for the silent-hide, Hide-callback and connecting-page close paths",
         );
         // The host-to-webview confirm dispatch rides the chan:command bridge:
         // the script the arm evaluates names the confirm command.
@@ -3452,7 +3469,7 @@ mod tests {
         // connecting screen) return WITHOUT prevent_close.
         assert!(arm.contains("if !ask {"));
         assert!(arm.contains("strip_prefix(\"control-terminal-\")"));
-        assert!(arm.contains("window_on_connecting_screen"));
+        assert!(arm.contains("read_page(app, label)"));
         // A kept-dead control terminal's red button routes through the same
         // explicit-close cleanup as Cmd+W / the SPA Close, clearing the
         // reconnect block instead of stranding it on a destroyed window.
@@ -3712,11 +3729,12 @@ mod tests {
     }
 
     #[test]
-    fn connecting_screen_windows_close_for_real() {
+    fn connecting_screen_windows_close_through_request_close_window() {
         // A window still on connecting.html must be closable. A devserver
-        // window's red button routes through request_close_window so its remote
-        // record becomes a pending delete, while the page offers the same path
-        // from Cmd/Ctrl+W, Ctrl+D, and Disconnect.
+        // window's red button closes it as request_close_window does, on the
+        // page that its handler read (main.rs's tests hold that arm), and the
+        // page invokes request_close_window from Cmd/Ctrl+W, Ctrl+D, and
+        // Disconnect.
         const SERVE_RS: &str = include_str!("serve.rs");
         let (_, rest) = SERVE_RS
             .split_once("\nfn on_close_requested(")
@@ -3725,7 +3743,6 @@ mod tests {
             .split_once("\n}\n")
             .expect("on_close_requested ends at a column-0 brace");
         assert!(close_arm.contains("if on_connecting && label.starts_with(\"lib-\")"));
-        assert!(close_arm.contains("crate::request_close_window(app, window)"));
         // KEY_BRIDGE_JS claims the close chord (window capture +
         // stopImmediatePropagation) before BOTH the page's listener and
         // the File-menu accelerator, so the bridge itself must route
@@ -3740,11 +3757,48 @@ mod tests {
                 .count(),
             3
         );
-        assert!(KEY_BRIDGE_JS.contains("location.pathname.endsWith('/connecting.html')"));
+        // Each of the bridge's three checks for the connecting page closes
+        // through request_close_window: the first command it invokes after
+        // the check is that one.
+        let checks: Vec<&str> = KEY_BRIDGE_JS
+            .split("location.pathname.endsWith('/connecting.html')")
+            .skip(1)
+            .collect();
+        assert_eq!(checks.len(), 3);
+        for after in checks {
+            let command = after
+                .split("invokeIpc(e, '")
+                .nth(1)
+                .expect("the connecting arm invokes a command");
+            assert!(
+                command.starts_with("request_close_window'"),
+                "a close chord on the connecting page invokes another command: {command:.40}"
+            );
+        }
         const CONNECTING_JS: &str = include_str!("../../src/connecting.js");
-        assert!(CONNECTING_JS.contains("request_close_window"));
         assert!(CONNECTING_JS.contains("key === 'd'"));
         assert!(CONNECTING_JS.contains("key === 'w'"));
+        // The page invokes two commands only: the probe, and the close of its
+        // chords and its Disconnect button, which is request_close_window.
+        let invoked: Vec<&str> = CONNECTING_JS
+            .split("invoke('")
+            .skip(1)
+            .map(|rest| rest.split('\'').next().unwrap_or_default())
+            .collect();
+        assert!(
+            invoked
+                .iter()
+                .all(|command| ["probe_url", "request_close_window"].contains(command)),
+            "the connecting page invokes a command other than the probe and the close: {invoked:?}"
+        );
+        assert_eq!(
+            invoked
+                .iter()
+                .filter(|command| **command == "request_close_window")
+                .count(),
+            2,
+            "the connecting page's chords and its Disconnect do not both close through request_close_window"
+        );
     }
 
     #[test]

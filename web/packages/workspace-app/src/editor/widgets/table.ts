@@ -6,11 +6,10 @@
 // for editing. EditorView.atomicRanges so caret motion skips the
 // table in one keypress.
 //
-// v1.2 scope: read-only grid. Click on the widget drops the caret at
-// the table's source start (selection-intersect then reveals source
-// next tick). True in-cell editing without losing pipe alignment is
-// v1.3+ work - the markdown source is plain enough that direct
-// editing is acceptable for now.
+// Read-only grid. Click on the widget drops the caret at the table's
+// source start (selection-intersect then reveals source next tick).
+// There is no in-cell editing: the markdown source is plain enough to
+// edit directly.
 
 import {
   Decoration,

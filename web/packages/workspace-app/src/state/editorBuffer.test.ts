@@ -275,7 +275,7 @@ describe("editorBuffer path-keyed buffers survive a reload", () => {
 
 // Walk the create -> type -> autosave -> save -> remount -> reload
 // lifecycle through the same calls FileEditorTab makes, asserting the
-// banner verdict at each step. Locks the false-banner regression: the
+// banner verdict at each step. It holds the banner to one rule: the
 // user's own edits never raise it, a crashed prior session does.
 describe("editorBuffer draft lifecycle", () => {
   test("own-session edits never raise the banner; a prior session does", () => {

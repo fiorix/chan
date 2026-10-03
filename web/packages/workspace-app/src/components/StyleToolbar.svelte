@@ -41,13 +41,12 @@
   } from "lucide-svelte";
   import type Wysiwyg from "../editor/Wysiwyg.svelte";
   import type { BlockKind } from "../editor/commands/format";
+  import { chordFor } from "../state/shortcuts";
 
   let {
     wysiwyg,
     selVer,
     disabled = false,
-    showImage = true,
-    floating = true,
     mode,
     onModeToggle,
   }: {
@@ -64,13 +63,6 @@
     /// needs to compute the gate once. The mode-toggle button, when
     /// present, ignores this so the user can always flip back.
     disabled?: boolean;
-    /// Show the image-insert button. Defaults on for the file
-    /// editor; opt out from contexts where pasting `![alt](url)`
-    /// into the buffer doesn't make sense.
-    showImage?: boolean;
-    /// Floating pill (position: absolute over the editor canvas)
-    /// vs in-flow row (block-level above the editor).
-    floating?: boolean;
     /// Optional current rendering mode. When set together with
     /// `onModeToggle`, the toolbar grows a trailing source/wysiwyg
     /// toggle button after a vertical separator. Both props must
@@ -230,6 +222,14 @@
     wysiwyg?.setBlockKind(v);
   }
 
+  // The tooltip of a button whose action the editor binds to a chord: its
+  // label and the chord the registry gives the command on this platform,
+  // or the label alone where the registry gives none.
+  function chordTitle(label: string, id: string): string {
+    const chord = chordFor(id);
+    return chord ? `${label} (${chord})` : label;
+  }
+
   // Pin/unpin around the editor's preventDefault dance: holding the
   // mouse down on a button keeps the toolbar from collapsing even if
   // the collapse timer is in flight.
@@ -248,12 +248,10 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="style-toolbar"
+  class="style-toolbar floating"
   class:expanded
   class:hidden={!visible}
   class:disabled
-  class:floating
-  class:inflow={!floating}
   role="toolbar"
   tabindex="-1"
   aria-label="Style toolbar"
@@ -302,7 +300,7 @@
     <button
       class="fbtn"
       class:on={isBold}
-      title="bold (Cmd/Ctrl+B)"
+      title={chordTitle("bold", "app.editor.bold")}
       aria-label="bold"
       disabled={disabled}
       onmousedown={onMouseDownPin}
@@ -312,7 +310,7 @@
     <button
       class="fbtn"
       class:on={isItalic}
-      title="italic (Cmd/Ctrl+I)"
+      title={chordTitle("italic", "app.editor.italic")}
       aria-label="italic"
       disabled={disabled}
       onmousedown={onMouseDownPin}
@@ -322,7 +320,7 @@
     <button
       class="fbtn"
       class:on={isStrike}
-      title="strikethrough (Cmd/Ctrl+Shift+S)"
+      title="strikethrough"
       aria-label="strikethrough"
       disabled={disabled}
       onmousedown={onMouseDownPin}
@@ -332,7 +330,7 @@
     <button
       class="fbtn"
       class:on={isInlineCode}
-      title="inline code (Cmd/Ctrl+E)"
+      title="inline code"
       aria-label="inline code"
       disabled={disabled}
       onmousedown={onMouseDownPin}
@@ -388,17 +386,15 @@
       onmouseup={onMouseUpUnpin}
       onclick={() => wysiwyg?.insertHorizontalRule()}
     ><Minus size={15} strokeWidth={1.9} aria-hidden="true" /></button>
-    {#if showImage}
-      <button
-        class="fbtn"
-        title="insert image"
-        aria-label="insert image"
-        disabled={disabled}
-        onmousedown={onMouseDownPin}
-        onmouseup={onMouseUpUnpin}
-        onclick={() => wysiwyg?.insertImage()}
-      ><Image size={15} strokeWidth={1.9} aria-hidden="true" /></button>
-    {/if}
+    <button
+      class="fbtn"
+      title="insert image"
+      aria-label="insert image"
+      disabled={disabled}
+      onmousedown={onMouseDownPin}
+      onmouseup={onMouseUpUnpin}
+      onclick={() => wysiwyg?.insertImage()}
+    ><Image size={15} strokeWidth={1.9} aria-hidden="true" /></button>
     </div>
   {/if}
   </div>
@@ -462,12 +458,6 @@
     top: 8px;
     left: 8px;
     z-index: 30;
-  }
-  /* In-flow: rendered as a normal block above the editor (used by
-     hosts that reserve layout space for the toolbar). Caller-owned
-     spacing stays outside this component. */
-  .style-toolbar.inflow {
-    align-self: flex-start;
   }
   .style-toolbar:hover {
     transform: scale(1.02);

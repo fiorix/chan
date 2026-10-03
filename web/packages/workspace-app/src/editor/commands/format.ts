@@ -5,9 +5,7 @@
 // block toggles add/remove line prefixes; isActive walks the syntax
 // tree.
 //
-// Naming follows the legacy editor's contract so StyleToolbar.svelte
-// works at cutover with no edits beyond importing from the new
-// component.
+// Naming follows the style-toolbar contract Wysiwyg.svelte exports.
 
 import { syntaxTree } from "@codemirror/language";
 import { enclosingFence } from "./fence";
@@ -233,10 +231,10 @@ export function quoteLines(view: EditorView): boolean {
 /// the document. Inside such a block the user has no natural way
 /// out: Enter inserts a literal newline INSIDE the fence, and
 /// ArrowDown is a no-op because there's no line below. Wired up to
-/// ArrowDown and Mod-Enter on desktop; Enter-on-closer-line covers
-/// mobile keyboards that don't have a reliable Mod modifier or
-/// arrow keys. All three paths route here and dispatch the same
-/// "insert newline after the block, park caret there" edit.
+/// ArrowDown; Enter-on-closer-line covers mobile keyboards that
+/// don't have arrow keys. Both paths dispatch the same "insert
+/// newline after the block, park caret there" edit
+/// (`exitFenceAtDocEnd`).
 function isCaretInsideFenceAtDocEnd(view: EditorView): boolean {
   const sel = view.state.selection.main;
   if (!sel.empty) return false;
@@ -305,9 +303,9 @@ function isFenceClosedAtDocEnd(view: EditorView): boolean {
   return lastLineNumber > 1;
 }
 
-/// ArrowDown + Mod-Enter binding: exit a fenced code block when the
-/// caret sits inside one on the last line of the doc. Returns false
-/// otherwise so the key keeps its default behaviour.
+/// ArrowDown binding: exit a fenced code block when the caret sits
+/// inside one on the last line of the doc. Returns false otherwise so
+/// the key keeps its default behaviour.
 export function escapeFenceAtDocEnd(view: EditorView): boolean {
   if (!isCaretInsideFenceAtDocEnd(view)) return false;
   return exitFenceAtDocEnd(view);

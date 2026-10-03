@@ -21,7 +21,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use chan_revtunnel::server::{AttachError, ControlAttach, ReadyReport};
@@ -32,6 +32,7 @@ use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::extract::Query;
 use crate::WorkspaceHost;
 
 /// Called only after the leg has decided to end, this one-second grace gives
@@ -452,6 +453,39 @@ mod tests {
                 StatusCode::UNAUTHORIZED,
                 "{path} must stay gated without a token"
             );
+        }
+    }
+
+    /// A leg's query is taken before the upgrade, so a leg that does not name
+    /// its tunnel or its connection is refused in the envelope.
+    #[tokio::test]
+    async fn a_leg_with_an_incomplete_query_is_refused_in_the_envelope() {
+        fn sentence<T: serde::de::DeserializeOwned>(uri: &str) -> String {
+            let uri: axum::http::Uri = uri.parse().expect("uri");
+            match axum::extract::Query::<T>::try_from_uri(&uri) {
+                Ok(_) => panic!("the framework must refuse this query"),
+                Err(rejection) => rejection.body_text(),
+            }
+        }
+        let cfg = tempfile::tempdir().expect("config dir");
+        let library =
+            chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let app = crate::routes::launcher_router(host, None, None);
+
+        let control = format!("{CONTROL_PATH}?conn=c-1");
+        let conn = format!("{CONN_PATH}?tunnel=tun-1");
+        for (uri, sentence) in [
+            (&control, sentence::<TunnelControlQuery>(&control)),
+            (&conn, sentence::<TunnelConnQuery>(&conn)),
+        ] {
+            let response = app.clone().oneshot(ws_probe(uri)).await.expect("response");
+            crate::routes::refusal_tests::assert_refusal(
+                response,
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"error": sentence}),
+            )
+            .await;
         }
     }
 

@@ -13,7 +13,14 @@
 //!     control transport, and the agent [`SubmitAgent`] submit map. The
 //!     `chan` / `chan-desktop` binaries enable it; chan-server does not.
 
+#[cfg(unix)]
+mod control_dir;
 mod wire;
+#[cfg(unix)]
+pub use control_dir::{
+    control_socket_fallback_dir_at, effective_uid, ensure_control_socket_dir,
+    validate_control_socket_dir, validate_control_socket_node,
+};
 pub use wire::{
     ControlRequest, ControlResponse, Identity, PaneOp, PaneSide, PastePrefer, ServeKind, SplitDir,
     SurveyReply, SurveySpec, TabDestination, TeamOp, TermWriteSubmit, GRAPH_LINK_PREFIX,

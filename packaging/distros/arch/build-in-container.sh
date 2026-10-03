@@ -41,10 +41,14 @@ if [ "$(id -u)" -eq 0 ]; then
     chown -R builder:builder "$OUT"
 
     status=0
+    cargo_jobs_env=()
+    if [ "${CARGO_BUILD_JOBS+x}" = x ]; then
+        cargo_jobs_env=("CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
+    fi
     runuser -u builder -- env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND \
         HOME=/home/builder USER=builder LOGNAME=builder SRC="$SRC" OUT="$OUT" \
         VERSION="$VERSION" PKGREL="$PKGREL" PKGBASE="$PKGBASE" \
-        AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" bash "$0" || status=$?
+        AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" "${cargo_jobs_env[@]}" bash "$0" || status=$?
 
     # $OUT is bind-mounted from the host, so hand the artifacts back to the
     # invoking user, on failure too: left owned by the in-container builder
@@ -85,6 +89,22 @@ unwaived_namcap_errors() {
     done < <(grep -E ' E: ' "$log" || true)
 }
 
+cgroup_metric() {
+    local value=unavailable
+    if [ -r "$1" ]; then
+        IFS= read -r value < "$1" || value=unavailable
+        [ -n "$value" ] || value=unavailable
+    fi
+    printf '%s' "$value"
+}
+
+meminfo_metric() {
+    local value
+    value="$(awk -v key="$1" '$1 == key ":" { print $2 $3; found = 1; exit } END { if (!found) exit 1 }' \
+        /proc/meminfo 2>/dev/null)" || value=unavailable
+    printf '%s' "$value"
+}
+
 echo ">> AUR validation: version=$VERSION pkgrel=$PKGREL arch=$(uname -m)" >&2
 for pkgbase in "${packages[@]}"; do
     echo ">> building $pkgbase" >&2
@@ -93,6 +113,12 @@ for pkgbase in "${packages[@]}"; do
         "$pkgbase" "$VERSION" "$PKGREL" "$OUT"
 
     pkgdir="$OUT/$pkgbase"
+    printf '>> cargo resources: CPUs=%s cpu.max=%s MemTotal=%s MemAvailable=%s memory.max=%s CARGO_BUILD_JOBS=%s\n' \
+        "$(nproc 2>/dev/null || printf unavailable)" \
+        "$(cgroup_metric /sys/fs/cgroup/cpu.max)" \
+        "$(meminfo_metric MemTotal)" "$(meminfo_metric MemAvailable)" \
+        "$(cgroup_metric /sys/fs/cgroup/memory.max)" \
+        "${CARGO_BUILD_JOBS-unset (cargo default)}" >&2
     (cd "$pkgdir" && makepkg --cleanbuild --force --syncdeps --noconfirm)
     # makepkg may also emit a $pkgbase-debug package. Select the main package
     # by its exact versioned prefix instead of relying on find's ordering.

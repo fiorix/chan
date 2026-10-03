@@ -6,6 +6,7 @@
 import { registerCommands, workspaceOnly, type Command } from "../commands";
 import { setTransientStatus } from "../store.svelte";
 import { api } from "../../api/client";
+import { ApiError, apiErrorCode } from "../../api/errors";
 
 async function rebuildIndex(): Promise<void> {
   try {
@@ -16,15 +17,22 @@ async function rebuildIndex(): Promise<void> {
   }
 }
 
-/// Enable semantic search. The route rejects when the embedding model is
-/// not present; the launcher does not orchestrate the download this
-/// round, so it points at Search settings where the download lives.
+/// Enable semantic search. The route refuses with a 409 whose code is
+/// `model_not_downloaded` when the embedding model is not on disk; this
+/// command does not download it, so it points at Search settings, where
+/// the download lives. Any other refusal is reported by its own sentence.
 async function enableSemantic(): Promise<void> {
   try {
     await api.semanticEnable();
     setTransientStatus("Semantic search enabled");
-  } catch {
-    setTransientStatus("Enable failed; download the embedding model in Search settings");
+  } catch (e) {
+    const modelMissing =
+      e instanceof ApiError && e.status === 409 && apiErrorCode(e) === "model_not_downloaded";
+    setTransientStatus(
+      modelMissing
+        ? "Enable failed; download the embedding model in Search settings"
+        : `Enable failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 }
 

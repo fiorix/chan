@@ -297,7 +297,6 @@ describe("the shared reconnect backoff", () => {
       fileMissing: null,
       inspectorOpen: false,
       outlineOpen: false,
-      repoRoot: null,
       readMode: false,
       fsWritable: true,
       styleToolbarOpen: false,

@@ -87,7 +87,6 @@
     value = $bindable(""),
     readonly = false,
     currentPath = null,
-    wikiPickerPrefix = null,
     highlightTrailingWhitespace = false,
     initialCaret = null,
     autoFocus = true,
@@ -105,7 +104,6 @@
     value: string;
     readonly?: boolean;
     currentPath?: string | null;
-    wikiPickerPrefix?: string | null;
     highlightTrailingWhitespace?: boolean;
     initialCaret?: { from: number; to: number } | null;
     /// When false, the editor skips the mount-time `view.focus()`.
@@ -192,6 +190,16 @@
   /// remounts instead.
   let activeTriggerStart: number | null = null;
   let activeTemplateMode: BubbleSpec["templateMode"];
+  /// The trigger whose bubble the bubble itself closed (Escape, a click
+  /// away, a pick). It stays closed while the caret stays in that trigger,
+  /// or the next keystroke there, which only changes the query, would open
+  /// it again at once. A caret that leaves the trigger, or another trigger,
+  /// clears it.
+  let dismissedTrigger: { kind: BubbleSpec["kind"]; triggerStart: number } | null = null;
+  /// Set while the editor closes the open bubble for a reason of its own
+  /// (another trigger, no trigger, a read-only flip), which is not a
+  /// dismissal to remember.
+  let closingActiveBubble = false;
 
   function clearActiveBubble(): void {
     activeBubble = null;
@@ -214,14 +222,32 @@
     onImageClick(args);
   }
 
+  function closeActiveBubble(): void {
+    if (!activeBubble) return;
+    closingActiveBubble = true;
+    try {
+      activeBubble.dismiss();
+    } finally {
+      closingActiveBubble = false;
+    }
+    clearActiveBubble();
+  }
+
   function handleSpec(spec: BubbleSpec | null): void {
     if (!view) return;
     if (spec === null) {
-      if (activeBubble) {
-        activeBubble.dismiss();
-        clearActiveBubble();
-      }
+      dismissedTrigger = null;
+      closeActiveBubble();
       return;
+    }
+    if (dismissedTrigger) {
+      if (
+        dismissedTrigger.kind === spec.kind &&
+        dismissedTrigger.triggerStart === spec.triggerStart
+      ) {
+        return;
+      }
+      dismissedTrigger = null;
     }
     // Same bubble kind AT THE SAME anchor + mode already open: update its
     // query / trigger end in place. A different kind, anchor, or mode (a
@@ -245,11 +271,11 @@
       activeBubble.setQuery(spec.query);
       return;
     }
-    if (activeBubble) {
-      activeBubble.dismiss();
-      clearActiveBubble();
-    }
+    closeActiveBubble();
     const onDismiss = () => {
+      if (!closingActiveBubble) {
+        dismissedTrigger = { kind: spec.kind, triggerStart: spec.triggerStart };
+      }
       clearActiveBubble();
     };
     if (spec.kind === "wiki") {
@@ -258,7 +284,6 @@
         triggerStart: spec.triggerStart,
         triggerEnd: spec.triggerEnd,
         initialQuery: spec.query,
-        prefix: wikiPickerPrefix,
         templateMode: spec.templateMode ?? "wrap",
         fromPath: currentPath,
         onOpenLink: (target, anchor) =>
@@ -341,15 +366,12 @@
     };
   }
 
-  /// Find-on-page adapter (same shape as Source.svelte and the legacy
-  /// WYSIWYG; FileEditorTab passes whichever editor is mounted to
-  /// FindBar).
+  /// Find-on-page adapter (same shape as Source.svelte's; FileEditorTab
+  /// passes whichever editor is mounted to FindBar).
   export const findAdapter: FindAdapter = makeFindAdapter(() => view);
 
   /// Style-toolbar contract. Each method routes to the corresponding
-  /// editor-cm6/commands/format function with the live view ref.
-  /// Mirrors the legacy editor's exported imperative API so
-  /// StyleToolbar.svelte works at cutover with no edits.
+  /// commands/format function with the live view ref.
   export function toggleBold(): void { if (view) fmt.toggleBold(view); }
   export function toggleItalic(): void { if (view) fmt.toggleItalic(view); }
   export function toggleStrike(): void { if (view) fmt.toggleStrike(view); }
@@ -426,6 +448,23 @@
     return true;
   }
 
+  // The editor's own Mod-Enter actions, listed as the chord tries them.
+  // Each returns false when it does not apply, so the next one gets the
+  // keypress. The keymap's Mod-Enter entries and `runOwnModEnter` are both
+  // made from this list.
+  const ownModEnterActions: ReadonlyArray<(view: EditorView) => boolean> = [
+    // Mod-Enter at a date pill opens the calendar / format
+    // popover (keyboard equivalent of clicking the pill).
+    // Returns false when the caret isn't on a date so the
+    // next entry below gets the keypress.
+    openDateAtCaret,
+    // Mod-Enter inside any fenced code block: append a fresh
+    // line just past the block end and place the caret
+    // there. Always-on escape, independent of the block's
+    // position in the doc and of whether the fence is closed.
+    fmt.exitFenceAnywhere,
+  ];
+
   /// The editor's own Mod-Enter actions, in its keymap's order: open the
   /// calendar of a date under the caret, then leave a fenced code block.
   /// True when one of them acted. A host that claims the chord ahead of the
@@ -433,7 +472,8 @@
   /// as its keymap would never see the chord.
   export function runOwnModEnter(): boolean {
     if (!view || !view.state.facet(EditorView.editable)) return false;
-    return openDateAtCaret(view) || fmt.exitFenceAnywhere(view) || fmt.escapeFenceAtDocEnd(view);
+    const editor = view;
+    return ownModEnterActions.some((action) => action(editor));
   }
 
   /// Re-measure without focusing. Used by FileEditorTab's keep-alive
@@ -599,30 +639,12 @@
                 return true;
               },
             },
-            // Mod-Enter at a date pill opens the calendar / format
-            // popover (keyboard equivalent of clicking the pill).
-            // Returns false when the caret isn't on a date so the
-            // next entry below gets the keypress.
-            {
-              key: "Mod-Enter",
-              run: (view) => openDateAtCaret(view),
-            },
-            // ArrowDown / Mod-Enter / Enter-on-closer escape a fenced
-            // code block that sits at the end of the doc. Without
-            // this, Enter inserts a literal newline inside the fence
-            // and ArrowDown is a no-op - the user has no way out.
-            // Each returns false when the trap conditions don't
-            // apply so the keys keep their default behaviour
-            // (cursorDown / caller submit / new line in code).
+            ...ownModEnterActions.map((run) => ({ key: "Mod-Enter", run })),
+            // ArrowDown escapes a fenced code block that sits at the
+            // end of the doc, where it is otherwise a no-op. It returns
+            // false when the caret is not on the last line of such a
+            // block, so the key keeps its default behaviour (cursorDown).
             { key: "ArrowDown", run: (view) => fmt.escapeFenceAtDocEnd(view) },
-            // Mod-Enter inside any fenced code block: append a fresh
-            // line just past the block end and place the caret
-            // there. Always-on escape, independent of the block's
-            // position in the doc - for cases the doc-end-only
-            // rule above can't catch (unclosed fence followed by
-            // content, opener inside a list, etc.).
-            { key: "Mod-Enter", run: (view) => fmt.exitFenceAnywhere(view) },
-            { key: "Mod-Enter", run: (view) => fmt.escapeFenceAtDocEnd(view) },
             // Submit when a host wires onSubmit; otherwise CONSUME the chord as
             // a no-op (return true) so it never falls through to CM6's default
             // Mod-Enter (insertBlankLine) in a plain file editor. RichPrompt
@@ -873,10 +895,7 @@
     // Also dismiss any open bubble at the moment of the flip; a
     // stale handle held across a reconfigure can't be dismissed
     // through the keymap anymore.
-    if (activeBubble) {
-      activeBubble.dismiss();
-      clearActiveBubble();
-    }
+    closeActiveBubble();
     view.dispatch({
       effects: writeSideCompartment.reconfigure(writeSideExtensions(readonly)),
     });
@@ -899,9 +918,8 @@
 <div class="md-wysiwyg-cm6" data-density={density} data-file-drop-zone bind:this={host}></div>
 
 <style>
-  /* Step 4 styles. Each rule is scoped to .md-wysiwyg-cm6 so we don't
-     bleed into Source mode or the legacy WYSIWYG. CSS variables come
-     from the app theme (theme.css). */
+  /* Each rule is scoped to .md-wysiwyg-cm6 so it does not bleed into
+     Source mode. CSS variables come from the app theme. */
 
   .md-wysiwyg-cm6 {
     flex: 1;
@@ -940,12 +958,9 @@
        first line clears its floating toolbar (2.5rem) or keeps the
        baseline spacing when the toolbar is off (0.5rem). */
     padding-top: var(--editor-top-pad, 0.5rem) !important;
-    /* Always keep 60px below the last line. Combined with the 60px
-       bottom scrollMargin in breathing_room.ts, this is what gives
-       the Google Docs effect: the caret never sits flush with the
-       bottom edge - when it would, CM scrolls so it stays 60px
-       above, and this padding gives the scroll room to happen even
-       at the doc's last line. */
+    /* Always keep 60px below the last line, so the viewport has room
+       to scroll past the doc's last line and the caret is not held
+       flush with the bottom edge there (breathing_room.ts). */
     padding-bottom: 60px !important;
     transition: padding-top 180ms ease;
   }
@@ -954,10 +969,10 @@
      CM6 makes itself while you scroll a tall, mostly-estimated document.
      During a trackpad pan those animated corrections fight the pan - a
      "scroll hangs, jumps the opposite way, then settles" stall.
-     The Google-Docs page-lift effect comes from the 60px
-     bottom padding + scrollMargin (breathing_room.ts), not from smooth,
-     so leaving the scroller at its default (instant) scroll-behavior
-     keeps the lift and removes the stall. */
+     The room below the last line comes from the 60px bottom padding
+     (breathing_room.ts), not from smooth, so leaving the scroller at
+     its default (instant) scroll-behavior keeps it and removes the
+     stall. */
   :global(.md-wysiwyg-cm6 .cm-editor),
   :global(.md-wysiwyg-cm6 .cm-editor .cm-scroller),
   :global(.md-wysiwyg-cm6 .cm-editor .cm-content),
@@ -1767,8 +1782,8 @@
     bottom: 0;
     width: 0;
     height: 0;
-    /* Lower-right triangle "tick" - drag handle that mirrors the
-       legacy editor's resize affordance. Built with CSS borders so
+    /* Lower-right triangle "tick": the resize drag handle. Built
+       with CSS borders so
        the shape scales cleanly without a glyph. The colored bottom
        border + transparent right form the hypotenuse running
        top-left → bottom-right. */

@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 
-// Guards ROOT CAUSE B of the wysiwyg-list regression: the walker used to
-// ignore the async parse completing. @codemirror/language's ParseWorker
-// publishes the finished tree through an effects-only dispatch that sets
-// none of docChanged / viewportChanged / selectionSet / geometryChanged,
-// so a gate keyed only on those left decorations stale (raw markers) until
-// the next interaction. The fix recomputes on syntax-tree identity change.
+// The walker recomputes when the async parse completes. @codemirror/language's
+// ParseWorker publishes the finished tree through an effects-only dispatch
+// that sets none of docChanged / viewportChanged / selectionSet /
+// geometryChanged, so a gate keyed only on those would leave decorations
+// stale (raw markers) until the next interaction. The walker recomputes on
+// a change of syntax-tree identity.
 //
 // We observe the recompute by counting handler invocations: each
 // computeDecorations pass walks the viewport once and calls the handler

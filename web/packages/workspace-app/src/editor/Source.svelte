@@ -40,7 +40,7 @@
   // Editor density follows the user's line_spacing pref. Same hook
   // the Wysiwyg side uses, exposed here as a `data-density` attribute
   // on .md-source so CSS can dial line-height without rebuilding the
-  // CodeMirror editor. Legacy `tight` reads as canonical `compact`.
+  // CodeMirror editor. A stored `tight` reads as `compact`.
   function editorDensity(value: string | null | undefined): "standard" | "compact" {
     if (value === "compact" || value === "tight") return "compact";
     return "standard";
@@ -61,7 +61,7 @@
     onSubmit,
   }: {
     value: string;
-    /// Workspace-relative file path. Workspaces the language pack picked for
+    /// Workspace-relative file path. Drives the language pack picked for
     /// syntax highlighting. Empty / pathless callers get plain text.
     path?: string;
     readonly?: boolean;
@@ -125,11 +125,12 @@
   // reconfigures when reactive deps re-fire without an actual change
   // (Svelte runs $effect on any prop touch).
   let lastLanguageKey: string | null = null;
+  let languageRequest = 0;
 
   /// Find-on-page adapter. FileEditorTab passes whichever editor is
-  /// currently visible to FindBar; the bar workspaces matches + decorations
+  /// currently visible to FindBar; the bar drives matches + decorations
   /// through this surface. Shared shape with the WYSIWYG adapter via
-  /// editor-cm6/base.ts.
+  /// base.ts.
   export const findAdapter: FindAdapter = makeFindAdapter(() => view);
 
   /// Scroll to a specific line (0-based). Called by the inspector
@@ -354,8 +355,9 @@
   /// the $effect without an actual prop change.
   async function applyLanguage(): Promise<void> {
     if (!view) return;
+    const request = ++languageRequest;
     const target = await resolveLanguage();
-    if (!view) return;
+    if (!view || request !== languageRequest) return;
     if (target.key === lastLanguageKey) return;
     lastLanguageKey = target.key;
     view.dispatch({ effects: language.reconfigure(target.extension) });
@@ -478,8 +480,7 @@
 <div class="md-source" data-density={density} data-file-drop-zone bind:this={host}></div>
 
 <style>
-  /* Keep the CodeMirror chrome wrapper themed. The CM6 editor itself
-     uses its default light highlight style for now (see v1.1 polish). */
+  /* Keep the CodeMirror chrome wrapper themed. */
   .md-source {
     /* `flex: 1` so the wrapper always spans the full pane width
        (matches `.md-wysiwyg`). Without it, the wrapper shrinks to
@@ -523,9 +524,9 @@
      EVERY scrollTop write, including CM6's own height-estimation
      corrections while scrolling a tall doc; during a trackpad pan those
      animated corrections fight the pan (the "hang, jump opposite,
-     settle" stall). Removed for parity with Wysiwyg.svelte's
-     `.cm-scroller`, where the same stall was reported and fixed. The
-     60px bottom padding keeps the off-the-edge clearance. */
+     settle" stall). Wysiwyg.svelte's `.cm-scroller` leaves it off for
+     the same reason. The 60px bottom padding keeps the off-the-edge
+     clearance. */
   /* Force every CM internal that could paint a background to
      transparent so `.md-source`'s `var(--bg)` shows uniformly,
      even past the longest line. CM injects theme rules as

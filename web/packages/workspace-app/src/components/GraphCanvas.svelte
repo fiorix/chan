@@ -1,32 +1,25 @@
 <script lang="ts">
-  // Canvas + d3-force renderer for the chan graph.
-  //
-  // Why d3-force over cytoscape: cytoscape's per-frame pipeline (style-selector resolution,
-  // SVG-icon bitmap compositing, scenegraph hit-testing) sits above
-  // the d3-force simulation it wraps, and chews enough budget that
-  // a 90-node graph never matches the Observable d3-force example's
-  // smoothness. Rendering straight to a canvas - one fill + ring +
-  // icon blit per node per tick - closes that gap.
+  // Canvas 2D + d3-force renderer for the chan graph.
   //
   // What GraphCanvas owns:
   //   - HTML5 canvas + animation loop (requestAnimationFrame)
-  //   - d3-force simulation (charge / link / collide / x / y) with
-  //     "infinite: true"-style alphaTarget bookkeeping so dragging
-  //     a node re-heats the cluster and releasing settles it
+  //   - d3-force simulation (link / charge / collide / x / y /
+  //     parentX); a node drag raises alphaTarget so the cluster
+  //     re-heats, and releasing returns it to 0 so it settles
   //   - hover / click / drag / pan / zoom interaction
-  //   - focal pinning during the initial layout
-  //   - icon pre-rasterisation per kind (chan's existing
-  //     lucide-style glyphs decoded once to HTMLImageElement and
-  //     drawn via ctx.drawImage)
-  //   - label visibility: hidden by default; opt-in for the
-  //     selected node and every first-degree neighbour
+  //   - focal pinning (fx / fy) on every working-set rebuild
+  //   - icon rasterisation per kind (lucide-style glyphs decoded to
+  //     HTMLImageElement per theme and drawn via ctx.drawImage)
+  //   - label visibility: hidden by default; drawn for the selected
+  //     node, its first-degree neighbours and its containment spine
   //
-  // What stays in GraphPanel.svelte:
-  //   - scope picker + BFS to compute visibleNodeIds / visibleEdges
-  //   - filter chips (link / tag / mention / img)
-  //   - depth slider, inspector, scope history, hamburger menu
+  // What GraphPanel.svelte owns:
+  //   - the scope and BFS that compute visibleNodeIds / visibleEdges
+  //   - filter chips (tag / mention / language / img / folder /
+  //     markdown / source)
+  //   - depth slider, inspector, scope breadcrumb, tab menu
 
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import {
     forceCollide,
     forceLink,
@@ -52,8 +45,7 @@
     | "tag"
     | "mention"
     | "contains"
-    | "language"
-    | "group";
+    | "language";
   type RenderedEdge = GraphViewEdge & { kind: RenderedEdgeKind };
   type RenderedNode = Extract<
     GraphViewNode,
@@ -74,6 +66,9 @@
     /// transform or discards node arrays. Default false (always-on
     /// hosts like the Dashboard slide pass nothing).
     paused?: boolean;
+    /// A new scope owns a new view; content refreshes within one scope keep
+    /// the user's pan and zoom. Omitted by canvases without a scope.
+    scopeKey?: string;
     nodes: RenderedNode[];
     edges: RenderedEdge[];
     visibleNodeIds: Set<string>;
@@ -109,6 +104,7 @@
   let {
     open,
     paused = false,
+    scopeKey,
     nodes,
     edges,
     visibleNodeIds,
@@ -177,8 +173,8 @@
 
   /// Node rendering radii. Doc nodes are slightly larger so the file
   /// chrome reads as the load-bearing kind at a glance; tag / mention
-  /// / image / contact sit a notch smaller. Backlink mapData scaling
-  /// is applied on top in `renderRadius`.
+  /// / image / contact sit a notch smaller. Backlink scaling is
+  /// applied on top in `renderRadius`.
   const RADIUS_BASE = 5;
   const RADIUS_DOC = 7;
   /// Directory nodes sit a notch above the leaf base (but below the
@@ -210,10 +206,10 @@
   const FOCUS_DIM_EDGE = 0.05;
   const FOCUS_LIT_EDGE = 0.9;
 
-  /// d3-force tuning lives in ../graph/force.ts (DEFAULT_FORCE), the
-  /// single source of truth shared with the graph-tuner playground.
-  /// Callers can override it via the `force` prop (below); every
-  /// production caller passes nothing and gets DEFAULT_force.
+  // d3-force tuning lives in ../graph/force.ts (DEFAULT_FORCE), the
+  // single source of truth shared with the graph-tuner playground.
+  // Callers can override it via the `force` prop; every production
+  // caller passes nothing and gets DEFAULT_FORCE.
 
   /// Stroke ring colour for non-missing nodes. Reads from the page
   /// background so touching nodes still separate visually.
@@ -253,13 +249,11 @@
   let expansionRefit: { until: number; ids: Set<string> } | null = null;
   let seenExpansionFitNonce = 0;
   /// Once the user has manually panned, zoomed, or dragged a node,
-  /// the view belongs to them. Periodic re-renders of the same node
-  /// set (e.g., the Dashboard indexing slide polling
+  /// the view belongs to them. Periodic re-renders within the same scope
+  /// (e.g., the Dashboard indexing slide polling
   /// `/api/indexing/state` every 3s, which produces fresh array
   /// references with no structural change) must not snap the view
-  /// back to fit-content. The flag stays set until the node SET
-  /// genuinely differs from what's on screen, which is clearly a new
-  /// dataset where a refit IS the right thing.
+  /// back to fit-content. A new scope clears the flag so its nodes fit.
   let userInteracted = false;
   /// When `start()` runs before the host has been measured
   /// (carousel mounts GraphCanvas before slide 2 is visible, so
@@ -276,7 +270,7 @@
   /// origin + transform snapshot at the moment the user started a
   /// background-pan gesture. hoverId: node under the cursor for
   /// the hover ring + cursor change.
-  let dragId: string | null = null;
+  let dragId = $state<string | null>(null);
   let panStart: { x: number; y: number; tx: number; ty: number } | null = null;
   let hoverId = $state<string | null>(null);
   /// Position of the mousedown that started the current gesture.
@@ -579,10 +573,10 @@
   }
 
   function renderRadius(kind: DKind, id: string): number {
-    // Workspace root is the structural anchor of the whole graph - per
-    // It is 1.5x every other directory so the hub reads at a
-    // glance. Doc nodes stay at the prior RADIUS_DOC; folder
-    // (non-workspace) nodes stay at RADIUS_DIR.
+    // The workspace root is the structural anchor of the whole graph:
+    // RADIUS_WORKSPACE is 1.5x the largest radius a directory can
+    // reach, so the hub reads at a glance. Doc nodes take RADIUS_DOC;
+    // folder (non-workspace) nodes take RADIUS_DIR.
     const base =
       kind === "workspace"
         ? RADIUS_WORKSPACE
@@ -606,10 +600,6 @@
     return base * (1 + (RADIUS_HUB_SCALE - 1) * t);
   }
 
-  /// Build the d3 working set from the latest props. Reuses existing
-  /// DNodes when ids match (preserves position + velocity through a
-  /// scope/depth tick); creates fresh ones for newly-visible ids and
-  /// drops any whose id left the visible set.
   /// Derive a node's filesystem depth + parent-directory id from its
   /// kind + path. Workspace root (folder
   /// id "") sits at depth 0; top-level files / directories at
@@ -653,6 +643,10 @@
     return { depth, parentId };
   }
 
+  /// Build the d3 working set from the latest props. Reuses existing
+  /// DNodes when ids match (preserves position + velocity through a
+  /// scope/depth tick); creates fresh ones for newly-visible ids and
+  /// drops any whose id left the visible set.
   function rebuildWorkingSet(): { added: DNode[]; removed: DNode[] } {
     const newById = new Map<string, DNode>();
     const added: DNode[] = [];
@@ -839,7 +833,7 @@
       .velocityDecay(force.velocityDecay)
       .alpha(1)
       .alphaTarget(0)
-      // The animation loop workspaces painting independently; the sim
+      // The animation loop drives painting independently; the sim
       // just needs to mutate positions. No-op on tick keeps us from
       // doing per-tick work twice (rAF + tick callback).
       .on("tick", () => {});
@@ -989,7 +983,7 @@
   /// the next paint.
   function bucketEdges(edgeList: DEdge[]): EdgeBuckets {
     const edgesByKind: Record<RenderedEdgeKind, DEdge[]> = {
-      link: [], tag: [], mention: [], contains: [], language: [], group: [],
+      link: [], tag: [], mention: [], contains: [], language: [],
     };
     for (const e of edgeList) edgesByKind[e.kind].push(e);
     // Falls back to the doc colour when the source kind isn't a recognised
@@ -1127,13 +1121,12 @@
     // `link` edges are coloured per source document type, so they are
     // sub-grouped by the source node's kind and stroked in their own
     // pass below. The other kinds keep the single-stroke-per-kind fast
-    // path. `group` (synthetic scope-hub) keeps the accent colour.
-    const strokeForKind = (kind: RenderedEdgeKind): string =>
+    // path.
+    const strokeForKind = (kind: Exclude<RenderedEdgeKind, "link">): string =>
       kind === "tag" ? theme.tag
       : kind === "mention" ? theme.mention
       : kind === "contains" ? theme.folder
-      : kind === "language" ? theme.language
-      : theme.accent;
+      : theme.language;
 
     /// Both endpoints strictly off the same side of the viewport means the
     /// segment cannot cross it. Cheap conservative reject; a segment that
@@ -1190,7 +1183,7 @@
     // is memoised in `selectionPaint()`, so a frame only walks the
     // buckets it draws.
     const drawEdgeBuckets = (buckets: EdgeBuckets, alpha: number): void => {
-      for (const kind of ["tag", "mention", "contains", "language", "group"] as const) {
+      for (const kind of ["tag", "mention", "contains", "language"] as const) {
         strokePass(buckets.byKind[kind], strokeForKind(kind), alpha);
       }
       for (const [kind, list] of buckets.linkByKind) {
@@ -1504,6 +1497,15 @@
     }
   }
 
+  /// The pointer left the canvas: end a press as a mouseup would, and drop
+  /// the hover, which a move over empty canvas is otherwise the one thing
+  /// to clear.
+  function onMouseLeave(e: MouseEvent): void {
+    onMouseUp(e);
+    hoverId = null;
+    markDirty();
+  }
+
   function onMouseUp(e: MouseEvent): void {
     const p = localCoords(e);
     const moved =
@@ -1517,8 +1519,9 @@
       if (dragActive) {
         const n = nodeById.get(dragId);
         if (n && !n.isFocal) {
-          // Release the node back to the simulation. Focal nodes
-          // remain pinned at origin regardless.
+          // Release the node back to the simulation. A focal node
+          // stays pinned where the drag left it until
+          // `rebuildWorkingSet` pins it to its own position again.
           n.fx = null;
           n.fy = null;
         }
@@ -1593,8 +1596,8 @@
   }
 
   function onContextMenuLocal(e: MouseEvent): void {
-    // Delegate to the parent so the existing hamburger-menu
-    // affordance still works on right-click.
+    // Delegate to the parent: GraphPanel opens its tab menu at the
+    // pointer.
     onContextMenu?.(e);
   }
 
@@ -1635,12 +1638,14 @@
   }
 
   /// Compute the transform that fits the current node set into the
-  /// canvas with `pad` pixels of margin. When a focal node is
-  /// present its world position is pinned to the viewport center so
-  /// the user's anchor stays put across scope / filter / depth
-  /// changes; the zoom is then chosen so the farthest node still
-  /// fits inside the padded viewport. Falls back to bbox-center
-  /// framing for views without a focal pin (e.g. whole-workspace).
+  /// canvas with `pad` pixels of margin. When `anchorFocal` is set
+  /// and a focal node is in the set, its world position is anchored
+  /// in the viewport, centered horizontally and placed vertically by
+  /// `focalAnchor`, so the user's anchor stays put across scope /
+  /// filter / depth changes; the zoom is then chosen so the farthest
+  /// node still fits inside the padded viewport. Falls back to
+  /// bbox-center framing for views without a focal pin (e.g.
+  /// whole-workspace).
   function computeFitForNodes(
     pad: number,
     ids: Set<string> | null,
@@ -1679,11 +1684,10 @@
       halfW = (xmax - xmin) / 2;
       halfH = (ymax - ymin) / 2;
     }
-    // Bottom-anchor mode (Dashboard search-index): seat the focal node near
-    // the bottom edge instead of the vertical center, so the spine grows
-    // upward from it and the root sits just above the carousel scroller. The
-    // fittable height is then the room ABOVE the bottom anchor, not half the
-    // canvas.
+    // Bottom anchor, the prop's default: seat the focal node near the
+    // bottom edge instead of the vertical center, so the spine grows
+    // upward from it. The fittable height is then the room ABOVE the
+    // bottom anchor, not half the canvas.
     const bottomAnchored = focalAnchor === "bottom" && focal !== null;
     const FOCAL_BOTTOM_MARGIN = 56;
     const anchorY = bottomAnchored ? ch - FOCAL_BOTTOM_MARGIN : ch / 2;
@@ -1726,9 +1730,8 @@
     // Skip auto-refit once the user has panned, zoomed, or dragged a
     // node. The view belongs to them; periodic data refreshes (e.g.,
     // Dashboard indexing polling) must not snap back to fit-content.
-    // The interaction flag resets when the node SET actually differs
-    // from the current dNodes (scope/depth change, first load), so
-    // genuine dataset swaps still re-frame the cluster.
+    // A scope change clears the interaction flag. Content refreshes
+    // within one scope preserve the user's view.
     if (userInteracted) return;
     refitUntil = performance.now() + ms;
   }
@@ -1812,10 +1815,9 @@
 
   // ---- prop-reactive effects -------------------------------------------
 
-  /// Open/close: start the renderer when the overlay becomes
-  /// visible, tear it down when it closes. Matches the previous
-  /// cytoscape lifecycle and keeps idle overlays from burning rAF
-  /// budget.
+  /// Open/close: start the renderer when `open` turns true; when it
+  /// turns false, stop the rAF loop and the simulation and drop the
+  /// working set.
   $effect(() => {
     if (open) {
       if (!sim) start();
@@ -1841,72 +1843,87 @@
     rafId = requestAnimationFrame(loop);
   });
 
-  /// Selection / hover emphasis. The paint pass reads `selectedId` straight
+  /// Selection emphasis. The paint pass reads `selectedId` straight
   /// from props rather than through reactivity, so the repaint has to be
-  /// requested explicitly. Load-bearing now that idle frames are gated:
-  /// without it, selecting a node on a settled graph would change nothing
-  /// on screen until the next unrelated repaint.
+  /// requested explicitly: idle frames are gated on `dirty`, and without
+  /// this, selecting a node on a settled graph would change nothing on
+  /// screen until the next unrelated repaint.
   $effect(() => {
     void selectedId;
     markDirty();
   });
 
+  let prevScopeKey: string | undefined;
+  let seenScopeKey = false;
+  $effect(() => {
+    const key = scopeKey;
+    if (!seenScopeKey) {
+      prevScopeKey = key;
+      seenScopeKey = true;
+      return;
+    }
+    if (key === prevScopeKey) return;
+    prevScopeKey = key;
+    userInteracted = false;
+  });
+
   /// Nodes / edges arrays changed (new graph payload from the
-  /// server). Full rebuild: regenerate adjacency, recreate the
-  /// working set, restart the sim with alpha=1.
+  /// server). Regenerate adjacency, rebuild the working set, and
+  /// re-warm the sim with an alpha picked by how much of the set
+  /// changed.
   $effect(() => {
     void nodes;
     void edges;
-    if (!sim) return;
-    // The Dashboard indexing slide polls /api/indexing/state every
-    // 3s, which produces a new (content-identical) `nodes`/`edges`
-    // array reference each tick. When the node id SET hasn't changed
-    // (only node fields like `indexState` colour have refreshed),
-    // this is a content-update tick, not a structural change: skip
-    // the refit so the user's view stays put rather than zooming
-    // back to fit-content. Scope / depth / first-load swaps still
-    // refit because the set actually differs.
-    const nextIds = new Set<string>();
-    for (const n of nodes) nextIds.add(n.id);
-    let overlap = 0;
-    for (const n of dNodes) if (nextIds.has(n.id)) overlap++;
-    const sameSet =
-      dNodes.length > 0 &&
-      dNodes.length === nextIds.size &&
-      overlap === dNodes.length;
-    // Pick the simulation re-warm alpha by structural delta, not by
-    // a binary "same set vs not". The Dashboard indexing slide adds
-    // nodes one at a time as files appear on disk; alpha=1 (full-swap
-    // strength) would yank every node toward the layout origin and
-    // look more like a scope change than a fluid file-browser update.
-    // Treat anything with >=50% overlap as incremental (gentle alpha
-    // so existing nodes barely move and the new ones ease in);
-    // zero-or-low overlap reads as a real scope swap and warrants the
-    // strong re-warm.
-    const incremental = !sameSet && dNodes.length > 0 && overlap * 2 >= dNodes.length;
-    // Capture emptiness BEFORE rebuildWorkingSet reassigns dNodes. An
-    // empty -> non-empty transition means the canvas opened before its
-    // data arrived (carousel flip-back, first load): start()'s fit ran
-    // on an empty set and left the viewport at the origin placeholder.
-    // We re-fit once the nodes have landed (below), independent of the
-    // userInteracted gate since there was nothing to interact with.
-    const wasEmpty = dNodes.length === 0;
-    rebuildAdjacency();
-    rebuildWorkingSet();
-    const alpha = sameSet ? 0.05 : incremental ? 0.2 : 1;
-    rewarmSim(alpha);
-    if (wasEmpty && dNodes.length > 0) {
-      fitToContent(24);
-    }
-    // scheduleRefit is itself gated on `userInteracted`, so calling
-    // it on a structural change is a no-op once the user has taken
-    // control of the view. First-load (userInteracted false) still
-    // gets the auto-fit. The interaction flag is never reset on set
-    // changes: the file-browser-style expectation is that new nodes
-    // appear in place while the user's chosen viewport stays put.
-    if (!sameSet) {
-      scheduleRefit(1200);
-    }
+    untrack(() => {
+      if (!sim) return;
+      // The Dashboard indexing slide polls /api/indexing/state every
+      // 3s, which produces a new (content-identical) `nodes`/`edges`
+      // array reference each tick. When the working set hasn't changed
+      // (only node fields like `indexState` colour have refreshed),
+      // this is a content-update tick, not a structural change: skip
+      // the refit so the user's view stays put rather than zooming
+      // back to fit-content. Scope / depth / first-load swaps still
+      // refit because the set actually differs. The working set holds
+      // only the visible nodes, so the delta is the one rebuilding it
+      // reports: comparing it with every node in `nodes` would read a
+      // graph with any node hidden as a new set on every publish.
+      const before = dNodes.length;
+      // Pick the simulation re-warm alpha by structural delta, not by
+      // a binary "same set vs not". The Dashboard indexing slide adds
+      // nodes one at a time as files appear on disk; alpha=1 (full-swap
+      // strength) would yank every node toward the layout origin and
+      // look more like a scope change than a fluid file-browser update.
+      // Treat anything with >=50% overlap as incremental (gentle alpha
+      // so existing nodes barely move and the new ones ease in);
+      // zero-or-low overlap reads as a real scope swap and warrants the
+      // strong re-warm.
+      //
+      // Capture emptiness BEFORE rebuildWorkingSet reassigns dNodes. An
+      // empty -> non-empty transition means the canvas opened before its
+      // data arrived (carousel flip-back, first load): start()'s fit ran
+      // on an empty set and left the viewport at the origin placeholder.
+      // We re-fit once the nodes have landed (below), independent of the
+      // userInteracted gate since there was nothing to interact with.
+      const wasEmpty = before === 0;
+      rebuildAdjacency();
+      const { added, removed } = rebuildWorkingSet();
+      const sameSet = before > 0 && added.length === 0 && removed.length === 0;
+      const incremental = !sameSet && before > 0 && (before - removed.length) * 2 >= before;
+      const alpha = sameSet ? 0.05 : incremental ? 0.2 : 1;
+      rewarmSim(alpha);
+      if (wasEmpty && dNodes.length > 0) {
+        fitToContent(24);
+      }
+      // scheduleRefit is itself gated on `userInteracted`, so calling
+      // it on a structural change is a no-op once the user has taken
+      // control of the view. First-load (userInteracted false) still
+      // gets the auto-fit. The interaction flag is never reset on set
+      // changes: the file-browser-style expectation is that new nodes
+      // appear in place while the user's chosen viewport stays put.
+      if (!sameSet) {
+        scheduleRefit(1200);
+      }
+    });
   });
 
   /// Visibility change without a full data swap: scope / depth /
@@ -2016,7 +2033,7 @@
     onmousedown={onMouseDown}
     onmousemove={onMouseMove}
     onmouseup={onMouseUp}
-    onmouseleave={onMouseUp}
+    onmouseleave={onMouseLeave}
     ondblclick={onDoubleClick}
     onwheel={onWheel}
   ></canvas>

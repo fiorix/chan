@@ -17,10 +17,9 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chan_shell::{ControlRequest, ControlResponse};
@@ -395,15 +394,15 @@ enum Answer {
 
 /// Run `cs <args> <mode flags>` against a one-shot fake control server that
 /// answers `reply` as one `Ok` line, timed by `answer`. The socket lives
-/// under the system temp dir with a short name, inside the Unix socket path
-/// limit on macOS.
+/// under a private temp directory with a short name, inside the Unix socket
+/// path limit on macOS.
 async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let socket: PathBuf = std::env::temp_dir().join(format!(
-        "cs-out-{}-{}.sock",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = tempfile::Builder::new()
+        .prefix("cs-out-")
+        .tempdir()
+        .unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket: PathBuf = dir.path().join("control.sock");
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).expect("bind fake control socket");
     let reply = ControlResponse::Ok {

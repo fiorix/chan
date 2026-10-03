@@ -8,18 +8,14 @@
 // uniform: ArrowUp / ArrowDown to navigate results, Enter to
 // commit, Escape to dismiss.
 //
-// This module provides two pieces:
+// This module provides `openBubbleShell`, the DOM scaffolding shared
+// by every bubble. It creates an absolute-positioned, body-attached
+// wrap div with a high z-index, anchors it under the trigger, and
+// re-anchors on viewport changes. The adapter builds its specific
+// content (result list, preview, footer) inside `shell.wrap`.
 //
-//   - `openBubbleShell` - DOM scaffolding shared by every bubble.
-//     Creates an absolute-positioned, body-attached wrap div with
-//     a high z-index, anchors it under the trigger, and re-anchors
-//     on viewport changes. The adapter builds its specific content
-//     (result list, preview, footer) inside `shell.wrap`.
-//
-//   - `BubbleHandle` - uniform keyboard contract every adapter
-//     exposes back to the host. The host's keydown handler routes
-//     events through `bubble.handleKey(event)` without per-type
-//     branches; each adapter decides how to interpret keys.
+// The handle the wiki, tag, contact and image adapters hand back to
+// the host is `BubbleHandle` in bubbles/types.ts.
 //
 // Per-bubble specifics (search source, result rendering, commit
 // transform) stay in the adapter files. The shell does not try to
@@ -101,20 +97,4 @@ export function openBubbleShell(opts: BubbleShellOpts): BubbleShell {
     },
     dismiss: dismissSelf,
   };
-}
-
-/// Uniform keyboard contract. The host's keydown handler iterates
-/// the active bubbles (only one is ever open at a time today) and
-/// calls `handleKey`; the adapter consumes Enter / Esc / Arrow
-/// keys however it sees fit, returns `true` to swallow the event,
-/// `false` to let it through.
-///
-/// Adapters that need to commit on Enter receive their commit
-/// callback via opts on open and call it from `handleKey`; the host
-/// stays out of the per-bubble accept logic so the keyboard
-/// routing stays generic.
-export interface BubbleHandle {
-  /// Process a keydown. Returns true when the event was consumed.
-  /// The host should `event.preventDefault()` and return on true.
-  handleKey(event: KeyboardEvent): boolean;
 }

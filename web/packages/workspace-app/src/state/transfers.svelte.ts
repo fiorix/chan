@@ -11,7 +11,7 @@
 // A download can be retried from its persisted source; an upload cannot (the
 // File bytes do not survive the reload), so it restores Dismiss-only.
 
-import { sessionWindowId } from "../api/client";
+import { sessionWindowId, type TransferRoot } from "../api/client";
 
 export type TransferKind = "upload" | "download";
 
@@ -61,7 +61,7 @@ export interface Transfer {
   savedPath: string | null;
   /// A download's source, persisted so an interrupted download can be retried
   /// after a reload. null for uploads (the File cannot be persisted).
-  source: { path: string; isDir: boolean } | null;
+  source: TransferSource | null;
   /// Live abort handle, set only while active. NOT persisted.
   cancel: (() => void) | null;
   /// Live retry handle for an interrupted/failed download, reconstructed on
@@ -109,14 +109,25 @@ interface PersistedTransfer {
   state: TransferState;
   error: string | null;
   savedPath: string | null;
-  source: { path: string; isDir: boolean } | null;
+  source: TransferSource | null;
 }
 
-function persist(): void {
-  if (typeof window === "undefined") return;
+// A hidden page's cancellation callbacks and progress timers can still run.
+// Keep its teardown record authoritative until the same page is shown again.
+let persistenceSuspended = false;
+
+function persist(payload = persistedTransfers()): void {
+  if (typeof window === "undefined" || persistenceSuspended) return;
   try {
-    const payload = {
-      items: transfers.items.map(
+    window.sessionStorage.setItem(storeKey(), JSON.stringify(payload));
+  } catch {
+    // sessionStorage unavailable / quota: the bubble degrades to in-memory.
+  }
+}
+
+function persistedTransfers(): { items: PersistedTransfer[]; shown: boolean } {
+  return {
+    items: transfers.items.map(
         (t): PersistedTransfer => ({
           id: t.id,
           kind: t.kind,
@@ -128,12 +139,8 @@ function persist(): void {
           source: t.source,
         }),
       ),
-      shown: transfers.shown,
-    };
-    window.sessionStorage.setItem(storeKey(), JSON.stringify(payload));
-  } catch {
-    // sessionStorage unavailable / quota: the bubble degrades to in-memory.
-  }
+    shown: transfers.shown,
+  };
 }
 
 let nextId = 1;
@@ -204,6 +211,10 @@ function emitSignal(): void {
   signalSink?.(activeTransferCount());
 }
 
+/// A download's source: its path, whether it is a directory, and the root
+/// it was started under when that is not the workspace.
+export type TransferSource = { path: string; isDir: boolean; root?: TransferRoot };
+
 /// Start tracking a transfer; returns its id. It starts active because the
 /// window has started it; whether the server runs it immediately or holds it is
 /// the server's call and arrives later in `queue`. `source` lets an interrupted
@@ -212,7 +223,7 @@ export function beginTransfer(opts: {
   kind: TransferKind;
   filename: string;
   cancel: (() => void) | null;
-  source?: { path: string; isDir: boolean } | null;
+  source?: TransferSource | null;
 }): string {
   const id = transferId();
   const state: TransferState = "active";
@@ -424,7 +435,7 @@ export function toggleTransfers(): void {
 /// `reconstructDownloadRetry` rebuilds the retry handle for an interrupted
 /// download from its source (uploads get none -- the File is gone).
 export function restoreTransfers(
-  reconstructDownloadRetry: (source: { path: string; isDir: boolean }) => () => void,
+  reconstructDownloadRetry: (source: TransferSource) => () => void,
 ): void {
   if (typeof window === "undefined") return;
   let raw: string | null = null;
@@ -477,12 +488,19 @@ export function restoreTransfers(
   emitSignal();
 }
 
+/// The page's own teardown: cancel every transfer's transport, but record the
+/// transfers as they stood, so the load that follows restores one cut short
+/// as interrupted, with a Retry for a download, not as cancelled by the user.
 export function cancelAllTransfers(): void {
+  const standing = persistedTransfers();
   for (const transfer of [...transfers.items]) {
     if (occupiesWindow(transfer)) transfer.cancel?.();
   }
+  persist(standing);
+  persistenceSuspended = true;
 }
 
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", cancelAllTransfers);
+  window.addEventListener("pageshow", () => { persistenceSuspended = false; });
 }

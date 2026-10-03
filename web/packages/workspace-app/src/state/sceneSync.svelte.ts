@@ -5,8 +5,8 @@
 /// and fans accepted values to the other attachments), remote changes
 /// arrive as `update` frames the canvas reconciles, and saves become
 /// flush confirmations instead of PUTs. When the channel is unavailable
-/// the tab degrades to the classic autosave + CAS path with a valid mtime
-/// token from the last `flush` frame.
+/// the tab degrades to the classic autosave + CAS path with the last
+/// flush token, once no unresolved push can race that replacement.
 ///
 /// One SceneSession per TAB (not per path), mirroring docSync: the
 /// session outlives canvas remounts (cross-pane move) via a short release
@@ -46,11 +46,14 @@ import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
   markTabFileMissing,
+  clearUnresolvedLiveSave,
   registerLiveSessionKind,
   registerPaneModeSettledSink,
   setTabDocState,
+  withholdUnresolvedLiveSave,
   type DocSyncStatus,
   type FileTab,
+  type PushSettlement,
 } from "./tabs.svelte";
 
 /// Feature flag. Default ON; localStorage `chan.scenesync = "0"` opts a
@@ -62,14 +65,15 @@ const SCENESYNC_DEFAULT_ON = true;
 /// Keep the socket + shadow alive briefly after the owning canvas
 /// releases; a cross-pane tab move is a full component remount and the
 /// linger carries the session across the swap.
-export const SCENE_RELEASE_LINGER_MS = 250;
+const SCENE_RELEASE_LINGER_MS = 250;
 
 /// Reconnect grace, mirroring docSync: a socket drop shows as
 /// `reconnecting` (classic autosave stays suppressed) for at most this
-/// many attempts / this long, then the session degrades and classic
-/// autosave resumes. Background retries continue at capped backoff.
-export const SCENE_RECONNECT_GRACE_ATTEMPTS = 2;
-export const SCENE_RECONNECT_GRACE_MS = 3000;
+/// many attempts / this long, then the session degrades. Classic saves
+/// resume only when no old push outcome remains unresolved; background
+/// retries continue at capped backoff.
+const SCENE_RECONNECT_GRACE_ATTEMPTS = 2;
+const SCENE_RECONNECT_GRACE_MS = 3000;
 
 /// A dial that produces no frame within this window counts as a failed
 /// attempt.
@@ -79,9 +83,14 @@ export const SCENE_ATTACH_TIMEOUT_MS = 5000;
 /// flush debounce plus the write with margin.
 export const SCENE_FLUSH_TIMEOUT_MS = 4000;
 
+/// Bound on waiting for a push before considering a classic fallback.
+/// Expiry leaves that fallback withheld until the push is acknowledged
+/// or a fresh session snapshot reconciles it.
+export const SCENE_FALLBACK_SETTLE_MS = 2000;
+
 /// Outbound pointer cadence: trailing-edge throttle on pointer moves,
 /// applied inside the session so every binding inherits it.
-export const SCENE_CURSOR_THROTTLE_MS = 100;
+const SCENE_CURSOR_THROTTLE_MS = 100;
 
 /// Client-side mirror of the server's text write limit (TEXT_WRITE_LIMIT,
 /// 2 MiB), compared against the serialized buffer length as a cheap
@@ -124,7 +133,8 @@ export function isSceneSyncEligible(tab: FileTab): boolean {
   if (tab.refusedUnwritten) return false;
   if (tab.mode !== "canvas") return false;
   if (!isExcalidraw(tab.path)) return false;
-  // Draft close/promote interleaves saves with file moves; excluded v1.
+  // Draft close/promote interleaves saves with file moves, so a draft
+  // is excluded.
   if (isDraftPath(tab.path)) return false;
   return true;
 }
@@ -319,7 +329,8 @@ export class SceneSession {
   /// is an adopt, so a part this left out would be adopted over the push:
   /// the older value would go on the board and never be offered again. A
   /// discarded push leaves its parts here until the next snapshot replaces
-  /// them, and no replay comes before that snapshot.
+  /// them. Claims released without a bound canvas are retained separately
+  /// so a later bind can offer them after that snapshot.
   private shadowElements = new Map<string, WireElement>();
   private shadowAppState: WireAppState = {};
   private shadowFiles: WireFiles = {};
@@ -336,14 +347,28 @@ export class SceneSession {
   /// frames so `flush()` can resolve immediately when there is nothing
   /// unflushed.
   private serverDirty = false;
+  /// The save error this session wrote for a flush the server could not
+  /// make. A flush that lands clears it, and only it: an error the classic
+  /// save wrote stays until a save of that path clears it.
+  private flushError: string | null = null;
 
   private pushInFlight = false;
+  private pushOutcomeUnresolved = false;
+  /// Fallback-settle waiters receive a positive result only after all
+  /// queued pushes are acknowledged.
+  private pushSettleWaiters: {
+    resolve: (outcome: PushSettlement) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }[] = [];
   /// The push currently on the wire, in the same three parts the queued one
   /// has, so a drop, or the next socket's first snapshot, can hand all of it
   /// back to the canvas: whether the authority read it is not known. Cleared
   /// by the ack.
   private unacked: QueuedPush | null = null;
   private queued: QueuedPush | null = null;
+  /// Claims released without a canvas survive until a new canvas can
+  /// replay and offer them after the next socket's snapshot.
+  private unboundClaims: QueuedPush | null = null;
 
   private cursors = new Map<number, ScenePeerCursor>();
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -398,7 +423,7 @@ export class SceneSession {
   /// prompt that guards a discard, and the alternative reads the save path
   /// from here to learn which of the two wrote last.
   hasUnflushedState(): boolean {
-    if (this.serverDirty || this.pushInFlight || this.queued !== null) return true;
+    if (this.serverDirty || this.pushOutcomeUnresolved || this.queued !== null || this.unboundClaims !== null) return true;
     return this.binding?.hasPendingLocal() ?? false;
   }
 
@@ -440,13 +465,14 @@ export class SceneSession {
     if (this.releaseTimer !== null) this.retain();
     this.binding = binding;
     if (this.haveSnapshot) {
-      binding.applySnapshot(
-        [...this.shadowElements.values()],
-        this.shadowAppState,
-        this.shadowFiles,
-      );
-      binding.collaboratorsChanged();
+      const recoveringClaims = this.unboundClaims !== null;
+      this.replayToBinding(binding, [...this.shadowElements.values()], this.shadowAppState, this.shadowFiles);
+      // A save may have degraded the session while no canvas existed. The
+      // current socket's snapshot is already authoritative, so the rebound
+      // canvas can resume its push after the replay.
+      if (recoveringClaims) this.promoteIfChannelUp();
       binding.flushPendingLocal();
+      this.finishDeferredReplay();
     }
   }
 
@@ -497,6 +523,7 @@ export class SceneSession {
       return true;
     }
     this.pushInFlight = true;
+    this.pushOutcomeUnresolved = true;
     this.unacked = claimedPush(elements, appState, files);
     this.send({
       type: "push",
@@ -517,6 +544,11 @@ export class SceneSession {
   bufferMirrored(): void {
     if (this.status !== "attached") return;
     this.confirmSaved();
+    // A clean fresh snapshot can settle an old push without a later flush.
+    if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
+        this.tab.content === this.tab.saved) {
+      clearUnresolvedLiveSave(this.tab);
+    }
   }
 
   /// Outbound presence: trailing-edge throttle on pointer moves.
@@ -540,9 +572,8 @@ export class SceneSession {
   }
 
   /// Save-funnel entry: ensure every local change is confirmed by the
-  /// authority and the authority has flushed to disk. Resolves false on
-  /// timeout or flush error; the caller degrades the session and falls
-  /// back to the classic PUT.
+  /// authority and the authority has flushed to disk. A timeout or flush
+  /// error degrades the session; fallback still needs a settled push.
   flush(timeoutMs: number = SCENE_FLUSH_TIMEOUT_MS): Promise<boolean> {
     if (!this.ownsSaves()) return Promise.resolve(false);
     this.binding?.flushPendingLocal();
@@ -565,6 +596,46 @@ export class SceneSession {
   degrade(): void {
     if (this.status === "degraded" || this.status === "off") return;
     this.setStatus("degraded");
+  }
+
+  /// A bounded wait cannot turn silence or socket closure into an ack.
+  awaitPushSettled(timeoutMs: number = SCENE_FALLBACK_SETTLE_MS): Promise<PushSettlement> {
+    if (!this.pushOutcomeUnresolved) return Promise.resolve("settled");
+    if (!this.pushInFlight) return Promise.resolve("unresolved");
+    return new Promise<PushSettlement>((resolve) => {
+      const waiter = {
+        resolve,
+        timer: setTimeout(() => {
+          this.pushSettleWaiters = this.pushSettleWaiters.filter(
+            (w) => w !== waiter,
+          );
+          resolve("unresolved");
+        }, timeoutMs),
+      };
+      this.pushSettleWaiters.push(waiter);
+    });
+  }
+
+  /// Recheck after the wait's microtask: an ack, redial or new push can
+  /// change ownership between the timer firing and the delegate resuming.
+  fallbackSettlement(): PushSettlement {
+    return this.pushOutcomeUnresolved || this.ownsSaves() ? "unresolved" : "settled";
+  }
+
+  /// Only an ack permits fallback. A lost socket or a new sync epoch
+  /// releases the bounded wait without claiming that old push settled.
+  private clearPushInFlight(outcome: PushSettlement): void {
+    this.pushInFlight = false;
+    if (outcome === "settled") {
+      this.pushOutcomeUnresolved = false;
+      this.tab.unresolvedLivePush = false;
+    } else if (this.pushOutcomeUnresolved) {
+      withholdUnresolvedLiveSave(this.tab);
+    }
+    for (const w of this.pushSettleWaiters.splice(0)) {
+      clearTimeout(w.timer);
+      w.resolve(outcome);
+    }
   }
 
   /// Re-apply the mirror onto whatever tab the layout holds now.
@@ -609,11 +680,10 @@ export class SceneSession {
     return this.tab.readMode || !this.tab.fsWritable;
   }
 
-  /// Tell the canvas that everything `pushScene` claimed and the authority
-  /// has not acknowledged is local again: the payload on the wire, which the
-  /// authority may or may not have read, and the one coalesced behind it, in
-  /// all three of their parts. Called wherever those are discarded: at the
-  /// socket's close and at the next socket's first snapshot.
+  /// Return unacknowledged claims to the canvas, or retain them until one
+  /// binds. The authority may have read the wire payload; socket closure
+  /// does not establish its outcome. Called at close and at the next
+  /// socket's first snapshot.
   private releaseUnaccepted(): void {
     const wire = this.unacked;
     const queued = this.queued;
@@ -630,7 +700,71 @@ export class SceneSession {
     // goes back.
     const appState = queued?.appState ?? wire?.appState ?? undefined;
     if (elements.length === 0 && files === undefined && appState === undefined) return;
-    this.binding?.forgetBroadcast(elements, appState, files);
+    if (this.binding) {
+      this.binding.forgetBroadcast(elements, appState, files);
+    } else {
+      const claims = this.unboundClaims ?? claimedPush([], undefined, undefined);
+      for (const el of elements) {
+        if (typeof el.id === "string") claims.elements.set(el.id, el);
+      }
+      if (appState !== undefined) claims.appState = appState;
+      if (files !== undefined) claims.files = { ...(claims.files ?? {}), ...files };
+      this.unboundClaims = claims;
+    }
+  }
+
+  private replayToBinding(
+    binding: SceneCanvasBinding,
+    elements: WireElement[],
+    appState: WireAppState | undefined,
+    files: WireFiles,
+  ): void {
+    const claims = this.unboundClaims;
+    if (claims === null) {
+      binding.applySnapshot(elements, appState, files);
+      binding.collaboratorsChanged();
+      return;
+    }
+    const replayElements = new Map(elements.map((el) => [el.id as string, el]));
+    const replayFiles = { ...files };
+    const pendingElements: WireElement[] = [];
+    const pendingFiles: WireFiles = {};
+    let pendingAppState: WireAppState | undefined;
+    for (const el of claims.elements.values()) {
+      const stored = replayElements.get(el.id as string);
+      if (stored && (storedElementWins(stored, el) ||
+          (stored.version === el.version && stored.versionNonce === el.versionNonce))) continue;
+      replayElements.set(el.id as string, el);
+      this.foldIntoShadow(el);
+      pendingElements.push(el);
+    }
+    for (const [id, file] of Object.entries(claims.files ?? {})) {
+      if (id in replayFiles) continue;
+      replayFiles[id] = file;
+      this.shadowFiles[id] = file;
+      pendingFiles[id] = file;
+    }
+    if (claims.appState !== null && JSON.stringify(claims.appState) !== JSON.stringify(this.shadowAppState)) {
+      pendingAppState = claims.appState;
+      this.shadowAppState = pendingAppState;
+      appState = pendingAppState;
+    }
+    binding.applySnapshot([...replayElements.values()], appState, replayFiles);
+    binding.collaboratorsChanged();
+    binding.forgetBroadcast(
+      pendingElements,
+      pendingAppState,
+      Object.keys(pendingFiles).length > 0 ? pendingFiles : undefined,
+    );
+    if (pendingElements.length === 0 && pendingAppState === undefined && Object.keys(pendingFiles).length === 0) {
+      this.unboundClaims = null;
+      this.pushOutcomeUnresolved = false;
+      this.tab.unresolvedLivePush = false;
+    }
+  }
+
+  private finishDeferredReplay(): void {
+    if (this.unboundClaims !== null && this.pushInFlight) this.unboundClaims = null;
   }
 
   private foldIntoShadow(el: WireElement): void {
@@ -644,6 +778,7 @@ export class SceneSession {
     this.queued = null;
     if (q.elements.size === 0 && q.appState === null && q.files === null) return;
     this.pushInFlight = true;
+    this.pushOutcomeUnresolved = true;
     this.unacked = q;
     this.send({
       type: "push",
@@ -666,6 +801,8 @@ export class SceneSession {
 
   private dial(): void {
     this.clearReconnectTimer();
+    this.clearAttachTimer();
+    if (this.pushInFlight) this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.sawFrameOnSocket = false;
     let ws: WebSocket;
@@ -715,7 +852,7 @@ export class SceneSession {
     this.clearAttachTimer();
     this.ws = null;
     this.releaseUnaccepted();
-    this.pushInFlight = false;
+    this.clearPushInFlight("unresolved");
     this.queued = null;
     if (this.closedByUs || this.retryStopped) return;
     // Capability probe: the first scene-ws connect that closes before
@@ -776,6 +913,9 @@ export class SceneSession {
         this.pushInFlight = false;
         this.unacked = null;
         this.drainQueued();
+        // A push the ack drains from the queue is on the wire in its
+        // turn, and a fallback save waits for it too.
+        if (!this.pushInFlight) this.clearPushInFlight("settled");
         this.confirmSaved();
         this.checkFlushWaiters();
         return;
@@ -821,6 +961,9 @@ export class SceneSession {
         // for good, classic behaviors resume.
         this.retryStopped = true;
         this.setStatus("off");
+        this.releaseUnaccepted();
+        this.clearPushInFlight("unresolved");
+        this.queued = null;
         this.closeSocket();
         return;
     }
@@ -863,7 +1006,9 @@ export class SceneSession {
       // marks the elements and files the authority holds, so only those it
       // lacks are offered again.
       this.releaseUnaccepted();
-      this.pushInFlight = false;
+      this.clearPushInFlight("unresolved");
+      this.pushOutcomeUnresolved = this.unboundClaims !== null;
+      this.tab.unresolvedLivePush = this.pushOutcomeUnresolved;
       this.queued = null;
     }
     this.serverDirty = f.dirty;
@@ -874,8 +1019,7 @@ export class SceneSession {
     }
     this.mirror();
     if (this.binding) {
-      this.binding.applySnapshot(f.elements, claim !== null ? undefined : f.appState, f.files);
-      this.binding.collaboratorsChanged();
+      this.replayToBinding(this.binding, f.elements, claim !== null ? undefined : f.appState, f.files);
     }
     this.promoteIfChannelUp();
     // Locally-newer elements survive the canvas reconciliation and must
@@ -884,6 +1028,7 @@ export class SceneSession {
     // session is degraded, and a snapshot landing on a degraded session is
     // exactly the reattach this rescue exists for.
     this.binding?.flushPendingLocal();
+    this.finishDeferredReplay();
     this.checkFlushWaiters();
   }
 
@@ -909,17 +1054,27 @@ export class SceneSession {
   private onFlush(f: Extract<ServerFrame, { type: "flush" }>): void {
     if (f.error !== undefined) {
       // Repeated flush failure server-side; the session stays alive
-      // (content safe in memory and on every client). Surface it and let
-      // any pending save fall back through the degrade path.
-      this.tab.error = `save failed: ${f.error}`;
+      // (content safe in memory and on every client), so the board stays
+      // and the save line says the file lacks it. Any pending save falls
+      // back through the degrade path.
+      this.flushError = `the server could not write it (${f.error})`;
+      this.tab.saveError = this.flushError;
       for (const w of this.flushWaiters.splice(0)) {
         clearTimeout(w.timer);
         w.resolve(false);
       }
       return;
     }
+    if (this.flushError !== null && this.tab.saveError === this.flushError) {
+      this.tab.saveError = null;
+    }
+    this.flushError = null;
     this.serverDirty = f.dirty;
     if (f.mtime_ns !== undefined) this.stampMtime(f.mtime_ns);
+    if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
+        this.tab.content === this.tab.saved) {
+      clearUnresolvedLiveSave(this.tab);
+    }
     this.checkFlushWaiters();
   }
 
@@ -964,13 +1119,13 @@ export class SceneSession {
   /// the authority has not acknowledged. It can still lag the authority, by
   /// a peer's edit the canvas's flush has not mirrored yet.
   private confirmSaved(): void {
-    if (this.pushInFlight || this.queued !== null) return;
+    if (this.pushInFlight || this.queued !== null || this.unboundClaims !== null) return;
     if (this.binding?.hasPendingLocal() ?? false) return;
     this.tab.saved = this.tab.content;
   }
 
   private allLocalConfirmed(): boolean {
-    if (this.pushInFlight || this.queued !== null) return false;
+    if (this.pushInFlight || this.queued !== null || this.unboundClaims !== null) return false;
     return !(this.binding?.hasPendingLocal() ?? false);
   }
 
@@ -1015,6 +1170,8 @@ export class SceneSession {
       clearTimeout(w.timer);
       w.resolve(false);
     }
+    this.releaseUnaccepted();
+    this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.binding = null;
     this.cursors.clear();
@@ -1101,7 +1258,10 @@ registerLiveSessionKind({
     if (!session || !session.ownsSaves()) return "classic";
     if (await session.flush()) return "saved";
     session.degrade();
-    return "degraded";
+    // Degrade stops new pushes. Only an ack of every queued push permits
+    // a classic PUT; the finite wait can end with that fallback withheld.
+    await session.awaitPushSettled();
+    return session.fallbackSettlement() === "settled" ? "degraded" : "unresolved";
   },
   release(tabId: string, immediate: boolean) {
     releaseSceneSession(tabId, { immediate });

@@ -1367,25 +1367,27 @@ pub fn install_local_workspace_overlay(host: &WorkspaceHost) {
 
 /// Install the launcher SPA as the host's root fallback: the devserver/library
 /// root `/` then serves `web-launcher` (and its `/api/library/*` data surface)
-/// instead of 404ing. Both embedders call this once after wrapping the host in
-/// an `Arc` -- chan-desktop's loopback (`embedded.rs`) and the headless devserver
-/// (`build_devserver_app`) -- so the one launcher is reached on every surface
-/// through the existing transparent proxy.
+/// instead of 404ing. chan-desktop's loopback (`embedded.rs`) calls this once
+/// after wrapping the host in an `Arc`. The headless devserver
+/// (`build_devserver_app`) installs the same bundle through
+/// `routes::admitting_launcher_router`, with the mount admission its stop
+/// refuses by, which this install leaves empty. The one launcher is reached on
+/// every surface through the existing transparent proxy.
 ///
 /// `bearer` gates `/api/library/*`: the desktop loopback passes its per-window
-/// token and the devserver passes its rotatable devserver token. Tunnel-origin
-/// requests bypass the local bearer only after the gateway proxy authenticates
-/// the browser (the request carries a signed gateway assertion). The static SPA
-/// shell is always public regardless, so it loads before it holds the token.
+/// token. The devserver's separate router install passes its rotatable token.
+/// Tunnel-origin requests bypass the local bearer only after the gateway proxy
+/// authenticates the browser (the request carries a signed gateway assertion).
+/// The static SPA shell is always public, so it loads before it holds the token.
 ///
 /// `serve_addr` is the read-only/full discriminator AND the mount enabler for
 /// workspace mutation:
 ///   - `Some(cell)` -- workspace add/on/off/rm is served, and the mount path
 ///     reads the listen address from the `OnceLock`. The embedder fills it
 ///     AFTER it binds (the install happens before the bind), so it is read at
-///     request time, not install time. Both embedders pass it, and the
-///     devserver's tunnel callers reach the same mutable surface as its
-///     loopback.
+///     request time, not install time. The desktop passes this cell here; the
+///     devserver's separate router install passes its own cell, shared by its
+///     tunnel and loopback callers.
 ///   - `None` -- a surface with nowhere to mount a workspace: mutation handlers
 ///     answer 403, and the SPA shell is served with the `readonly` hint so it
 ///     hides those controls.

@@ -47,6 +47,12 @@ impl FileLock {
         Ok(Self(file))
     }
 
+    /// Waits for the lock instead of refusing a held one.
+    pub(crate) fn exclusive(file: File) -> std::io::Result<Self> {
+        FileExt::lock_exclusive(&file)?;
+        Ok(Self(file))
+    }
+
     pub(crate) fn file(&self) -> &File {
         &self.0
     }

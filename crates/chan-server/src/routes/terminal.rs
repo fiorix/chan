@@ -246,6 +246,9 @@ enum ServerFrame {
         /// snapshot whose generation no longer matches.
         generation: u64,
         missed_bytes: u64,
+        /// Ring bytes sent immediately after this frame, excluding the
+        /// alternate-screen prelude and private-mode reassert.
+        replay_bytes: usize,
         bytes_since_focus: u64,
         /// MESSAGE depth of the shared write queue at attach time (a gemini
         /// text+chord pair counts once), so every (re)attach re-syncs the
@@ -1268,6 +1271,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         seq: session.seq,
         generation: session.generation,
         missed_bytes: session.missed_bytes,
+        replay_bytes: session.replay.iter().map(Vec::len).sum(),
         bytes_since_focus: session.bytes_since_focus(),
         queue_depth: session.queue_depth(),
         queued_prompt_ids: session.queued_prompt_ids(),
@@ -2255,6 +2259,7 @@ mod tests {
             seq: 7,
             generation: 3,
             missed_bytes: 0,
+            replay_bytes: 7,
             bytes_since_focus: 0,
             queue_depth: 2,
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
@@ -2262,7 +2267,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session).unwrap(),
-            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"submit_agent":"opencode"}"#
+            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"submit_agent":"opencode"}"#
         );
         // Empty list still serializes as `[]` (always present; the SPA can
         // assume the field exists -- pre-release, no back-compat).
@@ -2275,6 +2280,7 @@ mod tests {
             seq: 0,
             generation: 0,
             missed_bytes: 0,
+            replay_bytes: 0,
             bytes_since_focus: 0,
             queue_depth: 0,
             queued_prompt_ids: vec![],
@@ -2282,7 +2288,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session_empty).unwrap(),
-            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[]}"#
+            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[]}"#
         );
         // cancel-prompt decode (client→server) -- pin the tag + field so a
         // rename can't silently break the SPA wire with a green build.
@@ -4124,6 +4130,391 @@ mod tests {
         drop(whole);
         state.terminal_sessions.close(&shell, CloseReason::Explicit);
         state.terminal_sessions.close(&alt, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_counts_only_the_replayed_ring_chunks() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id();
+        let prefix = b"__OLDER__\x1b[?1h";
+        assert!(state.terminal_sessions.inject_output(id, prefix));
+        let chunks: &[&[u8]] = &[b"__FIRST__", b"\xc3\xa9\n", b"__LAST__\n"];
+        for chunk in chunks {
+            assert!(state.terminal_sessions.inject_output(id, chunk));
+        }
+        let mut socket = dial_terminal(
+            address,
+            &format!(
+                "cols=80&rows=24&session={id}&since={}&generation={}",
+                prefix.len(),
+                terminal.generation
+            ),
+        )
+        .await;
+        let frames = read_prelude(&mut socket).await;
+        let WireFrame::Control(session) = &frames[0] else {
+            panic!("session frame comes first: {:?}", wire_shape(&frames));
+        };
+        assert_eq!(session["type"], "session");
+        let mut replay = Vec::new();
+        for frame in &frames[1..frames.len() - 2] {
+            let WireFrame::Bytes(bytes) = frame else {
+                panic!("only replay bytes follow the session frame");
+            };
+            replay.extend_from_slice(bytes);
+        }
+        assert_eq!(replay, chunks.concat());
+        assert_eq!(
+            wire_shape(&frames[frames.len() - 2..]),
+            wire_shape(&[
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        assert_eq!(
+            session["replay_bytes"].as_u64(),
+            Some(replay.len() as u64),
+            "replay_bytes counts the ring bytes on the socket, excluding the mode reassert"
+        );
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_is_zero_for_an_alternate_screen_prelude() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id();
+        assert!(state.terminal_sessions.inject_output(id, b"__HISTORY__\n"));
+        assert!(state
+            .terminal_sessions
+            .inject_output(id, b"\x1b[?1049h\x1b[?1000h"));
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(ALT_SCREEN_ATTACH_PRELUDE.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1000h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        let WireFrame::Control(session) = &frames[0] else {
+            unreachable!();
+        };
+        assert_eq!(
+            session["replay_bytes"].as_u64(),
+            Some(0),
+            "replay_bytes excludes the alternate-screen prelude and mode reassert"
+        );
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_is_zero_at_the_ring_end() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id();
+        let history = b"__HISTORY__\n\x1b[?1h";
+        assert!(state.terminal_sessions.inject_output(id, history));
+        let mut socket = dial_terminal(
+            address,
+            &format!(
+                "cols=80&rows=24&session={id}&since={}&generation={}",
+                history.len(),
+                terminal.generation
+            ),
+        )
+        .await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        let WireFrame::Control(session) = &frames[0] else {
+            unreachable!();
+        };
+        assert_eq!(session["seq"].as_u64(), Some(history.len() as u64));
+        assert_eq!(
+            session["replay_bytes"].as_u64(),
+            Some(0),
+            "replay_bytes is zero when the cursor already names the ring end"
+        );
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_after_restart_excludes_reset_and_modes() {
+        use chan_library::terminal_sessions::{arm_attach_seam, AttachSeam};
+
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let id = terminal.id().to_owned();
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
+        let initial = read_prelude(&mut socket).await;
+        let WireFrame::Control(initial_session) = &initial[0] else {
+            panic!("initial attach starts with session");
+        };
+        let replay = b"__RESTARTED__\xc3\xa9\x1b[?1h";
+        let registry = state.terminal_sessions.clone();
+        let inject_id = id.clone();
+        arm_attach_seam(&id, AttachSeam::AttachBeforeRingLock, move || {
+            assert!(registry.inject_output(&inject_id, replay));
+        });
+        assert!(state
+            .terminal_sessions
+            .restart(&id, Default::default())
+            .expect("restart quiet terminal"));
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Bytes(RESET_TERMINAL.to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(replay.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ]),
+            "reset bytes precede the new session and its replay on the same socket"
+        );
+        let WireFrame::Control(session) = &frames[1] else {
+            unreachable!();
+        };
+        assert_eq!(session["id"], initial_session["id"]);
+        assert_ne!(session["generation"], initial_session["generation"]);
+        assert_eq!(session["replay_bytes"].as_u64(), Some(replay.len() as u64));
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_close_reason_from_detach_is_parked() {
+        use chan_library::terminal_sessions::{
+            current_boot_id, FdStorePark, FdStoreParker, RecordedChildIdentity,
+        };
+        use futures::StreamExt;
+        use std::os::fd::{BorrowedFd, OwnedFd};
+
+        #[derive(Clone, Default)]
+        struct Store(Arc<std::sync::Mutex<BTreeMap<String, OwnedFd>>>);
+        impl FdStorePark for Store {
+            fn park(&self, fds: &[(&str, BorrowedFd<'_>)]) -> bool {
+                let mut stored = self.0.lock().unwrap();
+                for (name, fd) in fds {
+                    stored.insert((*name).into(), fd.try_clone_to_owned().unwrap());
+                }
+                true
+            }
+            fn unpark(&self, names: &[&str]) {
+                let mut stored = self.0.lock().unwrap();
+                for name in names {
+                    stored.remove(*name);
+                }
+            }
+            fn adopt(&self, _name: &str) -> bool {
+                true
+            }
+            fn changed(&self) {}
+        }
+        struct ChildCleanup(OwnedFd);
+        impl Drop for ChildCleanup {
+            fn drop(&mut self) {
+                let _ = rustix::process::pidfd_send_signal(&self.0, rustix::process::Signal::KILL);
+            }
+        }
+
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let store = Store::default();
+        state
+            .terminal_sessions
+            .install_fd_parker(FdStoreParker::new(store.clone()));
+        let terminal = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: Some("parked-close-window".into()),
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn parked terminal");
+        let entries = state.terminal_sessions.fdstore_manifest_sessions("test");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        let _child = ChildCleanup(
+            RecordedChildIdentity {
+                boot_id: current_boot_id(),
+                start_time: entry.child_start_time,
+            }
+            .pin(
+                entry.meta.child_pid.expect("owned child"),
+                current_boot_id().as_deref(),
+            )
+            .unwrap(),
+        );
+        state
+            .terminal_sessions
+            .fdstore_manifest_committed("test", &entries);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let mut socket =
+            dial_terminal(address, &format!("session={}&since=0", terminal.id())).await;
+        read_prelude(&mut socket).await;
+        assert_eq!(state.terminal_sessions.detach_parked_sessions(), 1);
+        let closed = tokio::time::timeout(PROBE_BUDGET, async {
+            while let Some(message) = socket.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "closed" {
+                        return frame;
+                    }
+                }
+            }
+            panic!("socket ended without a closed frame");
+        })
+        .await;
+        server.abort();
+        assert_eq!(
+            closed.expect("detach sends a closed frame")["reason"],
+            "parked",
+            "a detach preserves the attached PTY for restore"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_replay_bytes_after_import_counts_the_usable_ring() {
+        use chan_library::terminal_sessions::{FdStorePark, FdStoreParker, FdStoreSessionImport};
+        use std::os::fd::{BorrowedFd, OwnedFd};
+
+        #[derive(Clone, Default)]
+        struct Store(Arc<std::sync::Mutex<BTreeMap<String, OwnedFd>>>);
+        impl FdStorePark for Store {
+            fn park(&self, fds: &[(&str, BorrowedFd<'_>)]) -> bool {
+                let mut stored = self.0.lock().expect("stored descriptors");
+                for (name, fd) in fds {
+                    stored.insert(
+                        (*name).into(),
+                        fd.try_clone_to_owned().expect("duplicate fd"),
+                    );
+                }
+                true
+            }
+            fn unpark(&self, names: &[&str]) {
+                let mut stored = self.0.lock().expect("stored descriptors");
+                for name in names {
+                    stored.remove(*name);
+                }
+            }
+            fn adopt(&self, _name: &str) -> bool {
+                true
+            }
+            fn changed(&self) {}
+        }
+
+        let _gate = pty_test_lock();
+        let original = crate::state::test_support::make_test_state(false);
+        let store = Store::default();
+        original
+            .terminal_sessions
+            .install_fd_parker(FdStoreParker::new(store.clone()));
+        let terminal = original
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: Some("ring-import-window".into()),
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn parked terminal");
+        let id = terminal.id().to_owned();
+        let replay = b"__IMPORTED__\xc3\xa9\x1b[?1h";
+        assert!(original.terminal_sessions.inject_output(&id, replay));
+        let mut entries = original.terminal_sessions.fdstore_manifest_sessions("test");
+        assert_eq!(entries.len(), 1);
+        original
+            .terminal_sessions
+            .fdstore_manifest_committed("test", &entries);
+        assert_eq!(original.terminal_sessions.detach_parked_sessions(), 1);
+        let entry = entries.pop().expect("parked manifest entry");
+        let import = {
+            let mut fds = store.0.lock().expect("stored descriptors");
+            FdStoreSessionImport {
+                child_identity: chan_library::terminal_sessions::RecordedChildIdentity {
+                    boot_id: chan_library::terminal_sessions::current_boot_id(),
+                    start_time: entry.child_start_time,
+                },
+                master_fd: fds.remove(&entry.fd_name).expect("parked PTY"),
+                ring_fd: Some(
+                    fds.remove(entry.ring_fd_name.as_ref().expect("ring name"))
+                        .expect("parked ring"),
+                ),
+                meta: entry.meta,
+                // A usable ring supplies replay independently of the manifest tail.
+                replay: Vec::new(),
+                sealed_manifest: true,
+            }
+        };
+        let state = crate::state::test_support::make_test_state(false);
+        let restored = state
+            .terminal_sessions
+            .restore_fdstore_sessions(vec![import]);
+        assert_eq!(restored.restored, 1, "skipped: {:?}", restored.skipped);
+        assert!(restored.abandoned_ring_fds.is_empty());
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
+        let frames = read_prelude(&mut socket).await;
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Control(serde_json::json!({ "type": "session" })),
+                WireFrame::Bytes(replay.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(serde_json::json!({ "type": "ready" })),
+            ])
+        );
+        let WireFrame::Control(session) = &frames[0] else {
+            unreachable!();
+        };
+        assert_eq!(session["generation"].as_u64(), Some(terminal.generation));
+        assert_eq!(session["seq"].as_u64(), Some(replay.len() as u64));
+        assert_eq!(session["missed_bytes"].as_u64(), Some(0));
+        assert_eq!(session["replay_bytes"].as_u64(), Some(replay.len() as u64));
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
         server.abort();
     }
 

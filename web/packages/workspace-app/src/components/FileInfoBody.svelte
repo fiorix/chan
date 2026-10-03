@@ -21,7 +21,7 @@
 
   import { untrack } from "svelte";
   import { ApiError, apiErrorCode } from "../api/errors";
-  import { api, withTokenQuery } from "../api/client";
+  import { api, fileUrl } from "../api/client";
   import type {
     GraphEdge,
     InspectorPayload,
@@ -67,6 +67,7 @@
     classifyFileActions,
     type FileActionId,
   } from "../state/fileActions";
+  import CodeReportSection from "./CodeReportSection.svelte";
   import KindChip from "./KindChip.svelte";
   import { ChevronDown, Copy } from "lucide-svelte";
 
@@ -191,11 +192,23 @@
     // loadTreeDir records the failure and clears loadingDirs without ever
     // setting loadedDirs, so an effect that asked only "loaded or loading"
     // would re-arm the instant the failure landed and ask forever. The
-    // failure is recorded for the File Tree's row to render, and the
-    // inspector shows what it has, which is nothing for an entry it cannot
-    // reach. Clearing the record (a collapse, a refresh) asks again.
+    // failure is shown by both the File Tree row and the inspector's
+    // missing-entry hint. Clearing the record (a collapse, a refresh)
+    // asks again.
     if (parent in tree.dirErrors) return;
     void loadTreeDir(parent).catch(() => {});
+  });
+
+  /// What the body says for a selected path with no entry: its folder's
+  /// listing is on its way, could not be read, or holds no such entry.
+  const missingEntryHint = $derived.by(() => {
+    if (!path || entry) return null;
+    const parent = parentDir(path);
+    if (parent in tree.dirErrors) {
+      return `cannot list ${parent || "the workspace root"}: ${tree.dirErrors[parent]}`;
+    }
+    if (tree.loadedDirs[parent]) return `${path} is not in its folder's listing`;
+    return "Loading...";
   });
 
   const dirStats = $derived.by(() => {
@@ -472,7 +485,7 @@
     await exportPathToPdf(entry.path);
   }
 
-  // Desktop-download progress now shows in the transfer bubble (the single
+  // Desktop-download progress shows in the transfer bubble (the single
   // transfer surface), not an inline inspector indicator.
 
   /// Full-path toggle for the actions section. The header shows the
@@ -702,19 +715,10 @@
   let reportError = $state<string | null>(null);
   let reportReq = 0;
 
-  /// "Top N + see more" toggle for the per-language list in directory
-  /// mode. Default of 5 matches the inspector's appetite for compact
-  /// sections; the full list is one click away. Resets to collapsed
-  /// whenever the selection changes so a new directory doesn't inherit
-  /// the previous one's expand state.
-  const LANG_PREVIEW = 5;
-  let langExpanded = $state(false);
-
   $effect(() => {
     fileReport = null;
     prefixReport = null;
     reportError = null;
-    langExpanded = false;
     if (entryPath === null) {
       reportLoading = false;
       return;
@@ -775,45 +779,16 @@
       controller.abort();
     };
   });
-
-  /// Per-language roll-up sliced for display: collapse to top N by
-  /// SLOC unless the user clicked "see more". The hidden count
-  /// workspaces the "+N more" affordance label.
-  const visibleLanguages = $derived.by(() => {
-    if (!prefixReport) return [];
-    const all = prefixReport.by_language;
-    if (langExpanded || all.length <= LANG_PREVIEW) return all;
-    return all.slice(0, LANG_PREVIEW);
-  });
-  const hiddenLanguageCount = $derived(
-    prefixReport
-      ? Math.max(0, prefixReport.by_language.length - visibleLanguages.length)
-      : 0,
-  );
-
-  /// COCOMO formatting helpers. We deliberately drop estimated cost
-  /// from the inspector: the dollar number is a default-salary
-  /// extrapolation that's noisy for a personal notes app. Effort,
-  /// schedule, and developer-count carry the useful signal.
-  function fmtMonths(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)} mo` : `${n.toFixed(1)} mo`;
-  }
-  function fmtDevs(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)}` : n.toFixed(1);
-  }
 </script>
 
 <!-- Shared ACTIONS section. Rendered directly under the filename header
      on every surface (File Browser, editor, Graph) so the inspector has
-     one consistent layout: header -> actions -> lazy content. Per
-     inspector-spec.md the actions move up here from the old bottom-of-
-     body placement. The contextual actions differ by entry kind:
+     one consistent layout: header -> actions -> lazy content. The
+     contextual actions differ by entry kind:
        - editable file: Open (gated on the server content kind, so an
          odd-suffix plaintext file opens like the tree double-click);
        - media: View/Zoom (image), View Audio, View Video, or View PDF;
-       - every entry: Upload + Download (+ progress indicator);
+       - every entry: Upload + Download;
        - host-provided: Show File/Directory (onReveal), Graph from here
          (onSetAsScope).
      A full-path toggle reveals the workspace-relative path (header shows
@@ -901,7 +876,7 @@
 {#if !entry}
   <div class="empty">
     <div class="empty-title">Details</div>
-    <div class="empty-hint">click a file or directory to inspect</div>
+    <div class="empty-hint">{missingEntryHint ?? "click a file or directory to inspect"}</div>
   </div>
 {:else if entry.is_dir}
   <div class="info">
@@ -919,7 +894,6 @@
       {label || basename(entry.path) || workspace.info?.label || "(root)"}
     </h3>
     {#if isDraftPath(entry.path)}
-      <!-- Drafts notice. Mirrors the copy in DirectoryInfoBody. -->
       <div class="drafts-notice" role="note">
         <strong>Drafts are uncommitted scratch space.</strong>
         Save or discard them from their editor tabs, not the tree.
@@ -962,61 +936,7 @@
       </section>
     {/if}
     {#if prefixReport && prefixReport.totals.files > 0}
-      <section class="refs">
-        <h4>Code</h4>
-        <div class="meta-grid">
-          <span class="k">indexed</span>
-          <span class="v">{prefixReport.totals.files}</span>
-          <span class="k">SLOC</span>
-          <span class="v">{prefixReport.totals.code.toLocaleString()}</span>
-          <span class="k">comments</span>
-          <span class="v">{prefixReport.totals.comments.toLocaleString()}</span>
-          <span class="k">blanks</span>
-          <span class="v">{prefixReport.totals.blanks.toLocaleString()}</span>
-          <span class="k">complexity</span>
-          <span class="v">{prefixReport.totals.complexity.toLocaleString()}</span>
-        </div>
-        {#if prefixReport.by_language.length > 0}
-          <ul class="lang-list">
-            {#each visibleLanguages as lang (lang.name)}
-              <li class="lang-row">
-                <button
-                  type="button"
-                  class="lang-name"
-                  title="open in graph (scoped to this language)"
-                  onclick={() => openGraphForLanguage(lang.name)}
-                >{lang.name}</button>
-                <span class="lang-files">{lang.files} file{lang.files === 1 ? "" : "s"}</span>
-                <span class="lang-sloc">{lang.code.toLocaleString()} SLOC</span>
-              </li>
-            {/each}
-          </ul>
-          {#if hiddenLanguageCount > 0}
-            <button
-              type="button"
-              class="see-more"
-              onclick={() => (langExpanded = true)}
-            >+{hiddenLanguageCount} more</button>
-          {:else if langExpanded && prefixReport.by_language.length > LANG_PREVIEW}
-            <button
-              type="button"
-              class="see-more"
-              onclick={() => (langExpanded = false)}
-            >show fewer</button>
-          {/if}
-        {/if}
-        <div class="cocomo">
-          <div class="cocomo-title">COCOMO ({prefixReport.cocomo.model})</div>
-          <div class="meta-grid">
-            <span class="k">effort</span>
-            <span class="v">{fmtMonths(prefixReport.cocomo.effort_person_months)}</span>
-            <span class="k">schedule</span>
-            <span class="v">{fmtMonths(prefixReport.cocomo.schedule_months)}</span>
-            <span class="k">developers</span>
-            <span class="v">{fmtDevs(prefixReport.cocomo.developers)}</span>
-          </div>
-        </div>
-      </section>
+      <CodeReportSection report={prefixReport} onLanguageClick={openGraphForLanguage} />
     {:else if reportLoading}
       <div class="refs-loading">loading report...</div>
     {:else if reportError}
@@ -1057,7 +977,7 @@
         onclick={() => openImageZoom(entry.path, null, dirImageSet(entry.path))}
       >
         <img
-          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={fileUrl(entry.path)}
           alt={basename(entry.path)}
           loading="lazy"
         />
@@ -1072,7 +992,7 @@
       <div class="video-preview">
         <!-- svelte-ignore a11y_media_has_caption -->
         <video
-          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={fileUrl(entry.path)}
           controls
           preload="metadata"
         ></video>
@@ -1080,7 +1000,7 @@
     {:else if audio}
       <div class="audio-preview">
         <audio
-          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={fileUrl(entry.path)}
           controls
           preload="metadata"
           onerror={() => (audioError = true)}
@@ -1292,14 +1212,17 @@
   }
   /* Hairline dividers between the inspector's top-level sections
      (buttons / file size / code / references). Target DIRECT children of
-     `.info` so the nested COCOMO meta-grid (inside `.refs`) keeps its own
-     dashed sub-divider and doesn't pick up a section rule. Each top-level
+     `.info` so a grid nested in a section (the Code section's COCOMO
+     grid, with its own dashed sub-divider) doesn't pick up a section
+     rule. The Code section is a child component, so the rule reaches it
+     by its `.code-report` class and not by this body's scope. Each top-level
      block owns the line above it; the identity header (.head/.title/
      .badge-row/.image-preview/.drafts-notice) stays divider-free so the
      first rule sits above the actions section. */
   .info > .actions-section,
   .info > .meta-grid,
   .info > .refs,
+  .info > :global(.code-report),
   .info > .refs-loading,
   .info > .refs-error {
     border-top: 1px solid var(--separator);
@@ -1327,9 +1250,6 @@
     gap: 0.4rem;
     margin-bottom: 0.4rem;
   }
-  /* Drafts chip + notice mirror the DirectoryInfoBody styling so
-     the FB-selected Drafts row renders identically to the graph-side
-     dir node inspector. */
   .kind-chip.drafts-chip {
     flex: 1;
     color: #fff;
@@ -1739,45 +1659,6 @@
     font-style: italic;
   }
   .refs-error { color: var(--warn-text); font-style: normal; }
-  /* Per-language row in the Code section. Three columns: language
-     name on the left (allowed to grow), file count + SLOC on the
-     right (tabular-nums so the digit columns line up across rows). */
-  .lang-list {
-    list-style: none;
-    padding: 0;
-    margin: 0.4rem 0 0 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .lang-row {
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    gap: 0.5rem;
-    font-size: 13px;
-    align-items: baseline;
-  }
-  /* A <button> so the language name routes to the Graph (scoped to
-     this language). Strip default button chrome, left-align, and add
-     hover + focus affordance. Stays a grid cell at column 1. */
-  .lang-name {
-    color: var(--text);
-    word-break: break-word;
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    font-size: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-  .lang-name:hover { text-decoration: underline; }
-  .lang-name:focus-visible {
-    outline: 2px solid var(--link);
-    outline-offset: 1px;
-    border-radius: 2px;
-  }
   .lang-link {
     color: var(--text);
     background: none;
@@ -1794,39 +1675,5 @@
     outline: 2px solid var(--link);
     outline-offset: 1px;
     border-radius: 2px;
-  }
-  .lang-files,
-  .lang-sloc {
-    color: var(--text-secondary);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .see-more {
-    display: block;
-    margin: 0.3rem 0 0 0;
-    background: none;
-    border: none;
-    color: var(--link);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    padding: 0;
-  }
-  .see-more:hover { text-decoration: underline; }
-  .cocomo {
-    margin-top: 0.5rem;
-    padding-top: 0.4rem;
-    border-top: 1px dashed var(--border);
-  }
-  .cocomo-title {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-    margin-bottom: 0.2rem;
-  }
-  .cocomo .meta-grid {
-    margin: 0;
   }
 </style>

@@ -382,7 +382,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "axum-macros",
  "base64 0.22.1",
  "bytes",
  "form_urlencoded",
@@ -430,17 +429,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "axum-macros"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aa268c23bfbbd2c4363b9cd302a4f504fb2a9dfe7e3451d66f35dd392e20aca"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -970,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "chan"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "chan-llm",
@@ -1002,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "chan-desktop"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "arboard",
  "axum",
@@ -1047,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "chan-library"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1073,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "chan-llm"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "base64 0.22.1",
  "chan-workspace",
@@ -1088,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "chan-report"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "chrono",
  "encoding_rs_io",
@@ -1102,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "chan-revtunnel"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "futures",
  "serde",
@@ -1114,7 +1102,7 @@ dependencies = [
 
 [[package]]
 name = "chan-server"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1156,13 +1144,14 @@ dependencies = [
 
 [[package]]
 name = "chan-shell"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chan-revtunnel",
  "chan-workspace",
  "clap 4.6.1",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tokio",
@@ -1171,14 +1160,14 @@ dependencies = [
 
 [[package]]
 name = "chan-systemd"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "rustix 1.1.4",
 ]
 
 [[package]]
 name = "chan-tunnel-client"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1203,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-proto"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1220,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-server"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1247,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "chan-workspace"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -2336,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "fetch-models"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "chan-workspace",

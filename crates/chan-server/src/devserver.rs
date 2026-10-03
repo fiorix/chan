@@ -50,8 +50,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::random_token;
 use crate::devserver_api::{
-    ActiveTerminalsRejection, DevserverInfo, MountedPrefix, OpenWorkspaceRequest, RotatedToken,
-    SetWorkspaceOnRequest, WorkspaceEntry, DEVSERVER_API_PROTOCOL,
+    DevserverInfo, MountedPrefix, OpenWorkspaceRequest, RotatedToken, SetWorkspaceOnRequest,
+    WorkspaceEntry, DEVSERVER_API_PROTOCOL,
 };
 use crate::extract::{Json, Path as AxumPath, Query};
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
@@ -692,6 +692,17 @@ enum StartupPhase {
     Stopped,
 }
 
+/// Why the startup gate refuses a request to a mounted tenant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TenantRoutesClosed {
+    /// The devserver is starting: the tenants' routes open once inherited
+    /// terminal sessions are adopted.
+    Starting,
+    /// The devserver is stopping: the tenants' routes do not open again in
+    /// this process.
+    Stopping,
+}
+
 struct StartupInner {
     phase: StartupPhase,
     pending: HashSet<MountAttemptKey>,
@@ -820,8 +831,17 @@ impl StartupCoordinator {
         }
     }
 
-    fn tenant_routes_ready(&self) -> bool {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase == StartupPhase::Ready
+    /// Whether the startup gate refuses a request to a mounted tenant, and
+    /// why, from one reading of the phase.
+    fn tenant_routes_closed(&self) -> Option<TenantRoutesClosed> {
+        match self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase {
+            StartupPhase::Ready => None,
+            StartupPhase::PreparingRows
+            | StartupPhase::Binding
+            | StartupPhase::ServingAndRestoring
+            | StartupPhase::ApplyingFdstore => Some(TenantRoutesClosed::Starting),
+            StartupPhase::Stopping | StartupPhase::Stopped => Some(TenantRoutesClosed::Stopping),
+        }
     }
 
     fn stop(&self) {
@@ -1066,20 +1086,19 @@ impl DevserverState {
         if let Some(prefix) = prefix {
             reject_reserved_prefix(prefix)?;
         }
-        let library = self.host.library().clone();
-        let registering = root.to_path_buf();
         let row = self
             .within_mount_bound(
                 started,
                 root,
-                tokio::task::spawn_blocking(move || library.register_workspace(&registering)),
+                self.host.register_workspace_keyed(root, key, None),
             )
             .await?
-            .map_err(|error| {
-                Error::from(std::io::Error::other(format!(
+            .map_err(|error| match error {
+                Error::Io(error) => Error::from(std::io::Error::other(format!(
                     "workspace registration task failed: {error}"
-                )))
-            })??;
+                ))),
+                error => error,
+            })?;
         let prefix = match prefix {
             Some(prefix) => prefix.to_string(),
             None => registered_workspace_prefix(&row.root_path)?,
@@ -2109,55 +2128,75 @@ impl WorkspaceRestore {
     }
 }
 
+/// How many attempts the startup restore runs at once. A root that does not
+/// answer holds one of them until its attempt's bound ends while the rows
+/// behind it restore through the rest, and a cold start overlaps at most this
+/// many workspace opens.
+const STARTUP_RESTORE_CONCURRENCY: usize = 4;
+
+/// Run the prepared rows' mount attempts, at most
+/// [`STARTUP_RESTORE_CONCURRENCY`] at a time and admitted in the order
+/// prepared, and return once every one has settled.
+///
+/// An attempt is bounded by the mount timeout or by what is left of the
+/// restore's budget when it starts, whichever is less. Rows still queued when
+/// the budget ends fail with the budget's reason and no attempt. A stop drops
+/// the attempts in flight, cancels them and the queued rows, and leaves a row
+/// that has settled as it settled. The attempts run inside this future, so
+/// the owner that joins it joins them all.
 async fn restore_prepared_workspaces(
     state: Arc<DevserverState>,
     attempts: Vec<MountAttempt>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
     let deadline = tokio::time::Instant::now() + STARTUP_RESTORE_TIMEOUT;
-    let mut attempts = attempts.into_iter();
-    while let Some(attempt) = attempts.next() {
-        if *shutdown_rx.borrow() {
-            state.cancel_mount_attempt(&attempt).await;
-            for pending in attempts {
-                state.cancel_mount_attempt(&pending).await;
+    let mut queued = attempts.into_iter();
+    let mut in_flight: Vec<MountAttempt> = Vec::new();
+    let mut running = FuturesUnordered::new();
+    while !*shutdown_rx.borrow() {
+        while running.len() < STARTUP_RESTORE_CONCURRENCY {
+            let Some(attempt) = queued.next() else {
+                break;
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                let reason = format!(
+                    "startup restore exceeded {} seconds",
+                    STARTUP_RESTORE_TIMEOUT.as_secs()
+                );
+                state.finish_failed_attempt(&attempt, reason.clone());
+                for pending in queued.by_ref() {
+                    state.finish_failed_attempt(&pending, reason.clone());
+                }
+                break;
             }
-            return;
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            let reason = format!(
-                "startup restore exceeded {} seconds",
-                STARTUP_RESTORE_TIMEOUT.as_secs()
-            );
-            state.finish_failed_attempt(&attempt, reason.clone());
-            for pending in attempts {
-                state.finish_failed_attempt(&pending, reason.clone());
-            }
-            return;
-        }
-        let mut restore = Box::pin(state.execute_mount_attempt(
-            attempt.clone(),
-            std::cmp::min(state.mount_timeout, remaining),
-        ));
-        tokio::select! {
-            result = &mut restore => {
-                if let Err(error) = result {
+            let timeout = std::cmp::min(state.mount_timeout, remaining);
+            in_flight.push(attempt.clone());
+            let state = &state;
+            running.push(async move {
+                if let Err(error) = state.execute_mount_attempt(attempt.clone(), timeout).await {
                     eprintln!(
                         "chan devserver: NOTE: could not re-mount {}: {error}",
                         attempt.root.display()
                     );
                 }
-            }
-            _ = shutdown_rx.changed() => {
-                drop(restore);
-                state.cancel_mount_attempt(&attempt).await;
-                for pending in attempts {
-                    state.cancel_mount_attempt(&pending).await;
-                }
-                return;
-            }
+                attempt.key()
+            });
         }
+        tokio::select! {
+            settled = running.next() => match settled {
+                Some(key) => in_flight.retain(|attempt| attempt.key() != key),
+                // Nothing in flight and nothing left to admit.
+                None => return,
+            },
+            _ = shutdown_rx.changed() => break,
+        }
+    }
+    drop(running);
+    for attempt in in_flight.into_iter().chain(queued) {
+        state.cancel_mount_attempt(&attempt).await;
     }
 }
 
@@ -2803,12 +2842,20 @@ fn build_devserver_app(
     // The cell is filled with the bound address after the listener binds
     // (unfilled on a tunnel-only devserver, where `require_mutable` answers
     // 503).
+    //
+    // The launcher's add and on ask the startup coordinator before they
+    // register or mount a root.
     let serve_addr: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
-    crate::install_launcher_root_fallback(
-        &host,
+    let admission: crate::routes::MountAdmission = {
+        let startup = state.startup.clone();
+        Arc::new(move |root: &Path| startup.refuse_mount_at_stop(root))
+    };
+    host.install_root_fallback(crate::routes::admitting_launcher_router(
+        host.clone(),
         Some(state.token.clone()),
         Some(serve_addr.clone()),
-    );
+        Some(admission),
+    ));
     let app = public
         .merge(authed)
         .merge(host.router())
@@ -2824,34 +2871,50 @@ fn build_devserver_app(
 
 /// Keep the launcher, health, and management APIs responsive while persisted
 /// workspaces mount, but refuse every mounted tenant until inherited PTYs have
-/// been adopted and continuous parking is active.
+/// been adopted and continuous parking is active, and again from the stop
+/// signal on, when the tenants are going away.
 async fn gate_tenant_during_startup(
     State(state): State<Arc<DevserverState>>,
     req: HttpRequest<Body>,
     next: Next,
 ) -> Response {
-    if state.startup.tenant_routes_ready() {
+    let Some(closed) = state.startup.tenant_routes_closed() else {
         return next.run(req).await;
-    }
-    match startup_refusal(state.host.owns_mounted_tenant_path(req.uri().path())) {
+    };
+    match startup_refusal(
+        closed,
+        state.host.owns_mounted_tenant_path(req.uri().path()),
+    ) {
         Some(response) => response,
         None => next.run(req).await,
     }
 }
 
-fn startup_refusal(ownership: Result<bool, Error>) -> Option<Response> {
+/// The gate's answer to a request while the tenants' routes are `closed`,
+/// or `None` for a path no mounted tenant owns. A start asks the client to
+/// retry, since the routes open soon; a stop does not, and carries a code
+/// that identifies this process's closed tenant routes.
+fn startup_refusal(closed: TenantRoutesClosed, ownership: Result<bool, Error>) -> Option<Response> {
     match ownership {
-        Ok(true) => {
-            let mut response = crate::error::err(
+        Ok(true) => Some(match closed {
+            TenantRoutesClosed::Starting => {
+                let mut response = crate::error::err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "devserver is restoring terminal sessions".into(),
+                );
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("1"),
+                );
+                response
+            }
+            TenantRoutesClosed::Stopping => crate::error::err_code(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "devserver is restoring terminal sessions".into(),
-            );
-            response.headers_mut().insert(
-                header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("1"),
-            );
-            Some(response)
-        }
+                "the devserver is stopping".into(),
+                "devserver_stopping",
+                serde_json::json!({}),
+            ),
+        }),
         Ok(false) => None,
         Err(error) => Some(crate::error::err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3181,14 +3244,9 @@ async fn handle_forget(
         Ok(WorkspaceLifecycleOutcome::NotFound) => {
             crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
         }
-        Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => (
-            StatusCode::CONFLICT,
-            Json(ActiveTerminalsRejection {
-                error: "live_terminals".into(),
-                active_terminals,
-            }),
-        )
-            .into_response(),
+        Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
+            crate::error::live_terminals_refusal(active_terminals)
+        }
         Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             crate::error::workspace_still_releasing()
         }
@@ -3221,14 +3279,7 @@ async fn handle_set_workspace_on(
     if !req.on && !req.force {
         let active = state.host.tenant_terminal_session_count(&prefix);
         if active > 0 {
-            return (
-                StatusCode::CONFLICT,
-                Json(ActiveTerminalsRejection {
-                    error: "live_terminals".into(),
-                    active_terminals: active,
-                }),
-            )
-                .into_response();
+            return crate::error::live_terminals_refusal(active);
         }
     }
     match state.set_workspace_on(&prefix, req.on, req.force).await {
@@ -3236,14 +3287,9 @@ async fn handle_set_workspace_on(
         Ok(SetWorkspaceOnResult::Updated(None)) => {
             crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
         }
-        Ok(SetWorkspaceOnResult::Refused { active_terminals }) => (
-            StatusCode::CONFLICT,
-            Json(ActiveTerminalsRejection {
-                error: "live_terminals".into(),
-                active_terminals,
-            }),
-        )
-            .into_response(),
+        Ok(SetWorkspaceOnResult::Refused { active_terminals }) => {
+            crate::error::live_terminals_refusal(active_terminals)
+        }
         Err(e @ Error::ShuttingDown(_)) => {
             crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
@@ -4157,6 +4203,10 @@ mod tests {
             let persisted = WorkspaceOverlay::open(overlay_path).entries();
             assert_eq!(persisted.len(), 1);
             assert!(!persisted[0].desired_on, "cancelled off left the restart overlay desired-on");
+            // The row probes a lock whose record is cleared before it unlocks.
+            while released.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
+                tokio::task::yield_now().await;
+            }
             let row = state.entry_for(&prefix).unwrap();
             assert!(!row.on);
             assert_eq!(row.status, WorkspaceStatus::Stopped);
@@ -4167,10 +4217,6 @@ mod tests {
                 assert_eq!(record.desired, DesiredMount::Off);
                 assert_eq!(record.phase, MountPhase::Stopped);
                 assert!(record.token.is_empty());
-            }
-            // A cancelled close aborts tasks without joining their handle release.
-            while released.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
-                tokio::task::yield_now().await;
             }
             let result = state.set_workspace_on(&prefix, true, false).await.unwrap();
             assert!(matches!(result, SetWorkspaceOnResult::Updated(Some(row)) if row.on && row.status == WorkspaceStatus::Running));
@@ -4657,7 +4703,10 @@ mod tests {
         startup
             .advance(StartupPhase::ServingAndRestoring)
             .expect("binding -> serving");
-        assert!(!startup.tenant_routes_ready());
+        assert_eq!(
+            startup.tenant_routes_closed(),
+            Some(TenantRoutesClosed::Starting)
+        );
         let during_restore = MountAttemptKey::new("/during-restore", 1);
         startup
             .track(during_restore.clone())
@@ -4682,7 +4731,19 @@ mod tests {
         startup
             .advance(StartupPhase::Ready)
             .expect("fdstore -> ready");
-        assert!(startup.tenant_routes_ready());
+        assert_eq!(startup.tenant_routes_closed(), None);
+    }
+
+    #[test]
+    fn stopped_phase_reads_as_stopping_for_mount_admission() {
+        let startup = StartupCoordinator::new();
+        startup.stop();
+        startup.stopped();
+        assert_eq!(startup.phase(), StartupPhase::Stopped);
+        assert_eq!(
+            startup.tenant_routes_closed(),
+            Some(TenantRoutesClosed::Stopping)
+        );
     }
 
     #[tokio::test]
@@ -5327,42 +5388,72 @@ mod tests {
             .await;
         }
 
+        /// The gate answers a request to a mounted tenant with one refusal in
+        /// every phase before `Ready`, its `Retry-After` included.
         #[tokio::test]
         async fn startup_restoring() {
             let home = tempfile::tempdir().unwrap();
             let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
             state.mount_shared_terminal_tenant().await.unwrap();
             let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-            let response = app
-                .oneshot(
-                    HttpRequest::get("/api/terminal/api/session?w=test")
-                        .body(Body::empty())
-                        .unwrap(),
+            for phase in [
+                StartupPhase::PreparingRows,
+                StartupPhase::Binding,
+                StartupPhase::ServingAndRestoring,
+                StartupPhase::ApplyingFdstore,
+            ] {
+                match phase {
+                    StartupPhase::PreparingRows => {}
+                    StartupPhase::ApplyingFdstore => {
+                        assert!(state.startup.begin_fdstore_apply_after_restore().await);
+                    }
+                    next => state.startup.advance(next).expect("startup transition"),
+                }
+                assert_eq!(state.startup.phase(), phase);
+                let response = app
+                    .clone()
+                    .oneshot(
+                        HttpRequest::get("/api/terminal/api/session?w=test")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("1"),
+                    "{phase:?}"
+                );
+                assert_refusal(
+                    response,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "devserver is restoring terminal sessions",
                 )
-                .await
-                .unwrap();
-            assert_eq!(response.headers()[header::RETRY_AFTER], "1");
-            assert_refusal(
-                response,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "devserver is restoring terminal sessions",
-            )
-            .await;
+                .await;
+            }
             state.host.shutdown_all().await.unwrap();
         }
 
         #[tokio::test]
         async fn startup_state_error_mapper() {
-            let response =
-                startup_refusal(Err(Error::Config("workspace host lock poisoned".into()))).unwrap();
-            assert!(response.headers().get(header::RETRY_AFTER).is_none());
-            assert_refusal(
-                response,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "config: workspace host lock poisoned",
-            )
-            .await;
-            assert!(startup_refusal(Ok(false)).is_none());
+            for closed in [TenantRoutesClosed::Starting, TenantRoutesClosed::Stopping] {
+                let response = startup_refusal(
+                    closed,
+                    Err(Error::Config("workspace host lock poisoned".into())),
+                )
+                .unwrap();
+                assert!(response.headers().get(header::RETRY_AFTER).is_none());
+                assert_refusal(
+                    response,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "config: workspace host lock poisoned",
+                )
+                .await;
+                assert!(startup_refusal(closed, Ok(false)).is_none());
+            }
         }
 
         async fn tunnel(case: &str) {
@@ -5592,6 +5683,86 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_close_reason_from_drain_is_shutdown() {
+        use futures::StreamExt;
+        use tower::ServiceExt;
+
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        complete_test_startup(&state).await;
+        let host = state.host.clone();
+        let mut config = tenant_config(state.addr, "/drain-terminal");
+        config.no_token = true;
+        host.open_terminal_session_with_command(config, Some("sleep 600".into()), None)
+            .await
+            .expect("mount terminal tenant");
+        let (app, _) = build_devserver_app(state, host.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = app.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/drain-terminal/api/terminal/ws?cols=80&rows=24"
+        ))
+        .await
+        .expect("attach terminal socket");
+        let ready = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(message) = socket.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "ready" {
+                        return;
+                    }
+                }
+            }
+            panic!("socket ended before ready");
+        })
+        .await;
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/devserver/terminal-sessions/drain")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(message) = socket.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "closed" {
+                        return frame;
+                    }
+                }
+            }
+            panic!("socket ended without a closed frame");
+        })
+        .await;
+        host.shutdown_all().await.unwrap();
+        server.abort();
+        ready.expect("terminal reached ready before the drain");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let drained: crate::devserver_api::DrainedTerminals =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(drained.closed, 1);
+        assert_eq!(drained.dead, 1);
+        assert!(drained.lingering.is_empty());
+        assert_eq!(
+            closed.expect("drain sends a closed frame")["reason"],
+            "shutdown",
+            "a drain kills the attached PTY"
+        );
+    }
+
     #[tokio::test]
     async fn rotate_token_route_swaps_the_live_bearer() {
         use tower::ServiceExt;
@@ -5794,6 +5965,57 @@ mod tests {
             Some(bearer),
         )
         .await;
+    }
+
+    /// The launcher is the devserver's root fallback, so its framework
+    /// refusals reach a devserver caller through the host's dispatch: a wrong
+    /// method and a malformed JSON body both answer in the envelope.
+    #[tokio::test]
+    async fn launcher_framework_refusals_cross_the_devserver_in_the_envelope() {
+        use axum::extract::FromRequest;
+        use tower::ServiceExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let host = state.host.clone();
+        let bearer = state.token.read().unwrap().clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        let request = |method: &str, body: &'static str| {
+            HttpRequest::builder()
+                .method(method)
+                .uri("/api/library/windows")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let envelope = |response: axum::response::Response| async move {
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).expect("a JSON refusal")
+        };
+
+        let wrong_method = app.clone().oneshot(request("PATCH", "")).await.unwrap();
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(wrong_method.headers()[header::ALLOW], "GET,HEAD,POST");
+        assert_eq!(
+            envelope(wrong_method).await,
+            serde_json::json!({"error": "method not allowed"})
+        );
+
+        let Err(rejection) =
+            axum::Json::<crate::CreateWindow>::from_request(request("POST", "{"), &()).await
+        else {
+            panic!("the framework must refuse this body");
+        };
+        let malformed = app.oneshot(request("POST", "{")).await.unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            envelope(malformed).await,
+            serde_json::json!({"error": rejection.body_text()})
+        );
     }
 
     #[tokio::test]
@@ -6909,6 +7131,535 @@ mod tests {
         );
     }
 
+    /// The startup restore's attempts beside one another: how many run at
+    /// once, what a held row costs the rows behind it, and what a held row
+    /// still holds up.
+    mod startup_restore_cap {
+        use super::*;
+
+        /// A devserver state before `Ready` whose `roots` are registered and
+        /// prepared as desired-on rows, in that order, with the attempts a
+        /// startup restore runs for them, each bounded by `mount_timeout`.
+        async fn prepared_restore(
+            home: &Path,
+            roots: &[tempfile::TempDir],
+            mount_timeout: Duration,
+        ) -> (Arc<DevserverState>, Vec<MountAttempt>) {
+            let mut state = test_state(home, "127.0.0.1:0".parse().unwrap());
+            Arc::get_mut(&mut state)
+                .expect("fixture: an unshared state")
+                .mount_timeout = mount_timeout;
+            state.host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.join("windows.json"))),
+                "lib-test".into(),
+            );
+            let mut rows = Vec::new();
+            for root in roots {
+                state
+                    .host
+                    .library()
+                    .register_workspace(root.path())
+                    .expect("register");
+                rows.push(PersistedWorkspace {
+                    path: canonical_root(root.path()).to_string_lossy().into_owned(),
+                    desired_on: true,
+                    generation: 1,
+                });
+            }
+            let rows = state.register_restore_rows(rows).await;
+            let attempts = state.prepare_restore_rows(rows);
+            assert!(
+                attempts.len() == roots.len()
+                    && attempts
+                        .iter()
+                        .zip(roots)
+                        .all(|(attempt, root)| attempt.root == canonical_root(root.path())),
+                "fixture: the attempts are not the rows in their order: {attempts:?}"
+            );
+            (state, attempts)
+        }
+
+        fn six_roots() -> Vec<tempfile::TempDir> {
+            (0..6).map(|_| tempfile::tempdir().expect("root")).collect()
+        }
+
+        /// Wait until every startup attempt outside `unsettled` has settled,
+        /// on the coordinator's own change notification.
+        async fn settled_except(state: &DevserverState, unsettled: &[MountAttemptKey]) {
+            loop {
+                let changed = state.startup.changed.notified();
+                let settled = state
+                    .startup
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .iter()
+                    .all(|key| unsettled.contains(key));
+                if settled {
+                    return;
+                }
+                changed.await;
+            }
+        }
+
+        /// A held row costs the restore one slot: the first of six desired-on
+        /// rows hangs on its root, under the production bound, and the five
+        /// behind it, more than the restore runs beside it at once, are
+        /// mounted while it is still held.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn the_rows_behind_a_held_one_are_mounted_while_it_is_held() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let held = attempts[0].clone();
+
+            let stall = root_stall::stall(roots[0].path());
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the first row's attempt never reached its root"
+            );
+
+            let settling = Arc::clone(&state);
+            let held_key = held.key();
+            completes_beside(
+                &stall,
+                "the restore of the rows behind a held one",
+                async move { settled_except(&settling, &[held_key]).await },
+            )
+            .await;
+            for root in &roots[1..] {
+                assert!(
+                    state.host.is_root_mounted(root.path()),
+                    "a row behind the held one was not restored: {}",
+                    root.path().display()
+                );
+            }
+            assert_eq!(
+                state.entry_for(&held.prefix).expect("the held row").status,
+                WorkspaceStatus::Starting,
+                "the held row's attempt ended while its root was held"
+            );
+            assert!(
+                !restore.is_finished(),
+                "the restore returned with a row still held"
+            );
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "the held root did not mount once it answered"
+            );
+        }
+
+        /// With six desired-on rows all hanging on their roots, the restore
+        /// has the first four prepared in flight and no more: the fifth and
+        /// sixth have not taken their prefix's attempt lock, the first thing
+        /// an attempt does, and nothing of theirs has reached a root.
+        ///
+        /// The test drives the restore itself instead of spawning it. When
+        /// the four have reached their roots the restore is between two
+        /// polls, and every attempt it has started has run to its first wait,
+        /// which is past that lock: an attempt lock that is free then is an
+        /// attempt that has not begun.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn four_attempts_run_at_once_and_no_more() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let prefixes: Vec<String> = attempts.iter().map(|a| a.prefix.clone()).collect();
+
+            let stalls: Arc<Vec<root_stall::RootStall>> = Arc::new(
+                roots
+                    .iter()
+                    .map(|root| root_stall::stall(root.path()))
+                    .collect(),
+            );
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let mut restore = std::pin::pin!(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx
+            ));
+
+            let first_four = Arc::clone(&stalls);
+            let reached = tokio::task::spawn_blocking(move || {
+                first_four[..4]
+                    .iter()
+                    .take_while(|stall| stall.wait_entered(HEALTHY_ROOT_BOUND))
+                    .count()
+            });
+            let reached = tokio::select! {
+                _ = &mut restore => panic!("the restore returned with every row's root held"),
+                reached = reached => reached.expect("wait task"),
+            };
+            assert_eq!(
+                reached, 4,
+                "the restore did not have its first four attempts in flight at once"
+            );
+            for (prefix, stall) in prefixes[4..].iter().zip(&stalls[4..]) {
+                let lock = std::pin::pin!(state.mount_attempt_locks.lock(prefix.as_str()));
+                assert!(
+                    futures::poll!(lock).is_ready(),
+                    "a fifth attempt began while four were held: {prefix}"
+                );
+                assert!(
+                    stall.entered().is_empty(),
+                    "a fifth attempt reached its root while four were held: {:?}",
+                    stall.entered()
+                );
+            }
+
+            drop(stalls);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once every root answers");
+            for root in &roots {
+                assert!(
+                    state.host.is_root_mounted(root.path()),
+                    "a row was not restored: {}",
+                    root.path().display()
+                );
+            }
+        }
+
+        /// What the list and the overlay read after a restore does not depend
+        /// on which row settled first. The first of three rows hangs and
+        /// expires at its own bound, shortened here, and the two behind it
+        /// mount: the list is in prefix order with each row's own outcome,
+        /// and every row is still desired on at its generation.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn each_row_has_its_own_outcome_whichever_settles_first() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(3).collect();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, Duration::from_millis(500)).await;
+            let held = attempts[0].prefix.clone();
+            let mut prefixes: Vec<String> = attempts.iter().map(|a| a.prefix.clone()).collect();
+            prefixes.sort();
+            let mut desired: Vec<(String, bool, u64)> = attempts
+                .iter()
+                .map(|a| (a.root.to_string_lossy().into_owned(), true, 1))
+                .collect();
+            desired.sort();
+
+            let stall = root_stall::stall(roots[0].path());
+            let restoring = Arc::clone(&state);
+            completes_beside(&stall, "a restore whose first row hangs", async move {
+                let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+                restore_prepared_workspaces(restoring, attempts, shutdown_rx).await;
+            })
+            .await;
+
+            let entries = state.workspace_entries();
+            assert_eq!(
+                entries.iter().map(|e| e.prefix.clone()).collect::<Vec<_>>(),
+                prefixes,
+                "the list is not the three rows in prefix order"
+            );
+            for entry in &entries {
+                if entry.prefix == held {
+                    assert_eq!(entry.status, WorkspaceStatus::Error, "{entry:?}");
+                    assert!(
+                        entry
+                            .error
+                            .as_deref()
+                            .is_some_and(|reason| reason.contains("timed out after 1 seconds")),
+                        "the held row does not carry its own bound's expiry: {entry:?}"
+                    );
+                } else {
+                    assert!(
+                        entry.on && entry.status == WorkspaceStatus::Running,
+                        "a healthy row is not running: {entry:?}"
+                    );
+                }
+            }
+            let mut persisted: Vec<(String, bool, u64)> = state
+                .host
+                .workspace_overlay()
+                .expect("overlay")
+                .entries()
+                .into_iter()
+                .map(|row| (row.path, row.desired_on, row.generation))
+                .collect();
+            persisted.sort();
+            assert_eq!(
+                persisted, desired,
+                "the overlay does not hold every row desired on at its generation"
+            );
+        }
+
+        /// A held row still holds up what follows the whole restore. With the
+        /// row beside it mounted, the fdstore apply has not begun, `Ready`
+        /// cannot be entered, and the gate answers the mounted tenant 503 with
+        /// its retry hint; the apply begins once the held row settles, and the
+        /// gate opens at `Ready` and not before.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_held_row_keeps_the_fdstore_apply_ready_and_the_gate_waiting() {
+            use tower::ServiceExt;
+
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(2).collect();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            state
+                .startup
+                .advance(StartupPhase::Binding)
+                .expect("preparing -> binding");
+            state
+                .startup
+                .advance(StartupPhase::ServingAndRestoring)
+                .expect("binding -> serving");
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let mounted_path = format!("{}/api/health", attempts[0].prefix);
+            let ask = || {
+                app.clone().oneshot(
+                    HttpRequest::get(mounted_path.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            };
+            let held_key = attempts[1].key();
+
+            let stall = root_stall::stall(roots[1].path());
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the held row's attempt never reached its root"
+            );
+            let settling = Arc::clone(&state);
+            completes_beside(
+                &stall,
+                "the restore of the row beside a held one",
+                async move { settled_except(&settling, &[held_key]).await },
+            )
+            .await;
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "fixture: the row beside the held one is not mounted"
+            );
+
+            let mut apply = std::pin::pin!(state.startup.begin_fdstore_apply_after_restore());
+            assert!(
+                futures::poll!(apply.as_mut()).is_pending(),
+                "the fdstore apply began with a row still held"
+            );
+            assert!(
+                state.startup.advance(StartupPhase::Ready).is_err(),
+                "Ready was entered before the fdstore apply"
+            );
+            let refused = ask().await.unwrap();
+            assert_eq!(
+                refused.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the gate let a mounted tenant's request through with a row still held"
+            );
+            assert_eq!(
+                refused
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+                Some("1")
+            );
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            assert!(
+                tokio::time::timeout(HEALTHY_ROOT_BOUND, apply)
+                    .await
+                    .expect("the fdstore apply begins once the whole restore has ended"),
+                "startup stopped instead of applying the fdstore"
+            );
+            assert_eq!(
+                ask().await.unwrap().status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the gate opened before Ready"
+            );
+            state
+                .startup
+                .advance(StartupPhase::Ready)
+                .expect("fdstore apply -> ready");
+            assert_ne!(
+                ask().await.unwrap().status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the gate stayed closed in Ready"
+            );
+        }
+
+        /// A stop during the restore cancels what has not settled and nothing
+        /// else: the first row, mounted, stays mounted; the row in flight on
+        /// a held root reads cancelled; the last row, still queued, never
+        /// reaches its root; and no startup attempt is left unsettled.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_stop_leaves_a_settled_row_mounted_and_cancels_the_rest() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let in_flight = attempts[1].prefix.clone();
+            let queued = attempts[5].prefix.clone();
+            let unsettled: Vec<MountAttemptKey> =
+                attempts[1..].iter().map(MountAttempt::key).collect();
+
+            let stalls: Vec<root_stall::RootStall> = roots[1..]
+                .iter()
+                .map(|root| root_stall::stall(root.path()))
+                .collect();
+            let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stalls[0].wait_entered(Duration::from_secs(10)),
+                "fixture: the second row's attempt never reached its root"
+            );
+            let settling = Arc::clone(&state);
+            completes_beside(&stalls[0], "the restore of the first row", async move {
+                settled_except(&settling, &unsettled).await
+            })
+            .await;
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "fixture: the first row is not mounted"
+            );
+
+            shutdown.send(true).expect("the restore listens for a stop");
+            completes_beside(&stalls[0], "a stopped restore", async move {
+                restore.await.expect("restore task")
+            })
+            .await;
+
+            assert!(
+                state.host.is_root_mounted(roots[0].path()),
+                "the stop closed a row that had settled"
+            );
+            assert!(
+                state
+                    .startup
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .is_empty(),
+                "the stop left a startup attempt unsettled"
+            );
+            let cancelled = state.entry_for(&in_flight).expect("the row in flight");
+            assert!(
+                cancelled
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("cancelled")),
+                "the row in flight does not read cancelled: {cancelled:?}"
+            );
+            assert!(
+                stalls[4].entered().is_empty(),
+                "the queued row's attempt began: {:?}",
+                stalls[4].entered()
+            );
+            assert_eq!(
+                state.entry_for(&queued).expect("the queued row").status,
+                WorkspaceStatus::Starting,
+                "the queued row lost its starting mark"
+            );
+        }
+
+        /// Rows still queued when the restore's budget ends fail with the
+        /// budget's reason and no attempt of their own. Six rows hang, the
+        /// clock is moved past the whole budget in one step, and the first
+        /// row reads its own bound's expiry while the last reads the budget's
+        /// and has never reached its root.
+        #[tokio::test(start_paused = true)]
+        async fn rows_queued_when_the_budget_ends_fail_without_an_attempt() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let first = attempts[0].prefix.clone();
+            let last = attempts[5].prefix.clone();
+
+            let stalls: Arc<Vec<root_stall::RootStall>> = Arc::new(
+                roots
+                    .iter()
+                    .map(|root| root_stall::stall(root.path()))
+                    .collect(),
+            );
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            let waiting = Arc::clone(&stalls);
+            assert!(
+                tokio::task::spawn_blocking(move || {
+                    waiting[0].wait_entered(Duration::from_secs(10))
+                })
+                .await
+                .expect("wait task"),
+                "fixture: the first row's attempt never reached its root"
+            );
+
+            tokio::time::advance(STARTUP_RESTORE_TIMEOUT).await;
+            completes_beside(&stalls[0], "a restore whose budget ended", async move {
+                restore.await.expect("restore task")
+            })
+            .await;
+
+            let expired = state.entry_for(&first).expect("the first row");
+            assert!(
+                expired
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("timed out after 60 seconds")),
+                "the first row does not carry its own bound's expiry: {expired:?}"
+            );
+            let unattempted = state.entry_for(&last).expect("the last row");
+            assert_eq!(
+                unattempted.status,
+                WorkspaceStatus::Error,
+                "{unattempted:?}"
+            );
+            assert_eq!(
+                unattempted.error.as_deref(),
+                Some("startup restore exceeded 480 seconds"),
+                "the last row does not carry the budget's reason"
+            );
+            assert!(
+                stalls[5].entered().is_empty(),
+                "the last row's attempt began after the budget ended: {:?}",
+                stalls[5].entered()
+            );
+        }
+    }
+
     /// Turning off a root that stopped answering settles its row from the
     /// key the record stores, holding no runtime worker: on a runtime with
     /// one worker, turning another root off still completes beside it.
@@ -7565,6 +8316,63 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_forget_beside_an_abandoned_registration_answers_still_releasing() {
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .unwrap()
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).unwrap();
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::REGISTER_WORKSPACE]);
+        let registering = Arc::clone(&state);
+        let requested = root.path().to_path_buf();
+        let first = tokio::spawn(async move { registering.register_workspace(&requested).await });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: registration was not held"
+        );
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let started = tokio::time::Instant::now();
+        let (status, retry_after, body) = completes_beside(
+            &stall,
+            "a forget beside an abandoned registration",
+            forget_over_the_router(app, prefix),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "forget skipped the release budget"
+        );
+        assert_eq!(retry_after.as_deref(), Some("1"));
+        assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "refused forget unregistered the root"
+        );
+        let closing = Arc::clone(&state.host);
+        let requested = root.path().to_path_buf();
+        let outcome = completes_beside(
+            &stall,
+            "a close beside an abandoned registration",
+            async move { closing.close_workspace_for_root(&requested, false).await },
+        )
+        .await
+        .expect("close the held root");
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::NotFound);
+        assert_eq!(stall.entered().len(), 1);
+    }
+
     /// A devserver whose workspace's record is starting, its attempt not yet
     /// run, beside a removal of that workspace whose caller left while its
     /// unregister was held: that unregister keeps the root's registry-write
@@ -8201,6 +9009,68 @@ mod tests {
                 .close_workspace_for_root(root.path(), false)
                 .await
                 .unwrap();
+        });
+    }
+
+    #[test]
+    fn registrations_of_a_hung_root_hold_one_blocking_thread() {
+        const RETRIES: usize = 3;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(RETRIES + 1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let hung = tempfile::tempdir().expect("hung root");
+            let other = tempfile::tempdir().expect("other root");
+            let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            Arc::get_mut(&mut state).unwrap().mount_timeout = Duration::from_millis(500);
+            state
+                .host
+                .library()
+                .register_workspace(other.path())
+                .unwrap();
+            let stall = root_stall::stall_matching(hung.path(), &[root_stall::REGISTER_WORKSPACE]);
+            let registering = Arc::clone(&state);
+            let root = hung.path().to_path_buf();
+            let first = tokio::spawn(async move { registering.register_workspace(&root).await });
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
+                while stall.entered().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("fixture: the first registration reached the held step");
+            assert!(stall.entered()[0].contains("register_workspace_with_name"));
+            let error = first
+                .await
+                .unwrap()
+                .expect_err("the registration must expire");
+            assert!(matches!(&error, Error::Config(message) if message.starts_with("mount timed out")), "{error}");
+            for _ in 1..RETRIES {
+                let error = state
+                    .register_workspace(hung.path())
+                    .await
+                    .expect_err("retry must expire");
+                assert!(matches!(&error, Error::Config(message) if message.starts_with("mount timed out")), "{error}");
+            }
+            // The spare blocking thread belongs to the healthy root's work;
+            // a blocking hang guard here would compete for that same thread.
+            let outcome = tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                state.host.close_workspace_for_root(other.path(), false),
+            )
+            .await
+            .expect("a close of another root answers beside abandoned registrations")
+            .expect("close another root");
+            assert_eq!(outcome, WorkspaceLifecycleOutcome::NotFound);
+            assert_eq!(
+                stall.entered().len(),
+                1,
+                "each expired registration held a thread"
+            );
         });
     }
 
@@ -9067,6 +9937,185 @@ mod tests {
         #[tokio::test]
         async fn a_pending_mount_repeat_refuses_after_the_stop_signal() {
             refuses_after_signal("pending").await;
+        }
+
+        /// A request to a mounted tenant after the stop signal is told that
+        /// this process is stopping, with a code identifying its closed tenant
+        /// routes and no retry instruction.
+        #[tokio::test]
+        async fn a_tenant_request_after_the_stop_signal_hears_that_the_devserver_stops() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let prefix = state.register_workspace(root.path()).await.expect("mount");
+            signal_stop(&state, false).await;
+
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let response = app
+                .oneshot(
+                    HttpRequest::get(format!("{prefix}/api/health"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+            assert_eq!(
+                refusal_body(response).await,
+                r#"{"error":"the devserver is stopping","code":"devserver_stopping"}"#
+            );
+            assert_eq!(retry_after, None, "a stopping devserver asks for no retry");
+            state.host.shutdown_all().await.unwrap();
+        }
+
+        /// A launcher add through the devserver's root fallback after the
+        /// stop signal is refused before it registers its root, in the
+        /// devserver's own words for a mount refused at the stop.
+        #[tokio::test]
+        async fn a_launcher_add_after_the_stop_signal_registers_nothing() {
+            let _env = chan_home_env_read();
+            for fully_stopped in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let state = devserver_with_windows(home.path()).await;
+                let (app, serve_addr) = build_devserver_app(state.clone(), state.host.clone());
+                serve_addr.set("127.0.0.1:0".parse().unwrap()).unwrap();
+                signal_stop(&state, fully_stopped).await;
+
+                let response = app
+                    .oneshot(mount_request(
+                        "/api/library/workspaces",
+                        serde_json::json!({"path": root.path()}),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    state.host.library().list_workspaces().is_empty(),
+                    "a launcher add after the stop signal registered its root, \
+                     fully_stopped={fully_stopped}"
+                );
+                assert!(
+                    !state.host.is_root_mounted(root.path()),
+                    "a launcher add after the stop signal mounted its root, \
+                     fully_stopped={fully_stopped}"
+                );
+                let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+                assert_eq!(
+                    refusal_body(response).await,
+                    serde_json::json!({
+                        "error": format!(
+                            "the devserver is stopping; {} was not mounted",
+                            root.path().display()
+                        )
+                    })
+                    .to_string(),
+                    "fully_stopped={fully_stopped}"
+                );
+                assert_eq!(retry_after, None, "fully_stopped={fully_stopped}");
+            }
+        }
+
+        /// A launcher on through the devserver's root fallback after the stop
+        /// signal is refused before the host is asked: it mounts nothing and
+        /// records nothing on for the next start.
+        #[tokio::test]
+        async fn a_launcher_on_after_the_stop_signal_mounts_nothing() {
+            let _env = chan_home_env_read();
+            for fully_stopped in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let key = canonical_root(root.path());
+                let prefix = registered_workspace_prefix(&key).unwrap();
+                let state = devserver_with_windows(home.path()).await;
+                state
+                    .host
+                    .library()
+                    .register_workspace(root.path())
+                    .unwrap();
+                let (app, serve_addr) = build_devserver_app(state.clone(), state.host.clone());
+                serve_addr.set("127.0.0.1:0".parse().unwrap()).unwrap();
+                signal_stop(&state, fully_stopped).await;
+
+                let response = app
+                    .oneshot(mount_request(
+                        &format!("/api/library/workspaces{prefix}/on"),
+                        serde_json::json!({}),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    !state.host.is_root_mounted(root.path()),
+                    "a launcher on after the stop signal mounted its root, \
+                     fully_stopped={fully_stopped}"
+                );
+                let intents = overlay_intents(&state);
+                assert!(
+                    intents.iter().all(|(_, on)| !on),
+                    "a launcher on after the stop signal recorded its root on, \
+                     fully_stopped={fully_stopped}: {intents:?}"
+                );
+                let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+                // The on names the root the library stored, its canonical form.
+                assert_eq!(
+                    refusal_body(response).await,
+                    serde_json::json!({
+                        "error": format!(
+                            "the devserver is stopping; {} was not mounted",
+                            key.display()
+                        )
+                    })
+                    .to_string(),
+                    "fully_stopped={fully_stopped}"
+                );
+                assert_eq!(retry_after, None, "fully_stopped={fully_stopped}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_launcher_on_after_the_stop_signal_leaves_a_mounted_workspace_as_it_was() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let key = canonical_root(root.path());
+            let state = devserver_with_windows(home.path()).await;
+            let prefix = state.register_workspace(root.path()).await.expect("mount");
+            assert!(state.host.is_root_mounted(root.path()));
+            let before = overlay_intents(&state);
+            assert_eq!(before, [(key.clone(), true)]);
+            let before_rows = state.host.workspace_overlay().unwrap().entries();
+            let (app, serve_addr) = build_devserver_app(state.clone(), state.host.clone());
+            serve_addr.set("127.0.0.1:0".parse().unwrap()).unwrap();
+            signal_stop(&state, false).await;
+
+            let response = app
+                .oneshot(mount_request(
+                    &format!("/api/library/workspaces{prefix}/on"),
+                    serde_json::json!({}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+            assert_eq!(
+                refusal_body(response).await,
+                serde_json::json!({
+                    "error": format!(
+                        "the devserver is stopping; {} was not mounted",
+                        key.display()
+                    )
+                })
+                .to_string()
+            );
+            assert_eq!(retry_after, None);
+            assert!(state.host.is_root_mounted(root.path()));
+            assert_eq!(state.host.mounted_prefixes().unwrap(), [prefix]);
+            assert_eq!(overlay_intents(&state), before);
+            assert_eq!(
+                state.host.workspace_overlay().unwrap().entries(),
+                before_rows
+            );
+            state.host.shutdown_all().await.unwrap();
         }
 
         /// A mount admitted before the signal can finish registering after it.

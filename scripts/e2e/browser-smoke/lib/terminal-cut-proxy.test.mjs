@@ -1,0 +1,525 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
+import http from "node:http";
+import net from "node:net";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import { promisify } from "node:util";
+import test from "node:test";
+import WebSocket, { WebSocketServer } from "ws";
+import { startTerminalCutProxy } from "./terminal-cut-proxy.mjs";
+import { startTerminalFixture, runTerminalFixture } from "./terminal-fixture.mjs";
+
+const text = (value) => [Buffer.from(JSON.stringify(value)), false];
+const replay = Buffer.from("row-0:\u00e9\x1b[31mRED\x1b[0m\r\n");
+const session = text({ type: "session", id: "wanted", generation: "g1", seq: replay.length, replay_bytes: replay.length });
+const ready = text({ type: "ready" });
+const frames = [session, [replay, true], ready, [Buffer.from("live"), true]];
+const digest = (items) => createHash("sha256").update(Buffer.concat(items.map(([bytes]) => bytes))).digest("hex");
+
+async function rig(t, { messages = frames, ordinal = 1, deadlineMs = 5000, httpHandler, ...limits } = {}) {
+  const sockets = new Set(), clients = new Set(), upstream = [];
+  const httpServer = http.createServer(httpHandler ?? ((req, res) => {
+    res.writeHead(201, { "x-echo": req.headers["x-echo"] ?? "absent" });
+    req.pipe(res);
+  }));
+  httpServer.on("connection", (socket) => {
+    sockets.add(socket); socket.on("close", () => sockets.delete(socket));
+  });
+  const wss = new WebSocketServer({ server: httpServer });
+  wss.on("connection", (socket, req) => {
+    upstream.push({ socket, url: req.url, headers: req.headers });
+    socket.on("error", () => {});
+    socket.on("message", (bytes, binary) => socket.send(bytes, { binary }));
+    for (const [bytes, binary] of messages) socket.send(bytes, { binary });
+  });
+  httpServer.listen(0, "127.0.0.1");
+  await once(httpServer, "listening");
+  const targetUrl = `http://127.0.0.1:${httpServer.address().port}`;
+  const proxy = await startTerminalCutProxy({ targetUrl, path: "/terminal/ws", session: "wanted", ordinal, deadlineMs, ...limits });
+  const port = new URL(proxy.url).port;
+  t.after(async () => {
+    for (const client of clients) client.terminate();
+    await proxy.close();
+    for (const client of wss.clients) client.terminate();
+    for (const socket of sockets) socket.destroy();
+    await Promise.all([new Promise((resolve) => wss.close(resolve)), new Promise((resolve) => httpServer.close(resolve))]);
+    assert.equal(httpServer.listening, false);
+    assert.equal(wss.clients.size, 0);
+    const probe = net.connect({ host: "127.0.0.1", port });
+    await assert.rejects(once(probe, "connect"), { code: "ECONNREFUSED" });
+    probe.destroy();
+  });
+  function dial(query = "session=wanted", pathname = "/terminal/ws", acknowledge = false) {
+    const socket = new WebSocket(`${proxy.url.replace("http:", "ws:")}${pathname}?${query}`, {
+      headers: { authorization: "Bearer DO_NOT_RECORD", origin: targetUrl },
+    });
+    clients.add(socket);
+    const delivered = [];
+    socket.on("error", () => {});
+    socket.on("message", (data, binary) => {
+      delivered.push([Buffer.from(data), binary]);
+      if (acknowledge) proxy.acknowledge({ connection: ordinal, frame: delivered.length, drained: true });
+    });
+    const closed = new Promise((resolve) => socket.once("close", resolve));
+    return { socket, delivered, closed };
+  }
+  return { proxy, dial, upstream, targetUrl };
+}
+
+for (const boundary of ["before-session", "after-session", "inside-replay", "after-ready"]) {
+  test(`cut ${boundary} carries its wire receipt`, { timeout: 10000 }, async (t) => {
+    const { proxy, dial } = await rig(t);
+    proxy.arm({ boundary, bytes: 7 });
+    assert.throws(() => proxy.arm({ boundary }), { code: "CONTROLLER_DISARMED" });
+    const client = dial("session=wanted&token=DO_NOT_RECORD&since=0", "/terminal/ws", true);
+    const receipt = await proxy.waitForCut();
+    await client.closed;
+    assert.equal(receipt.boundary, boundary);
+    assert.equal(receipt.connection, 1);
+    assert.deepEqual(receipt.disconnect, { client: "closed", upstream: "closed" });
+    const received = proxy.records.filter((r) => r.event === "frame" && r.direction === "received");
+    assert.equal(receipt.receivedBytes, received.reduce((sum, r) => sum + r.length, 0));
+    assert.equal(receipt.forwardedBytes, client.delivered.reduce((sum, [bytes]) => sum + bytes.length, 0));
+    assert.equal(JSON.stringify(proxy.records).includes("DO_NOT_RECORD"), false);
+    assert.equal(receipt.upstreamFrame, boundary === "after-ready" ? 3 : boundary === "inside-replay" ? 2 : 1);
+    if (boundary === "before-session") {
+      assert.deepEqual(client.delivered, []);
+      assert.equal(receipt.lastAcknowledged, null);
+      assert.equal(receipt.held[0].bytes, session[0].toString("base64"));
+    } else {
+      assert.deepEqual(receipt.lastAcknowledged, { frame: client.delivered.length, drained: true });
+      if (boundary === "after-session") assert.deepEqual(client.delivered, [session]);
+      if (boundary === "inside-replay") {
+        assert.deepEqual(client.delivered, [session, [replay.subarray(0, 7), true]]);
+        assert.equal(receipt.replayForwarded, 7);
+        assert.equal(receipt.held[0].offset, 7);
+        assert.equal(receipt.held[0].bytes, replay.subarray(7).toString("base64"));
+      }
+      if (boundary === "after-ready") {
+        assert.deepEqual(client.delivered, frames.slice(0, 3));
+        assert.equal(receipt.replayForwarded, replay.length);
+      }
+    }
+    const recovery = dial("session=wanted&since=0");
+    await proxy.waitForRecord((r) => r.connection === 2 && r.direction === "forwarded" && r.frame === frames.length);
+    await new Promise((resolve) => recovery.delivered.length === frames.length ? resolve() :
+      recovery.socket.on("message", () => { if (recovery.delivered.length === frames.length) resolve(); }));
+    assert.deepEqual(recovery.delivered, frames);
+    assert.equal(proxy.records.filter((r) => r.event === "cut").length, 1);
+  });
+}
+
+test("uncut streams preserve types, split UTF-8 and ANSI, HTTP and input", { timeout: 10000 }, async (t) => {
+  const messages = [session, [Buffer.from([0xc3]), true], [Buffer.from([0xa9, 0x1b]), true],
+    [Buffer.from("[31mred\x1b["), true], [Buffer.from("0m"), true], ready];
+  const { proxy, dial, upstream } = await rig(t, { messages });
+  const client = dial();
+  await once(client.socket, "open");
+  const echoed = Buffer.from([0, 255, 27]);
+  client.socket.send(echoed);
+  await proxy.waitForRecord((r) => r.direction === "forwarded" && r.frame === messages.length + 1);
+  while (client.delivered.length < messages.length + 1) await once(client.socket, "message");
+  assert.deepEqual(client.delivered, [...messages, [echoed, true]]);
+  const before = proxy.records.filter((r) => r.direction === "received").map((r) => [Buffer.from(r.bytes, "base64"), r.binary]);
+  assert.equal(digest(before), digest(client.delivered));
+  assert.equal(upstream[0].headers.authorization, "Bearer DO_NOT_RECORD");
+  const response = await fetch(`${proxy.url}/echo?keep=1`, { method: "POST", body: "body", headers: { "x-echo": "kept" } });
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("x-echo"), "kept");
+  assert.equal(await response.text(), "body");
+  await assert.rejects(proxy.waitForCut(), { code: "NOT_ARMED" });
+});
+
+test("an HTTP upstream error after headers destroys only its response", { timeout: 10000 }, async (t) => {
+  const request = http.request;
+  let upstreamRequest;
+  t.mock.method(http, "request", function (...args) {
+    upstreamRequest = request.apply(this, args);
+    return upstreamRequest;
+  });
+  const { proxy } = await rig(t, { httpHandler(req, res) {
+    res.writeHead(200);
+    if (req.url === "/partial") res.write("prefix");
+    else res.end("complete");
+  } });
+  const response = await fetch(`${proxy.url}/partial`);
+  assert.equal(response.status, 200);
+  assert.doesNotThrow(() => upstreamRequest.emit("error", new Error("upstream failed after headers")),
+    "a sent response must be destroyed without writing headers again");
+  await assert.rejects(response.text());
+  assert.equal(await (await fetch(`${proxy.url}/complete`)).text(), "complete");
+  assert.equal(proxy.records.some((r) => r.event === "failure"), false);
+});
+
+test("selection counts only the named path and session", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t, { ordinal: 2 });
+  proxy.arm({ boundary: "after-session" });
+  for (const [query, path] of [["session=other", "/terminal/ws"], ["session=wanted", "/other"], ["session=wanted", "/terminal/ws"]]) {
+    const peer = dial(query, path);
+    await once(peer.socket, "open");
+    if (peer.delivered.length < frames.length) await new Promise((resolve) => peer.socket.on("message", () => {
+      if (peer.delivered.length === frames.length) resolve();
+    }));
+    assert.deepEqual(peer.delivered, frames);
+  }
+  dial("session=wanted", "/terminal/ws", true);
+  assert.equal((await proxy.waitForCut()).connection, 2);
+  assert.equal(proxy.records.filter((r) => r.event === "connection").length, 2);
+});
+
+test("an earlier client close with a delivery in flight leaves the armed pair usable", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t, { ordinal: 2 });
+  const send = WebSocket.prototype.send;
+  let release;
+  const port = Number(new URL(proxy.url).port);
+  t.mock.method(WebSocket.prototype, "send", function (bytes, options, callback) {
+    if (this._socket?.localPort === port && !release) {
+      return send.call(this, bytes, options, (error) => { release = () => callback(error); });
+    }
+    return send.call(this, bytes, options, callback);
+  });
+  t.after(() => release?.());
+  proxy.arm({ boundary: "after-session" });
+  const earlier = dial();
+  await proxy.waitForRecord((r) => r.connection === 1 && r.direction === "received" && r.frame === frames.length);
+  if (earlier.delivered.length === 0) await once(earlier.socket, "message");
+  earlier.socket.close();
+  await earlier.closed;
+  release();
+  dial("session=wanted", "/terminal/ws", true);
+  await assert.doesNotReject(proxy.waitForCut(), "an ordinary earlier close must not fail the selected cut");
+  assert.equal(proxy.records.filter((r) => r.event === "cut")[0].connection, 2);
+  assert.equal(proxy.records.some((r) => r.event === "failure"), false);
+});
+
+test("a replay cut spans source messages without changing byte order", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t, { messages: [session, [replay.subarray(0, 3), true], [replay.subarray(3), true], ready] });
+  proxy.arm({ boundary: "inside-replay", bytes: 7 });
+  const peer = dial("session=wanted", "/terminal/ws", true);
+  const receipt = await proxy.waitForCut();
+  assert.equal(receipt.upstreamFrame, 3);
+  assert.deepEqual(Buffer.concat(peer.delivered.filter(([, binary]) => binary).map(([data]) => data)), replay.subarray(0, 7));
+});
+
+for (const afterReceipt of [false, true]) {
+  test(`an unarmed send error stays local with a prior receipt=${afterReceipt}`, { timeout: 10000 }, async (t) => {
+    const { proxy, dial } = await rig(t);
+    if (afterReceipt) {
+      proxy.arm({ boundary: "before-session" });
+      dial();
+      await proxy.waitForCut();
+    }
+    const connection = afterReceipt ? 2 : 1;
+    const send = WebSocket.prototype.send;
+    const port = Number(new URL(proxy.url).port);
+    let release;
+    t.mock.method(WebSocket.prototype, "send", function (bytes, options, callback) {
+      if (this._socket?.localPort === port && !release) {
+        return send.call(this, bytes, options, () => { release = callback; });
+      }
+      return send.call(this, bytes, options, callback);
+    });
+    proxy.arm({ boundary: "before-session", ordinal: connection + 1 });
+    const peer = dial();
+    await once(peer.socket, "open");
+    while (peer.delivered.length === 0) await once(peer.socket, "message");
+    assert.equal(typeof release, "function", "one forwarding callback is held");
+    peer.socket.terminate();
+    release(new Error("send failed during client disconnection"));
+    const outcome = await proxy.waitForRecord((r) => r.event === "failure" || (r.event === "end" && r.connection === connection));
+    assert.equal(outcome.event, "end", "an unarmed send error ends only its pair");
+    assert.equal(outcome.code, "FORWARD_FAILED");
+    await peer.closed;
+    dial();
+    const receipt = await proxy.waitForCut();
+    assert.equal(receipt.connection, connection + 1);
+    assert.equal(proxy.records.filter((r) => r.event === "cut").length, afterReceipt ? 2 : 1);
+    assert.equal(proxy.records.some((r) => r.event === "failure"), false);
+  });
+}
+
+test("a lost frame on the armed pair fails the cut", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t);
+  const send = WebSocket.prototype.send;
+  const port = Number(new URL(proxy.url).port);
+  let release;
+  t.mock.method(WebSocket.prototype, "send", function (bytes, options, callback) {
+    if (this._socket?.localPort === port && !release) {
+      return send.call(this, bytes, options, () => { release = callback; });
+    }
+    return send.call(this, bytes, options, callback);
+  });
+  proxy.arm({ boundary: "after-session" });
+  const peer = dial();
+  await once(peer.socket, "open");
+  while (peer.delivered.length === 0) await once(peer.socket, "message");
+  assert.equal(typeof release, "function", "the armed send callback is held");
+  peer.socket.terminate();
+  release(new Error("armed send failed"));
+  await assert.rejects(proxy.waitForCut(), { code: "FORWARD_FAILED" });
+  assert.deepEqual(proxy.records.filter((r) => r.event === "failure").map((r) => r.code), ["FORWARD_FAILED"]);
+  assert.equal(proxy.records.some((r) => r.event === "cut"), false);
+});
+
+test("a vanished client before upgrade refuses and settles the cut", { timeout: 10000 }, async () => {
+  // Contain an unhandled disconnect rejection so the assertion names it.
+  const script = `
+    import http from "node:http";
+    import { once } from "node:events";
+    import WebSocket, { WebSocketServer } from "ws";
+    import { startTerminalCutProxy } from "./terminal-cut-proxy.mjs";
+    const server = http.createServer();
+    const upstream = new WebSocketServer({ server });
+    upstream.on("connection", (socket) => {
+      socket.on("error", () => {});
+      socket.send(JSON.stringify({ type: "session", replay_bytes: 0 }));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const proxy = await startTerminalCutProxy({
+      targetUrl: "http://127.0.0.1:" + server.address().port,
+      path: "/terminal/ws", session: "wanted", deadlineMs: 1000,
+    });
+    const upgrade = WebSocketServer.prototype.handleUpgrade;
+    let abandoned = false;
+    WebSocketServer.prototype.handleUpgrade = function (...args) {
+      if (this.options.noServer) {
+        args[1].destroy();
+        abandoned = true;
+      }
+      return upgrade.apply(this, args);
+    };
+    let finish;
+    const result = new Promise((resolve) => { finish = resolve; });
+    process.on("unhandledRejection", (error) => finish({ code: "UNHANDLED_REJECTION", name: error.name }));
+    const deadline = setTimeout(() => finish({ code: "UNSETTLED_CUT" }), 2000);
+    proxy.arm({ boundary: "before-session" });
+    const client = new WebSocket(proxy.url.replace("http:", "ws:") + "/terminal/ws?session=wanted");
+    client.on("error", () => {});
+    proxy.waitForCut().then(() => finish({ code: "CUT" }), (error) => finish({ code: error.code }));
+    try {
+      const outcome = await result;
+      console.log(JSON.stringify({ ...outcome, abandoned, records: proxy.records }));
+    } finally {
+      clearTimeout(deadline);
+      client.terminate();
+      await proxy.close();
+      for (const peer of upstream.clients) peer.terminate();
+      await Promise.all([new Promise((resolve) => upstream.close(resolve)), new Promise((resolve) => server.close(resolve))]);
+    }
+  `;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: new URL(".", import.meta.url), timeout: 5000,
+  });
+  const outcome = JSON.parse(stdout);
+  assert.equal(outcome.abandoned, true, "the raw downstream socket vanished before upgrade");
+  assert.equal(outcome.code, "CLIENT_CLOSED_BEFORE_CUT", "an absent client refuses the cut without an unhandled rejection");
+  assert.deepEqual(outcome.records.filter((r) => r.event === "failure").map((r) => r.code), ["CLIENT_CLOSED_BEFORE_CUT"]);
+  assert.equal(outcome.records.some((r) => r.event === "cut"), false);
+});
+
+test("one proxy cuts twice with an unarmed redial between receipts", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t);
+  proxy.arm({ boundary: "after-session" });
+  dial("session=wanted", "/terminal/ws", true);
+  const first = await proxy.waitForCut();
+  const recovery = dial();
+  await proxy.waitForRecord((r) => r.connection === 2 && r.direction === "forwarded" && r.frame === frames.length);
+  while (recovery.delivered.length < frames.length) await once(recovery.socket, "message");
+  assert.deepEqual(recovery.delivered, frames);
+  assert.doesNotThrow(() => proxy.arm({ boundary: "before-session" }), "a completed cut permits another arm");
+  dial();
+  const second = await proxy.waitForCut();
+  assert.equal(second.connection, 3);
+  assert.equal(first.arm, 1);
+  assert.equal(second.arm, 2);
+  assert.equal(proxy.records.filter((r) => r.event === "cut").length, 2);
+  t.diagnostic(JSON.stringify({ first, second }));
+});
+
+for (const empty of [false, true]) {
+  test(`before-ready holds ready after all binary frames with empty=${empty}`, { timeout: 10000 }, async (t) => {
+    const prelude = text({ type: "session", replay_bytes: empty ? 0 : replay.length });
+    const output = empty ? [[Buffer.from("\x1b[?1049hSCREEN"), true]] : [[replay, true]];
+    const messages = [prelude, ...output, [Buffer.from("\x1b[?1h"), true], ready, [Buffer.from("live"), true]];
+    const { proxy, dial } = await rig(t, { messages });
+    assert.doesNotThrow(() => proxy.arm({ boundary: "before-ready" }), "before-ready is a supported boundary");
+    const peer = dial("session=wanted", "/terminal/ws", true);
+    const receipt = await proxy.waitForCut();
+    assert.deepEqual(peer.delivered, messages.slice(0, 3));
+    assert.equal(receipt.upstreamFrame, 4);
+    assert.equal(receipt.replayForwarded, empty ? 0 : replay.length);
+    assert.equal(receipt.held[0].bytes, ready[0].toString("base64"));
+    assert.deepEqual(receipt.lastAcknowledged, { frame: 3, drained: true });
+    t.diagnostic(JSON.stringify(receipt));
+  });
+}
+
+test("a counted post-replay cut acknowledges its frame and withholds the next", { timeout: 10000 }, async (t) => {
+  for (const empty of [false, true]) {
+    for (const count of [1, 2]) {
+      const prelude = text({ type: "session", replay_bytes: empty ? 0 : replay.length });
+      const history = empty ? [] : [[replay.subarray(0, 3), true], [replay.subarray(3), true]];
+      const tail = [[Buffer.from("first"), true], text({ type: "opaque" }), [Buffer.from("third"), true]];
+      const messages = [prelude, ...history, ...tail, ready];
+      const { proxy, dial } = await rig(t, { messages });
+      for (const frames of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        assert.throws(() => proxy.arm({ boundary: "after-replay-frame", frames }), { code: "INVALID_BOUNDARY" });
+      }
+      assert.doesNotThrow(() => proxy.arm({ boundary: "after-replay-frame", frames: count }),
+        "a positive post-replay frame count is supported");
+      const peer = dial("session=wanted", "/terminal/ws", true);
+      const receipt = await proxy.waitForCut();
+      await peer.closed;
+      const forwarded = 1 + history.length + count;
+      assert.deepEqual(peer.delivered, messages.slice(0, forwarded), "only frames through the counted boundary are delivered");
+      assert.equal(receipt.upstreamFrame, forwarded, "the receipt names the counted frame, not ready");
+      assert.deepEqual(receipt.lastAcknowledged, { frame: forwarded, drained: true });
+      assert.equal(receipt.replayForwarded, empty ? 0 : replay.length);
+      assert.equal(proxy.records.some((r) => r.direction === "forwarded" && r.type === "ready"), false);
+      assert.deepEqual(receipt.disconnect, { client: "closed", upstream: "closed" });
+      t.diagnostic(JSON.stringify({ empty, count, receipt }));
+    }
+  }
+});
+
+test("a counted post-replay cut refuses a boundary beyond ready", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t);
+  assert.doesNotThrow(() => proxy.arm({ boundary: "after-replay-frame", frames: 1 }));
+  dial();
+  await assert.rejects(proxy.waitForCut(), { code: "INVALID_POST_REPLAY_BOUNDARY" });
+  assert.equal(proxy.records.some((r) => r.direction === "forwarded" && r.type === "ready"), false);
+});
+
+for (const boundary of ["before-session", "after-session"]) {
+  test(`${boundary} selects a later session on one socket`, { timeout: 10000 }, async (t) => {
+    const reset = [Buffer.from("\x1bc"), true];
+    const messages = [...frames, reset, session, [replay, true], ready];
+    const { proxy, dial } = await rig(t, { messages });
+    proxy.arm({ boundary, sessionOrdinal: 2 });
+    const peer = dial("session=wanted", "/terminal/ws", true);
+    const receipt = await proxy.waitForCut();
+    assert.equal(receipt.upstreamFrame, 6, "the second session is the selected boundary");
+    assert.equal(receipt.sessionOrdinal, 2);
+    await peer.closed;
+    assert.deepEqual(peer.delivered, messages.slice(0, boundary === "before-session" ? 5 : 6));
+    t.diagnostic(JSON.stringify(receipt));
+  });
+}
+
+test("a future session can be armed on an open connection", { timeout: 10000 }, async (t) => {
+  const { proxy, dial, upstream } = await rig(t);
+  const peer = dial("session=wanted", "/terminal/ws", true);
+  while (peer.delivered.length < frames.length) await once(peer.socket, "message");
+  assert.doesNotThrow(() => proxy.arm({ boundary: "after-session", ordinal: 1, sessionOrdinal: 2 }));
+  upstream[0].socket.send(session[0], { binary: false });
+  const receipt = await proxy.waitForCut();
+  assert.equal(receipt.upstreamFrame, 5);
+  assert.equal(receipt.sessionOrdinal, 2);
+  assert.deepEqual(peer.delivered, [...frames, session]);
+  t.diagnostic(JSON.stringify(receipt));
+});
+
+for (const [name, setup, expected] of [
+  ["absent selection", () => {}, "NO_SELECTED_SOCKET"],
+  ["absent frame", ({ dial }) => dial(), "FRAME_TIMEOUT"],
+  ["lost acknowledgement", ({ dial }) => dial(), "ACK_TIMEOUT"],
+]) {
+  test(`refuses ${name}`, { timeout: 10000 }, async (t) => {
+    const context = await rig(t, { messages: name === "absent frame" ? [] : frames, deadlineMs: 1000 });
+    context.proxy.arm({ boundary: "after-session" });
+    setup(context);
+    await assert.rejects(context.proxy.waitForCut(), { code: expected });
+    assert.deepEqual(context.proxy.records.filter((r) => r.event === "failure").map((r) => r.code), [expected]);
+  });
+}
+
+test("held queue has a byte bound", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t, { maxQueueBytes: 150, messages: [session, [Buffer.alloc(151), true]] });
+  proxy.arm({ boundary: "after-session" });
+  dial();
+  await assert.rejects(proxy.waitForCut(), { code: "QUEUE_LIMIT" });
+});
+
+for (const code of ["TRACE_LIMIT", "QUEUE_LIMIT"]) {
+  test(`recovery refuses ${code} after preserving the cut receipt`, { timeout: 10000 }, async (t) => {
+    const limits = code === "TRACE_LIMIT" ? { maxTraceBytes: session[0].length * 3 + 1 } : { maxQueueBytes: 150 };
+    const { proxy, dial, upstream } = await rig(t, { messages: [session], ...limits });
+    proxy.arm({ boundary: "after-session" });
+    dial("session=wanted", "/terminal/ws", true);
+    const receipt = await proxy.waitForCut();
+    const recovery = dial();
+    await once(recovery.socket, "open");
+    if (code === "QUEUE_LIMIT") upstream[1].socket.send(Buffer.alloc(151));
+    await assert.doesNotReject(proxy.waitForRecord((r) => r.event === "failure" && r.code === code, 500),
+      "a recovery limit must produce its failure record");
+    await recovery.closed;
+    await assert.rejects(proxy.waitForCut(), { code });
+    assert.deepEqual(proxy.records.find((r) => r.event === "cut"), { event: "cut", ...receipt });
+    assert.equal(proxy.records.filter((r) => r.event === "failure").length, 1);
+  });
+}
+
+test("invalid replay offset and invalid acknowledgements refuse", { timeout: 10000 }, async (t) => {
+  const { proxy, dial } = await rig(t);
+  assert.throws(() => proxy.arm({ boundary: "inside-replay", bytes: 0 }), { code: "INVALID_BOUNDARY" });
+  assert.throws(() => proxy.acknowledge({ connection: 1, frame: 1 }), { code: "INVALID_ACK" });
+  proxy.arm({ boundary: "inside-replay", bytes: replay.length });
+  dial();
+  await assert.rejects(proxy.waitForCut(), { code: "INVALID_REPLAY_BOUNDARY" });
+});
+
+test("fixture commands, raw keys and barriers agree with its append-only log", { timeout: 10000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "chan-terminal-fixture-test-"));
+  const logPath = join(dir, "emitted.bin");
+  const controller = await startTerminalFixture({ logPath });
+  const input = new PassThrough(), output = new PassThrough(), emitted = [];
+  input.isTTY = output.isTTY = true;
+  input.setRawMode = (raw) => { input.isRaw = raw; };
+  output.columns = 80; output.rows = 24;
+  output.on("data", (bytes) => emitted.push(Buffer.from(bytes)));
+  const run = runTerminalFixture({ port: Number(controller.env.TERMINAL_FIXTURE_PORT),
+    token: controller.env.TERMINAL_FIXTURE_TOKEN, logPath, input, output });
+  run.catch(() => {});
+  t.after(async () => { await controller.close(); await run; await rm(dir, { recursive: true }); });
+  const identity = await controller.ready();
+  assert.equal(identity.raw, true);
+  assert.equal(identity.cols, 80);
+  await controller.send("rows", { prefix: "unique", count: 2 });
+  await controller.send("marker", { name: "main" });
+  await controller.send("alternate", { enabled: true });
+  await controller.send("redraw", { name: "alt" });
+  await controller.send("bytes", { base64: Buffer.from("\x1b[?1h").toString("base64") });
+  input.write(Buffer.from([27, 79, 65]));
+  assert.equal((await controller.waitFor((r) => r.type === "keys")).base64, Buffer.from([27, 79, 65]).toString("base64"));
+  await controller.send("alternate", { enabled: false });
+  const barrier = await controller.send("barrier", { name: "finite" });
+  const expected = Buffer.from("unique:00000000\r\nunique:00000001\r\nMARKER:main\r\n\x1b[?1049h\x1b[2J\x1b[HSCREEN:alt\r\n\x1b[?1h\x1b[?1049l");
+  assert.deepEqual(Buffer.concat(emitted), expected);
+  assert.deepEqual(await readFile(logPath), expected);
+  assert.equal(barrier.offset, expected.length);
+  assert.equal(barrier.sha256, createHash("sha256").update(expected).digest("hex"));
+  await assert.rejects(controller.send("marker", { name: "blocked" }), { code: "BARRIER_HELD" });
+  await assert.rejects(controller.send("resume", { name: "wrong" }), { code: "BARRIER_MISMATCH" });
+  await assert.rejects(controller.send("bytes", { base64: "!" }), { code: "INVALID_BYTES" });
+  assert.deepEqual(await readFile(logPath), expected);
+  await controller.send("resume", { name: "finite" });
+  await controller.send("rows", { prefix: "unique", count: 1 });
+  assert.deepEqual(await readFile(logPath), Buffer.concat([expected, Buffer.from("unique:00000002\r\n")]));
+  await controller.send("stop");
+  await run;
+  assert.equal(input.isRaw, false);
+});
+
+test("fixture refuses a missing peer and a non-PTY", { timeout: 10000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "chan-terminal-fixture-test-"));
+  const controller = await startTerminalFixture({ logPath: join(dir, "unused.bin"), deadlineMs: 100 });
+  t.after(async () => { await controller.close(); await rm(dir, { recursive: true }); });
+  await assert.rejects(controller.ready(), { code: "FIXTURE_EVENT_TIMEOUT" });
+  await assert.rejects(runTerminalFixture({ input: new PassThrough(), output: new PassThrough() }), { code: "PTY_REQUIRED" });
+});

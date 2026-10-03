@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import FileEditorTab from "./FileEditorTab.svelte";
 import Pane from "./Pane.svelte";
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import { setSocketFactory } from "../api/transport";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { demoSocketFactory } from "../demo/socket";
@@ -39,10 +40,13 @@ import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import {
   bumpTabFocusPulse,
   closeFind,
+  conflictDialog,
+  dismissConflict,
   ensureTabSlidePreview,
   layout,
   markTabFileMissing,
   openFind,
+  registerLiveSessionKind,
   rekeyTabsForRename,
   reloadTabFromDisk,
   saveTab,
@@ -175,7 +179,6 @@ function fileTab(over: Partial<FileTab> = {}): FileTab {
     fileMissing: null,
     inspectorOpen: false,
     outlineOpen: false,
-    repoRoot: null,
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: false,
@@ -1399,6 +1402,96 @@ describe("a right-click in the JSON tree and the table", () => {
   });
 });
 
+describe("the not-saved line", () => {
+  // A live session reports what the file on disk lacks through the hook its
+  // kind registers; this kind answers for the tab ids a test names and
+  // defers on every other question. The real document sessions are off, so
+  // it is the only one that answers.
+  const unflushedIds = new Set<string>();
+  registerLiveSessionKind({
+    save: async () => "classic",
+    release: () => {},
+    savePaused: () => false,
+    unflushed: (tabId) => unflushedIds.has(tabId),
+    fallbackSaved: () => {},
+  });
+
+  beforeEach(() => {
+    // No session of an earlier test may answer for this tab.
+    resetDocSyncForTests();
+    resetSceneSyncForTests();
+    localStorage.setItem("chan.docsync", "0");
+  });
+
+  afterEach(() => {
+    unflushedIds.clear();
+    localStorage.removeItem("chan.docsync");
+  });
+
+  function line(target: HTMLElement): string | null {
+    return target.querySelector(".editor-toolbar .error")?.textContent?.trim() ?? null;
+  }
+
+  test("a rejected text autosave keeps the typed editor and its reason", async () => {
+    const tab = seat(fileTab({ id: "rejected-text", mode: "source", content: "typed text", saved: "old text" }));
+    const { target } = await render(tab);
+    vi.spyOn(api, "write").mockRejectedValue(new Error("disk full"));
+    vi.useFakeTimers();
+    try {
+      scheduleAutosave(PANE, tab.id);
+      await vi.advanceTimersByTimeAsync(900);
+      await tick();
+      expect(target.querySelector(".cm-content"), "typed editor stays mounted").not.toBeNull();
+      expect(target.querySelector(".cm-content")?.textContent).toContain("typed text");
+      expect(target.querySelector(".error-placeholder")).toBeNull();
+      expect(line(target)).toBe("Not saved: the save request failed (disk full)");
+      expect(tab.refusedUnwritten).toBeFalsy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a failed text load still replaces the editor", async () => {
+    const tab = seat(fileTab({ id: "failed-load", mode: "source" }));
+    const { target } = await render(tab);
+    vi.spyOn(api, "readStream").mockRejectedValue(new Error("read interrupted"));
+    await reloadTabFromDisk(tab.id);
+    await settle(2);
+    expect(target.querySelector(".error-placeholder")?.textContent).toBe("read interrupted");
+    expect(target.querySelector(".cm-content")).toBeNull();
+  });
+
+  test("shows a save error while a live session holds what the file lacks, the tab being clean", async () => {
+    const tab = seat(fileTab({ id: "not-saved-1", saveError: "the server could not write it (disk full)" }));
+    unflushedIds.add(tab.id);
+    const { target } = await render(tab);
+    expect({ line: line(target), editor: target.querySelector(".cm-content") !== null }).toEqual({
+      line: "Not saved: the server could not write it (disk full)",
+      editor: true,
+    });
+  });
+
+  test("shows none once the file holds the buffer", async () => {
+    const tab = seat(fileTab({ id: "not-saved-2", saveError: "the server could not write it (disk full)" }));
+    const { target } = await render(tab);
+    expect(line(target)).toBeNull();
+  });
+
+  test("keeps the editor and unsaved line when a live push has no answer", async () => {
+    const tab = seat(fileTab({
+      id: "not-saved-3",
+      saveError: "the previous live push has not been confirmed",
+      unresolvedLivePush: true,
+      unresolvedLiveSave: true,
+    }));
+    const { target } = await render(tab);
+    expect({ line: line(target), editor: target.querySelector(".cm-content") !== null }).toEqual({
+      line: "Not saved: the previous live push has not been confirmed",
+      editor: true,
+    });
+  });
+});
+
 describe("a drawing whose save is refused", () => {
   const PATH = "notes/board.excalidraw";
   const SAVED = '{"type":"excalidraw","elements":[]}';
@@ -1473,7 +1566,7 @@ describe("a drawing whose save is refused", () => {
     }).toEqual({ line: undefined, editor: SAVED });
   });
 
-  test("on the board keeps the board unmounted and says to fix it in source", async () => {
+  test("on the board keeps the board unmounted and points to source", async () => {
     const { tab, target } = await refused();
     setMode(tab, "canvas");
     await settle();
@@ -1485,8 +1578,16 @@ describe("a drawing whose save is refused", () => {
     }).toEqual({
       line: `Not saved: the drawing does not parse (${reason()})`,
       board: false,
-      body: `This drawing does not parse, so the board cannot show it. Use Show source code (${chordFor("app.editor.toggleMode")}) to fix it.`,
+      body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
     });
+    setTabContent(tab, SAVED);
+    await settle();
+    expect({
+      line: toolbarLine(target),
+      placeholder: target.querySelector(".refused-placeholder") !== null,
+      board: island.props !== null,
+      held: tab.refusedUnwritten,
+    }).toEqual({ line: undefined, placeholder: false, board: true, held: false });
   });
 
   test("a missing file's state comes before the line", async () => {
@@ -1586,18 +1687,37 @@ describe("a drawing whose save is refused", () => {
 
     test("on the board a fixed text is written by the classic save, and the session comes after it lands", async () => {
       const realWrite = api.write.bind(api);
-      const { tab, write } = await refused();
+      const { tab, target, write } = await refused();
       const gate = heldWrites(write, realWrite);
       setTabContent(tab, FIXED);
       setMode(tab, "canvas");
       await settle();
+      const pending = {
+        held: tab.refusedUnwritten,
+        placeholder: target.querySelector(".refused-placeholder") !== null,
+        body: target.querySelector(".refused-placeholder")?.textContent?.trim(),
+        board: island.props !== null,
+      };
       await autosaveFires(tab.id);
       const inFlight = dialled("scene");
       gate.land?.();
       await settle();
 
-      expect({ inFlight, scene: dialled("scene"), disk: disk.get(PATH)?.content }).toEqual({
-        inFlight: 0, scene: 1, disk: FIXED,
+      expect({
+        pending,
+        inFlight,
+        scene: dialled("scene"),
+        disk: disk.get(PATH)?.content,
+        placeholder: target.querySelector(".refused-placeholder") !== null,
+        board: island.props !== null,
+      }).toEqual({
+        pending: {
+          held: true,
+          placeholder: true,
+          body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
+          board: false,
+        },
+        inFlight: 0, scene: 1, disk: FIXED, placeholder: false, board: true,
       });
     });
 
@@ -1617,6 +1737,42 @@ describe("a drawing whose save is refused", () => {
       await saveTab(tab);
 
       expect(write.mock.calls.map((call) => call.slice(2))).toEqual([[null, 1, null]]);
+    });
+
+    test("a fixed drawing held by a conflict says it has not been saved", async () => {
+      const { tab, target, write } = await refused();
+      write.mockRejectedValue(
+        new ApiError(409, "file changed on disk since it was read", {
+          error: "file changed on disk since it was read",
+          code: "write_conflict",
+          current_mtime: 5,
+          current_mtime_ns: "5",
+        }),
+      );
+      setTabContent(tab, FIXED);
+      setMode(tab, "canvas");
+      await saveTab(tab);
+      await settle();
+
+      try {
+        expect({
+          conflict: conflictDialog.open,
+          held: tab.refusedUnwritten,
+          reason: toolbarLine(target),
+          body: target.querySelector(".refused-placeholder")?.textContent?.trim(),
+          board: island.props !== null,
+          disk: disk.get(PATH)?.content,
+        }).toEqual({
+          conflict: true,
+          held: true,
+          reason: undefined,
+          body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
+          board: false,
+          disk: SAVED,
+        });
+      } finally {
+        dismissConflict();
+      }
     });
 
     test("a rename out of the check takes the line away and no document session until the write lands", async () => {

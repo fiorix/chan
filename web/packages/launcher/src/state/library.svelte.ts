@@ -216,35 +216,36 @@ function applyWorkspaceRow(row: WorkspaceEntry): void {
   library.workspaces = next;
 }
 
+// Feed events and mutation completions share one ordered refresh. A request
+// during a fetch queues a fresh snapshot, and mutation callers await it so
+// their completion and pending markers reflect the updated registry.
+let workspaceRefresh: Promise<void> | null = null;
+let workspaceRefreshPending = false;
+
 async function refreshWorkspaces(): Promise<void> {
-  library.workspaces = await backend.listWorkspaces();
-  reconcilePending();
+  if (workspaceRefresh) {
+    workspaceRefreshPending = true;
+    return workspaceRefresh;
+  }
+  workspaceRefresh = (async () => {
+    try {
+      do {
+        workspaceRefreshPending = false;
+        library.workspaces = await backend.listWorkspaces();
+      } while (workspaceRefreshPending);
+      reconcilePending();
+    } finally {
+      workspaceRefresh = null;
+    }
+  })();
+  return workspaceRefresh;
 }
 
-// The live re-fetch the window-watch feed drives. The feed pushes a full
-// snapshot on every window change, so bursts are coalesced: while a re-fetch
-// is in flight, a later push just flags one more run, and the in-flight call
-// re-runs once when it lands. No timer, so nothing leaks between tests, and a
-// transient list error is swallowed -- the next push (or a manual reload) heals.
-let liveRefreshing = false;
-let liveRefreshPending = false;
-
 async function refreshWorkspacesLive(): Promise<void> {
-  if (liveRefreshing) {
-    liveRefreshPending = true;
-    return;
-  }
-  liveRefreshing = true;
   try {
-    do {
-      liveRefreshPending = false;
-      library.workspaces = await backend.listWorkspaces();
-    } while (liveRefreshPending);
-    reconcilePending();
+    await refreshWorkspaces();
   } catch {
     // Best-effort: a failed live re-fetch must not tear down the feed.
-  } finally {
-    liveRefreshing = false;
   }
 }
 
@@ -336,8 +337,8 @@ export async function toggleWorkspace(id: string, on: boolean, force?: boolean):
   await refreshWorkspaces(); // reconcile clears the marker once on/off has landed
 }
 
-export async function removeWorkspace(id: string): Promise<void> {
-  await backend.removeWorkspace(id);
+export async function removeWorkspace(id: string, force?: boolean): Promise<void> {
+  await backend.removeWorkspace(id, force);
   await refreshWorkspaces();
 }
 

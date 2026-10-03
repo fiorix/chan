@@ -13,6 +13,8 @@ import {
   fileOps,
   graphReloadSignal,
   onWatchEvent,
+  raiseUploadPicker,
+  raiseReplacePicker,
   openFsGraphForDirectory,
   openFsGraphForFile,
   persistStateToHash,
@@ -20,7 +22,6 @@ import {
   resolveSpawnContext,
   revealPathInBrowser,
   scheduleSessionSave,
-  scopeFsGraphFromHere,
   searchPanel,
   tree,
   treeExpanded,
@@ -31,7 +32,6 @@ import {
   fbDirSubscriberCount,
   expandAllFoldersForInstance,
   collapseAllFoldersForInstance,
-  isFullyExpandedForInstance,
   revealAndSelect,
 } from "./store.svelte";
 import {
@@ -811,7 +811,10 @@ describe("workspace root loss", () => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes("/api/fs")) {
         return new Response(
-          JSON.stringify({ error: "workspace root does not exist: /tmp/gone" }),
+          JSON.stringify({
+            error: "workspace root does not exist: /tmp/gone",
+            code: "workspace_root_missing",
+          }),
           { status: 404, headers: { "content-type": "application/json" } },
         );
       }
@@ -1375,24 +1378,6 @@ describe("filesystem graph entrypoints", () => {
     expect(graph.mode).toBe("semantic");
     expect(graph.scopeId).toBe("workspace");
   });
-
-  test("filesystem graph scope action pivots to files and directories", () => {
-    scopeFsGraphFromHere("notes", true);
-
-    let graph = activeGraphTab();
-    expect(graph.mode).toBe("filesystem");
-    expect(graph.scopeId).toBe("dir:notes");
-    expect(graph.depth).toBe(1);
-    expect(graph.pendingSelectId).toBe("notes");
-
-    scopeFsGraphFromHere("notes/a.md", false);
-
-    graph = activeGraphTab();
-    expect(graph.mode).toBe("filesystem");
-    expect(graph.scopeId).toBe("file:notes/a.md");
-    expect(graph.depth).toBe(1);
-    expect(graph.pendingSelectId).toBe("notes/a.md");
-  });
 });
 
 describe("external-change banner", () => {
@@ -1736,9 +1721,9 @@ describe("per-instance file browser tree registry", () => {
 });
 
 // FileTree renders + toggles off the per-instance map, so the expand-all /
-// collapse-all / full-expansion helpers target one instance. A dock side
-// and a tab (two instances) must not toggle each other; a programmatic
-// reveal fans out to every live surface.
+// collapse-all helpers target one instance. A dock side and a tab (two
+// instances) must not toggle each other; a programmatic reveal fans out to
+// every live surface.
 describe("per-instance expansion helpers", () => {
   function seedTree(): void {
     const dirs = ["docs", "docs/api", "notes"];
@@ -1766,17 +1751,9 @@ describe("per-instance expansion helpers", () => {
     });
     // The sibling instance is untouched: per-instance independence.
     expect(tab.expanded).toEqual({ "": true });
-    expect(isFullyExpandedForInstance("fb-dock-left")).toBe(true);
-    expect(isFullyExpandedForInstance("fb-tab-1")).toBe(false);
 
     collapseAllFoldersForInstance("fb-dock-left");
     expect(dock.expanded).toEqual({ "": true });
-    expect(isFullyExpandedForInstance("fb-dock-left")).toBe(false);
-  });
-
-  test("isFullyExpandedForInstance is false for an unregistered instance", () => {
-    seedTree();
-    expect(isFullyExpandedForInstance("fb-overlay")).toBe(false);
   });
 
   test("revealAndSelect fans ancestor expansion across all live instances", () => {
@@ -1792,3 +1769,43 @@ describe("per-instance expansion helpers", () => {
     expect(browserSelection.path).toBe("docs/api/spec.md");
   });
 });
+
+
+for (const standalone of [true, false]) {
+  test(`native upload callers keep their own lane in a ${standalone ? "standalone" : "workspace"} window`, async () => {
+    const meta = document.createElement("meta");
+    meta.name = "chan-files";
+    meta.content = "1";
+    document.head.append(meta);
+    window.history.replaceState(null, "", standalone ? "/?w=window-a&kind=terminal" : "/?w=window-a");
+    const urls: string[] = [];
+    const invoke = vi.fn(async (cmd: string, args?: unknown) => {
+      if (cmd === "native_transfer_status") return null;
+      if (cmd === "upload_files_native") {
+        urls.push((args as { url: string }).url);
+        return [];
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const nativeWindow = window as unknown as { __TAURI__?: unknown };
+    nativeWindow.__TAURI__ = { core: { invoke } };
+    try {
+      raiseUploadPicker("notes");
+      await vi.waitFor(() => expect(urls).toHaveLength(1));
+      raiseReplacePicker("notes/a.md");
+      await vi.waitFor(() => expect(urls).toHaveLength(2));
+      onWatchEvent({ type: "window_command", window_id: "window-a", command: "upload", path: "/tmp/in", root: "filesystem" });
+      await vi.waitFor(() => expect(urls).toHaveLength(3));
+      const params = urls.map((url) => new URL(url).searchParams);
+      expect(params.map((q) => [q.get("app"), q.get("root")]), "Files pickers opt in; cs upload keeps its transfer route").toEqual([
+        [standalone ? "files" : null, null],
+        [standalone ? "files" : null, null],
+        [null, "filesystem"],
+      ]);
+    } finally {
+      delete nativeWindow.__TAURI__;
+      meta.remove();
+      window.history.replaceState(null, "", "/");
+    }
+  });
+}

@@ -55,6 +55,7 @@
   const optionId = (index: number): string => `chan-command-deck-option-${index}`;
 
   let input: HTMLInputElement | undefined = $state();
+  let shell: HTMLElement | undefined = $state();
   let zone: "input" | "results" | "scopes" = $state("input");
   let keyboardIndex = $state(0);
   let pointerIndex: number | null = $state(null);
@@ -69,10 +70,7 @@
   // (Escape, the backdrop, the host hiding the deck) hands focus back.
   let closingRun: object | null = null;
   let confirmKeyReleased = true;
-  // Whoever holds the operation card owns it: a preparation between its start
-  // and its paint, an executing command between its pending card and its
-  // result. A background call whose token no longer matches has lost the card
-  // and must not paint into it.
+  // Tokens bind card writes to the preparation or command currently owning it.
   let preparationToken: object | null = null;
   let executionToken: object | null = null;
 
@@ -105,7 +103,7 @@
       void tick().then(() => input?.focus());
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
-      // Handing focus back is not navigation: it must not scroll the page.
+      // Preserve the viewport while restoring the caller's focus.
       if (!closingRun && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
       returnFocus = null;
     }
@@ -168,10 +166,10 @@
     onScope(scope.id);
   }
 
-  async function openConfirm(item: DeckItem): Promise<void> {
+  async function openConfirm(item: DeckItem, enterHeld = false): Promise<void> {
     const request = item.confirm;
     if (!request) return;
-    confirmKeyReleased = false;
+    confirmKeyReleased = !enterHeld;
     const executionDraft = draft;
     const token = {};
     preparationToken = token;
@@ -288,14 +286,10 @@
       const chosen = onChoose(item);
       closedDuringChoose = !open;
       const result = await chosen;
-      // A hidden pending command can finish after the draft it started with
-      // was cleared and swapped for a fresh one. Never paint that result into
-      // the new draft.
+      // Results belong to the draft that started the command.
       if (draft !== executionDraft) return;
       if (result) {
-        // A confirmation answers the run that asked for it. Once the card has
-        // been released or handed to a newer run, this answer describes a
-        // decision the deck is no longer offering.
+        // Only the current card owner can offer its follow-up confirmation.
         if (executionToken !== token) return;
         executionDraft.operation = {
           kind: "confirm",
@@ -321,10 +315,10 @@
     }
   }
 
-  function choose(item: DeckItem | undefined): void {
+  function choose(item: DeckItem | undefined, enterHeld = false): void {
     if (!item || item.disabled) return;
     if (item.confirm && draft.operation?.itemId !== item.id) {
-      void openConfirm(item);
+      void openConfirm(item, enterHeld);
       return;
     }
     void execute(item);
@@ -341,14 +335,13 @@
     void tick().then(() => input?.focus());
   }
 
-  function retry(item: DeckItem): void {
-    if (typeof item.confirm === "function") void openConfirm(item);
+  function retry(item: DeckItem, enterHeld = false): void {
+    if (typeof item.confirm === "function") void openConfirm(item, enterHeld);
     else void execute(item);
   }
 
-  /// Give the card back to the results list. The command behind it may still
-  /// be in flight, so its ownership drops with it and its result stays off
-  /// screen.
+  /// Return to the results list and release ownership of the operation card.
+  /// An in-flight command settles independently.
   function releaseOperation(): void {
     preparationToken = null;
     executionToken = null;
@@ -371,7 +364,7 @@
         return;
       }
       const item = operationItem();
-      if (item) retry(item);
+      if (item) retry(item, true);
     }
   }
 
@@ -383,6 +376,31 @@
     zone = "input";
   }
 
+  function onPageKeydown(event: KeyboardEvent): void {
+    if (!open || !shell || event.defaultPrevented) return;
+    const target = event.target;
+    const inside = target instanceof Node && shell.contains(target);
+    const page = target === document.body || target === document.documentElement ||
+      target === document || target === window;
+    if (!inside && !page) return;
+
+    // This non-modal deck yields to a visible modal, including while the
+    // modal repairs focus after removing its active control.
+    const modals = document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"], dialog[open]');
+    for (const modal of modals) {
+      let visible = true;
+      for (let node: HTMLElement | null = modal; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (node.hidden || node.inert || style.display === "none" || style.visibility === "hidden") {
+          visible = false;
+          break;
+        }
+      }
+      if (visible) return;
+    }
+    onKeydown(event);
+  }
+
   function onKeydown(event: KeyboardEvent): void {
     // The deck owns keyboard input while open. A command can synchronously
     // activate an app-level key mode, so letting the execution key bubble
@@ -390,9 +408,8 @@
     event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
-      // Escape cancels confirmation preparation without hiding the deck. An
-      // executing command also releases its blocking view while its promise
-      // continues in the background.
+      // Escape returns to the results list. An executing command continues
+      // settling in the background.
       if (draft.operation?.kind === "preparing" || draft.operation?.kind === "pending") {
         releaseOperation();
         return;
@@ -448,7 +465,7 @@
         else setKeyboardIndex(keyboardIndex - 1);
       } else if (event.key === "Enter" || event.key === "ArrowRight") {
         event.preventDefault();
-        choose(selectedItem);
+        choose(selectedItem, event.key === "Enter");
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
         onBack();
@@ -467,7 +484,7 @@
       enterScopes();
     } else if (event.key === "Enter" && items.length) {
       event.preventDefault();
-      choose(selectedItem);
+      choose(selectedItem, true);
     } else if ((event.key === "Backspace" && draft.query === "") || event.key === "ArrowLeft" && draft.query === "") {
       event.preventDefault();
       onBack();
@@ -478,19 +495,21 @@
   }
 </script>
 
-<svelte:window onkeyup={(event) => { if (event.key === "Enter") confirmKeyReleased = true; }} />
+<svelte:window
+  onkeydowncapture={onPageKeydown}
+  onkeyup={(event) => { if (event.key === "Enter") confirmKeyReleased = true; }}
+/>
 
 {#if open}
   <div class="deck-overlay" data-direction={direction}>
     <button class="deck-backdrop" type="button" aria-label="Hide command launcher" onclick={onClose}></button>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
     <section
+      bind:this={shell}
       class="deck-shell"
       role="dialog"
       aria-modal="false"
       aria-label="Command launcher"
-      onkeydown={onKeydown}
     >
       <svg class="deck-filter" width="0" height="0" aria-hidden="true">
         <filter id="chan-command-orb-blob">

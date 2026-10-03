@@ -1,7 +1,7 @@
 // Contact picker bubble.
 //
 // Two trigger shapes, one bubble:
-//   - `@word`   (mode "wiki", legacy): commits `[[<path>|<label>]]`
+//   - `@word`   (mode "wiki"): commits `[[<path>|<label>]]`
 //     so the picked contact lands as a wiki-link pill in the source.
 //   - `@@word`  (mode "mention"): commits `@@<alias-or-stem>`
 //     so the picked contact lands as a mention pill that
@@ -27,8 +27,8 @@ export interface ContactBubbleOpts {
   triggerEnd: number;
   initialQuery: string;
   onDismiss: () => void;
-  /// Insertion mode. "wiki" is the legacy `@` trigger; "mention" is
-  /// the new `@@` trigger that writes `@@<alias-or-stem>` so the
+  /// Insertion mode. "wiki" is the `@` trigger; "mention" is
+  /// the `@@` trigger that writes `@@<alias-or-stem>` so the
   /// graph keeps the mention sigil in the source.
   mode?: ContactBubbleMode;
 }
@@ -72,19 +72,13 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   let query = opts.initialQuery;
   let triggerEnd = opts.triggerEnd;
   let hits: Suggestion[] = [];
+  /// Whether a lookup has answered: an empty list says "Loading" only
+  /// before that, or a workspace with no contacts would load for ever.
+  let answered = false;
   let selectedIndex = 0;
   let reqSeq = 0;
   let debounceTimer: number | undefined;
   let alive = true;
-  /// Mention-corpus completion is surfaced under BOTH triggers.
-  /// Both modes merge contact-file hits first, then mention-only
-  /// tokens from `api.mentions`. The insertion shape follows the
-  /// picked row's kind, not the trigger: a contact-file hit
-  /// commits a wiki-link under `@` (`commit`), a mention-only
-  /// hit commits `@@<Name>` under either trigger
-  /// (`commitMention`).
-  const includeMentions = true;
-
   const list = document.createElement("div");
   list.className = "md-bubble-list";
   shell.wrap.appendChild(list);
@@ -92,6 +86,13 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   status.className = "md-bubble-status";
   shell.wrap.appendChild(status);
 
+  /// Mention-corpus completion is surfaced under BOTH triggers.
+  /// Both modes merge contact-file hits first, then mention-only
+  /// tokens from `api.mentions`. The insertion shape follows the
+  /// picked row's kind, not the trigger: a contact-file hit
+  /// commits a wiki-link under `@` (`commit`), a mention-only
+  /// hit commits `@@<Name>` under either trigger
+  /// (`commitMention`).
   function fetchContacts(): void {
     if (debounceTimer !== undefined) clearTimeout(debounceTimer);
     const seq = ++reqSeq;
@@ -101,19 +102,24 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
       // 2*PAGE_LIMIT before the dedup pass; the dedup typically
       // collapses common-name overlap back under PAGE_LIMIT.
       const contactsP = api.contacts(query, PAGE_LIMIT);
-      const mentionsP = includeMentions
-        ? api.mentions(query, PAGE_LIMIT).catch(() => [] as MentionHit[])
-        : Promise.resolve<MentionHit[]>([]);
+      const mentionsP = api
+        .mentions(query, PAGE_LIMIT)
+        .catch(() => [] as MentionHit[]);
       Promise.all([contactsP, mentionsP])
         .then(([contactRows, mentionRows]) => {
           if (!alive || seq !== reqSeq) return;
+          answered = true;
           hits = mergeSuggestions(contactRows, mentionRows);
           if (selectedIndex >= hits.length) selectedIndex = 0;
           render();
         })
         .catch((err) => {
           if (!alive || seq !== reqSeq) return;
+          // The rows on screen must be the ones Enter and the arrows
+          // index, so the list is drawn again without the old hits.
           hits = [];
+          selectedIndex = 0;
+          render();
           status.textContent = `Contact lookup failed: ${err.message ?? err}`;
         });
     }, FETCH_DEBOUNCE_MS);
@@ -136,7 +142,7 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
       kind: "contact",
       contact: c,
     }));
-    if (!includeMentions || mentionRows.length === 0) return out;
+    if (mentionRows.length === 0) return out;
     // Build the dedup set from each contact's basename stem +
     // their alias list (both lowercased, sans `@@`).
     const seen = new Set<string>();
@@ -159,9 +165,11 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   function render(): void {
     list.innerHTML = "";
     if (hits.length === 0) {
-      status.textContent = query.length === 0
+      status.textContent = !answered
         ? "Loading contacts..."
-        : "No matches";
+        : query.length === 0
+          ? "No contacts"
+          : "No matches";
       shell.reposition();
       return;
     }
@@ -227,7 +235,7 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
 
   function commit(c: Contact): void {
     // Two insertion shapes (see module docstring):
-    //   - wiki mode (the legacy `@` trigger): `[[<path>|<label>]]`.
+    //   - wiki mode (the `@` trigger): `[[<path>|<label>]]`.
     //     The wikilink atom widget renders the pill on the next
     //     decoration tick.
     //   - mention mode (the `@@` trigger): `@@<alias-or-stem>`. The

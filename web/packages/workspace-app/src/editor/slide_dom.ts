@@ -149,7 +149,8 @@ function preserveExtraBlankLines(markdown: string): string {
   const out: string[] = [];
   let blankRun = 0;
   let inFence = false;
-  let fenceMarker: "`" | "~" | null = null;
+  /// The run of backticks or tildes that opened the fence in hand.
+  let openRun: string | null = null;
 
   // Blank runs at the slide boundaries are page-separator whitespace
   // left behind by the deck split, not authored in-slide spacing, so
@@ -165,7 +166,7 @@ function preserveExtraBlankLines(markdown: string): string {
   }
 
   for (const line of lines) {
-    const fence = line.match(/^\s*(`{3,}|~{3,})/);
+    const fence = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
     if (!inFence && line.trim() === "") {
       blankRun++;
       continue;
@@ -177,13 +178,20 @@ function preserveExtraBlankLines(markdown: string): string {
     out.push(line);
 
     if (!fence) continue;
-    const marker = fence[1]![0] as "`" | "~";
+    const run = fence[1]!;
     if (!inFence) {
       inFence = true;
-      fenceMarker = marker;
-    } else if (fenceMarker === marker) {
+      openRun = run;
+    } else if (
+      // CommonMark closes a fence only on a run of its opener's character
+      // at least as long, with nothing but spaces after it.
+      openRun !== null &&
+      run[0] === openRun[0] &&
+      run.length >= openRun.length &&
+      fence[2]!.trim() === ""
+    ) {
       inFence = false;
-      fenceMarker = null;
+      openRun = null;
     }
   }
 

@@ -121,9 +121,11 @@
     terminalMessageBytes,
   } from "../terminal/connection";
   import {
+    copyTerminalKeyboardProtocolState,
     handleGhosttyShiftEnter,
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
+    type TerminalKeyboardProtocolState,
   } from "../terminal/keymap";
   import {
     handleTerminalClipboardChord,
@@ -228,6 +230,8 @@
         /// generation no longer matches is discarded and the server full-replays.
         generation: number;
         missed_bytes?: number;
+        /// Ring bytes before the alternate-screen and mode preludes; absent on older servers.
+        replay_bytes?: number;
         bytes_since_focus?: number;
         /// MESSAGE depth of the shared write queue at attach time, so every
         /// (re)attach re-syncs the badge (the tab field is never persisted).
@@ -276,7 +280,7 @@
     | { type: "exit"; code?: number }
     | { type: "error"; message?: string; reason?: string };
 
-  type CloseReason = "idle" | "workspace" | "shutdown" | "explicit" | "capped" | "error";
+  type CloseReason = "idle" | "workspace" | "parked" | "shutdown" | "explicit" | "capped" | "error";
 
   let host: HTMLDivElement | undefined = $state();
   let searchInput: HTMLInputElement | undefined = $state();
@@ -297,6 +301,12 @@
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
   let resizeScanCols = 0;
+  // A drag of a pane's edge changes the width on every frame, and a
+  // whole-buffer mask rescan of a long scrollback costs a large part of one,
+  // so each change rescans the rows on screen and the whole buffer waits for
+  // the width to stay put this long.
+  const RESIZE_SCAN_QUIET_MS = 150;
+  let resizeScanTimer: ReturnType<typeof setTimeout> | null = null;
   // Scrollback line cap captured at construction time from the
   // persisted MB budget so xterm.js gets a stable number. Held on
   // the component so the "copy scrollback" actions serialize the same
@@ -338,6 +348,18 @@
   // its own session frame leaves the screen as it was and keeps it; only a
   // disposed xterm clears it.
   let sawSessionControl = false;
+  // Set when a socket is closed between a session frame and its `ready`
+  // (closeSocket, which every redial's connect runs first, marks it): the
+  // screen holds part of a replay and `receivedSeq` names the end of it, so
+  // neither the live cursor nor a snapshot is a place to resume from. The
+  // redial asks for the whole ring. A nonempty replay with a byte count
+  // starts on a reset screen; an empty or unmarked replay keeps it. The
+  // next `ready` clears the cut.
+  let replayCut = false;
+  // The keyboard protocol as it stood when the current replay began, which
+  // the reset write restores after its parser handlers have run and before
+  // the first ring byte is parsed.
+  let keyboardProtocolBeforeReplay: TerminalKeyboardProtocolState | null = null;
   let pendingPromptSeed = "";
   let promptSeedSent = false;
   let terminalCwdAbs: string | null = $state(null);
@@ -1001,7 +1023,7 @@
     // (no surviving session to reattach to). Reattaching to a long-lived
     // PTY keeps the protocol the program already announced, since a
     // running agent won't re-announce after the reconnect; resetting here
-    // is what regressed Shift+Enter -> newline into a plain submit.
+    // would turn Shift+Enter -> newline into a plain submit.
     const keyboardProtocol = ensureTerminalKeyboardProtocol(
       tab,
       !tab.terminalSessionId,
@@ -1254,7 +1276,12 @@
       // by marker tracking.
       if (cols !== resizeScanCols) {
         resizeScanCols = cols;
-        secretMasker?.scanAll();
+        secretMasker?.scanViewport();
+        if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
+        resizeScanTimer = setTimeout(() => {
+          resizeScanTimer = null;
+          secretMasker?.scanAll();
+        }, RESIZE_SCAN_QUIET_MS);
       }
     });
     resizeObserver = new ResizeObserver(queueFit);
@@ -1351,7 +1378,7 @@
     missedBytes = 0;
     const reattaching = Boolean(tab.terminalSessionId);
     const liveResumeSince =
-      reattaching && sawSessionControl && serverGeneration !== null
+      reattaching && sawSessionControl && !replayCut && serverGeneration !== null
         ? receivedSeq
         : undefined;
     const liveResumeGeneration =
@@ -1359,6 +1386,7 @@
     // Whether this dial's socket has delivered a session frame yet: its first
     // one on a reattach carries a replay of history the PTY already had.
     let dialSawSession = false;
+    let resetBeforeReplay = false;
     pendingPromptSeed = reattaching ? "" : (tab.seedInput ?? "");
     promptSeedSent = false;
     // Try to resume from either this live xterm or a cached scrollback
@@ -1384,7 +1412,7 @@
     // dump and the ghostty backend never captures one (serialize stays
     // null there), so a reattach under ghostty lets the server ring
     // replay restore the screen instead.
-    if (resumeSince === undefined && reattaching && tab.terminalSessionId && backend === "xterm") {
+    if (resumeSince === undefined && !replayCut && reattaching && tab.terminalSessionId && backend === "xterm") {
       const cached = readTerminalSnapshot(tab.terminalSessionId);
       if (cached && cached.cols === term.cols && cached.rows === term.rows) {
         pendingSnapshot = cached;
@@ -1440,6 +1468,23 @@
       armDeadline();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
+        if (resetBeforeReplay && bytes.length > 0) {
+          resetBeforeReplay = false;
+          const terminal = term;
+          const sessionId = tab.terminalSessionId;
+          const protocol = tab.keyboardProtocol;
+          const beforeReplay = keyboardProtocolBeforeReplay;
+          // RIS resets the registered keyboard state too. Its write callback
+          // runs after those handlers and before the queued replay bytes.
+          writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay", () => {
+            if (term === terminal && tab.terminalSessionId === sessionId && protocol && beforeReplay) {
+              copyTerminalKeyboardProtocolState(beforeReplay, protocol);
+            }
+          });
+          if (missedBytes > 0) {
+            writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
+          }
+        }
         writePtyOutput(bytes, attachPtyWriteOrigin());
         // Advance the server byte cursor only for LIVE output: replay chunks
         // (between the `session` and `ready` frames) reconstruct history up to
@@ -1456,7 +1501,9 @@
         return;
       }
       if (frame.type === "ready") {
+        resetBeforeReplay = false;
         attachReplayActive = false;
+        replayCut = false;
         replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
@@ -1472,6 +1519,15 @@
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
+        resetBeforeReplay = replayCut && typeof frame.replay_bytes === "number" && frame.replay_bytes > 0;
+        if (replayCut) {
+          // These observers can hold a partial sequence even when the server
+          // sends only its alternate-screen prelude and mode reassert.
+          mouseFilter?.reset();
+          osc52Bridge?.reset();
+        } else if (tab.keyboardProtocol) {
+          keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol);
+        }
         dialSawSession = true;
         sawSessionControl = true;
         // A successful attach proves the session + path healthy: reset the
@@ -1497,6 +1553,7 @@
         // modes untouched, as the start does for a reattach.
         if (frame.id !== priorId) {
           ensureTerminalKeyboardProtocol(tab, true);
+          keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol!);
           writeParsedPtyOutput(
             new TextEncoder().encode(
               "\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l",
@@ -1554,7 +1611,7 @@
         missedBytes = Math.max(0, Math.floor(frame.missed_bytes ?? 0));
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
-        if (missedBytes > 0) {
+        if (missedBytes > 0 && !resetBeforeReplay) {
           term?.writeln(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
       } else if (frame.type === "renamed") {
@@ -1604,15 +1661,15 @@
         setTerminalQueueDepth(tab, 0);
         failPendingPrompt(tab);
         // Drop the scrollback snapshot cached for this session id so a closed
-        // terminal holds no cache budget. A shutdown keeps the id below, and
+        // terminal holds no cache budget. A parked PTY keeps the id below, and
         // the reattach after the reload then asks for a full replay.
         if (tab.terminalSessionId) clearTerminalSnapshot(tab.terminalSessionId);
         clearTerminalMetadataSink();
-        // A devserver shutdown keeps the id, so every later save still names
+        // A parked PTY keeps the id, so every later save still names
         // the session and the reloaded window reattaches to the PTY the next
         // process restores; the server answers an id it no longer has with a
-        // fresh shell. Every other reason ended the session.
-        if (frame.reason !== "shutdown") clearTerminalSession(tab);
+        // fresh shell. Other reasons, including unknown ones, clear the id.
+        if (frame.reason !== "parked") clearTerminalSession(tab);
         if (frame.reason === "explicit") {
           // The user (or another window / `cs terminal close`) deleted this
           // terminal. Under Option A the dead tab vanishes automatically; if
@@ -1669,7 +1726,7 @@
       // A transient dial failure never strands a resumable session: the id
       // survives so an offline/sleep window can still reattach the persisted
       // remote session on reconnect. Only the server's `exit` frame and a
-      // `closed` frame for any reason but a shutdown clear the session id.
+      // `closed` frame for any reason but `parked` clear the session id.
       if (status !== "exited") status = "closed";
       // Heal: redial with capped backoff through the reattach path. An exited
       // session stays down (the server ended it; the tab shows its exit
@@ -1804,6 +1861,9 @@
     // An ended session's screen closes with the line this tab wrote below the
     // PTY's output, so it is no snapshot of the session.
     if (status === "exited") return;
+    // A replay that has not reached its `ready` has painted part of the
+    // session under a cursor that names the end of it.
+    if (attachReplayActive) return;
     const sessionId = tab.terminalSessionId;
     if (!term || !serialize || !sessionId || serverGeneration === null) return;
     // Never throw out of a pagehide/beforeunload handler: this fires globally
@@ -1877,7 +1937,7 @@
   // Rich Prompt: the right-click "Show/Hide Rich Prompt" entry mirrors the
   // `terminal.richPrompt` chord (App.svelte onWindowKey); the label comes
   // from the shortcut store so menu and keymap can't drift.
-  const richPromptChord = chordFor("terminal.richPrompt") ?? "";
+  const richPromptChord = $derived(chordFor("terminal.richPrompt") ?? "");
   function toggleRichPromptFromMenu(): void {
     closeTabMenu();
     toggleRichPromptForTab(tab.id);
@@ -1902,6 +1962,7 @@
   function writeParsedPtyOutput(
     bytes: Uint8Array,
     origin: PtyWriteOrigin,
+    onComplete?: () => void,
   ): void {
     if (!term || !termWriter) return;
     // Ghostty backend only: observe (never alter) the stream for OSC 52
@@ -1913,9 +1974,12 @@
       () => masker?.captureWrite() ?? null,
       (snapshot) => masker?.scanWrite(snapshot),
     );
-    // Keep the existing writer + origin ordering. Replay callbacks only drain
-    // the batch; live callbacks still run their captured per-write scan.
-    ptyWrites.write(termWriter, bytes, origin, completeMaskScan);
+    // Restore the reset's keyboard state before draining the mask batch or
+    // running a live write's captured scan.
+    ptyWrites.write(termWriter, bytes, origin, () => {
+      onComplete?.();
+      completeMaskScan();
+    });
   }
 
   /// OS file dropped on this terminal: type the dropped files' absolute
@@ -2045,6 +2109,7 @@
   }
 
   function closeSocket(): void {
+    if (attachReplayActive) replayCut = true;
     attachReplayActive = false;
     suppressAttachReplayGeneratedReplies = false;
     clearTerminalMetadataSink();
@@ -2085,6 +2150,8 @@
     host?.removeEventListener("keydown", onGhosttyHostChord, true);
     ghosttyScrollbarClickGate?.();
     ghosttyScrollbarClickGate = null;
+    if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
+    resizeScanTimer = null;
     secretMasker?.dispose();
     secretMasker = null;
     term?.dispose();
@@ -2312,8 +2379,6 @@
     closeTabMenu();
     requestTerminalCwd();
     ui.status = "PTY did not report CWD";
-    // Persistent so the pill gets a dismiss control; a null statusKind
-    // is neither dismissable nor auto-cleared and would stick forever.
     ui.statusKind = "persistent";
     focusTerminal();
   }
@@ -2570,9 +2635,9 @@
   {#if menuOpen}
     <div
       class="terminal-tab-menu-bubble"
-      role="menu"
+      role={tabMenu.source === "body" ? "menu" : "dialog"}
       tabindex="-1"
-      aria-label="terminal tab menu"
+      aria-label={tabMenu.source === "body" ? "terminal menu" : "terminal tab settings"}
       use:portal
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
@@ -2587,7 +2652,7 @@
             <span>Terminal engine</span>
             <span class="terminal-backend-value">{backend}</span>
           </div>
-          <button class="mbtn" onclick={toggleSecretMasking}>
+          <button class="mbtn" role="menuitem" onclick={toggleSecretMasking}>
             <span class="mbtn-icon">
               <EyeOff size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -2601,7 +2666,7 @@
           <div class="msep" role="separator"></div>
           {#if backend === "xterm"}
             <!-- Find rides xterm's SearchAddon; no ghostty-web equivalent. -->
-            <button class="mbtn" onclick={openFind}>
+            <button class="mbtn" role="menuitem" onclick={openFind}>
               <span class="mbtn-icon">
                 <Search size={16} strokeWidth={1.75} aria-hidden="true" />
               </span>
@@ -2609,21 +2674,21 @@
               <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
             </button>
           {/if}
-          <button class="mbtn" onclick={copySelectionOrScrollback}>
+          <button class="mbtn" role="menuitem" onclick={copySelectionOrScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">Copy</span>
             <span class="mbtn-chord">{chordFor("terminal.copy") ?? ""}</span>
           </button>
-          <button class="mbtn" onclick={pasteClipboard}>
+          <button class="mbtn" role="menuitem" onclick={pasteClipboard}>
             <span class="mbtn-icon">
               <ClipboardPaste size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">Paste</span>
             <span class="mbtn-chord">{chordFor("terminal.paste") ?? ""}</span>
           </button>
-          <button class="mbtn" onclick={copyScrollback}>
+          <button class="mbtn" role="menuitem" onclick={copyScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -2635,7 +2700,7 @@
                command gates, and a tenant without the store serves no
                drafts route. -->
           {#if windowCaps.drafts}
-            <button class="mbtn" onclick={toggleRichPromptFromMenu}>
+            <button class="mbtn" role="menuitem" onclick={toggleRichPromptFromMenu}>
               <span class="mbtn-icon">
                 <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />
               </span>

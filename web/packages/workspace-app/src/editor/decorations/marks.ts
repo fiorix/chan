@@ -1,14 +1,19 @@
-// Inline mark handlers: bold, italic, strike, code, link, naked URL.
+// Inline mark handlers: bold, italic, strike, code, link, autolink,
+// naked URL.
 //
-// Each outer-mark handler:
+// Each paired-mark handler (Emphasis, StrongEmphasis, Strikethrough,
+// InlineCode):
 //   1. Emits a `Decoration.mark` over the inner content with a class
 //      that the CSS layer styles (`cm-md-bold`, `cm-md-italic`, etc.).
 //   2. If the active selection does NOT intersect the OUTER mark's
 //      range, emits `Decoration.replace({})` over each marker child to
 //      hide the source punctuation. Outer-range intersection (not per-
 //      child) so caret near *a* reveals BOTH `*` chars together - a
-//      per-child rule would show `*a` then `a*` as the caret crossed,
-//      which is the bug class the rewrite exists to eliminate.
+//      per-child rule would show `*a` then `a*` as the caret crossed.
+//
+// Link and Autolink apply the same outer-range test to their own
+// children: an external `[label](url)` hides its LinkMarks and its
+// URL, an autolink hides its angle brackets.
 //
 // Naked URLs: lezer-markdown's GFM Autolink emits a bare `URL` node
 // for `https://x` text in paragraphs (also for emails). The URL node
@@ -21,6 +26,7 @@
 //     visible content.
 
 import { Decoration } from "@codemirror/view";
+import { isInternalHref } from "../links";
 import type { TokenContext, TokenHandler } from "./walker";
 
 // ---- shared decorations --------------------------------------------------
@@ -88,9 +94,9 @@ const handleStrong = handlePairedMark(MARK_BOLD);
 const handleStrike = handlePairedMark(MARK_STRIKE);
 const handleCode = handlePairedMark(MARK_CODE);
 
-/// Link `[label](url)` - external markdown links (internal paths get
-/// promoted to atomic wikilink widgets in step 6). Children layout per
-/// lezer-markdown:
+/// Link `[label](url)` - external markdown links (a link with an
+/// internal path is left to the wikilink widget, which renders it as
+/// an atomic pill). Children layout per lezer-markdown:
 ///   LinkMark `[`
 ///   <inline content for label> (zero or more nodes)
 ///   LinkMark `]`
@@ -104,7 +110,8 @@ const handleCode = handlePairedMark(MARK_CODE);
 ///     `[`) with link style
 ///   - hide each LinkMark unless visible
 ///   - hide the URL unless visible (when visible it gets the "url"
-///     dimmed style instead)
+///     dimmed style instead), except under an empty label, where the
+///     URL stays and takes the link style
 function handleLink(ctx: TokenContext): void {
   const cursor = ctx.node.node.cursor();
   if (!cursor.firstChild()) return;
@@ -123,12 +130,10 @@ function handleLink(ctx: TokenContext): void {
     // decorated here.
     return;
   }
-  // Skip internal links - those are owned by widgets/wikilink.ts and
-  // render as atomic pills. We detect "internal" cheaply by URL-scheme
-  // absence; the wikilink walker does the real normalizeHref check
-  // (and falls through to here if the path is unresolvable).
+  // The wikilink walker owns internal links, including paths it cannot
+  // place in the workspace, which it renders as broken pills.
   const url = ctx.state.doc.sliceString(urlRange.from, urlRange.to);
-  if (isInternalUrl(url)) return;
+  if (isInternalHref(url)) return;
   // Label sits between linkMarks[0].to and linkMarks[1].from.
   const labelFrom = linkMarks[0]!.to;
   const labelTo = linkMarks[1]!.from;
@@ -154,13 +159,6 @@ function handleLink(ctx: TokenContext): void {
       ctx.push(HIDE, urlRange.from, urlRange.to);
     }
   }
-}
-
-function isInternalUrl(url: string): boolean {
-  if (!url) return false;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return false; // scheme prefix → external
-  if (url.startsWith("#")) return false; // intra-doc anchor → leave alone
-  return true;
 }
 
 /// Bare URL handler. Fires for both naked URLs in paragraphs and the

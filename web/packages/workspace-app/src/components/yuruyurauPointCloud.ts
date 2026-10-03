@@ -4,10 +4,9 @@ import {
 } from "./pointCloudCover";
 import { linkProgram, uniformLocation } from "./webglProgram";
 
-// The 2D path drew each point as a rect between 0.75 and 1.25 device
+// Each point is between 0.75 and 1.25 device
 // pixels. GL rasterizes a point smaller than one pixel as a single
-// fragment, so the lower bound only ever reads as 1px -- the same place
-// the 2D fill landed once antialiasing collapsed the sub-pixel rect.
+// fragment, so the lower bound only ever reads as 1px.
 const MIN_POINT_SIZE = 0.75;
 const MAX_POINT_SIZE = 1.25;
 
@@ -106,7 +105,7 @@ export function createYuruyurauPointCloudRenderer(
       );
 
       // Points ship in source space and the vertex shader places them, so
-      // the cull repeats the screen-space test the 2D path used: a chaotic
+      // the cull runs the screen-space test before the upload: a chaotic
       // attractor throws stray points far outside the cover box, and they
       // would otherwise ride along in every upload.
       if (upload.length < frame.points.length) {

@@ -287,7 +287,6 @@ impl PreferencesPatch {
 
 #[derive(Debug, Serialize)]
 struct ConfigConflictBody {
-    error: &'static str,
     current: GlobalConfigView,
 }
 
@@ -364,14 +363,12 @@ pub async fn api_patch_config(
 fn patch_config_response(result: Result<GlobalConfigView, PatchConfigError>) -> Response {
     match result {
         Ok(view) => Json(view).into_response(),
-        Err(PatchConfigError::Conflict(current)) => (
+        Err(PatchConfigError::Conflict(current)) => crate::error::err_code(
             StatusCode::CONFLICT,
-            Json(ConfigConflictBody {
-                error: "config_conflict",
-                current: *current,
-            }),
-        )
-            .into_response(),
+            "configuration changed since the revision this write expected".into(),
+            "config_conflict",
+            ConfigConflictBody { current: *current },
+        ),
         Err(PatchConfigError::Error(error)) => err(status_for_error(&error), error.to_string()),
     }
 }
@@ -1095,7 +1092,14 @@ mod tests {
             .await
             .expect("read conflict body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("conflict JSON");
-        assert_eq!(json["error"], "config_conflict");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "error": "configuration changed since the revision this write expected",
+                "code": "config_conflict",
+                "current": serde_json::to_value(&current).expect("serialize the current view"),
+            })
+        );
         assert_eq!(json["current"]["revision"], 2);
         assert_eq!(json["current"]["preferences"]["theme"], "dark");
 

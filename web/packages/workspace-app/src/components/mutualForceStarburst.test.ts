@@ -27,6 +27,22 @@ vi.mock("./mutualForceStarburst", async (importOriginal) => {
 afterEach(stopAnimations);
 
 describe("Mutual Force Starburst", () => {
+  test("keeps its particles across a resize", () => {
+    const { callbacks } = startAnimation(MutualForceStarburst, recordingContext2d().ctx);
+    const advance = vi.mocked(advanceMutualForceParticles);
+    callbacks.resize(800, 800, false, 0);
+    advance.mockClear();
+    callbacks.frame(1000);
+    const before = advance.mock.calls[0]?.[0];
+    expect(before, "a frame advances the particles").toBeDefined();
+
+    callbacks.resize(600, 800, false, 1000);
+    advance.mockClear();
+    callbacks.frame(2000);
+
+    expect(advance.mock.calls[0]?.[0], "the same particles move on").toBe(before);
+  });
+
   test("steps the source simulation 60 times per second of animation time", () => {
     const { callbacks } = startAnimation(MutualForceStarburst, recordingContext2d().ctx);
     callbacks.resize(800, 800, false, 0);
@@ -47,6 +63,18 @@ describe("Mutual Force Starburst", () => {
     callbacks.frame(6000);
 
     expect(advance).toHaveBeenCalledTimes(4);
+  });
+
+  test("keeps up with the speed control: at 4x a paint of 150 ms of clock takes 9 source steps", () => {
+    const { run, callbacks } = startAnimation(MutualForceStarburst, recordingContext2d().ctx);
+    run.canvas.parentElement!.style.setProperty("--canvas-animation-speed", "4");
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const advance = vi.mocked(advanceMutualForceParticles);
+    advance.mockClear();
+    callbacks.frame(1150);
+
+    expect(advance).toHaveBeenCalledTimes(9);
   });
 
   test("fades each source step by 9/255 of the background its theme token names", () => {

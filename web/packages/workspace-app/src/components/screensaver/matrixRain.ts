@@ -68,8 +68,9 @@ export type RainColumn = {
 };
 
 // Build one column per grid column with randomized start delays so they don't
-// all fall in lockstep. Mirrors the original inline `newColumn` exactly
-// (chars sized to numCols, delay scaled by numChars) so the look is unchanged.
+// all fall in lockstep. A column's glyphs are sized by the rows it falls
+// through, as `stepRain` sizes them when a column restarts, so a viewport
+// taller than it is wide keeps the bottom of each first fall.
 export function createRainColumns(
   numCols: number,
   numChars: number,
@@ -77,7 +78,7 @@ export function createRainColumns(
   const columns: RainColumn[] = [];
   for (let index = 0; index < numCols; index += 1) {
     columns.push({
-      chars: randomChars(numCols),
+      chars: randomChars(numChars),
       delay: randInt(numChars * RAIN_DENSITY * 2),
       speed: !randInt(4) ? 1 : 0,
       position: 0,
@@ -98,8 +99,7 @@ function clearCell(
 // clears and repaints only the cells that change each tick and relies on the
 // canvas retaining the prior frame (it does NOT clear the whole canvas), so the
 // caller must clear once before the first tick and never between ticks. Mutates
-// each column's `position`/`delay`/`chars`. Identical logic to the original
-// inline `drawScreen`; only the closure vars became parameters.
+// each column's `position`/`delay`/`chars`.
 export function stepRain(
   ctx: CanvasRenderingContext2D,
   columns: RainColumn[],
@@ -176,7 +176,7 @@ export function stepRain(
 // A single frozen frame of the rain, for the reduced-motion path (both the
 // fullscreen screensaver and the preview fallback). Seeds columns at random
 // fall depths so the still reads as a moment of falling rain (sparse heads +
-// trails over black), NOT the dense full grid this used to draw. The caller
+// trails over black), NOT a dense full grid. The caller
 // owns the canvas; we clear the grid extent first.
 export function drawStaticMatrix(
   ctx: CanvasRenderingContext2D,

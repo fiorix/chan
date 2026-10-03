@@ -3,8 +3,8 @@
 // terminal PTY (/api/terminal/ws). None have a server here.
 //
 // The watcher and local-color sockets are idle: they open, satisfy the
-// handshake, and never push (there are no external filesystem events in the
-// mock). The terminal socket is a fake PTY that streams a canned session and
+// handshake, and push only the pong that answers a heartbeat ping (there are
+// no external filesystem events in the mock). The terminal socket is a fake PTY that streams a canned session and
 // echoes input locally. Same-window broadcast still works because it is
 // fanned out in the frontend (state/tabs.svelte.ts), independent of any
 // socket.
@@ -39,6 +39,13 @@ class MockSocket {
   }
 
   send(data: unknown): void {
+    // No server answers the transport's heartbeat here, so the socket does:
+    // an unanswered ping trips the read deadline and redials a watch that a
+    // test keeps open past it.
+    if (isPing(data)) {
+      this.emitText(JSON.stringify({ type: "pong" }));
+      return;
+    }
     this.received(data);
   }
 
@@ -62,7 +69,16 @@ class MockSocket {
   protected received(_data: unknown): void {}
 }
 
-// Idle watcher / local-color socket: opens and stays quiet.
+function isPing(data: unknown): boolean {
+  if (typeof data !== "string") return false;
+  try {
+    return (JSON.parse(data) as { type?: unknown } | null)?.type === "ping";
+  } catch {
+    return false;
+  }
+}
+
+// Idle watcher / local-color socket: opens and pushes no event.
 class IdleSocket extends MockSocket {}
 
 // Fake PTY. Streams a short canned session on open and echoes typed input so

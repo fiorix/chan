@@ -1189,6 +1189,58 @@ jobs:
             }
           }
 
+          $installDir = Join-Path $env:LOCALAPPDATA "Chan"
+          $uninstaller = Join-Path $installDir "uninstall.exe"
+          if (Test-Path -LiteralPath $installDir) {
+            throw "Chan is already installed at $installDir"
+          }
+          try {
+            $installerPath = (Resolve-Path -LiteralPath $installer).ProviderPath
+            $install = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru
+            if ($install.ExitCode -ne 0) {
+              throw "Silent NSIS install failed with exit code $($install.ExitCode)"
+            }
+            if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
+              throw "Silent NSIS install did not create $uninstaller"
+            }
+
+            $signature = Get-AuthenticodeSignature -LiteralPath $uninstaller
+            $signature | Format-List Path,Status,StatusMessage,SignerCertificate,TimeStamperCertificate
+            if ($signature.Status -ne "Valid") {
+              throw "Authenticode signature is not valid for ${uninstaller}: $($signature.Status)"
+            }
+            & $signtool verify /pa /v $uninstaller
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool verify failed for $uninstaller with exit code $LASTEXITCODE"
+            }
+            Write-Output "Installed uninstaller Authenticode signature verified: $uninstaller ($($signature.Status))"
+          } finally {
+            if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+              # _?= keeps NSIS in this process so -Wait observes the complete uninstall.
+              $uninstall = Start-Process -FilePath $uninstaller -ArgumentList "/S", "_?=$installDir" -Wait -PassThru
+              if ($uninstall.ExitCode -ne 0) {
+                throw "Silent NSIS uninstall failed with exit code $($uninstall.ExitCode)"
+              }
+              foreach ($name in @("chan-desktop.exe", "chan.exe")) {
+                $installedFile = Join-Path $installDir $name
+                if (Test-Path -LiteralPath $installedFile -PathType Leaf) {
+                  throw "Silent NSIS uninstall left $installedFile installed"
+                }
+              }
+              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+                Remove-Item -LiteralPath $uninstaller -Force
+              }
+              if (Test-Path -LiteralPath $installDir -PathType Container) {
+                $remaining = @(Get-ChildItem -LiteralPath $installDir -Force)
+                if ($remaining.Count -gt 0) {
+                  throw "Silent NSIS uninstall left files in ${installDir}: $($remaining.Name -join ', ')"
+                }
+                Remove-Item -LiteralPath $installDir
+              }
+              Write-Output "Silent NSIS uninstall completed: $installDir"
+            }
+          }
+
       - name: Headless boot + /api/health smoke
         working-directory: chan
         shell: bash

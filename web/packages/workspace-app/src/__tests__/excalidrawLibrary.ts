@@ -27,6 +27,12 @@
 //   6. The init applies the restored appState through `syncActionResult`,
 //      which keeps the `viewModeEnabled` prop over the restored value
 //      (:25139-25146); `updateScene` applies whatever it is handed.
+//   7. App's unmount destroys its scene and clears its files (:30285-30294);
+//      its API getters read those fields at call time (:29427-29434).
+//      React 18.3.1 renders null at a root with no boundary
+//      (react-dom.development.js:18724-18741), or calls a class boundary's
+//      componentDidCatch (:18746-18786). Deletions run in the mutation phase
+//      before that callback's layout phase (:22891, :26849-26862).
 //
 // The restore and the serializer are read from dist/dev/chunk-4FTI6OG3.js,
 // the reconcile from dist/dev/index.js.
@@ -136,6 +142,16 @@ export type BoardProps = {
   viewModeEnabled?: boolean;
 };
 
+/// Follow the React elements around a board, including an error boundary.
+export function boardPropsFromRender(rendered: unknown): BoardProps {
+  if (!rendered || typeof rendered !== "object") throw new Error("board render has no element");
+  if ("excalidrawAPI" in rendered) return rendered as BoardProps;
+  const props = (rendered as { props?: unknown }).props;
+  if (!props || typeof props !== "object") throw new Error("board render has no props");
+  if ("excalidrawAPI" in props) return props as BoardProps;
+  return boardPropsFromRender((props as { children?: unknown }).children);
+}
+
 export type Board = {
   /// The elements on the board.
   readonly elements: unknown[];
@@ -166,11 +182,14 @@ export type Board = {
   holdRenders(): void;
   /// Run the held renders: each shows its appState and reports the change.
   render(): Promise<void>;
+  /// Unmount the library's App and report its failure to a rendered boundary.
+  fail(): void;
 };
 
 /// A board whose App is built, at the handover, with the props of the render
 /// `latest` returns then.
-export function excalidrawBoard(latest: () => BoardProps): Board {
+export function excalidrawBoard(latest: () => unknown): Board {
+  const latestProps = () => boardPropsFromRender(latest());
   let mountedWith: BoardProps | null = null;
   let elements: Element[] = [];
   let appState: AppState = { ...SERIALIZED_APP_STATE, ...VIEW_APP_STATE };
@@ -182,7 +201,7 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
   const scheduleRender = (next: AppState | undefined) => {
     const run = () => {
       if (next) appState = { ...appState, ...next };
-      if (!loading) latest().onChange();
+      if (!loading) latestProps().onChange();
     };
     if (held) held.push(run);
     else setTimeout(run, 0);
@@ -218,7 +237,7 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
     },
     async handOver() {
       await Promise.resolve();
-      mountedWith = latest();
+      mountedWith = latestProps();
       mountedWith.excalidrawAPI(api);
     },
     async init(between) {
@@ -228,7 +247,7 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
       files = { ...scene.files };
       loading = false;
       between?.();
-      latest().onChange();
+      latestProps().onChange();
     },
     async start() {
       await this.handOver();
@@ -236,15 +255,15 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
     },
     stroke(element) {
       elements = [...elements, element as Element];
-      latest().onChange();
+      latestProps().onChange();
     },
     zoomTo(value) {
       appState = { ...appState, zoom: { value } };
-      latest().onChange();
+      latestProps().onChange();
     },
     pickBackground(color) {
       appState = { ...appState, viewBackgroundColor: color };
-      latest().onChange();
+      latestProps().onChange();
     },
     holdRenders() {
       held ??= [];
@@ -254,6 +273,20 @@ export function excalidrawBoard(latest: () => BoardProps): Board {
       held = null;
       for (const run of runs) run();
       await Promise.resolve();
+    },
+    fail() {
+      elements = [];
+      files = {};
+      const rendered = latest() as { type?: unknown; props?: unknown };
+      const boundary = rendered?.type as {
+        new (props: unknown): { state: Record<string, unknown>; componentDidCatch?: (error: Error) => void };
+        getDerivedStateFromError?: (error: Error) => Record<string, unknown>;
+      } | undefined;
+      if (!boundary?.getDerivedStateFromError) return;
+      const error = new Error("drawing library failed");
+      const instance = new boundary(rendered.props);
+      instance.state = { ...instance.state, ...boundary.getDerivedStateFromError(error) };
+      instance.componentDidCatch?.(error);
     },
   };
 }

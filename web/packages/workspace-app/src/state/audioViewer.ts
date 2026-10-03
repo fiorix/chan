@@ -1,8 +1,8 @@
 // Fullscreen audio viewer. The browser supplies playback controls; chan only
 // provides a tokenized byte URL and lifecycle ownership for the media element.
 
-import { withTokenQuery } from "../api/transport";
-import { consumeKey } from "./shortcuts";
+import { fileUrl } from "../api/client";
+import { openViewerOverlay } from "./viewerOverlay";
 
 export const AUDIO_UNSUPPORTED_MESSAGE =
   "This audio format is not supported by this browser.";
@@ -13,27 +13,7 @@ export const AUDIO_UNSUPPORTED_MESSAGE =
 /// closed viewer cannot keep downloading or playing in the background.
 export function openAudioViewer(path: string): void {
   if (!path) return;
-  const src = withTokenQuery(
-    `/api/fs/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
-  );
-
-  const backdrop = document.createElement("div");
-  backdrop.className = "md-audio-viewer";
-  backdrop.style.cssText =
-    "position:fixed;inset:0;z-index:40000;" +
-    "background:rgba(0,0,0,0.92);" +
-    "display:flex;flex-direction:column;align-items:center;justify-content:center;" +
-    "gap:0.75rem;padding:1rem;";
-
-  const close = document.createElement("button");
-  close.type = "button";
-  close.textContent = "Close";
-  close.title = "Close (Esc)";
-  close.style.cssText =
-    "position:absolute;top:1rem;right:1rem;z-index:1;" +
-    "background:rgba(255,255,255,0.9);color:#000;" +
-    "border:0;border-radius:4px;padding:4px 10px;cursor:pointer;" +
-    "font:600 13px system-ui,sans-serif;";
+  const src = fileUrl(path);
 
   const audio = document.createElement("audio");
   audio.controls = true;
@@ -55,33 +35,18 @@ export function openAudioViewer(path: string): void {
   };
   audio.addEventListener("error", onError);
 
-  backdrop.appendChild(audio);
-  backdrop.appendChild(error);
-  backdrop.appendChild(close);
-  document.body.appendChild(backdrop);
-
-  const dismiss = (): void => {
-    document.removeEventListener("keydown", onKey, true);
-    audio.removeEventListener("error", onError);
-    audio.pause();
-    audio.removeAttribute("src");
-    audio.load();
-    backdrop.remove();
-  };
-  // The viewer answers an unmodified Escape; a chord with Ctrl, Cmd or Alt
-  // held is the app's and travels on.
-  const onKey = (event: KeyboardEvent): void => {
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
-    if (event.key !== "Escape") return;
-    consumeKey(event);
-    dismiss();
-  };
-  close.addEventListener("click", (event) => {
-    event.stopPropagation();
-    dismiss();
+  openViewerOverlay({
+    className: "md-audio-viewer",
+    layout:
+      "display:flex;flex-direction:column;align-items:center;justify-content:center;" +
+      "gap:0.75rem;padding:1rem;",
+    surface: [audio, error],
+    dismissOnBackdropClick: true,
+    teardown: () => {
+      audio.removeEventListener("error", onError);
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    },
   });
-  backdrop.addEventListener("click", (event) => {
-    if (event.target === backdrop) dismiss();
-  });
-  document.addEventListener("keydown", onKey, true);
 }

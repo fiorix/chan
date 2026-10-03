@@ -264,6 +264,11 @@ describe("wireToDialog", () => {
     }
   });
 
+  test("derives the tab group from the path when the config's is empty", () => {
+    // The server reads a config written without `tab_group` back as "".
+    expect(wireToDialog(wire({ tab_group: "" }), "teams/alpha").tabGroup).toBe("alpha");
+  });
+
   test("preserves auto_prefix_at when false", () => {
     const dialog = wireToDialog(wire({ auto_prefix_at: false }), "demo");
     expect(dialog.autoPrefix).toBe(false);

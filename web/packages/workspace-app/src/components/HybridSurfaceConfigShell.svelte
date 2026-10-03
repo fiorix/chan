@@ -123,7 +123,7 @@
   .config-footer.bordered {
     border-top: 1px solid var(--border);
   }
-  /* Renamed off the bare `.footer-center`: excalidraw's index.css ships
+  /* Not the bare `.footer-center`: excalidraw's index.css ships
      a global `.footer-center` rule (unscoped) that would otherwise match
      this element once the canvas CSS loads. */
   .config-footer-center {

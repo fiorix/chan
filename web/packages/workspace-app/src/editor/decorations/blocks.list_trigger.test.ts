@@ -4,10 +4,9 @@
 // followed by space and nothing else -- and lezer-markdown emits the
 // `BulletList` / `OrderedList` node on the trailing whitespace.
 //
-// This test guards against a future regression that would re-
-// introduce a "content past marker required" check on the trigger
-// path. We exercise the parser directly (no DOM) so the test runs
-// fast in the standard Vitest pool.
+// The trigger path must not require content past the marker. We
+// exercise the parser directly (no DOM) so the test runs fast in
+// the standard Vitest pool.
 
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";

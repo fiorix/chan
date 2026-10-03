@@ -94,7 +94,7 @@
   hint="Absolute body size for WYSIWYG, source, document, and slide surfaces. Leave empty to use the active theme."
 >
   <NumberField
-    class="font-size"
+    class="editor-font-size"
     value={prefs.editor_font_size ?? null}
     min={EDITOR_FONT_SIZE_MIN}
     max={EDITOR_FONT_SIZE_MAX}
@@ -162,9 +162,9 @@
 <SurfaceThemeField kind="editor" {prefs} {commit} />
 
 <style>
-  /* The number input lives inside NumberField now, so the width
+  /* The number input lives inside NumberField, so the width
      reaches it through :global (same trick SettingField uses). */
-  :global(input.font-size) {
+  :global(input.editor-font-size) {
     width: 7em;
     min-width: 7em;
   }

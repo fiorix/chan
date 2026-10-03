@@ -25,13 +25,14 @@ export const confirmState = $state<ConfirmState>({
 });
 
 // The element that held DOM focus before the modal opened. The modal
-// parks focus on its OK button, so restoring this on dismissal returns
+// parks focus on its default button, so restoring this on dismissal returns
 // the caret to the invoking surface (terminal, editor) with no click.
 let previouslyFocused: HTMLElement | null = null;
 
 /// Show a confirm dialog. Resolves true on OK, false on Cancel / Esc /
-/// outside-click. Pass `destructive: true` to style the OK button as a
-/// warning so overwrite / delete reads correctly.
+/// outside-click. Pass `destructive: true` to default to Cancel and style
+/// the OK button as a warning. Enter on a button activates it; elsewhere
+/// in the panel it answers the default.
 export function uiConfirm(opts: {
   title: string;
   message?: string;

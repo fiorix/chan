@@ -489,8 +489,7 @@
         commandEntry("disconnect", "Disconnect", "Choose a devserver", Unplug),
       ];
       // A degraded connection leads; otherwise the pair sits after the spawn
-      // and window branches, which is index 3 now that the four window verbs
-      // have collapsed into one.
+      // and window branches at index 3.
       entries.splice(degraded ? 0 : 3, 0, ...connection);
     }
     entries.push(
@@ -551,8 +550,7 @@
     // Keep the branches in typed search as well as their leaves. This lets a
     // terse verb such as `close` jump into that submenu, while a compound
     // query such as `close release checks` can address the final target. The
-    // window rows are branches now, so their actions have to be flattened too
-    // or a verb query would only ever descend.
+    // window actions are also flattened so a verb query can reach a target.
     const windowLeaves = orderedWindows.flatMap((window) =>
       windowActions(window).map((action) => windowEntry(action, window)),
     );

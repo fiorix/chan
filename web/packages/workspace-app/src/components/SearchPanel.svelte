@@ -25,7 +25,7 @@
   import {
     ApiError,
     api,
-    withTokenQuery,
+    fileUrl,
     workspaceIsRecovering,
   } from "../api/client";
   import type { ContentHit, ReportFileStats } from "../api/types";
@@ -762,6 +762,7 @@
 </script>
 
 <OverlayShell
+  label="Search"
   id="search"
   open={searchPanel.open}
   onClose={close}
@@ -837,7 +838,7 @@
                   <span class="path">{r.path}</span>
                   <span class="image-thumb">
                     <img
-                      src={withTokenQuery(`/api/fs/${encodeURIComponent(r.path).replace(/%2F/g, "/")}`)}
+                      src={fileUrl(r.path)}
                       alt={basename(r.path)}
                       loading="lazy"
                     />
@@ -866,7 +867,7 @@
                      file (opens). The trailing "/" + "directory" label mark a
                      dir; a file shows its basename like a filename match. -->
                 <div class="row1">
-                  <KindChip kind="document" compact dim />
+                  <KindChip kind={r.isDir ? "folder" : "document"} compact dim />
                   <span class="path">{r.path}{r.isDir ? "/" : ""}</span>
                 </div>
                 <div class="preview muted">{r.isDir ? "directory" : basename(r.path)}</div>

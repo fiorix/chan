@@ -266,7 +266,9 @@ describe("a watcher reload that lands during Hybrid Nav", () => {
       .spyOn(api, "write")
       .mockImplementation(async (_path, _content, expectedMtimeNs) => {
         if ((expectedMtimeNs ?? null) !== diskMtimeNs) {
-          throw new ApiError(409, "conflict", {
+          throw new ApiError(409, "file changed on disk since it was read", {
+            error: "file changed on disk since it was read",
+            code: "write_conflict",
             current_mtime: 9,
             current_mtime_ns: diskMtimeNs,
           });

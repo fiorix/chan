@@ -6,7 +6,7 @@
 // it). Every explicit-open caller is driven here over the demo workspace, and
 // the tab that should move is already open with its caret mid-document.
 
-import { mount, tick, unmount } from "svelte";
+import { mount, tick, unmount, type ComponentProps } from "svelte";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import FileBrowserSurface from "../components/FileBrowserSurface.svelte";
@@ -53,7 +53,6 @@ function fileTab(path: string): FileTab {
     fileMissing: null,
     inspectorOpen: false,
     outlineOpen: false,
-    repoRoot: null,
     readMode: false,
     fsWritable: true,
     styleToolbarOpen: false,
@@ -90,7 +89,7 @@ async function settle(turns = 8): Promise<void> {
   }
 }
 
-async function renderBrowser(props: Record<string, unknown>): Promise<HTMLElement> {
+async function renderBrowser(props: ComponentProps<typeof FileBrowserSurface>): Promise<HTMLElement> {
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(FileBrowserSurface, { target, props }));

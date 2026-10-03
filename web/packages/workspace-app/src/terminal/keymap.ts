@@ -248,6 +248,21 @@ export function resetTerminalKeyboardProtocolState(
   protocol.kitty.alternateStack = [];
 }
 
+/// Copy `from` into `to` in place, since the installed parser and key
+/// handlers hold `to`; with no `to`, into a new state.
+export function copyTerminalKeyboardProtocolState(
+  from: TerminalKeyboardProtocolState,
+  to: TerminalKeyboardProtocolState = createTerminalKeyboardProtocolState(),
+): TerminalKeyboardProtocolState {
+  to.xtermModifyOtherKeys = from.xtermModifyOtherKeys;
+  to.kitty.screen = from.kitty.screen;
+  to.kitty.mainFlags = from.kitty.mainFlags;
+  to.kitty.alternateFlags = from.kitty.alternateFlags;
+  to.kitty.mainStack = [...from.kitty.mainStack];
+  to.kitty.alternateStack = [...from.kitty.alternateStack];
+  return to;
+}
+
 /// Compact snapshot of the negotiated state for the session hash. Only the
 /// load-bearing flags survive (xterm modifyOtherKeys + kitty main/alt
 /// flags + which screen is active); the transient push/pop stacks are

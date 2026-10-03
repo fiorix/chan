@@ -14,6 +14,18 @@ interface DemoDevserver extends DevserverEntry {
   token: string;
 }
 
+/** The server's 409 for an unforced operation over live terminal sessions. */
+function liveTerminalsRefusal(count: number): ApiError {
+  return new ApiError(
+    409,
+    JSON.stringify({
+      error: `workspace has ${count} live terminal session(s); close them or force`,
+      code: "live_terminals",
+      active_terminals: count,
+    }),
+  );
+}
+
 export interface LauncherDemoApi extends LibraryApi {
   reset(): void;
   // Null when the variant seeds no devservers, so there is nothing to flash.
@@ -364,7 +376,7 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       const ws = workspaces.find((w) => w.workspace_id === id);
       const liveKey = `local:${id}`;
       if (!on && !force && liveTerminals.has(liveKey)) {
-        return Promise.reject(new ApiError(409, JSON.stringify({ error: "live_terminals", active_terminals: liveTerminals.get(liveKey) })));
+        return Promise.reject(liveTerminalsRefusal(liveTerminals.get(liveKey) ?? 0));
       }
       if (ws) {
         ws.on = on;
@@ -504,7 +516,7 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       const ws = devserverWorkspaces.find((w) => w.devserver_id === id && w.prefix === prefix);
       const key = `${id}:${prefix}`;
       if (!on && !force && liveTerminals.has(key)) {
-        return Promise.reject(new ApiError(409, JSON.stringify({ error: "live_terminals", active_terminals: liveTerminals.get(key) })));
+        return Promise.reject(liveTerminalsRefusal(liveTerminals.get(key) ?? 0));
       }
       if (ws) {
         ws.on = on;

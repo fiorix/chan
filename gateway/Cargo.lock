@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "admin"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -156,7 +156,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "axum-macros",
  "base64 0.22.1",
  "bytes",
  "form_urlencoded",
@@ -170,7 +169,6 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
- "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -204,17 +202,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "axum-macros"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aa268c23bfbbd2c4363b9cd302a4f504fb2a9dfe7e3451d66f35dd392e20aca"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -307,7 +294,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chan-tunnel-client"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -332,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-proto"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -348,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-server"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -616,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "devserver-control"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -642,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "devserver-control-proto"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -658,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "devserver-proxy"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -963,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-common"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1428,7 +1415,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "identity"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1674,23 +1661,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "multer"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
-dependencies = [
- "bytes",
- "encoding_rs",
- "futures-util",
- "http 1.4.0",
- "httparse",
- "memchr",
- "mime",
- "spin",
- "version_check",
 ]
 
 [[package]]
@@ -1956,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "profile"
-version = "0.100.0"
+version = "0.101.0"
 dependencies = [
  "anyhow",
  "axum",

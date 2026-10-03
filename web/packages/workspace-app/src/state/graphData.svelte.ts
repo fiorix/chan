@@ -49,7 +49,7 @@ export function ensureGraphLoaded(): Promise<void> {
   inflight = (async () => {
     try {
       graphData.view = { nodes: [], edges: [] };
-      graphData.view = await api.graphStream(
+      const view = await api.graphStream(
         {},
         {
           signal: inflightAbort?.signal,
@@ -64,6 +64,8 @@ export function ensureGraphLoaded(): Promise<void> {
           },
         },
       );
+      // A load an invalidate dropped publishes nothing over the drop.
+      if (seq === inflightSeq) graphData.view = view;
     } catch (e) {
       if (seq === inflightSeq && (e as DOMException).name !== "AbortError") {
         graphData.error = (e as Error).message;
@@ -89,6 +91,8 @@ export function invalidateGraph(): void {
   inflight = null;
   graphData.view = null;
   graphData.error = null;
+  // The dropped load's own finally skips it as stale.
+  graphData.loading = false;
 }
 
 /// Re-fetch unconditionally. Useful when we know the payload is

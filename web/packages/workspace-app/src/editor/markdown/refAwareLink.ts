@@ -18,7 +18,8 @@ const CLOSE_BRACKET = 93; // ']'
 const OPEN_BRACKET = 91; // '['
 const OPEN_PAREN = 40; // '('
 
-// Minimal structural view of @lezer/markdown's @internal InlineContext.parts.
+// The exact @lezer/markdown pin protects these @internal parts and side fields;
+// the parser test checks their runtime shape before a version is accepted.
 type LinkDelim = { type: unknown; from: number; to: number; side: number };
 type PartsView = { parts: Array<{ type: unknown; side?: number } | null> };
 

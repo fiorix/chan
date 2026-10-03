@@ -4,6 +4,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   beginTransfer,
+  hideTransfers,
+  showTransfers,
   cancelAllTransfers,
   failTransfer,
   finishTransfer,
@@ -14,12 +16,16 @@ import {
 } from "./transfers.svelte";
 
 function resetTransfers(): void {
+  window.dispatchEvent(new Event("pageshow"));
   transfers.items = [];
   transfers.shown = false;
   window.sessionStorage.clear();
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // Drain the persist callback too, so its module-held timer handle cannot
+  // outlive the fake clock that owns it.
+  if (vi.isFakeTimers()) await vi.runOnlyPendingTimersAsync();
   vi.useRealTimers();
   vi.restoreAllMocks();
   resetTransfers();
@@ -133,6 +139,43 @@ describe("transfer records", () => {
     );
   });
 
+  test("a download the page's teardown cancels restores as interrupted with a Retry", () => {
+    resetTransfers();
+    const cancel = vi.fn();
+    beginTransfer({
+      kind: "download",
+      filename: "dump.sql",
+      cancel,
+      source: { path: "dump.sql", isDir: false },
+    });
+
+    window.dispatchEvent(new Event("pagehide"));
+    expect(cancel, "the transport is still cancelled").toHaveBeenCalledOnce();
+    transfers.items = [];
+    const retry = vi.fn();
+    restoreTransfers(() => retry);
+
+    expect(transfers.items.map((t) => t.state), "the reload finds it cut short").toEqual(["interrupted"]);
+    transfers.items[0]?.retry?.();
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  test("a download the user cancels restores as cancelled", () => {
+    resetTransfers();
+    beginTransfer({
+      kind: "download",
+      filename: "dump.sql",
+      cancel: vi.fn(),
+      source: { path: "dump.sql", isDir: false },
+    });
+
+    transfers.items[0]?.cancel?.();
+    transfers.items = [];
+    restoreTransfers(() => vi.fn());
+
+    expect(transfers.items.map((t) => [t.state, t.retry]), "a choice the user made").toEqual([["cancelled", null]]);
+  });
+
   test("failed download retry reconstructs after a window reload", () => {
     resetTransfers();
     const id = beginTransfer({
@@ -151,4 +194,21 @@ describe("transfer records", () => {
     expect(transfers.items[0]?.state).toBe("failed");
     expect(retry).toHaveBeenCalledOnce();
   });
+});
+
+
+test("pagehide freezes a pending progress write until pageshow permits persistence", async () => {
+  vi.useFakeTimers();
+  resetTransfers();
+  const id = beginTransfer({ kind: "download", filename: "a", cancel: null });
+  setTransferProgress(id, 0.5);
+  window.dispatchEvent(new Event("pagehide"));
+  const persist = vi.spyOn(Storage.prototype, "setItem");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(persist, "a queued progress timer writes nothing after teardown").not.toHaveBeenCalled();
+  hideTransfers();
+  expect(persist, "bubble changes write nothing after teardown").not.toHaveBeenCalled();
+  window.dispatchEvent(new Event("pageshow"));
+  showTransfers();
+  expect(persist, "a shown page can persist again").toHaveBeenCalledOnce();
 });

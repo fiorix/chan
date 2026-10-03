@@ -18,12 +18,14 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")
 import { api } from "./api/client";
 import type { WorkspaceWarning } from "./api/types";
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
-import { refreshWorkspace, ui } from "./state/store.svelte";
+import { settle as settleDialog, press as pressDialog } from "./__tests__/dialog";
+import { refreshWorkspace, ui, openSettings, settingsPanel, workspaceWarningsDialog } from "./state/store.svelte";
 
 stubAppEnvironment();
 
 let warnings: WorkspaceWarning[];
 let writeText: ReturnType<typeof vi.fn>;
+let warningRowSequence = 0;
 
 beforeEach(() => {
   warnings = [];
@@ -47,7 +49,7 @@ function statusAction(): HTMLButtonElement | null {
 }
 
 function dialog(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('.workspace-warnings-backdrop [role="dialog"]');
+  return document.querySelector<HTMLElement>('[role="dialog"][aria-labelledby="workspace-warnings-title"]');
 }
 
 function button(scope: ParentNode, label: string): HTMLButtonElement | undefined {
@@ -98,6 +100,57 @@ describe("warnings at boot", () => {
 });
 
 describe("the warnings dialog", () => {
+  test("a refused warning close preserves the underlying App overlay", async () => {
+    warnings = [broken("busy-overlay")];
+    await mountApp();
+    openSettings(); await settle();
+    expect(settingsPanel.open).toBe(true);
+    const open = await openDialog();
+    workspaceWarningsDialog.busyKey = "busy"; await settleDialog();
+    try {
+      pressDialog(document.body, "Escape"); await settleDialog();
+      expect(dialog(), "busy warning remains mounted").toBe(open);
+      expect(settingsPanel.open, "refused close preserves Settings").toBe(true);
+    } finally { workspaceWarningsDialog.busyKey = null; }
+    pressDialog(open, "Escape"); await settleDialog();
+    expect(dialog()).toBeNull();
+    expect(settingsPanel.open).toBe(true);
+    pressDialog(document.body, "Escape"); await settleDialog();
+    expect(settingsPanel.open, "App receives Escape after the shell closes").toBe(false);
+  });
+
+  test("recovers focus after dismissing a warning row while other rows remain", async () => {
+    // Dismissals belong to the session and survive an App fixture unmount.
+    const sequence = ++warningRowSequence;
+    warnings = [broken(`row-${sequence}-one`), broken(`row-${sequence}-two`)];
+    await mountApp();
+    const open = await openDialog();
+    expect(open.querySelectorAll(".warning-item"), "two undismissed warnings").toHaveLength(2);
+    const dismiss = button(open, "Dismiss")!;
+    dismiss.focus(); await settleDialog();
+    dismiss.click(); await settleDialog();
+    expect(dismiss.isConnected, "dismiss removes its row").toBe(false);
+    expect(open.querySelectorAll(".warning-item")).toHaveLength(1);
+    expect(open.isConnected, "the remaining row keeps the dialog open").toBe(true);
+    expect(document.activeElement, "warning row focus repair").toBe(open);
+  });
+
+  test("opens discard confirmation above warnings and returns focus after cancellation", async () => {
+    warnings = [broken("stack")];
+    await mountApp();
+    const open = await openDialog();
+    const discard = button(open, "Discard metadata")!;
+    discard.focus(); discard.click(); await settle();
+    const confirm = document.querySelector<HTMLElement>('[aria-labelledby="confirm-title"]')!;
+    expect(confirm).not.toBeNull();
+    expect(Number(confirm.parentElement!.style.zIndex), "discard confirm layer")
+      .toBeGreaterThan(Number(open.parentElement!.style.zIndex));
+    expect(document.activeElement).toBe(button(confirm, "Cancel"));
+    button(confirm, "Cancel")!.click(); await settle();
+    expect(confirm.isConnected).toBe(false);
+    expect(document.activeElement, "discard opener restoration").toBe(discard);
+  });
+
   test("Copy path copies the warning's path and says so", async () => {
     warnings = [broken("untitled-5")];
     await mountApp();

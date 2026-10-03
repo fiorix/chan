@@ -107,7 +107,7 @@
   const SLIDERS: SliderDef[] = [
     { key: "chargeStrength", label: "Charge (repulsion)", min: -600, max: 0, step: 5, hint: "forceManyBody; more negative spreads the cluster" },
     { key: "linkDistance", label: "Link distance", min: 10, max: 220, step: 1, hint: "target length of wiki/markdown link edges" },
-    { key: "linkDistanceTag", label: "Link distance · light edges", min: 10, max: 220, step: 1, hint: "tag / mention / contains / language / group edges" },
+    { key: "linkDistanceTag", label: "Link distance · light edges", min: 10, max: 220, step: 1, hint: "tag / mention / contains / language edges" },
     { key: "linkStrength", label: "Link strength", min: 0, max: 2, step: 0.01, hint: "spring stiffness on every edge" },
     { key: "collidePad", label: "Collide padding", min: 0, max: 24, step: 0.5, hint: "extra gap added to each node radius" },
     { key: "velocityDecay", label: "Velocity decay", min: 0.05, max: 0.95, step: 0.01, hint: "friction; higher settles faster" },

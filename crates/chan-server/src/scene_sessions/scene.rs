@@ -90,9 +90,8 @@ pub struct StoredElement {
 impl StoredElement {
     /// Normalize a raw client or file element: require an object with
     /// a string id, extract the merge metadata with defensive defaults
-    /// (a missing or non-numeric version reads as 0, so any real
-    /// update wins), and write the normalized fields back into the
-    /// value.
+    /// (a missing or zero version restores as 1, as the drawing library
+    /// does), and write the normalized fields back into the value.
     fn from_value(mut value: Value) -> Result<(String, Self), SceneError> {
         let obj = value
             .as_object_mut()
@@ -102,7 +101,11 @@ impl StoredElement {
             .and_then(Value::as_str)
             .ok_or(SceneError::Invalid("element without a string id"))?
             .to_owned();
-        let version = obj.get("version").and_then(Value::as_u64).unwrap_or(0);
+        let version = obj
+            .get("version")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .max(1);
         let version_nonce = obj.get("versionNonce").and_then(Value::as_u64).unwrap_or(0);
         let index = obj.get("index").and_then(Value::as_str).map(str::to_owned);
         let is_deleted = obj
@@ -1126,11 +1129,27 @@ mod tests {
     #[test]
     fn parse_normalizes_missing_merge_metadata() {
         let s = Scene::parse(r#"{"elements":[{"id":"x","type":"rectangle"}]}"#).unwrap();
-        assert_eq!(versions(&s, "x"), (0, 0, false));
+        assert_eq!(versions(&s, "x"), (1, 0, false));
         let snap = s.elements_snapshot();
-        assert_eq!(snap[0]["version"], 0, "defaults materialized in the value");
+        assert_eq!(snap[0]["version"], 1, "defaults materialized in the value");
         assert_eq!(snap[0]["versionNonce"], 0);
         assert_eq!(snap[0]["isDeleted"], false);
+    }
+
+    #[test]
+    fn parse_restores_missing_and_zero_element_versions() {
+        let scene = Scene::parse(
+            r#"{"elements":[
+                {"id":"missing","type":"rectangle"},
+                {"id":"zero","type":"rectangle","version":0}
+            ]}"#,
+        )
+        .unwrap();
+
+        for id in ["missing", "zero"] {
+            assert_eq!(versions(&scene, id).0, 1, "{id} is restored at version 1");
+            assert_eq!(scene.element(id).unwrap().value["version"], 1);
+        }
     }
 
     #[test]

@@ -58,7 +58,7 @@ kind = "posix"
 
 `kind` is `powershell`, `cmd`, `posix`, or `wsl`, and decides the argument convention; omitted, it is inferred from the program's file stem. `wsl` exists as its own kind because `-l` to `wsl.exe` means "list distributions", not "login shell". `args` replaces the discovered vector wholesale rather than appending, since appending could not express "spawn PowerShell without `-NoLogo`". An entry matching no discovered id and naming no `program` is dropped with a warning -- there would be nothing to spawn. Malformed entries are dropped, ids trimmed, duplicates resolved first-wins, and the list capped at 50; a bad entry costs you that profile, never the rest of your config.
 
-`GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; stale revisions return `409 config_conflict` with the current aggregate.
+`GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; a stale revision returns 409 with a sentence in `error`, `code: "config_conflict"` and the current aggregate in `current`.
 
 ### `~/.chan/extensions/<id>.toml` -- local extensions
 

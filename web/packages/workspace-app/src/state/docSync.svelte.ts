@@ -4,7 +4,8 @@
 /// (push at matching version, rebase on stale), remote edits arrive as
 /// `updates` frames, and saves become flush confirmations instead of PUTs.
 /// When the channel is unavailable the tab degrades to the classic
-/// autosave + CAS path with a valid mtime token from the last `flush` frame.
+/// autosave + CAS path with the last flush token, once no unresolved
+/// push can race that replacement.
 ///
 /// One DocSession per TAB (not per path): two panes on the same file are two
 /// attaches with independent clientIDs, exactly like two windows. The
@@ -60,12 +61,15 @@ import { isEditableText, isExcalidraw } from "./fileTypes";
 import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
+  clearUnresolvedLiveSave,
   markTabFileMissing,
   registerLiveSessionKind,
   registerPaneModeSettledSink,
   setTabDocState,
+  withholdUnresolvedLiveSave,
   type DocSyncStatus,
   type FileTab,
+  type PushSettlement,
 } from "./tabs.svelte";
 
 /// Feature flag. Default ON (the server half is live); localStorage
@@ -84,11 +88,12 @@ export const DOC_RELEASE_LINGER_MS = 250;
 /// Reconnect grace: a socket drop is shown as `reconnecting` (autosave
 /// stays suppressed so a blip cannot fire a CAS PUT racing the
 /// authority's flush) for at most this many attempts / this long,
-/// after which the session degrades and classic autosave resumes.
+/// after which the session degrades. Classic autosave still waits for
+/// any unresolved push to be answered or reconciled.
 /// Retries continue in the background at capped backoff; a later
 /// successful reattach hard-resyncs and returns to `attached`.
-export const DOC_RECONNECT_GRACE_ATTEMPTS = 2;
-export const DOC_RECONNECT_GRACE_MS = 3000;
+const DOC_RECONNECT_GRACE_ATTEMPTS = 2;
+const DOC_RECONNECT_GRACE_MS = 3000;
 
 /// A dial that produces no frame within this window counts as a failed
 /// attempt. Without it a hung upgrade would pin the tab in `connecting`
@@ -108,15 +113,14 @@ export const DOC_FLUSH_TIMEOUT_MS = 4000;
 /// wedged authority) must still fall through to the classic path.
 export const DOC_FLUSH_CAP_MS = 30_000;
 
-/// Bound on the degraded-fallback wait for an in-flight push to settle
-/// before the classic PUT fires. Keeps the two writers serialized: the
-/// push already on the wire lands (and its push-ok/flush frames restamp
-/// the CAS token) before the PUT reads that token.
+/// Bound on waiting for a push before considering a classic fallback.
+/// Expiry leaves that fallback withheld until an ack/refusal or a fresh
+/// session snapshot reconciles the prior outcome.
 export const DOC_FALLBACK_SETTLE_MS = 2000;
 
 /// Outbound cursor cadence: trailing-edge throttle on selection moves.
 /// The presence field's freshness fade assumes roughly this rate.
-export const DOC_CURSOR_THROTTLE_MS = 100;
+const DOC_CURSOR_THROTTLE_MS = 100;
 
 /// Client-side mirror of the server's editable-text write limit
 /// (TEXT_WRITE_LIMIT, 2 MiB). Compared against UTF-16 length as a cheap
@@ -161,7 +165,8 @@ export function isDocSyncEligible(tab: FileTab): boolean {
   if (tab.refusedUnwritten) return false;
   if (tab.mode !== "source" && tab.mode !== "wysiwyg") return false;
   if (!isEditableText(tab.path) || isExcalidraw(tab.path)) return false;
-  // Draft close/promote interleaves saves with file moves; excluded v1.
+  // Draft close/promote interleaves saves with file moves, so a draft
+  // is excluded.
   if (isDraftPath(tab.path)) return false;
   return true;
 }
@@ -176,7 +181,7 @@ function freshClientId(): string {
 /// Build the doc-ws path. `version` rides only on reconnects that can
 /// take the incremental catch-up; a fresh attach omits it and gets a
 /// snapshot.
-export function docWsPath(path: string, windowId: string, version?: number): string {
+function docWsPath(path: string, windowId: string, version?: number): string {
   const params = new URLSearchParams({ path, w: windowId });
   if (version !== undefined) params.set("version", String(version));
   return `/api/doc/ws?${params.toString()}`;
@@ -306,10 +311,15 @@ export class DocSession {
   private shadowText: Text = Text.empty;
   private shadowVersion = 0;
   private haveSnapshot = false;
+  private snapshotSocket: WebSocket | null = null;
   /// Authority-side dirty flag, tracked from snapshot/updates/flush
   /// frames so `flush()` can resolve immediately when there is nothing
   /// unflushed.
   private serverDirty = false;
+  /// The save error this session wrote for a flush the server could not
+  /// make. A flush that lands clears it, and only it: an error the classic
+  /// save wrote stays until a save of that path clears it.
+  private flushError: string | null = null;
 
   private view: EditorView | null = null;
   private slot: Compartment | null = null;
@@ -319,6 +329,7 @@ export class DocSession {
   private attachQueued = false;
 
   private pushInFlight = false;
+  private pushOutcomeUnresolved = false;
   /// push-stale latch: the authority version our next push must reach
   /// before re-pushing (the missed broadcasts are already in flight on
   /// this socket).
@@ -329,10 +340,10 @@ export class DocSession {
 
   private flushWaiters: FlushWaiter[] = [];
 
-  /// Fallback-settle waiters: resolved the moment no push is in flight
-  /// (or on their own bound). See awaitPushSettled.
+  /// Fallback-settle waiters receive a positive result only when the
+  /// authority has answered the push.
   private pushSettleWaiters: {
-    resolve: () => void;
+    resolve: (outcome: PushSettlement) => void;
     timer: ReturnType<typeof setTimeout>;
   }[] = [];
 
@@ -366,8 +377,8 @@ export class DocSession {
   /// save path suppresses the PUT + error here; the buffer stays in the
   /// live editor (and the localStorage editorBuffer) for the reattach
   /// diff-push. Deliberately FALSE when the socket is still open (a
-  /// flush-timeout degrade against a reachable server - classic CAS PUT
-  /// is correct there) and for every permanent stop (CRLF, doc-too-large,
+  /// flush-timeout degrade can use classic CAS after its push is answered)
+  /// and for every permanent stop (CRLF, doc-too-large,
   /// attach-failed, closed, capability-off - `retryStopped` true or a
   /// self-close - where the server is alive and classic errors belong).
   isOutagePaused(): boolean {
@@ -382,7 +393,7 @@ export class DocSession {
   /// on this: for an attached tab, `content === saved` only means
   /// "confirmed by the authority", not "safe on disk".
   hasUnflushedState(): boolean {
-    if (this.serverDirty || this.pushInFlight) return true;
+    if (this.serverDirty || this.pushOutcomeUnresolved) return true;
     if (this.view && this.collabInstalled) {
       return sendableUpdates(this.view.state).length > 0;
     }
@@ -411,7 +422,6 @@ export class DocSession {
   /// need no imperative wiring from the host.
   extension(): Extension {
     const slot = new Compartment();
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const session = this;
     return [
       slot.of([]),
@@ -458,7 +468,7 @@ export class DocSession {
   }
 
   /// A waiter's quiet window or absolute cap ran out: resolve false so
-  /// the save degrades to the classic path.
+  /// the save degrades and evaluates the guarded fallback.
   private expireFlushWaiter(w: FlushWaiter): void {
     const i = this.flushWaiters.indexOf(w);
     if (i === -1) return;
@@ -487,38 +497,37 @@ export class DocSession {
     }
   }
 
-  /// Drop to the classic autosave + CAS path. The last `flush` frame's
-  /// mtime token is already stamped on the tab, so the next PUT's CAS
-  /// check is correct, and the pump stops pushing (maybePush gates on
-  /// this status) so the classic writer is the only writer. Recovery: a
-  /// socket-down degrade heals through the background reconnects; a
-  /// socket-open degrade heals through healAfterFallbackSave once a
-  /// classic save lands.
+  /// Stop the live push pump and consider the classic autosave + CAS
+  /// path once any old push is answered. The last flush token is stamped
+  /// on the tab. A socket-down degrade heals through background
+  /// reconnects; a socket-open degrade heals after a guarded classic save.
   degrade(): void {
     if (this.status === "degraded" || this.status === "off") return;
     this.setStatus("degraded");
   }
 
-  /// Fallback settle: resolves once no push is in flight, bounded by
-  /// `timeoutMs`. The degrade gate in maybePush stops NEW pushes; this
-  /// waits out the one already on the wire so the classic fallback PUT
-  /// never interleaves with it, and so the push's own push-ok/flush
-  /// frames get their chance to restamp the tab's CAS token before the
-  /// PUT reads it.
-  awaitPushSettled(timeoutMs: number = DOC_FALLBACK_SETTLE_MS): Promise<void> {
-    if (!this.pushInFlight) return Promise.resolve();
-    return new Promise<void>((resolve) => {
+  /// Silence and socket cleanup do not establish whether a push landed.
+  awaitPushSettled(timeoutMs: number = DOC_FALLBACK_SETTLE_MS): Promise<PushSettlement> {
+    if (!this.pushOutcomeUnresolved) return Promise.resolve("settled");
+    if (!this.pushInFlight) return Promise.resolve("unresolved");
+    return new Promise<PushSettlement>((resolve) => {
       const waiter = {
         resolve,
         timer: setTimeout(() => {
           this.pushSettleWaiters = this.pushSettleWaiters.filter(
             (w) => w !== waiter,
           );
-          resolve();
+          resolve("unresolved");
         }, timeoutMs),
       };
       this.pushSettleWaiters.push(waiter);
     });
+  }
+
+  /// Recheck after the wait's microtask: an ack, redial or new push can
+  /// change ownership between the timer firing and the delegate resuming.
+  fallbackSettlement(): PushSettlement {
+    return this.pushOutcomeUnresolved || this.ownsSaves() ? "unresolved" : "settled";
   }
 
   /// A classic fallback save for this tab landed while the session sat
@@ -750,6 +759,7 @@ export class DocSession {
     const updates = sendableUpdates(this.view.state);
     if (updates.length === 0) return;
     this.pushInFlight = true;
+    this.pushOutcomeUnresolved = true;
     this.send({
       type: "push",
       version: getSyncedVersion(this.view.state),
@@ -760,13 +770,19 @@ export class DocSession {
     });
   }
 
-  /// The in-flight push settled (answered, superseded, or its socket
-  /// died): release any fallback-settle waiters with it.
-  private clearPushInFlight(): void {
+  /// Only an authority answer settles the push. A socket loss releases
+  /// the bounded wait while leaving the fallback blocked.
+  private clearPushInFlight(outcome: PushSettlement): void {
     this.pushInFlight = false;
+    if (outcome === "settled") {
+      this.pushOutcomeUnresolved = false;
+      this.tab.unresolvedLivePush = false;
+    } else if (this.pushOutcomeUnresolved) {
+      withholdUnresolvedLiveSave(this.tab);
+    }
     for (const w of this.pushSettleWaiters.splice(0)) {
       clearTimeout(w.timer);
-      w.resolve();
+      w.resolve(outcome);
     }
   }
 
@@ -783,6 +799,8 @@ export class DocSession {
 
   private dial(fresh = false): void {
     this.clearReconnectTimer();
+    this.clearAttachTimer();
+    if (this.pushInFlight) this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.sawFrameOnSocket = false;
     const version = !fresh && this.haveSnapshot ? this.shadowVersion : undefined;
@@ -810,7 +828,7 @@ export class DocSession {
       // attached on open: the server may have nothing to send, so no
       // frame can be awaited. A fresh dial stays `connecting` until the
       // snapshot lands and the attach algorithm runs.
-      if (this.collabInstalled) {
+      if (this.collabInstalled && !this.pushOutcomeUnresolved) {
         this.onChannelUp();
         this.setStatus("attached");
         this.maybePush();
@@ -848,7 +866,7 @@ export class DocSession {
     const dialTimedOut = this.attachDialTimedOut;
     this.attachDialTimedOut = false;
     this.ws = null;
-    this.clearPushInFlight();
+    this.clearPushInFlight("unresolved");
     this.staleLatch = null;
     if (this.closedByUs || this.retryStopped) return;
     // Capability probe: the first doc-ws connect the SERVER closes
@@ -877,7 +895,7 @@ export class DocSession {
     this.checkFlushWaiters();
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, WS_RECONNECT_BACKOFF_MAX_MS);
-    this.reconnectTimer = setTimeout(() => this.dial(), delay);
+    this.reconnectTimer = setTimeout(() => this.dial(this.pushOutcomeUnresolved), delay);
   }
 
   /// Live-channel desync recovery: drop the socket and redial WITHOUT a
@@ -931,12 +949,12 @@ export class DocSession {
         return;
       case "push-ok":
         this.tab.authorityVersion = f.version;
-        this.clearPushInFlight();
+        this.clearPushInFlight("settled");
         this.maybePush();
         this.checkFlushWaiters();
         return;
       case "push-stale":
-        this.clearPushInFlight();
+        this.clearPushInFlight("settled");
         if (this.shadowVersion >= f.version) {
           this.maybePush();
         } else {
@@ -1002,12 +1020,14 @@ export class DocSession {
         // for good, classic behaviors resume.
         this.retryStopped = true;
         this.setStatus("off");
+        this.clearPushInFlight("unresolved");
         this.closeSocket();
         return;
     }
   }
 
   private onSnapshot(f: Extract<ServerFrame, { type: "snapshot" }>): void {
+    const sameSocket = this.ws !== null && this.snapshotSocket === this.ws;
     if (f.doc.indexOf("\r") !== -1) {
       // CodeMirror normalizes CR/CRLF on input, so client-side UTF-16
       // offsets would desync from the authority's exact text. Degrade to
@@ -1054,11 +1074,15 @@ export class DocSession {
     this.tab.authorityVersion = f.version;
     this.tab.diskConflicted = f.conflicted ?? false;
     this.haveSnapshot = true;
-    // A snapshot opens a fresh sync epoch: any in-flight push belongs
-    // to the pre-resync world and will never be answered on this epoch
-    // (a reconnect already dropped it; a same-socket resync superseded
-    // it). Clearing here lets the re-attach push immediately.
-    this.clearPushInFlight();
+    this.snapshotSocket = this.ws;
+    // A same-socket snapshot precedes this socket's pending push and
+    // cannot settle it. A fresh socket starts a new authority epoch;
+    // the old wait ends without permitting its caller to PUT.
+    if (!sameSocket) {
+      this.clearPushInFlight("unresolved");
+      this.pushOutcomeUnresolved = false;
+      this.tab.unresolvedLivePush = false;
+    }
     this.staleLatch = null;
     this.serverDirty = f.dirty;
     this.stampMtime(f.mtime_ns ?? null);
@@ -1139,14 +1163,24 @@ export class DocSession {
   private onFlush(f: Extract<ServerFrame, { type: "flush" }>): void {
     if (f.error !== undefined) {
       // Repeated flush failure server-side; the session stays alive
-      // (data safe in memory and on every client). Surface it and let
-      // any pending save fall back through the degrade path.
-      this.tab.error = `save failed: ${f.error}`;
+      // (data safe in memory and on every client), so the editor stays
+      // and the save line says the file lacks it. Any pending save falls
+      // back through the degrade path.
+      this.flushError = `the server could not write it (${f.error})`;
+      this.tab.saveError = this.flushError;
       this.settleFlushWaiters(false);
       return;
     }
+    if (this.flushError !== null && this.tab.saveError === this.flushError) {
+      this.tab.saveError = null;
+    }
+    this.flushError = null;
     this.serverDirty = f.dirty;
     if (f.mtime_ns !== undefined) this.stampMtime(f.mtime_ns);
+    if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
+        lf(this.tab.content) === this.shadowText.toString()) {
+      clearUnresolvedLiveSave(this.tab);
+    }
     this.checkFlushWaiters();
   }
 
@@ -1223,7 +1257,7 @@ export class DocSession {
     this.clearAttachTimer();
     this.clearCursorTimer();
     this.settleFlushWaiters(false);
-    this.clearPushInFlight();
+    this.clearPushInFlight("unresolved");
     this.closeSocket();
     this.view = null;
     this.slot = null;
@@ -1308,12 +1342,10 @@ registerLiveSessionKind({
     if (!session || !session.ownsSaves()) return "classic";
     if (await session.flush()) return "saved";
     session.degrade();
-    // Single-writer handoff: the degrade gated the pump; wait out any
-    // push already on the wire before the classic PUT fires so the two
-    // writers never interleave and the freshest flush token is on the
-    // tab when the PUT stamps its CAS check.
+    // Degrade stops new pushes. Only an answer to the pending push
+    // permits a classic PUT; silence leaves the buffer unsaved.
     await session.awaitPushSettled();
-    return "degraded";
+    return session.fallbackSettlement() === "settled" ? "degraded" : "unresolved";
   },
   release(tabId: string, immediate: boolean) {
     releaseDocSession(tabId, { immediate });

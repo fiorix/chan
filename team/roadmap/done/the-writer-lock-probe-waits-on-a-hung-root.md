@@ -1,0 +1,39 @@
+# The writer-lock probe resolves a root another process holds, so a hung one stalls the workspace lists
+
+Status: shipped in [v0.101.0](../../release/release-v0.101.0.md).
+
+Record before the release: accepted for v0.101.0 by the owner on 2026-09-26; raised during v0.101.0 on 2026-09-26 from the independent review of the root locks lane (`dev/v0101-tasks/reviews/review-rlock-2.md`, finding 2), which the lane's report also leaves open (`dev/v0101-tasks/report-rlock-2.md`, part C). It follows from [one-root-blocks-every-other-mount](one-root-blocks-every-other-mount.md): the path is outside that lane's files. A source reading against the root locks lane at `3746c268f`, which had not landed on the integration branch when this was raised, so every line cited is as it is at that sha; read in code, not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-26 on the owner's word that nothing is deferred, in the services lane's hung-root orders with [a-hung-root-keeps-reading-running](a-hung-root-keeps-reading-running.md). The lead's ruling on the open point: the holder's record is compared with the stored key lexically, a dead holder of a relinked root reading `locked` where it read `stopped` is acceptable and is named in the design text, and `workspace_entries` copies its records out before it builds rows.
+
+## What was seen
+
+The root locks lane builds each list row from what the registry stores, so that a listing asks no root's filesystem. The writer-lock probe is the exception. `registered_workspace_status` in `crates/chan-library/src/host.rs` probes the root's writer lock (`:3470-3473`) when the root is neither mounted nor in a lifecycle state (`workspace_status_by_key`, `:3519-3530`). The probe, `probe_foreign_holder` in `crates/chan-workspace/src/lock.rs` (`:365-377`), opens the lock file under the chan home, not under the root (`Library::workspace_paths_for_row`, `crates/chan-workspace/src/library.rs:543-545`). But when another process holds the lock and its record can be read, `classify_lock_attempt` compares the record's path with `canonical_string(workspace_root)` (`lock.rs:395`), and that canonicalizes the root (`:480-486`). So the probe waits on the filesystem of exactly the roots another process holds.
+
+Its callers run it synchronously on a runtime worker. The launcher's `GET /api/library/workspaces` (`handle_list_workspaces`, `crates/chan-server/src/routes/library.rs:1681-1691`) and the library command snapshot (`:788-802`) build every local row through `scoped_local_workspaces` and `local_launcher_row` (`:663-684`, `:696-703`), and the desktop serves the same routes from its embedded server. The devserver's `GET /api/devserver/workspaces` (`handle_list`, `crates/chan-server/src/devserver.rs:2735-2737`) builds its rows in `workspace_entries` (`:1471-1502`) through `off_row` (`:1529-1530`) and `entry_from_record` (`:1544-1566`), and both call `canonical_root_status` (`host.rs:3479-3489`).
+
+The review's scenario: a separate `chan serve /nfs/c` holds C's lock, or a desktop and a devserver share one chan home and the other one serves C, and then the NFS server hangs. Each list poll parks one runtime worker in that canonicalization until C answers. The CLI runtime has at most eight workers (`crates/chan/src/main.rs:17`, `:56-60`), so after about eight polls every route that process serves stalls.
+
+This reading found one thing the review did not name. `workspace_entries` calls `entry_from_record` for every devserver record while it holds the devserver's record map (`devserver.rs:1472-1479`), a `std::sync::Mutex` (`:37`, `:738`). A stopped record, for a root this devserver turned off and the other process now serves, reaches the probe inside that lock. The first poll that hangs there holds the map, and every devserver path that takes it (the mount's `begin_registered_mount` at `:959`, the on and off route at `:1184`, and the others) blocks its worker on the mutex, so on that path one poll starts the stall.
+
+The words say the opposite: `crates/chan-library/design.md:38` ("Listing workspaces, serving the window feed and preparing startup restore resolve no root either"), and the doc comments of `registered_workspace_status` and `canonical_root_status` (`host.rs:3463-3465`, `:3476-3478`) and of `local_launcher_row` (`routes/library.rs:692-694`). The lead's notes on the review rule that the lane corrects the design.md sentence before it lands; the three comments are not named there.
+
+## Desired contract
+
+Listing workspaces, on the launcher and on the devserver, asks no root's filesystem, a root another process holds included: the writer-lock probe classifies the holder from what the lock record and the registry row store, and no list builds its rows while holding a lock that other paths take.
+
+## What to do
+
+The review suggests comparing the holder's record against the stored root in `lock.rs` rather than resolving the root. The holder writes `canonical_string` of its root into the record when it takes the lock (`lock.rs:452-455`), and a registry row stores its root's canonical key, so the comparison can be lexical, for example through a probe that takes the stored key. A relinked root, whose holder recorded the new location, would then miss the path match, so a dead holder of it would read `locked` where today it reads `stopped`; decide whether that is acceptable or whether the lane's relinked-root fix gives a second stored key to compare. Separately, have `workspace_entries` copy the records out and build their rows after it releases the map, as it already does for the rows without a record. Red first: a devserver test that holds C's lock from a second handle (`hold_foreign_lock`, `devserver.rs:6379`) and stalls C with the `paths::root_stall` seam, then shows `workspace_entries` return and a mount of another root complete; today both hang. Then correct the words listed above.
+
+## Boundaries
+
+`crates/chan-workspace/src/lock.rs` (`probe_foreign_holder`, `classify_lock_attempt`, `canonical_string`), `crates/chan-library/src/host.rs` (`registered_workspace_status`, `canonical_root_status`), `crates/chan-server/src/devserver.rs` (`workspace_entries`, `off_row`, `entry_from_record`), the comment on `local_launcher_row` in `crates/chan-server/src/routes/library.rs`, and the listing sentence of `crates/chan-library/design.md` if the lane's correction has not already made it true. The relinked-root regression (review finding 1) is fixed in the lane before it lands and is not part of this item.
+
+## What shipped
+
+Landed on 2026-09-26. The writer-lock probe (`chan_workspace::lock::probe_foreign_holder`) compares the holder's record with the key its caller passes, as given, and resolves nothing itself. The launcher list, the scoped command snapshot and the devserver list pass the registry row's stored root; `chan search` and `chan ps` build the lock path from the row's metadata key; none of them asks a held root's filesystem. The devserver's list, and the row an on or off toggle answers with, are built after the record map is released, so one hung poll blocks no mount or toggle behind the mutex.
+
+The relinked-root cost, on every surface: a root whose path resolves elsewhere since it was registered no longer matches its holder's record, so a holder that is this process, or provably dead with a leaked lock descriptor, reads as another process. The launcher row reads `locked` and loses the turn-on that would have stolen the lock; the devserver list reads `locked`; `chan search` tries the dead holder's server and fails with `served_workspace_unreachable`; `chan workspace status` reports the root served, with the dead pid. The state clears when the holder record is cleaned. `chan workspace status <path>` still resolves the path it is given, which is the user's own.

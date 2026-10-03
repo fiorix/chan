@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// R3: a Wysiwyg host with no `onSubmit` (the file editor) must NOT insert a
+// A Wysiwyg host with no `onSubmit` (the file editor) must NOT insert a
 // blank line on Cmd/Ctrl+Enter. The chord is consumed as a no-op instead of
 // falling through to CM6's default Mod-Enter (insertBlankLine). With an
 // `onSubmit` wired (a chat-style host) the chord still submits.

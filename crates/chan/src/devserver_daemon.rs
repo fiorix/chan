@@ -55,7 +55,7 @@ pub async fn start_devserver_chan(
 ) -> Result<DaemonRecord> {
     let lock_path = daemon_lock_path();
     let record_path = daemon_record_path();
-    let log_path = crate::devserver_log_path()?;
+    let log_path = crate::devserver::persisted::devserver_log_path()?;
     if verbose {
         print_daemon_paths(&lock_path, &record_path, &log_path);
     }
@@ -80,7 +80,10 @@ pub async fn start_devserver_chan(
     let mut child = spawn_daemon_child(addr, tunnel, &log_path)?;
     let record =
         wait_for_spawned_daemon(&mut child, addr, &lock_path, &record_path, &log_path).await?;
-    crate::emit_devserver_token_marker(crate::DEVSERVER_TOKEN_WAIT).await?;
+    crate::devserver::management::emit_devserver_token_marker(
+        crate::devserver::management::DEVSERVER_TOKEN_WAIT,
+    )
+    .await?;
     eprintln!(
         "chan devserver: started the self-managed daemon (pid {}) on {}.",
         record.pid, record.addr
@@ -98,7 +101,7 @@ pub async fn restart_devserver_chan(
     let lock_path = daemon_lock_path();
     let record_path = daemon_record_path();
     if verbose {
-        let log_path = crate::devserver_log_path()?;
+        let log_path = crate::devserver::persisted::devserver_log_path()?;
         print_daemon_paths(&lock_path, &record_path, &log_path);
     }
     stop_live_daemon(&lock_path, &record_path, STOP_TIMEOUT)?;
@@ -147,7 +150,7 @@ pub async fn stop_devserver_chan(verbose: bool) -> Result<()> {
     let lock_path = daemon_lock_path();
     let record_path = daemon_record_path();
     if verbose {
-        let log_path = crate::devserver_log_path()?;
+        let log_path = crate::devserver::persisted::devserver_log_path()?;
         print_daemon_paths(&lock_path, &record_path, &log_path);
     }
 
@@ -187,7 +190,7 @@ pub async fn stop_devserver_chan(verbose: bool) -> Result<()> {
 pub fn status_devserver_chan(verbose: bool) -> Result<()> {
     let lock_path = daemon_lock_path();
     let record_path = daemon_record_path();
-    let log_path = crate::devserver_log_path()?;
+    let log_path = crate::devserver::persisted::devserver_log_path()?;
     if verbose {
         print_daemon_paths(&lock_path, &record_path, &log_path);
     }
@@ -259,7 +262,10 @@ async fn attach_existing(
         Duration::from_secs(5),
     )
     .await?;
-    crate::emit_devserver_token_marker(crate::DEVSERVER_TOKEN_WAIT).await?;
+    crate::devserver::management::emit_devserver_token_marker(
+        crate::devserver::management::DEVSERVER_TOKEN_WAIT,
+    )
+    .await?;
     eprintln!(
         "chan devserver: the self-managed daemon is already running (pid {}) on {}.",
         record.pid, record.addr
@@ -273,7 +279,7 @@ async fn serve_as_daemon(
     tunnel: Option<chan_server::DevserverTunnel>,
 ) -> Result<()> {
     eprintln!("chan devserver: self-managed daemon running in the background (bind={addr}).");
-    let result = crate::run_devserver_foreground(addr, tunnel, true).await;
+    let result = crate::devserver::foreground::run_devserver_foreground(addr, tunnel, true).await;
     drop(guard);
     result
 }
@@ -283,7 +289,7 @@ fn spawn_daemon_child(
     tunnel: Option<chan_server::DevserverTunnel>,
     log_path: &Path,
 ) -> Result<Child> {
-    let exe = crate::resolve_relaunchable_exe()?;
+    let exe = crate::devserver::relaunch::resolve_relaunchable_exe()?;
     let home = DaemonHome::of_this_process()?;
     let (stdout, stderr) = open_daemon_log(log_path)?;
     let mut cmd = daemon_command(&exe, addr, tunnel, &home);
@@ -531,7 +537,7 @@ async fn ready_record(
     let url = format!("http://{addr}/api/health");
     // Startup polls loop at 100ms under their own deadline; the short cap
     // keeps one hung probe from eating the whole readiness budget.
-    if crate::health_ok(&client, &url, Duration::from_secs(2)).await {
+    if crate::devserver::management::health_ok(&client, &url, Duration::from_secs(2)).await {
         Ok(Some(record))
     } else {
         Ok(None)
@@ -619,9 +625,9 @@ async fn watchdog(record: DaemonRecord) -> Result<()> {
     );
     // The subject deliberately omits the pid: the watchdog re-pins to a
     // restarted daemon's pid, so a pid baked in here would go stale.
-    crate::run_health_watchdog(
+    crate::devserver::watchdog::run_health_watchdog(
         &record.addr,
-        crate::DaemonLiveness::Chan {
+        crate::devserver::watchdog::DaemonLiveness::Chan {
             record_path: daemon_record_path(),
             pid: record.pid,
         },

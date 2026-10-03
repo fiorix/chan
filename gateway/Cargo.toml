@@ -72,7 +72,7 @@ members = [
 # ships on chan's `vX.Y.Z` release line, and the release CI refuses to
 # build if the tag doesn't equal this value. Whatever bumps the root
 # version must bump this in the same commit.
-version = "0.100.0"
+version = "0.101.0"
 edition = "2021"
 # Mirrors the repo-root rust-toolchain.toml (1.95.0); the gateway has
 # no toolchain file of its own and inherits the monorepo pin.
@@ -92,7 +92,7 @@ devserver-control-proto = { path = "crates/devserver-control-proto" }
 
 anyhow = "1"
 async-trait = "0.1"
-axum = { version = "0.8", features = ["macros", "ws"] }
+axum = { version = "0.8", features = ["ws"] }
 # yamux Streams from chan-tunnel-server expose futures-io traits;
 # devserver-proxy needs the Compat shim and TokioAsyncReadCompatExt to
 # bridge them onto tokio io.
@@ -141,9 +141,9 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 tower-sessions = "0.14"
-# The newest store release pairs with tower-sessions 0.14 (it requires
-# tower-sessions-core ^0.14); both pins must resolve to one
-# tower-sessions-core or PostgresStore stops satisfying SessionStore.
+# Checked 2026-10-01: tower-sessions 0.15.0 requires core =0.15.0,
+# while the newest SQLx store 0.15.0 requires core ^0.14.0. Keep
+# tower-sessions at 0.14 so PostgresStore satisfies SessionStore.
 tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

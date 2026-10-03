@@ -35,7 +35,7 @@ import {
   type WatchSubscription,
   type WsStatus,
 } from "../api/client";
-import { isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
+import { apiErrorCode, isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -93,7 +93,6 @@ import {
   resolveTabDestination,
   restoreLayout,
   serializeLayout,
-  selectTabInPane,
   splitPane,
   swapPanes,
   type BrowserTab,
@@ -117,6 +116,7 @@ import {
   restoreTransfers,
   setTransferProgress,
   setTransferSignalSink,
+  type TransferSource,
   waitForTransferSlot,
 } from "./transfers.svelte";
 import {
@@ -139,9 +139,8 @@ import {
   proposeDefaultFilename,
 } from "./pathValidate";
 import { basename, parentDir } from "./format";
-import { setNotifyHandler } from "./notify.svelte";
+import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
-import { defaultScopeId } from "./scope.svelte";
 import {
   allTerminalTabs,
   applyFsWritable,
@@ -262,16 +261,8 @@ function effectiveTheme(choice: ThemeChoice): "light" | "dark" {
 
 export const ui = $state<{
   status: string | null;
-  /// Notification kind workspaces the auto-dismiss policy. Transient
-  /// statuses (action confirmations: "Copied path", "Saved", short
-  /// notify() pings) clear themselves after a short window;
-  /// persistent statuses (in-flight ops: "Moving...", errors) stay
-  /// until overwritten or explicitly cleared. A bare `ui.status = ...`
-  /// write leaves `statusKind` null: the pill then has no dismiss
-  /// control and never auto-clears, so a caller that wants a dismissable
-  /// pill sets `statusKind = "persistent"` alongside the write. Transient
-  /// writes go through `setTransientStatus` (or `notify()` which routes
-  /// through that helper).
+  /// Writer metadata. Bare status writes leave this unchanged; transient
+  /// ownership also requires the live timer's message to match the text.
   statusKind: "transient" | "persistent" | null;
   statusAction: { kind: "workspace-warnings"; label: string } | null;
   /// Used to nudge tabs to reload on external changes.
@@ -527,7 +518,16 @@ registerOverridePersist((shortcuts) => {
 });
 
 const TRANSIENT_STATUS_DEFAULT_MS = 3000;
-let transientStatusTimer: ReturnType<typeof setTimeout> | null = null;
+let transientStatusOwner = $state.raw<{
+  message: string;
+  timer: ReturnType<typeof setTimeout> | null;
+} | null>(null);
+
+/// Whether the displayed text belongs to the live transient timer.
+export function isTransientStatus(): boolean {
+  return transientStatusOwner !== null &&
+    ui.status === transientStatusOwner.message && ui.statusKind === "transient";
+}
 
 /// Set an auto-dismissing status pill. Used for action
 /// confirmations (Copied, Saved, etc.) - anything where the user
@@ -537,20 +537,19 @@ export function setTransientStatus(
   msg: string,
   ms: number = TRANSIENT_STATUS_DEFAULT_MS,
 ): void {
-  if (transientStatusTimer !== null) {
-    clearTimeout(transientStatusTimer);
-    transientStatusTimer = null;
+  if (transientStatusOwner && transientStatusOwner.timer !== null) {
+    clearTimeout(transientStatusOwner.timer);
   }
+  const owner = { message: msg, timer: null as ReturnType<typeof setTimeout> | null };
+  transientStatusOwner = owner;
   ui.status = msg;
   ui.statusKind = "transient";
   ui.statusAction = null;
-  transientStatusTimer = setTimeout(() => {
-    transientStatusTimer = null;
-    // Only clear if the message hasn't been overwritten by a newer
-    // status during the window. A direct `ui.status = ...`
-    // (persistent) write stomps our transient mid-flight and we
-    // leave it alone.
-    if (ui.status === msg && ui.statusKind === "transient") {
+  owner.timer = setTimeout(() => {
+    if (transientStatusOwner !== owner) return;
+    const ownsText = isTransientStatus();
+    transientStatusOwner = null;
+    if (ownsText) {
       ui.status = null;
       ui.statusKind = null;
       ui.statusAction = null;
@@ -566,10 +565,10 @@ export function setTransientStatus(
 /// kind: a "Moving..." progress status re-clears when the move settles, and
 /// a workspace-warnings status re-asserts itself on the next info pass.
 export function dismissStatus(): void {
-  if (transientStatusTimer !== null) {
-    clearTimeout(transientStatusTimer);
-    transientStatusTimer = null;
+  if (transientStatusOwner && transientStatusOwner.timer !== null) {
+    clearTimeout(transientStatusOwner.timer);
   }
+  transientStatusOwner = null;
   ui.status = null;
   ui.statusKind = null;
   ui.statusAction = null;
@@ -581,6 +580,7 @@ export function dismissStatus(): void {
 setNotifyHandler((msg) => {
   setTransientStatus(msg);
 });
+setStatusReader(() => ui.status);
 
 const dismissedWorkspaceWarningKeys = new Set<string>();
 
@@ -1695,9 +1695,9 @@ function isSurveyCloseReason(value: unknown): value is SurveyCloseReason {
 /// programmatic file-input `.click()` made outside a user gesture. Rust opens
 /// the native picker and streams the chosen paths directly to the upload API;
 /// paths and bytes never cross webview IPC.
-export function raiseUploadPicker(destDir: string, root?: TransferRoot): void {
+export function raiseUploadPicker(destDir: string, root?: TransferRoot, filesApp = true): void {
   if (isTauriDesktop()) {
-    void raiseDesktopUploadPicker(destDir, root);
+    void raiseDesktopUploadPicker(destDir, root, filesApp);
     return;
   }
   const input = document.createElement("input");
@@ -1742,12 +1742,13 @@ export function raiseReplacePicker(targetPath: string): void {
   input.click();
 }
 
-async function raiseDesktopUploadPicker(destDir: string, root?: TransferRoot): Promise<void> {
+async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | undefined, filesApp: boolean): Promise<void> {
   try {
     const uploaded = await runDesktopUpload(
       { dir: destDir, multiple: true },
       destDir ? `Upload to ${destDir}` : "Upload files",
       root,
+      filesApp,
     );
     if (uploaded.length === 0) return;
     if (root !== "filesystem" || usesStandaloneFiles()) {
@@ -1917,10 +1918,9 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "upload" && typeof frame.path === "string") {
-    // `cs upload`: raise the SAME upload UI the Inspector pill uses -- open a
-    // file picker, then hand the picked files to fileOps.uploadFilesTo (which
-    // drives the shared transfer-progress indicator). Reuse, not a parallel path.
-    raiseUploadPicker(frame.path, frame.root);
+    // Share the picker and transfer-progress flow with Files uploads while
+    // keeping the native command on the terminal transfer route.
+    raiseUploadPicker(frame.path, frame.root, false);
     setTransientStatus(`upload to ${frame.path || "/"}`);
     return;
   }
@@ -2452,9 +2452,7 @@ async function bootstrapStandalone(): Promise<void> {
       }
       if (windowCaps.files && !fresh) {
         applyTreeExpandedReloadSnapshot();
-        restoreTransfers(
-          (source) => () => fileOps.downloadPathWithProgress(source.path, source.isDir),
-        );
+        restoreTransfers(fileOps.downloadRetry);
       }
     } catch (e) {
       ui.status = `restore failed: ${(e as Error).message}`;
@@ -2626,9 +2624,7 @@ export async function bootstrap(): Promise<void> {
       // re-runs a download from its source (uploads cannot retry -- the File is
       // gone). Fresh windows start with no transfers.
       if (!fresh) {
-        restoreTransfers(
-          (source) => () => fileOps.downloadPathWithProgress(source.path, source.isDir),
-        );
+        restoreTransfers(fileOps.downloadRetry);
       }
       // Per-overlay state from the hash lands on top of any
       // session-restored knobs so a shared URL always wins. Skipped
@@ -2837,11 +2833,11 @@ export async function relistTreeDir(dir: string): Promise<void> {
   for (let waited = 0; tree.loadingDirs[dir] && waited < 2000; waited += 100) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (!tree.loadedDirs[dir]) {
-    await loadTreeDir(dir);
-    return;
-  }
   try {
+    if (!tree.loadedDirs[dir]) {
+      await loadTreeDir(dir);
+      return;
+    }
     const entries = await api.list(dir);
     tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
   } catch {
@@ -2982,23 +2978,14 @@ export function scheduleWorkspaceRefresh(): void {
 
 // ---- URL hash bridge for layout + UI persistence ------------------------
 //
-// Every visible surface round-trips through the URL hash so a
-// copy-paste of the address bar reproduces the same screen on
-// another browser: pane / tab tree under `s`, plus a per-overlay
-// key (`files`, `search`, `graph`, `settings`). Presence of an
-// overlay key = that overlay is open; its value carries the scoped
-// state (selected entry, query, scope+depth+filters). Settings has
-// no per-overlay state so its value is just `1`.
+// The `s` key carries the pane/tab layout, including graph and browser
+// tabs. The `search` key opens Search with its inspector bit and query.
+// Other overlays, including Settings, have no URL-hash state.
 
 const HASH_LAYOUT = "s";
 const HASH_SIDEBAR = "c"; // "1" if collapsed, absent if expanded
 const HASH_SEARCH = "search";
-// The `settings`, `files`, `graph`, and `search_scope` overlay hash
-// keys are no longer active. Settings is an overlay without hash state;
-// graph and browser surfaces are first-class tabs that persist via the
-// layout `s` key; search is workspace-wide with no scope. Old bookmarks
-// with these keys degrade gracefully: they are
-// not in HASH_KEYS so dropUnknownHashKeys strips them on the next write.
+// Hash writes retain only the layout and workspace-wide Search state.
 const HASH_KEYS = new Set([
   HASH_LAYOUT,
   HASH_SEARCH,
@@ -3096,22 +3083,18 @@ export function persistStateToHash(): void {
   const ser = serializeLayout();
   const url = new URL(window.location.href);
   const params = hashParams();
-  // Canonicalize stale/shared links as we write our state back.
-  // Unknown keys from old builds and legacy experiments are ignored
-  // on restore and should not survive forever once the current app
-  // has touched the URL.
+  // Keep shared links limited to the state this app restores.
   dropUnknownHashKeys(params);
   if (!ser) {
     params.delete(HASH_LAYOUT);
   } else {
     params.set(HASH_LAYOUT, JSON.stringify(ser));
   }
-  // Drop the legacy sidebar-collapsed key from any pre-existing
-  // saved URL hash so it doesn't sit there forever.
+  // Sidebar visibility is not part of the shared URL state.
   params.delete(HASH_SIDEBAR);
   // ---- overlay keys: presence = open ------------------------
-  // Only search is an overlay surface; graph and browser tabs persist via
-  // the layout `s` key above.
+  // Search is the only overlay persisted here; graph and browser tabs
+  // persist via the layout `s` key above.
   if (searchPanel.open) {
     const ins = searchPanel.inspectorOpen ? "1" : "0";
     params.set(HASH_SEARCH, `${ins}:${searchPanel.query ?? ""}`);
@@ -3456,7 +3439,7 @@ registerPaneModeSettledSink((pendingRemoteLayout) => {
 /// label) and stop any pending or future save from re-persisting it. The caller
 /// closes the window afterward. Idempotent; fires a `keepalive` DELETE so the
 /// reap survives an immediate window destroy/unload -- this is the explicit,
-/// synchronous discard signal that replaces the old reliance on a `pagehide`
+/// synchronous discard signal, not a reliance on a `pagehide`
 /// flush (which a hidden/buried WKWebView may never fire).
 ///
 /// `reap: false` (a cross-window terminal MOVE that emptied this window): still
@@ -3798,13 +3781,6 @@ export function closeSettings(): void {
   settingsPanel.open = false;
 }
 
-/// Toggle the settings surface, for a bound chord or the native host
-/// bridge; a second press closes it.
-export function toggleSettings(): void {
-  if (settingsPanel.open) closeSettings();
-  else openSettings();
-}
-
 // ---- graph overlay -----------------------------------------------------
 //
 // Open + scope picker state, plus a `depth` knob for how far the
@@ -3832,17 +3808,6 @@ function openGraphAtDestination(
   } else {
     openGraphInActivePane(opts);
   }
-}
-
-/** Open the graph overlay, snapping the scope to the active file
- *  when applicable. Idempotent. */
-export function openGraph(): void {
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: defaultScopeId(),
-    pendingSelectId: null,
-  });
-  scheduleSessionSave();
 }
 
 /** Spawn a graph tab rooted at the focused surface's context.
@@ -3978,16 +3943,6 @@ export function openFsGraphForDirectory(path: string): void {
   scheduleSessionSave();
 }
 
-export function scopeFsGraphFromHere(path: string, isDir: boolean): void {
-  openGraphInActivePane({
-    mode: "filesystem",
-    scopeId: isDir ? `dir:${path}` : `file:${path}`,
-    depth: 1,
-    pendingSelectId: path,
-  });
-  scheduleSessionSave();
-}
-
 /** Open the graph overlay scoped to a tag, with the tag node itself
  *  pre-selected. The resulting subgraph is the tag's neighbourhood
  *  (every file referencing the tag, plus their depth-limited
@@ -4073,32 +4028,7 @@ export function openGraphFromLink(
   return true;
 }
 
-// ---- file browser overlay ----------------------------------------------
-//
-// The file browser is a window-level overlay (not a tab), so its
-// open + inspector-open state lives here. One per window; the
-// inspector toggle is window-scoped now (was per-tab when the
-// browser was a tab kind) since there's only ever one instance.
-
-export function openBrowser(): BrowserTab {
-  const tab = focusExistingBrowserTab() ?? openBrowserInActivePane();
-  scheduleSessionSave();
-  return tab;
-}
-
-function focusExistingBrowserTab(): BrowserTab | null {
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    const tab = allPaneTabs(node).find(
-      (candidate): candidate is BrowserTab => candidate.kind === "browser",
-    );
-    if (!tab) continue;
-    selectTabInPane(node.id, tab.id);
-    layout.activePaneId = node.id;
-    return tab;
-  }
-  return null;
-}
+// ---- file browser reveal -----------------------------------------------
 
 /// Reveal a path by OPENING a File Browser TAB: a tab in the active
 /// pane, with the path selected and its ancestor chain expanded;
@@ -4463,7 +4393,7 @@ export function fbClearSelection(): void {
   browserSelection.anchor = null;
 }
 
-/// File Browser clipboard (FB2). Module-level (NOT per-instance) so a
+/// File Browser clipboard. Module-level (NOT per-instance) so a
 /// copy/cut in one File Browser can be pasted into another - the spec
 /// explicitly allows cross-instance paste on the same workspace. `mode`
 /// distinguishes copy (duplicate) from cut (move on paste). `paths` is
@@ -4769,9 +4699,9 @@ function applyTreeExpandedReloadSnapshot(): boolean {
 // the file-browser dock, which is not a layout tab) is NOT a durable saved
 // window: `serializeSession()` returns null so no on-disk session blob is
 // written (that is what stops it lingering as a `cs window list` phantom after
-// close -- step-5). But Cmd+R must still RE-ATTACH the surviving server-side
+// close). But Cmd+R must still RE-ATTACH the surviving server-side
 // PTYs, and the reload tsid graft (tabs.svelte.ts) sources tsids from the
-// server session blob -- which is now absent. So we mirror the live layout
+// server session blob -- which such a window does not have. So we mirror the live layout
 // (WITH tsids, plus the rich-prompt pp/rpv) into sessionStorage, which
 // survives a reload but is cleared when the window/tab closes. Same channel as
 // the treeExpanded reload snapshot above: reload reattaches, a real close
@@ -4862,12 +4792,12 @@ export function persistTreeExpanded(): void {
 // ---- per-instance reload persistence ----------------------------------------
 //
 // FileTree.svelte renders off the per-instance `expanded` map, so the
-// global reload snapshot above no longer feeds it. Each surface gets its
+// global reload snapshot above does not feed it. Each surface gets its
 // own sessionStorage snapshot keyed by workspace + instance id so a full
 // browser reload restores that surface's expansion. The TAB variant's
 // authoritative store is the layout tab's `expanded` field (round-tripped
 // through the hash + session.json and re-seeded by FileBrowserSurface on
-// mount); the DOCK / overlay variants have no layout home, so this
+// mount); the dock variants have no layout home, so this
 // snapshot is what survives their reload.
 
 const FB_INSTANCE_RELOAD_KEY = "chan.fileBrowser.instanceExpanded";
@@ -4961,32 +4891,6 @@ function seedTreeExpansionIfFresh(): void {
   treeExpanded.map[""] = true;
 }
 
-/// Expand every directory in the current tree. Wired to the file
-/// browser's expand-all header button. Mutates the existing map
-/// proxy in place so consumers that captured `treeExpanded.map` at
-/// mount time (FileTree.svelte) keep seeing the live state.
-export function expandAllFolders(): void {
-  treeExpanded.map[""] = true;
-  for (const e of tree.entries) {
-    if (e.is_dir) treeExpanded.map[e.path] = true;
-  }
-  treeExpansionSeeded = true;
-  persistTreeExpanded();
-}
-
-/// Collapse every directory (top-level rows still render; their
-/// children are hidden). Keeps the implicit root key alive so
-/// FileTree's pre-order walk stays consistent. Mutates in place
-/// for the same reason as `expandAllFolders`.
-export function collapseAllFolders(): void {
-  for (const k of Object.keys(treeExpanded.map)) {
-    if (k !== "") delete treeExpanded.map[k];
-  }
-  treeExpanded.map[""] = true;
-  treeExpansionSeeded = true;
-  persistTreeExpanded();
-}
-
 /// Reveal a path in the file browser tree: expand every ancestor
 /// directory so the row is visible, then set the browser selection to
 /// it. FileTree's selection-change effect scrolls the row into
@@ -5003,11 +4907,11 @@ export function revealAndSelect(path: string): void {
     treeExpanded.map[acc] = true;
   }
   treeExpanded.map[""] = true;
-  // FileTree renders off per-instance maps now, so a reveal must reach
+  // FileTree renders off per-instance maps, so a reveal must reach
   // every live surface (the dock + the active tab) rather than only the
   // global singleton; the entry should appear wherever the user is
   // looking. Expand ancestors only (not the file itself).
-  expandAncestorsInAllInstances(path, false);
+  expandAncestorsInAllInstances(path);
   // Programmatic reveal is a single-select: reset the multi-set + anchor
   // so a later shift+click ranges from the revealed entry.
   fbSelectSingle(path);
@@ -5017,48 +4921,13 @@ export function revealAndSelect(path: string): void {
   persistTreeExpanded();
 }
 
-/// Enter a directory from an external window command. This expands the
-/// target directory itself so lazy child loading reveals that directory's
-/// contents, not just the parent chain that makes the directory row visible.
-export function revealAndEnterDirectory(path: string): void {
-  const parts = path.split("/").filter(Boolean);
-  let acc = "";
-  treeExpanded.map[""] = true;
-  for (const part of parts) {
-    acc = acc ? `${acc}/${part}` : part;
-    treeExpanded.map[acc] = true;
-  }
-  // Reach every live surface (see revealAndSelect). Entering a directory
-  // expands the directory ITSELF plus its ancestors.
-  expandAncestorsInAllInstances(path, true);
-  fbSelectSingle(path || null);
-  browserSelection.showWorkspace = false;
-  // Nothing awaits this load, and `loadTreeDir` rethrows after recording the
-  // failure, so the rejection is swallowed here rather than left unhandled.
-  // The reader is `tree.dirErrors`, which the directory's own row renders; an
-  // unhandled rejection would raise a second, contextless report of a failure
-  // the tree is already showing.
-  if (path) void loadTreeDir(path).catch(() => {});
-  persistTreeExpanded();
-}
-
-/// True when every directory in the current tree is expanded.
-/// Feeds the expand/collapse affordance's glyph and title.
-export function isFullyExpanded(): boolean {
-  for (const e of tree.entries) {
-    if (e.is_dir && !treeExpanded.map[e.path]) return false;
-  }
-  return true;
-}
-
 // ---- per-instance expansion helpers ------------------------------------------
 //
 // FileTree.svelte renders + toggles off the per-instance `expanded` map in
 // `fbTreeInstances` so two visible File Browser surfaces (a dock side + a
 // tab, or two split panes) keep independent expand/collapse state. These
-// mirror the global `expandAllFolders` / `collapseAllFolders` /
-// `isFullyExpanded` above but target one instance's map. The FB header
-// menu calls them with the surface's own instance id.
+// target one instance's map. The FB header menu calls them with the
+// surface's own instance id.
 
 /// Expand every directory in the current tree for one instance.
 export function expandAllFoldersForInstance(id: string): void {
@@ -5079,25 +4948,14 @@ export function collapseAllFoldersForInstance(id: string): void {
   inst.expanded[""] = true;
 }
 
-/// True when every directory in the current tree is expanded for one
-/// instance. Feeds the expand/collapse affordance for that surface.
-export function isFullyExpandedForInstance(id: string): boolean {
-  const inst = fbTreeInstance(id);
-  if (!inst) return false;
-  for (const e of tree.entries) {
-    if (e.is_dir && !inst.expanded[e.path]) return false;
-  }
-  return true;
-}
-
 /// Expand the ancestor chain of `path` across EVERY live File Browser
-/// instance. Programmatic reveals (after create / move / upload, or an
-/// external open-browser command) must surface the new entry in whatever
-/// surface is on screen; unlike a user toggle, a reveal is not scoped to
-/// one instance. Always keeps each instance's root expanded.
-function expandAncestorsInAllInstances(path: string, includeSelf: boolean): void {
-  const parts = (includeSelf ? path.split("/").filter(Boolean) : path.split("/"));
-  const upto = includeSelf ? parts.length : parts.length - 1;
+/// instance. Programmatic reveals (after create / move / upload) must
+/// surface the new entry in whatever surface is on screen; unlike a user
+/// toggle, a reveal is not scoped to one instance. Always keeps each
+/// instance's root expanded.
+function expandAncestorsInAllInstances(path: string): void {
+  const parts = path.split("/");
+  const upto = parts.length - 1;
   for (const inst of Object.values(fbTreeInstances.byId)) {
     inst.expanded[""] = true;
     let acc = "";
@@ -5143,7 +5001,7 @@ async function pollIndexStatusOnce(): Promise<void> {
     const s = await api.indexStatus();
     indexStatus.value = s;
     // Idle → slow poll. Single-file Reindexing → transient cadence
-    // so the post-reindex idle is caught within ~250ms (Bug 1).
+    // so the post-reindex idle is caught within ~250ms.
     // Multi-file Building → fast cadence (the pass takes seconds
     // and per-tick UI churn isn't useful). Error → fast cadence so
     // an operator-visible recovery surfaces quickly.
@@ -5169,6 +5027,9 @@ async function pollIndexStatusOnce(): Promise<void> {
 
 type PromptState = {
   open: boolean;
+  /// Bumped by every prompt, so the modal starts afresh for one asked over
+  /// an open prompt, the same default or not.
+  seq: number;
   title: string;
   defaultValue: string;
   resolve: ((value: string | null) => void) | null;
@@ -5176,6 +5037,7 @@ type PromptState = {
 
 export const promptState = $state<PromptState>({
   open: false,
+  seq: 0,
   title: "",
   defaultValue: "",
   resolve: null,
@@ -5193,6 +5055,7 @@ export function uiPrompt(
     promptState.title = title;
     promptState.defaultValue = defaultValue;
     promptState.resolve = resolve;
+    promptState.seq += 1;
     promptState.open = true;
   });
 }
@@ -5227,8 +5090,7 @@ export function resolvePrompt(value: string | null): void {
 /// `"either"` lets the unified "New File or Directory" prompt accept
 /// both shapes. The modal detects file-vs-dir from the path's trailing
 /// slash: `foo/bar/` is a directory, `foo/bar` (or with an extension)
-/// is a file. Callers resolve the returned path against the chosen kind
-/// via `pathPromptKind()` below.
+/// is a file.
 export type PathPromptKind = "file" | "folder" | "either";
 /// `attach` is the watcher-dialog mode: the user picks a path to
 /// attach a long-running watcher to,
@@ -5333,14 +5195,6 @@ export function resolvePathPrompt(value: string | null): void {
 /// active pane on create. Surfacing one set of behaviors via several
 /// affordances keeps the actions consistent regardless of which entry
 /// point the user reaches for.
-
-// `appendDefaultMd` moved to ../state/pathValidate so PathPromptModal
-// can preview the auto-extension live; we re-import below.
-
-// `preserveExtension` moved to ../state/pathValidate so the
-// PathPromptModal can preview the rename-with-preserved-extension
-// inline. We re-import above; the call below is now a defensive
-// idempotent layer (the modal already resolved the extension).
 
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style
 /// prompt) and drag-and-drop. No-ops if source == target. An occupied
@@ -5688,14 +5542,20 @@ export const fileOps = {
         window.location.href,
       ).toString();
       // Pass the source so an interrupted download (window reload) can offer
-      // Retry from the transfer bubble.
+      // Retry from the transfer bubble, under the same root.
       void runDesktopDownload(url, downloadFilename(path, isDir), {
         path,
         isDir,
+        root,
       }).catch(() => {});
       return;
     }
     this.downloadPath(path, isDir, root);
+  },
+  /// The Retry a reload rebuilds for an interrupted or failed download: it
+  /// asks for the recorded source again, under the root it was started with.
+  downloadRetry(source: TransferSource): () => void {
+    return () => fileOps.downloadPathWithProgress(source.path, source.isDir, source.root);
   },
   async replaceFileAt(targetPath: string, picked: File): Promise<void> {
     const draftsReason = fileBrowserDraftsPathReason(targetPath);
@@ -6058,9 +5918,11 @@ export const fileOps = {
   /// selected path is a target, deleted deepest first: a directory selected
   /// with all its contents empties and then goes, and one that still holds an
   /// unselected path is refused. A refused delete does not stop the rest: the
-  /// status line says how many went and names the first refusal, and the
-  /// selection keeps the paths that were refused, less any the server no
-  /// longer has. A delete of every path clears the selection.
+  /// status line says how many went and names the first refusal, by the
+  /// server's sentence alone when that sentence names the path (a directory
+  /// that is not empty, a protected path), and the selection keeps the paths
+  /// that were refused, less any the server no longer has. A delete of every
+  /// path clears the selection.
   async removeSelection(paths: readonly string[]): Promise<void> {
     const unique = [...new Set(paths)];
     const targets = windowCaps.workspace
@@ -6100,7 +5962,11 @@ export const fileOps = {
         deleted.push(path);
       } catch (e) {
         const gone = e instanceof ApiError && e.status === 404;
-        refused.push({ path, reason: (e as Error).message, gone });
+        // The sentence of either no-workspace conflict names the path itself.
+        const code = e instanceof ApiError && e.status === 409 ? apiErrorCode(e) : null;
+        const namesPath = code === "directory_not_empty" || code === "protected_path";
+        const sentence = (e as Error).message;
+        refused.push({ path, reason: namesPath ? sentence : `${path}: ${sentence}`, gone });
       }
     }
     // A path the server no longer has is not left selected: it is not in
@@ -6118,7 +5984,7 @@ export const fileOps = {
     const first = refused[0];
     if (!first && refreshError === null) return;
     const outcome = first
-      ? `deleted ${deleted.length} of ${targets.length}; ${first.path}: ${first.reason}`
+      ? `deleted ${deleted.length} of ${targets.length}; ${first.reason}`
       : `deleted ${deleted.length}`;
     ui.status = refreshError === null ? outcome : `${outcome}; refresh failed: ${refreshError}`;
   },

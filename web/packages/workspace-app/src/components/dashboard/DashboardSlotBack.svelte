@@ -1,6 +1,5 @@
 <script lang="ts">
-  // Per-slot Dashboard flip-back. Replaces the monolithic
-  // HybridDashboardConfig: the back now mirrors the front carousel's
+  // Per-slot Dashboard flip-back: the back mirrors the front carousel's
   // current slot (Workspace / Search / About) and shows that slot's own
   // body. A carousel navigator (prev/next chevrons + a dot pager +
   // a pause/play toggle) lets the user move between slots without
@@ -67,9 +66,8 @@
 
   <!-- Carousel navigator. Mirrors the FRONT card's carousel controls
        (EmptyPaneCarousel.svelte): prev/next chevrons + a dot pager + a
-       pause/play toggle. It rides in the shell's footer row (footerCenter)
-       now - centered, sharing the row with the right-aligned OK - instead
-       of a separate bottom row above a divider. Selecting a slot swaps the
+       pause/play toggle. It rides in the shell's footer row (footerCenter),
+       centered, sharing the row with the right-aligned OK. Selecting a slot swaps the
        body above and moves tab.carouselSlide so the front lands on the
        same slot when flipped back; pause/play sets tab.autoRotate. The
        navigator itself does not auto-rotate (you are configuring, not
@@ -128,7 +126,7 @@
   /* Carousel navigator, styled to match the front carousel's
      `.carousel-controls` (EmptyPaneCarousel.svelte) so the two faces read
      as the same control family. It lives in the shell footer's centered
-     slot now, so the row placement/centering is the footer grid's job;
+     slot, so the row placement/centering is the footer grid's job;
      this just lays the controls out inline. */
   .carousel-nav {
     display: inline-flex;

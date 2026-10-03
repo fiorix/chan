@@ -4,15 +4,17 @@
 //
 //   selectionInRange(sel, from, to)
 //     true if any selection range touches [from, to]. Boundary equality
-//     counts as intersection - caret AT a marker's edge reveals the
-//     marker. This is the rule for inline marks (bold, italic, strike,
-//     code, link/image markers, wikilink brackets).
+//     counts as intersection - a caret AT the edge of the range reveals
+//     it. The inline marks (bold, italic, strike, code), external links
+//     and autolinks pass their OUTER token range, and the wikilink,
+//     date, table and diagram widgets pass the range they replace.
 //
 //   lineIntersect(state, from, to, sel)
 //     true if any selection range's line span overlaps the line span of
-//     [from, to]. Block prefixes (heading `#`, list bullet, blockquote
-//     `>`, code fence) use this so they don't flicker on/off as the
-//     caret crosses the prefix mid-line.
+//     [from, to]. A heading's `#` prefix uses this so it doesn't flicker
+//     on/off as the caret crosses the prefix mid-line; a code fence and
+//     a page-break line use it to show their source while the caret is
+//     on any of their lines.
 //
 // Pure functions; no CM6 view dependency. Intended to be cheap (no
 // allocations beyond computing line objects via state.doc.lineAt).

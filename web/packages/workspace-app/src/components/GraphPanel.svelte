@@ -1,18 +1,23 @@
 <script lang="ts">
-  // Graph view overlay: Cytoscape.js renderer over chan's GraphView
-  // payload. fcose handles force-directed layout; pan / zoom / node
-  // drag / hover / selection all come from Cytoscape's built-ins.
+  // Graph tab body. Loads the graph for the tab's scope (`load`) and
+  // hands it to GraphCanvas, which lays it out with d3-force and
+  // paints it on a Canvas 2D context; pan / zoom / node drag / hover
+  // / selection live there too.
   //
-  // Scope (top-bar dropdown) workspaces a BFS over the full graph that
-  // produces a visible-id set; the per-edge-kind chips compose with
-  // it. Both filters are applied as a `display: none` toggle on the
-  // existing Cytoscape elements, so layout positions are stable
-  // across filter changes.
+  // The scope (`graphState.scopeId`) drives `scopedNodeIds`, the
+  // visible-id set: a workspace or directory scope shows a file or
+  // folder when its ancestors are expanded; the tag, mention,
+  // contact, language and semantic file scopes walk a BFS
+  // (`lensClosure`). The filter chips compose with it in
+  // `visibleEdges` / `visibleNodeIds`. GraphCanvas reuses the
+  // laid-out node of every id that stays visible and re-warms the
+  // simulation around the change.
   //
-  // Pinning: in file / group / git_repo / dir scope, the seed file
-  // nodes are repositioned to the canvas center (or fanned around
-  // it for multi-seed) and locked, then a gentle fcose pass relaxes
-  // neighbours. Workspace / global scope leaves all nodes free.
+  // Pinning: `focalIds` names the nodes GraphCanvas pins. A tag,
+  // mention, contact or language scope pins its own node; a file or
+  // directory scope pins the file nodes at or under its path. One
+  // focal node sits at the world origin, several fan around it.
+  // Workspace scope leaves all nodes free.
 
   import { api } from "../api/client";
   import { isWorkspaceRootMissingError } from "../api/errors";
@@ -57,7 +62,7 @@
     fbWatchReconcile,
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
-  import { type ScopeOption } from "../state/scope.svelte";
+  import { type ScopeOption } from "../state/scope";
   import { basename, parentDir } from "../state/format";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
@@ -105,8 +110,8 @@
   } = $props();
 
   // The graph is always a first-class TAB (Pane mounts GraphPanel only
-  // with a `graph`-kind tab). The pre-migration overlay variant is gone,
-  // so the scope/state come straight from the tab. Every graph tab in
+  // with a `graph`-kind tab), so the scope/state come straight from
+  // the tab. Every graph tab in
   // the pane stays mounted and hidden through the visibility contract,
   // so `visible` tracks the `active` prop. The load + depth-probe +
   // watcher effects gate on it: a hidden graph does no background
@@ -115,26 +120,20 @@
   const graphState = $derived(tab);
   const visible = $derived(active);
 
-  /// The scope-selector dropdown is gone; "Graph from here", inspector
-  /// reveal, and file-browser navigation are the canonical scope-setting
-  /// paths. The graph tab carries its own `scopeId`, so `currentScope`
-  /// resolves straight from it via `synthesizeScope` - no global,
-  /// pane-derived option list (the retired `availableGraphScopes`). The
-  /// rest of the panel branches on `currentScope.kind` (filesystemMode,
-  /// seedIds, BFS shape, etc.).
+  /// The graph tab carries its own `scopeId`, and `currentScope`
+  /// resolves straight from it via `synthesizeScope`. The rest of the
+  /// panel branches on `currentScope.kind` (filesystemMode, seedIds,
+  /// BFS shape, etc.).
   const currentScope = $derived<ScopeOption | null>(
     synthesizeScope(graphState.scopeId),
   );
 
-  /// Graph tabs carry six live scopeId prefixes today: workspace,
-  /// `file:` / `dir:` (path lens), `tag:` (tag lens, centered on
-  /// the tag node), `contact:` (contact lens --
-  /// bidirectional BFS from the contact file picks up backlinks),
-  /// and `language:` (language lens -- 1-hop neighbours).
-  /// The wiped scope kinds (global, group, git_repo) are never
-  /// produced for a graph, so this resolver only covers the live
-  /// entry points; the dead kind-branches that used to handle the
-  /// others were removed with the scope-concept wipe.
+  /// A graph tab's scopeId is `workspace` or one of six prefixes:
+  /// `file:` / `dir:` (path lens), `tag:` and `mention:` (lens
+  /// centered on the tag or mention node), `contact:` (contact lens
+  /// -- bidirectional BFS from the contact file picks up backlinks),
+  /// and `language:` (language lens -- 1-hop neighbours). Any other
+  /// id resolves to null.
   function synthesizeScope(scopeId: string): ScopeOption | null {
     if (scopeId === "workspace") return { id: "workspace", kind: "workspace", label: "workspace" };
     if (scopeId.startsWith("file:")) {
@@ -182,9 +181,9 @@
   /// entry is one clickable hop in the path from the workspace root down
   /// to the current scope's root. Click an ancestor → mutate
   /// `graphState.scopeId` in place (no new tab). The chain renders
-  /// only for path-based scopes (`workspace` / `dir:` / `file:`); tag /
-  /// git_repo / global scopes return an empty list so the breadcrumb
-  /// band is hidden for those modes.
+  /// only for path-based scopes (`workspace` / `dir:` / `file:`); every
+  /// other scope kind returns an empty list so the breadcrumb band is
+  /// hidden for it.
   ///
   /// The list always starts with the workspace root so the user can hop
   /// back up to workspace scope from anywhere. The final entry is the
@@ -219,8 +218,7 @@
     return out;
   });
 
-  /// Re-scope the current graph in place. Mirrors the existing
-  /// semantic-mode `onSetAsScope` handler: depth resets to 1 so a
+  /// Re-scope the current graph in place: depth resets to 1 so a
   /// freshly-scoped graph starts tight; selection clears so the
   /// inspector lands on the new scope's body. Used by the
   /// breadcrumb's click handler.
@@ -232,23 +230,6 @@
     selectedId = null;
   }
 
-  /// "Graph from here" on a selected file or folder node. Re-scopes IN
-  /// PLACE (the graph tab/overlay the user is in) rather than spawning a
-  /// new tab, with the node itself pinned + re-selected so the inspector
-  /// stays on it.
-  ///
-  /// The re-root target differs by kind, matching the canonical
-  /// `openFsGraphFor{File,Directory}` helpers:
-  ///   - FILE: a file cannot be an fs-graph scope root, so re-root to its
-  ///     PARENT folder (workspace root when the file is top-level) and select
-  ///     the file inside that cohort.
-  ///   - DIRECTORY: re-root to the DIRECTORY ITSELF (workspace root for
-  ///     the empty/root path) so its subtree comes into view and the
-  ///     directory node stays selected. Applying the file (parent) rule
-  ///     to directories would make re-rooting a no-op whenever the
-  ///     clicked folder's parent already IS the current scope (scopeId
-  ///     unchanged -> no reload), leaving the unconsumed pendingSelectId
-  ///     and a blank inspector.
   /// Double-click a graph node. For a directory node in filesystem mode
   /// this expands/collapses it in place (File Browser parity): expanding
   /// reveals the directory's next degree (find -d 1), collapsing hides its
@@ -293,8 +274,8 @@
     }
   }
 
-  /// Workspace-relative parent directory of a path ("" for a top-level
-  /// entry).
+  /// Id of the rendered node for the directory at `path`: the bare path
+  /// in filesystem mode, `directoryNodeId(path)` otherwise.
   function renderedDirectoryId(path: string): string {
     return filesystemMode ? path : directoryNodeId(path);
   }
@@ -525,7 +506,9 @@
 
   /// "Graph from here" spawns a NEW graph tab seeded at the clicked node
   /// (the nav contract: a from-here graph is always its own tab, never an
-  /// in-place re-root of the current one). The new tab opens in semantic
+  /// in-place re-root of the current one). A directory roots the new
+  /// graph at itself; a file roots it at its parent folder (the workspace
+  /// root for a top-level file). The new tab opens in semantic
   /// mode -- a directory scope pulls the `contains` spine plus every layer
   /// (link / backlink / hashtag / contact / language) and supports
   /// double-click / depth-slider expansion, so the from-here graph stays
@@ -555,18 +538,11 @@
 
   // ---- types -------------------------------------------------------------
 
-  // The graph view renders documents (files), images (also file
-  // nodes, split by extension at element-build time), tags, and
-  // mentions. Dates are still filtered out at load: chan-workspace's
-  // graph index has stopped emitting date edges (issue #17), but
-  // older indexes may still contain them.
-  /// `group` is a synthetic edge kind: cytoscape-only, never emitted
-  /// by chan-workspace's graph index. It exists to fan `group` edges
-  /// from a synthetic hub node to the files in a
-  /// multi-file `group` scope -- but no graph scope kind produces a
-  /// group scope, so that synthesis is unreachable; the edge-kind +
-  /// hub machinery is dead and awaits a follow-up cleanup.
-  type RenderedEdgeKind = "link" | "tag" | "mention" | "contains" | "language" | "group";
+  // The graph view renders files (media arrive as file nodes too),
+  // folders, tags, mentions and languages. The wire types also name a
+  // `date` node and edge kind; `mapGraphNode` and `renderableGraphEdge`
+  // drop both at load.
+  type RenderedEdgeKind = "link" | "tag" | "mention" | "contains" | "language";
   type RenderedEdge = GraphViewEdge & { kind: RenderedEdgeKind };
   type RenderedNode = Extract<
     GraphViewNode,
@@ -686,9 +662,9 @@
   // depth decreases (or the scope narrows / the panel closes) the dropped
   // directories are unsubscribed, with the LAST instance to release a dir
   // tearing the server watcher down. This shares the exact refcounted
-  // mechanism File Browser workspaces via `fbWatch`; the actual redraw still
-  // runs through the existing `graphReloadSignal` reload path.
-  const graphInstanceId = $derived(tab ? `graph-tab-${tab.id}` : "graph-overlay");
+  // mechanism File Browser drives via `fbWatch`; the actual redraw
+  // runs through the `graphReloadSignal` reload path.
+  const graphInstanceId = $derived(`graph-tab-${tab.id}`);
 
   /// Directory scopes the currently-loaded graph displays. In
   /// filesystem mode this is the set of `directory` fs-graph nodes; in
@@ -745,8 +721,7 @@
   /// ("missing") nodes. Surface an "indexing" cue so an in-flight graph
   /// isn't trusted as complete; once the index is idle, any remaining
   /// dead-end is a real broken link. (`hiddenMissingIds` below pulls
-  /// those dead-ends back while indexing; a per-parent-dir pulse is a
-  /// deferred refinement.)
+  /// those dead-ends back while indexing.)
   const workspaceRecovering = $derived(
     indexStatus.value?.state === "recovering",
   );
@@ -786,7 +761,7 @@
   /// a glance there's nothing more to reveal. Gates: only fires
   /// outside language mode (which has its own depth=0 "max"
   /// affordance) + only when the slider would otherwise be
-  /// enabled (depthDisabled is the workspace/global guard).
+  /// enabled (depthDisabled is the unresolved-scope guard).
   const depthShallow = $derived.by(() => {
     if (languageMode) return false;
     // Workspace scope takes the shallow check too: with the
@@ -845,7 +820,7 @@
   /// shared tab-menu state addresses THIS tab; positioned via the
   /// stored anchor through `clampMenu` so the bubble stays on-
   /// screen even when the tab sits near the viewport edge.
-  const tabMenuOpen = $derived(tab !== undefined && tabMenu.openForTabId === tab.id);
+  const tabMenuOpen = $derived(tabMenu.openForTabId === tab.id);
   const tabMenuPos = $derived.by(() => {
     const a = tabMenu.anchor;
     if (!a) return { x: 0, y: 0 };
@@ -873,20 +848,15 @@
     if (trigger) return;
     closeTabMenu();
   }
-  /// Cap matches the slider's `max` attribute below. Lifting it past
-  /// 5 gave room for sparse workspaces where the seed file's neighborhood
-  /// fans out wider than the previous limit allowed; 10 is well
-  /// short of the diameter of any realistic workspace.
   const DEPTH_MAX = 10;
 
   /// File nodes reach the chips, the hidden-id sets and the inspector
   /// through `fileBucket` (state/kinds.ts), the bucketer the canvas
   /// paints with, so a node is counted, hidden and coloured as one kind.
 
-  /// Watcher-triggered reload for visible graphs. With keep-alive the
-  /// graph no longer reloads on tab activation; this forces a fresh
-  /// /api/graph fetch when an in-scope edit arrives and keeps the
-  /// depth probe aligned at workspace scope.
+  /// Forced reload of the current scope: at workspace scope the depth
+  /// probe is re-run first, then `load()` refetches. Called by the
+  /// launcher's `Reload graph` command and by the index-settle effect.
   async function reloadGraph(): Promise<void> {
     closeTabMenu();
     // A reload is one of the things that may make a failed probe succeed, so
@@ -991,29 +961,27 @@
   //
   // Two filters compose to decide what's drawn:
   //
-  //   (1) the SCOPE picker in the header (file / group / workspace).
-  //       For file and group, BFS out from the seed paths up to
-  //       graphState.depth hops. Workspace = no filter.
-  //   (2) the per-edge-kind chips (link / tag). Edges whose kind
-  //       is filtered out are dropped, and any non-file node
-  //       attached only via filtered edges drops too.
+  //   (1) the tab's SCOPE (`scopedNodeIds`): the expanded-directory
+  //       gate for workspace and directory scopes, a BFS
+  //       (`lensClosure`) for the lens and file scopes.
+  //   (2) the chips (tag / mention / language / img / folder /
+  //       markdown / source). An edge whose kind or endpoint is
+  //       filtered out drops, and a tag, mention or language node
+  //       reached by no visible edge drops with it.
   //
   // (1) runs first so the BFS sees the full graph (depth = "graph
   // hops away"). (2) is a render-time filter that can change without
   // re-walking the graph.
 
-  /// Set of node ids included by the current scope. `null` means
-  /// "no scope filter" -- workspace scope (current behaviour) or the
-  /// global scope (placeholder; once cross-workspace indexing lands
-  /// it'll need its own logic, but treating it as "no filter"
-  /// today returns the same set as workspace since chan only knows
-  /// about one workspace at a time).
   /// The directory-spine expanded set, stored on the graph tab so it
   /// serializes into the tab's hash / session state (File Browser tab
   /// parity) and survives a window reload. A directory is present when its
   /// children should show; the scope root ("") is always expanded.
   const expandedDirs = $derived(graphState.expanded ?? { "": true });
 
+  /// Set of node ids included by the current scope. `null` means
+  /// "no scope filter": an unresolved scope, or a file scope in
+  /// filesystem mode.
   const scopedNodeIds = $derived.by<Set<string> | null>(() => {
     if (!currentScope) return null;
     // Semantic-mode workspace + dir scope renders the
@@ -1208,11 +1176,11 @@
   });
 
   /// Contact-kind file-node ids hidden when the contact chip is off.
-  /// The chip is wired off the `mention` filter slot (which is now
-  /// user-labeled "contact") so toggling it has the same shape as the
-  /// img toggle: hide the nodes AND any edges touching them. Without
-  /// the node hide, the user would just see the contact rectangles
-  /// floating with their mention edges gone -- half a filter.
+  /// The chip is wired off the `mention` filter slot (labelled
+  /// "contact" in the semantic graph) so toggling it has the same shape
+  /// as the img toggle: hide the nodes AND any edges touching them.
+  /// Without the node hide, the contact nodes would stay on screen with
+  /// their mention edges gone -- half a filter.
   const hiddenContactIds = $derived.by(() => {
     const ids = new Set<string>();
     if (show.mention) return ids;
@@ -1254,10 +1222,8 @@
   /// Directory node ids hidden when the folder chip is off -- directory-bubble
   /// CLUTTER only. Directories on the file→parent spine (`spineFolderIds`) stay
   /// visible so files keep their containment anchor; the folder chip declutters
-  /// directory bubbles, it does not cut the spine. Only meaningful in filesystem
-  /// mode where directory-kind nodes are emitted; in markdown / language modes
-  /// there are no directory nodes so the set stays empty and the toggle is a
-  /// no-op.
+  /// directory bubbles, it does not cut the spine. Every mode maps a directory
+  /// to a `folder` node, so the set can be non-empty in each of them.
   const hiddenFolderIds = $derived.by(() => {
     const ids = new Set<string>();
     if (show.folder) return ids;
@@ -1304,8 +1270,7 @@
   /// settles, so the graph never presents not-yet-known data as a broken
   /// link. Once `indexBuilding` clears, the `missing` survivors are real
   /// broken links and render with the established dashed-ghost styling.
-  /// (The status bar's "indexing" cue is the loading signal; a
-  /// per-parent-dir pulse is a deferred refinement.)
+  /// (The status bar's "indexing" cue is the loading signal.)
   const hiddenMissingIds = $derived.by(() => {
     const ids = new Set<string>();
     if (!indexBuilding) return ids;
@@ -1318,10 +1283,9 @@
   function edgeVisibleByChip(kind: RenderedEdgeKind): boolean {
     // `contains` is the file→parent spine, NOT folder-chip clutter: it renders
     // whenever both endpoints are visible (the hiddenFolderIds gate keeps only
-    // non-spine directory bubbles out). Gating it on show.folder dropped the
-    // whole spine when the folder chip was off and made files render loose.
+    // non-spine directory bubbles out). Gating it on show.folder would drop
+    // the whole spine when the folder chip is off and leave files loose.
     if (kind === "contains") return true;
-    if (kind === "group") return true;
     // Link edges always render -- a link filter doesn't make
     // sense because link visibility
     // is implicit (an edge renders iff both endpoints render under
@@ -1440,6 +1404,16 @@
       else if (cls === "doc") c.markdown++;
       else if (cls === "source") c.source++;
     }
+    if (filesystemMode) {
+      c.tag = fsNodes.filter((n) => n.kind === "symlink").length;
+      const hardlinkedIds = new Set<string>();
+      for (const edge of fsEdgesRaw) {
+        if (edge.kind !== "hardlink") continue;
+        hardlinkedIds.add(edge.source);
+        hardlinkedIds.add(edge.target);
+      }
+      c.mention = hardlinkedIds.size;
+    }
     return c;
   });
 
@@ -1477,48 +1451,6 @@
       selectedNode.kind === "file" &&
       selectedNode.missing === true,
   );
-  let ghostIndexerHint = $state<string | null>(null);
-
-  function indexerGhostHint(status: string | undefined, queueDepth: number | undefined): string | null {
-    if (status === "settling") {
-      const n = Math.max(0, Math.floor(queueDepth ?? 0));
-      return `indexer is catching up (${n} event(s) pending)`;
-    }
-    if (status === "rebuilding") return "indexer is rebuilding (full pass)";
-    return null;
-  }
-
-  $effect(() => {
-    if (
-      !visible ||
-      !isFileGhost ||
-      selectedNode?.kind !== "file" ||
-      selectedNode.missing
-    ) {
-      ghostIndexerHint = null;
-      return;
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    async function poll(): Promise<void> {
-      try {
-        const health = await api.health();
-        if (cancelled) return;
-        ghostIndexerHint = indexerGhostHint(
-          health.indexer?.status,
-          health.indexer?.queue_depth,
-        );
-      } catch {
-        if (!cancelled) ghostIndexerHint = null;
-      }
-    }
-    void poll();
-    timer = setInterval(() => void poll(), 1000);
-    return () => {
-      cancelled = true;
-      if (timer) clearInterval(timer);
-    };
-  });
 
   /// Documents that reference the currently-selected tag or mention
   /// node, restricted to nodes drawn in the current subgraph. Passed
@@ -1562,8 +1494,9 @@
 
   /// Path the currently-selected mention/contact node resolves to,
   /// or null when the mention is unresolved (no contact file on
-  /// disk yet). Workspaces whether the inspector renders the "Open in
-  /// this pane" and "Set as Scope" buttons for mention rows.
+  /// disk yet). Drives whether a mention selection gets an `onOpen`
+  /// action, and whether its `onSetAsScope` scopes the new graph to the
+  /// contact file or to the mention node.
   const selectedContactPath = $derived<string | null>(
     selectedNode && selectedNode.kind === "mention"
       ? resolveContactToPath(selectedNode.label)
@@ -1575,13 +1508,8 @@
   /// ITSELF too so the browser opens AT it ("enter the directory").
   /// Mirrors FileTree's `openSelectionInFileBrowser`.
   ///
-  /// The graph is a tab, not an overlay, so the File Browser opens as a
-  /// sibling tab and the graph persists -- there is no overlay to
-  /// dismiss. This routes through the same tab-world primitive the File
-  /// Browser's own "Open in File Browser" uses; an overlay-style
-  /// `revealPathInBrowser(...)` + `close()` chain would run the
-  /// directory fetch but open no visible browser tab, making Show
-  /// Directory look like a no-op / graph re-layout.
+  /// The File Browser opens as a sibling tab (`openBrowserInActivePane`)
+  /// and the graph tab stays open.
   function revealPathInBrowserTab(path: string, isDir: boolean): void {
     const parts = path.split("/").filter(Boolean);
     // Directory: expand itself + ancestors. File: ancestors only (select
@@ -1611,8 +1539,8 @@
   /// (markdown note, contact, plain source / config) opens in the active
   /// editor pane through the same `openInActivePane` call
   /// `FileBrowserSurface` uses, so the two surfaces agree on what "Open"
-  /// means. A binary / media / non-openable file keeps its prior
-  /// behavior and reveals in a File Browser tab instead; the filesystem
+  /// means. A binary / media / non-openable file reveals in a File
+  /// Browser tab instead; the filesystem
   /// layer's `file`-kind nodes carry no text-vs-binary distinction, so
   /// the editable verdict comes from the tree entry's server kind (with
   /// a path-based fallback when the entry isn't in the current listing).
@@ -1641,8 +1569,8 @@
   /// the scope kind to the matching node id in the current graph
   /// nodes list; workspace root + tag have stable ids, file/dir need a
   /// path-based lookup. No-op when the scope doesn't have a
-  /// corresponding node in this view (e.g. global scope, or a file
-  /// scope whose file isn't in the response).
+  /// corresponding node in this view (e.g. a file scope whose file
+  /// isn't in the response).
   function openScopeHeaderInspector(): void {
     if (!currentScope) return;
     let nodeId: string | null = null;
@@ -1727,9 +1655,8 @@
             }
           : selectedNode.kind === "folder"
             ? {
-                // Directory nodes route to
-                // DirectoryInfoBody via the "directory" kind on
-                // InspectorSelection. Backend emits `directory` for
+                // Directory nodes route to FileInfoBody via the
+                // "directory" kind on InspectorSelection. Backend emits `directory` for
                 // the main /api/graph filesystem layer; GraphPanel
                 // normalises that to `folder` for `RenderedNode`
                 // (see `kind: "folder"` mappings at the data load
@@ -1755,31 +1682,20 @@
 
   // ---- presentation ------------------------------------------------------
 
-  /// Cytoscape resolves --g-* via getComputedStyle at buildCytoscape
-  /// time, so theme changes propagate next reload.
-  const EDGE_COLORS: Record<RenderedEdgeKind, string> = {
-    link: "var(--text-secondary)",
+  /// Per-chip dot color. The tag, mention and language chips name the
+  /// tokens GraphCanvas strokes those edge kinds with, so a dot matches
+  /// its edges; img is a node filter so it points at the image node
+  /// color directly.
+  const FILTER_COLORS: Record<FilterKind, string> = {
     tag: "var(--g-tag)",
     mention: "var(--g-contact, var(--warn-text))",
-    contains: "var(--g-folder)",
     language: "var(--g-language)",
-    // Group-scope edges read as the accent so they pop against the
-    // document edges without looking like another link kind.
-    group: "var(--accent)",
-  };
-
-  /// Per-chip dot color. Edge-kind chips reuse EDGE_COLORS; img is a
-  /// node filter so it points at the image node color directly.
-  const FILTER_COLORS: Record<FilterKind, string> = {
-    tag: EDGE_COLORS.tag,
-    mention: EDGE_COLORS.mention,
-    language: EDGE_COLORS.language,
     img: "var(--g-img)",
     folder: "var(--g-folder)",
     // FileBucket chip swatch colours. Markdown
     // tracks `--g-doc` (orange); source
     // tracks `--g-source` (royalblue). Binary nodes have no chip;
-    // the `--g-binary` slot still workspaces their canvas fill but the
+    // the `--g-binary` slot still drives their canvas fill but the
     // user can't toggle them on/off.
     markdown: "var(--g-doc)",
     source: "var(--g-source)",
@@ -1819,7 +1735,7 @@
   /// ones). Standard mode yields an empty string: no attribute, no
   /// override, theme palette untouched.
   const paletteStyle = $derived(
-    tab ? graphPaletteStyleFor(effectiveHybridSurfaceTheme("graph")) : "",
+    graphPaletteStyleFor(effectiveHybridSurfaceTheme("graph")),
   );
 
   // ---- canvas glue -------------------------------------------------------
@@ -1828,23 +1744,8 @@
   // panel owns the data fetch + the scope/depth derivations; the
   // canvas owns the d3-force simulation, painting, and pointer
   // interaction. Selection round-trips: GraphCanvas calls back into
-  // `setSelected` on tap, and we re-emit `selectedId` so the
-  // inspector + per-selection style updates fire as before.
-
-  /// Files under a directory or repo-root prefix. Used by
-  /// `focalIds` to seed the canvas with anchor nodes for dir /
-  /// git_repo scopes.
-  function filesUnder(prefix: string): string[] {
-    const root = prefix.replace(/\/+$/, "");
-    const withSlash = root + "/";
-    return nodes
-      .filter(
-        (n) =>
-          n.kind === "file" && (n.path === root || n.path.startsWith(withSlash)),
-      )
-      .map((n) => (n.kind === "file" ? n.path : ""))
-      .filter((p) => p);
-  }
+  // `setSelected` on tap, and `selectedId` goes back down as a prop,
+  // so the inspector and the canvas's selection emphasis follow it.
 
   /// Node ids the canvas should pin at the world origin while the
   /// initial layout settles. Empty list = no anchor (workspace scope);
@@ -1859,7 +1760,7 @@
     // Contact lens pins the contact's
     // file node so the canvas centres on it like a regular
     // file-scope graph would; the bidirectional BFS in
-    // computeScopedNodeSet pulls in the backlinks around it.
+    // `scopedNodeIds` pulls in the backlinks around it.
     if (currentScope.kind === "contact") {
       const ids: string[] = [];
       for (const n of nodes) {
@@ -1871,21 +1772,22 @@
     // bubble itself; its 1-hop neighbours (every file of that
     // language) splay around it.
     if (currentScope.kind === "language") return [`language:${currentScope.language}`];
-    let seedPaths: string[];
-    if (currentScope.kind === "file") seedPaths = [currentScope.path];
-    else if (currentScope.kind === "dir") seedPaths = filesUnder(currentScope.path);
-    else return [];
+    if (currentScope.kind !== "file" && currentScope.kind !== "dir") return [];
+    const directory = currentScope.kind === "dir";
+    const root = directory ? currentScope.path.replace(/\/+$/, "") : currentScope.path;
+    const withSlash = root + "/";
     const ids: string[] = [];
     for (const n of nodes) {
-      if (n.kind === "file" && seedPaths.includes(n.path)) ids.push(n.id);
+      if (n.kind === "file" && (n.path === root || (directory && n.path.startsWith(withSlash)))) {
+        ids.push(n.id);
+      }
     }
     return ids;
   });
 
-  /// Fetch the graph view and stash the rendered-kind subset
-  /// (files + tags + mentions). Date nodes / edges are dropped:
-  /// chan-workspace's index has stopped emitting them (issue #17), but
-  /// stale indexes may still contain them.
+  /// The edge when its kind is one the graph draws (link / tag /
+  /// mention / contains / language), else null; a `date` edge is
+  /// dropped here.
   function renderableGraphEdge(e: GraphViewEdge): RenderedEdge | null {
     if (
       e.kind === "link" ||
@@ -1906,9 +1808,8 @@
   /// Resolve a `pendingSelectId` (set by "Graph from here") to the real
   /// rendered node id. The select is a workspace PATH: for a file that
   /// path IS the node id, but a directory node's id is `directory:<path>`
-  /// (graph.rs::directory_node_id), so a bare-path pending never matched
-  /// and the originating directory was left unselected after the re-scope
-  /// (the graph redrew but did not select the node). Match by id first,
+  /// (graph.rs::directory_node_id), so a bare-path pending does not match
+  /// a directory by id. Match by id first,
   /// then fall back to a file/folder node whose `.path` equals the pend.
   function resolveSelectId(
     pending: string,
@@ -2063,7 +1964,7 @@
       // the fs-seeded one; everything else layers on. Only the
       // tree-bearing scopes seed a spine; the tag / mention / contact /
       // language lenses have no directory tree (and no fsGraph scope), so
-      // they fall straight through to the stream as before.
+      // they fall straight through to the stream.
       if (
         currentScope &&
         (currentScope.kind === "file" ||
@@ -2139,8 +2040,8 @@
       );
       if (seq !== graphLoadSeq) return;
       publish();
-      // Honour any selection openGraphAtNode pre-loaded into the
-      // overlay state so the inspector opens on the right node.
+      // Honour a pending selection stored on the tab so the inspector
+      // opens on that node.
       const pending = graphState.pendingSelectId;
       if (pending !== null && renderedNodesById.has(pending)) {
         selectedId = pending;
@@ -2303,24 +2204,17 @@
 
   /// The stable identity of "what graph to show": the scope id, the
   /// depth, and the mode. A reload is warranted only when ONE OF THESE
-  /// changes. We track THIS key in the reload effect rather than letting
-  /// the effect track `load()`'s internal reads, because `load()` reads
-  /// the `currentScope` $derived, whose object identity is recomputed by
-  /// `availableGraphScopes()` whenever the WORKSPACE LAYOUT changes (a
-  /// new editor tab, a File Browser reveal). Tracking the object would
-  /// make the inspector's "Open" / "Show File" actions reload the
-  /// graph: they open a tab / reveal in the browser, the layout shifts,
-  /// `currentScope` recomputes to an equal-but-new object, and the effect
-  /// re-fired. The logical scope did NOT change, so anchoring on this
-  /// value key keeps those actions from triggering a spurious reload.
+  /// changes. The reload effect tracks THIS key and runs `load()`
+  /// untracked, so nothing `load()` reads on the way (the `currentScope`
+  /// object, the expanded set, the pending selection) is a reload
+  /// trigger.
   const loadKey = $derived(
     `${graphState.scopeId}|${graphState.depth}|${graphState.mode}`,
   );
 
-  /// Keep-alive load gating. A graph tab is now kept mounted while
-  /// hidden, so this effect can no longer treat "visible" as "just
-  /// (re)mounted" -- it must decide per activation whether a fetch is
-  /// actually warranted:
+  /// Keep-alive load gating. A graph tab stays mounted while hidden,
+  /// so "visible" does not mean "just mounted": this effect decides
+  /// per activation whether a fetch is warranted:
   ///   - HIDDEN: never fetch (the whole point -- no background load).
   ///     If the load key changed while hidden, mark dirty so the next
   ///     activation refetches once. (A hidden in-scope watcher edit
@@ -2328,9 +2222,8 @@
   ///   - VISIBLE: fetch only on the first activation (lazy, not mount),
   ///     on a real scope/depth/mode change, or when dirty. Then latch
   ///     hasLoadedOnce, record the key, and clear dirty.
-  /// `load()` still runs untracked so its internal reads (the
-  /// layout-churny `currentScope` object, filters, etc.) don't register
-  /// as reload triggers; only `visible` + `loadKey` do.
+  /// `load()` runs untracked so its internal reads don't register as
+  /// reload triggers; only `visible` + `loadKey` do.
   $effect(() => {
     // Read both triggers up front so the effect tracks exactly them.
     const show = visible;
@@ -2393,10 +2286,7 @@
   });
 
   /// Does a watcher event touching `paths` warrant reloading THIS graph?
-  /// Pre-fix the graph reloaded on every workspace edit, even files not
-  /// in the open graph (any change to any file in the workspace
-  /// triggered a graph reload). We reload only when the
-  /// change is in scope:
+  /// Only when the change is in scope:
   ///   - workspace scope spans the whole tree -> always.
   ///   - dir / file scope -> a path inside the subtree (covers a NEW
   ///     file not yet a node) or a path currently rendered as a node.
@@ -2440,13 +2330,12 @@
     // re-fire on load.
     if (!untrack(() => changeAffectsScope(graphReloadSignal.paths))) return;
     if (!visible) {
-      // Hidden + in-scope edit: don't reload in the background (the
-      // keep-alive win). Remember it so the next activation refetches
-      // once. The visible graph still live-reloads, per @@Alex.
+      // Hidden + in-scope edit: don't reload in the background.
+      // Remember it so the next activation refetches once.
       graphDirty = true;
       return;
     }
-    // Visible + in-scope: debounce-reload as before. Sync lastLoadedKey
+    // Visible + in-scope: debounce-reload. Sync lastLoadedKey
     // so the load effect doesn't treat this fresh data as stale on the
     // next re-fire, and clear dirty since we're refetching now.
     if (watchReloadTimer) clearTimeout(watchReloadTimer);
@@ -2477,7 +2366,7 @@
   /// via `prevIndexBuilding` (no reload loop); `visible`-only (don't wake a
   /// backgrounded tab); semantic-mode only (filesystem mode is structural,
   /// language mode is its own surface). NOT gated on `nodes.length === 0`:
-  /// the fs spine keeps `nodes` populated, so the old empty-only guard
+  /// the fs spine keeps `nodes` populated, so an empty-only guard
   /// would never fire the re-layer. Distinct trigger from the
   /// graphReloadSignal watcher (a save's reindex), so no double-load.
   /// `visible` / mode are read untracked so only `indexBuilding` re-fires
@@ -2493,13 +2382,11 @@
     });
   });
 
-  /// Persist the live selection so it survives a window reload (the
-  /// selected node used to be lost on reload). The serializer already writes
-  /// `gn`/`gnl` from graphState.selectedNodeId/Label, and restore reads
-  /// them back into selectedNodeId + pendingSelectId - the missing link
-  /// was the TRIGGER: App.svelte's layout-persist effect tracks the graph
-  /// tab's scope/depth/filters/inspector but NOT its selection, so a pure
-  /// select change never reached the hash. Mirror selectedId (the live,
+  /// Persist the live selection so it survives a window reload. The
+  /// serializer writes `gn`/`gnl` from graphState.selectedNodeId/Label,
+  /// and restore reads them back into selectedNodeId + pendingSelectId.
+  /// App.svelte's layout-persist effect does not track the graph tab's
+  /// selection, so this effect is the trigger. Mirror selectedId (the live,
   /// component-local source of truth, written by clicks AND the
   /// programmatic re-scope / load-resolution paths) into the tab fields
   /// and kick both persists (each debounces internally).
@@ -2530,7 +2417,7 @@
     selectedId = id;
     // A user tap is a definitive selection: drop any unresolved
     // pending auto-select (restore / re-scope) so the persist effect
-    // below is free to capture this click.
+    // above is free to capture this click.
     graphState.pendingSelectId = null;
     if (id !== null) graphState.inspectorOpen = true;
     // Surface the selection to the tab so the
@@ -2538,10 +2425,8 @@
     // label. We cache the label too so the title renders before
     // the graph data finishes reloading (e.g. after a hard
     // reload that round-trips the selection via URL hash).
-    if (tab) {
-      tab.selectedNodeId = id;
-      tab.selectedNodeLabel = id === null ? null : graphSelectionLabel(id);
-    }
+    tab.selectedNodeId = id;
+    tab.selectedNodeLabel = id === null ? null : graphSelectionLabel(id);
   }
 
   function graphSelectionLabel(id: string): string | null {
@@ -2559,23 +2444,21 @@
 <svelte:window onkeydown={onTabMenuKeydown} onpointerdown={onTabMenuPointerDown} />
 
 <!-- The graph is always a first-class TAB (mounted only by Pane.svelte
-     with a `tab`); there is no overlay variant - OverlayShell lives only
-     in Search + Settings. `graphState` is the tab, `visible` is constant,
-     and GraphPanel does not read the store's graphOverlay/browserOverlay
-     state. -->
+     with a `tab`): `graphState` is the tab and `visible` follows the
+     `active` prop. -->
 {@render graphContent()}
 
 {#snippet graphContent()}
   <div
     class="graph-tab"
     class:active
-    data-theme={tab ? surfaceThemeOverride("graph") : undefined}
+    data-theme={surfaceThemeOverride("graph")}
     style={paletteStyle || undefined}
     oncontextmenu={onGraphContextMenu}
     role="tabpanel"
     aria-hidden={!active}
   >
-  {#if tab && tabMenuOpen}
+  {#if tabMenuOpen}
     <!-- Graph-tab right-click bubble. Anchored to
          the tab-strip click position via clampMenu.
          Row shape follows the standard
@@ -2720,7 +2603,9 @@
                   ? "symlink"
                   : kind === "mention"
                     ? "hardlink"
-                    : "directory"}
+                    : kind === "folder"
+                      ? "directory"
+                      : kind}
               {:else}
                 {kind === "mention" ? "contact" : kind === "img" ? "media" : kind}
               {/if}
@@ -2758,6 +2643,7 @@
       <GraphCanvas
         open={canvasEverShown}
         paused={!active}
+        scopeKey={`${graphState.mode}:${graphState.scopeId}`}
         {nodes}
         {edges}
         {visibleNodeIds}
@@ -2815,8 +2701,8 @@
              The workspace root is a regular directory inspector
              with both directory actions wired:
              "Show in File Browser" (revealPathInBrowserTab) and
-             "Graph from here" (graphFromHere re-scopes the current
-             tab to workspace root). variant defaults to inspector. -->
+             "Graph from here" (graphFromHere opens a new graph tab at
+             the workspace root). variant defaults to inspector. -->
         <WorkspaceInfoBody
           onReveal={() => revealPathInBrowserTab("", true)}
           onSetAsScope={() => graphFromHere("", true)}
@@ -2882,25 +2768,20 @@
           {/if}
         </div>
       {:else if selectedNode && selectedNode.kind === "file" && isFileGhost}
-        <!-- Ghost: either an explicit broken-link target, or the
-             graph claims the file exists but it's not in the current
-             tree listing (stale search index, common after a bulk
-             workspace change). FileInfoBody can't render either; surface
-             inline inside the shared Inspector header. -->
+        <!-- Ghost: a file node marked missing, a broken-link target.
+             FileInfoBody can't render it; surface inline inside the
+             shared Inspector header. -->
         {@const ghostKind = classifyFileKind(
           selectedNode.path,
           selectedNode.node_kind,
         ) as FileKind}
-        {@const hint = selectedNode.missing
-          ? "file does not exist (broken-link target)"
-          : ghostIndexerHint ?? "not in the current file listing (try Reload / chan index)"}
         <div class="ghost-body">
           <header class="head">
             <KindChip kind={ghostKind} path={selectedNode.path} block ghost />
           </header>
           <h3 class="title" title={selectedNode.path}>{selectedNode.label}</h3>
           <div class="path mono">{selectedNode.path}</div>
-          <div class="missing">{hint}</div>
+          <div class="missing">file does not exist (broken-link target)</div>
         </div>
       {:else}
         <!-- `onSetAsScope` wires "Graph from here" to always open a NEW
@@ -2930,7 +2811,7 @@
               ? // Directory "Open": FileInfoBody routes a directory's
                 // "Open" button through openDirInBrowser → onReveal, so a
                 // dir reveals into a new File Browser tab here (the file
-                // case uses onOpen above). Fixes the dir-Open no-op.
+                // case uses onOpen above).
                 () => revealPathInBrowserTab(inspectorSelection.path, true)
               : undefined
           }
@@ -3011,10 +2892,10 @@
      visibility (NEVER display:none -- a display:none host reports 0x0,
      GraphCanvas.resize() then refits to nothing and pan/zoom is lost).
      visibility:hidden keeps real layout geometry while the rAF loop is
-     paused, so a re-shown graph resumes its exact transform. No `flex:1`
-     any more: the host is absolutely positioned in the pane's
-     .face.front now, not a flex child. The inner flex column is kept
-     for the canvas + menu children. */
+     paused, so a re-shown graph resumes its exact transform. The host
+     is absolutely positioned, not a flex child, so it takes no
+     `flex: 1`; its own flex column lays out the body and the status
+     bar. */
   .graph-tab {
     position: absolute;
     inset: 0;
@@ -3121,16 +3002,12 @@
     position: relative;
     overflow: hidden;
   }
-  /* Cytoscape mount: positioned absolute inside the relative
-     .canvas parent. Cytoscape's example pattern; without explicit
-     positioning its internal canvases can resolve their absolute
-     positioning to the wrong ancestor and end up sized wrong. */
+  /* GraphCanvas mount: positioned absolute inside the relative
+     .canvas parent, filling it. */
   .cy {
     position: absolute;
     inset: 0;
-    /* Smooth fade when buildCytoscape clears the inline opacity:0
-       it sets at the start of a rebuild; gives a gentler reveal
-       than a hard pop into the d3-force animation. */
+    /* Eases the opacity change when an error toggles `.dim`. */
     transition: opacity 200ms ease-out;
   }
   .cy.dim {

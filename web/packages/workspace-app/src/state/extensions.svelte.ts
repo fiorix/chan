@@ -5,7 +5,7 @@
 import { api } from "../api/client";
 import { isTransientApiError } from "../api/errors";
 import type { ExtensionCommandInfo, ExtensionInfo } from "../api/types";
-import { registerCommands, workspaceOnly } from "./commands";
+import { registerCommands, unregisterCommands, workspaceOnly } from "./commands";
 import { notify } from "./notify.svelte";
 import { openOrFocusExtension } from "./tabs.svelte";
 
@@ -37,10 +37,13 @@ const commandQueues = new Map<string, PendingExtensionCommand[]>();
 /// Fetch + validate the catalog and (re-)register launcher commands.
 /// Throws on a failed fetch; the caller owns failure policy (the initial
 /// load empties the catalog, a refresh retains the current one).
-/// Re-registration is safe: `allCommands()` de-duplicates later-wins.
+/// Each resolve replaces every extension row: the registry keys a row by
+/// id, category and title, so without the drop an extension that went away
+/// would keep its row and a renamed one would show both names.
 async function resolveCatalog(): Promise<void> {
   const entries = (await api.extensions()).filter(isValidExtensionInfo);
   catalog = entries;
+  unregisterCommands((command) => command.id.startsWith("extension."));
   registerCommands(
     entries.flatMap((extension) => [
       {
@@ -234,6 +237,12 @@ export function isValidExtensionInfo(value: unknown): value is ExtensionInfo {
   if (
     candidate.singleton !== undefined &&
     typeof candidate.singleton !== "boolean"
+  ) {
+    return false;
+  }
+  if (
+    candidate.running !== undefined &&
+    typeof candidate.running !== "boolean"
   ) {
     return false;
   }

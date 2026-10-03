@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 //
 // FileBrowserSurface, mounted over the in-memory demo workspace. The surface's
-// own menu (the hamburger, opened by the tab strip, the dock body or the
-// overlay trigger) and the tree's row menu it hosts are driven here the way a
+// own menu (the hamburger, opened by the tab strip or dock body) and the
+// tree's row menu it hosts are driven here the way a
 // user reaches them; Pane is mounted for the one hop it owns, the Flip.
 
-import { mount, tick, unmount } from "svelte";
+import { mount, tick, unmount, type ComponentProps } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const caps = vi.hoisted(() => ({ workspace: true }));
@@ -86,7 +86,7 @@ async function settle(turns = 6): Promise<void> {
   }
 }
 
-async function render(props: Record<string, unknown>): Promise<HTMLElement> {
+async function render(props: ComponentProps<typeof FileBrowserSurface>): Promise<HTMLElement> {
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(FileBrowserSurface, { target, props }));
@@ -264,16 +264,10 @@ describe("clicking a row", () => {
   test("opens the inspector in a Files tab", async () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab });
-    clickRow(target, "README.md");
-    await settle();
-    expect(tab.inspectorOpen).toBe(true);
-  });
-
-  test("opens the inspector in the overlay", async () => {
-    const target = await render({ variant: "overlay" });
     expect(target.querySelector(".inspector")).toBeNull();
     clickRow(target, "README.md");
     await settle();
+    expect(tab.inspectorOpen).toBe(true);
     expect(target.querySelector(".inspector")).not.toBeNull();
   });
 });
@@ -444,20 +438,6 @@ describe("the dock variant", () => {
     const labels = [...document.body.querySelectorAll(".menu-row-label")].map((el) => el.textContent);
     expect(labels).toContain("Delete");
     expect(labels).not.toContain("Flip");
-  });
-});
-
-describe("the overlay variant", () => {
-  test("keeps a header with the maximize control and the menu trigger", async () => {
-    const target = await render({ variant: "overlay" });
-    const header = target.querySelector("header");
-    expect(header).not.toBeNull();
-    expect(header!.querySelector("button[aria-label='Maximize']")).not.toBeNull();
-    const trigger = header!.querySelector<HTMLButtonElement>(".hamburger-trigger");
-    expect(trigger).not.toBeNull();
-    trigger!.click();
-    await settle();
-    expect(menuRows()).toContain("Stick to left");
   });
 });
 

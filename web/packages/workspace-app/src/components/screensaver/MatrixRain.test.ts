@@ -160,6 +160,11 @@ describe("the rain engine", () => {
     // far short of the 40 x 20 cells a full grid would fill.
     expect(glyphs(ops)).toHaveLength(40 * 4);
   });
+
+  test("sizes each column's trail by the rows it falls through, on a tall viewport too", () => {
+    const columns = createRainColumns(5, 30);
+    expect(columns.map((column) => column.chars.length)).toEqual([30, 30, 30, 30, 30]);
+  });
 });
 
 describe("the screensaver", () => {

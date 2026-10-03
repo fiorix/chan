@@ -27,7 +27,7 @@ export type TunerNode = Extract<
   { kind: "file" | "tag" | "mention" | "language" | "folder" }
 >;
 export type TunerEdge = GraphViewEdge & {
-  kind: "link" | "tag" | "mention" | "contains" | "language" | "group";
+  kind: "link" | "tag" | "mention" | "contains" | "language";
 };
 export type TunerGraph = { nodes: TunerNode[]; edges: TunerEdge[] };
 

@@ -19,21 +19,22 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path as AxumPath, Query, State};
+use axum::extract::{Extension, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
-use axum::{Json, Router};
+use axum::Router;
 use chan_library::{registered_workspace_prefix, ServeConfig};
 use chan_workspace::KnownWorkspace;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
 use crate::devserver::{bytes_eq, ForceQuery};
-use crate::error::workspace_still_releasing;
+use crate::error::{live_terminals_refusal, workspace_still_releasing};
+use crate::extract::{Bytes, Json, Path as AxumPath, Query};
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,
@@ -51,9 +52,31 @@ use crate::{
 ///     request time).
 ///   - `None` -- a surface with nowhere to mount a workspace. The mutation
 ///     handlers answer 403 there.
+///
+/// `admission` is the surface's [`MountAdmission`], if it has one.
 struct LauncherState {
     host: Arc<WorkspaceHost>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+    admission: Option<MountAdmission>,
+}
+
+/// A check the launcher's add asks before it registers a root and its on
+/// before it mounts one, naming the root. An `Err` is the refusal the route
+/// answers instead: 503 in the envelope, with the error's sentence. The
+/// devserver's refuses every root from its stop signal on; a surface with no
+/// stop of its own has none.
+pub(crate) type MountAdmission = Arc<dyn Fn(&Path) -> Result<(), crate::Error> + Send + Sync>;
+
+impl LauncherState {
+    /// The refusal to answer instead of registering or mounting `root`, when
+    /// the surface's admission refuses it.
+    fn refuse_mount(&self, root: &Path) -> Option<Response> {
+        let refusal = (self.admission.as_ref()?)(root).err()?;
+        Some(crate::error::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            refusal.to_string(),
+        ))
+    }
 }
 
 const COMMAND_CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
@@ -110,6 +133,18 @@ pub fn launcher_router(
     host: Arc<WorkspaceHost>,
     bearer: Option<LauncherBearer>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+) -> Router {
+    admitting_launcher_router(host, bearer, serve_addr, None)
+}
+
+/// [`launcher_router`] whose add and on ask `admission` before registration or
+/// mounting. The devserver installs its launcher through here, with an
+/// admission its stop refuses by.
+pub(crate) fn admitting_launcher_router(
+    host: Arc<WorkspaceHost>,
+    bearer: Option<LauncherBearer>,
+    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+    admission: Option<MountAdmission>,
 ) -> Router {
     // The launcher surface descriptor the injected meta advertises: no serve
     // address is the read-only surface; a serve address plus a desktop bridge is
@@ -228,6 +263,12 @@ pub fn launcher_router(
         .route("/api/library/fs/pick-folder", post(handle_pick_folder))
         .merge(tunnel_legs())
         .with_state(host.clone());
+    // The workspace, config, gateway and devserver routes share one state.
+    let launcher_state = Arc::new(LauncherState {
+        host: host.clone(),
+        serve_addr,
+        admission,
+    });
     // Workspaces: list always; the mutation routes are always present but
     // refuse with 403 on the read-only surface (gated by `serve_addr` inside the
     // handlers), so a direct call can never escalate to mutation.
@@ -245,10 +286,7 @@ pub fn launcher_router(
             "/api/library/workspaces/{id}",
             delete(handle_remove_workspace),
         )
-        .with_state(Arc::new(LauncherState {
-            host: host.clone(),
-            serve_addr: serve_addr.clone(),
-        }));
+        .with_state(launcher_state.clone());
     // Library config: this library's own pane-highlight colour. GET + PUT on
     // EVERY surface (a no-store surface reports `null` = default accent / 404s the
     // PUT): a library's colour belongs to that library, set from a pane's
@@ -276,14 +314,9 @@ pub fn launcher_router(
             "/api/library/collapsed-machines",
             get(handle_get_collapsed_machines).put(handle_set_collapsed_machines),
         )
-        .with_state(Arc::new(LauncherState {
-            host: host.clone(),
-            serve_addr: serve_addr.clone(),
-        }));
-    // Captured before `host` is moved into the devservers state below: the
-    // surface-bearer gate needs the host to validate a window's per-tenant
-    // token against the live tenants.
-    let host_for_surface = host.clone();
+        // Before the gate, so the bearer check answers a wrong method first.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
+        .with_state(launcher_state.clone());
     // A workspace mints one short-lived, live-window-bound capability with its
     // own tenant token. Uses are authenticated by the opaque capability itself,
     // so the browser can navigate a popup through the launch redirect without
@@ -293,10 +326,13 @@ pub fn launcher_router(
             "/api/library/command-capabilities",
             post(handle_mint_library_command_capability),
         )
+        // Before the layers, so the 405 carries the capability headers and the
+        // bearer check answers a wrong method first.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .route_layer(middleware::from_fn(command_capability_response_headers))
         .with_state(command_state.clone());
     let command_mint = if let Some(surface_token) = bearer.clone() {
-        let host = host_for_surface.clone();
+        let host = host.clone();
         command_mint.route_layer(middleware::from_fn(move |req, next| {
             let token = surface_token.clone();
             let host = host.clone();
@@ -322,6 +358,8 @@ pub fn launcher_router(
             "/api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals",
             get(handle_library_command_live_terminals),
         )
+        // Before the layer, so the 405 carries the capability headers.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .route_layer(middleware::from_fn(command_capability_response_headers))
         .with_state(command_state);
     // Gateways: list on BOTH surfaces (a registry-less surface returns
@@ -336,10 +374,7 @@ pub fn launcher_router(
             "/api/library/gateways/{id}",
             put(handle_update_gateway).delete(handle_remove_gateway),
         )
-        .with_state(Arc::new(LauncherState {
-            host: host.clone(),
-            serve_addr: serve_addr.clone(),
-        }));
+        .with_state(launcher_state.clone());
     // Devservers: list on BOTH surfaces (a registry-less surface returns empty);
     // add/update/remove gated mutable (403 read-only, 404 no registry) inside the
     // handlers, same as workspaces.
@@ -352,14 +387,20 @@ pub fn launcher_router(
             "/api/library/devservers/{id}",
             put(handle_update_devserver).delete(handle_remove_devserver),
         )
-        .with_state(Arc::new(LauncherState { host, serve_addr }));
+        .with_state(launcher_state);
     // The launcher-management routes (windows / workspaces / devservers) stay
     // gated on the launcher token. The local-color (`config`) routes set the
     // surface's OWN cosmetic colour from a pane menu, called by whatever window
     // is open -- which carries a per-TENANT token, not the launcher token -- so
     // they get a relaxed SURFACE gate (launcher OR any valid tenant token): a
     // launcher-only gate would 401 every window's colour GET/PUT/watch.
-    let launcher_api = windows.merge(workspaces).merge(gateways).merge(devservers);
+    // The 405 goes on before the gate, so the bearer check answers a wrong
+    // method first. The tunnel legs took theirs inside their own gate.
+    let launcher_api = windows
+        .merge(workspaces)
+        .merge(gateways)
+        .merge(devservers)
+        .method_not_allowed_fallback(crate::error::method_not_allowed);
     let (launcher_api, config) = match bearer {
         Some(token) => {
             let launcher_token = token.clone();
@@ -370,7 +411,7 @@ pub fn launcher_router(
             }));
             let config = config.route_layer(middleware::from_fn(move |req, next| {
                 let token = surface_token.clone();
-                let host = host_for_surface.clone();
+                let host = host.clone();
                 async move { require_surface_bearer(token, host, req, next).await }
             }));
             (launcher_api, config)
@@ -984,6 +1025,8 @@ fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
             chan_revtunnel::wire::CONN_PATH,
             get(super::tunnel::handle_tunnel_conn),
         )
+        // Before the gate, so the owner check answers a wrong method first.
+        .method_not_allowed_fallback(crate::error::method_not_allowed)
         .route_layer(middleware::from_fn(require_owner_desktop))
 }
 
@@ -1533,26 +1576,6 @@ struct WorkspaceOff {
     force: bool,
 }
 
-/// The `409 Conflict` body returned by workspace off, forget, and DELETE routes when an unforced operation would kill live terminal sessions. The launcher matches `error == "live_terminals"`, displays `active_terminals`, and retries with `force: true` after confirmation.
-#[derive(Serialize)]
-struct LiveTerminalsRejection {
-    /// Discriminator the launcher matches on -- always `"live_terminals"`.
-    error: &'static str,
-    /// Live terminal sessions the requested operation would kill.
-    active_terminals: usize,
-}
-
-fn live_terminals_response(active_terminals: usize) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(LiveTerminalsRejection {
-            error: "live_terminals",
-            active_terminals,
-        }),
-    )
-        .into_response()
-}
-
 /// `POST /api/library/devservers/{id}/workspaces/on` `{prefix}`: turn a connected
 /// devserver's workspace (the remote mount `prefix`) on through the desktop
 /// bridge. 200 with the workspace's [`LauncherWorkspace`] row, the shape the
@@ -1571,7 +1594,7 @@ async fn handle_devserver_workspace_on(
 
 /// `POST /api/library/devservers/{id}/workspaces/off` `{prefix, force}`: turn it
 /// off through the desktop bridge. An unforced off of a workspace with live
-/// terminals answers 409 + [`LiveTerminalsRejection`] so the launcher can confirm
+/// terminals answers [`live_terminals_refusal`] so the launcher can confirm
 /// and retry with `force: true` (which force-offs → 204).
 async fn handle_devserver_workspace_off(
     State(host): State<Arc<WorkspaceHost>>,
@@ -1583,7 +1606,7 @@ async fn handle_devserver_workspace_off(
 
 /// Shared on/off dispatch for a connected devserver's workspace. Maps the bridge
 /// outcome: `Done` → 200 with the row for an on that carried one, 204 otherwise;
-/// `NeedsForce` → 409 + [`LiveTerminalsRejection`] (the distinguishable confirm
+/// `NeedsForce` → [`live_terminals_refusal`] (the distinguishable confirm
 /// signal); a bridge error → 409 with the message (no desktop attached /
 /// devserver not connected). Only the on verb answers with a row: an off reports
 /// no state the caller does not already hold, so it keeps its 204.
@@ -1610,7 +1633,7 @@ async fn set_devserver_workspace_on(
             _ => StatusCode::NO_CONTENT.into_response(),
         },
         Ok(SetWorkspaceOnOutcome::NeedsForce { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
     }
@@ -1637,7 +1660,7 @@ async fn handle_forget_devserver_workspace(
     {
         Ok(SetWorkspaceOnOutcome::Done { .. }) => StatusCode::NO_CONTENT.into_response(),
         Ok(SetWorkspaceOnOutcome::NeedsForce { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
     }
@@ -1818,7 +1841,7 @@ fn add_workspace_prefix_error(error: crate::Error) -> Response {
     crate::error::err(StatusCode::BAD_REQUEST, error.to_string())
 }
 
-fn workspace_registration_task_error(error: tokio::task::JoinError) -> Response {
+fn workspace_registration_task_error(error: impl std::fmt::Display) -> Response {
     crate::error::err(
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("workspace registration task failed: {error}"),
@@ -1847,6 +1870,10 @@ fn mount_timed_out_refusal(root: &Path) -> Response {
 /// start. A root that stops answering in any of them is refused at the bound,
 /// and an open waiting on it gives the root's lock back to a close or a
 /// removal when it is dropped there.
+///
+/// A root the surface's [`MountAdmission`] refuses, as a stopping devserver's
+/// refuses every root, is answered with that refusal before anything is
+/// registered.
 async fn handle_add_workspace(
     State(state): State<Arc<LauncherState>>,
     Json(req): Json<AddWorkspace>,
@@ -1857,6 +1884,9 @@ async fn handle_add_workspace(
         Err(resp) => return *resp,
     };
     let root = Path::new(&req.path);
+    if let Some(refusal) = state.refuse_mount(root) {
+        return refusal;
+    }
     match tokio::time::timeout_at(
         started + crate::WORKSPACE_MOUNT_TIMEOUT,
         add_workspace(&state, addr, root, req.label.clone()),
@@ -1878,15 +1908,22 @@ async fn add_workspace(
     // Registering and opening the root ask its filesystem, so both run off
     // the runtime: an add of a root that stopped answering waits on the
     // blocking pool, not on a worker every other request needs.
-    let registering = {
-        let library = state.host.library().clone();
-        let root = root.to_path_buf();
-        tokio::task::spawn_blocking(move || library.register_workspace_with_name(&root, label))
+    let key = match state.host.root_key(root).await {
+        Ok(key) => key,
+        Err(error) => {
+            return crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
     };
-    let registered = match registering.await {
-        Ok(Ok(ws)) => ws,
-        Ok(Err(e)) => return crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
-        Err(e) => return workspace_registration_task_error(e),
+    let registered = match state.host.register_workspace_keyed(root, &key, label).await {
+        Ok(ws) => ws,
+        Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            return workspace_still_releasing();
+        }
+        Err(crate::Error::Core(error)) => {
+            return crate::error::err(StatusCode::BAD_REQUEST, error.to_string());
+        }
+        Err(crate::Error::Io(error)) => return workspace_registration_task_error(error),
+        Err(error) => return crate::error::err(StatusCode::BAD_REQUEST, error.to_string()),
     };
     let prefix = match registered_workspace_prefix(&registered.root_path) {
         Ok(prefix) => prefix,
@@ -1934,6 +1971,8 @@ async fn add_workspace(
 /// until the health probe marks it.
 /// The open and a mounted root's recheck share the devserver mount's bound,
 /// counted from the request's start, as the add's steps do.
+/// A root the surface's [`MountAdmission`] refuses is answered with that
+/// refusal before the host is asked, mounted or not.
 /// Loopback-only.
 async fn handle_workspace_on(
     State(state): State<Arc<LauncherState>>,
@@ -1948,6 +1987,9 @@ async fn handle_workspace_on(
         return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     let root = registered.root_path.clone();
+    if let Some(refusal) = state.refuse_mount(&root) {
+        return refusal;
+    }
     let opening = state
         .host
         .open_or_get_registered_workspace(&root, tenant_config(addr, &prefix));
@@ -1989,7 +2031,7 @@ fn workspace_off_error(error: crate::Error) -> Response {
 }
 
 /// `POST /api/library/workspaces/{id}/off`: unmount (release the per-workspace
-/// flock), keep the registration, and persist off. Live terminal sessions return 409 with `LiveTerminalsRejection` unless the optional JSON body sets `force: true`. Requires a mutable launcher.
+/// flock), keep the registration, and persist off. Live terminal sessions return [`live_terminals_refusal`] unless the optional JSON body sets `force: true`. Requires a mutable launcher.
 async fn handle_workspace_off(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
@@ -2010,7 +2052,7 @@ async fn handle_workspace_off(
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(e) => workspace_off_error(e),
     }
@@ -2044,7 +2086,7 @@ async fn handle_remove_workspace(
             crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
         }
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
-            live_terminals_response(active_terminals)
+            live_terminals_refusal(active_terminals)
         }
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             workspace_still_releasing()
@@ -3590,6 +3632,91 @@ mod devserver_route_tests {
             });
         }
 
+        #[test]
+        fn a_launcher_add_beside_a_held_registration_answers_still_releasing() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let body = serde_json::json!({ "path": root.path().to_string_lossy() }).to_string();
+            let stall = Arc::new(root_stall::stall_matching(
+                root.path(),
+                &[root_stall::REGISTER_WORKSPACE],
+            ));
+            let registration = Arc::clone(&stall);
+            on_a_paused_clock(stall, "an add beside a held registration", async move {
+                let (host, router) = mutable_router(lib);
+                let first = tokio::spawn(send(
+                    router.clone(),
+                    "POST",
+                    "/api/library/workspaces".into(),
+                    Some(body.clone()),
+                ));
+                held(&registration, "the first add's registration").await;
+                let started = tokio::time::Instant::now();
+                let second = tokio::spawn(send(
+                    router.clone(),
+                    "POST",
+                    "/api/library/workspaces".into(),
+                    Some(body.clone()),
+                ));
+                // Give the key's blocking task time to finish between clock
+                // ticks; it must precede the permit's release-budget timer.
+                for _ in 0..110 {
+                    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+                        .await
+                        .unwrap();
+                    settle().await;
+                    if second.is_finished() {
+                        break;
+                    }
+                    tokio::time::advance(Duration::from_millis(10)).await;
+                }
+                settle().await;
+                assert_eq!(
+                    registration.entered().len(),
+                    1,
+                    "the second add started another registration"
+                );
+                assert!(
+                    second.is_finished(),
+                    "the second add exceeded the one-second release budget"
+                );
+                let (status, retry_after, response) = second.await.unwrap();
+                assert!(started.elapsed() >= Duration::from_secs(1));
+                assert!(started.elapsed() <= Duration::from_millis(1100));
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "add: {response}");
+                assert_eq!(retry_after.as_deref(), Some("1"));
+                assert_eq!(response, serde_json::json!({ "error": STILL_RELEASING }));
+                assert!(
+                    !first.is_finished(),
+                    "the original registration did not remain held"
+                );
+                registration.release_held();
+                let (status, _, response) = first.await.unwrap();
+                assert_eq!(status, StatusCode::OK, "first add: {response}");
+                let third = tokio::spawn(send(
+                    router,
+                    "POST",
+                    "/api/library/workspaces".into(),
+                    Some(body),
+                ));
+                let deadline = Instant::now() + HEALTHY_ROOT_BOUND;
+                while registration.entered().len() < 2 {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the next add never reached registration"
+                    );
+                    tokio::task::yield_now().await;
+                }
+                registration.release_held();
+                let (status, _, response) = third.await.unwrap();
+                assert_eq!(status, StatusCode::OK, "third add: {response}");
+                host.close_workspace_for_root(root.path(), false)
+                    .await
+                    .unwrap();
+            });
+        }
+
         /// An on of a mounted root whose revalidation hangs is refused at the
         /// bound with the root's name, and gives the root's lock back: the off
         /// of that root answers after it, and so does its removal, whatever it
@@ -3882,6 +4009,60 @@ mod devserver_route_tests {
         // Nothing was torn down: the tenant and its live state are still
         // mounted for `off` to clear.
         assert!(host.is_root_mounted(&root), "add tore the tenant down");
+    }
+
+    /// The desktop's embedded host installs the launcher through
+    /// `install_launcher_root_fallback`, which asks no mount admission, so its
+    /// add and on mount as a surface with no stop of its own does.
+    #[tokio::test]
+    async fn a_surface_without_a_mount_admission_adds_and_turns_on() {
+        let cfg = tempfile::tempdir().unwrap();
+        let added = tempfile::tempdir().unwrap();
+        let turned_on = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = lib.register_workspace(turned_on.path()).unwrap().root_path;
+        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        let cell = OnceLock::new();
+        let _ = cell.set("127.0.0.1:8080".parse::<SocketAddr>().unwrap());
+        crate::install_launcher_root_fallback(
+            &host,
+            Some(Arc::new(std::sync::RwLock::new(
+                "launcher-token".to_string(),
+            ))),
+            Some(Arc::new(cell)),
+        );
+        let router = host.clone().router();
+        let send = |uri: String, body: String| {
+            router.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, "Bearer launcher-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        };
+
+        let add = send(
+            "/api/library/workspaces".into(),
+            serde_json::json!({"path": added.path()}).to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(add.status(), StatusCode::OK, "the add was not answered");
+        assert!(
+            host.is_root_mounted(added.path()),
+            "the add mounted nothing"
+        );
+
+        let prefix = chan_library::registered_workspace_prefix(&stored).unwrap();
+        let on = send(format!("/api/library/workspaces{prefix}/on"), String::new())
+            .await
+            .unwrap();
+        assert_eq!(on.status(), StatusCode::OK, "the on was not answered");
+        assert!(host.is_root_mounted(&stored), "the on mounted nothing");
+        host.shutdown_all().await.unwrap();
     }
 
     // Unix-only for the same two reasons as
@@ -4667,8 +4848,14 @@ mod devserver_route_tests {
             let uri = format!("/api/library/workspaces{prefix}");
             let (status, body) = request(&launcher, "DELETE", &uri, None).await;
             assert_eq!(status, StatusCode::CONFLICT);
-            assert_eq!(body["error"], "live_terminals");
-            assert_eq!(body["active_terminals"], 1);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "error": "workspace has 1 live terminal session(s); close them or force",
+                    "code": "live_terminals",
+                    "active_terminals": 1,
+                })
+            );
             assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
 
             let (status, _) =
@@ -4736,16 +4923,28 @@ mod devserver_route_tests {
         // Unforced off → 409 + the shared live_terminals body with the count.
         let (status, body) = request(&launcher, "POST", &off_uri, None).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"], "live_terminals");
-        assert_eq!(body["active_terminals"], 1);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "workspace has 1 live terminal session(s); close them or force",
+                "code": "live_terminals",
+                "active_terminals": 1,
+            })
+        );
         assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
 
         // Unforced remove uses the same owner-side guard and body, and leaves
         // the running workspace intact.
         let (status, body) = request(&launcher, "DELETE", &remove_uri, None).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"], "live_terminals");
-        assert_eq!(body["active_terminals"], 1);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "workspace has 1 live terminal session(s); close them or force",
+                "code": "live_terminals",
+                "active_terminals": 1,
+            })
+        );
         assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
 
         // Retry with force → the off goes through (204).
@@ -6016,7 +6215,8 @@ mod window_op_route_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "unforced off");
         assert_eq!(
-            body, r#"{"error":"live_terminals","active_terminals":2}"#,
+            body,
+            r#"{"error":"workspace has 2 live terminal session(s); close them or force","code":"live_terminals","active_terminals":2}"#,
             "needs-force body"
         );
         // Retried with force:true → force-off → 204.
@@ -6047,7 +6247,8 @@ mod window_op_route_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "unforced forget");
         assert_eq!(
-            body, r#"{"error":"live_terminals","active_terminals":2}"#,
+            body,
+            r#"{"error":"workspace has 2 live terminal session(s); close them or force","code":"live_terminals","active_terminals":2}"#,
             "needs-force body"
         );
         let (status, _) = send(
@@ -6444,6 +6645,85 @@ mod refusal_envelopes {
             "chan-workspace: workspace is locked by another process",
         )
         .await;
+    }
+
+    /// A delete of a workspace whose stored root was pointed at another
+    /// registered workspace's folder while it was mounted removes that
+    /// workspace and leaves the other one registered and mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_remove_of_a_row_relinked_onto_another_workspace_leaves_that_workspace() {
+        let (_dir, host) = host();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let prefix = registered_root(&host, &parent.join("ws"));
+        let stored = host
+            .library()
+            .list_workspaces()
+            .into_iter()
+            .map(|row| row.root_path)
+            .find(|root| registered_workspace_prefix(root).ok().as_deref() == Some(prefix.as_str()))
+            .expect("the relinked row");
+        let link = stored.parent().expect("the linked parent").to_path_buf();
+        let moved = holder.path().join("moved");
+        std::fs::rename(&link, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &link).unwrap();
+        let other_holder = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
+        let other = host
+            .library()
+            .register_workspace(&other_holder.path().join("ws"))
+            .unwrap()
+            .root_path;
+        for (root, at) in [(&stored, "/ws"), (&other, "/other")] {
+            host.open_registered_workspace(
+                root,
+                chan_library::ServeConfig {
+                    addr: "127.0.0.1:0".parse().unwrap(),
+                    no_token: true,
+                    prefix: at.into(),
+                    idle_timeout: None,
+                    open_browser: false,
+                    search_aggression: None,
+                    settings_disabled: false,
+                    verbose: false,
+                },
+            )
+            .await
+            .expect("mount a workspace");
+        }
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(other_holder.path(), &link).unwrap();
+
+        let status = send(
+            &mutable_app(host.clone()),
+            "DELETE",
+            &format!("/api/library/workspaces{prefix}"),
+            None,
+        )
+        .await
+        .status();
+
+        let registered = |root: &Path| {
+            host.library()
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == root)
+        };
+        assert!(
+            host.mounted_root(&other).is_some(),
+            "the delete closed another workspace: {status}"
+        );
+        assert!(
+            registered(&other),
+            "the delete unregistered another workspace: {status}"
+        );
+        assert!(
+            !registered(&stored),
+            "the delete left the workspace it names registered: {status}"
+        );
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     #[test]

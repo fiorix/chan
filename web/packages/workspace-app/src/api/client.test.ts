@@ -6,10 +6,12 @@ import {
   clientNonce,
   dragScopeMimeToken,
   filesMutationSuffix,
+  fileUrl,
   sessionPath,
   sessionWindowId,
   windowDragScope,
   windowLibraryId,
+  withTokenQuery,
 } from "./client";
 
 afterEach(() => {
@@ -62,6 +64,24 @@ describe("standalone filesystem request markers", () => {
     // window with no routes behind them.
     serveFiles(false);
     expect(sessionPath()).toBe(`/api/session?w=w-term&client=${clientNonce()}`);
+  });
+});
+
+describe("fileUrl", () => {
+  test.each([
+    "photo.png",
+    "notes/a b.png",
+    "notes/a#b.png",
+    "notes/a?b=c&d.png",
+    "notes/100%.png",
+    "notes/caf\u00e9/\u65e5\u672c\u8a9e.png",
+    "a/b/c/d e.pdf",
+  ])("is the files route for %j, with the token query", (path) => {
+    expect(fileUrl(path)).toBe(withTokenQuery(`/api/fs/${encodeURIComponent(path).replace(/%2F/g, "/")}`));
+  });
+
+  test("encodes each segment and keeps the separators", () => {
+    expect(fileUrl("media/my tone #1.WAV")).toBe(withTokenQuery("/api/fs/media/my%20tone%20%231.WAV"));
   });
 });
 

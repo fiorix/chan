@@ -318,7 +318,7 @@
   /// Walk every ancestor of `path` and return the ones that don't
   /// exist as directories yet. Used so the status row can announce both
   /// the implicit ancestors AND the target instead of mentioning
-  /// only the immediate parent (which used to hide multi-segment
+  /// only the immediate parent (which would hide multi-segment
   /// chains like `a/b/c/d` from the user).
   function missingAncestors(path: string): string[] {
     if (path.startsWith("/")) return [];
@@ -404,7 +404,7 @@
     // Open mode never treats an existing entry as an error: an existing
     // directory opens the file browser, an existing file opens the
     // editor (the server's content sniff has the final word on binary).
-    // A path the tree doesn't know gets the ruling-6 disclosure: the
+    // A path the tree doesn't know gets a disclosure: the
     // server creates it empty and opens it, full `cs open` parity.
     if (pathPromptState.mode === "open") {
       if (targetEntry) {

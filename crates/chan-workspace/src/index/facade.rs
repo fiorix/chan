@@ -471,9 +471,8 @@ impl Index {
 
     /// Walk the workspace and re-index everything from scratch. If
     /// `cancel` is set to true mid-build, returns `Cancelled` without
-    /// calling `commit()` so tantivy discards every pending write
-    /// queued in this run; the on-disk index is left as it was at
-    /// the start.
+    /// the final commit. BM25 batches committed before an embedding flush
+    /// remain searchable on disk; cancellation does not roll them back.
     ///
     /// A cold full build SKIPS the embedding
     /// pass when the workspace has more than `EMBED_FILE_CAP` indexable

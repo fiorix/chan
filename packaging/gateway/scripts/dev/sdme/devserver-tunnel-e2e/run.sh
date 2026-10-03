@@ -163,7 +163,7 @@ $SDME cp "$TLS_DIR/ca.crt" "$C_DS:/usr/local/share/ca-certificates/chan-e2e.crt"
 $SDME exec "$C_DS" -- /usr/sbin/update-ca-certificates >/dev/null
 $SDME exec "$C_DS" -- /bin/chmod +x /root/chan
 $SDME exec "$C_DS" -- /bin/sh -c \
-  "mkdir -p /root/$WS_NAME /run/chan && printf '# e2e notes\nhello-through-the-tunnel\n' > /root/$WS_NAME/README.md"
+  "mkdir -p /root/$WS_NAME /run/chan && chmod 700 /run/chan && printf '# e2e notes\nhello-through-the-tunnel\n' > /root/$WS_NAME/README.md"
 # A declared local extension: chan starts it when the devserver starts.
 $SDME exec "$C_DS" -- /bin/mkdir -p /root/.chan/extensions
 $SDME cp "$EXTENSION_PY" "$C_DS:/root/.chan/extensions/e2e-extension.py"

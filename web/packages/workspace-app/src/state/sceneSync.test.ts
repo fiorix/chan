@@ -14,6 +14,9 @@ import {
   acquireSceneSession,
   isSceneSyncEligible,
   resetSceneSyncForTests,
+  SCENE_ATTACH_TIMEOUT_MS,
+  SCENE_FLUSH_TIMEOUT_MS,
+  SCENE_FALLBACK_SETTLE_MS,
   sceneSessionFor,
   sceneWsPath,
   type SceneCanvasBinding,
@@ -32,8 +35,10 @@ import {
   isDocAttached,
   isDocSavePaused,
   isDocUnflushed,
+  isDirty,
   reorderTab,
   saveTab,
+  scheduleAutosave,
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
@@ -450,6 +455,32 @@ describe("presence", () => {
 // ---- capability probe + degrade ----------------------------------------------
 
 describe("probe and degrade", () => {
+  test("a fallback redial keeps its own attach window", async () => {
+    vi.useFakeTimers();
+    const tab = sceneTab();
+    const { session, sock } = attached(tab);
+    sock.drop();
+    await vi.advanceTimersByTimeAsync(500);
+    lastSocket().drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    lastSocket().drop();
+    expect(tab.doc?.state).toBe("degraded");
+
+    await vi.advanceTimersByTimeAsync(2000);
+    const retry = lastSocket();
+    retry.open();
+    await vi.advanceTimersByTimeAsync(1000);
+    session.healAfterFallbackSave();
+    const healed = lastSocket();
+    expect(healed).not.toBe(retry);
+    expect(retry.closedByClient).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(SCENE_ATTACH_TIMEOUT_MS - 1000 + 1);
+    expect(healed.closedByClient, "the previous dial must not close the new socket").toBe(false);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(healed.closedByClient, "the new dial must still time out on its own deadline").toBe(true);
+  });
+
   test("a close before any frame latches scene sync off module-wide", () => {
     const tab = sceneTab();
     const session = acquireSceneSession(tab)!;
@@ -532,12 +563,25 @@ describe("save funnel", () => {
     await expect(pending).resolves.toBe(true);
     expect(tab.savedMtimeNs).toBe("2000000000");
 
-    // Flush error: resolves false and surfaces on the tab.
+    // Flush error: resolves false and says so on the save line.
     sock.frame({ type: "update", version: 2, elements: [elem("z", 2)] });
     const failing = session.flush();
     sock.frame({ type: "flush", dirty: true, error: "disk full" });
     await expect(failing).resolves.toBe(false);
-    expect(tab.error).toContain("disk full");
+    expect(tab.saveError).toContain("disk full");
+  });
+
+  test("a flush error keeps the board and says the file is not saved until a flush lands", () => {
+    const tab = sceneTab();
+    const { sock } = attached(tab);
+    sock.frame({ type: "update", version: 1, elements: [elem("y", 2)] });
+    sock.frame({ type: "flush", dirty: true, error: "disk full" });
+    const failed = { error: tab.error, saveError: tab.saveError ?? null };
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    expect({ failed, landed: tab.saveError ?? null }).toEqual({
+      failed: { error: null, saveError: "the server could not write it (disk full)" },
+      landed: null,
+    });
   });
 
   test("attached scene tabs save through the delegate arrays, never a PUT", async () => {
@@ -561,6 +605,164 @@ describe("save funnel", () => {
     await flushMicro();
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0]![4]).toBe(0);
+  });
+
+  test("a save whose flush fails sends its PUT after the push on the wire, with the version it stamps", async () => {
+    vi.useFakeTimers();
+    try {
+      const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+      const [tab] = installTabs([sceneTab()]);
+      const { session, sock } = attached(tab);
+      session.pushScene([elem("a", 2)]);
+      tab.content = tab.content + "\n";
+      const saving = saveTab(tab);
+      // The flush never answers, so the save degrades once its bound passes.
+      await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + 1);
+      const beforeAck = write.mock.calls.length;
+      sock.frame({ type: "push-ok", version: 7 });
+      await vi.advanceTimersByTimeAsync(0);
+      await saving;
+      expect({ beforeAck, calls: write.mock.calls.length, version: write.mock.calls[0]?.[4] }).toEqual({
+        beforeAck: 0,
+        calls: 1,
+        version: 7,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a delayed scene ack beyond both save bounds withholds the PUT", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("late", 2)]);
+    tab.content = sceneBufferWith("late");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + SCENE_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    expect(write, "unresolved scene push must not race a PUT").not.toHaveBeenCalled();
+    expect(tab.content).toContain("late");
+    expect(tab.saveError).toContain("push");
+    expect(tab.error).toBeNull();
+    expect(isDirty(tab)).toBe(true);
+    expect(isDocUnflushed(tab.id)).toBe(true);
+    await saveTab(tab);
+    expect(write, "repeated save must stay withheld").not.toHaveBeenCalled();
+    scheduleAutosave("pane-scene-test", tab.id);
+    await vi.advanceTimersByTimeAsync(801);
+    expect(write, "autosave must stay withheld").not.toHaveBeenCalled();
+    sock.frame({ type: "push-ok", version: 1 });
+    await saveTab(tab);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  test("a queued second scene push keeps fallback withheld after the first ack", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("first", 2)]);
+    session.pushScene([elem("second", 2)]);
+    tab.content = sceneBufferWith("second");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + SCENE_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    sock.frame({ type: "push-ok", version: 1 });
+    expect(sock.frames("push")).toHaveLength(2);
+    await saveTab(tab);
+    expect(write, "first ack cannot settle a queued second push").not.toHaveBeenCalled();
+    sock.frame({ type: "push-ok", version: 2 });
+    await saveTab(tab);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  test("an ack after the settle timer fires but before its continuation permits fallback", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("boundary", 2)]);
+    tab.content = sceneBufferWith("boundary");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS);
+    vi.advanceTimersByTime(SCENE_FALLBACK_SETTLE_MS);
+    sock.frame({ type: "push-ok", version: 7 });
+    await saving;
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0]?.[4]).toBe(7);
+  });
+
+  test("a deliberate closed frame leaves an unanswered scene push unsaved", async () => {
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab);
+    session.pushScene([elem("retired", 2)]);
+    tab.content = sceneBufferWith("retired");
+    sock.frame({ type: "closed", reason: "reset" });
+    await saveTab(tab);
+
+    expect(write, "retirement cannot settle an unanswered push").not.toHaveBeenCalled();
+    expect(tab.doc?.state).toBe("off");
+    expect(tab.content).toContain("retired");
+    expect(tab.saveError).toContain("push");
+    expect(tab.error).toBeNull();
+    expect(isDirty(tab)).toBe(true);
+  });
+
+  test("a save timeout marks the tab committed by pane mode", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session } = attached(tab);
+    session.pushScene([elem("moved", 2)]);
+    tab.content = sceneBufferWith("moved");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS);
+    enterPaneMode();
+    commitPaneMode();
+    const moved = readTab(tab.id)!;
+    expect(moved).not.toBe(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FALLBACK_SETTLE_MS);
+    await saving;
+
+    expect(write).not.toHaveBeenCalled();
+    expect(moved.content).toContain("moved");
+    expect(moved.saveError).toContain("push");
+    expect(isDirty(moved)).toBe(true);
+  });
+
+  test("a lost scene socket retains its claim until a fresh snapshot and live flush", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock, binding } = attached(tab);
+    session.pushScene([elem("local", 2)]);
+    tab.content = sceneBufferWith("local");
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + SCENE_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    sock.frame(snap([]));
+    expect(tab.unresolvedLivePush).toBe(true);
+    expect(write, "same-socket snapshot cannot settle the claim").not.toHaveBeenCalled();
+    sock.drop();
+    expect(binding.pending.map((e) => e.id)).toContain("local");
+    expect(tab.unresolvedLivePush).toBe(true);
+    expect(write, "socket close cannot settle the claim").not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600);
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([]));
+    expect(back.frames("push")).toHaveLength(1);
+    const recovered = saveTab(tab);
+    back.frame({ type: "push-ok", version: 1 });
+    back.frame({ type: "flush", dirty: false, mtime_ns: "9000000000" });
+    await recovered;
+    expect(write).not.toHaveBeenCalled();
+    expect(tab.saveError).toBeNull();
+    expect(isDirty(tab)).toBe(false);
   });
 });
 
@@ -1152,6 +1354,47 @@ describe("a socket's snapshot comes before anything else on it", () => {
       replays: [["authority"]],
     });
   });
+
+  test("an unbound canvas keeps its unacknowledged scene through a fresh socket snapshot", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write");
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    const local = elem("local", 2);
+    const appState = { viewBackgroundColor: "#123456" };
+    const files = { "local-file": { dataURL: "data:image/png;base64,AAA" } };
+    session.pushScene([local], appState, files);
+    tab!.content = sceneBufferWith("local");
+    session.unbindCanvas(binding);
+    sock.drop();
+
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([elem("peer", 3)]));
+    const saving = saveTab(tab!);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + 1);
+    await saving;
+    expect(write, "an unbound claim cannot fall back to PUT").not.toHaveBeenCalled();
+    expect(tab!.saveError).toContain("push");
+    const next = new FakeBinding();
+    next.session = session;
+    session.bindCanvas(next);
+
+    expect(next.snapshots[0]?.elements.map((el) => el.id)).toEqual(["peer", "local"]);
+    expect(next.snapshots[0]?.appState).toEqual(appState);
+    expect(next.snapshots[0]?.files).toHaveProperty("local-file");
+    expect(back.frames("push")).toEqual([
+      expect.objectContaining({ elements: [local], appState, files }),
+    ]);
+    expect(tab!.content).toContain("local");
+    back.frame({ type: "push-ok", version: 1 });
+    back.frame({ type: "flush", dirty: false, mtime_ns: "9000000000" });
+    await saveTab(tab!);
+    expect(tab!.saveError).toBeNull();
+    vi.useRealTimers();
+  });
 });
 
 describe("a snapshot the server fans on a socket that had its own", () => {
@@ -1341,4 +1584,3 @@ describe("the classic PUT during an outage", () => {
     expect(String(write.mock.calls[0]![1])).toContain("drawn-during-outage");
   });
 });
-

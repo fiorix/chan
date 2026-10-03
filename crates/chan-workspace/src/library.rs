@@ -301,6 +301,52 @@ impl Library {
         Ok(true)
     }
 
+    /// Unregister the registry row that stores `stored`, compared as the
+    /// registry stores it, and wipe its chan-managed state as
+    /// [`unregister_workspace`](Self::unregister_workspace) does, without
+    /// resolving any path to find the row. A caller that holds the row
+    /// reaches it so even when its root resolves elsewhere since the
+    /// registry was loaded, where a lookup of that root finds another row
+    /// or none.
+    ///
+    /// `holder` names the writer lock's holder: the lock records its
+    /// canonical form and compares that with its record at a contention, so
+    /// it is the canonical root the caller holds the workspace by. It picks
+    /// no row.
+    ///
+    /// Refuses with `ChanError::WorkspaceAlreadyOpen` while this process
+    /// holds a live `Arc<Workspace>` of the row. Returns `Ok(false)`, having
+    /// wiped nothing, when no row stores `stored`.
+    pub fn unregister_workspace_row(&self, stored: &Path, holder: &Path) -> Result<bool> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _step = crate::paths::root_stall::UNREGISTER_WORKSPACE.open();
+        // Asked before the lock is taken, so a holder whose filesystem does
+        // not answer stops this call here, before it holds the lock.
+        let holder = paths::canonicalize_normalized(holder);
+        let Some(metadata_key) = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .workspaces
+            .iter()
+            .find(|row| row.root_path == stored)
+            .map(|row| row.metadata_key.clone())
+        else {
+            return Ok(false);
+        };
+        self.refuse_if_row_live(&metadata_key)?;
+        let (_lock, _removed) =
+            self.wipe_row_state(&metadata_key, &holder, &crate::progress::NoProgress)?;
+        // The writer lock is held across the registry update, as
+        // `reset_workspace_with` holds it.
+        let mut reg = self.inner.registry.lock().unwrap();
+        if reg.remove_stored(stored, &metadata_key) {
+            reg.save_to(&self.inner.config_path)?;
+        }
+        Ok(true)
+    }
+
     /// Open a workspace handle. The workspace must already be registered;
     /// callers do `register_workspace` first if needed (CLI does both
     /// in one shot for the "point at a directory and go" path).
@@ -370,6 +416,24 @@ impl Library {
         Ok(())
     }
 
+    /// [`refuse_if_live`](Self::refuse_if_live) for a caller that holds a
+    /// registry row: finds this process's live handle of the row by its
+    /// metadata key and resolves nothing. By a root's canonical form, a root
+    /// that resolves elsewhere since its handle opened finds another
+    /// workspace's handle, or none.
+    fn refuse_if_row_live(&self, metadata_key: &str) -> Result<()> {
+        let mut map = self.inner.live_workspaces.lock().unwrap();
+        gc_dead_entries(&mut map);
+        if map
+            .values()
+            .filter_map(Weak::upgrade)
+            .any(|workspace| workspace.metadata_key() == metadata_key)
+        {
+            return Err(ChanError::WorkspaceAlreadyOpen);
+        }
+        Ok(())
+    }
+
     /// Wipe per-workspace chan-managed state for `root`. The user's
     /// notes tree is never touched (chan-workspace never writes inside
     /// it). The trash is preserved (it holds user-deleted files,
@@ -417,7 +481,6 @@ impl Library {
         mode: ResetMode,
         progress: &dyn crate::progress::ProgressCallback,
     ) -> Result<ResetReport> {
-        use crate::progress::{ProgressEvent, ProgressStage};
         // A buggy caller might hold a Workspace and call reset_workspace
         // from another thread, expecting the flock to serialize.
         self.refuse_if_live(root)?;
@@ -436,9 +499,43 @@ impl Library {
         else {
             return Ok(ResetReport { removed_entries: 0 });
         };
+        let (_lock, removed) = self.wipe_row_state(&metadata_key, root, progress)?;
+        // Hold the writer lock across the registry update so a
+        // concurrent open_workspace cannot lazily recreate the state we
+        // just wiped, lazily commit a half-formed index/graph dir,
+        // and then notice its registry entry has been dropped. The
+        // registry mutex composes cleanly here: it's a lock we own,
+        // the flock is process-wide, and no path acquires them in
+        // the opposite order. _lock is dropped at the end of the
+        // function after the registry write completes.
+        if matches!(mode, ResetMode::Everything) {
+            let found = self.match_root(root);
+            let mut reg = self.inner.registry.lock().unwrap();
+            if reg.remove_matched(&found) {
+                reg.save_to(&self.inner.config_path)?;
+            }
+        }
+        Ok(ResetReport {
+            removed_entries: removed,
+        })
+    }
+
+    /// Wipe the chan-managed state stored under `metadata_key` (the index,
+    /// the graph, the session blobs, the app tokens and the report), firing
+    /// one `ProgressStage::Reset` event per subsystem as it goes. Takes the
+    /// workspace's writer lock first, with `holder` as the root its record
+    /// names, and returns it with the count of entries removed, so the
+    /// caller holds it across its registry update.
+    fn wipe_row_state(
+        &self,
+        metadata_key: &str,
+        holder: &Path,
+        progress: &dyn crate::progress::ProgressCallback,
+    ) -> Result<(WorkspaceLock, usize)> {
+        use crate::progress::{ProgressEvent, ProgressStage};
         let workspace_paths =
-            paths::workspace_paths_for_metadata_key_in(&self.inner.chan_home, &metadata_key);
-        let _lock = WorkspaceLock::acquire(&workspace_paths.lock, root)?;
+            paths::workspace_paths_for_metadata_key_in(&self.inner.chan_home, metadata_key);
+        let lock = WorkspaceLock::acquire(&workspace_paths.lock, holder)?;
         let mut removed = 0;
         let report_dir = workspace_paths
             .report
@@ -462,24 +559,7 @@ impl Library {
             });
             removed += wipe_dir(dir)?;
         }
-        // Hold the writer lock across the registry update so a
-        // concurrent open_workspace cannot lazily recreate the state we
-        // just wiped, lazily commit a half-formed index/graph dir,
-        // and then notice its registry entry has been dropped. The
-        // registry mutex composes cleanly here: it's a lock we own,
-        // the flock is process-wide, and no path acquires them in
-        // the opposite order. _lock is dropped at the end of the
-        // function after the registry write completes.
-        if matches!(mode, ResetMode::Everything) {
-            let found = self.match_root(root);
-            let mut reg = self.inner.registry.lock().unwrap();
-            if reg.remove_matched(&found) {
-                reg.save_to(&self.inner.config_path)?;
-            }
-        }
-        Ok(ResetReport {
-            removed_entries: removed,
-        })
+        Ok((lock, removed))
     }
 
     /// Record an `mv` of a registered workspace's directory. Preserves
@@ -869,6 +949,99 @@ mod tests {
         assert!(!lib.unregister_workspace(workspace.path()).unwrap());
     }
 
+    /// An unregister by row removes the row that stores the root it is
+    /// given, and wipes that row's state, although the root now resolves to
+    /// another registered workspace's folder, whose row and state it leaves.
+    #[cfg(unix)]
+    #[test]
+    fn unregister_workspace_row_removes_the_row_that_stores_the_root() {
+        use std::os::unix::fs::symlink;
+        let (lib, _cfg, holder) = lib();
+        std::fs::create_dir_all(holder.path().join("parent").join("ws")).unwrap();
+        let first = lib
+            .register_workspace(&holder.path().join("parent").join("ws"))
+            .unwrap();
+        let other_holder = TempDir::new().unwrap();
+        std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
+        let other = lib
+            .register_workspace(&other_holder.path().join("ws"))
+            .unwrap();
+        populate_state(&lib, &first.root_path);
+        populate_state(&lib, &other.root_path);
+        let link = first.root_path.parent().unwrap();
+        std::fs::rename(link, holder.path().join("moved")).unwrap();
+        symlink(other_holder.path(), link).unwrap();
+        assert_eq!(
+            paths::canonicalize_normalized(&first.root_path),
+            other.root_path,
+            "fixture: the stored root does not resolve to the other workspace"
+        );
+
+        assert!(
+            !lib.unregister_workspace_row(&other_holder.path().join("none"), &first.root_path)
+                .unwrap(),
+            "a root no row stores was unregistered"
+        );
+        assert!(lib
+            .unregister_workspace_row(&first.root_path, &first.root_path)
+            .unwrap());
+
+        let keys: Vec<String> = lib
+            .list_workspaces()
+            .into_iter()
+            .map(|row| row.metadata_key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![other.metadata_key.clone()],
+            "the unregister removed another row or kept its own"
+        );
+        assert!(
+            lib.workspace_paths_for_row(&other)
+                .tokens
+                .join("server.token")
+                .exists(),
+            "the unregister wiped another row's state"
+        );
+        assert!(
+            !lib.workspace_paths_for_row(&first)
+                .tokens
+                .join("server.token")
+                .exists(),
+            "the unregister left its row's state"
+        );
+    }
+
+    /// A live handle of a row refuses its unregister by row as already open,
+    /// although the root the row stores resolves elsewhere now than where
+    /// the handle opened it, which is the place its lock's record names.
+    #[cfg(unix)]
+    #[test]
+    fn unregister_workspace_row_refuses_a_live_handle_of_its_row_as_already_open() {
+        use std::os::unix::fs::symlink;
+        let (lib, _cfg, holder) = lib();
+        std::fs::create_dir_all(holder.path().join("parent").join("ws")).unwrap();
+        let row = lib
+            .register_workspace(&holder.path().join("parent").join("ws"))
+            .unwrap();
+        let _open = lib.open_workspace(&row.root_path).unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        std::fs::create_dir_all(elsewhere.path().join("ws")).unwrap();
+        let link = row.root_path.parent().unwrap();
+        std::fs::rename(link, holder.path().join("moved")).unwrap();
+        symlink(elsewhere.path(), link).unwrap();
+
+        let err = lib
+            .unregister_workspace_row(&row.root_path, &row.root_path)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ChanError::WorkspaceAlreadyOpen),
+            "a live handle of the row did not refuse as already open: {err:?}"
+        );
+        assert_eq!(lib.list_workspaces().len(), 1, "the refused row went");
+    }
+
     #[test]
     fn open_uses_default_index_excluded_dirs() {
         let (lib, _cfg, _workspace) = lib();
@@ -1041,7 +1214,13 @@ mod tests {
     /// the workspace so the test can verify reset doesn't touch the
     /// user's notes.
     fn populate_state(lib: &Library, root: &Path) {
+        populate_state_with(lib, root, |_| {});
+    }
+
+    fn populate_state_with(lib: &Library, root: &Path, opened: impl FnOnce(&Arc<Workspace>)) {
         let workspace = lib.open_workspace(root).unwrap();
+        opened(&workspace);
+        workspace.stop_open_recovery();
         workspace
             .write_text("notes/keep.md", "kept across reset")
             .unwrap();
@@ -1050,6 +1229,49 @@ mod tests {
         let p = workspace.paths();
         std::fs::create_dir_all(&p.tokens).unwrap();
         std::fs::write(p.tokens.join("server.token"), b"deadbeef").unwrap();
+    }
+
+    #[test]
+    fn populate_state_joins_startup_recovery_before_returning() {
+        let (lib, _cfg, root) = lib();
+        lib.register_workspace(root.path()).unwrap();
+        let paths = paths_of(&lib, root.path());
+        std::fs::create_dir_all(&paths.graph_dir).unwrap();
+        std::fs::write(paths.graph_dir.join("rebuild.inprogress"), b"").unwrap();
+        let (reached, _release) =
+            crate::workspace::arm_open_recovery_pause_for_test(root.path().canonicalize().unwrap());
+        let mut weak = None;
+        populate_state_with(&lib, root.path(), |workspace| {
+            reached
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("startup recovery did not reach the preclaim pause");
+            assert_eq!(
+                workspace.recovery_status().pending.unwrap().action,
+                crate::workspace::RecoveryAction::FullRebuild
+            );
+            assert!(workspace.recovery_worker_running_for_test());
+            weak = Some(Arc::downgrade(workspace));
+        });
+
+        let retained = weak.unwrap().upgrade();
+        let worker_owns_handle = retained.is_some();
+        if let Some(workspace) = retained {
+            workspace.stop_open_recovery();
+        }
+        assert!(
+            !worker_owns_handle,
+            "populate_state returned while startup recovery still owned the handle"
+        );
+
+        let reopened = lib.open_workspace(root.path()).unwrap();
+        reopened.stop_open_recovery();
+        reopened.reindex(None).unwrap();
+        assert!(reopened.recovery_status().is_ready());
+        assert!(reopened
+            .list_tree()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.path == "notes/keep.md"));
     }
 
     fn paths_of(lib: &Library, root: &Path) -> paths::WorkspacePaths {
@@ -1343,17 +1565,29 @@ mod tests {
 
         let p = paths_of(&lib, workspace.path());
         assert!(p.graph_db.exists(), "graph DB should exist after populate");
-        // Sanity: the graph actually has the file we wrote.
+        // The fixture owns recovery because it has no retry driver.
         {
             let d = lib.open_workspace(workspace.path()).unwrap();
+            d.stop_open_recovery();
+            d.reindex(None).unwrap();
             let entries = d.list_tree().unwrap();
             assert!(entries.iter().any(|e| e.path == "notes/keep.md"));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-            while !d.recovery_status().is_ready() && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            assert!(d.recovery_status().is_ready());
-            d.join_open_recovery();
+            assert!(
+                d.recovery_status().is_ready(),
+                "fixture recovery not ready: root={} status={:?} worker_running={} unowned={} observation={:?}; state samples are separate",
+                d.root().display(),
+                d.recovery_status(),
+                d.recovery_worker_running_for_test(),
+                d.recovery_is_unowned(),
+                d.recovery_observation_for_test()
+            );
+            let opts = crate::workspace::SearchOpts {
+                mode: crate::SearchMode::Bm25,
+                limit: 10,
+                scope: None,
+            };
+            let hits = d.search("kept", &opts).unwrap();
+            assert!(hits.hits.iter().any(|hit| hit.path == "notes/keep.md"));
         }
 
         assert!(lib.unregister_workspace(workspace.path()).unwrap());

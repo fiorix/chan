@@ -278,6 +278,19 @@ describe("openSlidePreview", () => {
     expect(page.style.colorScheme).toBe("light");
   });
 
+  test("applies a theme that arrives with a source that does not parse", () => {
+    const handle = openSlidePreview({
+      source: SOURCE,
+      currentLine: 0,
+      fromPath: "slides-test.md",
+      theme: "dark",
+    });
+    // The host sends the buffer with every update, and a deck being edited
+    // does not parse for as long as its frontmatter is half typed.
+    handle?.update({ source: "no frontmatter yet", theme: "light" });
+    expect(backdrop()?.dataset.theme).toBe("light");
+  });
+
   test("applies the slide zoom factor from frontmatter", () => {
     const handle = openSlidePreview({
       source: SOURCE,

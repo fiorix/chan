@@ -49,9 +49,6 @@ export interface WikiBubbleOpts {
   triggerStart: number;
   triggerEnd: number;
   initialQuery: string;
-  /// Reserved path scope from the host. File mode currently uses
-  /// /api/link-targets globally so title/heading matches are visible.
-  prefix: string | null;
   /// "wrap" (default): commit inserts `[[path]]`. Used when the user
   /// typed `[[` from scratch.
   /// "raw": commit inserts just `path`. Used when the caret is inside
@@ -225,6 +222,9 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   let mode: Mode = slotMode ? { kind: "file" } : classifyQuery(query);
   // File-mode results from /api/link-targets.
   let fileHits: LinkTarget[] = [];
+  /// Why the last link-target search failed, shown in place of the empty
+  /// state while no row is left; null once a search answers.
+  let searchFailure: string | null = null;
   // Client-synthesized workspace-PATH candidates (see computePathHits),
   // merged into the file-mode list. `allEntries` caches the workspace
   // file tree for the bubble's lifetime so we fetch it at most once per
@@ -304,6 +304,12 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
     const hits = activeHits();
     if (hits.length === 0) {
       if (mode.kind === "file") {
+        if (searchFailure !== null) {
+          status.textContent = searchFailure;
+          status.classList.remove("md-bubble-status-empty");
+          shell.reposition();
+          return;
+        }
         if (!windowCaps.workspace) {
           // No index exists behind this window, so the index-aware empty
           // states ("Indexing...", "0 documents") would be lies; a plain
@@ -447,6 +453,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         .then((results) => {
           if (!alive || seq !== reqSeq || mode.kind !== "file") return;
           fileHits = results;
+          searchFailure = null;
           // Clamp against the FULL list (a prepended Self row + path extras),
           // not just fileHits, or the selection can land out of range.
           if (selectedIndex >= activeHits().length) selectedIndex = 0;
@@ -454,8 +461,12 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         })
         .catch((err) => {
           if (!alive || seq !== reqSeq) return;
+          // The rows on screen must be the ones Enter and the arrows
+          // index, so the list is drawn again without the old hits.
           fileHits = [];
-          status.textContent = `Search failed: ${err.message ?? err}`;
+          searchFailure = `Search failed: ${err.message ?? err}`;
+          if (selectedIndex >= activeHits().length) selectedIndex = 0;
+          render();
         });
     }, FETCH_DEBOUNCE_MS);
   }

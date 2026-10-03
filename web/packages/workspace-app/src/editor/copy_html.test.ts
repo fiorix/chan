@@ -136,7 +136,7 @@ describe("buildBaselineHtml (wrapper + resolution + tagging)", () => {
     expect(html).toContain('data-chan-ref="0"');
     expect(html).toContain('data-chan-ref="1"');
     // Exact, not `toContain`: a prefix match cannot see a query appended
-    // to the src, which is how the session bearer used to ride along. The
+    // to the src, which is where a session bearer would ride along. The
     // tokened case, where this environment has no bearer to leak, is
     // copyHtmlToken.test.ts.
     const doc = new DOMParser().parseFromString(html, "text/html");

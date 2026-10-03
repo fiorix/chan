@@ -11,8 +11,6 @@ import { confirmState, resolveConfirm } from "./confirm.svelte";
 import {
   clearRecentlyClosedTabsForTest,
   cancelPaneMode,
-  closeAllTabs,
-  closeOtherTabsInPane,
   closePane,
   closeTab,
   closeTabsInPane,
@@ -288,36 +286,6 @@ describe("the bulk closes follow their tabs", () => {
     await settle();
 
     expect(sideA()).toEqual([]);
-  });
-
-  test("closeOtherTabsInPane leaves a tab that arrived during the prompt", async () => {
-    resetLayout([fileTab("keep"), liveTerminalTab("b"), fileTab("a")]);
-
-    const closing = closeOtherTabsInPane(PANE_ID, "keep");
-    await settle();
-    expect(confirmState.open).toBe(true);
-    pane().tabs.push(fileTab("late"));
-
-    resolveConfirm(true);
-    await closing;
-    await settle();
-
-    expect(sideA()).toEqual(["keep", "late"]);
-  });
-
-  test("closeAllTabs leaves a tab that arrived during the prompt", async () => {
-    resetLayout([liveTerminalTab("b"), fileTab("a")]);
-
-    const closing = closeAllTabs();
-    await settle();
-    expect(confirmState.open).toBe(true);
-    pane().tabs.push(fileTab("late"));
-
-    resolveConfirm(true);
-    await closing;
-    await settle();
-
-    expect(sideA()).toEqual(["late"]);
   });
 });
 

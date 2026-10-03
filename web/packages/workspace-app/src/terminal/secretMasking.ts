@@ -315,6 +315,22 @@ export class TerminalSecretMasker {
     }
   }
 
+  /// Rescan the visible wrapped groups after a width change. Off-screen
+  /// decorations can remain at old cells until the trailing full scan;
+  /// scrolling during continuous resize can reveal stale coverage.
+  scanViewport(): void {
+    if (this.#disposed || !this.#enabled) return;
+    try {
+      const buffer = this.#activeBuffer();
+      if (!buffer) return;
+      const end = Math.min(buffer.length, buffer.viewportY + this.#term.rows);
+      const rows = Array.from({ length: Math.max(0, end - buffer.viewportY) }, (_, i) => buffer.viewportY + i);
+      this.#scanDirtyRows(rows);
+    } catch (error) {
+      this.#fail("xterm secret masking scan failed", error);
+    }
+  }
+
   clear(): void {
     for (const entry of Array.from(this.#decorations)) {
       this.#disposeEntry(entry);

@@ -456,7 +456,11 @@ export function diagramDecorations(config: DiagramConfig): Extension {
       return scan(state, isDark(), spec);
     },
     update(decorations, tr) {
-      if (!tr.docChanged && !tr.selection && treeUnchanged(tr)) return decorations;
+      // A reconfigure is how the editor flips its theme, and the faces
+      // are drawn in the palette `isDark` reads at the scan.
+      if (!tr.docChanged && !tr.selection && !tr.reconfigured && treeUnchanged(tr)) {
+        return decorations;
+      }
       return scan(tr.state, isDark(), spec);
     },
     provide: (f) => EditorView.decorations.from(f),

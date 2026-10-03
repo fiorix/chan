@@ -6,7 +6,7 @@
 // replacing the `#query` trigger with `#chosen`.
 //
 // No network round-trip per keystroke (graph fetch is one-shot, then
-// in-memory filter). Mirrors the legacy editor's tag picker behavior.
+// in-memory filter).
 
 import type { EditorView } from "@codemirror/view";
 import { openBubbleShell } from "../bubble";
@@ -63,6 +63,9 @@ export function openTagBubble(opts: TagBubbleOpts): TagBubbleHandle {
   let query = opts.initialQuery;
   let triggerEnd = opts.triggerEnd;
   let allTags: string[] = [];
+  /// Whether the tag list has loaded: an empty list says "Loading" only
+  /// before that, or a workspace with no tags would load for ever.
+  let loaded = false;
   let hits: string[] = [];
   let selectedIndex = 0;
   let alive = true;
@@ -86,9 +89,11 @@ export function openTagBubble(opts: TagBubbleOpts): TagBubbleHandle {
   function render(): void {
     list.innerHTML = "";
     if (hits.length === 0) {
-      status.textContent = allTags.length === 0
+      status.textContent = !loaded
         ? "Loading tags..."
-        : "No matches";
+        : allTags.length === 0
+          ? "No tags"
+          : "No matches";
       shell.reposition();
       return;
     }
@@ -130,6 +135,7 @@ export function openTagBubble(opts: TagBubbleOpts): TagBubbleHandle {
     .then((tags) => {
       if (!alive) return;
       allTags = tags;
+      loaded = true;
       filter();
     })
     .catch((err) => {

@@ -11,10 +11,11 @@ import {
   failTransfer,
   finishTransfer,
   setTransferProgress,
+  type TransferSource,
   waitForTransferSlot,
 } from "../state/transfers.svelte";
 import type { ScopedWindowKind } from "./libraryCommand";
-import type { TransferRoot } from "./client";
+import { transferSuffix, type TransferRoot } from "./client";
 import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
 type TauriWindow = Window &
@@ -155,12 +156,11 @@ setGatewayCsrfTokenReader(isTauriDesktop() ? readGatewayCsrfToken : null);
 /// `read_clipboard_text` IPC, which goes straight to the OS clipboard
 /// and never shows the button. On web `navigator.clipboard.readText()`
 /// is fine -- it is gesture-permitted and shows no persistent button in
-/// Chrome. Returns "" when the clipboard holds no text or the read fails
-/// (the caller treats empty as "nothing to paste"). Note Cmd+V does NOT
-/// use this: it rides xterm's native paste event (the user's own paste
-/// gesture), which is buttonless everywhere -- this is only for the
-/// right-click menu's "Paste", where no paste gesture exists.
-export async function readClipboardText(): Promise<string> {
+/// Chrome. The menu treats a refused read as nothing to paste; `cs paste`
+/// requests throwing errors so its payload reader can try the web fallback
+/// and report a permission hint. Cmd+V rides xterm's native paste event
+/// instead of this reader.
+export async function readClipboardText(opts: { throwOnError?: boolean } = {}): Promise<string> {
   if (isTauriDesktop()) {
     try {
       return await tauriInvoke<string>("read_clipboard_text");
@@ -168,7 +168,14 @@ export async function readClipboardText(): Promise<string> {
       console.warn("readClipboardText: read_clipboard_text IPC failed", err);
     }
   }
-  return (await navigator.clipboard?.readText()) ?? "";
+  try {
+    return (await navigator.clipboard?.readText()) ?? "";
+  } catch (err) {
+    if (opts.throwOnError) throw err;
+    // The menu can give focus back even when clipboard access is refused.
+    console.warn("readClipboardText: navigator.clipboard.readText failed", err);
+    return "";
+  }
 }
 
 /// Write clipboard text without needing a user gesture (the OSC 52 path).
@@ -531,7 +538,7 @@ function pollNativeProgress(nativeId: string, transferId: string): () => void {
 export async function runDesktopDownload(
   url: string,
   filename: string,
-  source: { path: string; isDir: boolean } | null = null,
+  source: TransferSource | null = null,
 ): Promise<string> {
   if (!isTauriDesktop()) {
     throw new Error("runDesktopDownload called outside chan-desktop");
@@ -585,6 +592,7 @@ export async function runDesktopUpload(
   target: { dir?: string; path?: string; multiple: boolean },
   label: string,
   root?: TransferRoot,
+  filesApp = true,
 ): Promise<NativeUploadedFile[]> {
   if (!isTauriDesktop()) {
     throw new Error("runDesktopUpload called outside chan-desktop");
@@ -598,8 +606,10 @@ export async function runDesktopUpload(
   try {
     if (!(await waitForTransferSlot(xferId))) return [];
     stopProgress = pollNativeProgress(nativeId, xferId);
+    // Files pickers need the route that supports Replace and rejects links.
+    // Terminal uploads retain the transfer route's linked-directory support.
     const url = new URL(
-      withTokenQuery(`/api/fs/upload${root === "filesystem" ? "?root=filesystem" : ""}`),
+      withTokenQuery(`/api/fs/upload${transferSuffix(root, filesApp)}`),
       window.location.href,
     ).toString();
     const uploaded = await tauriInvoke<NativeUploadedFile[]>("upload_files_native", {

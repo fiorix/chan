@@ -10,6 +10,7 @@ type MermaidApi = typeof import("mermaid").default;
 
 let loader: Promise<MermaidApi> | null = null;
 let seq = 0;
+let renderQueue: Promise<void> = Promise.resolve();
 
 async function loadMermaid(): Promise<MermaidApi> {
   if (!loader) {
@@ -21,30 +22,36 @@ async function loadMermaid(): Promise<MermaidApi> {
 /// Render mermaid source to an SVG string. A parse/render failure (bad
 /// diagram source) resolves to { ok:false, error } rather than throwing,
 /// so the caller can show the message on the card's back face.
-async function renderMermaidWithLabels(
+function renderMermaidWithLabels(
   source: string,
   dark: boolean,
   htmlLabels: boolean,
 ): Promise<DiagramResult> {
-  try {
-    const mermaid = await loadMermaid();
-    // Theme is a global init option; set it per render so a surface
-    // theme flip is honoured on the next render. securityLevel "strict"
-    // keeps mermaid's own sanitizer on.
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: dark ? "dark" : "default",
-      htmlLabels,
-    });
-    const id = `chan-mermaid-${seq++}`;
-    const { svg } = await mermaid.render(id, source.trim());
-    return { ok: true, svg };
-  } catch (err) {
-    const error = (err as Error)?.message ?? String(err);
-    const { line, col } = parseErrorPos(source, error);
-    return { ok: false, error, errorLine: line, errorCol: col };
-  }
+  // Mermaid queues renders internally, but initialization changes global
+  // settings immediately. Keep both operations in the same queue entry.
+  const result = renderQueue.then(async (): Promise<DiagramResult> => {
+    try {
+      const mermaid = await loadMermaid();
+      // Theme is a global init option; set it per render so a surface
+      // theme flip is honoured on the next render. securityLevel "strict"
+      // keeps mermaid's own sanitizer on.
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: dark ? "dark" : "default",
+        htmlLabels,
+      });
+      const id = `chan-mermaid-${seq++}`;
+      const { svg } = await mermaid.render(id, source.trim());
+      return { ok: true, svg };
+    } catch (err) {
+      const error = (err as Error)?.message ?? String(err);
+      const { line, col } = parseErrorPos(source, error);
+      return { ok: false, error, errorLine: line, errorCol: col };
+    }
+  });
+  renderQueue = result.then(() => undefined, () => undefined);
+  return result;
 }
 
 export function renderMermaid(

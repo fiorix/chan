@@ -1,33 +1,39 @@
 // Block-level decoration handlers.
 //
-// Per design.md spec #4 (block prefixes use line-intersect): the
-// blockquote `>` and HR text both reveal/hide based on whether the
-// caret line touches them, not whether the selection intersects the
-// token range. Heading prefix uses the same rule (handled in
-// headings.ts).
+// A fenced block is the only one here that tests the selection, and it
+// tests by line: its fence markers and language text hide unless a
+// selection range's lines overlap the block's. Every other handler
+// decorates the same way wherever the selection is.
 //
-// What we cover here:
-//   - Blockquote: line decoration on every quoted line so CSS can
-//     paint a left border + indent. Quote markers stay visible (per
-//     Obsidian convention - the `>` IS the visual cue that the line
-//     is quoted; hiding it removes meaning).
-//   - HorizontalRule: leave source text visible. Many notes use
-//     `---` as an authoring separator, and replacing it with a
-//     rendered rule makes the markdown harder to edit.
-//   - FencedCode: per-line decoration distinguishing opener row,
-//     content rows, closer row, plus a mark for the language info
-//     (CodeInfo). No hide - the fences stay visible (we want the
-//     user to see the block structure as they edit).
-//   - Task (GFM task-list item, bullet or ordered): TaskMarker `[ ]` /
-//     `[x]` is replaced by the CheckboxWidget from widgets/checkbox.ts.
-//     The replace is boundary-inclusive - clicking the box edits the
-//     source.
-//   - BulletList: `*` / `+` markers are replaced by depth glyphs; `-`
-//     markers stay literal but use the shared marker column. Nested
-//     list rows get an extra visual indent without changing source.
-//   - OrderedList: markers (`1.` / `2)` / etc.) stay literal but use
-//     the shared marker column; nested rows get the same visual indent
-//     as bullets.
+//   - Blockquote: a line decoration on every quoted line, which the
+//     stylesheet paints as a left border and padding. The `>` markers
+//     are never hidden: the marker is the cue that the line is quoted.
+//   - HorizontalRule: no handler, so the source text stays visible.
+//     Many notes use `---` as an authoring separator, and replacing
+//     it with a rendered rule makes the markdown harder to edit.
+//   - FencedCode: a line decoration per row (opener, content, closer)
+//     and a badge widget at the end of the opener row with the
+//     language and a copy button. The fence markers and the language
+//     text beside the opener are hidden unless a selection range's
+//     lines overlap the block's; while they overlap, the language
+//     text carries a mark instead. An unclosed fence has no closing
+//     marker, so its block runs to the end of the parsed node, and a
+//     ghost closer widget sits at the end of its last line.
+//   - Task (GFM task-list item, bullet or ordered): the TaskMarker
+//     `[ ]` / `[x]` is replaced by the CheckboxWidget from
+//     widgets/checkbox.ts, whose mousedown toggles the source of a
+//     writable view, and the whitespace after it is hidden. A bullet
+//     item's indent, marker and gap are hidden too; an ordered item
+//     keeps its number, which the OrderedList handler renders.
+//   - BulletList: the marker of every item that is not a task is
+//     replaced by a widget, a depth glyph for `*` / `+` and the
+//     literal dash for `-`. The indent before the marker and the
+//     whitespace after it are hidden, and the line carries the item's
+//     nesting depth for the stylesheet's indent.
+//   - OrderedList: every marker (`1.` / `2)` / etc.) is replaced by a
+//     widget showing its literal text, with the same hidden whitespace
+//     and depth as a bullet.
+//   - Frontmatter: a line decoration on every line of the block.
 
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { TokenContext, TokenHandler } from "./walker";
@@ -162,10 +168,6 @@ const handleBlockquote: TokenHandler = (ctx) => {
     const line = ctx.state.doc.line(n);
     ctx.push(LINE_QUOTE, line.from, line.from);
   }
-};
-
-const handleHorizontalRule: TokenHandler = (ctx) => {
-  void ctx;
 };
 
 const handleFencedCode: TokenHandler = (ctx) => {
@@ -407,16 +409,13 @@ const BULLET_GLYPH_CLASSES = [
 
 /// The `*` / `+` source marker is REPLACED by this widget, which renders
 /// the depth glyph as a REAL inline character (real width, real
-/// position). That is the load-bearing change behind the bullet
-/// cursor/click cleanup: the earlier rendering kept the source char but
-/// collapsed it to font-size:0 and drew the glyph in a CSS ::before, so
-/// the visible glyph was DECOUPLED from the source position - click and
-/// caret coordinates mapped into the marker prefix and needed a pile of
-/// snap logic to compensate. A replace-widget glyph behaves like the
-/// hyphen `-` and ordered `1.` markers (which are real text): default
-/// CodeMirror cursor / click / arrow motion just works, no snap. The
-/// DOCUMENT is untouched (the replace is render-only); round-trip still
-/// writes the literal `*` / `+`.
+/// position) in a span of its own, not as CSS-generated content. The
+/// visible glyph sits where the source marker is, and the widget leaves
+/// its events to CodeMirror (`ignoreEvent` is false), so cursor, click
+/// and arrow motion around it take no correction here, as with the
+/// hyphen `-` and ordered `1.` marker widgets. The DOCUMENT is untouched
+/// (the replace is render-only); round-trip still writes the literal
+/// `*` / `+`.
 class BulletGlyphWidget extends WidgetType {
   constructor(readonly depth: number) {
     super();
@@ -449,12 +448,12 @@ class BulletGlyphWidget extends WidgetType {
 ///
 /// This is load-bearing on chan-desktop's WKWebView: a `Decoration.mark` (a
 /// class added to existing text) does not force WKWebView to repaint the line
-/// when the list decoration first applies, so typing `- ` or `1. ` left the
-/// item un-flowed (no hanging indent) until an unrelated event (scroll, click,
-/// another keystroke) forced a repaint - the "sporadic list mode" the host hit.
+/// when the list decoration first applies, so a typed `- ` or `1. ` stays
+/// un-flowed (no hanging indent) until an unrelated event (scroll, click,
+/// another keystroke) forces a repaint.
 /// A replace widget swaps a real DOM node in, which forces the line to
 /// re-layout and applies the hanging-indent line decoration with it, exactly as
-/// the `*` / `+` glyph already does. Blink repaints either way, so this is
+/// the `*` / `+` glyph does. Blink repaints either way, so this is
 /// invisible in Chrome. The document is untouched (render-only; round-trip
 /// still writes the literal marker), and the widget carries the marker classes
 /// so the marker column geometry is unchanged.
@@ -636,7 +635,6 @@ const handleFrontmatter: TokenHandler = (ctx) => {
 
 export const blockHandlers = {
   Blockquote: handleBlockquote,
-  HorizontalRule: handleHorizontalRule,
   FencedCode: handleFencedCode,
   BulletList: handleBulletList,
   OrderedList: handleOrderedList,

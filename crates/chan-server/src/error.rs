@@ -114,6 +114,20 @@ pub(crate) fn workspace_still_releasing() -> Response {
     response
 }
 
+/// The 409 an unforced off, forget or delete answers while the workspace
+/// still has live terminal sessions: the code a client branches on, beside
+/// the count it confirms with before it retries forced. The launcher's
+/// routes and the devserver's answer it, so the status, the sentence, the
+/// code and the count have one definition.
+pub(crate) fn live_terminals_refusal(active_terminals: usize) -> Response {
+    err_code(
+        StatusCode::CONFLICT,
+        format!("workspace has {active_terminals} live terminal session(s); close them or force"),
+        "live_terminals",
+        serde_json::json!({ "active_terminals": active_terminals }),
+    )
+}
+
 /// The refusal of a request to mount a workspace whose root did not answer
 /// within [`WORKSPACE_MOUNT_TIMEOUT`](crate::WORKSPACE_MOUNT_TIMEOUT) of the
 /// request's start, naming `root`. The launcher's add and on and the desktop's
@@ -156,9 +170,15 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
             (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string())
         }
         C::SpecialFile { .. } => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()),
-        C::WorkspaceNotRegistered(_) | C::WorkspaceRootMissing(_) | C::NotFound(_) => {
-            (StatusCode::NOT_FOUND, e.to_string())
+        C::WorkspaceRootMissing(_) => {
+            return err_code(
+                StatusCode::NOT_FOUND,
+                e.to_string(),
+                "workspace_root_missing",
+                serde_json::json!({}),
+            );
         }
+        C::WorkspaceNotRegistered(_) | C::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
         C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
@@ -215,6 +235,33 @@ mod tests {
             assert_eq!(
                 to_bytes(response.into_body(), 8192).await.unwrap(),
                 expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_workspace_root_has_a_coded_404() {
+        let missing = chan_workspace::ChanError::WorkspaceRootMissing("/tmp/missing".into());
+        let response = err_from(&missing);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), 8192).await.unwrap(),
+            r#"{"error":"workspace root does not exist: /tmp/missing","code":"workspace_root_missing"}"#,
+        );
+        for error in [
+            chan_workspace::ChanError::WorkspaceNotRegistered("/tmp/missing".into()),
+            chan_workspace::ChanError::NotFound("missing file".into()),
+        ] {
+            let response = err_from(&error);
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let expected = serde_json::json!({"error": error.to_string()}).to_string();
+            assert_eq!(
+                to_bytes(response.into_body(), 8192).await.unwrap().as_ref(),
+                expected.as_bytes()
             );
         }
     }

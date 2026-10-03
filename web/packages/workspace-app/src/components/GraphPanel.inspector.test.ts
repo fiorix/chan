@@ -232,6 +232,11 @@ describe("a file the editor cannot open", () => {
 });
 
 describe("the scope breadcrumb", () => {
+  test("a directory scope pins its files in graph order", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes", depth: 2 }));
+    expect(canvas.props!.focalIds).toEqual([A, D]);
+  });
+
   test("lists the scope's ancestors, and a crumb re-scopes this tab in place", async () => {
     const { tab, target } = await mountGraphPanel(
       GraphPanel,
@@ -250,6 +255,7 @@ describe("the scope breadcrumb", () => {
     await settle();
     expect(tab.scopeId).toBe("dir:notes");
     expect(tab.depth).toBe(1);
+    expect(canvas.props!.scopeKey).toBe("semantic:dir:notes");
     expect(newGraphTabs(tab.id), "no new tab").toEqual([]);
   });
 });

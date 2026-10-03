@@ -21,6 +21,7 @@
 
   import { api } from "../api/client";
   import type { LanguageGraphDetail } from "../api/types";
+  import { fmtCost, fmtDevs, fmtMonths } from "../state/format";
 
   /// Directory rows shown initially and added per "Load more" click.
   const DIR_PAGE = 5;
@@ -73,21 +74,6 @@
 
   const visibleDirectories = $derived((detail?.directories ?? []).slice(0, dirShown));
   const hiddenDirectoryCount = $derived((detail?.directories.length ?? 0) - dirShown);
-
-  /// COCOMO formatting helpers; identical shape to WorkspaceInfoBody
-  /// so every inspector formats the estimate the same way.
-  function fmtMonths(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)} mo` : `${n.toFixed(1)} mo`;
-  }
-  function fmtDevs(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)}` : n.toFixed(1);
-  }
-  function fmtCost(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return `$${Math.round(n).toLocaleString()}`;
-  }
 </script>
 
 <div class="info">

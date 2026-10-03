@@ -201,11 +201,11 @@ export function installScreensaverTracker(): () => void {
     "pointermove",
   ] as const;
   for (const ev of events) {
-    window.addEventListener(ev, reset, { passive: true });
+    window.addEventListener(ev, reset, { passive: true, capture: ev === "scroll" });
   }
   return () => {
     for (const ev of events) {
-      window.removeEventListener(ev, reset);
+      window.removeEventListener(ev, reset, { capture: ev === "scroll" });
     }
     cancelInactivityTimer();
   };

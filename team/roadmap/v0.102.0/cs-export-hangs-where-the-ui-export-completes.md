@@ -1,0 +1,53 @@
+# `cs export` hangs where the same export from the UI completes
+
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0, on the owner's word "add to next roadmap for fixing"; raised by the owner the same day, from use. Read in code at `4c4ada0a1`; nothing was run and the hang was not reproduced, so every cause named here is a reading.
+
+## Owner ruling
+
+Accepted on 2026-09-29 for the next version: the owner reported the defect and asked in the same sentence to "add to next roadmap for fixing". It is not part of v0.101.0. The shape of the fix is not ruled.
+
+## What was seen
+
+The owner's words: "cs export --format pdf is hanging but works from the UI". The rest of that sentence, a slide deck's images missing from the PDF that the UI writes, is [a-slide-decks-pdf-lacks-the-images-it-shows](a-slide-decks-pdf-lacks-the-images-it-shows.md). Not recorded: how long the command was left to wait, which windows of the workspace were open and in which app, and what the file holds.
+
+Read, not run. Lines at `4c4ada0a1`.
+
+**Both exports run one engine, in a window.** The window's Export to PDF reads the file, calls `exportMarkdownToPdf` and saves the bytes as a download (`exportPathToPdf`, `web/packages/workspace-app/src/state/fileActionExecutors.ts:16-41`). `cs export` asks the server, which pushes an `export-job` frame to a window; that window reads the file, calls the same function with the same options, uploads the bytes into the workspace and posts a reply (`runExportJob`, `web/packages/workspace-app/src/editor/pdf_export.ts:175-193`). So the command adds four things to what the UI does, the choice of a window, the delivery of the frame, the upload and the reply, all under one wait of the server's.
+
+**The command waits with no bound of its own and prints nothing while it waits.** `cmd_shell_export` sends the request and prints the reply (`crates/chan-shell/src/cli.rs:1505-1511`). The client reads the first response line with no timeout (`read_first_response`, `crates/chan-shell/src/control.rs:413-430`; `round_trip`, `:448-467`); the only bound in that module is the two-second identity probe (`:259-261`). The server waits 90 seconds for the window's reply (`EXPORT_REPLY_TIMEOUT`, `crates/chan-server/src/control_socket.rs:2974-2977`; `export_round_trip`, `:3050-3087`). By this reading the command ends within about 90 seconds in every path read, so the hang that was seen is that wait, left before its end, or something this reading did not find.
+
+**The window that renders is the server's choice, not the caller's.** The request carries no window (`crates/chan-shell/src/wire.rs:390-409`), and the command does not read `$CHAN_WINDOW_ID` (`control_socket_env`, `control.rs:232-244`). The server takes the latest-joined participant that holds a `/ws` socket (`resolve_export_window`, `control_socket.rs:2985-2999`; `computed_state`, `crates/chan-library/src/session_presence.rs:222-237`), and the help says that it "may not be the one you are looking at" (`crates/chan-shell/src/help.rs:284-285`). The socket pump ends a socket on a close, an error or a shutdown and has no check that its peer still answers (`pump_loop`, `crates/chan-server/src/routes/ws.rs:392-520`), so a page on a machine that went to sleep, or a page its browser throttles, can be the window chosen; that such a window was chosen is inferred. A frame reaches every socket that carries the window's id (`ws.rs:450-462`), and one id can be held by more than one page, as where two desktops share a devserver (`desktop/src-tauri/src/window_watcher.rs:233-239`, `:280-289`), so two pages can render and upload one job; inferred.
+
+**The server's wait does not follow the renderer's own bounds.** The renderer bounds each page at 30 seconds and each fetch, decode and encode at 15, and has no bound over a whole document (`PAGE_TIMEOUT_MS`, `pdf_export.ts:32-34`, `:247-252`, `:300-306`; `DEFAULT_STEP_TIMEOUT_MS`, `web/packages/workspace-app/src/editor/pdf_snapshot.ts:12-15`). A deck of more than three slides can stay inside every one of them and outlast the 90 seconds; the UI has no such wait and completes. Each slide fetches and inlines its fonts again (`inlineFonts`, `pdf_snapshot.ts:134-162`, reached from `snapshotPage`, `:334-347`; the comment at `pdf_export.ts:289-295` says so of a document's pages). How long a real deck takes was not measured.
+
+**Four ways a reply never comes, each ending at the 90 seconds.** The frame is sent wherever any socket is subscribed, not only while the target holds one (`send_window_command`, `control_socket.rs:3065`, `:3963-3980`), where the pane round trip sends only to a live target (`send_window_command_if_live`, `:2907`, `:4044-4056`). A socket that lagged skips frames and is sent again only its surveys (`ws.rs:472-474`; the bus holds 256 frames, `crates/chan-server/src/lib.rs:566`). The page loads the export engine with a dynamic import that no `try` holds, and its caller discards the promise (`web/packages/workspace-app/src/state/store.svelte.ts:2090-2106`, `:950-952`), so an import that rejects sends no reply. And a reply whose POST fails with anything but a 404 is written to the console alone (`pdf_export.ts:164-172`).
+
+**At the bound the answer is a plain error, and the window goes on.** The elapsed wait answers `ControlResponse::Error`, "no reply from the renderer within 90s", exit 1 (`control_socket.rs:3077-3085`), where the clipboard round trip answers the typed `Timeout` that the client exits 124 on (`:3156-3166`; `crates/chan-shell/src/exit_code.rs:15-23`). The server drops its parked request and tells the window nothing (`:3078`); the window finishes, uploads the PDF, and its reply is answered 404, which it swallows (`pdf_export.ts:164-172`; `crates/chan-server/src/routes/window.rs:36-51`). The same holds when the command's client goes away, since only a survey and a handover watch their client's end (`control_socket.rs:1071-1082`). So a command that failed, or that its user interrupted, can be followed by the file.
+
+**What checks it.** The browser smoke runs `cs export` of a document against one window in headless Chrome and allows it 120 seconds (`scripts/e2e/browser-smoke/checks/30-pdf-cs-export.mjs:26-36`). No check runs it with two windows, with a window that does not answer, or with a deck.
+
+No cause shared with the missing images was found. The two share the render engine. Slides that carry images are the slowest pages, so an image-heavy deck is the one most likely to outlast the wait; that link is possible and not established.
+
+## Desired contract
+
+`cs export` ends within a bound that the command states, with the PDF's path or with a refusal that names its cause, and a user who waits can read what it waits on. It renders in the window its terminal belongs to while that window is live, and says which window renders when it is another. What a window's own Export to PDF can finish, the command finishes too. A job that cannot be delivered or started is refused at once and not at the bound, and an export that the command reported as failed, or that its user gave up, writes no file afterwards.
+
+## What to do
+
+Decide the shape, then build red first. As suggestions: the request carries the caller's window id as an optional field, the server uses it while it is live and keeps its present choice otherwise, and the reply names the window that rendered; the window reports each page it finishes and the server's wait becomes a quiet window that progress restarts, under an absolute cap, or the command takes a `--timeout` as the survey does; the bound's answer is the typed timeout; the frame is sent only while the target holds a socket; a page whose engine cannot load answers `ok: false`; and at the bound, or at the client's end, the server tells the window to stop, or the window asks before it uploads.
+
+## Boundaries
+
+`crates/chan-shell/src/cli.rs`, `control.rs`, `wire.rs` and `help.rs`, with `crates/chan-shell/design.md`; the export handlers in `crates/chan-server/src/control_socket.rs`, and `routes/window.rs` if the reply route changes; the `export-job` arm in `web/packages/workspace-app/src/state/store.svelte.ts` and `respondExportJob` in `editor/pdf_export.ts`; `scripts/e2e/browser-smoke/checks/30-pdf-cs-export.mjs`; and their tests. A new field of the request is optional on the wire, so that a `cs` and a server of different releases still answer each other. How a page is composed and painted (`pdf_pages.ts`, `pdf_snapshot.ts`, `slide_dom.ts`) belongs to the item on the missing images; both items change `pdf_export.ts`, so they are built one after the other.
+
+## Acceptance
+
+1. With two live windows, an export asked from a terminal of the one that joined first renders in that window; pinned on the server's choice with two participants, red first, since the latest-joined is chosen today.
+2. With the caller's window gone, the export renders in another live window and the command's output names it; with no live window the refusal is the present one.
+3. An export whose window never answers ends at the bound with the typed timeout, and `cs export` exits 124 with a line that names the window; pinned on the server under a paused clock and on the client against a stand-in server that never answers.
+4. A deck whose slides each stay inside their own bound and together take longer than 90 seconds completes through `cs export`; pinned with a slow rasterizer under a fake clock.
+5. A job for a window that holds no socket is refused at once; pinned.
+6. A page whose export engine fails to load answers `ok: false` under the job's id; pinned in the store's test with the import made to reject, red first.
+7. After the bound, and after the command's client has gone, that job writes no PDF; pinned.
+8. The browser smoke runs `cs export` of a deck with two windows open and asserts which of them rendered.
+9. On a display, by a person: in a chan terminal on the owner's machine, with the windows the owner keeps open, `cs export` of the deck that hung prints the PDF's path within the bound, the terminal says meanwhile which window renders, and the PDF opens; taken again with that window minimized or on another desktop, and with a second window of the workspace open on another machine.

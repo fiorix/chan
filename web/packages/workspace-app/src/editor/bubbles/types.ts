@@ -37,9 +37,8 @@ export type BubbleSpec = {
   origin?: "inline-code";
 };
 
-/// Active-bubble handle exposed back to the host. Mirrors the legacy
-/// editor/bubble.ts BubbleHandle (kept for shape parity); the host's
-/// keymap routes keys through `handleKey` before CM6 defaults run.
+/// Active-bubble handle exposed back to the host; the host's keymap
+/// routes keys through `handleKey` before CM6 defaults run.
 export interface BubbleHandle {
   /// Process a keydown. Return true to consume; the host's keymap
   /// then preventDefaults the event.

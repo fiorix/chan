@@ -184,7 +184,8 @@ export function wireToDialog(
     hostName: wire.host_name,
     configMode: "load",
     teamDir: dir,
-    tabGroup: wire.tab_group ?? defaultTabGroupFromPath(dir),
+    // A config written without the key reads back from the server as "".
+    tabGroup: wire.tab_group?.trim() ? wire.tab_group : defaultTabGroupFromPath(dir),
     size,
     autoPrefix: wire.auto_prefix_at,
     mcpEnv: wire.mcp_env,

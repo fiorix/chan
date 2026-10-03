@@ -2,11 +2,9 @@
 //
 // Heading detection for the WYSIWYG fold gutter comes from the lezer syntax
 // tree: a line is a heading iff the tree resolves it to ATXHeading1..6. The
-// gutter marker, the fold service, and the gutter click all read the same two
-// helpers (`headingLevelAt`, `headingFoldRange`), so these tests exercise the
-// real decision directly rather than through `foldable()`, which also reports
-// the markdown language's own foldNodeProp folding of fenced blocks and would
-// conflate the two sources. Fenced code, tilde fences, indented fences, inline
+// gutter marker and the gutter click read `headingLevelAt`, and the click
+// folds the range `headingFoldRange` returns, so these tests exercise both
+// helpers directly. Fenced code, tilde fences, indented fences, inline
 // code and frontmatter must never be a heading; a real heading must, and its
 // fold range must not be truncated by a fenced `#` comment.
 
@@ -173,6 +171,12 @@ describe("fold gutter: heading detection from the syntax tree", () => {
     expect(rangeOf(s2, "## OnLastLine")).toBeNull();
   });
 
+  test("11. a heading followed at once by a heading of its level has nothing to fold", () => {
+    const s = mkState(["## A", "## B", "body"].join("\n"));
+    expect(rangeOf(s, "## A")).toBeNull();
+    expect(realRange(rangeOf(s, "## B")).to).toBe(s.doc.length);
+  });
+
   // The 4000-line filler puts `## Bottom` far past the initial in-budget
   // parse (which never covers more than the first 3000 characters at state
   // creation), so both cases below genuinely exercise the helper against an
@@ -274,6 +278,27 @@ describe("the fold gutter", () => {
       folded.push({ from, to });
     });
     expect(folded).toEqual([headingFoldRange(view.state, 0)]);
+    view.destroy();
+    parent.remove();
+  });
+
+  test("paints a chevron only on a heading with a section to fold", () => {
+    const parent = document.body.appendChild(document.createElement("div"));
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        // `## A` is followed at once by `## B`, and `## C` is the last line:
+        // neither has anything to fold.
+        doc: "## A\n## B\nbody\n## C",
+        extensions: [chanMarkdown(), headingFold()],
+      }),
+    });
+    ensureSyntaxTree(view.state, view.state.doc.length, 5000);
+    // The gutter's hidden spacer carries a chevron of its own for width.
+    const painted = [...parent.querySelectorAll<HTMLElement>(".cm-md-fold-chevron")].filter(
+      (el) => el.closest<HTMLElement>(".cm-gutterElement")?.style.visibility !== "hidden",
+    );
+    expect(painted).toHaveLength(1);
     view.destroy();
     parent.remove();
   });

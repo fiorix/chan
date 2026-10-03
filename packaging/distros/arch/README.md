@@ -32,6 +32,8 @@ The AUR is a collection of git repositories containing build recipes; it does no
 - `build-with-sdme.sh` archives a committed local revision and runs both packages in a disposable sdme container.
 - `build-in-ci.sh` is the workflow's entry point: it validates the tag and `pkgrel`, then runs the same container build against the image the job provides, so the x86_64 and aarch64 jobs cannot drift apart.
 
+The CI wrapper defaults `AUR_CARGO_JOBS` to 2 and passes it as `CARGO_BUILD_JOBS` to every cargo call in either package's recipe, including `build()` and `check()`; a workflow caller can set a positive integer `AUR_CARGO_JOBS` to change the bound. The published recipes and a user's own `makepkg` do not set it and keep cargo's default. `check()` still runs the same release-profile command and tests, so what it proves is unchanged. Fewer jobs can lengthen the hosted run; the amount has not been measured there. Run `packaging/distros/arch/test-build-in-ci.sh` to check the wrapper's Docker arguments, the builder's environment, and the resource log with local stubs.
+
 Import an Arch rootfs once, then run the local gate:
 
 ```bash

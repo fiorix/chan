@@ -70,6 +70,17 @@ describe("local extensions", () => {
     ).toBe(false);
   });
 
+  test("accepts a boolean running flag and rejects other values", () => {
+    const entry = {
+      id: "echo",
+      name: "Echo",
+      entry_path: `/_chan/extensions/echo/${capability}/`,
+    };
+    expect(isValidExtensionInfo({ ...entry, running: false })).toBe(true);
+    expect(isValidExtensionInfo({ ...entry, running: true })).toBe(true);
+    expect(isValidExtensionInfo({ ...entry, running: "yes" })).toBe(false);
+  });
+
   test("registers singleton commands and queues dispatch until frame readiness", async () => {
     const pane: LeafNode = {
       kind: "leaf",
@@ -152,6 +163,29 @@ describe("catalog refresh across a devserver restart", () => {
     // mounted frame to ExtensionTab's unavailable state.
     expect(extensionFor("echo")?.entry_path).toContain(capB);
     expect(extensionFor("gone")).toBeUndefined();
+  });
+
+  test("refresh drops the launcher rows of a vanished extension and of an old name", async () => {
+    vi.spyOn(api, "extensions").mockResolvedValue([
+      { id: "keep", name: "Old name", entry_path: `/_chan/extensions/keep/${capA}/` },
+      {
+        id: "went",
+        name: "Went",
+        entry_path: `/_chan/extensions/went/${capA}/`,
+        commands: [{ id: "run", title: "Run it" }],
+      },
+    ]);
+    await refreshExtensions();
+
+    vi.spyOn(api, "extensions").mockResolvedValue([
+      { id: "keep", name: "New name", entry_path: `/_chan/extensions/keep/${capB}/` },
+    ]);
+    await refreshExtensions();
+
+    const rows = allCommands()
+      .filter((command) => command.id.startsWith("extension."))
+      .map((command) => [command.id, command.title]);
+    expect(rows).toEqual([["extension.keep", "New name"]]);
   });
 
   test("singleton focus is unchanged across a refresh: run() focuses, never reopens", async () => {
@@ -249,6 +283,92 @@ describe("catalog refresh across a devserver restart", () => {
     expect(second).toBe(first);
     await first;
     expect(extensions).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    { title: "an exited extension shows its status without a frame", running: false },
+    { title: "a running extension loads its frame", running: true },
+  ])("$title", async ({ running }) => {
+    resetLayout([]);
+    const entry = {
+      id: "echo",
+      name: "Echo",
+      entry_path: `/_chan/extensions/echo/${capA}/`,
+      singleton: true,
+      running,
+    };
+    vi.spyOn(api, "extensions").mockResolvedValue([entry]);
+    await refreshExtensions();
+    const command = allCommands().find((item) => item.id === "extension.echo");
+    expect(command?.category).toBe("Apps");
+    command?.run();
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "extension") throw new Error("expected extension tab");
+    const target = document.createElement("div");
+    document.body.append(target);
+    const view = mount(ExtensionTab, { target, props: { tab, paneId: activePane().id } });
+    try {
+      flushSync();
+      if (running) {
+        expect(target.querySelector("iframe")?.getAttribute("src")).toBe(apiPath(entry.entry_path));
+      } else {
+        expect(target.querySelector("iframe")).toBeNull();
+        expect(target.textContent).toContain(`${tab.title} is unavailable.`);
+        expect(target.textContent).toContain("Its process exited. Check its output, then restart Chan.");
+      }
+    } finally {
+      unmount(view);
+      target.remove();
+    }
+  });
+
+  test.each([
+    { title: "Reload checks an exited extension", running: false },
+    { title: "Reload keeps a running frame", running: true },
+  ])("$title", async ({ running }) => {
+    resetLayout([]);
+    const entry = {
+      id: "echo",
+      name: "Echo",
+      entry_path: `/_chan/extensions/echo/${capA}/`,
+      singleton: true,
+      running: true,
+    };
+    const extensions = vi.spyOn(api, "extensions").mockResolvedValue([entry]);
+    await refreshExtensions();
+    allCommands().find((item) => item.id === "extension.echo")?.run();
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "extension") throw new Error("expected extension tab");
+    const target = document.createElement("div");
+    document.body.append(target);
+    const view = mount(ExtensionTab, { target, props: { tab, paneId: activePane().id } });
+    try {
+      flushSync();
+      const frame = target.querySelector("iframe");
+      expect(frame?.getAttribute("src")).toBe(apiPath(entry.entry_path));
+      extensions.mockClear().mockResolvedValue([{ ...entry, running }]);
+      target.querySelector(".extension-tab")!.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }),
+      );
+      await settle();
+      const reload = [...document.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')]
+        .find((button) => button.textContent?.trim() === "Reload extension");
+      expect(reload).toBeDefined();
+      expect(reload?.disabled).toBe(false);
+      reload!.click();
+      await settle();
+      if (running) {
+        expect(target.querySelector("iframe")).toBe(frame);
+        expect(frame?.getAttribute("src")).toBe(apiPath(entry.entry_path));
+      } else {
+        expect(extensions).toHaveBeenCalledTimes(1);
+        expect(target.querySelector("iframe")).toBeNull();
+        expect(target.textContent).toContain("Its process exited.");
+      }
+    } finally {
+      unmount(view);
+      target.remove();
+    }
   });
 
   test("an open extension tab's frame follows the live catalog, and says when the extension is gone", async () => {

@@ -47,7 +47,7 @@
     onOpen?: () => void;
     /// Optional scope-filtered document list. When provided, this
     /// replaces the full-graph `documentsReferencing(nodeId)` lookup.
-    /// GraphPanel passes its scope-filtered selectionEdges.documents
+    /// GraphPanel passes its scope-filtered `selectionDocumentsInScope`
     /// so the tag inspector only lists docs visible in the rendered
     /// subgraph; search overlay leaves this unset for the full list.
     documentsOverride?: GraphViewNode[];

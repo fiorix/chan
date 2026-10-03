@@ -20,6 +20,7 @@ let profiles = $state<ShellProfileView[]>([]);
 let defaultProfileId = $state<string | null>(null);
 let loaded = $state(false);
 let inflight: Promise<void> | null = null;
+let loadGeneration = 0;
 
 export function shellProfiles(): ShellProfileView[] {
   return profiles;
@@ -43,18 +44,22 @@ export function shellProfilesLoaded(): boolean {
 export function ensureShellProfiles(): Promise<void> {
   if (loaded) return Promise.resolve();
   if (inflight) return inflight;
+  const generation = ++loadGeneration;
   inflight = api
     .terminalShells()
     .then((res) => {
+      if (generation !== loadGeneration) return;
       profiles = res.profiles ?? [];
       defaultProfileId = res.default_profile ?? null;
     })
     .catch(() => {
+      if (generation !== loadGeneration) return;
       // Older server, or the endpoint is unreachable. Empty list = no picker.
       profiles = [];
       defaultProfileId = null;
     })
     .finally(() => {
+      if (generation !== loadGeneration) return;
       loaded = true;
       inflight = null;
     });

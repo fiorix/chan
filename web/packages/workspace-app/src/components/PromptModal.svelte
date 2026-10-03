@@ -9,8 +9,10 @@
   let value = $state("");
   let inputEl: HTMLInputElement | undefined = $state();
 
-  // Sync the local value whenever a new prompt opens.
+  // Sync the local value whenever a new prompt opens, one asked over an open
+  // prompt included: the sequence changes with every prompt.
   $effect(() => {
+    void promptState.seq;
     if (promptState.open) {
       value = promptState.defaultValue;
       // Focus + select-all on the next tick so the user can overtype.

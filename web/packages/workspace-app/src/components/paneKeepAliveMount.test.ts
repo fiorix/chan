@@ -9,9 +9,9 @@
 // each-block out of the source says which shape is written, not which
 // instances live.
 //
-// Graph tabs are absent here and covered by their own suite's negative pin
-// instead: GraphPanel paints a real canvas, jsdom has none, and the second
-// instance throws before it can be compared.
+// Graph tabs are covered by GraphPanel.keepAlive.test.ts, which mounts two
+// panels over a stand-in canvas and checks their identity across a switch and
+// reorder.
 
 import { mount, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -71,6 +71,11 @@ import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 import {
+  activeLayout,
+  cancelPaneMode,
+  commitPaneMode,
+  enterPaneMode,
+  enterPaneModeTransaction,
   layout,
   moveActiveTabToSide,
   reorderTab,
@@ -250,7 +255,7 @@ describe("a pane keeps a board's first stroke across a copy of its tab", () => {
   /// Open a drawing beside a text tab, draw its first stroke, copy the tab
   /// with `copy` while the stroke's serialize waits, let the wait run out,
   /// and return the drawing's tab as the pane holds it.
-  async function strokeThenCopy(copy: () => void): Promise<FileTab | undefined> {
+  async function strokeThenCopy(copy: () => void, beforeStroke?: () => Promise<void>) {
     await standInForBoards();
     drawableBoards();
     await mountWith([
@@ -265,20 +270,27 @@ describe("a pane keeps a board's first stroke across a copy of its tab", () => {
     await tick();
     vi.useFakeTimers();
     try {
+      await beforeStroke?.();
       board.stroke({ id: "last-stroke", version: 1 });
       copy();
       await tick();
       await tick();
       await vi.advanceTimersByTimeAsync(200);
-      const pane = layout.nodes[PANE] as LeafNode;
-      return [...pane.tabs, ...(pane.bTabs ?? [])].find((tab) => tab.id === BOARD) as FileTab | undefined;
+      const live = layout.nodes[PANE] as LeafNode;
+      const shown = activeLayout().nodes[PANE] as LeafNode;
+      const findBoard = (pane: LeafNode) =>
+        [...pane.tabs, ...(pane.bTabs ?? [])].find((tab) => tab.id === BOARD) as FileTab | undefined;
+      return {
+        held: findBoard(live), shown: findBoard(shown),
+        boardHasStroke: board.elements.some((element) => (element as { id?: string }).id === "last-stroke"),
+      };
     } finally {
       vi.useRealTimers();
     }
   }
 
   test("a first stroke waiting at a reorder lands on the tab the pane holds", async () => {
-    const held = await strokeThenCopy(() => reorderTab(PANE, BOARD, 1));
+    const { held } = await strokeThenCopy(() => reorderTab(PANE, BOARD, 1));
     const pane = layout.nodes[PANE] as LeafNode;
 
     expect({ order: pane.tabs.map((tab) => tab.id), stroke: held?.content.includes("last-stroke") })
@@ -286,10 +298,58 @@ describe("a pane keeps a board's first stroke across a copy of its tab", () => {
   });
 
   test("a first stroke waiting at a send to the other side lands on the tab the pane holds", async () => {
-    const held = await strokeThenCopy(() => moveActiveTabToSide("b"));
+    const { held } = await strokeThenCopy(() => moveActiveTabToSide("b"));
     const pane = layout.nodes[PANE] as LeafNode;
 
     expect({ side: pane.side, onB: pane.bTabs?.map((tab) => tab.id), stroke: held?.content.includes("last-stroke") })
       .toEqual({ side: "b", onB: [BOARD], stroke: true });
+  });
+
+  test("a first stroke waiting at Hybrid Nav entry survives in both trees", async () => {
+    try {
+      const { held, shown, boardHasStroke } = await strokeThenCopy(() => enterPaneMode());
+
+      expect({
+        boardHasStroke,
+        live: held?.content.includes("last-stroke"),
+        draft: shown?.content.includes("last-stroke"),
+        copied: held !== shown,
+      }).toEqual({ boardHasStroke: true, live: true, draft: true, copied: true });
+    } finally {
+      cancelPaneMode();
+    }
+  });
+
+  test("a first stroke waiting at transaction entry survives in both trees", async () => {
+    try {
+      const { held, shown, boardHasStroke } = await strokeThenCopy(() => enterPaneModeTransaction(PANE));
+
+      expect({
+        boardHasStroke,
+        live: held?.content.includes("last-stroke"),
+        draft: shown?.content.includes("last-stroke"),
+        copied: held !== shown,
+      }).toEqual({ boardHasStroke: true, live: true, draft: true, copied: true });
+    } finally {
+      cancelPaneMode();
+    }
+  });
+
+  test("a first stroke waiting at Hybrid Nav commit survives in the live tree", async () => {
+    try {
+      const { held, boardHasStroke } = await strokeThenCopy(
+        () => commitPaneMode(),
+        async () => {
+          enterPaneMode();
+          await tick();
+          await tick();
+        },
+      );
+
+      expect({ boardHasStroke, live: held?.content.includes("last-stroke") })
+        .toEqual({ boardHasStroke: true, live: true });
+    } finally {
+      cancelPaneMode();
+    }
   });
 });

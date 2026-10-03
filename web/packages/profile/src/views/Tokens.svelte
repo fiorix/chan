@@ -258,8 +258,10 @@
     >
       <h2>Revoke token</h2>
       <p class="muted small">
-        Revoke <strong>{confirmRevoke.label}</strong>? Existing chan devserver
-        sessions using it will be disconnected.
+        Revoke <strong>{confirmRevoke.label}</strong>? This disconnects all your
+        chan devservers, including those using other tokens, and signs your
+        browser out of every devserver, including ones shared with you; you
+        stay signed in here.
       </p>
       <div class="modal-actions">
         <button type="button" onclick={() => (confirmRevoke = null)}>

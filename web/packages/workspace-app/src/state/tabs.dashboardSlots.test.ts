@@ -11,6 +11,8 @@
 
 import { describe, expect, test } from "vitest";
 import {
+  activePane,
+  restoreLayout,
   DASHBOARD_SEARCH_SLIDE,
   DASHBOARD_SLOT_COUNT,
   DASHBOARD_SLOT_LABELS,
@@ -67,5 +69,15 @@ describe("the dashboard slot walks", () => {
 
     expect(nextEnabledSlot(onlySearch, 1)).toBe(1);
     expect(prevEnabledSlot(onlySearch, 1)).toBe(1);
+  });
+});
+
+
+describe("restored dashboard slots", () => {
+  test.each([3, 99])("replaces out-of-range slide %i with the first enabled slot", async (slide) => {
+    await restoreLayout({ k: "l", t: [{ k: "d", cs: slide, ds: [0] }] });
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "dashboard") throw new Error("expected dashboard tab");
+    expect(tab.carouselSlide).toBe(1);
   });
 });

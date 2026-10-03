@@ -12,6 +12,7 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { InlineContext, parser as lezerParser, type InlineParser } from "@lezer/markdown";
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "./grammar";
 import { chanDecorations } from "../decorations";
@@ -58,6 +59,33 @@ function urlText(doc: string, info: NodeInfo): string | null {
 }
 
 describe("RefAwareLink parser", () => {
+  test("pinned Lezer exposes the link delimiter internals used by RefAwareLink", () => {
+    let inspected = false;
+    const probe: InlineParser = {
+      name: "RefAwareLinkInternals",
+      before: "LinkEnd",
+      parse(cx, next, position) {
+        if (next !== 93 || position !== 5) return -1;
+        inspected = true;
+        const parts = (cx as unknown as { parts?: unknown }).parts;
+        expect(Array.isArray(parts), "InlineContext.parts must remain an array").toBe(true);
+        const starts = (parts as Array<{ type?: unknown; from?: unknown; to?: unknown; side?: unknown } | null>)
+          .filter((part) => part?.type === InlineContext.linkStart);
+        expect(
+          starts.map((part) => ({ from: part?.from, to: part?.to, side: part?.side })),
+          "link delimiters in InlineContext.parts must retain their side field",
+        ).toEqual([
+          { from: 0, to: 1, side: 1 },
+          { from: 1, to: 2, side: 1 },
+        ]);
+        return -1;
+      },
+    };
+
+    lezerParser.configure({ parseInline: [probe] }).parse("[[foo] bar](path)");
+    expect(inspected, "the parser must visit the inner closing bracket").toBe(true);
+  });
+
   test("`[[foo] bar](path)` forms one 4-mark outer Link with URL `path`", () => {
     const doc = "[[foo] bar](path)";
     const links = nodesOf(doc, "Link");

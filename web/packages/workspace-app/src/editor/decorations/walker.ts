@@ -1,36 +1,38 @@
 // Decoration walker: the load-bearing module per design.md.
 //
-// A CM6 ViewPlugin that, on every relevant update (doc change, viewport
-// change, or selection change), iterates the visible portion of the
-// markdown syntax tree and emits a DecorationSet by dispatching each
-// node to a handler registered by node name.
+// A CM6 ViewPlugin that, on every relevant update (see the re-run
+// triggers below), iterates the visible portion of the markdown syntax
+// tree and emits a DecorationSet by dispatching each node to a handler
+// registered by node name.
 //
 // The handler API is intentionally minimal:
 //
 //   - `node` exposes the syntax-tree position (name, from, to). Handlers
 //     can descend via `node.node.firstChild` / `nextSibling` if they
-//     need internal structure (e.g. wikilink body, link URL).
+//     need internal structure (e.g. a link's marks and URL).
 //   - `state` is the EditorState - handlers read doc text via
 //     `state.doc.sliceString(...)`.
 //   - `sel` is the active selection.
-//   - `view` is the EditorView (rarely needed, but useful for atomic
-//     widgets that want `view.coordsAtPos`).
+//   - `view` is the EditorView being decorated.
 //   - `push(deco, from, to)` queues a decoration. We buffer everything
 //     in an array and let `Decoration.set(..., true)` handle ordering.
 //   - `selectionInRange` / `lineIntersect` are the visibility primitives
 //     from `selection.ts`, bound to the current selection / state.
 //
-// Handlers are registered as `{ [nodeName]: handler }`. Unknown nodes
-// are silently skipped - handlers fill in coverage progressively
-// across steps 4 (marks, naked URL, headings), 5 (blocks), 6 (atoms).
+// Handlers are registered as `{ [nodeName]: handler }`. A node whose
+// name has no handler is skipped.
 //
-// Re-run triggers (each one independently invalidates the decoration
+// Re-run triggers (each one independently recomputes the decoration
 // set):
 //   - `update.docChanged` - text edits, paste, undo/redo.
 //   - `update.viewportChanged` - scroll, fold toggle, window resize.
 //   - `update.selectionSet` - caret/selection movement. Required so
-//     the visibility rule (which hides decorations the selection
-//     intersects) re-evaluates on caret moves.
+//     the visibility tests, which read the selection, re-evaluate on
+//     caret moves.
+//   - `update.geometryChanged` - a layout change, which can come with
+//     none of the flags above.
+//   - a syntax tree instance other than the one last walked - a parse
+//     that finishes in an update that sets none of the flags above.
 //
 // All re-runs walk only the visible viewport (`view.viewport.from..to`)
 // per CM6 convention - cost stays proportional to visible content,
@@ -94,18 +96,12 @@ export function decorationWalker(handlers: HandlerRegistry): Extension {
 
       update(u: ViewUpdate): void {
         const tree = syntaxTree(u.state);
-        // `geometryChanged` covers the tab-switch remount case: editor
-        // tabs are unmounted/remounted on switch (unlike terminals), so
-        // the EditorView is reconstructed and the constructor walks the
-        // INITIAL (pre-layout) viewport - only the top portion. The
-        // post-layout measure settles the real viewport but does not
-        // reliably fire `viewportChanged`, leaving the lower blocks showing
-        // raw markers until a caret move or scroll. Recomputing on
-        // `geometryChanged` re-decorates over the corrected viewport once
-        // the geometry settles. The walk is viewport-bounded, so the extra
-        // recompute stays cheap. (The race manifests under chan-desktop's
-        // WKWebView, not Blink/Chrome, so it browser-smokes clean either
-        // way; verified no Chrome regression, desktop confirmation pending.)
+        // `geometryChanged` covers a layout change that sets none of the
+        // other flags. The constructor walks the viewport the view has
+        // when it is built; when a later measure corrects that viewport
+        // without setting `viewportChanged`, recomputing here decorates
+        // the corrected one. The walk is viewport-bounded, so the extra
+        // recompute stays cheap.
         if (
           u.docChanged ||
           u.viewportChanged ||

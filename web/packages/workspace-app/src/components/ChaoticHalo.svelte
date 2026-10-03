@@ -7,6 +7,7 @@
     fitChaoticHalo,
   } from "./chaoticHalo";
   import {
+    canvasAnimationSpeed,
     canvasCssNumber,
     canvasCssValue,
     runCanvasAnimation,
@@ -78,7 +79,7 @@
         const elapsedMs =
           lastSimulationMs === 0
             ? 1000 / 60
-            : Math.min(1000 / 15, timeMs - lastSimulationMs);
+            : Math.min((1000 / 15) * Math.max(1, canvasAnimationSpeed(host)), timeMs - lastSimulationMs);
         lastSimulationMs = timeMs;
         phase += (elapsedMs / 1000) * SOURCE_PHASE_PER_SECOND;
         draw(phase);

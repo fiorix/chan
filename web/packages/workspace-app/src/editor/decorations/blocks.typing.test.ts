@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 
-// End-to-end check that list markers decorate in the three contexts the
-// wysiwyg-list regression broke: an empty doc, after a paragraph, and
-// directly under a `---` opener with no closing fence. The `---`-headed
-// case is the regression: the frontmatter parser used to corrupt the whole
-// document parse there, so no list ever styled. Also verifies the Enter
+// End-to-end check that list markers decorate in three contexts: an empty
+// doc, after a paragraph, and directly under a `---` opener with no closing
+// fence. The `---`-headed case depends on the frontmatter parser leaving an
+// unclosed opener alone: a parser that consumed it would corrupt the whole
+// document parse, and no list would style. Also verifies the Enter
 // keymap's regex path continues numbering regardless of parse state.
 
 import { EditorState } from "@codemirror/state";
@@ -28,7 +28,7 @@ function mountDecorated(doc: string): { parent: HTMLDivElement; view: EditorView
 }
 
 // The three contexts a freshly-typed list item can appear in. The `head`
-// prefix precedes the list line; the regression lived in the `---` head.
+// prefix precedes the list line; the `---` head is the unclosed opener.
 const CONTEXTS: Array<{ label: string; head: string }> = [
   { label: "empty doc", head: "" },
   { label: "after a paragraph", head: "intro\n\n" },

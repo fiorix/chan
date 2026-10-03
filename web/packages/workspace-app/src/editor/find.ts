@@ -43,7 +43,7 @@ export function scanMatches(
 }
 
 /// Imperative surface each editor exposes to FindBar.svelte.
-/// `scan` is pure (no side effects); the others workspace the view's
+/// `scan` is pure (no side effects); the others drive the view's
 /// decoration / scroll / selection state.
 ///
 /// `placeCursor` is invoked on Enter / Shift+Enter only; it sets

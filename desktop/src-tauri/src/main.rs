@@ -1877,8 +1877,8 @@ fn spawn_control_terminal_exit_watcher(
 ///
 /// Driven over the desktop bridge: the launcher's Connect button fires
 /// `POST /api/library/devservers/{id}/connect` → `DesktopWindowOp::ConnectDevserver`
-/// → `window_ops`, which calls this. There is no `#[tauri::command]` wrapper  --
-/// the launcher is pure HTTP, never a Tauri invoke.
+/// → `window_ops`, which calls this. This connect action has no
+/// `#[tauri::command]` wrapper; the launcher also invokes narrow app commands.
 async fn connect_devserver_impl(
     app: tauri::AppHandle,
     state: Arc<AppState>,
@@ -3029,9 +3029,7 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
 /// by the root its registry row stores, which the host reads from its
 /// runtime before the close takes it away. It is forgotten by that root
 /// while the root still resolves to the canonical root the runtime was
-/// mounted at, and by that canonical root otherwise: the host resolves the
-/// root it is named again, and a stored root that resolves to another
-/// workspace's folder would forget that workspace.
+/// mounted at, and by that canonical root otherwise.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 async fn close_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -3049,10 +3047,11 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
         .mounted_root(Path::new(&key))
         .unwrap_or_else(|| PathBuf::from(&key));
     let outcome = if remove {
-        // Named by the row's root, the host's purge matches the windows stored
-        // under it, where the desktop stores them, and under the canonical
-        // path that root resolves to. Named by the canonical root, it matches
-        // the windows stored under that root alone.
+        // With the root and registry unchanged during removal, the host's
+        // purge matches each window's stored path, lexically normalized,
+        // against the name sent here, its removal key and the stored root of
+        // any row its close finds. It resolves no window path, so the match
+        // does not wait on another workspace's filesystem.
         let named = match embedded.mounted_canonical_root(Path::new(&key)) {
             Some(canonical) if Path::new(&canonical_key(&stored)) != canonical => canonical,
             _ => stored.clone(),
@@ -4160,6 +4159,19 @@ async fn request_close_window(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    close_window_with_page(app, window, None).await
+}
+
+/// Close `window` as `request_close_window` does. `page` is the page that a
+/// route read from the window's webview on the main thread before it spawned
+/// this close: the close button and the macOS menu, on the connecting page.
+/// The command reads none, and a devserver window's close then reads the page
+/// once, in `close_devserver_window`.
+async fn close_window_with_page(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    page: Option<serve::PageReading>,
+) -> Result<(), String> {
     let closing = window.label();
     // A control terminal WINDOW close is explicit teardown of that row. The
     // script/PTY-exit watcher is the path that keeps the row and emits launcher
@@ -4194,48 +4206,84 @@ async fn request_close_window(
             }
         }
     }
-    // A watcher-managed DEVSERVER window (`lib-<library_id>::<window_id>`) closes
-    // immediately while its registry DELETE runs asynchronously. Record the
-    // close intent before destroying the native surface. A stale feed snapshot
-    // must keep treating this label as suppressed when the DELETE cannot reach
-    // the server; reconnect retries the same intent without reopening it.
     if closing.starts_with("lib-") {
-        let state = Arc::clone(app.state::<Arc<AppState>>().inner());
-        let label = closing.to_string();
-        if let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(&label) {
-            state.pending_window_deletes.queue(&devserver_id, &record);
-            if let Some(view) = state
-                .devserver_watcher_views
-                .lock()
-                .unwrap()
-                .get(&devserver_id)
-                .cloned()
-            {
-                // The watcher view closes the surface on any reconcile that
-                // races the direct destroy. The process-wide pending state is
-                // the durable suppression across watcher replacement.
-                view.bury(&label);
-            }
-            if let Some(conn) = state.devservers.get(&devserver_id) {
-                if let Some(attempt) = state.pending_window_deletes.begin(&label) {
-                    spawn_pending_window_delete_attempt(
-                        app.clone(),
-                        Arc::clone(&state),
-                        conn,
-                        attempt,
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(window = %label, "closed devserver window is absent from the feed");
-        }
-        return window.destroy().map_err(err);
+        return close_devserver_window(&app, &window, page);
     }
     // `destroy()`, not `close()`: this is the SPA's DELIBERATE close-cascade
     // (last tab, then last pane, just closed -- the window is empty). `close()`
     // would fire `CloseRequested`, where the close-on-red-dot handler prompts
     // instead of closing SPA windows; an empty window is worthless buried.
     // Destroy skips the request phase and goes straight to `Destroyed` cleanup.
+    window.destroy().map_err(err)
+}
+
+/// Close a watcher-managed DEVSERVER window (`lib-<library_id>::<window_id>`).
+/// On its connecting page the close hides it and keeps its record. Anywhere
+/// else it closes immediately while its registry DELETE runs asynchronously.
+/// Record the close intent before destroying the native surface. A stale feed
+/// snapshot must keep treating this label as suppressed when the DELETE cannot
+/// reach the server; reconnect retries the same intent without reopening it.
+/// `page` is the page that the close's route read from the window's webview
+/// before it spawned the close; with `None`, the close reads the page itself.
+/// Generic over the Tauri runtime so a test can drive it with the mock app.
+fn close_devserver_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+    page: Option<serve::PageReading>,
+) -> Result<(), String> {
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    let label = window.label().to_string();
+    match page.unwrap_or_else(|| serve::read_page(app, &label)) {
+        // A window still on its connecting page is waiting for its devserver,
+        // and its record there holds the window's terminal sessions. A close
+        // there stops the wait and hides the window, as the live page's Hide
+        // does: the record and its sessions stay. The destroy does not wait
+        // for the watcher's reconcile, which closes nothing when the
+        // devserver has no view registered. With a view, the window is
+        // listed with the hidden windows and reopens from the Window menu.
+        // With none, in the instant between a disconnect's stop of the
+        // watcher and its sweep, the destroy's handler takes the window out
+        // of that list, and the window is in no list until the next connect
+        // opens it again.
+        serve::PageReading::Connecting => {
+            serve::bury_window_now(app, &state, &label);
+            return window.destroy().map_err(err);
+        }
+        // No page was read: the window is gone, as it is for a second close
+        // that runs after the first one destroyed it, or its URL cannot be
+        // read. Nothing says it left the connecting page, so its record
+        // stays. A bury would store the label over the title that the first
+        // close kept, so the close changes no list either and destroys what
+        // is left of the native window.
+        serve::PageReading::Unread => {
+            tracing::info!(window = %label, "closed devserver window shows no page; its record stays");
+            return window.destroy().map_err(err);
+        }
+        // Another page: the close discards the window's record.
+        serve::PageReading::Other => {}
+    }
+    if let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(&label) {
+        state.pending_window_deletes.queue(&devserver_id, &record);
+        if let Some(view) = state
+            .devserver_watcher_views
+            .lock()
+            .unwrap()
+            .get(&devserver_id)
+            .cloned()
+        {
+            // The watcher view closes the surface on any reconcile that
+            // races the direct destroy. The process-wide pending state is
+            // the durable suppression across watcher replacement.
+            view.bury(&label);
+        }
+        if let Some(conn) = state.devservers.get(&devserver_id) {
+            if let Some(attempt) = state.pending_window_deletes.begin(&label) {
+                spawn_pending_window_delete_attempt(app.clone(), Arc::clone(&state), conn, attempt);
+            }
+        }
+    } else {
+        tracing::warn!(window = %label, "closed devserver window is absent from the feed");
+    }
     window.destroy().map_err(err)
 }
 
@@ -5993,9 +6041,9 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
         .build(app)?;
     // Close Window on Linux/Windows rides Ctrl+Alt+W (plain
     // Ctrl+W stays a terminal readline chord, and Ctrl+Shift+W is
-    // tab close there). Same routed handler
-    // as macOS's Cmd+W item: tab-close in SPA windows,
-    // cancel-close on the connecting screen, native close
+    // tab close there). The same handler as macOS's Cmd+W item
+    // routes it: the SPA's window close in SPA windows, the close
+    // button's hide on the connecting screen, native close
     // elsewhere. On the launcher that means the launcher's own
     // hide-on-close. SPA windows claim the same chord inside
     // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
@@ -6050,7 +6098,7 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
 /// is the only bar, so this is its Window submenu alone. Empty before
 /// the launcher window exists (early setup) or if the bar lost the
 /// submenu.
-fn window_submenus(app: &tauri::AppHandle) -> Vec<Submenu<tauri::Wry>> {
+fn window_submenus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Submenu<R>> {
     #[cfg(target_os = "macos")]
     {
         app.menu()
@@ -6077,7 +6125,7 @@ fn window_submenus(app: &tauri::AppHandle) -> Vec<Submenu<tauri::Wry>> {
 /// on the main thread -- muda requires menu mutation there on macOS --
 /// and is best-effort throughout: a menu glitch must never take down a
 /// close/destroy handler.
-pub fn rebuild_window_menu(app: &tauri::AppHandle) {
+pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         let submenus = window_submenus(&app);
@@ -6541,7 +6589,7 @@ async fn mint_another_devserver_window(
 /// close path and the feed-reconnect driver use this owner so completion and
 /// the one terminal notice cannot diverge.
 pub(crate) fn spawn_pending_window_delete_attempt(
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<impl tauri::Runtime>,
     state: Arc<AppState>,
     conn: devserver::DevserverConn,
     attempt: window_watcher::PendingDeleteAttempt,
@@ -6623,9 +6671,9 @@ fn capture_launcher_geometry(app: &tauri::AppHandle) {
 /// workspace `KEY_BRIDGE_JS`, so without this it has no reload chord. Claims
 /// Cmd+R (macOS) / Ctrl+R (Linux/Windows) in the capture phase and reloads via
 /// the `reload_window` IPC, falling back to `location.reload()` when the Tauri
-/// bridge is absent. Plain Ctrl+R is safe to claim here: the launcher hosts no
-/// terminal whose shell reverse-search it would shadow (workspace windows move
-/// reload to Ctrl+Shift+R off macOS for exactly that reason).
+/// bridge is absent or the invoke fails. Plain Ctrl+R is safe to claim here:
+/// the launcher hosts no terminal whose shell reverse-search it would shadow
+/// (workspace windows move reload to Ctrl+Shift+R off macOS for that reason).
 const LAUNCHER_RELOAD_BRIDGE_JS: &str = include_str!("launcher_reload_bridge.js");
 
 enum ShutdownAction {
@@ -6900,10 +6948,10 @@ fn handle_close_window(app: &tauri::AppHandle) {
 /// Close `window` by its kind: control terminals route through
 /// `request_close_window` (reap the control row/tenant, disconnect only
 /// if it still owns a live devserver connection); SPA webviews get the
-/// close command dispatched (or a real destroy on the connecting/retry
-/// screen, where the close means cancel); anything else (the launcher,
-/// the About window) closes natively -- the launcher's `CloseRequested`
-/// handler turns that into a hide.
+/// close command dispatched, except on the connecting screen, where the
+/// window closes as its close button does, on the page read here;
+/// anything else (the launcher, the About window) closes natively -- the
+/// launcher's `CloseRequested` handler turns that into a hide.
 fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWindow) {
     if window.label().starts_with("control-terminal-") {
         let app = app.clone();
@@ -6913,11 +6961,18 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
         return;
     }
     if serve::is_workspace_webview_label(window.label()) {
-        // A window still on the connecting/retry screen has no tabs to
-        // close and nothing to bury: the close chord means cancel, so destroy
-        // for real (destroy skips the bury-on-close handler).
-        if serve::window_on_connecting_screen(app, window.label()) {
-            let _ = window.destroy();
+        // A window still on its connecting page has no tabs to close. The
+        // chord closes the window as its close button does, which hides it
+        // and keeps its record: a bare destroy leaves the record shown, and
+        // the watcher opens the window again. The close is handed the page
+        // read here and does not read it again, so a navigation to the live
+        // page before the close runs does not discard the record.
+        let page = serve::read_page(app, window.label());
+        if page == serve::PageReading::Connecting {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = close_window_with_page(app, window, Some(page)).await;
+            });
             return;
         }
         // macOS Cmd+W is tab-close; off-mac Ctrl+Alt+W is window-close (its
@@ -8152,16 +8207,421 @@ mod tests {
         assert!(!by_id.contains("cfg.devservers"));
     }
 
+    /// The label of the devserver window the close tests close.
+    const CLOSED_LABEL: &str = "lib-close::w-1";
+
+    /// A page of the devserver the window's tenant serves.
+    const LIVE_PAGE: &str = "http://127.0.0.1:9/terminal/index.html?w=w-1";
+
+    /// A desktop connected to one devserver, with one window, `CLOSED_LABEL`,
+    /// in its feed and in its watcher's view. The devserver's stand-in answers
+    /// every request with 204 and records it as `METHOD path`.
+    struct ClosingDevserver {
+        app: tauri::App<tauri::test::MockRuntime>,
+        state: Arc<AppState>,
+        view: Arc<window_watcher::WatcherViewState>,
+        requests: Arc<Mutex<Vec<String>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl ClosingDevserver {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&requests);
+            let stand_in = axum::Router::new().fallback(move |request: axum::extract::Request| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.lock().unwrap().push(format!(
+                        "{} {}",
+                        request.method(),
+                        request.uri().path()
+                    ));
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            });
+            let server =
+                tokio::spawn(async move { axum::serve(listener, stand_in).await.unwrap() });
+            let state = empty_state();
+            state.devservers.set(
+                "ds-close".to_string(),
+                devserver::DevserverConn {
+                    host: "127.0.0.1".into(),
+                    port,
+                    token: "devserver-token".into(),
+                    name: "test".into(),
+                    gateway: None,
+                },
+            );
+            let record = chan_server::WindowRecord {
+                window_id: "w-1".into(),
+                library_id: "lib-close".into(),
+                kind: chan_server::WindowKind::Terminal,
+                title: "Terminal".into(),
+                ordinal: 1,
+                label: String::new(),
+                workspace_path: None,
+                prefix: "/terminal".into(),
+                token: "tok".into(),
+                persisted: true,
+                connected: false,
+                active_transfer: false,
+                control: false,
+                hidden: false,
+                origin: chan_server::WindowOrigin::Native,
+            };
+            state
+                .devserver_feed
+                .register_windows("ds-close".to_string(), Arc::new(Mutex::new(vec![record])));
+            let view = Arc::new(window_watcher::WatcherViewState::with_pending_deletes(
+                Arc::clone(&state.pending_window_deletes),
+            ));
+            state
+                .devserver_watcher_views
+                .lock()
+                .unwrap()
+                .insert("ds-close".to_string(), Arc::clone(&view));
+            let app = tauri::test::mock_app();
+            app.manage(Arc::clone(&state));
+            Self {
+                app,
+                state,
+                view,
+                requests,
+                server,
+            }
+        }
+
+        /// The window at `url`, as the watcher's build or a navigation left it.
+        fn window_at(&self, url: WebviewUrl) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
+            WebviewWindowBuilder::new(&self.app, CLOSED_LABEL, url)
+                .build()
+                .expect("mock webview window")
+        }
+
+        /// The requests the stand-in answered, once one of them is `request`.
+        async fn requests_through(&self, request: &str) -> Vec<String> {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let seen = self.requests.lock().unwrap().clone();
+                if seen.iter().any(|sent| sent == request) {
+                    return seen;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the devserver was not sent {request} within five seconds: {seen:?}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        /// The close discarded the window: its delete is queued and sent.
+        async fn assert_discarded(&self) {
+            assert!(
+                self.state.pending_window_deletes.contains(CLOSED_LABEL),
+                "the close queued no delete of the window"
+            );
+            self.requests_through("DELETE /api/library/windows/w-1")
+                .await;
+        }
+
+        /// The close hid the window and kept its record: it queued and sent
+        /// no delete, buried the window in its watcher's view, listed it with
+        /// the hidden windows and sent its hidden visibility.
+        async fn assert_hidden(&self) {
+            assert!(
+                !self.state.pending_window_deletes.contains(CLOSED_LABEL),
+                "the close queued the window's delete"
+            );
+            assert!(
+                self.view.is_buried(CLOSED_LABEL),
+                "the close left the window shown in its watcher's view"
+            );
+            assert!(
+                self.state
+                    .buried_snapshot()
+                    .iter()
+                    .any(|(label, _)| label == CLOSED_LABEL),
+                "the close left the window out of the hidden windows"
+            );
+            let sent = self
+                .requests_through("POST /api/library/windows/w-1/visibility")
+                .await;
+            assert!(
+                !sent.iter().any(|request| request.starts_with("DELETE ")),
+                "the close sent the window's delete: {sent:?}"
+            );
+        }
+    }
+
+    impl Drop for ClosingDevserver {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    /// A close of a devserver window still on its connecting page hides it:
+    /// the window leaves the screen and is listed for reopening, and its
+    /// record, which holds its terminal sessions, stays on the devserver.
+    #[tokio::test]
+    async fn a_close_on_the_connecting_page_hides_the_window_and_keeps_its_record() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        assert!(
+            serve::read_page(devserver.app.handle(), CLOSED_LABEL)
+                == serve::PageReading::Connecting,
+            "fixture: the window is not on the connecting page"
+        );
+
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the close");
+
+        assert!(
+            !devserver
+                .state
+                .pending_window_deletes
+                .contains(CLOSED_LABEL),
+            "a close on the connecting page queued the window's delete"
+        );
+        assert!(
+            devserver.view.is_buried(CLOSED_LABEL),
+            "a close on the connecting page left the window shown in its watcher's view"
+        );
+        assert!(
+            devserver
+                .state
+                .buried_snapshot()
+                .iter()
+                .any(|(label, _)| label == CLOSED_LABEL),
+            "a close on the connecting page left the window out of the hidden windows"
+        );
+        let sent = devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        assert!(
+            !sent.iter().any(|request| request.starts_with("DELETE ")),
+            "a close on the connecting page sent the window's delete: {sent:?}"
+        );
+    }
+
+    /// A close of a devserver window on its live page discards it, as the
+    /// live page's Close and the page's empty-window cascade ask.
+    #[tokio::test]
+    async fn a_close_on_the_live_page_discards_the_devserver_window() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::External(LIVE_PAGE.parse().unwrap()));
+
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the close");
+
+        devserver.assert_discarded().await;
+    }
+
+    /// A window that left its connecting page for its live page is closed as
+    /// a live one: the close reads the page the window shows when it closes.
+    #[tokio::test]
+    async fn a_close_after_the_connecting_page_navigated_discards_the_devserver_window() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        window
+            .navigate(LIVE_PAGE.parse().unwrap())
+            .expect("navigate to the live page");
+        assert!(
+            serve::read_page(devserver.app.handle(), CLOSED_LABEL) == serve::PageReading::Other,
+            "fixture: the window does not show its live page"
+        );
+
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the close");
+
+        devserver.assert_discarded().await;
+    }
+
+    /// A close that reads no page of the window keeps its record. A second
+    /// close sent while the first is in flight reads none once the first
+    /// close's destroy is handled: the native window is gone from the
+    /// manager, and its webview answers no URL. The close queues and sends no
+    /// delete, and the hidden windows keep the entry and the title that the
+    /// first close stored.
+    #[tokio::test]
+    async fn a_close_that_reads_no_page_keeps_the_record_and_the_hidden_windows() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the first close");
+        let hidden = devserver.state.buried_snapshot();
+        assert!(
+            hidden.iter().any(|(label, _)| label == CLOSED_LABEL),
+            "fixture: the first close did not list the window with the hidden windows"
+        );
+        devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        // The mock keeps a destroyed window under its label, so the second
+        // close reads through an app whose manager holds no window there,
+        // with the same desktop state.
+        let gone = tauri::test::mock_app();
+        gone.manage(Arc::clone(&devserver.state));
+        assert_eq!(
+            serve::read_page(gone.handle(), CLOSED_LABEL),
+            serve::PageReading::Unread,
+            "fixture: the second close reads a page"
+        );
+
+        close_devserver_window(gone.handle(), &window, None).expect("the second close");
+
+        assert!(
+            !devserver
+                .state
+                .pending_window_deletes
+                .contains(CLOSED_LABEL),
+            "a close that read no page queued the window's delete"
+        );
+        assert_eq!(
+            devserver.state.buried_snapshot(),
+            hidden,
+            "a close that read no page changed the hidden windows"
+        );
+        let sent = devserver.requests.lock().unwrap().clone();
+        assert!(
+            !sent.iter().any(|request| request.starts_with("DELETE ")),
+            "a close that read no page sent the window's delete: {sent:?}"
+        );
+    }
+
+    /// A route that read the connecting page hands that reading to the
+    /// close it spawns, and the window reaches its live page before the
+    /// close runs: the close hides the window on the route's reading.
+    async fn close_on_a_connecting_reading_after_the_navigation() {
+        let devserver = ClosingDevserver::start().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        let page = serve::read_page(devserver.app.handle(), CLOSED_LABEL);
+        assert_eq!(
+            page,
+            serve::PageReading::Connecting,
+            "fixture: the route did not read the connecting page"
+        );
+        window
+            .navigate(LIVE_PAGE.parse().unwrap())
+            .expect("navigate to the live page");
+        assert_eq!(
+            serve::read_page(devserver.app.handle(), CLOSED_LABEL),
+            serve::PageReading::Other,
+            "fixture: the window does not show its live page"
+        );
+
+        close_devserver_window(devserver.app.handle(), &window, Some(page)).expect("the close");
+
+        devserver.assert_hidden().await;
+    }
+
+    /// The macOS menu's close of a window on its connecting page hides it on
+    /// the page that the menu read. The menu reads the page on the main
+    /// thread and hands that reading to the close it spawns: in the instant
+    /// of the page's navigation to its live page, a second reading would
+    /// discard the record. The menu handler reads the focused window, which
+    /// a mock window cannot be, so its arm is read as text and the close is
+    /// driven with the menu's reading.
+    #[tokio::test]
+    async fn the_menu_closes_a_connecting_window_on_the_page_it_read() {
+        close_on_a_connecting_reading_after_the_navigation().await;
+        const MAIN_RS: &str = include_str!("main.rs");
+        let close = source_region(
+            MAIN_RS,
+            "\nfn close_spa_or_native_window(",
+            "\nfn spawn_terminal_window(",
+        );
+        let connecting = close
+            .split("if serve::is_workspace_webview_label(window.label()) {")
+            .nth(1)
+            .expect("the menu's close has an arm for workspace windows")
+            .split("return;")
+            .next()
+            .expect("the connecting arm returns");
+        assert!(
+            connecting.contains("close_window_with_page(app, window, Some(page))"),
+            "the menu's close of a connecting window does not hand its reading to the close"
+        );
+        assert!(
+            connecting.contains("let page = serve::read_page(app, window.label());"),
+            "the menu's close hands on a reading that is not its read of the page"
+        );
+        assert!(
+            !connecting.contains("destroy()"),
+            "the menu's close destroys a connecting window itself"
+        );
+    }
+
+    /// The close button of a devserver window on its connecting page hides
+    /// it on the page that its close handler read. The handler reads the
+    /// page on the main thread and hands that reading to the close it
+    /// spawns, so a navigation in between keeps the record. The handler
+    /// takes the Wry types, so its arm is read as text and the close is
+    /// driven with its reading.
+    #[tokio::test]
+    async fn the_close_button_closes_a_connecting_window_on_the_page_it_read() {
+        close_on_a_connecting_reading_after_the_navigation().await;
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let handler = source_region(SERVE_RS, "\nfn on_close_requested(", "\nfn on_destroyed(");
+        let connecting = handler
+            .split("if on_connecting && label.starts_with(\"lib-\") {")
+            .nth(1)
+            .expect("the close handler has an arm for a connecting devserver window")
+            .split("return;")
+            .next()
+            .expect("the connecting arm returns");
+        assert!(
+            connecting.contains("crate::close_window_with_page(app, window, Some(page))"),
+            "the close button of a connecting window does not hand its reading to the close"
+        );
+        assert!(
+            handler.contains("let page = read_page(app, label);"),
+            "the close button hands on a reading that is not its read of the page"
+        );
+    }
+
+    /// The page's chords, the key bridge's chords and the page's Disconnect
+    /// close a devserver window through `request_close_window`, whose close
+    /// reaches the one function that decides between hiding the window and
+    /// discarding its record. The command takes the Wry types, so the seam is
+    /// read as text; the tests above drive the decision.
+    #[test]
+    fn request_close_window_closes_a_devserver_window_through_its_decision() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let command = source_region(
+            MAIN_RS,
+            "\nasync fn request_close_window(",
+            "\nasync fn close_window_with_page(",
+        );
+        assert!(
+            command.contains("close_window_with_page(app, window, None).await"),
+            "request_close_window does not close the window as its routes that read the page do"
+        );
+        let close = source_region(
+            MAIN_RS,
+            "\nasync fn close_window_with_page(",
+            "\nfn close_devserver_window<",
+        );
+        let devserver_arm = close
+            .split("if closing.starts_with(\"lib-\") {")
+            .nth(1)
+            .expect("the close has an arm for a devserver window")
+            .split('}')
+            .next()
+            .expect("the devserver arm ends");
+        assert!(
+            devserver_arm.contains("return close_devserver_window(&app, &window, page);"),
+            "the close of a devserver window does not reach close_devserver_window"
+        );
+    }
+
     #[test]
     fn devserver_window_close_records_pending_delete_before_destroy() {
         const MAIN_RS: &str = include_str!("main.rs");
         let close = source_region(
             MAIN_RS,
-            "\nasync fn request_close_window(",
+            "\nfn close_devserver_window<",
             "\nfn hide_window_from_close_confirm(",
         );
         let lib_branch = close
-            .split("if closing.starts_with(\"lib-\")")
+            .split("record_for_native_label(&label)")
             .nth(1)
             .expect("devserver close branch exists");
         let pending = lib_branch
@@ -9914,7 +10374,7 @@ mod tests {
         /// A forget handed to the desktop by the folder a restored workspace
         /// is mounted from, after the path its registry row stores was pointed
         /// at another registered workspace, leaves that other workspace as it
-        /// was and closes the one whose folder it names.
+        /// was and removes the one whose folder it names.
         #[cfg(unix)]
         #[test]
         fn a_forget_of_a_restored_root_relinked_to_another_workspace_leaves_that_workspace() {
@@ -9948,23 +10408,22 @@ mod tests {
                 !desktop.embedded().is_workspace_mounted_by_key(&root.now),
                 "the forget left the workspace it names mounted: {outcome:?}"
             );
-            // The host's removal unregisters by the name it is given, and a
-            // name matches a row by the canonical path the row last resolved
-            // to or by resolving the root the row stores again. This row last
-            // resolved to the root it stores, when the registry was loaded or
-            // the root registered, and that root now resolves to the other
-            // workspace's folder, so no name matches the row: it stays
-            // registered, and off, and the removal finds nothing to remove.
+            // The mounted folder identifies the runtime whose stored root
+            // selects the row to unregister without resolving that root.
             assert!(
-                desktop.row(&root.stored).is_some()
+                desktop.row(&root.stored).is_none()
                     && !desktop
                         .on_paths()
                         .contains(&root.stored.to_string_lossy().into_owned()),
-                "the forget did not leave the workspace it names registered and off: {outcome:?}"
+                "the forget left the workspace it names registered or on: {outcome:?}"
+            );
+            assert!(
+                !desktop.window_paths().contains(&root.stored),
+                "the forget left a window under the workspace's stored root: {outcome:?}"
             );
             assert_eq!(
                 outcome,
-                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound)
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
         }
 
@@ -9997,6 +10456,60 @@ mod tests {
                 !desktop.embedded().is_workspace_mounted_by_key(&root.now),
                 "the forget left the workspace it names mounted: {outcome:?}"
             );
+            assert!(
+                desktop.row(&root.stored).is_none(),
+                "the forget left the workspace it names registered: {outcome:?}"
+            );
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+            );
+        }
+
+        /// A forget handed to the desktop of a restored workspace whose stored
+        /// root resolves nowhere, named by the folder it is mounted from,
+        /// closes the workspace and removes its registry row.
+        #[cfg(unix)]
+        #[test]
+        fn a_forget_of_a_restored_root_that_resolves_nowhere_removes_it() {
+            if !own_home("a_forget_of_a_restored_root_that_resolves_nowhere_removes_it") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            let link = root.stored.parent().expect("the linked parent");
+            std::fs::remove_file(link).expect("unlink the old parent");
+            assert!(
+                std::fs::canonicalize(&root.stored).is_err(),
+                "fixture: the stored root still resolves"
+            );
+            assert!(
+                desktop.embedded().is_workspace_mounted_by_key(&root.now),
+                "fixture: the workspace is not mounted at the folder it resolved to"
+            );
+            assert_eq!(
+                desktop
+                    .row(&root.stored)
+                    .expect("fixture: the root is registered")
+                    .cached_canonical_path(),
+                root.stored,
+                "fixture: the row's cache is not the root it stores"
+            );
+
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                root.now.clone(),
+                true,
+            ));
+
+            assert!(
+                !desktop.embedded().is_workspace_mounted_by_key(&root.now),
+                "the forget left the workspace it names mounted: {outcome:?}"
+            );
+            // The runtime's stored root selects the row even when that root
+            // resolves nowhere; finding the row asks no filesystem.
             assert!(
                 desktop.row(&root.stored).is_none(),
                 "the forget left the workspace it names registered: {outcome:?}"

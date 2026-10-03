@@ -150,4 +150,19 @@ describe("PromptModal", () => {
     clickBackdrop(target);
     await expect(answer).resolves.toBeNull();
   });
+
+  test("a prompt asked over an open one starts from its own default, focused", async () => {
+    const target = mountDialog(PromptModal);
+    const first = uiPrompt("Terminal group", "");
+    await settle();
+    await type(target, "typed for the first");
+
+    void uiPrompt("Set screen-lock PIN", "");
+    await settle();
+
+    await expect(first, "the first prompt answers as cancelled").resolves.toBeNull();
+    expect(dialogIn(target)!.textContent).toContain("Set screen-lock PIN");
+    expect(input(target).value, "the second prompt's own default").toBe("");
+    expect(document.activeElement).toBe(input(target));
+  });
 });

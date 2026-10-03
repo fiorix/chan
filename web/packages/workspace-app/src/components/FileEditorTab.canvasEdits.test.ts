@@ -11,17 +11,18 @@ import { demoSocketFactory } from "../demo/socket";
 import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { applySessionRoster } from "../state/session.svelte";
 import { ApiError } from "../api/errors";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
-import { EXCALIDRAW_VERSION, excalidrawBoard, type BoardProps } from "../__tests__/excalidrawLibrary";
+import { EXCALIDRAW_VERSION, boardPropsFromRender, excalidrawBoard, type BoardProps } from "../__tests__/excalidrawLibrary";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { applyLocalTheme, effectiveHybridSurfaceTheme, onWatchEvent, refreshWorkspace } from "../state/store.svelte";
 import {
-  closeAllTabs, closeFileTabAfterMove, closeOtherTabsInPane, closePane, detachTabToPaneEdge,
+  closeFileTabAfterMove, closePane, detachTabToPaneEdge,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
-  layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
+  forceReloadFromDisk, refreshTabFromDisk, layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
 const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
@@ -33,7 +34,15 @@ const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
   scene: { live: false },
 }));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render, unmount: unmountRoot }) }));
-vi.mock("react", () => ({ createElement: (_kind: unknown, props: unknown) => props }));
+vi.mock("react", () => ({
+  Component: class {
+    props: unknown;
+    state: Record<string, unknown> = {};
+    constructor(props: unknown) { this.props = props; }
+  },
+  createElement: (type: unknown, props: Record<string, unknown>, child?: unknown) =>
+    ({ type, props: child === undefined ? props : { ...props, children: child } }),
+}));
 vi.mock("@excalidraw/excalidraw", async () => (await import("../__tests__/excalidrawLibrary")).excalidrawModule);
 // The canvas configures the library's assets after it is created and before
 // it imports the library, so `beforeLibrary.run` is a step taken in that gap.
@@ -70,11 +79,14 @@ beforeEach(async () => {
   await refreshWorkspace();
   render.mockReset();
   beforeLibrary.run = null;
-  canvasReady = new Promise((resolve) => { render.mockImplementation(resolve); });
+  canvasReady = new Promise((resolve) => {
+    render.mockImplementation((element: unknown) => resolve(boardPropsFromRender(element)));
+  });
   unmountRoot.mockClear();
 });
 
 afterEach(async () => {
+  resolveConfirm(false);
   resolveDraftClose("cancel");
   for (const component of mounted.splice(0)) await unmount(component);
   vi.useRealTimers();
@@ -135,14 +147,17 @@ async function loadedTab(path: string, content: string, over: Partial<FileTab> =
 
 /// Mount the tab's editor and hand its board to the library stand-in.
 async function mountBoard(tab: FileTab) {
-  canvasReady = new Promise((resolve) => { render.mockImplementation(resolve); });
+  canvasReady = new Promise((resolve) => {
+    render.mockImplementation((element: unknown) => resolve(boardPropsFromRender(element)));
+  });
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(FileEditorTab, { target, props: { tab, active: true, focused: true } });
   mounted.push(component);
   await canvasReady;
-  const lastRender = () => render.mock.calls.at(-1)![0] as BoardProps;
-  return { target, component, board: excalidrawBoard(lastRender), lastRender };
+  const lastElement = () => render.mock.calls.at(-1)![0] as unknown;
+  const lastRender = () => boardPropsFromRender(lastElement());
+  return { target, component, board: excalidrawBoard(lastElement), lastRender };
 }
 
 async function mountDuringLoad(exists = true) {
@@ -190,6 +205,20 @@ async function mountDuringLoad(exists = true) {
 }
 
 describe("drawing loads", () => {
+  test("a rejected drawing autosave keeps the board and reports the failure", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING, { content: FOREIGN, saved: DRAWING });
+    const { target, board } = await mountBoard(tab);
+    await board.start();
+    write.mockRejectedValue(new Error("disk full"));
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(900);
+    await tick();
+    expect(target.querySelector(".excalidraw-host")).not.toBeNull();
+    expect(target.querySelector(".error-placeholder")).toBeNull();
+    expect(target.querySelector(".editor-toolbar .error")?.textContent).toContain("Not saved: the save request failed (disk full)");
+    expect(tab.refusedUnwritten).toBeFalsy();
+  });
   test("a failed load under a mounted canvas leaves the drawing clean and unwritten", async () => {
     const { pane, tab, target, loading, write, rejectRead, chunk } = await mountDuringLoad();
     await chunk();
@@ -268,7 +297,7 @@ async function draw(over: Partial<FileTab> = {}) {
   board.stroke({ id: "last-stroke", version: 1 });
   vi.advanceTimersByTime(50);
   expect(tab.content).toBe(tab.saved);
-  return { pane, tab, target, strokeAt: Date.now() - 50 };
+  return { pane, tab, target, board, strokeAt: Date.now() - 50 };
 }
 
 /// What the control client prints for a `cs pane` operation: the window
@@ -289,6 +318,78 @@ async function paneExec(op: Record<string, unknown>) {
 }
 
 describe("pending drawing edits", () => {
+  test("a refresh leaves a stroke waiting in a drawing's buffer", async () => {
+    const { tab, strokeAt } = await draw();
+    const read = vi.spyOn(api, "readStream");
+
+    await refreshTabFromDisk(tab.id);
+
+    expect({
+      inDebounce: Date.now() - strokeAt < 200,
+      reads: read.mock.calls.length,
+      loading: tab.loading,
+      stroke: tab.content.includes("last-stroke"),
+      dirty: isDirty(tab),
+    }).toEqual({ inDebounce: true, reads: 0, loading: false, stroke: true, dirty: true });
+  });
+
+  test("Reload from disk asks before discarding a waiting stroke", async () => {
+    const { tab, strokeAt } = await draw();
+    const read = vi.spyOn(api, "readStream");
+
+    const reload = forceReloadFromDisk(tab.id);
+    await Promise.resolve();
+    const asked = { open: confirmState.open, title: confirmState.title };
+    resolveConfirm(false);
+    await reload;
+
+    expect({
+      inDebounce: Date.now() - strokeAt < 200,
+      asked,
+      reads: read.mock.calls.length,
+      stroke: tab.content.includes("last-stroke"),
+      dirty: isDirty(tab),
+    }).toEqual({
+      inDebounce: true, asked: { open: true, title: "Reload from disk?" },
+      reads: 0, stroke: true, dirty: true,
+    });
+  });
+
+  test("accepting Reload from disk replaces the pending stroke", async () => {
+    const { tab, board } = await draw();
+    const read = vi.spyOn(api, "readStream");
+
+    const reload = forceReloadFromDisk(tab.id);
+    expect(confirmState.title).toBe("Reload from disk?");
+    expect(read).not.toHaveBeenCalled();
+    resolveConfirm(true);
+    await reload;
+    await tick();
+
+    expect({ reads: read.mock.calls.length, buffer: tab.content, elements: board.elements })
+      .toEqual({ reads: 1, buffer: INITIAL, elements: [] });
+  });
+
+  test("a clean drawing refreshes and reloads without a question", async () => {
+    const initial = fileTab({
+      path: "notes/clean.excalidraw", fileKind: "text", mode: "canvas", content: INITIAL, saved: INITIAL,
+    });
+    initial.savedMtime = disk.write(initial.path, INITIAL).mtime;
+    resetLayout([initial]);
+    const tab = readTab(initial.id)!;
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    vi.advanceTimersByTime(50);
+    const read = vi.spyOn(api, "readStream");
+
+    await refreshTabFromDisk(tab.id);
+    await forceReloadFromDisk(tab.id);
+
+    expect({ reads: read.mock.calls.length, asked: confirmState.open, dirty: isDirty(tab) })
+      .toEqual({ reads: 2, asked: false, dirty: false });
+  });
+
   test("a mode switch carries the pending stroke into Source", async () => {
     const { tab, target } = await draw();
     setMode(tab, "source");
@@ -298,13 +399,11 @@ describe("pending drawing edits", () => {
     expect(view?.state.doc.toString()).toBe(tab.content);
   });
 
-  test.each(["single tab", "workspace tabs", "other tabs", "pane tabs", "pane", "moved tab"])(
+  test.each(["single tab", "pane tabs", "pane", "moved tab"])(
     "closing %s saves the pending stroke before removal", async (method) => {
       const { pane, tab } = await draw();
       pane.tabs.push(fileTab({ id: "keep", mode: "source" }));
       if (method === "single tab") await closeTab(pane.id, tab.id);
-      else if (method === "workspace tabs") await closeAllTabs();
-      else if (method === "other tabs") await closeOtherTabsInPane(pane.id, "keep");
       else if (method === "pane tabs") await closeTabsInPane(pane.id);
       else if (method === "pane") await closePane(pane.id);
       else await closeFileTabAfterMove(pane.id, tab.id);
@@ -431,6 +530,86 @@ describe("the drawing library stand-in", () => {
   test("models the installed version of the drawing library", () => {
     const manifest = readFileSync("../../node_modules/@excalidraw/excalidraw/package.json", "utf8");
     expect(JSON.parse(manifest).version).toBe(EXCALIDRAW_VERSION);
+  });
+});
+
+describe("a drawing library failure", () => {
+  const MESSAGE = "The drawing library failed. Changes drawn since the board last paused may be lost. Switch to Source and back, or close and reopen the tab to reload the drawing.";
+
+  test("a failure with a stroke waiting keeps the saved buffer and writes nothing", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    board.stroke({ id: "waiting", version: 1 });
+    board.fail();
+    await tick();
+    await vi.advanceTimersByTimeAsync(200);
+    const afterWait = { buffer: tab.content, dirty: isDirty(tab) };
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(afterWait, "failed library must not publish an empty scene").toEqual({ buffer: DRAWING, dirty: false });
+    expect({ writes: write.mock.calls.length, disk: disk.get(tab.path)?.content }).toEqual({ writes: 0, disk: DRAWING });
+  });
+
+  test("a failure prevents theme and read-only changes from rendering the library again", async () => {
+    const { tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { board } = await mountBoard(tab);
+    await board.start();
+    board.fail();
+    await tick();
+    const count = render.mock.calls.length;
+    applyLocalTheme(effectiveHybridSurfaceTheme("editor") === "dark" ? "light" : "dark");
+    await tick();
+    setTabReadMode(tab, true);
+    await tick();
+    setTabReadMode(tab, false);
+    await tick();
+
+    expect(render.mock.calls.length, "failed library must not render again").toBe(count);
+    expect({ buffer: tab.content, writes: write.mock.calls.length }).toEqual({ buffer: DRAWING, writes: 0 });
+  });
+
+  test("a failure after seeding shows the loss and recovery alert", async () => {
+    const { tab } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { target, board } = await mountBoard(tab);
+    await board.start();
+    board.fail();
+    await tick();
+
+    expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe(MESSAGE);
+  });
+
+  test("a failure before API handover shows the alert without publishing", async () => {
+    const { tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const { target, board } = await mountBoard(tab);
+    board.fail();
+    await tick();
+
+    expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe(MESSAGE);
+    expect({ buffer: tab.content, writes: write.mock.calls.length }).toEqual({ buffer: DRAWING, writes: 0 });
+  });
+
+  test("a new mount after failure restores the buffer without writing", async () => {
+    const { pane, tab, write } = await loadedTab("notes/board.excalidraw", DRAWING);
+    const first = await mountBoard(tab);
+    vi.useFakeTimers();
+    await first.board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    first.board.fail();
+    await tick();
+    await unmount(first.component);
+    mounted.splice(mounted.indexOf(first.component), 1);
+    const second = await mountBoard(tab);
+    await second.board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ board: second.board.elements, buffer: tab.content, writes: write.mock.calls.length })
+      .toEqual({ board: [ON_DISK], buffer: DRAWING, writes: 0 });
   });
 });
 
@@ -778,8 +957,6 @@ describe("a seed the library has not shown yet", () => {
     const savedMtime = disk.write(path, TINTED_FILE).mtime;
     const shown = fileTab({ id: "shown", path, fileKind: "text", mode: "canvas", content: TINTED_FILE, saved: TINTED_FILE, savedMtime });
     const sibling = fileTab({ id: "sibling", path, fileKind: "text", mode: "source", content: TINTED_FILE, saved: TINTED_FILE, savedMtime });
-    // The sibling's pane comes first in the layout, so a close of every tab
-    // saves it before it reaches the shown board.
     layout.nodes = {
       root: { kind: "split", id: "root", direction: "row", ratio: 0.5, a: "pane-sibling", b: "pane-shown" },
       "pane-sibling": { kind: "leaf", id: "pane-sibling", tabs: [sibling], activeTabId: sibling.id },
@@ -805,7 +982,10 @@ describe("a seed the library has not shown yet", () => {
     await vi.advanceTimersByTimeAsync(200);
     board.zoomTo(1.25);
     setTabContent(other, GREEN_FILE);
-    await closeAllTabs();
+    // The sibling's pane closes first, so its save lands while the shown board
+    // is still mounted, and the shown pane's own close follows it.
+    await closeTabsInPane("pane-sibling");
+    await closeTabsInPane("pane-shown");
     const written = write.mock.calls.map((call) => (call[1] === BLUE_FILE ? "blue" : call[1] === GREEN_FILE ? "green" : call[1]));
 
     expect({ mirrored, written, open: [readTab(shown.id), readTab(sibling.id)] }).toEqual({
@@ -968,6 +1148,42 @@ describe("a live drawing", () => {
     return { pane, tab, board, socket, reads };
   }
 
+  test("a failed live board pushes no scene part after a late change callback", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    const rendered = () => boardPropsFromRender(render.mock.calls.at(-1)![0]);
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(200);
+    board.pickBackground("#b2f2bb");
+    board.fail();
+    await tick();
+    socket.frame({ type: "update", version: 2, elements: [PEER] });
+    expect(board.elements, "failed board must drop later live frames").toEqual([]);
+    rendered().onChange();
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(socket.pushes(), "failed library must not push elements, files or appState").toEqual([]);
+    expect(tab.content).toBe(DRAWING);
+  });
+
+  test("Reload from disk sends a waiting live stroke before asking", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    const resolved = vi.spyOn(api, "resolveSessionConflict")
+      .mockRejectedValue(new ApiError(409, "scene session conflict could not be resolved"));
+    vi.useFakeTimers();
+    board.stroke(STROKE);
+    vi.advanceTimersByTime(50);
+    const reload = forceReloadFromDisk(tab.id);
+
+    expect({ asked: confirmState.title, pushes: socket.pushes().length, resolved: resolved.mock.calls.length })
+      .toEqual({ asked: "Reload from disk?", pushes: 1, resolved: 0 });
+    resolveConfirm(true);
+    await reload;
+    await tick();
+    expect(resolved).toHaveBeenCalledWith(tab.path, "reload");
+    expect(tab.content).toContain('"stroke"');
+    expect(board.elements).toContainEqual(STROKE);
+  });
+
   test("a peer's edit leaves the drawing saved, and its close closes it", async () => {
     const { pane, tab, socket } = await attachedDrawing();
     socket.frame({ type: "update", version: 2, elements: [PEER] });
@@ -1007,6 +1223,33 @@ describe("a live drawing", () => {
     socket.frame({ type: "push-ok", version: 3 });
 
     expect({ beforeAck, afterAck: isDirty(tab) }).toEqual({ beforeAck: true, afterAck: false });
+  });
+
+  test("a timed-out live push keeps the mounted drawing and its unsaved reason", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    board.stroke(STROKE);
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(6001);
+    await saving;
+    await tick();
+    vi.useRealTimers();
+
+    expect({
+      mounted: document.querySelector(".excalidraw-host") !== null,
+      buffer: tab.content.includes('"stroke"'),
+      reason: document.querySelector(".editor-toolbar .error")?.textContent?.trim(),
+      fatal: tab.error,
+      dirty: isDirty(tab),
+      pushes: socket.pushes().length,
+    }).toEqual({
+      mounted: true,
+      buffer: true,
+      reason: "Not saved: the previous live push has not been confirmed",
+      fatal: null,
+      dirty: true,
+      pushes: 1,
+    });
   });
 
   test("an unforced close_tab reports a pending stroke unsaved and pushes it, and the same op closes it after its ack", async () => {
@@ -1296,6 +1539,30 @@ describe("a live drawing", () => {
     vi.useRealTimers();
 
     expect({ afterFan, pushedAgain: idsPushed(next) }).toEqual({ afterFan: [["x"]], pushedAgain: [["y"]] });
+  });
+
+  test("a stroke on the wire survives an unbound fresh snapshot and canvas remount", async () => {
+    const X = { id: "x", type: "rectangle", version: 1, versionNonce: 3, isDeleted: false };
+    const { tab, board, socket } = await attachedDrawing();
+    vi.useFakeTimers();
+    board.stroke(X);
+    await vi.advanceTimersByTimeAsync(250);
+    await unmount(mounted.pop()!);
+    const { board: rebound } = await mountBoard(tab);
+    socket.drop();
+    const next = await nextSocket();
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    await rebound.start();
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      first: idsPushed(socket),
+      replayedStroke: idsPushed(next).some((ids) => ids.includes("x")),
+      board: shownIds(rebound),
+      buffer: tab.content.includes('"x"'),
+      dirty: isDirty(tab),
+    }).toEqual({ first: [["x"]], replayedStroke: true, board: ["on-disk", "x"], buffer: true, dirty: true });
   });
 
   test("a snapshot fanned on the socket over a background on the wire leaves the pick on the board and in the buffer", async () => {

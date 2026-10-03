@@ -11,6 +11,8 @@
 // without a local handle request a re-open click, connected or disconnected.
 // Missing handles cannot prove a window is gone; those rows stay for an explicit
 // Open or Close. A blocked popup leaves its record available by the same rule.
+// A closed handle stays while its record reads connected, since another window
+// may hold the socket. The first disconnected push discards it and its record.
 // Open repairs a blank window or a disconnected record regardless of document
 // type, leaving a connected nonblank page untouched. Refusals close only a
 // blank this gesture opened, never one an earlier wait left marked.
@@ -33,8 +35,9 @@ import { windowUrl } from "../lib/windowUrl";
 import { demoState } from "./demo.svelte";
 import { clearWindowAttention, markWindowAttention } from "./windowAttention.svelte";
 
-// window_id -> the open browser window. Imperative (the reactive surface is
-// windowAttention); a reload wipes it and the reconciler re-flags orphans.
+// window_id -> the browser handle, including a closed one kept until its record
+// reads disconnected. Imperative (the reactive surface is windowAttention); a
+// reload wipes it and the reconciler re-flags orphans.
 const handles = new Map<string, Window>();
 // window_ids from the last feed push, so the reconciler detects removals (the
 // feed signals a discard by ABSENCE, never a tombstone).
@@ -78,7 +81,6 @@ function handleState(id: string): "live" | "closed" | "none" {
   const h = handles.get(id);
   if (!h) return "none";
   if (!h.closed) return "live";
-  handles.delete(id);
   return "closed";
 }
 
@@ -229,8 +231,10 @@ export async function toggleWindowVisibility(
  * left the feed (absence == discard), and flags a VISIBLE browser-origin record
  * this launcher holds no live handle for as an orphan (a reload lost the handle,
  * a peer surface minted it, or its window is gone and the record stays until
- * Close) so its row flashes for a re-open click. A hidden or native record is
- * never flagged. A record an Open is still deciding is left to that Open. */
+ * Close) so its row flashes for a re-open click. A closed browser handle stays
+ * until its record reads disconnected, when both are discarded. A hidden or
+ * native record is never flagged. A record an Open is still deciding is left
+ * to that Open. */
 export function reconcileWindows(set: WindowSet): void {
   if (demoState.enabled) return;
   latestWindows = set.windows;
@@ -247,7 +251,7 @@ export function reconcileWindows(set: WindowSet): void {
     const state = handleState(w.window_id);
     if (state === "live") {
       clearWindowAttention(w.window_id);
-    } else if (w.origin === "browser" && state === "closed") {
+    } else if (w.origin === "browser" && state === "closed" && !w.connected) {
       discardBrowserWindow(w.window_id);
     } else if (w.origin === "browser" && !w.hidden) {
       markWindowAttention(w.window_id);

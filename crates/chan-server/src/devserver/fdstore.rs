@@ -53,9 +53,9 @@ mod linux {
     use anyhow::Context;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use chan_library::terminal_sessions::{
-        fdstore_fd_name, fdstore_ring_fd_name, FdStoreManifestEntry, FdStorePark, FdStoreParker,
-        FdStoreSessionImport, FdStoreSessionMeta, FdStoreSkippedSession, FDSTORE_FD_PREFIX,
-        FDSTORE_RING_FD_PREFIX,
+        current_boot_id, fdstore_fd_name, fdstore_ring_fd_name, FdStoreManifestEntry, FdStorePark,
+        FdStoreParker, FdStoreSessionImport, FdStoreSessionMeta, FdStoreSkippedSession,
+        RecordedChildIdentity, FDSTORE_FD_PREFIX, FDSTORE_RING_FD_PREFIX,
     };
     use serde::{Deserialize, Serialize};
 
@@ -129,26 +129,6 @@ mod linux {
                     .collect(),
             }
         }
-    }
-
-    fn current_boot_id() -> Option<String> {
-        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
-        let boot_id = boot_id.trim();
-        (!boot_id.is_empty()).then(|| boot_id.to_owned())
-    }
-
-    fn process_start_time(pid: u32) -> Option<u64> {
-        parse_process_start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
-    }
-
-    fn parse_process_start_time(stat: &str) -> Option<u64> {
-        // comm is parenthesized and can itself contain spaces and parentheses.
-        stat.rsplit_once(')')?
-            .1
-            .split_ascii_whitespace()
-            .nth(19)?
-            .parse()
-            .ok()
     }
 
     /// Parking lifecycle. Transitions are one-way:
@@ -254,7 +234,7 @@ mod linux {
         fn write_entries_locked(
             &self,
             phase: &MutexGuard<'_, ParkerPhase>,
-            entries: Vec<chan_library::terminal_sessions::FdStoreManifestEntry>,
+            entries: Vec<FdStoreManifestEntry>,
         ) -> Result<(), String> {
             if entries.is_empty() {
                 let _ = std::fs::remove_file(&self.manifest_path);
@@ -270,7 +250,7 @@ mod linux {
                     .map(|entry| ManifestSession {
                         fd_name: entry.fd_name.clone(),
                         ring_fd_name: entry.ring_fd_name.clone(),
-                        child_start_time: entry.meta.child_pid.and_then(process_start_time),
+                        child_start_time: entry.meta.child_pid.and(entry.child_start_time),
                         meta: entry.meta.clone(),
                         replay_b64: BASE64.encode(&entry.replay),
                     })
@@ -626,8 +606,8 @@ mod linux {
                     fd_name,
                     ring_fd_name,
                     meta,
+                    child_start_time,
                     replay_b64,
-                    ..
                 } = session;
                 // Claimed before any skip, so a skipped session's ring file
                 // is closed with it rather than reported as an orphan. Only
@@ -698,6 +678,10 @@ mod linux {
                 let replay = decode_replay(&replay_b64, &meta, &mut skipped);
                 imports.push(FdStoreSessionImport {
                     meta,
+                    child_identity: RecordedChildIdentity {
+                        boot_id: manifest.boot_id.clone(),
+                        start_time: child_start_time,
+                    },
                     master_fd,
                     ring_fd,
                     replay,
@@ -932,21 +916,11 @@ mod linux {
         current_boot: Option<&str>,
         recorded_start: Option<u64>,
     ) -> Result<(), String> {
-        let recorded_boot = recorded_boot.ok_or("manifest boot id is missing")?;
-        if current_boot != Some(recorded_boot) {
-            return Err("manifest boot id does not match the current boot".into());
+        let pidfd = RecordedChildIdentity {
+            boot_id: recorded_boot.map(str::to_owned),
+            start_time: recorded_start,
         }
-        let recorded_start = recorded_start.ok_or("no recorded start time for this fd name")?;
-        let raw_pid = i32::try_from(pid).map_err(|_| "invalid child pid")?;
-        let process = rustix::process::Pid::from_raw(raw_pid).ok_or("invalid child pid")?;
-        // Pin the process before reading /proc so pid reuse between validation
-        // and either signal cannot redirect cleanup to a different process.
-        let pidfd = rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty())
-            .map_err(|error| format!("cannot pin child identity: {error}"))?;
-        let current_start = process_start_time(pid).ok_or("cannot read child start time")?;
-        if current_start != recorded_start {
-            return Err("child start time does not match the manifest".into());
-        }
+        .pin(pid, current_boot)?;
         let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::HUP);
         let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::TERM);
         Ok(())
@@ -1123,24 +1097,6 @@ mod linux {
                 child.try_wait().unwrap().is_none(),
                 "an invalid fd name killed an unverified child"
             );
-        }
-
-        #[test]
-        fn process_start_time_parser_handles_parentheses_and_spaces() {
-            let mut fields = vec!["0"; 20];
-            fields[0] = "S";
-            fields[19] = "424242";
-            let stat = format!(
-                "123 (a ) name (with parentheses)) {} 99 88",
-                fields.join(" ")
-            );
-            assert_eq!(parse_process_start_time(&stat), Some(424242));
-            assert_eq!(parse_process_start_time("123 (truncated) S 0"), None);
-            assert_eq!(
-                parse_process_start_time(&stat.replace("424242", "invalid")),
-                None
-            );
-            assert_eq!(parse_process_start_time("malformed"), None);
         }
 
         #[tokio::test]
@@ -1664,8 +1620,314 @@ mod linux {
                 fd_name: fdstore_fd_name(session_id, Some(7)),
                 ring_fd_name: with_ring.then(|| fdstore_ring_fd_name(session_id, Some(7))),
                 meta,
+                child_start_time: None,
                 replay: Vec::new(),
             }
+        }
+
+        struct IdentitySentinel {
+            child: Option<std::process::Child>,
+            pin: std::os::fd::OwnedFd,
+            identity: RecordedChildIdentity,
+            can_reap: bool,
+        }
+
+        impl IdentitySentinel {
+            fn start() -> Self {
+                let child = std::process::Command::new("sleep")
+                    .arg("60")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let identity = RecordedChildIdentity {
+                    boot_id: current_boot_id(),
+                    start_time: chan_library::terminal_sessions::process_start_time(child.id()),
+                };
+                let pin = identity
+                    .pin(child.id(), current_boot_id().as_deref())
+                    .expect("owned-child identity and pidfd must be available");
+                Self {
+                    child: Some(child),
+                    pin,
+                    identity,
+                    can_reap: true,
+                }
+            }
+
+            fn pid(&self) -> u32 {
+                self.child.as_ref().unwrap().id()
+            }
+
+            fn exited(&self) -> bool {
+                let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.pid())).unwrap();
+                matches!(
+                    stat.rsplit_once(')').unwrap().1.split_whitespace().next(),
+                    Some("Z" | "X")
+                )
+            }
+        }
+
+        impl Drop for IdentitySentinel {
+            fn drop(&mut self) {
+                let _ =
+                    rustix::process::pidfd_send_signal(&self.pin, rustix::process::Signal::KILL);
+                if self.can_reap {
+                    if let Some(mut child) = self.child.take() {
+                        let _ = child.wait();
+                    }
+                } else {
+                    // A failed close acknowledgement cannot prove its
+                    // numeric-PID controller has stopped. Keep ownership
+                    // until this test process tears down all its threads.
+                    std::mem::forget(self.child.take());
+                }
+            }
+        }
+
+        fn identity_registry() -> chan_library::terminal_sessions::Registry {
+            chan_library::terminal_sessions::Registry::new(
+                chan_library::terminal_sessions::RegistryConfig {
+                    workspace_root: PathBuf::from("/"),
+                    mcp_socket_path: None,
+                    control_socket_path: None,
+                    terminal: chan_library::config::TerminalConfig::default(),
+                },
+            )
+        }
+
+        fn identity_manifest_session(
+            id: &str,
+            child: Option<&IdentitySentinel>,
+        ) -> ManifestSession {
+            let mut entry = manifest_entry(id, true);
+            entry.meta.child_pid = child.map(IdentitySentinel::pid);
+            entry.meta.tab_name = Some(id.into());
+            entry.fd_name = fdstore_fd_name(id, entry.meta.child_pid);
+            entry.ring_fd_name = Some(fdstore_ring_fd_name(id, entry.meta.child_pid));
+            ManifestSession {
+                fd_name: entry.fd_name,
+                ring_fd_name: entry.ring_fd_name,
+                meta: entry.meta,
+                child_start_time: child.and_then(|child| child.identity.start_time),
+                replay_b64: BASE64.encode(b"saved tail"),
+            }
+        }
+
+        fn identity_inherited(
+            session: &ManifestSession,
+        ) -> (Vec<chan_systemd::NamedFd>, std::os::unix::net::UnixStream) {
+            // This descriptor surrogate keeps the imported reader live and
+            // cannot hang up the independent sentinel. PTY behavior is covered
+            // by the library's owned-child import fixtures.
+            let (master, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let mut fds = vec![chan_systemd::NamedFd {
+                name: session.fd_name.clone(),
+                fd: master.into(),
+            }];
+            if let Some(name) = &session.ring_fd_name {
+                fds.push(inherited(name));
+            }
+            (fds, peer)
+        }
+
+        #[test]
+        fn child_identity_mismatch_is_refused_by_import_and_cleanup() {
+            let mut sentinel = IdentitySentinel::start();
+            let mut bad = identity_manifest_session("identity-bad", Some(&sentinel));
+            bad.child_start_time = sentinel.identity.start_time.map(|time| time + 1);
+            let mut good = identity_manifest_session("identity-good", None);
+            good.ring_fd_name = None;
+            let bad_names = [bad.fd_name.clone(), bad.ring_fd_name.clone().unwrap()];
+            let good_names = [good.fd_name.clone()];
+            let (mut inherited_fds, _bad_pair) = identity_inherited(&bad);
+            let (good_fds, _good_pair) = identity_inherited(&good);
+            inherited_fds.extend(good_fds);
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("manifest.json");
+            write_manifest(
+                &path,
+                &RestartManifest {
+                    version: MANIFEST_VERSION,
+                    library_id: "lib-test".into(),
+                    boot_id: current_boot_id(),
+                    sealed: Some(true),
+                    sessions: vec![bad, good],
+                },
+            )
+            .unwrap();
+            let restore = StartupRestore::from_inherited(path, inherited_fds);
+            assert_eq!(
+                restore.imports.len(),
+                2,
+                "both independent live descriptors reach import verification"
+            );
+            let registry = identity_registry();
+            sentinel.can_reap = false;
+            let report = registry.restore_fdstore_sessions(restore.imports);
+            let closed = registry.close_matching_and_wait(
+                Some("identity-bad"),
+                None,
+                Duration::from_secs(5),
+            );
+            sentinel.can_reap = closed.is_empty() || closed.iter().all(|session| session.ended);
+            let mut skipped = Vec::new();
+            cleanup_skipped_session_children(
+                &report.skipped_sessions,
+                &restore.recorded_children,
+                &mut skipped,
+            );
+            let removals = fds_to_remove(
+                Vec::new(),
+                &report.skipped_sessions,
+                report.abandoned_ring_fds,
+            );
+            let store = FakeStoreOps::default();
+            for name in bad_names.iter().chain(&good_names) {
+                store
+                    .store(name, std::fs::File::open("/dev/null").unwrap().as_fd())
+                    .unwrap();
+            }
+            for name in &removals {
+                store.remove(name);
+            }
+            let alive = !sentinel.exited();
+            registry.close_matching_and_wait(Some("identity-good"), None, Duration::from_secs(5));
+            assert!(
+                alive,
+                "mismatching import or cleanup signalled the owned sentinel"
+            );
+            assert_eq!(
+                report.restored, 1,
+                "only the unrelated descriptor-only entry may restore"
+            );
+            assert!(report
+                .skipped
+                .iter()
+                .any(|reason| reason.contains("child start time does not match")));
+            assert!(skipped
+                .iter()
+                .any(|reason| reason.contains("child start time does not match")));
+            let stored = store.0.fds.lock().unwrap();
+            assert!(bad_names.iter().all(|name| !stored.contains_key(name)));
+            assert!(
+                good_names.iter().all(|name| stored.contains_key(name)),
+                "unrelated valid store entries must survive"
+            );
+        }
+
+        #[test]
+        fn child_identity_cleanup_mismatch_authorizes_no_signal() {
+            let sentinel = IdentitySentinel::start();
+            let reason = signal_child(
+                sentinel.pid(),
+                sentinel.identity.boot_id.as_deref(),
+                current_boot_id().as_deref(),
+                sentinel.identity.start_time.map(|time| time + 1),
+            )
+            .unwrap_err();
+            assert_eq!(reason, "child start time does not match the manifest");
+            assert!(!sentinel.exited());
+        }
+
+        #[tokio::test]
+        async fn child_identity_writer_keeps_absent_capture() {
+            let child = IdentitySentinel::start();
+            let (parker, _, path) = test_parker(FakeStoreOps::default());
+            let mut entry = manifest_entry("identity-no-capture", false);
+            entry.meta.child_pid = Some(child.pid());
+            entry.fd_name = fdstore_fd_name(&entry.meta.session_id, entry.meta.child_pid);
+            entry.child_start_time = None;
+            {
+                let phase = parker.shared.phase.lock().unwrap();
+                parker
+                    .shared
+                    .write_entries_locked(&phase, vec![entry])
+                    .unwrap();
+            }
+            let written: RestartManifest =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            parker.stop().await;
+            assert_eq!(
+                written.sessions[0].child_start_time, None,
+                "a failed capture must never be refreshed by a manifest write"
+            );
+        }
+
+        #[tokio::test]
+        async fn child_identity_writer_preserves_import_across_rewrites() {
+            let mut child = IdentitySentinel::start();
+            let session = identity_manifest_session("identity-rewrite", Some(&child));
+            let (fds, _pair) = identity_inherited(&session);
+            let tmp = tempfile::tempdir().unwrap();
+            let input = tmp.path().join("input.json");
+            write_manifest(
+                &input,
+                &RestartManifest {
+                    version: MANIFEST_VERSION,
+                    library_id: "lib-test".into(),
+                    boot_id: current_boot_id(),
+                    sealed: Some(true),
+                    sessions: vec![session],
+                },
+            )
+            .unwrap();
+            let restore = StartupRestore::from_inherited(input, fds);
+            let registry = identity_registry();
+            let (parker, hook, path) = test_parker(FakeStoreOps::default());
+            registry.install_fd_parker(FdStoreParker::new(hook));
+            parker.activate();
+            child.can_reap = false;
+            let report = registry.restore_fdstore_sessions(restore.imports);
+            assert_eq!(report.restored, 1, "{:?}", report.skipped);
+            let exported = || registry.fdstore_manifest_sessions("/t/terminals");
+            assert_eq!(exported().len(), 1);
+            {
+                let phase = parker.shared.phase.lock().unwrap();
+                parker
+                    .shared
+                    .write_entries_locked(&phase, exported())
+                    .unwrap();
+            }
+            let written: RestartManifest =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let (second_fds, _second_peer) = identity_inherited(&written.sessions[0]);
+            let second = identity_registry();
+            let again = StartupRestore::from_inherited(path.clone(), second_fds);
+            assert_eq!(
+                again.imports[0].child_identity, child.identity,
+                "a second import must receive the original recorded identity"
+            );
+            let second_report = second.restore_fdstore_sessions(again.imports);
+            assert_eq!(second_report.restored, 1, "{:?}", second_report.skipped);
+            let changed = child.identity.start_time.unwrap() + 99;
+            assert!(
+                !child.exited(),
+                "the child must be live during the rewrites"
+            );
+            let mut written_times = Vec::new();
+            for _ in 0..2 {
+                let mut entries = exported();
+                entries[0].child_start_time = Some(changed);
+                let phase = parker.shared.phase.lock().unwrap();
+                parker.shared.write_entries_locked(&phase, entries).unwrap();
+                let written: RestartManifest =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                written_times.push(written.sessions[0].child_start_time);
+            }
+            let closed = registry.close_matching_and_wait(None, None, Duration::from_secs(5));
+            let second_closed = second.close_matching_and_wait(None, None, Duration::from_secs(5));
+            child.can_reap = closed
+                .iter()
+                .chain(&second_closed)
+                .all(|session| session.ended);
+            parker.stop().await;
+            assert_eq!(
+                written_times,
+                vec![Some(changed); 2],
+                "manifest rewrites must copy the stored time instead of reading the live child's"
+            );
         }
 
         #[test]

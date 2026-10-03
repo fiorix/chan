@@ -25,7 +25,7 @@ describe("AltGr is a macOS-free notion", () => {
   });
 
   test("on macOS the same flags are Ctrl+Option and resolve", () => {
-    // The digit row keeps its position, so this is digit 8, not `[`.
+    // Digit shortcuts follow the physical top-row position, here digit 8.
     expect(shortcutKey(keyVectorEvent(altGrBracket), true)?.key).toBe("8");
   });
 });

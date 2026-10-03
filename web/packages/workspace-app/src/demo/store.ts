@@ -11,12 +11,19 @@ import type {
   MoveResponse,
   TreeEntry,
 } from "../api/types";
-import { parentDir } from "../state/format";
 import type { MockFileEntry, MockWorkspaceData } from "./data";
 
 function baseName(path: string): string {
   const i = path.lastIndexOf("/");
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/// An entry's parent, cut at the last `/` as the server cuts it. The demo
+/// stands in for the server, so it does not take the client's rule: a client
+/// that cut a parent wrongly would otherwise agree with its own stand-in.
+export function parentOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i < 0 ? "" : path.slice(0, i);
 }
 
 function nowSeconds(): number {
@@ -34,6 +41,9 @@ export class MockWorkspaceStore {
   #files = new Map<string, MockFileEntry>();
   #children = new Map<string, DirBucket>();
   #dirs = new Set<string>();
+  // Folders created empty. Every other directory is implied by a file under
+  // it, so a rebuild from the file map alone would lose these.
+  #folders = new Set<string>();
   #sessions = new Map<string, unknown>();
 
   constructor(data: MockWorkspaceData) {
@@ -56,15 +66,18 @@ export class MockWorkspaceStore {
       }
       return b;
     };
-    for (const path of this.#files.keys()) {
-      bucket(parentDir(path)).files.add(path);
-      let dir = parentDir(path);
+    const seed = (dir: string): void => {
       while (dir !== "") {
         this.#dirs.add(dir);
-        bucket(parentDir(dir)).dirs.add(dir);
-        dir = parentDir(dir);
+        bucket(parentOf(dir)).dirs.add(dir);
+        dir = parentOf(dir);
       }
+    };
+    for (const path of this.#files.keys()) {
+      bucket(parentOf(path)).files.add(path);
+      seed(parentOf(path));
     }
+    for (const dir of this.#folders) seed(dir);
   }
 
   isDir(path: string): boolean {
@@ -148,14 +161,8 @@ export class MockWorkspaceStore {
 
   create(path: string, isDir: boolean, content?: string): void {
     if (isDir) {
-      // Directories are implicit in the index; seed an empty bucket so an
-      // empty new folder still lists (until it gets a child).
-      this.#dirs.add(path);
-      if (!this.#children.has(path)) {
-        this.#children.set(path, { dirs: new Set(), files: new Set() });
-      }
-      const b = this.#children.get(parentDir(path));
-      if (b) b.dirs.add(path);
+      this.#folders.add(path);
+      this.#reindex();
       return;
     }
     this.#files.set(path, {
@@ -176,6 +183,9 @@ export class MockWorkspaceStore {
       const prefix = `${path}/`;
       for (const p of [...this.#files.keys()]) {
         if (p.startsWith(prefix)) this.#files.delete(p);
+      }
+      for (const dir of [...this.#folders]) {
+        if (dir === path || dir.startsWith(prefix)) this.#folders.delete(dir);
       }
     }
     this.#reindex();
@@ -198,9 +208,36 @@ export class MockWorkspaceStore {
         this.#files.set(np, { ...e, path: np });
         renamed.push([p, np]);
       }
+      for (const dir of [...this.#folders]) {
+        if (dir !== from && !dir.startsWith(prefix)) continue;
+        this.#folders.delete(dir);
+        this.#folders.add(`${to}${dir.slice(from.length)}`);
+      }
     }
     this.#reindex();
     return { renamed, rewritten: [], conflicts: [] };
+  }
+
+  /// Copy a file, or a directory's whole subtree, and return the paths
+  /// written. The source stays.
+  copy(from: string, to: string): string[] {
+    const written: string[] = [];
+    const mtime = nowSeconds();
+    const source = this.#files.get(from);
+    if (source) {
+      this.#files.set(to, { ...source, path: to, mtime });
+      written.push(to);
+    } else {
+      const prefix = `${from}/`;
+      for (const [p, e] of [...this.#files]) {
+        if (!p.startsWith(prefix)) continue;
+        const np = `${to}/${p.slice(prefix.length)}`;
+        this.#files.set(np, { ...e, path: np, mtime });
+        written.push(np);
+      }
+    }
+    this.#reindex();
+    return written;
   }
 
   // --- session (per-window layout) ---

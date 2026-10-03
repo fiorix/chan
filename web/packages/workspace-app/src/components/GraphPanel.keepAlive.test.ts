@@ -33,7 +33,7 @@ import {
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { layout, type LeafNode } from "../state/tabs.svelte";
+import { layout, reorderTab, type LeafNode } from "../state/tabs.svelte";
 
 installGraphDom();
 
@@ -96,6 +96,22 @@ describe("graph tabs in a pane", () => {
     expect(panels()[0], "the same element, not a remount").toBe(one);
     expect(two!.classList.contains("active")).toBe(true);
     expect(one!.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  test("reordering after a switch moves each graph panel with its tab", async () => {
+    const { pane, panels } = await renderPane();
+    const [one, two] = panels();
+    expect(panels()).toHaveLength(2);
+
+    pane.activeTabId = "two";
+    await settle();
+    expect(panels()[0], "the first panel survives the switch").toBe(one);
+
+    reorderTab(GRAPH_PANE, "one", 1);
+    await settle();
+    expect(pane.tabs.map((tab) => tab.id)).toEqual(["two", "one"]);
+    expect(panels()[0], "the second tab brings its panel forward").toBe(two);
+    expect(panels()[1], "the first tab keeps its panel after moving").toBe(one);
   });
 
   test("a hidden tab loads when first shown, not before", async () => {
@@ -172,4 +188,3 @@ describe("graph tabs in a pane", () => {
     expect(rule(".graph-tab.active")).toContain("visibility: visible;");
   });
 });
-

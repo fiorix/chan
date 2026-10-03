@@ -7,12 +7,19 @@
   import ModalShell from "./ModalShell.svelte";
 
   let okEl: HTMLButtonElement | undefined = $state();
+  let cancelEl: HTMLButtonElement | undefined = $state();
 
-  // Park focus on the OK button when the dialog opens, so the default
-  // action is the focused control.
+  // Each request focuses its default, including a replacement while open.
+  // Destructive confirms default to Cancel; other confirms default to OK.
   $effect(() => {
     if (confirmState.open) {
-      queueMicrotask(() => okEl?.focus());
+      const request = confirmState.resolve;
+      const destructive = confirmState.destructive;
+      queueMicrotask(() => {
+        if (confirmState.open && confirmState.resolve === request) {
+          (destructive ? cancelEl : okEl)?.focus();
+        }
+      });
     }
   });
 
@@ -26,7 +33,7 @@
     if (e.key === "Enter") {
       e.preventDefault();
       if (e.target instanceof HTMLButtonElement) e.target.click();
-      else ok();
+      else resolveConfirm(!confirmState.destructive);
     }
   }
 </script>
@@ -38,7 +45,7 @@
       <div class="message">{confirmState.message}</div>
     {/if}
     <div class="actions">
-      <button class="cancel" onclick={cancel}>{confirmState.cancelLabel}</button>
+      <button bind:this={cancelEl} class="cancel" onclick={cancel}>{confirmState.cancelLabel}</button>
       <button
         bind:this={okEl}
         class="ok"

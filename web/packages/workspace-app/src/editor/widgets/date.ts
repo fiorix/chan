@@ -2,9 +2,8 @@
 //
 // Detection: lezer-markdown doesn't recognize dates, so this lives in
 // its own ViewPlugin (mirrors the tag pattern from widgets/tag.ts).
-// We delegate matching to dateFormats.findDateMatches - the same
-// matcher the legacy editor used, kept under web/packages/workspace-app/src/editor/ so date
-// catalog evolution stays in one place.
+// Matching is delegated to dateFormats.findDateMatches, so the date
+// catalog stays in one place.
 //
 // Rendering: per design.md #3 / #5, dates are atomic widgets.
 //   - When selection intersects the date range (boundary-inclusive,
@@ -110,18 +109,21 @@ class DateWidget extends WidgetType {
           if (!isWidgetWritable(view)) return;
           // Caret must always land OUTSIDE the date range so the
           // pill re-renders (anywhere inside / at the boundary
-          // keeps it in source-edit mode). Two cases:
-          //   - next char is a space: jump the caret past it.
-          //   - next char isn't a space (or we're at EOF): insert
-          //     a space so the caret has a valid landing spot one
-          //     past the date.
+          // keeps it in source-edit mode). When a space follows the
+          // date the caret jumps past it; otherwise it stays where
+          // it was, which the pill's click did not move and which
+          // was already outside the date. Only the date is replaced:
+          // a space inserted for the caret would push punctuation
+          // away from the date or leave one at the end of the line.
           const after = view.state.doc.sliceString(to, to + 1);
-          const needsSpace = after !== " ";
-          const insert = formatted + (needsSpace ? " " : "");
-          view.dispatch({
-            changes: { from, to, insert },
-            selection: { anchor: from + formatted.length + 1 },
-          });
+          view.dispatch(
+            after === " "
+              ? {
+                  changes: { from, to, insert: formatted },
+                  selection: { anchor: from + formatted.length + 1 },
+                }
+              : { changes: { from, to, insert: formatted } },
+          );
           // Picking a different format from the popover sticks as
           // the new default so subsequent @today / @date macros
           // honor the user's choice.

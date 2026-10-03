@@ -21,201 +21,13 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.101.0
-
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item. On 2026-09-25 the owner accepted all twenty-three items then neither landed, withdrawn nor being built, each as the lead recommended, and those rulings are recorded the same way. On 2026-09-26 the owner accepted the seven items the landing before had raised, with no deferral, and the lane and shape rulings the lead made under that word are recorded in each item. The same day the owner gave the four rulings the frontend review remainder waited on and closed the ring mirror's throughput cost as measured; one test-harness race from landing 15's CI is raised for a decision. Later that day the owner accepted the seven items then awaiting a decision, each as the lead recommended, with the shape and lane rulings recorded in their files. Five more, raised that day by reviews and reports of the work in hand, were accepted the same evening, each as the lead recommended, and a sixth found the same way landed with its fix. On 2026-09-27 eight items landed, among them a live terminal that keeps its renderer across a pane split, the desktop's close and quit beside a hung root, and one found and fixed while those were built, a save during shutdown that turned every other workspace off; the refusal envelope's first part landed too, with its item still open. The two items a review raised on 2026-09-26, the terminal tenant answering for a home workspace and a quit drain that can hang on a recovery pass, enter as accepted with the owner's rulings of that day, and three more found in that work are raised for a decision. Later on 2026-09-27 the owner ruled that every accepted item lands before the first candidate, with the comment pass, the low-severity rows of the frontend review remainder, the dedup seams and the CLI crate split last. Then three items landed: the terminal tenant answering for a home workspace, with the two narrower items it absorbed. The refusal envelope's second part landed too, the refusals a tenant's own handlers write, the devserver's own and the extension proxy's, with the owner's two rulings on it and its item still open, and two of the frontend review remainder's editor defects were fixed. One more item, a JSON tab attached to a document session skipping the save's parse check, is raised for a decision. The same day the owner decided the four items then raised for a decision, each as the lead recommended: a stopping devserver that refuses a mount before its host is asked and the JSON tab skipping the parse check are accepted for this version, the second with the shape of its fix still to be ruled, and the two that need a relinked root, a forget that waits on a hung root at each registry lookup and an off row that outlives a devserver restart, are accepted for a later version and move to v0.102.0. Two items raised that day were accepted for this version with the owner's rulings: the desktop taking Ctrl+] from a focused shell, which the owner met leaving a container session, and a quit that can still hang on a standalone Files window's watch, which the review of the quit drain found. The owner also ruled that a version's first release candidate is rc0. Then the quit drain that could hang on a recovery pass landed, with a quit's wait on each workspace's teardown now bounded; the refusal envelope's third part landed too, the launcher's shared refusal gates, with its item still open; and thirteen more of the frontend review remainder's defects were fixed, four in the editor and nine in the app shell, the panes and the file tree. The owner then ruled that the desktop frees Ctrl+Q on macOS as well; it joins the Ctrl+] item, and the wider keyboard rule on macOS stays open. Then the Linux gate's two items landed, two steps `make ci-linux` runs after `make pre-push`: the chan-library and chan-server suites under a symlinked temp directory, with five path assertions made exact, and a check of the Windows arm's test crates for the Windows target; and two more of the frontend review remainder's editor defects were fixed, the JSON tree's size and depth limits and the keyboard's return to the editor when the find bar closes. Main CI's first run of those two steps was red: both suites passed under the symlinked temp directory, but on a runner whose user is not root the step's cleanup could not remove two directories that tests had left without write permission, and the Windows-target check did not run. Then three items landed: the desktop leaving Ctrl+[, Ctrl+] and Ctrl+/ to a focused terminal, with the terminal sending 0x1F for Ctrl+/ on every client and Ctrl+Q left to the page on macOS; a stopping devserver refusing a mount before it registers the root; and a quit's wait on a standalone Files window's watch, now bounded. With them landed the fix for that red step, whose cleanup no longer decides its verdict, with the tests putting their modes back; the refusal envelope's fourth part, the launcher handlers' own refusals, after which no launcher route is exempt from the check, with the web clients' first readers of a refusal's code and the extension catalog's `running` field, its item still open; and five more of the frontend review remainder's defects, the style toolbar's four and a drawing's last stroke, with two older ways to lose a drawing found and still open. Ten items found in that work are raised for a decision: a close on the connecting page that discards a library window, the launcher's add and on skipping a stopping devserver's check, the startup gate's sentence while a devserver stops, the extension proxy forwarding to an exited extension's port, a race in two tests that capture warnings, the deck's Hide and Close on another host's window, two closes that still drop a drawing's last stroke, a rejected JSON body's refusal naming the request's Rust type, the gate's container running as root, and the terminal pruner's save under the chan home on a runtime worker. Main CI's run for that landing was green in all nine jobs, the first green run of the Linux gate's two steps on a runner: the suites under the symlinked temp directory passed in 2 minutes 56 seconds, with the cleanup leaving nothing behind, and the Windows-target check passed in 2 minutes 39 seconds. Then the refusal envelope's fifth part landed, the crate's own extractors, whose rejection answers the framework's status and sentence in the envelope, with the devserver's own handlers moved to them, and the CLI's two readers of a devserver's refusal, its item still open; and more of the frontend review remainder's defects were fixed: three in the editor's widgets, the shared deck's handling of a command that rejects, the launcher's dialog focus and its poll, and a drawing on disk becoming a scene nobody drew, which closes the two older ways to lose a drawing, with two more found by its review and still open. Three items found in that work are raised for a decision: a live drawing's scene snapshot that the drawing library's init wipes, a draft closed before its content arrives going to the trash, and a gate's refusal of a wrong method listing the route's methods. Then the refusal envelope's sixth part landed, the framework's own refusals in the workspace and terminal tenants and on the devserver's management routes: their extractors' rejections, the two draft-create routes among them after a fix round, and a wrong method's 405 answer in the envelope, with each gate still answering a wrong method before the 405, its item still open; and three more of the frontend review remainder's defects were fixed, in the file editor's hosts: a slide deck's Mod+Enter taken ahead of the rendered editor's own actions, the editor's body menu opened in the JSON tree and the CSV table, and a CSV cell only the mouse could edit. The texts of three items were brought up to this code: a gate's refusal listing the route's methods, which the landed code now pins, the JSON tab skipping the parse check, whose reading now covers what the server writes and when, and a scene snapshot wiped by the drawing library's init, with how its order is reached. Three items found in that work are raised for a decision: an MCP tool's read that takes a whole file before its size cap, an open with no time limit of its own holding a hung root's lock ahead of a close, and a live drawing written with no edit because its stored appState lacks the serializer's keys. Later on 2026-09-27 the owner accepted in one answer every recommendation the lead had put to them that day. Nine of the items then raised for a decision are accepted for this version: a close on the connecting page that discards a library window, the launcher's add and on skipping a stopping devserver's check, built with the startup gate's sentence while a devserver stops, the extension proxy forwarding to an exited extension's port, the race in two tests that capture warnings, two closes that still drop a drawing's last stroke, the gate's container running as root, a scene snapshot that the drawing library's init wipes, and a draft closed during its load going to the trash. Four are accepted for a later version and move to v0.102.0: the deck's Hide and Close on another host's window, a rejected JSON body naming the request's Rust type, the terminal pruner's save on a runtime worker, and a gate's refusal listing the route's methods. The same answer revised three rulings of items already accepted, each recorded in its item: a spawned child's hold on a lock ends with an unlock after the probe, a relinked root widens to one row per workspace, and a hung root's caller keeps its lock while the blocking call holds a permit of its own. The JSON tab's contract is rewritten to the owner's ruling, the save's check dropped for `.json` and kept for a drawing. In a second answer the same day, question by question, the owner accepted the three items then raised for a decision, the MCP read's bound as a stat before the read with the documents saying so, the open with no bound of its own and the live drawing's write with no edit, and a fourth raised and accepted at once, a drawing in source mode that loses its editor when its buffer does not parse; confirmed that on macOS the desktop leaves Ctrl+Q to the page and ruled nothing wider; and asked for a survey, in the next version, of how other MCP servers answer a read of a file over their cap. The AUR check's item, landed on 2026-09-26, is open again: two test dependencies added after it make the AUR package of `chan` install a binary that its test build wrote with a test-only feature, which its pin, reading only the recipes, did not see. In a third answer the owner accepted the lead's fix of it, in the AUR recipes, and two rulings on the launcher's browser windows that wait for their page. Then the cancellation of a started MCP tool landed: a cancelled request, or a close of its root, stops a running file listing or report scan at its next entry or file and a workspace search at its next seed, with a search's stop inside a seed and a whole file's read still open. Three more of the frontend review remainder's rows were fixed with it: a shortcut that could be Shift with a key alone, a cleared search box that a late answer filled again, and a recalled prompt that gave its text back before the server had answered, with a fault the lead's reading found in that fix mended before it landed. Three items found in that work are raised for a decision: a graceful restart of a raw devserver that may close desktop windows it should keep, a workspace search that stops between seeds and not inside one, and the `chan` crate exporting a module that only tests call. The development box ran out of memory on the night of 2026-09-27 and was rebooted, with no commit lost, so that landing and the next are dated 2026-09-28. That day the owner ruled that the launcher's browser windows that wait for their page and the workspace app's capability popup, whose two reviews had asked that they land with a fix round, land with that round's first order, and that its three other orders follow as ranges of their own. So the refusal envelope's client half landed its first part, its item still open: a window that the launcher or the workspace app's deck opens in a browser waits for its page before it navigates, and the shared deck shows a failed command's error on its card only while it is open on the draft that ran the command and the run still owns the card, and otherwise hands the error to its host once. What that leaves open on `main` is written in the item as costs: an Open that no longer repairs a window showing a refusal page or an engine's own error page, until the order on when a window is on its page lands; the mark of a navigation in flight, with no bound in time; two mechanisms that remember a navigation; a caller that takes another page's wait for a navigation; and a tab the user moved before the create answered. With them landed a drawing's board seeded only from the whole of a finished load, with a fix round for the appState a seed hands the board, which closes the two ways to lose a drawing that the review of the earlier fix had found; and the JSON tab's item, a `.json` file saved as typed in every window, while a drawing edited as source is still refused when it does not parse. Four items are raised for a decision: an element whose id repeats getting a new id at every seed, a drawing library that throws leaving a seeded board to publish an empty scene, a released command whose success paints over what the deck shows by then, and the AUR build of `chan` killed with its hosted runner in its release test compile. Later on 2026-09-28 five ranges landed together. A hung root's blocking calls landed, their item still open: the caller keeps its root's lock, and the blocking open with its root check, and a mounted root's revalidation, each hold a permit of their own for the root, so a root that stops answering holds one thread for each kind of call however many callers give up; a later open waits about two seconds at most for a permit that abandoned work holds, and an open of a mounted root beside a revalidation whose caller left returns the mount without a check. The registration and a close's and a removal's own hops still take a thread for each caller that gives up, and a caller that still waits on a call that never returns holds a close and a removal behind it, which is the item of an open with no bound. The AUR check's item landed again: both AUR recipes install the binary that `build()` set aside, the checker pins it, and a package built by each recipe showed by four hashes that the test build of `chan` writes another file and that the package installs the one `build()` made. The rule of when a browser window is on its page landed, its item still open with the rule's fix round to come: an Open, a Focus or a Show decides by the window's record and not by what the window shows, which closes the regression the landing before left on `main`, a browser's Show repairs before it un-hides, and the launcher keeps the row of a browser window it holds no handle for, as the owner ruled. The desktop's half of the refusal clients landed too: a new window waits out a loopback devserver's startup refusal, an open window waits for a restarting devserver in place, retargeted by its watcher alone, and the desktop's readers print a refusal's sentence, the workspace add through a gateway among them. And a probe of a workspace's lock now unlocks before it closes its file, which lands the item of a spawned child holding a lock until it execs. Twelve items found in that work are raised for a decision: the desktop's probe taking a gateway's 404 as ready, a window's record that says a socket is live and not whose, a browser's Show that opens a second window for a record a desktop owns, a kept browser terminal row that keeps its sessions alive, the shared confirm dialog focusing its confirm button, a failed save that replaces the editor with its error, whether a draft drawing that does not parse may be discarded from its own dialog, a close over the control socket that runs to its end whatever its client does, a close or a removal that answers before the workspace is let go, an open's result that nobody received blocking a runtime worker, a test that reads a row before the lock is released, and a lock probe whose own hold can refuse a concurrent acquire; and a second reading, a raw devserver killed and restarted, joins the item on its graceful restart. Then five more ranges landed the same day. An MCP tool's read of one file is bounded by its cap, which lands its item: `read_media` refuses a file over its cap from the size its open handle reports, having read none of it, and `read_file` reads at most its 256 KiB cap and takes the file's size from that stat; by the lead's ruling, which the owner has not answered, a text file over the cap whose bytes past it are not UTF-8 is answered with its text up to the cap, where it was refused. A relinked root's server half landed with its fix round, its item still open: the devserver's handoff and the launcher's window route and command action mint a workspace window at the root its runtime was opened at, and the devserver lists such a workspace once, under its registry row, with the record whose prefix the host serves, and answers its on route with that row. The devserver can still hold two records for one relinked workspace, a relinked root's public path can change across a restart, the desktop's half is not ordered yet, and one record per workspace, in the shape the lead ruled, the owner's to overrule, which changes the prefix of a workspace served through an alias of another name, is built and under review in the development tree and is not in this landing. A drawing edited as source whose text does not parse keeps its editor at a refused save and says that it was not saved, a close of it asks whether to keep editing, and the refused text takes no live session until a write of it lands, which lands its item, with four checks on a display owed at rc0. Three small fixes landed, each with its item: a scripted team passes each member's env, the extension proxy sends nothing to an extension whose supervisor saw it exit, and a capture of warnings in chan-library's tests sees a warning whose callsite another thread registered first. The rule of when a browser window is on its page got its fix round, the refusal envelope's item still open: a window's record is read again before the window is navigated, a browser's Show takes a window only for a record of a browser's origin, and a popup the browser blocks is reported; the mark of a navigation with no bound in time, the two mechanisms that remember a navigation and a caller that takes another page's wait for its own are left to the order on the wait, in hand. One item is raised for a decision: a close of a mounted root that awaits its teardown with no deadline. Then three more ranges landed the same day. An open of a root that stops answering gives the root back, which lands its item: the launcher's add and on and the desktop's embedded open each stop at the devserver mount's bound of sixty seconds, the launcher's counted from the request's start and the desktop's from its call, and answer that the root did not answer, the launcher with a 503 and no `Retry-After`, so a close and a removal of that root get through after them. By two rulings of the lead's, which the owner has not answered, a root that this process is still releasing is answered by the launcher's add and on with a 503, `Retry-After: 1` and the words its row reads, where they answered 400 and 500, while the desktop says the row's words and keeps its sentence about another chan process for another process's lock; and an add refused at the bound can still register its workspace once the root answers, which is written as a cost. A file whose name holds a backslash reads as itself, the Rust half, its item still open for the web app's copies of `basename` and `parentDir`: the item's premise is corrected, since on Unix the rewrite of `\` to `/` made such a file unreachable through every store derived from the walk rather than giving it two spellings, and one function now spells a relative path on every surface, which also closes three faults beside a real `a/b.md`. And the waiting windows' wait landed, the refusal envelope's item still open: a navigation's mark runs out, after sixty seconds for a wait and ten after a navigation, one function reads it, a caller that finds another page's wait follows it before it answers, a refused repair closes only a blank that its own gesture opened, a wait gives back the mark it replaced, and the launcher discards no window while an Open of it is pending; by the lead's ruling, which the owner has not answered, a user's own close of a window still discards its record. A tab its user moved before the create answered, a record the workspace app minted that no failure path discards, and the pins of the refusal readers are still to build. Five items found in that work are raised for a decision: one window's close discarding a record whose connection another window still holds, the desktop's `chan serve` handoff registering a path with no time limit, the launcher's add and on answering another process's lock with two statuses and two sentences, an upload that cuts a file's name at its backslash with the desktop refusing an upload into a directory whose name holds one, and the restart manifest's writer asking every workspace root's filesystem under the host's routing lock. Later on 2026-09-28 four ranges landed together. One devserver record per workspace landed with its fix round, the relinked root's item still open for the desktop's half: every devserver record is keyed by the root its registry row stores and served at the prefix derived from that root, whether the serve handoff, the open route or the on route made it, the launcher's add mounts at the same prefix, and a restore makes one record of the overlay rows that an earlier build or the host's close wrote under either of a workspace's keys, on when any of them is on, at their highest generation and at least 1, so a relinked root is one record at one prefix across restarts. By two rulings of the lead's, which the owner has not answered, a workspace served through an alias of another name is served at its registered prefix, and a workspace turned off from its row after a failed restore and a `chan serve` comes back on once, at the first restart under this build. That restart moves the prefix of a workspace served at one this build no longer derives, and an address a client kept for it stops answering; a terminal such a workspace parked is now restored in the tenant its window is shown under, where it was ended, though `cs` in it fails until an order in hand lands, and one whose window an earlier build stored under an alias's spelling is still ended. Written as costs: a launcher mount over a devserver record that is off, which reads off and after a save on with no token, and an add or a launcher's on alone, which leaves no devserver record. The code of this landing does what the item on a relinked off row that outlives a devserver restart asks, accepted for v0.102.0 and its state the owner's, and narrows the reading that a root relinked while mounted cannot be handed off to a root with no devserver record that reads mounted. The refusal envelope's client half landed its fifth part, its item still open: a new window's tab that its user took elsewhere before the create answered is left to them and its record discarded, with a sentence that says so, the workspace app's create discards the record it minted wherever no window shows it, and the refusal readers are pinned as they are. The launcher's removal answering another process's lock with a 500 joins the item on the add's and the on's two answers, and the AUR build of `chan` was red twice more on landing 31's commit, killed in its release test compile and then lost with its runner. Five items are raised for a decision: two tests of chan-library that signal a process they did not start, with one of chan-server that kills by command line, two registry rows that can name one directory, the fd-store e2e suite printing the devserver's token, a test of chan-library that ran out its ten seconds once on a hosted Windows runner, and the root stall, which holds a named step only in a build that keeps its symbols, so that two tests of chan-desktop fail in the AUR recipe's release build and main CI is red at that job since the landing that added them. Later on 2026-09-28 two ranges of the web app landed together, and each lands its item. A file whose name holds a backslash reads as itself in the web app, the item's web half: the workspace app's `basename` and `parentDir` cut a workspace path at `/` alone, so the inspector's title and image text and the PDF export's status line and file name call such a file by its whole name, where they named it by the part after its last `\`; eight copies written as functions and sixteen written in place are folded onto the two, three that answer an edge input differently and the file classifier, which a check compiles by itself, keep a cut of their own at `/`, and the launcher's copy, which is handed a host's root, is renamed `rootName` and keeps its cut; the path prompt still refuses a typed `\` and says that a name cannot hold one. By rulings of the lead's, which the owner has not answered, the Clients lane built the fold that the owner's ruling gave to the frontend lane, the cuts written in place were folded too, and the editor's inline Name field and a drop are not changed. A draft closed before its content arrives is kept: a single close that is not forced leaves the draft's file as it is while its load runs, or while its last read failed and nothing was typed over what had arrived, with no notice by a ruling of the lead's that the owner has not answered, and the reopen opens that draft by its path and loads it again, in a workspace window and a standalone one alike; a reading on a display is owed at rc0. Four items are raised for a decision, three found in that work, the surfaces that take a typed or dropped name disagreeing on a backslash, the excluded-directories control among them, chan-desktop saving a download under the part of its name after the last backslash, and a draft reopened after a forced or a bulk close coming back as a new draft, and one found by the order on the tests that signal a process they did not start, the close of a restored terminal signalling a process id and not the process its session started; and the demo's stand-in server taking an entry's parent from the client's own function joins the frontend review remainder. Two more are raised by the lead: the control socket's directory, which the server and every client believe as found where the handoff's sockets refuse a directory that is not the user's own, and a test of the host that waits on a reference and not on the lock's release, which failed once in main CI on the landing before this one. Later on 2026-09-28 a test's repair and two ranges landed together, each range with its fix round. The test of the host waits for the lock's release, which lands its item: its builder reproduced the race with a delay in the lock's drop, and the file's two tests with that wait call the host's own wait for no reference and a free lock and assert the lock free after it. No test of chan-library or chan-server signals a process it did not start, which lands its item: the two tests that imported a session with a made-up pid import a child of their own, and the test of chan-server kills the child it read through a pidfd. `cs` in a terminal whose devserver tenant moved reaches it: when its stable socket is gone, `cs` asks the devserver's other stable sockets in the same directory, only where neither the group nor the world can write that directory, and uses the one tenant that serves the terminal's workspace, saying so on stderr only to a terminal. By two rulings of the lead's, which the owner has not answered, the directory's mode is the rule and its owner is not checked, and only `cs`'s own resolvers can start the search; the costs are written in the relinked root's item, among them a directory put in the place of a runtime directory that has gone away, which the search believes without the socket's name, and a terminal whose workspace folder does not answer, which waits. And the desktop's half of a relinked root landed, its item still open: the desktop keys a workspace by the root its registry row stores, asks its host whether a workspace is served, and mints the windows of its handoff, `serve::start` and `cs window new` under that root, so a relinked root's window nests under its row, `cs window new` opens a window of a workspace the launcher turned on, a `chan serve` after the launcher's off turns the workspace on, and a user's open that loses the race to publish still opens its window, which closes the case of a `chan serve` that starts the desktop for a workspace left on and opened none. It lands the item of a handoff that keyed a root before the root existed. By a ruling of the lead's, which the owner has not answered, the desktop's forget names the stored root only while it still resolves to the canonical root of the runtime it found, and that canonical root otherwise, so a forget of a workspace whose stored root was pointed at another workspace's folder while it was open no longer forgets that other workspace, and the workspace asked stays registered and off, which is written as a cost. What that leaves open is the two menu commands that copy a window's path, left out by a ruling of the lead's, the host's removal, which unregisters by the name it is given, and a root relinked while it is mounted, which the devserver cannot hand off when none of its records reads mounted. Five items are raised for a decision: the reset and the import taking their own reference's drop for the lock's release, a library id in the control socket's identity and a terminal's environment, the host's removal unregistering and purging by the name it is given, the desktop's two menu commands copying a window outside its row, and the workspace app's deck naming a window on a Windows host by its whole root. The texts of three items are brought up to this code: the control socket's directory, which the search now believes by its mode, the stale sentences, which gain five comments these ranges left stale in other files, and a draft reopened after a forced close, whose user's bulk closes refuse a pane that holds a draft; and the relinked root's item says that for one of its three kinds of restored session `cs` reaches another tenant than the one that holds it.
-
-**Frontend review, phased from v0.100.0**
-
-| item | state | next |
-| --- | --- | --- |
-| [source-text-tests-pin-spelling-not-behaviour][rawt] | landed | GA |
-| [one-question-is-answered-in-many-places][dedup] | accepted | after rawt |
-| [frontend-comments-narrate-history][cmts] | accepted | build |
-| [hand-mirrored-contracts-have-no-gate][mirr] | landed | GA |
-| [the-frontend-review-remainder-has-no-owner][ferem] | accepted | build |
-
-**From the v0.99.0 follow-ups**
-
-| item | state | next |
-| --- | --- | --- |
-| [an-admitted-tunnel-outlives-its-connection][tunl] | landed | GA |
-| [a-stalled-reader-parks-a-pool-thread][stall] | landed | GA |
-| [one-root-blocks-every-other-mount][rlock] | landed | GA |
-| [a-non-utf8-text-file-loses-its-backlinks][nutf] | landed | GA |
-| [two-copies-to-one-free-name-can-collide][copy2] | landed | GA |
-| [a-blocking-pool-pin-passes-without-proof][bpin] | landed | GA |
-| [stale-sentences-outlive-their-code][prose] | accepted | build |
-| [a-service-spawned-extension-gets-a-bare-path][extp] | landed | GA |
-| [the-aur-check-could-ship-a-test-only-feature][aurc] | landed | GA |
-
-**Raised during v0.100.0**
-
-| item | state | next |
-| --- | --- | --- |
-| [refusals-answer-in-four-shapes][refus] | accepted | build |
-| [the-team-poke-names-a-path-it-does-not-anchor][poke] | landed | GA |
-| [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | landed | GA |
-| [an-expired-survey-cannot-be-dismissed][surv] | landed | GA |
-| [the-test-util-comments-omit-the-attach-seam][tutil] | landed | GA |
-| [the-fdstore-manifest-splits-seq-and-tail][fdsq] | landed | GA |
-| [a-mount-retry-test-races-a-wall-clock][mwclk] | landed | GA |
-| [desktop-design-omits-the-root-health-probe][dhp] | landed | GA |
-| [a-dropped-indexers-driver-eats-recovery][drvr] | landed | GA |
-| [the-bulk-skip-note-calls-unknown-locked][bskip] | landed | GA |
-| [mcp-write-errors-follow-an-unpinned-display][mcpd] | landed | GA |
-| [a-joining-snapshot-fails-during-reconcile][join] | landed | GA |
-| [profile-workers-have-no-shutdown-owner][pwork] | landed | GA |
-| [the-email-fold-merges-distinct-characters][fold] | withdrawn | GA |
-| [the-move-out-spare-covers-the-whole-window][spare] | landed | GA |
-| [an-emptied-window-waits-without-a-bound][ewait] | landed | GA |
-| [the-chan-home-fallback-trusts-var-tmp][vtmp] | landed | GA |
-| [three-inputs-have-no-size-cap][caps] | landed | GA |
-| [content-search-truncation-ignores-its-window][trunc] | landed | GA |
-| [move-and-create-can-replace-a-new-file][clob] | landed | GA |
-| [the-graph-indexer-drops-renames-and-lingers][gidx] | landed | GA |
-| [the-side-effect-and-error-lows-are-unread][unread] | landed | GA |
-| [the-launcher-says-off-beside-running][offrn] | landed | GA |
-| [devserver-root-probe-wiring-has-no-test][rprob] | landed | GA |
-| [page-break-scan-and-renderer-still-differ][pgres] | withdrawn | GA |
-| [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | landed | GA |
-| [graph-bodies-have-no-mounted-test][gmnt] | accepted | after rawt |
-| [the-nsis-uninstaller-stub-ships-unsigned][nsis] | accepted | rc0 |
-| [signing-has-no-early-credential-probe][cprb] | landed | GA |
-
-**From the development archive's backlog**
-
-| item | state | next |
-| --- | --- | --- |
-| [the-chan-cli-crate-is-one-13k-line-file][clib] | accepted | analyze |
-| [two-exact-pins-hold-back-web-upgrades][pins] | accepted | build |
-| [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | accepted | build |
-| [gateway-ci-misses-root-tunnel-crate-changes][gwci] | landed | GA |
-| [the-web-bundles-still-build-on-node-20][nd22] | landed | GA |
-| [the-launcher-build-hint-cannot-run][hint] | landed | GA |
-| [the-site-carries-a-workspace-mock-nobody-ships][mock] | landed | GA |
-| [an-unknown-window-kind-may-drop-every-window-row][wkind] | landed | GA |
-
-**Raised during v0.101.0**
-
-| item | state | next |
-| --- | --- | --- |
-| [a-revocation-aborts-the-bridge-before-its-close][revab] | landed | GA |
-| [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | landed | GA |
-| [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | landed | GA |
-| [a-restart-replays-only-the-manifest-tail][rtail] | landed | GA |
-| [a-crash-restart-restores-a-stale-manifest][crash] | landed | GA |
-| [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | landed | GA |
-| [a-failed-dial-makes-the-next-replay-from-zero][fdial] | landed | GA |
-| [the-served-index-forgets-a-lone-rename][srename] | landed | GA |
-| [a-case-only-rename-leaves-a-phantom-row][casef] | landed | GA |
-| [the-apps-wake-path-outlives-its-mount][wgap] | landed | GA |
-| [a-watcher-loss-leaves-the-code-report-stale][wrep] | landed | GA |
-| [terminal-env-overrides-are-silently-dropped][tenv] | landed | GA |
-| [a-corrupt-devserver-config-re-mints-the-library-identity][dscfg] | landed | GA |
-| [the-detached-daemon-keeps-the-launching-shells-directory][dcwd] | landed | GA |
-| [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | landed | GA |
-| [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | landed | GA |
-| [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | landed | GA |
-| [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
-| [a-cut-paste-can-replace-the-first-moved-file][mvrep] | landed | GA |
-| [the-settings-date-format-never-saves][dfmt] | landed | GA |
-| [four-tests-still-read-source-with-node-fs][fsrd] | landed | GA |
-| [the-attach-prelude-order-has-no-rust-test][prel] | landed | GA |
-| [mounted-components-mutate-props-they-do-not-own][ownw] | landed | GA |
-| [a-sent-prompt-stays-editable-while-pending][rpro] | landed | GA |
-| [a-click-beside-a-graph-node-clears-the-selection][gring] | landed | GA |
-| [a-mirrored-value-focuses-an-unfocused-editor][afoc] | landed | GA |
-| [a-started-mcp-tool-cannot-be-cancelled][mcan] | landed | GA |
-| [the-writer-lock-probe-waits-on-a-hung-root][wlock] | landed | GA |
-| [a-hung-root-stalls-desktop-close-and-quit][dquit] | landed | GA |
-| [one-hung-root-holds-up-the-whole-restore][rseq] | accepted | build |
-| [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | accepted | build |
-| [a-hung-root-keeps-reading-running][hrun] | landed | GA |
-| [a-late-http-mount-escapes-the-shutdown-sweep][lsweep] | landed | GA |
-| [the-linux-gate-runs-tests-under-a-canonical-tmpdir][ctmp] | landed | GA |
-| [a-relinked-root-window-nests-outside-its-row][rnest] | accepted | build |
-| [the-desktop-handoff-keys-an-absent-root][hkey] | landed | GA |
-| [one-close-reason-covers-a-parked-and-a-killed-pty][pkill] | accepted | build |
-| [a-fresh-session-under-an-old-id-keeps-the-key-protocol][kproto] | landed | GA |
-| [the-scripted-team-drops-member-env][senv] | landed | GA |
-| [the-memfd-ring-mirror-doubles-the-terminals-memory][mmap] | landed | GA |
-| [a-reattach-replays-before-the-pty-takes-the-clients-size][rsz] | landed | GA |
-| [a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes][psplit] | landed | GA |
-| [a-backslash-in-a-name-reads-two-ways-on-the-wire][bslash] | landed | GA |
-| [a-spawned-child-holds-a-lock-until-it-execs][lockdup] | landed | GA |
-| [a-resilience-transcript-is-dumped-before-its-readers-drain][tdump] | landed | GA |
-| [co-viewers-of-a-window-keep-an-answered-survey][coview] | landed | GA |
-| [an-adopted-sessions-recorded-size-can-lag-its-pty][adsz] | landed | GA |
-| [is-root-mounted-answers-from-the-first-tenant-the-key-finds][rmfirst] | landed | GA |
-| [the-canonical-key-query-counts-the-terminal-tenant][ckterm] | landed | GA |
-| [the-linux-gate-has-no-windows-target-check][wingate] | landed | GA |
-| [an-inspector-effect-refetches-a-failing-graph-stream-without-bound][insp] | landed | GA |
-| [a-save-after-the-shutdown-sweeps-turns-every-workspace-off][ssave] | landed | GA |
-| [the-terminal-tenant-answers-for-a-home-workspace][tterm] | landed | GA |
-| [the-quit-drain-can-hang-on-a-recovery-pass][qdrain] | landed | GA |
-| [the-devserver-stop-refuses-mounts-before-the-host][dstp] | landed | GA |
-| [an-attached-json-tab-skips-the-parse-check][jsave] | landed | GA |
-| [the-desktop-takes-ctrl-right-bracket-from-a-shell][rbrk] | landed | GA |
-| [a-quit-can-hang-on-a-standalone-files-watch][fwatch] | landed | GA |
-| [a-connecting-page-close-discards-its-window][cdisc] | accepted | build |
-| [the-launchers-add-and-on-skip-the-stop-check][lstop] | accepted | build |
-| [a-stopping-devserver-says-it-is-restoring][sgate] | accepted | build |
-| [the-extension-proxy-forwards-to-an-exited-port][xport] | landed | GA |
-| [two-warning-capture-tests-race-a-callsite-cache][wcap] | landed | GA |
-| [two-closes-still-drop-a-drawings-last-stroke][sclose] | accepted | build |
-| [the-gate-container-runs-as-root][groot] | accepted | build |
-| [a-scene-snapshot-before-the-init-is-wiped][swipe] | accepted | build |
-| [a-draft-closed-during-its-load-is-trashed][dtrash] | landed | GA |
-| [an-mcp-read-loads-the-whole-file-before-its-cap][rdcap] | landed | GA |
-| [an-open-with-no-bound-holds-a-hung-roots-lock][hrwait] | landed | GA |
-| [a-live-drawing-gains-appstate-keys-with-no-edit][aswrt] | accepted | build |
-| [a-drawing-that-does-not-parse-loses-its-editor][drwed] | landed | GA |
-| [a-raw-devserver-restart-may-close-desktop-windows][rrwin] | raised | decide |
-| [a-workspace-search-stops-only-between-seeds][sseed] | raised | decide |
-| [the-chan-crate-exports-a-test-only-module][tstmod] | raised | decide |
-| [a-repeated-element-id-gets-a-new-id-at-every-seed][rpid] | raised | decide |
-| [a-drawing-library-crash-publishes-an-empty-scene][unmt] | raised | decide |
-| [a-released-commands-success-paints-over-the-deck][rlsok] | raised | decide |
-| [the-aur-check-is-killed-with-its-hosted-runner][aurkl] | raised | decide |
-| [the-desktop-probe-takes-a-gateway-404-as-ready][gwnfd] | raised | decide |
-| [a-connected-record-does-not-say-whose-socket][sockw] | raised | decide |
-| [a-browser-show-opens-a-twin-of-a-native-window][natsh] | raised | decide |
-| [a-kept-terminal-row-keeps-its-sessions-alive][ktrow] | raised | decide |
-| [a-destructive-confirm-focuses-its-confirm-button][cfoc] | raised | decide |
-| [a-failed-save-replaces-the-editor-with-its-error][svfal] | raised | decide |
-| [a-draft-that-does-not-parse-cannot-be-discarded][drdsc] | raised | decide |
-| [a-control-socket-close-outlives-its-client][ctlcs] | raised | decide |
-| [a-close-answers-before-the-writer-lock-is-free][clfre] | raised | decide |
-| [an-unreceived-open-result-blocks-a-runtime-worker][unrcv] | raised | decide |
-| [a-test-reads-a-row-before-the-lock-is-released][rowrc] | raised | decide |
-| [a-lock-probe-can-refuse-a-concurrent-acquire][prbhd] | raised | decide |
-| [a-mounted-close-awaits-a-teardown-with-no-deadline][tdcl] | raised | decide |
-| [a-closed-window-discards-a-connected-record][clwdc] | raised | decide |
-| [the-desktop-handoff-registration-has-no-bound][hdreg] | raised | decide |
-| [the-add-and-on-answer-a-foreign-lock-two-ways][lkfor] | raised | decide |
-| [an-upload-cuts-a-name-at-its-backslash][bslup] | raised | decide |
-| [the-manifest-writer-asks-every-root-under-a-lock][mnfrt] | raised | decide |
-| [tests-signal-a-process-they-did-not-start][fkpid] | landed | GA |
-| [two-registry-rows-can-name-one-directory][dupreg] | raised | decide |
-| [the-fdstore-e2e-prints-the-devservers-token][tokpr] | raised | decide |
-| [a-sweep-test-overran-its-ten-seconds-on-windows][wintmo] | raised | decide |
-| [the-root-stall-names-a-step-by-symbols][stsym] | raised | decide |
-| [typed-and-dropped-names-disagree-on-a-backslash][bstyp] | raised | decide |
-| [the-desktop-cuts-a-download-name-at-its-backslash][bsdwn] | raised | decide |
-| [a-force-closed-draft-reopens-as-a-new-draft][freop] | raised | decide |
-| [a-restored-terminals-close-signals-a-bare-pid][impid] | raised | decide |
-| [the-control-sockets-directory-is-believed-as-found][sokdr] | raised | decide |
-| [a-test-waits-on-a-reference-and-not-on-the-lock][wkref] | landed | GA |
-| [a-reset-counts-a-reference-another-can-upgrade][rsupg] | raised | decide |
-| [the-control-socket-identity-names-no-library][cslib] | raised | decide |
-| [a-removal-unregisters-by-the-name-it-is-given][rmnam] | raised | decide |
-| [the-desktops-menu-copies-a-window-outside-its-row][mnucp] | raised | decide |
-| [the-workspace-deck-names-a-windows-root-whole][dkwin] | raised | decide |
-
 ### v0.102.0
 
-Opened 2026-09-27 to hold what the owner accepted for a version after v0.101.0, none of it part of v0.101.0: two items raised during v0.101.0 that need a root which moved under a symlink; four more raised during v0.101.0 and accepted the same day for a later version, each as the lead recommended: the deck's Hide and Close on another host's window, a rejected JSON body's refusal naming the request's Rust type, the terminal pruner's save under the chan home on a runtime worker, and a gate's refusal of a wrong method listing the route's methods; and the owner's own request of the same day, a survey of how other MCP servers answer a read of a file over their cap.
+Opened 2026-09-27 to hold what the owner accepted for a version after v0.101.0, none of it part of v0.101.0: two items raised during v0.101.0 that need a root which moved under a symlink; four more raised during v0.101.0 and accepted the same day for a later version, each as the lead recommended: the deck's Hide and Close on another host's window, a rejected JSON body's refusal naming the request's Rust type, the terminal pruner's save under the chan home on a runtime worker, and a gate's refusal of a wrong method listing the route's methods; and the owner's own request of the same day, a survey of how other MCP servers answer a read of a file over their cap. On 2026-09-29 the owner closed v0.101.0's intake under one rule and accepted for a later version thirty-eight of the items then raised during v0.101.0, which move here with their rulings; fourteen of them wait on a shape that is not ruled, and the code map of one, a desktop recovery entry that ends with its run, may be taken in v0.101.0. Two items that the same rulings made join them: the concurrent selection race of a removal, accepted with its design on record as a source contract and executable tests of it stopped, and whether a window's close should save first, raised for a decision. On 2026-09-29 the owner added two items from use, each accepted with the report: `cs export` hanging where the same export from the UI completes, and a slide deck's PDF lacking the images the deck shows. On 2026-09-30 eleven findings that the round's records held with no item of their own were raised for a decision, and are held here since v0.101.0's intake is closed: four gaps outside the design of a removal's row claim, a window hidden on the connecting page in the desktop's memory alone, document and scene sync staying off after a first connection that closed before a frame, the launcher's off and `chan workspace forget` still acting on another workspace after the removal's repair, two written costs of the launcher's add and on, a root relinked while mounted that cannot be handed off, the stopping devserver's code that no client reads, four side findings of that order's report, a standalone Files write whose stale token equals the current one, the launcher's Focus and Open and the workspace app's deck taking a window for any record, and the pins of a case-only rename running in no gate. On 2026-10-02 one more was raised for a decision, the missing-file check that commits no waiting stroke: it is the third route of a v0.101.0 item whose other two routes are built, kept out of that version by a standing hold.
+
+At the v0.101.0 GA on 2026-10-02 six items moved here from that version: four whose remaining work carries over, the dedup seams, the frontend comment pass, the frontend review remainder and a hung root's registration thread, and two still raised for a decision, a raw devserver's restart beside desktop windows and a desktop hide beside a waiting stroke.
+
+On 2026-10-03 the owner raised one more from use and accepted it with the report: that no line chan prints opens a running devserver in a browser, which also asks that secret masking default on in a control terminal alone. The same day the owner's own PDF exports of a slide deck were read back pixel by pixel, which settles the causes of [a-slide-decks-pdf-lacks-the-images-it-shows][pdimg] and adds to it the width half of the one design box it already named: a deck's PDF breaks lines the deck keeps whole when it plays, and paints a scrollbar into the raster.
 
 | item | state | next |
 | --- | --- | --- |
@@ -226,170 +38,75 @@ Opened 2026-09-27 to hold what the owner accepted for a version after v0.101.0, 
 | [the-terminal-pruner-saves-on-a-runtime-worker][prune] | accepted | build |
 | [a-gate-refusal-lists-the-routes-methods][allow] | accepted | build |
 | [how-mcp-servers-cap-a-read-is-unsurveyed][mcpsv] | accepted | build |
+| [a-workspace-search-stops-only-between-seeds][sseed] | accepted | build |
+| [the-chan-crate-exports-a-test-only-module][tstmod] | accepted | build |
+| [a-repeated-element-id-gets-a-new-id-at-every-seed][rpid] | accepted | build |
+| [a-released-commands-success-paints-over-the-deck][rlsok] | accepted | build |
+| [the-desktop-probe-takes-a-gateway-404-as-ready][gwnfd] | accepted | decide |
+| [a-connected-record-does-not-say-whose-socket][sockw] | accepted | build |
+| [a-draft-that-does-not-parse-cannot-be-discarded][drdsc] | accepted | build |
+| [a-control-socket-close-outlives-its-client][ctlcs] | accepted | build |
+| [a-close-answers-before-the-writer-lock-is-free][clfre] | accepted | decide |
+| [an-unreceived-open-result-blocks-a-runtime-worker][unrc] | accepted | build |
+| [a-lock-probe-can-refuse-a-concurrent-acquire][prbhd] | accepted | build |
+| [a-mounted-close-awaits-a-teardown-with-no-deadline][td] | accepted | decide |
+| [the-desktop-handoff-registration-has-no-bound][hdreg] | accepted | build |
+| [the-add-and-on-answer-a-foreign-lock-two-ways][lkfor] | accepted | decide |
+| [an-upload-cuts-a-name-at-its-backslash][bslup] | accepted | decide |
+| [the-manifest-writer-asks-every-root-under-a-lock][mnfrt] | accepted | build |
+| [two-registry-rows-can-name-one-directory][dupreg] | accepted | decide |
+| [the-fdstore-e2e-prints-the-devservers-token][tokpr] | accepted | build |
+| [typed-and-dropped-names-disagree-on-a-backslash][bstyp] | accepted | decide |
+| [the-desktop-cuts-a-download-name-at-its-backslash][bsd] | accepted | decide |
+| [a-force-closed-draft-reopens-as-a-new-draft][freop] | accepted | build |
+| [a-reset-counts-a-reference-another-can-upgrade][rsupg] | accepted | build |
+| [the-control-socket-identity-names-no-library][cslib] | accepted | build |
+| [the-desktops-menu-copies-a-window-outside-its-row][mnu] | accepted | decide |
+| [the-workspace-deck-names-a-windows-root-whole][dkwin] | accepted | build |
+| [a-background-the-authority-never-took-turns-back][bgrv] | accepted | decide |
+| [hybrid-nav-leaves-a-live-drawing-unsaved][hnsav] | accepted | build |
+| [a-save-fallback-writes-an-unseeded-boards-buffer][unsd] | accepted | decide |
+| [a-live-drawing-save-answers-before-the-write][erlsv] | accepted | build |
+| [a-late-off-row-outlives-a-removal][offwin] | accepted | build |
+| [a-launcher-delete-leaves-a-devserver-record-on][ldrec] | accepted | build |
+| [a-forgets-tombstone-outlasts-its-answer][fgtomb] | accepted | build |
+| [chan-workspace-forget-ignores-the-hosts-answer][fgcli] | accepted | build |
+| [a-desktop-recovery-entry-ends-with-its-run][rcorg] | accepted | decide |
+| [any-later-write-retires-a-recovery-entry][rcstl] | accepted | decide |
+| [restore-on-a-live-board-pushes-an-older-scene][rstlv] | accepted | decide |
+| [the-decks-close-row-keeps-the-window-session][dkcls] | accepted | build |
+| [a-forced-pane-close-pushes-a-waiting-stroke][fclng] | accepted | build |
+| [a-removal-does-not-hold-the-row-it-selected][rmrace] | accepted | decide |
+| [a-window-close-does-not-save-first][wclsv] | raised | decide |
+| [cs-export-hangs-where-the-ui-export-completes][xhang] | accepted | build |
+| [a-slide-decks-pdf-lacks-the-images-it-shows][pdimg] | accepted | build |
+| [a-hung-root-keeps-restored-tenants-at-503][rgate] | accepted | build |
+| [four-gaps-lie-outside-a-removals-row-claim][rmgap] | raised | decide |
+| [a-connecting-page-hide-lives-in-memory-alone][hdmem] | raised | decide |
+| [a-sync-socket-closed-before-a-frame-stays-off][syoff] | raised | decide |
+| [an-off-and-the-cli-forget-name-another-workspace][fgoth] | raised | decide |
+| [a-refused-add-registers-late-and-an-on-is-not-kept][adon] | raised | decide |
+| [a-root-relinked-while-mounted-cannot-be-handed-off][rlmt] | raised | decide |
+| [no-client-reads-the-devserver-stopping-code][stprd] | raised | decide |
+| [a-stopping-devservers-report-left-four-findings][stp4] | raised | decide |
+| [a-stale-files-token-can-equal-the-current-one][eqtok] | raised | decide |
+| [focus-and-open-take-a-window-for-any-record][fcany] | raised | decide |
+| [the-casefold-pins-run-in-no-gate][cfgat] | raised | decide |
+| [a-missing-file-check-commits-no-waiting-stroke][mfchk] | raised | decide |
+| [one-question-is-answered-in-many-places][dedup] | accepted | build |
+| [frontend-comments-narrate-history][cmts] | accepted | build |
+| [the-frontend-review-remainder-has-no-owner][ferem] | accepted | build |
+| [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | accepted | build |
+| [a-raw-devserver-restart-may-close-desktop-windows][rrwin] | raised | decide |
+| [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
+| [no-printed-line-opens-the-devserver-in-a-browser][dsurl] | accepted | build |
 
-[rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
-[dedup]: v0.101.0/one-question-is-answered-in-many-places.md
-[cmts]: v0.101.0/frontend-comments-narrate-history.md
-[mirr]: v0.101.0/hand-mirrored-contracts-have-no-gate.md
-[ferem]: v0.101.0/the-frontend-review-remainder-has-no-owner.md
-[tunl]: v0.101.0/an-admitted-tunnel-outlives-its-connection.md
-[stall]: v0.101.0/a-stalled-reader-parks-a-pool-thread.md
-[rlock]: v0.101.0/one-root-blocks-every-other-mount.md
-[nutf]: v0.101.0/a-non-utf8-text-file-loses-its-backlinks.md
-[copy2]: v0.101.0/two-copies-to-one-free-name-can-collide.md
-[bpin]: v0.101.0/a-blocking-pool-pin-passes-without-proof.md
-[prose]: v0.101.0/stale-sentences-outlive-their-code.md
-[extp]: v0.101.0/a-service-spawned-extension-gets-a-bare-path.md
-[aurc]: v0.101.0/the-aur-check-could-ship-a-test-only-feature.md
-[refus]: v0.101.0/refusals-answer-in-four-shapes.md
-[poke]: v0.101.0/the-team-poke-names-a-path-it-does-not-anchor.md
-[rdrw]: v0.101.0/a-redrawing-tui-never-lets-the-write-queue-drain.md
-[surv]: v0.101.0/an-expired-survey-cannot-be-dismissed.md
-[clib]: v0.101.0/the-chan-cli-crate-is-one-13k-line-file.md
-[pins]: v0.101.0/two-exact-pins-hold-back-web-upgrades.md
-[tses]: v0.101.0/tower-sessions-lags-and-axum-has-a-dead-feature.md
-[gwci]: v0.101.0/gateway-ci-misses-root-tunnel-crate-changes.md
-[nd22]: v0.101.0/the-web-bundles-still-build-on-node-20.md
-[hint]: v0.101.0/the-launcher-build-hint-cannot-run.md
-[mock]: v0.101.0/the-site-carries-a-workspace-mock-nobody-ships.md
-[wkind]: v0.101.0/an-unknown-window-kind-may-drop-every-window-row.md
-[tutil]: v0.101.0/the-test-util-comments-omit-the-attach-seam.md
-[fdsq]: v0.101.0/the-fdstore-manifest-splits-seq-and-tail.md
-[mwclk]: v0.101.0/a-mount-retry-test-races-a-wall-clock.md
-[dhp]: v0.101.0/desktop-design-omits-the-root-health-probe.md
-[drvr]: v0.101.0/a-dropped-indexers-driver-eats-recovery.md
-[bskip]: v0.101.0/the-bulk-skip-note-calls-unknown-locked.md
-[mcpd]: v0.101.0/mcp-write-errors-follow-an-unpinned-display.md
-[join]: v0.101.0/a-joining-snapshot-fails-during-reconcile.md
-[pwork]: v0.101.0/profile-workers-have-no-shutdown-owner.md
-[fold]: v0.101.0/the-email-fold-merges-distinct-characters.md
-[spare]: v0.101.0/the-move-out-spare-covers-the-whole-window.md
-[ewait]: v0.101.0/an-emptied-window-waits-without-a-bound.md
-[vtmp]: v0.101.0/the-chan-home-fallback-trusts-var-tmp.md
-[caps]: v0.101.0/three-inputs-have-no-size-cap.md
-[trunc]: v0.101.0/content-search-truncation-ignores-its-window.md
-[clob]: v0.101.0/move-and-create-can-replace-a-new-file.md
-[gidx]: v0.101.0/the-graph-indexer-drops-renames-and-lingers.md
-[unread]: v0.101.0/the-side-effect-and-error-lows-are-unread.md
-[offrn]: v0.101.0/the-launcher-says-off-beside-running.md
-[rprob]: v0.101.0/devserver-root-probe-wiring-has-no-test.md
-[pgres]: v0.101.0/page-break-scan-and-renderer-still-differ.md
-[tkey]: v0.101.0/a-tab-list-duplicate-key-escapes-its-boundary.md
-[gmnt]: v0.101.0/graph-bodies-have-no-mounted-test.md
-[nsis]: v0.101.0/the-nsis-uninstaller-stub-ships-unsigned.md
-[cprb]: v0.101.0/signing-has-no-early-credential-probe.md
-[revab]: v0.101.0/a-revocation-aborts-the-bridge-before-its-close.md
-[lfetch]: v0.101.0/a-late-fetch-after-teardown-reds-the-web-check.md
-[wfeed]: v0.101.0/the-desktop-decodes-a-window-feed-all-or-nothing.md
-[rtail]: v0.101.0/a-restart-replays-only-the-manifest-tail.md
-[crash]: v0.101.0/a-crash-restart-restores-a-stale-manifest.md
-[gdrop]: v0.101.0/a-graceful-restart-drops-output-past-its-snapshot.md
-[fdial]: v0.101.0/a-failed-dial-makes-the-next-replay-from-zero.md
-[srename]: v0.101.0/the-served-index-forgets-a-lone-rename.md
-[casef]: v0.101.0/a-case-only-rename-leaves-a-phantom-row.md
-[wgap]: v0.101.0/the-apps-wake-path-outlives-its-mount.md
-[wrep]: v0.101.0/a-watcher-loss-leaves-the-code-report-stale.md
-[tenv]: v0.101.0/terminal-env-overrides-are-silently-dropped.md
-[dscfg]: v0.101.0/a-corrupt-devserver-config-re-mints-the-library-identity.md
-[dcwd]: v0.101.0/the-detached-daemon-keeps-the-launching-shells-directory.md
-[rsyes]: v0.101.0/a-scripted-reports-disable-exits-zero-having-changed-nothing.md
-[kring]: v0.101.0/a-keychain-failure-freezes-a-connected-gateways-roster.md
-[resave]: v0.101.0/a-graceful-restarts-session-save-drops-the-terminals-session-id.md
-[cpsk]: v0.101.0/a-single-file-copy-skips-the-utf8-gate.md
-[mvrep]: v0.101.0/a-cut-paste-can-replace-the-first-moved-file.md
-[dfmt]: v0.101.0/the-settings-date-format-never-saves.md
-[fsrd]: v0.101.0/four-tests-still-read-source-with-node-fs.md
-[prel]: v0.101.0/the-attach-prelude-order-has-no-rust-test.md
-[ownw]: v0.101.0/mounted-components-mutate-props-they-do-not-own.md
-[rpro]: v0.101.0/a-sent-prompt-stays-editable-while-pending.md
-[gring]: v0.101.0/a-click-beside-a-graph-node-clears-the-selection.md
-[afoc]: v0.101.0/a-mirrored-value-focuses-an-unfocused-editor.md
-[mcan]: v0.101.0/a-started-mcp-tool-cannot-be-cancelled.md
-[wlock]: v0.101.0/the-writer-lock-probe-waits-on-a-hung-root.md
-[dquit]: v0.101.0/a-hung-root-stalls-desktop-close-and-quit.md
-[rseq]: v0.101.0/one-hung-root-holds-up-the-whole-restore.md
-[rthrd]: v0.101.0/a-hung-root-takes-a-thread-per-expired-caller.md
-[hrun]: v0.101.0/a-hung-root-keeps-reading-running.md
-[lsweep]: v0.101.0/a-late-http-mount-escapes-the-shutdown-sweep.md
-[ctmp]: v0.101.0/the-linux-gate-runs-tests-under-a-canonical-tmpdir.md
-[rnest]: v0.101.0/a-relinked-root-window-nests-outside-its-row.md
-[hkey]: v0.101.0/the-desktop-handoff-keys-an-absent-root.md
-[pkill]: v0.101.0/one-close-reason-covers-a-parked-and-a-killed-pty.md
-[kproto]: v0.101.0/a-fresh-session-under-an-old-id-keeps-the-key-protocol.md
-[senv]: v0.101.0/the-scripted-team-drops-member-env.md
-[mmap]: v0.101.0/the-memfd-ring-mirror-doubles-the-terminals-memory.md
-[rsz]: v0.101.0/a-reattach-replays-before-the-pty-takes-the-clients-size.md
-[psplit]: v0.101.0/a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes.md
-[bslash]: v0.101.0/a-backslash-in-a-name-reads-two-ways-on-the-wire.md
-[lockdup]: v0.101.0/a-spawned-child-holds-a-lock-until-it-execs.md
-[tdump]: v0.101.0/a-resilience-transcript-is-dumped-before-its-readers-drain.md
-[coview]: v0.101.0/co-viewers-of-a-window-keep-an-answered-survey.md
-[adsz]: v0.101.0/an-adopted-sessions-recorded-size-can-lag-its-pty.md
-[rmfirst]: v0.101.0/is-root-mounted-answers-from-the-first-tenant-the-key-finds.md
-[ckterm]: v0.101.0/the-canonical-key-query-counts-the-terminal-tenant.md
-[wingate]: v0.101.0/the-linux-gate-has-no-windows-target-check.md
-[insp]: v0.101.0/an-inspector-effect-refetches-a-failing-graph-stream-without-bound.md
-[ssave]: v0.101.0/a-save-after-the-shutdown-sweeps-turns-every-workspace-off.md
-[tterm]: v0.101.0/the-terminal-tenant-answers-for-a-home-workspace.md
-[qdrain]: v0.101.0/the-quit-drain-can-hang-on-a-recovery-pass.md
-[dstp]: v0.101.0/the-devserver-stop-refuses-mounts-before-the-host.md
-[jsave]: v0.101.0/an-attached-json-tab-skips-the-parse-check.md
-[rbrk]: v0.101.0/the-desktop-takes-ctrl-right-bracket-from-a-shell.md
-[fwatch]: v0.101.0/a-quit-can-hang-on-a-standalone-files-watch.md
-[cdisc]: v0.101.0/a-connecting-page-close-discards-its-window.md
-[lstop]: v0.101.0/the-launchers-add-and-on-skip-the-stop-check.md
-[sgate]: v0.101.0/a-stopping-devserver-says-it-is-restoring.md
-[xport]: v0.101.0/the-extension-proxy-forwards-to-an-exited-port.md
-[wcap]: v0.101.0/two-warning-capture-tests-race-a-callsite-cache.md
-[sclose]: v0.101.0/two-closes-still-drop-a-drawings-last-stroke.md
-[groot]: v0.101.0/the-gate-container-runs-as-root.md
-[swipe]: v0.101.0/a-scene-snapshot-before-the-init-is-wiped.md
-[dtrash]: v0.101.0/a-draft-closed-during-its-load-is-trashed.md
-[rdcap]: v0.101.0/an-mcp-read-loads-the-whole-file-before-its-cap.md
-[hrwait]: v0.101.0/an-open-with-no-bound-holds-a-hung-roots-lock.md
-[aswrt]: v0.101.0/a-live-drawing-gains-appstate-keys-with-no-edit.md
-[drwed]: v0.101.0/a-drawing-that-does-not-parse-loses-its-editor.md
-[rrwin]: v0.101.0/a-raw-devserver-restart-may-close-desktop-windows.md
-[sseed]: v0.101.0/a-workspace-search-stops-only-between-seeds.md
-[tstmod]: v0.101.0/the-chan-crate-exports-a-test-only-module.md
-[rpid]: v0.101.0/a-repeated-element-id-gets-a-new-id-at-every-seed.md
-[unmt]: v0.101.0/a-drawing-library-crash-publishes-an-empty-scene.md
-[rlsok]: v0.101.0/a-released-commands-success-paints-over-the-deck.md
-[aurkl]: v0.101.0/the-aur-check-is-killed-with-its-hosted-runner.md
-[gwnfd]: v0.101.0/the-desktop-probe-takes-a-gateway-404-as-ready.md
-[sockw]: v0.101.0/a-connected-record-does-not-say-whose-socket.md
-[natsh]: v0.101.0/a-browser-show-opens-a-twin-of-a-native-window.md
-[ktrow]: v0.101.0/a-kept-terminal-row-keeps-its-sessions-alive.md
-[cfoc]: v0.101.0/a-destructive-confirm-focuses-its-confirm-button.md
-[svfal]: v0.101.0/a-failed-save-replaces-the-editor-with-its-error.md
-[drdsc]: v0.101.0/a-draft-that-does-not-parse-cannot-be-discarded.md
-[ctlcs]: v0.101.0/a-control-socket-close-outlives-its-client.md
-[clfre]: v0.101.0/a-close-answers-before-the-writer-lock-is-free.md
-[unrcv]: v0.101.0/an-unreceived-open-result-blocks-a-runtime-worker.md
-[rowrc]: v0.101.0/a-test-reads-a-row-before-the-lock-is-released.md
-[prbhd]: v0.101.0/a-lock-probe-can-refuse-a-concurrent-acquire.md
-[tdcl]: v0.101.0/a-mounted-close-awaits-a-teardown-with-no-deadline.md
-[clwdc]: v0.101.0/a-closed-window-discards-a-connected-record.md
-[hdreg]: v0.101.0/the-desktop-handoff-registration-has-no-bound.md
-[lkfor]: v0.101.0/the-add-and-on-answer-a-foreign-lock-two-ways.md
-[bslup]: v0.101.0/an-upload-cuts-a-name-at-its-backslash.md
-[mnfrt]: v0.101.0/the-manifest-writer-asks-every-root-under-a-lock.md
-[fkpid]: v0.101.0/tests-signal-a-process-they-did-not-start.md
-[dupreg]: v0.101.0/two-registry-rows-can-name-one-directory.md
-[tokpr]: v0.101.0/the-fdstore-e2e-prints-the-devservers-token.md
-[wintmo]: v0.101.0/a-sweep-test-overran-its-ten-seconds-on-windows.md
-[stsym]: v0.101.0/the-root-stall-names-a-step-by-symbols.md
-[bstyp]: v0.101.0/typed-and-dropped-names-disagree-on-a-backslash.md
-[bsdwn]: v0.101.0/the-desktop-cuts-a-download-name-at-its-backslash.md
-[freop]: v0.101.0/a-force-closed-draft-reopens-as-a-new-draft.md
-[impid]: v0.101.0/a-restored-terminals-close-signals-a-bare-pid.md
-[sokdr]: v0.101.0/the-control-sockets-directory-is-believed-as-found.md
-[wkref]: v0.101.0/a-test-waits-on-a-reference-and-not-on-the-lock.md
-[rsupg]: v0.101.0/a-reset-counts-a-reference-another-can-upgrade.md
-[cslib]: v0.101.0/the-control-socket-identity-names-no-library.md
-[rmnam]: v0.101.0/a-removal-unregisters-by-the-name-it-is-given.md
-[mnucp]: v0.101.0/the-desktops-menu-copies-a-window-outside-its-row.md
-[dkwin]: v0.101.0/the-workspace-deck-names-a-windows-root-whole.md
+[dedup]: v0.102.0/one-question-is-answered-in-many-places.md
+[cmts]: v0.102.0/frontend-comments-narrate-history.md
+[ferem]: v0.102.0/the-frontend-review-remainder-has-no-owner.md
+[rthrd]: v0.102.0/a-hung-root-takes-a-thread-per-expired-caller.md
+[rrwin]: v0.102.0/a-raw-devserver-restart-may-close-desktop-windows.md
+[hdnpg]: v0.102.0/a-host-side-hide-commits-no-waiting-stroke.md
 [sfgt]: v0.102.0/forgetting-a-relinked-root-waits-four-lookups.md
 [roff]: v0.102.0/a-relinked-off-row-outlives-a-devserver-restart.md
 [dhost]: v0.102.0/the-deck-offers-close-on-another-hosts-window.md
@@ -397,8 +114,205 @@ Opened 2026-09-27 to hold what the owner accepted for a version after v0.101.0, 
 [prune]: v0.102.0/the-terminal-pruner-saves-on-a-runtime-worker.md
 [allow]: v0.102.0/a-gate-refusal-lists-the-routes-methods.md
 [mcpsv]: v0.102.0/how-mcp-servers-cap-a-read-is-unsurveyed.md
+[sseed]: v0.102.0/a-workspace-search-stops-only-between-seeds.md
+[tstmod]: v0.102.0/the-chan-crate-exports-a-test-only-module.md
+[rpid]: v0.102.0/a-repeated-element-id-gets-a-new-id-at-every-seed.md
+[rlsok]: v0.102.0/a-released-commands-success-paints-over-the-deck.md
+[gwnfd]: v0.102.0/the-desktop-probe-takes-a-gateway-404-as-ready.md
+[sockw]: v0.102.0/a-connected-record-does-not-say-whose-socket.md
+[drdsc]: v0.102.0/a-draft-that-does-not-parse-cannot-be-discarded.md
+[ctlcs]: v0.102.0/a-control-socket-close-outlives-its-client.md
+[clfre]: v0.102.0/a-close-answers-before-the-writer-lock-is-free.md
+[unrc]: v0.102.0/an-unreceived-open-result-blocks-a-runtime-worker.md
+[prbhd]: v0.102.0/a-lock-probe-can-refuse-a-concurrent-acquire.md
+[td]: v0.102.0/a-mounted-close-awaits-a-teardown-with-no-deadline.md
+[hdreg]: v0.102.0/the-desktop-handoff-registration-has-no-bound.md
+[lkfor]: v0.102.0/the-add-and-on-answer-a-foreign-lock-two-ways.md
+[bslup]: v0.102.0/an-upload-cuts-a-name-at-its-backslash.md
+[mnfrt]: v0.102.0/the-manifest-writer-asks-every-root-under-a-lock.md
+[dupreg]: v0.102.0/two-registry-rows-can-name-one-directory.md
+[tokpr]: v0.102.0/the-fdstore-e2e-prints-the-devservers-token.md
+[bstyp]: v0.102.0/typed-and-dropped-names-disagree-on-a-backslash.md
+[bsd]: v0.102.0/the-desktop-cuts-a-download-name-at-its-backslash.md
+[freop]: v0.102.0/a-force-closed-draft-reopens-as-a-new-draft.md
+[rsupg]: v0.102.0/a-reset-counts-a-reference-another-can-upgrade.md
+[cslib]: v0.102.0/the-control-socket-identity-names-no-library.md
+[mnu]: v0.102.0/the-desktops-menu-copies-a-window-outside-its-row.md
+[dkwin]: v0.102.0/the-workspace-deck-names-a-windows-root-whole.md
+[bgrv]: v0.102.0/a-background-the-authority-never-took-turns-back.md
+[hnsav]: v0.102.0/hybrid-nav-leaves-a-live-drawing-unsaved.md
+[unsd]: v0.102.0/a-save-fallback-writes-an-unseeded-boards-buffer.md
+[erlsv]: v0.102.0/a-live-drawing-save-answers-before-the-write.md
+[offwin]: v0.102.0/a-late-off-row-outlives-a-removal.md
+[ldrec]: v0.102.0/a-launcher-delete-leaves-a-devserver-record-on.md
+[fgtomb]: v0.102.0/a-forgets-tombstone-outlasts-its-answer.md
+[fgcli]: v0.102.0/chan-workspace-forget-ignores-the-hosts-answer.md
+[rcorg]: v0.102.0/a-desktop-recovery-entry-ends-with-its-run.md
+[rcstl]: v0.102.0/any-later-write-retires-a-recovery-entry.md
+[rstlv]: v0.102.0/restore-on-a-live-board-pushes-an-older-scene.md
+[dkcls]: v0.102.0/the-decks-close-row-keeps-the-window-session.md
+[fclng]: v0.102.0/a-forced-pane-close-pushes-a-waiting-stroke.md
+[rmrace]: v0.102.0/a-removal-does-not-hold-the-row-it-selected.md
+[wclsv]: v0.102.0/a-window-close-does-not-save-first.md
+[xhang]: v0.102.0/cs-export-hangs-where-the-ui-export-completes.md
+[pdimg]: v0.102.0/a-slide-decks-pdf-lacks-the-images-it-shows.md
+[rmgap]: v0.102.0/four-gaps-lie-outside-a-removals-row-claim.md
+[hdmem]: v0.102.0/a-connecting-page-hide-lives-in-memory-alone.md
+[syoff]: v0.102.0/a-sync-socket-closed-before-a-frame-stays-off.md
+[fgoth]: v0.102.0/an-off-and-the-cli-forget-name-another-workspace.md
+[adon]: v0.102.0/a-refused-add-registers-late-and-an-on-is-not-kept.md
+[rlmt]: v0.102.0/a-root-relinked-while-mounted-cannot-be-handed-off.md
+[stprd]: v0.102.0/no-client-reads-the-devserver-stopping-code.md
+[stp4]: v0.102.0/a-stopping-devservers-report-left-four-findings.md
+[eqtok]: v0.102.0/a-stale-files-token-can-equal-the-current-one.md
+[fcany]: v0.102.0/focus-and-open-take-a-window-for-any-record.md
+[cfgat]: v0.102.0/the-casefold-pins-run-in-no-gate.md
+[mfchk]: v0.102.0/a-missing-file-check-commits-no-waiting-stroke.md
+[rgate]: v0.102.0/a-hung-root-keeps-restored-tenants-at-503.md
+[dsurl]: v0.102.0/no-printed-line-opens-the-devserver-in-a-browser.md
 
 ## Completed
+
+### v0.101.0
+
+Shipped 2026-10-02; see [release-v0.101.0](../release/release-v0.101.0.md). Of its 142 items, 133 closed in [`done/`](done/) as shipped and three as withdrawn, and six moved to v0.102.0: four whose remaining work carries over and two still raised for a decision. Each closed item is named here by the behaviour it raised; what changed for a user is in the changelog:
+
+- [a-backslash-in-a-name-reads-two-ways-on-the-wire](done/a-backslash-in-a-name-reads-two-ways-on-the-wire.md) - A backslash in a file name reads two ways on the wire.
+- [a-blocking-pool-pin-passes-without-proof](done/a-blocking-pool-pin-passes-without-proof.md) - The blocking-pool pin passes for a handler that does its work on the runtime thread.
+- [a-browser-show-opens-a-twin-of-a-native-window](done/a-browser-show-opens-a-twin-of-a-native-window.md) - A browser's Show opens a second window for a record that a desktop owns.
+- [a-case-only-rename-leaves-a-phantom-row](done/a-case-only-rename-leaves-a-phantom-row.md) - A case-only rename leaves a phantom row on a case-insensitive volume.
+- [a-click-beside-a-graph-node-clears-the-selection](done/a-click-beside-a-graph-node-clears-the-selection.md) - A click beside a graph node clears the selection.
+- [a-closed-window-discards-a-connected-record](done/a-closed-window-discards-a-connected-record.md) - One window's close discards a record whose connection another window still holds.
+- [a-connecting-page-close-discards-its-window](done/a-connecting-page-close-discards-its-window.md) - A close or a Disconnect on the connecting page discards a library window and reaps its terminals.
+- [a-corrupt-devserver-config-re-mints-the-library-identity](done/a-corrupt-devserver-config-re-mints-the-library-identity.md) - A corrupt devserver config silently re-mints the library identity.
+- [a-crash-restart-restores-a-stale-manifest](done/a-crash-restart-restores-a-stale-manifest.md) - A crash restart restores a stale sequence and tail from the manifest.
+- [a-cut-paste-can-replace-the-first-moved-file](done/a-cut-paste-can-replace-the-first-moved-file.md) - A cut-paste can replace the first moved file.
+- [a-destructive-confirm-focuses-its-confirm-button](done/a-destructive-confirm-focuses-its-confirm-button.md) - The shared confirm dialog focuses its confirm button, so Enter answers a destructive confirm.
+- [a-draft-closed-during-its-load-is-trashed](done/a-draft-closed-during-its-load-is-trashed.md) - A draft closed before its content arrives is discarded to the trash.
+- [a-drawing-library-crash-publishes-an-empty-scene](done/a-drawing-library-crash-publishes-an-empty-scene.md) - A drawing library that throws unmounts its board, and a seeded board then publishes an empty scene.
+- [a-drawing-that-does-not-parse-loses-its-editor](done/a-drawing-that-does-not-parse-loses-its-editor.md) - A drawing in source mode whose buffer does not parse loses its editor.
+- [a-dropped-indexers-driver-eats-recovery](done/a-dropped-indexers-driver-eats-recovery.md) - A dropped indexer's driver swallows a recovery wake.
+- [a-failed-dial-makes-the-next-replay-from-zero](done/a-failed-dial-makes-the-next-replay-from-zero.md) - A failed dial makes the next terminal dial replay from zero.
+- [a-failed-save-replaces-the-editor-with-its-error](done/a-failed-save-replaces-the-editor-with-its-error.md) - A save that fails replaces the file tab's editor with its message.
+- [a-fresh-session-under-an-old-id-keeps-the-key-protocol](done/a-fresh-session-under-an-old-id-keeps-the-key-protocol.md) - A fresh session under an old tab id keeps the tab's key protocol.
+- [a-graceful-restart-drops-output-past-its-snapshot](done/a-graceful-restart-drops-output-past-its-snapshot.md) - A graceful restart can drop output read after its last manifest write.
+- [a-graceful-restarts-session-save-drops-the-terminals-session-id](done/a-graceful-restarts-session-save-drops-the-terminals-session-id.md) - A graceful restart's session save drops the terminal's session id.
+- [a-hung-root-keeps-reading-running](done/a-hung-root-keeps-reading-running.md) - A mounted root that hangs, rather than errors, reads running for as long as it hangs.
+- [a-hung-root-stalls-desktop-close-and-quit](done/a-hung-root-stalls-desktop-close-and-quit.md) - The desktop waits on every registered root to close a workspace, open a window or quit.
+- [a-joining-snapshot-fails-during-reconcile](done/a-joining-snapshot-fails-during-reconcile.md) - A joining snapshot fails while a reconciliation runs.
+- [a-kept-terminal-row-keeps-its-sessions-alive](done/a-kept-terminal-row-keeps-its-sessions-alive.md) - withdrawn, did not ship: A browser terminal window's kept row keeps its sessions alive until it is closed.
+- [a-keychain-failure-freezes-a-connected-gateways-roster](done/a-keychain-failure-freezes-a-connected-gateways-roster.md) - A keychain failure freezes a connected gateway's roster without a trace.
+- [a-late-fetch-after-teardown-reds-the-web-check](done/a-late-fetch-after-teardown-reds-the-web-check.md) - A late fetch after a test's teardown reds the web check.
+- [a-late-http-mount-escapes-the-shutdown-sweep](done/a-late-http-mount-escapes-the-shutdown-sweep.md) - A management mount accepted just before stop can publish after the devserver's last shutdown sweep.
+- [a-live-drawing-gains-appstate-keys-with-no-edit](done/a-live-drawing-gains-appstate-keys-with-no-edit.md) - A live drawing whose stored appState lacks the serializer's keys is written with no edit.
+- [a-mirrored-value-focuses-an-unfocused-editor](done/a-mirrored-value-focuses-an-unfocused-editor.md) - A mirrored value focuses an unfocused editor.
+- [a-mount-retry-test-races-a-wall-clock](done/a-mount-retry-test-races-a-wall-clock.md) - A mount-retry test races a five-second wall clock.
+- [a-non-utf8-text-file-loses-its-backlinks](done/a-non-utf8-text-file-loses-its-backlinks.md) - A text file the workspace cannot decode loses its backlinks and is re-read on every reconcile.
+- [a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes](done/a-pane-split-rebuilds-a-live-terminal-from-old-width-bytes.md) - A pane split or tab move rebuilds a live terminal from bytes written at another width.
+- [a-quit-can-hang-on-a-standalone-files-watch](done/a-quit-can-hang-on-a-standalone-files-watch.md) - A quit can still hang on a standalone Files window's watch.
+- [a-reattach-replays-before-the-pty-takes-the-clients-size](done/a-reattach-replays-before-the-pty-takes-the-clients-size.md) - A reattach replays and redraws before the PTY takes the client's size.
+- [a-redrawing-tui-never-lets-the-write-queue-drain](done/a-redrawing-tui-never-lets-the-write-queue-drain.md) - A TUI that redraws while idle never lets the write queue drain.
+- [a-relinked-root-window-nests-outside-its-row](done/a-relinked-root-window-nests-outside-its-row.md) - A relinked root's handoff window nests outside its launcher row.
+- [a-removal-unregisters-by-the-name-it-is-given](done/a-removal-unregisters-by-the-name-it-is-given.md) - The host's removal unregisters and purges by the name it is given, so no name reaches a restored row whose stored root resolves elsewhere.
+- [a-resilience-transcript-is-dumped-before-its-readers-drain](done/a-resilience-transcript-is-dumped-before-its-readers-drain.md) - A resilience test dumps a child's transcript before its reader threads drain.
+- [a-restart-replays-only-the-manifest-tail](done/a-restart-replays-only-the-manifest-tail.md) - A restart replays only the manifest's 128 KiB tail, so a fresh view reports missed bytes.
+- [a-restored-terminals-close-signals-a-bare-pid](done/a-restored-terminals-close-signals-a-bare-pid.md) - The close of a restored terminal signals a process id and not the process its session started.
+- [a-revocation-aborts-the-bridge-before-its-close](done/a-revocation-aborts-the-bridge-before-its-close.md) - A revocation aborts the bridge before its Close can go out.
+- [a-save-after-the-shutdown-sweeps-turns-every-workspace-off](done/a-save-after-the-shutdown-sweeps-turns-every-workspace-off.md) - A save after the shutdown sweeps turns every other workspace off.
+- [a-scene-snapshot-before-the-init-is-wiped](done/a-scene-snapshot-before-the-init-is-wiped.md) - A live drawing's scene snapshot applied before the drawing library's init is wiped.
+- [a-scripted-reports-disable-exits-zero-having-changed-nothing](done/a-scripted-reports-disable-exits-zero-having-changed-nothing.md) - A scripted reports disable without --yes exits 0 having changed nothing.
+- [a-sent-prompt-stays-editable-while-pending](done/a-sent-prompt-stays-editable-while-pending.md) - A sent prompt stays editable while it is pending.
+- [a-service-spawned-extension-gets-a-bare-path](done/a-service-spawned-extension-gets-a-bare-path.md) - An extension spawned by the installed devserver gets a bare PATH, and the warning hides why it failed.
+- [a-single-file-copy-skips-the-utf8-gate](done/a-single-file-copy-skips-the-utf8-gate.md) - A single-file copy skips the UTF-8 gate.
+- [a-spawned-child-holds-a-lock-until-it-execs](done/a-spawned-child-holds-a-lock-until-it-execs.md) - A spawned child holds a duplicate of a workspace lock until it execs.
+- [a-stalled-reader-parks-a-pool-thread](done/a-stalled-reader-parks-a-pool-thread.md) - A client that stops reading parks a blocking-pool thread.
+- [a-started-mcp-tool-cannot-be-cancelled](done/a-started-mcp-tool-cannot-be-cancelled.md) - A started MCP tool cannot be cancelled and holds its root's writer lock until it returns.
+- [a-stopping-devserver-says-it-is-restoring](done/a-stopping-devserver-says-it-is-restoring.md) - While a devserver stops, its startup gate answers every tenant request that it is restoring terminal sessions.
+- [a-stroke-in-the-debounce-is-lost-to-a-load](done/a-stroke-in-the-debounce-is-lost-to-a-load.md) - A drawing's stroke still inside the canvas's debounce is lost when its tab loads again.
+- [a-sweep-test-overran-its-ten-seconds-on-windows](done/a-sweep-test-overran-its-ten-seconds-on-windows.md) - A test of chan-library ran out its own ten-second bound once on a hosted Windows runner.
+- [a-tab-copy-reseeds-over-a-first-stroke](done/a-tab-copy-reseeds-over-a-first-stroke.md) - A board reseeds when its tab is copied, and Hybrid Nav copies every tab with no commit first.
+- [a-tab-list-duplicate-key-escapes-its-boundary](done/a-tab-list-duplicate-key-escapes-its-boundary.md) - A duplicate key in a tab list escapes the per-tab boundary.
+- [a-test-reads-a-row-before-the-lock-is-released](done/a-test-reads-a-row-before-the-lock-is-released.md) - A devserver test reads a workspace's row before the lock that row probes is released.
+- [a-test-waits-on-a-reference-and-not-on-the-lock](done/a-test-waits-on-a-reference-and-not-on-the-lock.md) - A test of the host waits on a reference and not on the lock's release.
+- [a-watcher-loss-leaves-the-code-report-stale](done/a-watcher-loss-leaves-the-code-report-stale.md) - A watcher loss leaves the code report stale for the rest of the session.
+- [an-admitted-tunnel-outlives-its-connection](done/an-admitted-tunnel-outlives-its-connection.md) - An ended tunnel keeps its connection, and a refused bridge tells the browser nothing.
+- [an-adopted-sessions-recorded-size-can-lag-its-pty](done/an-adopted-sessions-recorded-size-can-lag-its-pty.md) - An adopted session's recorded size can lag its PTY after a restart.
+- [an-attached-json-tab-skips-the-parse-check](done/an-attached-json-tab-skips-the-parse-check.md) - A JSON tab attached to a document session skips the save's parse check.
+- [an-element-with-no-version-is-written-unedited](done/an-element-with-no-version-is-written-unedited.md) - A live drawing whose elements carry no version is written by a window that only opens it.
+- [an-emptied-window-waits-without-a-bound](done/an-emptied-window-waits-without-a-bound.md) - An emptied window waits for its move-out without a bound.
+- [an-expired-survey-cannot-be-dismissed](done/an-expired-survey-cannot-be-dismissed.md) - A survey whose request is gone cannot be dismissed.
+- [an-inspector-effect-refetches-a-failing-graph-stream-without-bound](done/an-inspector-effect-refetches-a-failing-graph-stream-without-bound.md) - An inspector effect refetches a failing graph stream without bound.
+- [an-mcp-read-loads-the-whole-file-before-its-cap](done/an-mcp-read-loads-the-whole-file-before-its-cap.md) - An MCP tool reads a whole file before its size cap applies.
+- [an-open-with-no-bound-holds-a-hung-roots-lock](done/an-open-with-no-bound-holds-a-hung-roots-lock.md) - An open with no time limit of its own holds a hung root's lock, and a close of that root waits behind it.
+- [an-unknown-window-kind-may-drop-every-window-row](done/an-unknown-window-kind-may-drop-every-window-row.md) - One unreadable window row may drop every window row.
+- [co-viewers-of-a-window-keep-an-answered-survey](done/co-viewers-of-a-window-keep-an-answered-survey.md) - Co-viewers of one window keep an answered survey.
+- [content-search-truncation-ignores-its-window](done/content-search-truncation-ignores-its-window.md) - Content search can report a truncated result as complete.
+- [desktop-design-omits-the-root-health-probe](done/desktop-design-omits-the-root-health-probe.md) - The desktop design does not mention the root health probe.
+- [devserver-root-probe-wiring-has-no-test](done/devserver-root-probe-wiring-has-no-test.md) - No test pins the devserver's root health probe.
+- [four-tests-still-read-source-with-node-fs](done/four-tests-still-read-source-with-node-fs.md) - Four tests still read source with node:fs.
+- [gateway-ci-misses-root-tunnel-crate-changes](done/gateway-ci-misses-root-tunnel-crate-changes.md) - Gateway CI does not run when the root tunnel crates change.
+- [graph-bodies-have-no-mounted-test](done/graph-bodies-have-no-mounted-test.md) - Graph bodies have no mounted test.
+- [hand-mirrored-contracts-have-no-gate](done/hand-mirrored-contracts-have-no-gate.md) - Contracts mirrored by hand across the seam have nothing checking the copies.
+- [is-root-mounted-answers-from-the-first-tenant-the-key-finds](done/is-root-mounted-answers-from-the-first-tenant-the-key-finds.md) - The by-root mount query answers from the first tenant the key finds.
+- [mcp-write-errors-follow-an-unpinned-display](done/mcp-write-errors-follow-an-unpinned-display.md) - Three MCP error texts follow an unpinned Display.
+- [mounted-components-mutate-props-they-do-not-own](done/mounted-components-mutate-props-they-do-not-own.md) - Mounted components mutate props they do not own.
+- [move-and-create-can-replace-a-new-file](done/move-and-create-can-replace-a-new-file.md) - A move or a create can replace a file created a moment earlier.
+- [one-close-reason-covers-a-parked-and-a-killed-pty](done/one-close-reason-covers-a-parked-and-a-killed-pty.md) - One close reason covers a PTY parked for restore and a PTY that was killed.
+- [one-hung-root-holds-up-the-whole-restore](done/one-hung-root-holds-up-the-whole-restore.md) - One hung root holds up every other restored workspace and the devserver's READY.
+- [one-root-blocks-every-other-mount](done/one-root-blocks-every-other-mount.md) - One root's release budget blocks every other mount, close and remove.
+- [page-break-scan-and-renderer-still-differ](done/page-break-scan-and-renderer-still-differ.md) - withdrawn, did not ship: Page-break line scan and renderer still differ on some inputs.
+- [profile-workers-have-no-shutdown-owner](done/profile-workers-have-no-shutdown-owner.md) - Profile's background workers have no shutdown owner.
+- [refusals-answer-in-four-shapes](done/refusals-answer-in-four-shapes.md) - A refusal answers in one of four shapes, and only one of them is the convention.
+- [signing-has-no-early-credential-probe](done/signing-has-no-early-credential-probe.md) - Windows signing has no early credential probe.
+- [source-text-tests-pin-spelling-not-behaviour](done/source-text-tests-pin-spelling-not-behaviour.md) - Two hundred frontend tests pin spelling, not behaviour.
+- [stale-sentences-outlive-their-code](done/stale-sentences-outlive-their-code.md) - Five families of sentences still describe code that changed under them.
+- [terminal-env-overrides-are-silently-dropped](done/terminal-env-overrides-are-silently-dropped.md) - Terminal env overrides for TERM, HOME, NO_COLOR and CI are silently dropped.
+- [tests-signal-a-process-they-did-not-start](done/tests-signal-a-process-they-did-not-start.md) - Two tests of chan-library signal a process they did not start, and one of chan-server kills by command line.
+- [the-apps-wake-path-outlives-its-mount](done/the-apps-wake-path-outlives-its-mount.md) - The app's wake path outlives its mount and a failed resume rejects unhandled.
+- [the-attach-prelude-order-has-no-rust-test](done/the-attach-prelude-order-has-no-rust-test.md) - The terminal attach prelude order has no Rust test.
+- [the-aur-check-could-ship-a-test-only-feature](done/the-aur-check-could-ship-a-test-only-feature.md) - Nothing pins the one packaging recipe whose shape could ship a test-only feature.
+- [the-aur-check-is-killed-with-its-hosted-runner](done/the-aur-check-is-killed-with-its-hosted-runner.md) - The AUR check's release test build is killed with its hosted runner.
+- [the-bulk-skip-note-calls-unknown-locked](done/the-bulk-skip-note-calls-unknown-locked.md) - The bulk-skip note calls an unknown row locked.
+- [the-canonical-key-query-counts-the-terminal-tenant](done/the-canonical-key-query-counts-the-terminal-tenant.md) - The canonical-key mount query counts the terminal tenant as a workspace.
+- [the-chan-cli-crate-is-one-13k-line-file](done/the-chan-cli-crate-is-one-13k-line-file.md) - The chan CLI crate is one 13,736-line file.
+- [the-chan-home-fallback-trusts-var-tmp](done/the-chan-home-fallback-trusts-var-tmp.md) - The chan home fallback trusts a path under /var/tmp.
+- [the-control-sockets-directory-is-believed-as-found](done/the-control-sockets-directory-is-believed-as-found.md) - The control socket's directory is believed as found, by the server that binds in it and by every client.
+- [the-desktop-decodes-a-window-feed-all-or-nothing](done/the-desktop-decodes-a-window-feed-all-or-nothing.md) - The desktop decodes a devserver's window feed all or nothing.
+- [the-desktop-handoff-keys-an-absent-root](done/the-desktop-handoff-keys-an-absent-root.md) - The desktop handoff keys an absent root before it creates it.
+- [the-desktop-takes-ctrl-right-bracket-from-a-shell](done/the-desktop-takes-ctrl-right-bracket-from-a-shell.md) - The desktop takes Ctrl+] from a focused shell.
+- [the-detached-daemon-keeps-the-launching-shells-directory](done/the-detached-daemon-keeps-the-launching-shells-directory.md) - The detached devserver daemon keeps the launching shell's directory.
+- [the-devserver-stop-refuses-mounts-before-the-host](done/the-devserver-stop-refuses-mounts-before-the-host.md) - A stopping devserver refuses a new mount with a config error before its host is asked.
+- [the-email-fold-merges-distinct-characters](done/the-email-fold-merges-distinct-characters.md) - withdrawn, did not ship: The grant-claim email fold merges distinct characters.
+- [the-extension-proxy-forwards-to-an-exited-port](done/the-extension-proxy-forwards-to-an-exited-port.md) - The extension proxy forwards to an exited extension's port with the extension's token.
+- [the-fdstore-manifest-splits-seq-and-tail](done/the-fdstore-manifest-splits-seq-and-tail.md) - The fd-store manifest reads the sequence apart from its replay tail.
+- [the-gate-container-runs-as-root](done/the-gate-container-runs-as-root.md) - The build container runs the gate as root, so a fault that needs a user who is not root shows in no gate.
+- [the-graph-indexer-drops-renames-and-lingers](done/the-graph-indexer-drops-renames-and-lingers.md) - The graph indexer drops a rename's destination and outlives its drop.
+- [the-launcher-build-hint-cannot-run](done/the-launcher-build-hint-cannot-run.md) - The launcher-not-built hint names a command that cannot run.
+- [the-launcher-says-off-beside-running](done/the-launcher-says-off-beside-running.md) - The launcher says Off beside a running status.
+- [the-launchers-add-and-on-skip-the-stop-check](done/the-launchers-add-and-on-skip-the-stop-check.md) - The launcher's own add and on never ask a stopping devserver's coordinator.
+- [the-linux-gate-has-no-windows-target-check](done/the-linux-gate-has-no-windows-target-check.md) - The Linux gate has no Windows-target check for the crates the Windows arm compiles.
+- [the-linux-gate-runs-tests-under-a-canonical-tmpdir](done/the-linux-gate-runs-tests-under-a-canonical-tmpdir.md) - The Linux gate runs every test under a canonical temp directory.
+- [the-memfd-ring-mirror-doubles-the-terminals-memory](done/the-memfd-ring-mirror-doubles-the-terminals-memory.md) - The memfd ring mirror doubles a terminal's memory and costs peak write throughput.
+- [the-move-out-spare-covers-the-whole-window](done/the-move-out-spare-covers-the-whole-window.md) - The move-out spare covers the whole window.
+- [the-nsis-uninstaller-stub-ships-unsigned](done/the-nsis-uninstaller-stub-ships-unsigned.md) - The NSIS uninstaller stub ships unsigned.
+- [the-quit-drain-can-hang-on-a-recovery-pass](done/the-quit-drain-can-hang-on-a-recovery-pass.md) - The quit drain can hang on a mounted root's recovery pass.
+- [the-root-stall-names-a-step-by-symbols](done/the-root-stall-names-a-step-by-symbols.md) - The root stall holds a named step only in a build that keeps its symbols.
+- [the-scripted-team-drops-member-env](done/the-scripted-team-drops-member-env.md) - The scripted team form drops every member's env.
+- [the-served-index-forgets-a-lone-rename](done/the-served-index-forgets-a-lone-rename.md) - The served index forgets the destination of a lone rename.
+- [the-settings-date-format-never-saves](done/the-settings-date-format-never-saves.md) - The Settings date format never saves.
+- [the-side-effect-and-error-lows-are-unread](done/the-side-effect-and-error-lows-are-unread.md) - The side-effect and error-handling lows were never read.
+- [the-site-carries-a-workspace-mock-nobody-ships](done/the-site-carries-a-workspace-mock-nobody-ships.md) - The site carries a workspace mock nobody ships, and the graph tuner a fixture nobody uses.
+- [the-team-poke-names-a-path-it-does-not-anchor](done/the-team-poke-names-a-path-it-does-not-anchor.md) - The team identity poke names a relative path and never says what it is relative to.
+- [the-terminal-tenant-answers-for-a-home-workspace](done/the-terminal-tenant-answers-for-a-home-workspace.md) - The terminal tenant answers for a registered home workspace.
+- [the-test-util-comments-omit-the-attach-seam](done/the-test-util-comments-omit-the-attach-seam.md) - The test-util comments do not name the attach seam.
+- [the-web-bundles-still-build-on-node-20](done/the-web-bundles-still-build-on-node-20.md) - The web bundles still build on node 20 everywhere but Nix.
+- [the-writer-lock-probe-waits-on-a-hung-root](done/the-writer-lock-probe-waits-on-a-hung-root.md) - The writer-lock probe resolves a root another process holds, so a hung one stalls the workspace lists.
+- [three-inputs-have-no-size-cap](done/three-inputs-have-no-size-cap.md) - Three inputs have no size cap.
+- [tower-sessions-lags-and-axum-has-a-dead-feature](done/tower-sessions-lags-and-axum-has-a-dead-feature.md) - tower-sessions is held a release behind, and axum carries a feature nothing uses.
+- [two-closes-still-drop-a-drawings-last-stroke](done/two-closes-still-drop-a-drawings-last-stroke.md) - A pane close from the control client, and a window's close, can still drop a drawing's last stroke.
+- [two-copies-to-one-free-name-can-collide](done/two-copies-to-one-free-name-can-collide.md) - Two copies to one free name can still collide.
+- [two-exact-pins-hold-back-web-upgrades](done/two-exact-pins-hold-back-web-upgrades.md) - Two exact version pins hold back routine web upgrades.
+- [two-warning-capture-tests-race-a-callsite-cache](done/two-warning-capture-tests-race-a-callsite-cache.md) - Two tests of chan-library that capture warnings fail now and then.
 
 ### v0.100.0
 

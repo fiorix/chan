@@ -5,15 +5,13 @@
   // toggle hides the floating format toolbar and the editor caret
   // for the spec's "maximize for reading" mode.
   //
-  // Backlinks come from /api/backlinks/{path}; counts are debounced
-  // off the live `content` prop so heavy edits don't spam the
-  // network or recompute on every keystroke.
+  // Backlinks come from /api/backlinks/{path}. A rename keeps the displayed
+  // count until a second query has allowed the indexer's debounce to pass.
   //
   // Collapse state is local to the component (no persistence): the
   // bar is small enough that re-expanding on each open is cheap,
   // and avoiding a serialized field keeps tab-state simple.
 
-  import { onDestroy } from "svelte";
   import { api } from "../api/client";
   import { idle } from "../state/idle.svelte";
 
@@ -52,40 +50,30 @@
   });
   const chars = $derived(content.length);
 
-  /// Backlinks fetch. Debounced so a burst of edits coalesces into
-  /// one query. Hits an existing chan-server endpoint.
-  let pending: ReturnType<typeof setTimeout> | null = null;
-  let lastFetched = "";
-  function scheduleBacklinks(): void {
-    if (pending) clearTimeout(pending);
-    pending = setTimeout(() => {
-      pending = null;
-      const target = path;
-      if (target === lastFetched) return;
-      lastFetched = target;
-      void api
-        .backlinks(target)
-        .then((edges) => {
-          // Drop the result if the path changed under us (tab swap).
-          if (path !== target) return;
-          backlinkCount = Array.isArray(edges) ? edges.length : 0;
-        })
-        .catch(() => {
-          if (path !== target) return;
-          backlinkCount = null;
-        });
-    }, 600);
-  }
-
-  // Re-query when path changes (tab swap).
+  let previousPath = "";
   $effect(() => {
-    lastFetched = "";
-    backlinkCount = null;
-    scheduleBacklinks();
-  });
-
-  onDestroy(() => {
-    if (pending) clearTimeout(pending);
+    const target = path;
+    const renamed = previousPath !== "";
+    previousPath = target;
+    let disposed = false;
+    async function fetchBacklinks(publish: boolean): Promise<void> {
+      try {
+        const edges = await api.backlinks(target);
+        if (!disposed && publish) backlinkCount = Array.isArray(edges) ? edges.length : 0;
+      } catch {
+        if (!disposed && publish) backlinkCount = null;
+      }
+    }
+    const first = setTimeout(() => void fetchBacklinks(!renamed), 600);
+    // Watch notifications precede indexing, and the graph cache invalidates
+    // on that same notification. Allow even the conservative two-second
+    // debounce and its worker tick before adopting a renamed path's count.
+    const settled = renamed ? setTimeout(() => void fetchBacklinks(true), 2600) : null;
+    return () => {
+      disposed = true;
+      clearTimeout(first);
+      if (settled !== null) clearTimeout(settled);
+    };
   });
 
   function toggleCollapse(): void {

@@ -50,30 +50,58 @@ CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri and Window
 limactl shell default sudo sdme create --name chan-build -r ubuntu --storage btrfs
 limactl shell default sudo sdme start  chan-build
 
-# seed the repo (tracked files only) into the container
-git archive HEAD -o ~/chan-src.tar
-limactl shell default sudo sdme cp ~/chan-src.tar chan-build:/root/chan.tar
-limactl shell default sudo sdme exec chan-build /bin/sh -c \
-  'mkdir -p /root/chan && tar -xf /root/chan.tar -C /root/chan'
+# transfer the committed HEAD with its Git metadata: the gate uses git ls-files
+git bundle create ~/chan-src.bundle HEAD
+limactl shell default sudo sdme cp ~/chan-src.bundle chan-build:/tmp/chan-src.bundle
 
-# install deps (same set CI installs) + the pinned Rust toolchain
-limactl shell default sudo sdme exec chan-build /bin/sh -c '
-  export HOME=/root DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y build-essential pkg-config curl ca-certificates \
-    nodejs npm libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-    librsvg2-dev libsoup-3.0-dev patchelf xdg-utils \
-    desktop-file-utils gcc-mingw-w64-x86-64 file
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-  . /root/.cargo/env
-  cd /root/chan && rustup target add x86_64-pc-windows-gnu'
+# install build dependencies and create the uid-1000 build user
+limactl shell default sudo sdme exec chan-build /bin/bash -c '
+  set -euo pipefail
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends build-essential git curl \
+    ca-certificates pkg-config python3 jq ripgrep xz-utils unzip zip dbus \
+    util-linux libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+    librsvg2-dev libsoup-3.0-dev patchelf xdg-utils desktop-file-utils \
+    gcc-mingw-w64-x86-64 file libssl-dev clang lld
+  if ! id ubuntu >/dev/null 2>&1; then useradd -m -u 1000 -U -s /bin/bash ubuntu; fi
+  test "$(id -u ubuntu)" = 1000
+  test "$(getent passwd ubuntu | cut -d: -f6)" = /home/ubuntu
+  chmod 644 /tmp/chan-src.bundle
+  runuser -u ubuntu -- git clone /tmp/chan-src.bundle /home/ubuntu/chan
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64) node_arch=x64 ;;
+    aarch64) node_arch=arm64 ;;
+    *) echo "unsupported Linux architecture: $arch" >&2; exit 2 ;;
+  esac
+  cd /tmp
+  curl -fsSLo SHASUMS256.txt https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt
+  node_archive=$(grep -Eo "node-v22\\.[0-9]+\\.[0-9]+-linux-${node_arch}\\.tar\\.xz" SHASUMS256.txt)
+  test "$(printf "%s\n" "$node_archive" | wc -l)" -eq 1
+  curl -fLO "https://nodejs.org/dist/latest-v22.x/$node_archive"
+  grep -F "  $node_archive" SHASUMS256.txt > node.sha256
+  sha256sum -c node.sha256
+  tar -xJf "$node_archive" -C /opt
+  ln -s "/opt/${node_archive%.tar.xz}" /opt/node22
+  curl -fsSLo rustup-init "https://static.rust-lang.org/rustup/dist/${arch}-unknown-linux-gnu/rustup-init"
+  curl -fsSLo rustup-init.sha256 "https://static.rust-lang.org/rustup/dist/${arch}-unknown-linux-gnu/rustup-init.sha256"
+  sha256sum -c rustup-init.sha256
+  chmod 755 rustup-init
+  runuser -u ubuntu -- /tmp/rustup-init -y --no-modify-path --profile minimal \
+    --default-toolchain 1.95.0 --component rustfmt --component clippy \
+    --target x86_64-pc-windows-gnu'
 
-# run the gate (reads rust-toolchain.toml -> 1.95.0)
-limactl shell default sudo sdme exec chan-build /bin/sh -c '
-  export HOME=/root; . /root/.cargo/env; cd /root/chan && make ci-linux'
+# run the gate as ubuntu, with its own home, toolchain and target directory
+limactl shell default sudo sdme exec chan-build /usr/sbin/runuser -u ubuntu -- /bin/bash -c '
+  set -euo pipefail
+  . /home/ubuntu/.cargo/env
+  export PATH=/opt/node22/bin:$PATH
+  cd /home/ubuntu/chan
+  make ci-linux'
 ```
 
-`git archive HEAD` ships committed files only; re-run it (and re-`cp`) after each commit you want reflected in the container. To iterate without rebuilding the container, `sdme cp` individual files or `sdme join chan-build` for an interactive shell. A cold `make ci-linux` also installs Tauri CLI under `target/tauri-cli`, then builds and boots the release devserver and produces an AppImage after the compile/test gates.
+The bundle checks out the committed HEAD with its Git index, which the static linters need for `git ls-files`. For a later commit, create and copy a new bundle, then run `git fetch /tmp/chan-src.bundle HEAD && git checkout --detach FETCH_HEAD` as `ubuntu` in `/home/ubuntu/chan` before repeating the gate. The `ubuntu` user owns that checkout, so Cargo writes its target there and permission-sensitive tests run without root privileges. A cold `make ci-linux` also installs Tauri CLI under `target/tauri-cli`, then builds and boots the release devserver and produces an AppImage after the compile/test gates.
 
 ## Desktop: build the chan-desktop AppImage and .deb
 
@@ -212,7 +240,7 @@ CHAN_HOME=/tmp/chan-devserver-home \
 The built macOS `.app` (`make chan-desktop` produces `target/release/bundle/macos/Chan.app`) reads and writes your **real** `~/.chan` library and, on a plain launch, hands off to your **real** running chan-desktop. To exercise a dev build without disturbing either, run it from a terminal with a throwaway `HOME` and `XDG_RUNTIME_DIR`:
 
 ```sh
-rm -rf /tmp/chan-smoke /tmp/chan-smoke-xdg && mkdir -p /tmp/chan-smoke /tmp/chan-smoke-xdg
+rm -rf /tmp/chan-smoke /tmp/chan-smoke-xdg && mkdir -p /tmp/chan-smoke /tmp/chan-smoke-xdg && chmod 700 /tmp/chan-smoke-xdg
 HOME=/tmp/chan-smoke XDG_RUNTIME_DIR=/tmp/chan-smoke-xdg \
   target/release/bundle/macos/Chan.app/Contents/MacOS/chan-desktop
 ```
@@ -259,41 +287,36 @@ The gateway's per-change test loop runs `cargo` + `npm` **on your host** against
 The gateway ships five `.deb` packages run under systemd. To verify the prod path (packages -> postinst user -> systemd units -> `configure.sh` -> running services) end to end, build and install them in a systemd container with a reachable Postgres (the `chan-psql` container from the gateway doc; host networking makes it reachable at `localhost:5432`).
 
 ```sh
-# create a build container and seed the repo (tracked files only)
+# create a separate build container
 limactl shell default sudo sdme create --name chan-gw-build -r ubuntu --storage btrfs
 limactl shell default sudo sdme start  chan-gw-build
-git archive HEAD -o ~/chan-src.tar
-limactl shell default sudo sdme cp ~/chan-src.tar chan-gw-build:/root/chan.tar
+```
 
-# drop into the container; everything below runs inside it
+Run the core gate's bundle transfer and setup commands above with `chan-gw-build` in place of `chan-build`, stopping before `make ci-linux`. This clones the committed HEAD as `ubuntu` (uid 1000) and installs Node 22 and Rust in that user's environment. Then enter the container:
+
+```sh
 limactl shell default sudo sdme join chan-gw-build
 ```
 
-Inside `chan-gw-build`:
+Inside `chan-gw-build`, install `cargo-deb` and build as `ubuntu`. Only package installation and service configuration need root:
 
 ```sh
-mkdir -p /root/chan && tar -xf /root/chan.tar -C /root/chan
+apt-get install -y openssl
+runuser -u ubuntu -- /bin/bash -c '
+  set -euo pipefail
+  . /home/ubuntu/.cargo/env
+  export PATH=/opt/node22/bin:$PATH
+  cargo install cargo-deb
+  cd /home/ubuntu/chan
+  npm ci --prefix web
+  npm run build -w @chan/profile --prefix web
+  cd gateway
+  cargo build --release -p profile -p identity -p devserver-proxy -p devserver-control -p admin
+  for c in profile identity devserver-proxy devserver-control admin; do cargo deb --no-build -p "$c"; done'
 
-# build deps + the pinned toolchain. openssl + python3 are required by
-# configure.sh (random secrets + password URL-encoding).
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y build-essential pkg-config libssl-dev curl \
-  ca-certificates nodejs npm openssl python3
-curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-. "$HOME/.cargo/env"
-cargo install cargo-deb
-
-# build the SPA, then the five .debs
-(cd /root/chan/web && npm ci && npm run build -w @chan/profile)
-cd /root/chan/gateway
-cargo build --release -p profile -p identity -p devserver-proxy -p devserver-control -p admin
-for c in profile identity devserver-proxy devserver-control admin; do cargo deb --no-build -p "$c"; done
-
-# install (postinst creates the chan-gateway user + units + default env),
-# generate config, start, and check health
-dpkg -i target/debian/*.deb || apt-get -f install -y
-bash ../packaging/gateway/scripts/configure.sh   # answers: PG user/pass/db, base domain, scheme, >=1 provider
+# install (postinst creates the chan-gateway user + units + default env), generate config, start, and check health
+dpkg -i /home/ubuntu/chan/gateway/target/debian/*.deb || apt-get -f install -y
+bash /home/ubuntu/chan/packaging/gateway/scripts/configure.sh   # answers: PG user/pass/db, base domain, scheme, >=1 provider
 systemctl enable --now chan-gateway-profile chan-gateway-identity chan-gateway-devserver-proxy chan-gateway-devserver-control
 systemctl is-active chan-gateway-profile chan-gateway-identity chan-gateway-devserver-proxy chan-gateway-devserver-control
 for p in 7001 7000 7002 7003; do curl -fsS "http://127.0.0.1:$p/healthz"; echo; done

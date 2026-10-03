@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import StyleToolbar from "./StyleToolbar.svelte";
 import type Wysiwyg from "../editor/Wysiwyg.svelte";
 import type { BlockKind } from "../editor/commands/format";
+import { chordFor } from "../state/shortcuts";
 
 type MockFn = ReturnType<typeof vi.fn>;
 
@@ -128,12 +129,16 @@ describe("StyleToolbar", () => {
     }
   });
 
-  test("file editor variant exposes and wires every formatting control", async () => {
+  test("floats and exposes and wires every formatting control", async () => {
     const { target, toolbar, wysiwyg } = await renderToolbar();
 
     expect(toolbar.classList.contains("floating")).toBe(true);
-    expect(toolbar.classList.contains("inflow")).toBe(false);
     expect(target.querySelector(".fbtn-row")).not.toBeNull();
+    expect(button(target, "bold").classList.contains("fbtn")).toBe(true);
+    expect(button(target, "toggle link").classList.contains("fbtn")).toBe(true);
+    const boldClasses = Array.from(button(target, "bold").classList).sort();
+    const linkClasses = Array.from(button(target, "toggle link").classList).sort();
+    expect(linkClasses).toEqual(boldClasses);
 
     const select = target.querySelector<HTMLSelectElement>("select.block-kind");
     expect(select).not.toBeNull();
@@ -158,20 +163,6 @@ describe("StyleToolbar", () => {
       button(target, label).click();
       expect(action).toHaveBeenCalledTimes(1);
     }
-  });
-
-  test("prompt variant shares the control styling contract without image insertion", async () => {
-    const { target, toolbar } = await renderToolbar({ showImage: false });
-
-    expect(toolbar.classList.contains("floating")).toBe(true);
-    expect(target.querySelector(".fbtn-row")).not.toBeNull();
-    expect(button(target, "bold").classList.contains("fbtn")).toBe(true);
-    expect(button(target, "toggle link").classList.contains("fbtn")).toBe(true);
-    expect(target.querySelector("button[aria-label='insert image']")).toBeNull();
-
-    const fileControlClasses = Array.from(button(target, "bold").classList).sort();
-    const promptControlClasses = Array.from(button(target, "toggle link").classList).sort();
-    expect(promptControlClasses).toEqual(fileControlClasses);
   });
 
   test("disabled state gates formatting controls but leaves mode toggle available", async () => {
@@ -200,6 +191,18 @@ describe("StyleToolbar", () => {
     expect(button(target, "toggle link").classList.contains("on")).toBe(true);
     expect(button(target, "task list").classList.contains("on")).toBe(true);
     expect(target.querySelector<HTMLSelectElement>("select.block-kind")?.value).toBe("quote");
+  });
+
+  test("a tooltip names a chord only for an action the editor binds", async () => {
+    const { target } = await renderToolbar();
+    const names = ["bold", "italic", "strikethrough", "inline code"];
+
+    expect(Object.fromEntries(names.map((name) => [name, button(target, name).title]))).toEqual({
+      bold: `bold (${chordFor("app.editor.bold")})`,
+      italic: `italic (${chordFor("app.editor.italic")})`,
+      strikethrough: "strikethrough",
+      "inline code": "inline code",
+    });
   });
 
   test("the formatting pill opens the row by focus and preserves editor mouse focus", async () => {

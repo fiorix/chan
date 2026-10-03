@@ -44,6 +44,7 @@ vi.mock("../api/client", () => ({
     backlinksStream: vi.fn(async () => {}),
   },
   withTokenQuery: (u: string) => `${u}?token=inspector-test`,
+  fileUrl: (p: string) => `/api/fs/${encodeURIComponent(p).replace(/%2F/g, "/")}?token=inspector-test`,
 }));
 
 vi.mock("../state/store.svelte", () => ({
@@ -90,6 +91,7 @@ import {
   openGraphForContact,
   openGraphForLanguage,
   revealPathInBrowser,
+  tree,
 } from "../state/store.svelte";
 import { openTerminalInActivePane } from "../state/tabs.svelte";
 import { openMediaViewer } from "../state/mediaOpen";
@@ -786,5 +788,25 @@ describe("a name that holds a backslash", () => {
 
     const target = await render({ path: "dir/a\\p.png" });
     expect(target.querySelector(".image-preview img")?.getAttribute("alt")).toBe("a\\p.png");
+  });
+});
+
+// A selected path that is not in the loaded listing yet has an entry on its
+// way, or one its folder could not list. Neither is an empty selection.
+describe("a selected path with no entry yet", () => {
+  afterEach(() => {
+    delete (tree.dirErrors as Record<string, string>).notes;
+  });
+
+  test("says it is loading, not that nothing is selected", async () => {
+    const target = await render({ path: "notes/a.md" });
+    expect(target.textContent).not.toContain("click a file or directory to inspect");
+    expect(target.querySelector(".empty-hint")?.textContent).toBe("Loading...");
+  });
+
+  test("gives the folder's listing error when it could not be listed", async () => {
+    (tree.dirErrors as Record<string, string>).notes = "permission denied";
+    const target = await render({ path: "notes/a.md" });
+    expect(target.querySelector(".empty-hint")?.textContent).toBe("cannot list notes: permission denied");
   });
 });

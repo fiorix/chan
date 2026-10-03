@@ -41,8 +41,8 @@
 
       <!-- Revealed only once the retry loop gives up (connecting.js
            GIVE_UP_AFTER_ATTEMPTS): Retry restarts the loop with a fresh
-           budget; Disconnect destroys the window so the launcher leaves the
-           connecting state instead of spinning forever. -->
+           budget; Disconnect closes the window as its close button does,
+           which hides it with its record kept and ends the wait. -->
       <div class="connecting-actions" id="actions" hidden>
         <button type="button" class="connecting-btn primary" id="retry">Retry</button>
         <button type="button" class="connecting-btn" id="disconnect">Disconnect</button>

@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::wire::{ControlRequest, ControlResponse, Identity};
+#[cfg(unix)]
+use crate::{validate_control_socket_dir, validate_control_socket_node};
 
 /// The chan-terminal environment a window-targeting action needs: which
 /// window to act on and which server socket to reach it through.
@@ -56,14 +58,16 @@ impl EnvControlSocket {
     /// the terminal's workspace (see [`Self::find_moved_server`]). Otherwise
     /// the connect fails as it would for any path.
     async fn connect(&self) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
+        #[cfg(unix)]
+        validate_socket_path(&self.path)?;
         let err = match transport::connect(&self.path).await {
             Ok(halves) => return Ok(halves),
             Err(err) => err,
         };
         #[cfg(unix)]
         if is_gone(&err) {
-            if let Some((found, root)) = self.find_moved_server().await {
-                if let Ok(halves) = transport::connect(&found).await {
+            if let Some((found, root)) = self.find_moved_server().await? {
+                if let Ok(halves) = connect_path(&found).await {
                     self.announce(&found, &root);
                     return Ok(halves);
                 }
@@ -75,33 +79,26 @@ impl EnvControlSocket {
     /// The one devserver tenant beside this gone socket that serves the
     /// terminal's workspace, with the root it reports. The search runs only
     /// when this socket has a devserver's stable name (a `chan serve` or
-    /// desktop socket belongs to its own process), when its directory's
-    /// mode has no group or world write bit, and when the environment names
-    /// a workspace. It then asks each stable socket beside this one who it
-    /// is, and answers only when exactly one devserver tenant reports the
-    /// canonical path of that workspace as its root.
-    ///
-    /// The directory rule is why a name found there may be believed. On
-    /// Linux the users who can create an entry in a directory without those
-    /// two bits are its owner and root, since a user that a POSIX access
-    /// list names may write only where the list's mask allows, and the mask
-    /// is the mode's group bits (acl(5)); both can already replace the
-    /// socket the environment names, so the search trusts nobody that
-    /// connecting to the environment's path does not. Where a system keeps
-    /// an access list beside the mode, the mode does not say who else may
-    /// add a name, and the search does not read the list. Where others can
-    /// add names, as in `/tmp`, anybody could answer as a devserver.
+    /// desktop socket belongs to its own process), when its directory passes
+    /// the control socket owner rule, and when the environment names a
+    /// workspace. It asks each stable socket beside this one who it is and
+    /// answers only when exactly one devserver tenant reports the canonical
+    /// path of that workspace as its root.
     #[cfg(unix)]
-    async fn find_moved_server(&self) -> Option<(PathBuf, PathBuf)> {
-        let name = self.path.file_name()?.to_str()?;
+    async fn find_moved_server(&self) -> Result<Option<(PathBuf, PathBuf)>> {
+        let Some(name) = self.path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(None);
+        };
         if !stable_control_socket_name(name, true) {
-            return None;
+            return Ok(None);
         }
-        let dir = self.path.parent()?;
-        if !only_owner_writes(dir) {
-            return None;
-        }
-        let workspace = self.workspace_path.as_deref()?;
+        let Some(dir) = self.path.parent() else {
+            return Ok(None);
+        };
+        validate_control_socket_dir(dir)?;
+        let Some(workspace) = self.workspace_path.as_deref() else {
+            return Ok(None);
+        };
         let mut serving = Vec::new();
         for candidate in stable_control_socket_candidates(dir, true) {
             if candidate == self.path {
@@ -118,16 +115,20 @@ impl EnvControlSocket {
             }
         }
         if serving.is_empty() {
-            return None;
+            return Ok(None);
         }
         // Resolved only once a devserver tenant has answered: a workspace
         // folder that does not answer holds `cs` here, until it does or the
         // user interrupts, and only in a terminal with such a tenant beside
         // its socket.
-        let root = std::fs::canonicalize(workspace).ok()?;
+        let Some(root) = std::fs::canonicalize(workspace).ok() else {
+            return Ok(None);
+        };
         let mut matching = serving.into_iter().filter(|(_, served)| *served == root);
-        let found = matching.next()?;
-        matching.next().is_none().then_some(found)
+        let Some(found) = matching.next() else {
+            return Ok(None);
+        };
+        Ok(matching.next().is_none().then_some(found))
     }
 
     /// Say, only to a person at a terminal, that this terminal's server
@@ -150,18 +151,6 @@ impl EnvControlSocket {
         #[cfg(test)]
         self.announced.lock().expect("announced lines").push(line);
     }
-}
-
-/// Whether the mode of `dir`, read through a link, has neither the group's
-/// nor the world's write bit. On Linux that leaves only its owner and root
-/// able to create entries in it, since an access list's named entries write
-/// only within its mask, which is the mode's group bits (acl(5)). Where a
-/// system keeps an access list beside the mode, this does not see whom else
-/// the list lets create an entry.
-#[cfg(unix)]
-fn only_owner_writes(dir: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(dir).is_ok_and(|meta| meta.is_dir() && meta.permissions().mode() & 0o022 == 0)
 }
 
 /// Where a control request goes: a socket its caller found by path, or the
@@ -263,6 +252,10 @@ const CONTROL_SOCKET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// The stable-named control-socket candidates in `dir`, sorted for a
 /// deterministic probe order.
 pub fn stable_control_socket_candidates(dir: &Path, require_sock_ext: bool) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    if validate_control_socket_dir(dir).is_err() {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -322,9 +315,25 @@ async fn connect_control(
 }
 
 async fn connect_path(socket: &Path) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
+    #[cfg(unix)]
+    validate_socket_path(socket)?;
     transport::connect(socket)
         .await
         .map_err(|err| connect_error(socket, err))
+}
+
+#[cfg(unix)]
+fn validate_socket_path(socket: &Path) -> Result<()> {
+    let dir = socket
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("control socket {} has no directory", socket.display()))?;
+    validate_control_socket_dir(dir)?;
+    match validate_control_socket_node(socket) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Whether a failed connect means no server is behind the socket: its node
@@ -711,8 +720,8 @@ mod tests {
         // A one-shot fake server that answers every request with the
         // queue-full status, standing in for a survey target whose FIFO is
         // at capacity.
-        let socket =
-            std::env::temp_dir().join(format!("chan-cs-queue-full-{}.sock", std::process::id()));
+        let dir = SocketDir::new("queue-full", 0o700);
+        let socket = dir.0.join("queue-full.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
@@ -749,8 +758,8 @@ mod tests {
         // in for a clipboard round-trip (or survey window) that elapsed. The
         // reply must downcast to ControlTimeout so the dispatch edge exits
         // 124 instead of the generic 1.
-        let socket =
-            std::env::temp_dir().join(format!("chan-cs-timeout-{}.sock", std::process::id()));
+        let dir = SocketDir::new("timeout", 0o700);
+        let socket = dir.0.join("timeout.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
@@ -789,10 +798,8 @@ mod tests {
     async fn send_control_request_types_an_older_servers_submit_refusal() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let socket = std::env::temp_dir().join(format!(
-            "chan-cs-submit-refused-{}.sock",
-            std::process::id()
-        ));
+        let dir = SocketDir::new("submit-refused", 0o700);
+        let socket = dir.0.join("submit-refused.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
@@ -858,8 +865,8 @@ mod tests {
     async fn send_control_request_accepts_a_reply_from_a_server_that_closes_at_once() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-        let socket =
-            std::env::temp_dir().join(format!("chan-cs-early-close-{}.sock", std::process::id()));
+        let dir = SocketDir::new("early-close", 0o700);
+        let socket = dir.0.join("early-close.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
@@ -893,8 +900,8 @@ mod tests {
     async fn send_control_request_names_a_server_that_closed_without_answering() {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let socket =
-            std::env::temp_dir().join(format!("chan-cs-no-answer-{}.sock", std::process::id()));
+        let dir = SocketDir::new("no-answer", 0o700);
+        let socket = dir.0.join("no-answer.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
@@ -941,8 +948,8 @@ mod tests {
         // "the command ended" and would tear the tunnel down. The fake server
         // proves it by reading again and expecting to time out, not to see
         // EOF, while the client blocks in `wait`.
-        let socket =
-            std::env::temp_dir().join(format!("chan-cs-tunnel-hold-{}.sock", std::process::id()));
+        let dir = SocketDir::new("tunnel-hold", 0o700);
+        let socket = dir.0.join("tunnel-hold.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
@@ -983,8 +990,8 @@ mod tests {
     async fn streaming_wait_surfaces_a_second_line_as_the_tunnel_dying() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-        let socket =
-            std::env::temp_dir().join(format!("chan-cs-tunnel-died-{}.sock", std::process::id()));
+        let dir = SocketDir::new("tunnel-died", 0o700);
+        let socket = dir.0.join("tunnel-died.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
@@ -1033,11 +1040,9 @@ mod tests {
                 true,
             ),
         ];
+        let dir = SocketDir::new("tunnel-first", 0o700);
         for (index, (reply, expect_timeout)) in cases.into_iter().enumerate() {
-            let socket = std::env::temp_dir().join(format!(
-                "chan-cs-tunnel-first-{}-{index}.sock",
-                std::process::id()
-            ));
+            let socket = dir.0.join(format!("tunnel-first-{index}.sock"));
             let _ = std::fs::remove_file(&socket);
             let listener = tokio::net::UnixListener::bind(&socket).unwrap();
             let server = tokio::spawn(async move {
@@ -1146,9 +1151,10 @@ mod tests {
         }
     }
 
-    /// A directory of the test's own under the temp dir, with the mode it
-    /// is given, removed on drop. The name is short: macOS caps a socket
-    /// path at 104 bytes.
+    /// A directory of the test's own under `/tmp`, with the mode it is
+    /// given, removed on drop. The root is fixed, as the private fallback's
+    /// is: macOS caps a socket path at 104 bytes and its per-user temp dir
+    /// takes 49 of them, which leaves no room for a stable socket's name.
     #[cfg(unix)]
     struct SocketDir(PathBuf);
 
@@ -1156,7 +1162,7 @@ mod tests {
     impl SocketDir {
         fn new(tag: &str, mode: u32) -> Self {
             use std::os::unix::fs::PermissionsExt;
-            let path = std::env::temp_dir().join(format!("cs-{}-{tag}", std::process::id()));
+            let path = Path::new("/tmp").join(format!("cs-{}-{tag}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -1236,6 +1242,50 @@ mod tests {
             "a socket beside a live one was knocked"
         );
         assert!(socket.announced.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_environment_socket_in_a_writable_directory_is_refused() {
+        let dir = SocketDir::new("unsafe-live", 0o777);
+        let tenant = FakeTenant::spawn(&dir.stable(1), None, "wrong peer");
+        let socket = env_socket(&dir.stable(1), None);
+        let error = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .expect_err("connected through a world-writable directory");
+        assert!(error.to_string().contains(&dir.0.display().to_string()));
+        assert_eq!(tenant.connections(), 0, "request reached an untrusted peer");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_gone_environment_socket_refuses_an_untrusted_search_directory() {
+        let dir = SocketDir::new("unsafe-gone", 0o777);
+        let tenant = FakeTenant::spawn(&dir.stable(2), None, "wrong peer");
+        let socket = env_socket(&dir.stable(1), None);
+        let error = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .expect_err("searched an untrusted directory");
+        let message = error.to_string();
+        assert!(message.contains(&dir.0.display().to_string()), "{message}");
+        assert!(message.contains("0700"), "{message}");
+        assert_eq!(tenant.connections(), 0, "untrusted peer was contacted");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_path_refuses_a_linked_socket_before_connecting() {
+        let dir = SocketDir::new("linked-node", 0o700);
+        let tenant = FakeTenant::spawn(&dir.stable(1), None, "wrong peer");
+        let linked = dir.stable(2);
+        std::os::unix::fs::symlink(dir.stable(1), &linked).unwrap();
+        let error = send_control_request(&linked, ControlRequest::WindowList)
+            .await
+            .expect_err("connected through a socket symlink");
+        let message = error.to_string();
+        assert!(message.contains(&linked.display().to_string()), "{message}");
+        assert!(message.contains("not a socket node"), "{message}");
+        assert_eq!(tenant.connections(), 0, "linked peer was contacted");
     }
 
     // A terminal whose tenant moved to another prefix keeps the socket of
@@ -1425,7 +1475,7 @@ mod tests {
                 workspace: link,
                 tenants: vec![(Devserver, None)],
                 probed: false,
-                words: gone,
+                words: "0700",
             },
             Case {
                 name: "a directory its group can write",
@@ -1434,7 +1484,7 @@ mod tests {
                 workspace: link,
                 tenants: vec![(Devserver, None)],
                 probed: false,
-                words: gone,
+                words: "0700",
             },
             Case {
                 name: "a directory the world can write",
@@ -1443,7 +1493,7 @@ mod tests {
                 workspace: link,
                 tenants: vec![(Devserver, None)],
                 probed: false,
-                words: gone,
+                words: "0700",
             },
             Case {
                 name: "a connect error of another kind",
@@ -1452,7 +1502,7 @@ mod tests {
                 workspace: link,
                 tenants: vec![(Devserver, None)],
                 probed: false,
-                words: "connecting to chan control socket",
+                words: "not a socket node",
             },
         ];
         for (n, case) in cases.into_iter().enumerate() {
@@ -1487,8 +1537,9 @@ mod tests {
                 .await
                 .map(|reply| format!("reached a tenant: {reply}"))
                 .unwrap_or_else(|e| e.to_string());
+            let named_path = if case.mode == 0o700 { &dead } else { &dir.0 };
             assert!(
-                err.contains(case.words) && err.contains(&dead.display().to_string()),
+                err.contains(case.words) && err.contains(&named_path.display().to_string()),
                 "{}: {err}",
                 case.name
             );
@@ -1517,6 +1568,11 @@ mod tests {
         // A $CHAN_CONTROL_SOCKET pointing at a socket whose server has exited
         // (the file is gone, common after a devserver restart) surfaces a
         // friendly stale-socket message, not a raw connect trace.
+        #[cfg(unix)]
+        let dir = SocketDir::new("stale", 0o700);
+        #[cfg(unix)]
+        let missing = dir.0.join("chan-control-cs-test-does-not-exist.sock");
+        #[cfg(not(unix))]
         let missing = std::env::temp_dir().join("chan-control-cs-test-does-not-exist.sock");
         let _ = std::fs::remove_file(&missing);
         let err = send_control_request(&missing, ControlRequest::WindowList)

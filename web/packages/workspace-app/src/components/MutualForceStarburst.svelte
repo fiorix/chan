@@ -7,6 +7,7 @@
     fitMutualForceStarburst,
   } from "./mutualForceStarburst";
   import {
+    canvasAnimationSpeed,
     canvasCssNumber,
     canvasCssValue,
     runCanvasAnimation,
@@ -14,6 +15,9 @@
 
   const SOURCE_FRAMES_PER_SECOND = 60;
   const SOURCE_FADE_ALPHA = 9 / 255;
+  // The source frames one paint may catch up after a stall, at 1x. The cap
+  // grows with the speed control, whose clock runs that much faster, so a
+  // faster speed is not clipped back to the one this cap allows.
   const MAX_SOURCE_STEPS_PER_FRAME = 4;
   const STATIC_TRAIL_STEPS = 5;
 
@@ -28,7 +32,7 @@
       let height = 0;
       let lastSimulationMs = 0;
       let pendingSourceFrames = 0;
-      let particles = createMutualForceParticles();
+      const particles = createMutualForceParticles();
       let paintedBackground = "";
 
       function backgroundColor(): string {
@@ -124,7 +128,7 @@
             : timeMs - lastSimulationMs;
         lastSimulationMs = timeMs;
         pendingSourceFrames = Math.min(
-          MAX_SOURCE_STEPS_PER_FRAME,
+          MAX_SOURCE_STEPS_PER_FRAME * Math.max(1, canvasAnimationSpeed(host)),
           pendingSourceFrames +
             (elapsedMs * SOURCE_FRAMES_PER_SECOND) / 1000,
         );
@@ -140,7 +144,6 @@
         resize(nextWidth, nextHeight, reducedMotion, timeMs) {
           width = nextWidth;
           height = nextHeight;
-          particles = createMutualForceParticles();
           lastSimulationMs = 0;
           pendingSourceFrames = 0;
           resetSurface();

@@ -122,8 +122,9 @@
         fire(e, 'app.tab.reopenClosed');
       } else if (!e.metaKey && !shift && code === 'KeyW') {
         // On the connecting screen the SPA command bus is dead, so
-        // destroy the window directly to cancel the connect, exactly
-        // as the other two KeyW routings do.
+        // close the window through request_close_window, which hides
+        // it and keeps its record, exactly as the other two KeyW
+        // routings do.
         if (location.pathname.endsWith('/connecting.html')) {
           invokeIpc(e, 'request_close_window');
         } else {
@@ -180,9 +181,9 @@
         case 'KeyW':
           if (e.metaKey) {
             // On the connecting/retry page there are no tabs and the
-            // app.tab.close dispatch is dead: Cmd+W means cancel, so
-            // close the window for real (request_close_window
-            // destroys, bypassing bury-on-close). The bridge claims
+            // app.tab.close dispatch is dead: Cmd+W closes the window
+            // through request_close_window, which hides it and keeps
+            // its record. The bridge claims
             // KeyW with stopImmediatePropagation BEFORE the page's own
             // listener AND before the File menu accelerator gets a
             // look-in, so the routing must happen here. Gate on the
@@ -275,8 +276,8 @@
         // browser), so what stands between Ctrl+Shift+W and a focused
         // shell is this listener's window-capture
         // stopImmediatePropagation. On the connecting screen the SPA
-        // command bus is dead, so destroy the window directly to cancel
-        // the connect.
+        // command bus is dead, so close the window through
+        // request_close_window, which hides it and keeps its record.
         case 'KeyW':
           if (location.pathname.endsWith('/connecting.html')) {
             invokeIpc(e, 'request_close_window');

@@ -12,9 +12,13 @@
 // still tiny (~MBs).
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tantivy::collector::TopDocs;
+use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
+use tantivy::directory::{
+    Directory, DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
+};
 use tantivy::indexer::IndexWriterOptions;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RegexQuery};
 use tantivy::schema::{
@@ -30,6 +34,7 @@ use super::chunking::Chunk;
 #[cfg(test)]
 use super::config::Chunking;
 use super::facade::Hit;
+use crate::lock::FileLock;
 
 /// Memory budget per writer batch. tantivy's recommendation is
 /// 50 MB minimum; our corpora are small so this is more than enough.
@@ -88,7 +93,7 @@ impl Bm25Index {
         // different schema. We don't migrate yet (schema_version
         // bump => full rebuild); the caller (index::Index) is
         // responsible for clearing the dir before bumps.
-        let index = Index::open_or_create(tantivy::directory::MmapDirectory::open(&dir)?, schema)?;
+        let index = Index::open_or_create(IndexDirectory::open(&dir)?, schema)?;
         let writer_budget = crate::fd_budget::tantivy_writer_budget(default_writer_threads());
         let writer_options = IndexWriterOptions::builder()
             .num_worker_threads(writer_budget.worker_threads)
@@ -568,6 +573,81 @@ fn bm25_dir(index_dir: &Path) -> PathBuf {
     index_dir.join("bm25")
 }
 
+/// The directory tantivy reads and writes the index through: an
+/// `MmapDirectory` whose lock files are unlocked before they are closed.
+///
+/// An advisory lock belongs to the open file description, and a child
+/// process holds a duplicate of every descriptor of this process from fork
+/// until exec. `MmapDirectory` releases a lock only by closing its file, so
+/// such a duplicate keeps the writer lock held after the index is gone, and
+/// the next open of the same directory is refused as busy. An explicit unlock
+/// releases the description itself, whoever still holds a descriptor on it.
+#[derive(Clone, Debug)]
+struct IndexDirectory {
+    root: PathBuf,
+    inner: MmapDirectory,
+}
+
+impl IndexDirectory {
+    fn open(root: &Path) -> Result<Self, Bm25Error> {
+        let inner = MmapDirectory::open(root)?;
+        Ok(Self {
+            root: root.canonicalize()?,
+            inner,
+        })
+    }
+}
+
+impl Directory for IndexDirectory {
+    fn get_file_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>, OpenReadError> {
+        self.inner.get_file_handle(path)
+    }
+
+    fn delete(&self, path: &Path) -> Result<(), DeleteError> {
+        self.inner.delete(path)
+    }
+
+    fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
+        self.inner.exists(path)
+    }
+
+    fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
+        self.inner.open_write(path)
+    }
+
+    fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+        self.inner.atomic_read(path)
+    }
+
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        self.inner.atomic_write(path, data)
+    }
+
+    fn sync_directory(&self) -> std::io::Result<()> {
+        self.inner.sync_directory()
+    }
+
+    fn acquire_lock(&self, lock: &Lock) -> Result<DirectoryLock, LockError> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join(&lock.filepath))
+            .map_err(LockError::wrap_io_error)?;
+        let held = if lock.is_blocking {
+            FileLock::exclusive(file).map_err(LockError::wrap_io_error)?
+        } else {
+            // Any refusal reads as contention, as `MmapDirectory` reports it.
+            FileLock::try_exclusive(file).map_err(|_| LockError::LockBusy)?
+        };
+        Ok(DirectoryLock::from(Box::new(held)))
+    }
+
+    fn watch(&self, watch_callback: WatchCallback) -> tantivy::Result<WatchHandle> {
+        self.inner.watch(watch_callback)
+    }
+}
+
 fn build_schema() -> Schema {
     let mut sb = SchemaBuilder::default();
     // STRING (single-token, exact-match) is what we need for delete-
@@ -615,6 +695,48 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let idx = Bm25Index::open(tmp.path()).unwrap();
         (tmp, idx)
+    }
+
+    /// A second descriptor of this process on the live writer's lock file,
+    /// sharing its open file description: what a child process holds from
+    /// fork until exec.
+    #[cfg(target_os = "linux")]
+    fn writer_lock_duplicate(index_dir: &Path) -> std::fs::File {
+        use std::os::fd::{BorrowedFd, RawFd};
+        use std::os::unix::fs::MetadataExt;
+
+        let lock = std::fs::metadata(bm25_dir(index_dir).join(".tantivy-writer.lock")).unwrap();
+        for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+            let entry = entry.unwrap();
+            // Other tests open and close descriptors while this one lists them.
+            let Ok(target) = std::fs::metadata(entry.path()) else {
+                continue;
+            };
+            if (target.dev(), target.ino()) != (lock.dev(), lock.ino()) {
+                continue;
+            }
+            let fd: RawFd = entry.file_name().to_str().unwrap().parse().unwrap();
+            // SAFETY: the caller's index keeps its writer, and so this
+            // descriptor, open for the whole call.
+            let held = unsafe { BorrowedFd::borrow_raw(fd) };
+            return std::fs::File::from(held.try_clone_to_owned().unwrap());
+        }
+        panic!("no descriptor of this process is open on the writer lock file");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_closed_index_reopens_while_a_duplicate_of_its_writer_lock_is_open() {
+        let (tmp, idx) = fresh();
+        let duplicate = writer_lock_duplicate(tmp.path());
+        drop(idx);
+        let reopened = Bm25Index::open(tmp.path());
+        assert!(
+            reopened.is_ok(),
+            "a closed index left its writer lock held through a duplicate descriptor: {:?}",
+            reopened.err()
+        );
+        drop(duplicate);
     }
 
     #[test]

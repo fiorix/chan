@@ -19,6 +19,9 @@
   let loadError = $state<string | null>(null);
   let saveStatus = $state<SaveStatus>("idle");
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  // Counts edits, so the answer to a save sent before a later edit does not
+  // replace the list the user has changed since; that edit's own save follows.
+  let edits = 0;
 
   onMount(async () => {
     try {
@@ -89,6 +92,7 @@
   // Debounce so rapid add/remove edits collapse into one PUT (and one re-walk)
   // rather than firing per keystroke.
   function scheduleSave(): void {
+    edits += 1;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(save, 600);
   }
@@ -96,12 +100,15 @@
   async function save(): Promise<void> {
     saveTimer = null;
     saveStatus = "saving";
+    const sentAfter = edits;
     try {
       const v = await api.setExcludedDirs(additions);
+      if (edits !== sentAfter) return;
       view = v;
       additions = [...v.workspace];
       saveStatus = "saved";
     } catch (e) {
+      if (edits !== sentAfter) return;
       saveStatus = { error: e instanceof Error ? e.message : String(e) };
     }
   }

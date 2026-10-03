@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { EditorSelection, EditorState } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { forceParsing, syntaxTree } from "@codemirror/language";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -164,6 +164,37 @@ describe("parse-progress recompute", () => {
     // next edit or caret move.
     expect(forceParsing(view, view.state.doc.length, 5000)).toBe(true);
     expect(atomicCount(view)).toBe(1);
+    view.destroy();
+    parent.remove();
+  });
+});
+
+describe("a theme flip", () => {
+  test("redraws a rendered diagram in the new palette with no edit", async () => {
+    let dark = false;
+    const render = vi.fn(async (_src: string, d: boolean) => ({
+      ok: true,
+      svg: `<svg viewBox="0 0 40 20" data-dark="${d}"></svg>`,
+    }));
+    const deco = diagramDecorations({
+      lang: "mermaid",
+      label: "Mermaid",
+      render,
+      isDark: () => dark,
+    });
+    // The editor flips its theme by reconfiguring a compartment, a
+    // transaction with no doc change, no selection and no new tree.
+    const theme = new Compartment();
+    const { parent, view } = mount([deco, theme.of([])], MERMAID_DOC, 0);
+    await vi.waitFor(() => {
+      expect(parent.querySelector('svg[data-dark="false"]')).not.toBeNull();
+    });
+    dark = true;
+    view.dispatch({ effects: theme.reconfigure([]) });
+    await vi.waitFor(() => {
+      expect(parent.querySelector('svg[data-dark="true"]')).not.toBeNull();
+    });
+    expect(render).toHaveBeenLastCalledWith(expect.any(String), true);
     view.destroy();
     parent.remove();
   });

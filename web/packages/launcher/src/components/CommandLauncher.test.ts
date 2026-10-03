@@ -220,8 +220,7 @@ describe("Computers command deck", () => {
     );
     flushSync();
     expect(activeCommandLauncherDraft().visible).toBe(true);
-    // One Windows branch where Focus / Hide / Show / Close used to sit as four
-    // siblings, each listing the same roster through its own filter.
+    // Window actions share one Windows branch.
     for (const title of ["New terminal", "New window", "Windows", "Turn on", "Turn off"]) {
       expect(result(title)).toBeTruthy();
     }

@@ -68,6 +68,26 @@ async function settled(): Promise<void> {
 }
 
 describe("the close of a drawing whose save is refused", () => {
+  test("an unanswered live push keeps a clean-looking buffer open until the user decides", async () => {
+    const tab = fileTab({
+      id: "unanswered-live-push",
+      content: "same text",
+      saved: "same text",
+      unresolvedLivePush: true,
+      unresolvedLiveSave: true,
+      saveError: "the previous live push has not been confirmed",
+    });
+    const pane = resetLayout([tab]);
+    const write = vi.spyOn(api, "write");
+    const close = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    expect(confirmState.message).toContain("previous live push has not been confirmed");
+    expect(write).not.toHaveBeenCalled();
+    resolveConfirm(false);
+    await close;
+    expect(readTab(tab.id)).toBeDefined();
+  });
+
   test("asks, naming the file and the reason, and keeps editing on a no", async () => {
     const pane = resetLayout([drawingTab("notes/board.excalidraw")]);
     const write = stubWrites();
@@ -173,7 +193,12 @@ describe("the close of a drawing whose save is refused", () => {
     const typed = '{ "type": "excalidraw", "elements": [1] }';
     const pane = resetLayout([drawingTab("notes/board.excalidraw", typed)]);
     vi.spyOn(api, "write").mockRejectedValue(
-      new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }),
+      new ApiError(409, "file changed on disk since it was read", {
+        error: "file changed on disk since it was read",
+        code: "write_conflict",
+        current_mtime: 5,
+        current_mtime_ns: "5",
+      }),
     );
 
     const close = closeTab(pane.id, "board-1");
@@ -194,7 +219,12 @@ describe("the close of a drawing whose save is refused", () => {
     vi.useRealTimers();
     setTabContent(readTab("board-1")!, '{ "type": "excalidraw", "elements": [1] }');
     vi.spyOn(api, "write").mockRejectedValue(
-      new ApiError(409, "conflict", { current_mtime: 5, current_mtime_ns: "5" }),
+      new ApiError(409, "file changed on disk since it was read", {
+        error: "file changed on disk since it was read",
+        code: "write_conflict",
+        current_mtime: 5,
+        current_mtime_ns: "5",
+      }),
     );
 
     const close = closeTab(pane.id, "board-1");
@@ -224,7 +254,7 @@ describe("a refused drawing that does not close says why", () => {
       inspected: inspect.mock.calls.length,
       draftDialog: draftCloseState.open,
     }).toEqual({
-      notices: [["untitled.excalidraw was not saved."]],
+      notices: [[`untitled.excalidraw was not saved because the drawing does not parse (${parseReason(BROKEN)}).`]],
       content: BROKEN,
       written: [],
       inspected: 0,

@@ -579,6 +579,45 @@ pub(crate) struct RecoveryPlan {
     action: Option<RecoveryAction>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryObservation {
+    pub(crate) events: std::collections::VecDeque<String>,
+    pub(crate) last_result: Option<String>,
+    pub(crate) last_error: Option<String>,
+}
+
+#[cfg(test)]
+impl RecoveryObservation {
+    fn new(plan: String) -> Self {
+        Self {
+            events: std::collections::VecDeque::from([plan]),
+            last_result: None,
+            last_error: None,
+        }
+    }
+
+    fn record(&mut self, event: String) {
+        if self.events.len() == 24 {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+}
+
+#[cfg(test)]
+struct RecoveryWorkerExit<'a>(&'a Workspace);
+
+#[cfg(test)]
+impl Drop for RecoveryWorkerExit<'_> {
+    fn drop(&mut self) {
+        self.0.observe_recovery(format!(
+            "worker exit panicking={}",
+            std::thread::panicking()
+        ));
+    }
+}
+
 impl RecoveryPlan {
     fn derive(
         needs_rebuild: bool,
@@ -811,6 +850,63 @@ fn index_commit_pause_for_test(workspace: &Workspace) {
     let _ = pause.release.recv_timeout(INDEX_COMMIT_PAUSE_BUDGET);
 }
 
+/// One armed barrier in front of a workspace's index teardown.
+#[cfg(test)]
+struct IndexTeardownPause {
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    /// Nothing is sent on it: its drop, when the tearing-down thread exits,
+    /// is what tells the test the whole workspace is gone.
+    exited: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(test)]
+static INDEX_TEARDOWN_PAUSES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, IndexTeardownPause>>,
+> = std::sync::OnceLock::new();
+
+/// How long a teardown waits at its barrier for a release before going on.
+#[cfg(test)]
+const INDEX_TEARDOWN_PAUSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(test)]
+thread_local! {
+    static INDEX_TEARDOWN_EXIT: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A field of `Workspace` declared immediately before `index`, so its drop is
+/// the last step of a workspace's teardown before the index goes.
+///
+/// A barrier armed for the workspace's root holds the teardown there: the last
+/// handle is gone, the index and everything declared after it still exist.
+/// The wait ends when the test releases the barrier, when the test's end of it
+/// is dropped (a failed assertion unwinding), or after
+/// `INDEX_TEARDOWN_PAUSE_BUDGET`, so no outcome of a test leaves the thread
+/// here. This runs inside a drop, possibly while unwinding, so it never
+/// panics.
+#[cfg(test)]
+struct IndexTeardownGate(std::path::PathBuf);
+
+#[cfg(test)]
+impl Drop for IndexTeardownGate {
+    fn drop(&mut self) {
+        let Some(pauses) = INDEX_TEARDOWN_PAUSES.get() else {
+            return;
+        };
+        let pause = pauses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+        let Some(pause) = pause else {
+            return;
+        };
+        let _ = pause.reached.send(());
+        let _ = pause.release.recv_timeout(INDEX_TEARDOWN_PAUSE_BUDGET);
+        let _ = INDEX_TEARDOWN_EXIT.try_with(|exit| *exit.borrow_mut() = Some(pause.exited));
+    }
+}
+
 struct RecoveryExecutionGuard<'a> {
     workspace: &'a Workspace,
     pass: Option<RecoveryPass>,
@@ -861,12 +957,12 @@ pub struct Workspace {
     /// the first `create_draft_dir`.
     drafts_root: std::path::PathBuf,
     paths: WorkspacePaths,
-    /// Held for the lifetime of the Workspace. Released on drop.
-    _lock: WorkspaceLock,
     /// Keeps live Workspace count bounded under descriptor pressure.
     /// This leaves room for editor reads, writes, PTYs, and watchers
     /// even when tests or callers try to open many workspaces at once.
     _fd_permit: crate::fd_budget::WorkspacePermit,
+    #[cfg(test)]
+    _index_teardown_gate: IndexTeardownGate,
     /// Opened from sidecar metadata during startup readiness probing.
     /// `OnceLock` so a sidecar that failed to open during that probe is
     /// retried on first use.
@@ -913,6 +1009,8 @@ pub struct Workspace {
     /// One owned startup worker. It executes the metadata-derived recovery
     /// plan off the open caller and joins on ordinary workspace teardown.
     recovery_worker: RecoveryWorker,
+    #[cfg(test)]
+    recovery_observation: std::sync::Mutex<RecoveryObservation>,
     /// Installed by whatever process claims this workspace's recovery passes,
     /// and woken every time one is parked. The startup worker covers only the
     /// plan derived at open, so without a driver a pass requested later has no
@@ -936,12 +1034,21 @@ pub struct Workspace {
     /// Replacements swap one Arc under a short lock; in-flight work keeps its
     /// generation while newer recovery remains pending.
     scope_policy: Arc<std::sync::RwLock<Arc<fs_ops::IndexScopePolicy>>>,
+    /// Admission to this root's sidecars, in this process and across
+    /// processes. Declared last because fields drop in declaration order: it
+    /// is released only after the index writer, the graph and the recovery
+    /// worker are gone, so no opener is admitted beside them.
+    _lock: WorkspaceLock,
 }
 
 fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, stop: &AtomicBool) {
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
+    #[cfg(test)]
+    let _exit = RecoveryWorkerExit(&workspace);
+    #[cfg(test)]
+    workspace.observe_recovery("worker preclaim".to_string());
     #[cfg(any(test, feature = "test-hooks"))]
     open_recovery_pause_for_test(&workspace, stop);
     #[cfg(any(test, feature = "test-hooks"))]
@@ -959,6 +1066,8 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
         && !stop.load(Ordering::Acquire)
     {
         if let Err(error) = workspace.replay_pending_writes() {
+            #[cfg(test)]
+            workspace.observe_recovery_result(format!("preclaim replay error: {error:?}"), true);
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 ?error,
@@ -969,23 +1078,40 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
     }
 
     while !stop.load(Ordering::Acquire) {
+        #[cfg(test)]
+        workspace.observe_recovery("before claim".to_string());
         let Some(pass) = workspace.begin_recovery() else {
             break;
         };
+        #[cfg(test)]
+        workspace.observe_recovery(format!("claimed {pass:?}"));
         let mut result = match pass.action {
             RecoveryAction::Replay => workspace.replay_pending_writes().map(|_| ()),
             RecoveryAction::Reconcile => workspace.reconcile().map(|_| ()),
             RecoveryAction::FullRebuild => workspace.reindex(Some(stop)).map(|_| ()),
         };
+        #[cfg(test)]
+        workspace.observe_recovery_result(format!("action {pass:?}: {result:?}"), result.is_err());
         if result.is_ok() && !stop.load(Ordering::Acquire) {
             result = workspace.refresh_persisted_report_if_owed();
+            #[cfg(test)]
+            workspace.observe_recovery_result(
+                format!("report refresh {pass:?}: {result:?}"),
+                result.is_err(),
+            );
         }
         let outcome = if result.is_ok() {
             RecoveryOutcome::Complete
         } else {
             RecoveryOutcome::Retry
         };
-        if let Err(error) = workspace.finish_recovery(pass, outcome) {
+        let finished = workspace.finish_recovery(pass, outcome);
+        #[cfg(test)]
+        workspace.observe_recovery_result(
+            format!("finish {pass:?} {outcome:?}: {finished:?}"),
+            finished.is_err(),
+        );
+        if let Err(error) = finished {
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 ?error,
@@ -1209,14 +1335,17 @@ impl Workspace {
             }
             cell
         };
+        #[cfg(test)]
+        let index_teardown_gate = IndexTeardownGate(fs.root().to_path_buf());
         let workspace = Arc::new(Self {
             entry,
             fs,
             drafts_dir_name,
             drafts_root,
             paths,
-            _lock: lock,
             _fd_permit: fd_permit,
+            #[cfg(test)]
+            _index_teardown_gate: index_teardown_gate,
             index: index_cell,
             graph: graph_cell,
             rename_log: std::sync::Mutex::new(rename_log),
@@ -1230,10 +1359,16 @@ impl Workspace {
                 PersistedReportRefresh::Settled
             })),
             recovery_worker: RecoveryWorker::new(),
+            #[cfg(test)]
+            recovery_observation: std::sync::Mutex::new(RecoveryObservation::new(format!(
+                "plan needs_rebuild={needs_rebuild} replay_pending_writes={needs_replay_writes} readiness={state_readiness:?} refresh_report={refresh_report} action={:?}",
+                recovery_plan.action
+            ))),
             recovery_driver: std::sync::RwLock::new(None),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
             scope_policy: Arc::new(std::sync::RwLock::new(scope_policy)),
+            _lock: lock,
         });
 
         Ok((workspace, recovery_plan))
@@ -1241,6 +1376,40 @@ impl Workspace {
 
     pub(crate) fn start_open_recovery(self: &Arc<Self>, plan: RecoveryPlan) -> Result<()> {
         self.recovery_worker.start(Arc::downgrade(self), plan)
+    }
+
+    #[cfg(test)]
+    fn observe_recovery(&self, event: String) {
+        self.recovery_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(event);
+    }
+
+    #[cfg(test)]
+    fn observe_recovery_result(&self, result: String, failed: bool) {
+        let mut observation = self
+            .recovery_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if failed {
+            observation.last_error = Some(result.clone());
+        }
+        observation.last_result = Some(result.clone());
+        observation.record(result);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_observation_for_test(&self) -> RecoveryObservation {
+        self.recovery_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_worker_running_for_test(&self) -> bool {
+        self.recovery_worker.is_running()
     }
 
     /// Cancel and synchronously join the owned startup recovery worker.
@@ -4013,7 +4182,11 @@ impl Workspace {
     /// stat check.
     pub fn reconcile(&self) -> Result<ReconcileReport> {
         let recovery = self.recovery_execution(RecoveryAction::Reconcile);
+        #[cfg(test)]
+        self.observe_recovery("reconcile before write_serial".to_string());
         let _serial = self.write_serial.lock().unwrap();
+        #[cfg(test)]
+        self.observe_recovery("reconcile acquired write_serial".to_string());
         #[cfg(test)]
         open_recovery_probe(self);
         #[cfg(test)]
@@ -5595,6 +5768,97 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_observation_retains_error_and_isolates_roots() {
+        let (_healthy_cfg, healthy_root, healthy_lib, _entry) = persisted_report_fixture();
+        let healthy = healthy_lib.open_workspace(healthy_root.path()).unwrap();
+        healthy.join_open_recovery();
+        let healthy_before = healthy.recovery_observation_for_test();
+
+        let (_cfg, root, lib, _entry) = persisted_report_fixture();
+        arm_report_refresh_probe(root.path().canonicalize().unwrap(), true);
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while workspace.recovery_worker_running_for_test() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!workspace.recovery_worker_running_for_test());
+        let status = workspace.recovery_status();
+        let observed = workspace.recovery_observation_for_test();
+        assert!(workspace.recovery_is_unowned(), "{status:?} {observed:?}");
+        assert_eq!(status.pending.unwrap().action, RecoveryAction::Reconcile);
+        assert!(
+            observed
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("injected persisted report refresh failure")),
+            "{observed:?}"
+        );
+        assert!(
+            observed
+                .events
+                .iter()
+                .any(|event| event.contains("finish") && event.contains("Retry")),
+            "{observed:?}"
+        );
+        assert!(
+            observed
+                .events
+                .iter()
+                .any(|event| event == "worker exit panicking=false"),
+            "{observed:?}"
+        );
+        let healthy_after = healthy.recovery_observation_for_test();
+        assert_eq!(healthy_after.events, healthy_before.events);
+        assert_eq!(healthy_after.last_result, healthy_before.last_result);
+        assert_eq!(healthy_after.last_error, healthy_before.last_error);
+        assert_eq!(take_report_refresh_attempts(workspace.root()), 1);
+    }
+
+    #[test]
+    fn startup_recovery_observation_distinguishes_active_write_lock_wait() {
+        let (_cfg, root, lib, _entry) = persisted_report_fixture();
+        let (reached, release) =
+            arm_open_recovery_pause_for_test(root.path().canonicalize().unwrap());
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        reached
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("startup worker did not reach preclaim pause");
+        let serial = workspace.write_serial.lock().unwrap();
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !workspace
+            .recovery_observation_for_test()
+            .events
+            .iter()
+            .any(|event| event == "reconcile before write_serial")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let observed = workspace.recovery_observation_for_test();
+        assert!(
+            observed
+                .events
+                .iter()
+                .any(|event| event == "reconcile before write_serial"),
+            "{observed:?}"
+        );
+        assert!(
+            !observed
+                .events
+                .iter()
+                .any(|event| event == "reconcile acquired write_serial"),
+            "{observed:?}"
+        );
+        assert!(workspace.recovery_status().active.is_some());
+        assert!(workspace.recovery_worker_running_for_test());
+        assert!(!workspace.recovery_is_unowned());
+        drop(serial);
+        workspace.join_open_recovery();
+        assert!(workspace.recovery_status().is_ready());
+    }
+
+    #[test]
     fn persisted_report_recovery_refreshes_only_once() {
         let (_cfg, _root, lib, entry) = persisted_report_fixture();
         let (workspace, _plan) = open_without_starting_recovery(&lib, entry);
@@ -6337,6 +6601,230 @@ mod tests {
             .open_workspace(root)
             .expect("workspace should reopen immediately after recovery teardown");
         reopened.stop_open_recovery();
+    }
+
+    /// A test's end of one armed index-teardown barrier. Dropping it lets the
+    /// teardown go on and waits, within the barrier's budget, for the thread
+    /// that ran it to exit, so a failed assertion strands no thread and no
+    /// temporary directory is removed under a teardown still running.
+    struct IndexTeardownBarrier {
+        root: std::path::PathBuf,
+        reached: std::sync::mpsc::Receiver<()>,
+        release: Option<std::sync::mpsc::SyncSender<()>>,
+        exited: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl IndexTeardownBarrier {
+        fn arm(root: &std::path::Path) -> Self {
+            let (reached_tx, reached) = std::sync::mpsc::sync_channel(1);
+            let (release, release_rx) = std::sync::mpsc::sync_channel(1);
+            let (exited_tx, exited) = std::sync::mpsc::sync_channel(1);
+            let replaced = INDEX_TEARDOWN_PAUSES
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    root.to_path_buf(),
+                    IndexTeardownPause {
+                        reached: reached_tx,
+                        release: release_rx,
+                        exited: exited_tx,
+                    },
+                );
+            assert!(
+                replaced.is_none(),
+                "index teardown barrier already armed for {}",
+                root.display()
+            );
+            Self {
+                root: root.to_path_buf(),
+                reached,
+                release: Some(release),
+                exited,
+            }
+        }
+
+        fn wait_reached(&self) {
+            self.reached
+                .recv_timeout(INDEX_TEARDOWN_PAUSE_BUDGET)
+                .expect("no teardown reached the index barrier");
+        }
+
+        /// Let the teardown go on and wait for its thread to exit; true when
+        /// it exited within the budget. A barrier no teardown reached is
+        /// disarmed, which reads as an exit at once.
+        fn release_and_join(&mut self) -> bool {
+            self.release = None;
+            if let Some(pauses) = INDEX_TEARDOWN_PAUSES.get() {
+                pauses
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&self.root);
+            }
+            self.exited.recv_timeout(INDEX_TEARDOWN_PAUSE_BUDGET)
+                == Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        }
+    }
+
+    impl Drop for IndexTeardownBarrier {
+        fn drop(&mut self) {
+            self.release_and_join();
+        }
+    }
+
+    /// What the rest of the process sees of a workspace whose last handle is
+    /// gone and whose index is about to be torn down.
+    #[derive(Debug, PartialEq, Eq)]
+    struct AtIndexTeardown {
+        workspace_upgrades: bool,
+        index_writer_held: bool,
+        direct_admission: String,
+        library_open: String,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FinalOwner {
+        OrdinaryThread,
+        StartupRecoveryWorker,
+    }
+
+    const TEARDOWN_NOTE: &str = "# teardown\nadmission-teardown-token stays searchable\n";
+
+    /// A same-root open admitted while the previous handle's index writer is
+    /// still alive finds that writer's lock held and cannot recover its
+    /// index, so admission has to outlast the index. `owner` is the thread
+    /// that drops the last handle and so runs the teardown.
+    fn assert_admission_outlives_index_teardown(owner: FinalOwner) {
+        let cfg = TempDir::new().unwrap();
+        let root_dir = TempDir::new().unwrap();
+        let root = root_dir.path().canonicalize().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(&root).unwrap();
+        let paths = lib.workspace_paths_for(&root).unwrap();
+        let initial = lib.open_workspace(&root).unwrap();
+        initial.stop_open_recovery();
+        initial.write_text("note.md", TEARDOWN_NOTE).unwrap();
+        initial.reindex(None).unwrap();
+        assert!(initial.recovery_status().is_ready());
+
+        let (old, worker_release) = match owner {
+            FinalOwner::OrdinaryThread => (initial, None),
+            FinalOwner::StartupRecoveryWorker => {
+                drop(initial);
+                let (reached, release) = arm_open_recovery_pause_for_test(root.clone());
+                let old = lib.open_workspace(&root).unwrap();
+                reached
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .expect("the startup worker did not reach its claim");
+                // The worker's join handle stays in its slot, so the teardown
+                // it runs meets its own thread there.
+                assert!(old.recovery_worker.worker.lock().unwrap().is_some());
+                (old, Some(release))
+            }
+        };
+        let indexed_docs = old.index.get().map(|index| index.stats().indexed_docs);
+        assert!(
+            indexed_docs.is_some_and(|docs| docs > 0),
+            "the old index is not initialized and populated: {indexed_docs:?}"
+        );
+        let mut barrier = IndexTeardownBarrier::arm(old.root());
+        let weak = Arc::downgrade(&old);
+        let dropper = match worker_release {
+            Some(release) => {
+                drop(old);
+                assert_eq!(
+                    weak.strong_count(),
+                    1,
+                    "the startup worker does not hold the last handle"
+                );
+                release.send(()).unwrap();
+                None
+            }
+            None => {
+                assert_eq!(Arc::strong_count(&old), 1);
+                Some(std::thread::spawn(move || drop(old)))
+            }
+        };
+
+        barrier.wait_reached();
+        let observed = AtIndexTeardown {
+            workspace_upgrades: weak.upgrade().is_some(),
+            index_writer_held: Index::open(&root, &paths.index)
+                .err()
+                .is_some_and(|error| format!("{error:?}").contains("LockBusy")),
+            direct_admission: match WorkspaceLock::acquire(&paths.lock, &root) {
+                Ok(lock) => {
+                    drop(lock);
+                    "admitted".to_string()
+                }
+                Err(error) => format!("refused: {error:?}"),
+            },
+            library_open: match lib.open_workspace(&root) {
+                Ok(admitted) => {
+                    admitted.stop_open_recovery();
+                    "admitted".to_string()
+                }
+                Err(error) => format!("refused: {error:?}"),
+            },
+        };
+        assert_eq!(
+            observed,
+            AtIndexTeardown {
+                workspace_upgrades: false,
+                index_writer_held: true,
+                direct_admission: "refused: WorkspaceAlreadyOpen".to_string(),
+                library_open: "refused: WorkspaceAlreadyOpen".to_string(),
+            },
+            "admission was given up before the index teardown"
+        );
+
+        assert!(
+            barrier.release_and_join(),
+            "the thread running the teardown did not exit"
+        );
+        if let Some(dropper) = dropper {
+            dropper.join().unwrap();
+        }
+        assert!(
+            crate::lock::is_free(&paths.lock),
+            "a finished teardown kept admission"
+        );
+
+        let reopened = lib
+            .open_workspace(&root)
+            .expect("the root reopens once the teardown is over");
+        let indexed_docs = reopened.index.get().map(|index| index.stats().indexed_docs);
+        assert!(
+            indexed_docs.is_some_and(|docs| docs > 0),
+            "the reopen did not get the populated index: {indexed_docs:?}"
+        );
+        await_recovery_ready(&reopened);
+        let recovery = reopened.recovery_observation_for_test();
+        assert!(
+            recovery.events.front().is_some_and(|plan| {
+                plan.contains("readiness=Populated") && plan.contains("action=Some(Reconcile)")
+            }),
+            "the reopen did not plan an ordinary reconcile: {recovery:?}"
+        );
+        assert_eq!(recovery.last_error, None, "{recovery:?}");
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        let hits = reopened.search("admission-teardown-token", &opts).unwrap();
+        assert!(hits.hits.iter().any(|hit| hit.path == "note.md"));
+        assert_eq!(reopened.read_text("note.md").unwrap(), TEARDOWN_NOTE);
+    }
+
+    #[test]
+    fn admission_outlives_index_teardown_run_by_an_ordinary_thread() {
+        assert_admission_outlives_index_teardown(FinalOwner::OrdinaryThread);
+    }
+
+    #[test]
+    fn admission_outlives_index_teardown_run_by_the_startup_worker() {
+        assert_admission_outlives_index_teardown(FinalOwner::StartupRecoveryWorker);
     }
 
     /// Snapshot of the queryable end state of a workspace. Two workspaces

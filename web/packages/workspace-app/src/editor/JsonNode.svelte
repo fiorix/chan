@@ -22,7 +22,6 @@
     /// The parsed JSON value at this node. `any` here is unavoidable
     /// (the renderer dispatches on JS runtime type); upstream
     /// guards on JSON.parse keep the input safe.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     value: any;
     /// Object key for this node, when applicable. `undefined` for
     /// root values, array members (the index is part of `path`),
@@ -78,7 +77,6 @@
     if (kind !== "object") return [];
     return Object.keys(value as Record<string, unknown>).map((k) => ({
       key: k,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       val: (value as Record<string, any>)[k],
     }));
   });

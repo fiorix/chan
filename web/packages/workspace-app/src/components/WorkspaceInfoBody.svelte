@@ -3,7 +3,7 @@
   // when the user clicks the Directory row in the hamburger menu, in the
   // graph when the workspace-root node is selected, and on the Dashboard's
   // front Workspace slide. Search index status lives in the Search Status
-  // overlay; the global default-workspace + recents config now lives on the
+  // overlay; the global default-workspace + recents config lives on the
   // Dashboard Workspace slot's flip-back (WorkspaceSlotConfig).
   //
   // Parity with FileInfoBody's directory mode: this body renders the same
@@ -34,6 +34,7 @@
   import InspectorActionPill, {
     type InspectorAction,
   } from "./InspectorActionPill.svelte";
+  import CodeReportSection from "./CodeReportSection.svelte";
 
   /// Optional "Graph from here" callback. Consumers that host this
   /// body alongside an existing inspector convention pass it;
@@ -218,13 +219,10 @@
   let reportLoading = $state(false);
   let reportError = $state<string | null>(null);
   let reportReq = 0;
-  let langExpanded = $state(false);
-  const LANG_PREVIEW = 5;
 
   $effect(() => {
     prefixReport = null;
     reportError = null;
-    langExpanded = false;
     // Workspace-only route; see the inspector effect above.
     if (!windowCaps.workspace) {
       reportLoading = false;
@@ -251,18 +249,6 @@
         reportLoading = false;
       });
   });
-
-  const visibleLanguages = $derived.by(() => {
-    if (!prefixReport) return [];
-    const all = prefixReport.by_language;
-    if (langExpanded || all.length <= LANG_PREVIEW) return all;
-    return all.slice(0, LANG_PREVIEW);
-  });
-  const hiddenLanguageCount = $derived(
-    prefixReport
-      ? Math.max(0, prefixReport.by_language.length - visibleLanguages.length)
-      : 0,
-  );
 
   /// Contacts section at the workspace root.
   /// FileInfoBody's contact pills derive from a single file's outgoing
@@ -328,17 +314,6 @@
     return out;
   });
 
-  /// COCOMO formatting helpers; identical shape to FileInfoBody so the
-  /// dir-mode and workspace-root inspectors format the same way.
-  function fmtMonths(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)} mo` : `${n.toFixed(1)} mo`;
-  }
-  function fmtDevs(n: number): string {
-    if (!Number.isFinite(n)) return " - ";
-    return n >= 10 ? `${Math.round(n)}` : n.toFixed(1);
-  }
-
 </script>
 
 <div class="info">
@@ -401,61 +376,7 @@
     </section>
   {/if}
   {#if prefixReport && prefixReport.totals.files > 0}
-    <section class="refs">
-      <h4>Code</h4>
-      <div class="meta-grid">
-        <span class="k">indexed</span>
-        <span class="v">{prefixReport.totals.files}</span>
-        <span class="k">SLOC</span>
-        <span class="v">{prefixReport.totals.code.toLocaleString()}</span>
-        <span class="k">comments</span>
-        <span class="v">{prefixReport.totals.comments.toLocaleString()}</span>
-        <span class="k">blanks</span>
-        <span class="v">{prefixReport.totals.blanks.toLocaleString()}</span>
-        <span class="k">complexity</span>
-        <span class="v">{prefixReport.totals.complexity.toLocaleString()}</span>
-      </div>
-      {#if prefixReport.by_language.length > 0}
-        <ul class="lang-list">
-          {#each visibleLanguages as lang (lang.name)}
-            <li class="lang-row">
-              <button
-                type="button"
-                class="lang-name"
-                title="open in graph (scoped to this language)"
-                onclick={() => onLanguageClick(lang.name)}
-              >{lang.name}</button>
-              <span class="lang-files">{lang.files} file{lang.files === 1 ? "" : "s"}</span>
-              <span class="lang-sloc">{lang.code.toLocaleString()} SLOC</span>
-            </li>
-          {/each}
-        </ul>
-        {#if hiddenLanguageCount > 0}
-          <button
-            type="button"
-            class="see-more"
-            onclick={() => (langExpanded = true)}
-          >+{hiddenLanguageCount} more</button>
-        {:else if langExpanded && prefixReport.by_language.length > LANG_PREVIEW}
-          <button
-            type="button"
-            class="see-more"
-            onclick={() => (langExpanded = false)}
-          >show fewer</button>
-        {/if}
-      {/if}
-      <div class="cocomo">
-        <div class="cocomo-title">COCOMO ({prefixReport.cocomo.model})</div>
-        <div class="meta-grid">
-          <span class="k">effort</span>
-          <span class="v">{fmtMonths(prefixReport.cocomo.effort_person_months)}</span>
-          <span class="k">schedule</span>
-          <span class="v">{fmtMonths(prefixReport.cocomo.schedule_months)}</span>
-          <span class="k">developers</span>
-          <span class="v">{fmtDevs(prefixReport.cocomo.developers)}</span>
-        </div>
-      </div>
-    </section>
+    <CodeReportSection report={prefixReport} {onLanguageClick} />
   {:else if reportLoading}
     <div class="refs-loading">loading report...</div>
   {:else if reportError}
@@ -557,7 +478,8 @@
     opacity: 0;
     pointer-events: none;
   }
-  .refs { margin: 0.8rem 0 0 0; }
+  .refs,
+  .info > :global(.code-report) { margin: 0.8rem 0 0 0; }
   .refs h4 {
     font-size: 12px;
     font-weight: 600;
@@ -621,9 +543,9 @@
     -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='5' r='3'/><path d='M2 14c0-3 3-5 6-5s6 2 6 5z'/></svg>") center / contain no-repeat;
     mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='5' r='3'/><path d='M2 14c0-3 3-5 6-5s6 2 6 5z'/></svg>") center / contain no-repeat;
   }
-  /* Folder-parity sections (file kinds + code report). Visual style
-     mirrors FileInfoBody so the workspace inspector and a regular
-     folder inspector read as one feature. */
+  /* The file kinds section. Visual style mirrors FileInfoBody so the
+     workspace inspector and a regular folder inspector read as one
+     feature. */
   .compact-section { margin-top: 0.35rem; }
   .kind-counts {
     display: flex;
@@ -643,77 +565,6 @@
   .kind-count strong {
     color: var(--text);
     font-weight: 600;
-  }
-  .lang-list {
-    list-style: none;
-    padding: 0;
-    margin: 0.4rem 0 0 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .lang-row {
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    gap: 0.5rem;
-    font-size: 13px;
-    align-items: baseline;
-  }
-  /* A <button> so the language name routes to the Graph (scoped to
-     this language). Strip default button chrome, left-align, add
-     hover + focus affordance. Stays a grid cell at column 1. Mirrors
-     FileInfoBody's `.lang-name`. */
-  .lang-name {
-    color: var(--text);
-    word-break: break-word;
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    font-size: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-  .lang-name:hover { text-decoration: underline; }
-  .lang-name:focus-visible {
-    outline: 2px solid var(--link);
-    outline-offset: 1px;
-    border-radius: 2px;
-  }
-  .lang-files,
-  .lang-sloc {
-    color: var(--text-secondary);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .see-more {
-    display: block;
-    margin: 0.3rem 0 0 0;
-    background: none;
-    border: none;
-    color: var(--link);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    padding: 0;
-  }
-  .see-more:hover { text-decoration: underline; }
-  .cocomo {
-    margin-top: 0.5rem;
-    padding-top: 0.4rem;
-    border-top: 1px dashed var(--border);
-  }
-  .cocomo-title {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-    margin-bottom: 0.2rem;
-  }
-  .cocomo .meta-grid {
-    margin: 0;
   }
   .refs-loading,
   .refs-error {

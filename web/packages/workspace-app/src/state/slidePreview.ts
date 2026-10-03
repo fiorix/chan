@@ -275,14 +275,19 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
     let needsShow = false;
     const previousIndex = state.index;
     if (typeof next.source === "string" && next.source !== state.source) {
+      // A deck being edited does not parse while its frontmatter is half
+      // typed, and the host sends the buffer with every update: the
+      // preview keeps the last deck that parsed and still takes the
+      // other fields.
       const spec = parseSlidesSpec(next.source);
-      if (!spec) return;
-      state.source = next.source;
-      state.aspectRatio = spec.aspectRatio;
-      state.zoomFactor = spec.zoomFactor;
-      state.pages = splitSlidePages(next.source);
-      state.index = clampSlideIndex(state.pages, state.index);
-      needsShow = true;
+      if (spec) {
+        state.source = next.source;
+        state.aspectRatio = spec.aspectRatio;
+        state.zoomFactor = spec.zoomFactor;
+        state.pages = splitSlidePages(next.source);
+        state.index = clampSlideIndex(state.pages, state.index);
+        needsShow = true;
+      }
     }
     if (next.fromPath !== undefined) state.fromPath = next.fromPath;
     if (next.styleSource !== undefined) state.styleSource = next.styleSource;
@@ -406,14 +411,6 @@ function navButton(
   btn.className = `md-image-zoom-nav md-image-zoom-${kind} md-slide-preview-${kind}`;
   btn.setAttribute("aria-label", label);
   btn.textContent = glyph;
-  const side = kind === "prev" ? "left:12px;" : "right:12px;";
-  btn.style.cssText =
-    "position:fixed;top:50%;transform:translateY(-50%);" +
-    side +
-    "width:48px;height:64px;border:none;border-radius:8px;" +
-    "background:rgba(0,0,0,0.45);color:#fff;cursor:pointer;" +
-    "font-size:34px;line-height:1;display:flex;align-items:center;" +
-    "justify-content:center;";
   btn.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();

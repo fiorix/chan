@@ -1292,6 +1292,44 @@ impl WorkspaceHost {
         &self.desktop
     }
 
+    /// Register `root` with an optional display name, using its canonical
+    /// `key` from [`root_key`](Self::root_key) to serialize registry writes.
+    ///
+    /// Wait at most the open's release budget for a registration or removal
+    /// already writing this root, then answer [`ChanError::WorkspaceAlreadyOpen`]
+    /// without changing its row. The blocking registration owns the permit
+    /// until it returns, including when its caller stops waiting. It holds
+    /// no lifecycle lock and releases the permit before any later open can
+    /// await one. Key resolution belongs inside the caller's request bound.
+    pub async fn register_workspace_keyed(
+        &self,
+        root: &Path,
+        key: &Path,
+        display_name: Option<String>,
+    ) -> Result<chan_workspace::KnownWorkspace, Error> {
+        #[cfg(test)]
+        let release_budget = self.open_release_budget;
+        #[cfg(not(test))]
+        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
+        let permit = tokio::time::timeout(
+            release_budget,
+            self.root_calls
+                .lock(&(key.to_path_buf(), RootCall::RegistryWrite)),
+        )
+        .await
+        .map_err(|_| Error::Core(ChanError::WorkspaceAlreadyOpen))?
+        .into_owned();
+        let library = self.library.clone();
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            library.register_workspace_with_name(&root, display_name)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(Error::from)
+    }
+
     /// Open a registered workspace path and mount it under
     /// `config.prefix`.
     ///
@@ -2560,12 +2598,12 @@ impl WorkspaceHost {
     /// [`WindowRecord`] (the same shape the feed serves, so a `POST` handler
     /// returns it directly). The registry's create fires the watch via the
     /// bridge; this also fires it directly so the push does not hinge on the
-    /// bridge task's scheduling. The tenant side ensures a serving tenant exists
-    /// for the new window. chan-desktop mints through here, its workspace
-    /// windows included, with the key it computed. The devserver's serve
-    /// handoff and the launcher's window route and command action mint a
-    /// workspace window through [`Self::mint_workspace_window`], which stores
-    /// the root the workspace's runtime was opened at; the launcher's other
+    /// bridge task's scheduling. Live tenant details attach when a serving
+    /// tenant exists; minting a workspace record does not require one.
+    /// Desktop command-deck and menu actions use this method with a path
+    /// resolved by their caller. Desktop serve and CLI handoffs, the
+    /// devserver's serve handoff, and the launcher's workspace mints use
+    /// [`Self::mint_workspace_window`] to resolve a stored root. Other
     /// browser mints use [`Self::mint_window_with_origin`].
     pub fn mint_window(
         &self,
@@ -3049,15 +3087,21 @@ impl WorkspaceHost {
     /// [`remove_workspace_for_root`](Self::remove_workspace_for_root)): OFF
     /// keeps the records and filters them from the live feed, and host shutdown
     /// drops runtimes without closing, so windows still restore across a
-    /// restart. `target` is the canonical key the removal already holds and
-    /// `root` the path it was asked to remove. Neither the match nor the
+    /// restart. `target` is the canonical key the removal already holds,
+    /// `root` the path it was asked to remove and `row_root` the root the
+    /// registry row it closed or found stores. Neither the match nor the
     /// discards touch the filesystem, so the purge runs on the caller's
     /// thread.
-    fn discard_workspace_windows(&self, target: &Path, root: &Path) -> usize {
+    fn discard_workspace_windows(
+        &self,
+        target: &Path,
+        root: &Path,
+        row_root: Option<&Path>,
+    ) -> usize {
         let Some(registry) = self.window_registry() else {
             return 0;
         };
-        let ids = workspace_window_ids(registry, target, root);
+        let ids = workspace_window_ids(registry, target, root, row_root);
         for id in &ids {
             let _ = self.discard_window(id);
         }
@@ -3353,7 +3397,8 @@ impl WorkspaceHost {
     /// for it however many callers ask, and every caller of it waits without
     /// holding a runtime worker. This bound covers key resolution; separate
     /// call permits admit the open, its root check, mounted revalidation, a
-    /// close's or removal's registry lookup and a removal's unregister.
+    /// close's or removal's registry lookup, registration and a removal's
+    /// unregister.
     pub async fn root_key(&self, root: &Path) -> Result<PathBuf, Error> {
         #[cfg(test)]
         let probe = self.blocking_thread_probe.lock().unwrap().clone();
@@ -3545,6 +3590,71 @@ impl WorkspaceHost {
         )
     }
 
+    /// The canonical key the workspace `root` names goes by. A path that a
+    /// registry row stores, as given and lexically normalized, names that
+    /// row. With a workspace runtime opened at that root, the key is that
+    /// runtime's canonical root, read without asking any filesystem. With
+    /// none, it is the path's canonical key ([`root_key`](Self::root_key)),
+    /// unless another workspace goes by that key, and then the canonical
+    /// path the row last resolved to. Any other path goes by its canonical
+    /// key.
+    async fn workspace_key(&self, root: &Path) -> Result<PathBuf, Error> {
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        let Some(row) = self
+            .library
+            .list_workspaces()
+            .into_iter()
+            .find(|row| row.root_path == given)
+        else {
+            return self.root_key(root).await;
+        };
+        let opened = {
+            let workspaces = self
+                .workspaces
+                .read()
+                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            workspaces
+                .values()
+                .find(|runtime| runtime.holds_workspace && runtime.root == row.root_path)
+                .map(|runtime| runtime.canonical_root.clone())
+        };
+        if let Some(key) = opened {
+            return Ok(key);
+        }
+        let key = self.root_key(root).await?;
+        if self.goes_by_another_workspace(&key, &row.root_path)? {
+            Ok(row.cached_canonical_path().to_path_buf())
+        } else {
+            Ok(key)
+        }
+    }
+
+    /// Whether a workspace other than the one whose registry row stores
+    /// `stored` goes by `key`: another row by a key it stores
+    /// ([`registry_row_keys`]), or a workspace runtime opened at another
+    /// root by its canonical root, which is the only key of a runtime whose
+    /// own root resolves elsewhere since its row was loaded. Asks no
+    /// filesystem.
+    fn goes_by_another_workspace(&self, key: &Path, stored: &Path) -> Result<bool, Error> {
+        if self
+            .library
+            .list_workspaces()
+            .iter()
+            .any(|row| row.root_path != stored && registry_row_keys(row).contains(&key))
+        {
+            return Ok(true);
+        }
+        let workspaces = self
+            .workspaces
+            .read()
+            .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        Ok(workspaces.values().any(|runtime| {
+            runtime.holds_workspace && runtime.root != stored && runtime.canonical_root == key
+        }))
+    }
+
     /// Remove the workspace at `root`: unmount it if mounted, forget it from the
     /// on/off overlay and purge its window records, then UNREGISTER it from the
     /// host library. The
@@ -3556,10 +3666,27 @@ impl WorkspaceHost {
     /// stay consistent (a CLI-side `config.toml` edit alone would leave them
     /// stale, so the workspace lingers in the launcher and survives a restart).
     ///
+    /// The unregister removes the registry row the close closed or found, by
+    /// the root that row stores, and resolves no path to find it: a root that
+    /// resolves elsewhere since the registry was loaded, onto another
+    /// registered workspace's folder or nowhere, finds another row or none
+    /// when it is resolved again. The writer lock's holder is the key the
+    /// removal goes by. A close that found no row leaves nothing to
+    /// unregister, and the removal answers `NotFound`.
+    ///
+    /// The removal goes by the key `workspace_key` answers: a path that a
+    /// registry row stores names that row, as the launcher's delete and the
+    /// devserver's forget send it, so a root pointed at another registered
+    /// workspace's folder since it was mounted or registered, or at nothing,
+    /// removes its own workspace and leaves the other one, while the root
+    /// and the registry stay as they are from the key's computation to the
+    /// unregister.
+    ///
     /// Holds the root's lock in the host's `root_locks` from the unmount
-    /// through the unregister, keyed by the canonical root computed
-    /// on the blocking pool first, so a mount of the same root cannot slip in
-    /// between and a caller of another root never waits on this one. The
+    /// through the unregister, keyed by that key, which a path that no row
+    /// stores computes on the blocking pool first, so a mount of the same
+    /// root cannot slip in between and a caller of another root never waits
+    /// on this one. The
     /// shared stores it writes (the overlay, the window registry, the library
     /// registry) serialize their writes under locks of their own, which is
     /// what keeps removals of different roots safe beside each other.
@@ -3588,7 +3715,7 @@ impl WorkspaceHost {
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let target = self.root_key(root).await?;
+        let target = self.workspace_key(root).await?;
         let _root_lock = self.root_locks.lock(&target).await;
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
@@ -3654,7 +3781,7 @@ impl WorkspaceHost {
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
         // and leaves the records -- filtered from the live feed until ON restores
         // them.) A no-op when the workspace had no windows.
-        self.discard_workspace_windows(&target, root);
+        self.discard_workspace_windows(&target, root, stored);
         // The hop runs to its end even when the caller is dropped during it,
         // so it forgets the overlay rows again and clears the row itself: no
         // await separates the unregister from the last of its bookkeeping.
@@ -3662,7 +3789,8 @@ impl WorkspaceHost {
         // each alone, after the registry's lock is released.
         let removed = {
             let library = self.library.clone();
-            let root = root.to_path_buf();
+            let stored = stored.map(Path::to_path_buf);
+            let holder = target.clone();
             let keys = row.lifecycle_keys(&target);
             let overlay = self.workspace_overlay().cloned();
             let mount_state = Arc::clone(&self.mount_state);
@@ -3677,7 +3805,13 @@ impl WorkspaceHost {
                     if let Some(probe) = probe {
                         probe(RemovalHop::Unregister);
                     }
-                    let removed = unregister_registered_workspace(&library, &root)?;
+                    // The row the close found, by the root it stores: named
+                    // again, a root that resolves elsewhere since the
+                    // registry was loaded finds another row or none.
+                    let removed = match &stored {
+                        Some(stored) => unregister_registered_row(&library, stored, &holder)?,
+                        None => false,
+                    };
                     // Found or not, the removal answers as if the workspace
                     // is gone, and an off recorded beside this call, by a
                     // removal refused at its permit or by a close, would name
@@ -4601,7 +4735,7 @@ impl WorkspaceHost {
     async fn dispatch_to(&self, req: Request<Body>) -> Response {
         let Some(router) = (match self.router_for_path(req.uri().path()) {
             Ok(router) => router,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => return dispatch_refusal(StatusCode::INTERNAL_SERVER_ERROR, &e),
         }) else {
             // No tenant prefix owns this path. Serve the library root fallback
             // (the launcher SPA + `/api/library/*`) when one is installed;
@@ -4619,6 +4753,18 @@ impl WorkspaceHost {
             Err(e) => match e {},
         }
     }
+}
+
+/// A refusal the dispatch answers itself, in the envelope every refusal of
+/// the serving layer has: a JSON object whose `error` is a sentence a client
+/// may show. The serving crate depends on this one, so its builder of that
+/// envelope is out of reach here.
+fn dispatch_refusal(status: StatusCode, error: &Error) -> Response {
+    (
+        status,
+        axum::Json(serde_json::json!({ "error": error.to_string() })),
+    )
+        .into_response()
 }
 
 /// The control socket reaches the host through `Weak<dyn HostControl>` (the
@@ -4916,24 +5062,36 @@ fn registered_workspace_paths(
     library.workspace_paths_for(root)
 }
 
-/// [`Library::unregister_workspace`] for the removal, which must call it off
-/// the runtime thread: the registry canonicalizes `root` and resets its
-/// metadata on disk.
-fn unregister_registered_workspace(library: &Library, root: &Path) -> chan_workspace::Result<bool> {
+/// [`Library::unregister_workspace_row`] for the removal, which must call it
+/// off the runtime thread: it canonicalizes `holder`, the key the removal
+/// goes by, as the writer lock's holder, and resets the row's metadata on
+/// disk. `stored` is the root the row the removal's close found stores.
+fn unregister_registered_row(
+    library: &Library,
+    stored: &Path,
+    holder: &Path,
+) -> chan_workspace::Result<bool> {
     #[cfg(test)]
-    observe_canonicalization("unregister_workspace");
-    library.unregister_workspace(root)
+    observe_canonicalization("unregister_workspace_row");
+    library.unregister_workspace_row(stored, holder)
 }
 
 /// Window records rooted at the workspace a removal holds, matched by the
 /// path each record stores. A record is minted with a canonical root (the
 /// tenant's, the registry's, or one its caller canonicalized), so its path,
-/// lexically normalized, is `target` (the removal's canonical key) or `root`
-/// (the path the removal was asked for). No record's path is resolved: that
-/// would make a removal wait on the filesystem of every workspace that has a
-/// window, and one of those may have stalled. A record minted with some
-/// other alias of the root is not matched and stays.
-fn workspace_window_ids(registry: &WindowRegistry, target: &Path, root: &Path) -> Vec<String> {
+/// lexically normalized, is `target` (the removal's canonical key), `root`
+/// (the path the removal was asked for) or `row_root` (the root the removed
+/// registry row stores, under which the launcher and the desktop store a
+/// workspace's windows). No record's path is resolved: that would make a
+/// removal wait on the filesystem of every workspace that has a window, and
+/// one of those may have stalled. A record minted with some other alias of
+/// the root is not matched and stays.
+fn workspace_window_ids(
+    registry: &WindowRegistry,
+    target: &Path,
+    root: &Path,
+    row_root: Option<&Path>,
+) -> Vec<String> {
     let stored = stored_window_key;
     let root = stored(root);
     registry
@@ -4942,7 +5100,7 @@ fn workspace_window_ids(registry: &WindowRegistry, target: &Path, root: &Path) -
         .filter(|row| {
             row.workspace_path.as_deref().is_some_and(|p| {
                 let path = stored(Path::new(p));
-                path == target || path == root
+                path == target || path == root || row_root == Some(path.as_path())
             })
         })
         .map(|row| row.window_id)
@@ -6049,6 +6207,66 @@ mod tests {
         assert_eq!(body_of("/").await, "launcher");
     }
 
+    /// A host that cannot read its map of mounted workspaces, because a
+    /// panic under the map's write guard poisoned it, answers the request in
+    /// the refusal envelope: a JSON object whose `error` is the sentence.
+    #[tokio::test]
+    async fn a_poisoned_workspace_map_answers_in_the_refusal_envelope() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
+        host.open_registered_workspace(root.path(), serve_config("/blog"))
+            .await
+            .expect("open");
+        host.install_root_fallback(
+            Router::new().fallback(|| async { (StatusCode::OK, "launcher") }),
+        );
+        let poisoner = Arc::clone(&host);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = poisoner.workspaces.write().unwrap();
+            panic!("fixture: poison the host's workspace map");
+        })
+        .join();
+        assert!(poisoned.is_err(), "fixture: the poisoning thread returned");
+        assert!(
+            host.workspaces.is_poisoned(),
+            "fixture: the map is not poisoned"
+        );
+
+        let response = host
+            .router()
+            .oneshot(
+                Request::builder()
+                    .uri("/blog/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .map(|value| value.to_str().expect("ascii content type").to_owned());
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        assert_eq!(
+            (
+                status,
+                content_type.as_deref(),
+                String::from_utf8_lossy(&body).as_ref()
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("application/json"),
+                r#"{"error":"config: workspace host lock poisoned"}"#
+            )
+        );
+    }
+
     #[tokio::test]
     async fn host_routes_requests_to_the_matching_workspace_prefix() {
         let cfg = tempfile::tempdir().expect("config dir");
@@ -6475,6 +6693,64 @@ mod tests {
         );
     }
 
+    /// Remove a relinked root by the folder it resolves to, as the desktop's
+    /// forget names it, beside one window stored under the root its registry
+    /// row stores, where the launcher and the desktop store its windows.
+    /// Answers the removal and the windows left.
+    #[cfg(unix)]
+    async fn remove_a_relinked_root_with_a_window(
+        mounted: bool,
+    ) -> (
+        Result<WorkspaceLifecycleOutcome, Error>,
+        Vec<PersistedWindow>,
+    ) {
+        let (host, _overlay, stored, canonical, dirs) = relinked_host();
+        let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+        host.install_window_registry(Arc::clone(&windows), "local".into());
+        if mounted {
+            host.open_registered_workspace(&stored, serve_config("/ws"))
+                .await
+                .expect("mount the relinked root");
+        }
+        windows.create(
+            WindowKind::Workspace,
+            Some(stored.to_string_lossy().into_owned()),
+        );
+        let outcome = host.remove_workspace_for_root(&canonical, false).await;
+        (outcome, windows.snapshot())
+    }
+
+    /// A removal of a mounted relinked root by the folder it resolves to
+    /// purges the windows stored under the root its row stores.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_of_a_mounted_relinked_root_purges_the_windows_under_its_rows_root() {
+        let (outcome, left) = remove_a_relinked_root_with_a_window(true).await;
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "fixture: the removal did not remove the workspace: {outcome:?}"
+        );
+        assert!(
+            left.is_empty(),
+            "the removal left a window stored under the row's root: {left:?}"
+        );
+    }
+
+    /// The same for a relinked root that is not mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_of_a_relinked_root_not_mounted_purges_the_windows_under_its_rows_root() {
+        let (outcome, left) = remove_a_relinked_root_with_a_window(false).await;
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "fixture: the removal did not remove the workspace: {outcome:?}"
+        );
+        assert!(
+            left.is_empty(),
+            "the removal left a window stored under the row's root: {left:?}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mount_root_check_leaves_routing_unlocked() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -6736,21 +7012,23 @@ mod tests {
     /// runtime down before it reports the refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mount_built_before_the_last_sweep_shuts_its_runtime_down() {
+        let (host, builder, workspace, _dirs) = sweep_host();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let mounting = host.clone();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_workspace(workspace, serve_config("/late"))
+                .await
+        });
+        // Tenant setup can be delayed by the executor; the bound covers the
+        // shutdown sweep and refusal once the root check holds publication.
+        entered_rx.await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let (host, builder, workspace, _dirs) = sweep_host();
-            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
-                entered: entered_tx,
-                release: release_rx,
-            });
-            let mounting = host.clone();
-            let mount = tokio::spawn(async move {
-                mounting
-                    .open_workspace(workspace, serve_config("/late"))
-                    .await
-            });
-            entered_rx.await.unwrap();
             assert_eq!(builder.built(), 1, "fixture: the mount did not build");
             host.shutdown_all().await.unwrap();
             release_tx.send(()).unwrap();
@@ -6815,6 +7093,191 @@ mod tests {
         overlay.set(&stored.to_string_lossy(), true);
         host.install_workspace_overlay(Arc::clone(&overlay));
         (host, overlay, stored, canonical, [cfg, holder])
+    }
+
+    /// Register a second workspace with `host`, at a folder named as
+    /// [`relinked_host`]'s root is, so pointing that root's parent link at
+    /// the returned holder makes the root the relinked row stores resolve to
+    /// this workspace's folder. Returns the root this row stores.
+    #[cfg(unix)]
+    fn another_workspace(host: &WorkspaceHost) -> (PathBuf, tempfile::TempDir) {
+        let holder = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(holder.path().join("ws")).unwrap();
+        let root = host
+            .library
+            .register_workspace(&holder.path().join("ws"))
+            .unwrap()
+            .root_path;
+        (root, holder)
+    }
+
+    /// Point the link that is `stored`'s parent at `onto`, so `stored`
+    /// resolves to the folder of its name under `onto`.
+    #[cfg(unix)]
+    fn relink(stored: &Path, onto: &Path) {
+        let link = stored.parent().expect("the linked parent");
+        std::fs::remove_file(link).expect("unlink the parent");
+        std::os::unix::fs::symlink(onto, link).expect("point the parent elsewhere");
+    }
+
+    /// Whether a registry row of `host` stores `root`.
+    #[cfg(unix)]
+    fn registered(host: &WorkspaceHost, root: &Path) -> bool {
+        host.library
+            .list_workspaces()
+            .iter()
+            .any(|row| row.root_path == root)
+    }
+
+    /// Assert that a removal left the workspace at `other` registered, on
+    /// and with its window.
+    #[cfg(unix)]
+    fn assert_left_whole(
+        host: &WorkspaceHost,
+        overlay: &WorkspaceOverlay,
+        windows: &WindowRegistry,
+        other: &Path,
+        outcome: &impl std::fmt::Debug,
+    ) {
+        let path = other.to_string_lossy().into_owned();
+        assert!(
+            registered(host, other),
+            "the removal unregistered another workspace: {outcome:?}"
+        );
+        assert!(
+            windows
+                .snapshot()
+                .iter()
+                .any(|row| row.workspace_path.as_deref() == Some(path.as_str())),
+            "the removal removed another workspace's window: {outcome:?}"
+        );
+        assert!(
+            overlay.on_paths().contains(&path),
+            "the removal turned another workspace off: {outcome:?}"
+        );
+    }
+
+    /// A [`relinked_host`] whose root was pointed at another registered
+    /// workspace's folder, as the launcher, the devserver and a restore
+    /// meet it.
+    #[cfg(unix)]
+    struct RelinkedOnto {
+        host: Arc<WorkspaceHost>,
+        overlay: Arc<WorkspaceOverlay>,
+        windows: Arc<WindowRegistry>,
+        /// The root the relinked row stores.
+        stored: PathBuf,
+        /// The folder that root resolved to before it was pointed elsewhere.
+        canonical: PathBuf,
+        /// The root the other workspace's row stores.
+        other: PathBuf,
+        /// The folder the other workspace is mounted from.
+        other_folder: PathBuf,
+        _dirs: ([tempfile::TempDir; 2], tempfile::TempDir),
+    }
+
+    #[cfg(unix)]
+    impl RelinkedOnto {
+        /// Mount the relinked root when `mounted`, register another
+        /// workspace, mounted when `other_mounted`, with its row on and one
+        /// window, and point the relinked root's parent link at it. With
+        /// `other_relinked`, the other workspace's own root moved under a
+        /// symlink before it was mounted, so its row goes by a root that is
+        /// not its folder, and only its runtime goes by that folder.
+        async fn new(mounted: bool, other_mounted: bool, other_relinked: bool) -> Self {
+            let (host, overlay, stored, canonical, dirs) = relinked_host();
+            let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+            host.install_window_registry(Arc::clone(&windows), "local".into());
+            let other_holder = tempfile::tempdir().unwrap();
+            let (other, onto) = if other_relinked {
+                let parent = other_holder.path().join("parent");
+                std::fs::create_dir_all(parent.join("ws")).unwrap();
+                let other = host
+                    .library
+                    .register_workspace(&parent.join("ws"))
+                    .unwrap()
+                    .root_path;
+                let moved = other_holder.path().join("moved");
+                let link = other.parent().expect("the other root's parent");
+                std::fs::rename(link, &moved).expect("move the other root's parent");
+                std::os::unix::fs::symlink(&moved, link).expect("link the other root's parent");
+                (other, moved)
+            } else {
+                std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
+                let other = host
+                    .library
+                    .register_workspace(&other_holder.path().join("ws"))
+                    .unwrap()
+                    .root_path;
+                (other, other_holder.path().to_path_buf())
+            };
+            let other_folder = chan_workspace::paths::canonicalize_normalized(&other);
+            if mounted {
+                host.open_registered_workspace(&stored, serve_config("/ws"))
+                    .await
+                    .expect("mount the relinked root");
+            }
+            if other_mounted {
+                host.open_registered_workspace(&other, serve_config("/other"))
+                    .await
+                    .expect("mount the other workspace");
+            }
+            overlay.set(&other.to_string_lossy(), true);
+            windows.create(
+                WindowKind::Workspace,
+                Some(other.to_string_lossy().into_owned()),
+            );
+            relink(&stored, &onto);
+            assert_eq!(
+                chan_workspace::paths::canonicalize_normalized(&stored),
+                other_folder,
+                "fixture: the stored root does not resolve to the other workspace"
+            );
+            Self {
+                host,
+                overlay,
+                windows,
+                stored,
+                canonical,
+                other,
+                other_folder,
+                _dirs: (dirs, other_holder),
+            }
+        }
+
+        /// Assert that a removal answered `outcome` removed the relinked
+        /// workspace and left the other one whole, mounted when `mounted`.
+        fn assert_removed_it_alone(
+            &self,
+            other_mounted: bool,
+            outcome: &Result<WorkspaceLifecycleOutcome, Error>,
+        ) {
+            if other_mounted {
+                assert!(
+                    self.host.mounted_root(&self.other_folder).is_some(),
+                    "the removal closed another workspace: {outcome:?}"
+                );
+            }
+            assert_left_whole(
+                &self.host,
+                &self.overlay,
+                &self.windows,
+                &self.other,
+                outcome,
+            );
+            assert!(
+                self.host.mounted_root(&self.canonical).is_none(),
+                "the removal left the workspace it names mounted: {outcome:?}"
+            );
+            assert!(
+                !registered(&self.host, &self.stored),
+                "the removal left the workspace it names registered: {outcome:?}"
+            );
+            assert!(
+                matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+                "the removal did not answer that it removed the workspace: {outcome:?}"
+            );
+        }
     }
 
     /// A user's off of a relinked root that is not mounted, called with the
@@ -6882,6 +7345,190 @@ mod tests {
             .unwrap()
             .completed());
         assert_eq!(overlay.entries(), Vec::new(), "a row survived the forget");
+    }
+
+    /// A removal by the folder a workspace was mounted from, after the root
+    /// its row stores was pointed at another registered workspace's folder,
+    /// as the desktop's forget names it, unregisters the workspace it closed
+    /// and leaves the other one whole.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_folder_of_a_root_relinked_onto_another_workspace_unregisters_its_row()
+    {
+        let (host, overlay, stored, canonical, dirs) = relinked_host();
+        let (other, other_holder) = another_workspace(&host);
+        let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+        host.install_window_registry(Arc::clone(&windows), "local".into());
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        host.open_registered_workspace(&other, serve_config("/other"))
+            .await
+            .expect("mount the other workspace");
+        overlay.set(&other.to_string_lossy(), true);
+        windows.create(
+            WindowKind::Workspace,
+            Some(other.to_string_lossy().into_owned()),
+        );
+        relink(&stored, other_holder.path());
+        assert_eq!(
+            chan_workspace::paths::canonicalize_normalized(&stored),
+            other,
+            "fixture: the stored root does not resolve to the other workspace"
+        );
+
+        let outcome = host.remove_workspace_for_root(&canonical, false).await;
+
+        assert!(
+            host.mounted_root(&other).is_some(),
+            "the removal closed another workspace: {outcome:?}"
+        );
+        assert_left_whole(&host, &overlay, &windows, &other, &outcome);
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the removal left the workspace it names mounted: {outcome:?}"
+        );
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it closed registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
+    }
+
+    /// A removal by the folder a workspace was mounted from, after the root
+    /// its row stores stopped resolving, unregisters the workspace it closed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_folder_of_a_mounted_root_that_resolves_nowhere_unregisters_it() {
+        let (host, _overlay, stored, canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        std::fs::remove_file(stored.parent().expect("the linked parent"))
+            .expect("unlink the parent");
+        assert!(
+            std::fs::canonicalize(&stored).is_err(),
+            "fixture: the stored root still resolves"
+        );
+
+        let outcome = host.remove_workspace_for_root(&canonical, false).await;
+
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the removal left the workspace it names mounted: {outcome:?}"
+        );
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it closed registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
+    }
+
+    /// A removal by the root a workspace's row stores, as the launcher's
+    /// delete and the devserver's forget name it, after that root was pointed
+    /// at another registered workspace's folder while the workspace was
+    /// mounted, removes that workspace and leaves the other one whole.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_mounted_root_relinked_onto_another_workspace_leaves_that_workspace(
+    ) {
+        let fixture = RelinkedOnto::new(true, true, false).await;
+        let outcome = fixture
+            .host
+            .remove_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_removed_it_alone(true, &outcome);
+    }
+
+    /// The same for a workspace that is not mounted, beside another that is
+    /// not mounted either: the other workspace's row goes by the folder the
+    /// stored root resolves to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_root_relinked_onto_another_row_leaves_that_row() {
+        let fixture = RelinkedOnto::new(false, false, false).await;
+        let outcome = fixture
+            .host
+            .remove_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_removed_it_alone(false, &outcome);
+    }
+
+    /// The same for a workspace that is not mounted, beside another whose
+    /// own root moved under a symlink and which is mounted: only its runtime
+    /// goes by the folder the stored root resolves to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_root_relinked_onto_another_runtime_leaves_that_runtime(
+    ) {
+        let fixture = RelinkedOnto::new(false, true, true).await;
+        let outcome = fixture
+            .host
+            .remove_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_removed_it_alone(true, &outcome);
+    }
+
+    /// A removal by the root a mounted workspace's row stores, after that
+    /// root stopped resolving, closes and unregisters the workspace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_mounted_root_that_resolves_nowhere_removes_it() {
+        let (host, _overlay, stored, canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        std::fs::remove_file(stored.parent().expect("the linked parent"))
+            .expect("unlink the parent");
+        assert!(
+            std::fs::canonicalize(&stored).is_err(),
+            "fixture: the stored root still resolves"
+        );
+
+        let outcome = host.remove_workspace_for_root(&stored, false).await;
+
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the removal left the workspace it names mounted: {outcome:?}"
+        );
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it names registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
+    }
+
+    /// The same for a workspace that is not mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_by_the_stored_root_of_a_root_that_resolves_nowhere_removes_it() {
+        let (host, _overlay, stored, _canonical, _dirs) = relinked_host();
+        std::fs::remove_file(stored.parent().expect("the linked parent"))
+            .expect("unlink the parent");
+        assert!(
+            std::fs::canonicalize(&stored).is_err(),
+            "fixture: the stored root still resolves"
+        );
+
+        let outcome = host.remove_workspace_for_root(&stored, false).await;
+
+        assert!(
+            !registered(&host, &stored),
+            "the removal left the workspace it names registered: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
     }
 
     /// Asked by the path it resolves to now, which `chan close` and the
@@ -11669,6 +12316,10 @@ mod tests {
             let report = host.restore_fdstore_terminal_sessions(vec![
                 crate::terminal_sessions::FdStoreSessionImport {
                     meta,
+                    child_identity: crate::terminal_sessions::RecordedChildIdentity {
+                        boot_id: crate::terminal_sessions::current_boot_id(),
+                        start_time: crate::terminal_sessions::process_start_time(pid),
+                    },
                     master_fd,
                     ring_fd: None,
                     replay: b"replay".to_vec(),
@@ -11794,6 +12445,7 @@ mod tests {
             };
             let import = crate::terminal_sessions::FdStoreSessionImport {
                 meta,
+                child_identity: crate::terminal_sessions::RecordedChildIdentity::default(),
                 master_fd,
                 ring_fd: None,
                 replay: Vec::new(),

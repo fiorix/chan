@@ -34,7 +34,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 
 ### Headings
 
-- WYSIWYG: large/bolded heading line, fold chevron on the left.
+- WYSIWYG: large/bolded heading line, fold chevron on the left when the heading has a section to fold (none when the next line is a heading of its level or higher, or on the last line).
 - Cursor on the line: `#`, `##`, ... prefix appears in a muted color at the start of the line. Chevron stays.
 - Cursor leaves: prefix hides again.
 - Typing/erasing `#` characters works as plain text edit; the heading level follows the marker count.
@@ -42,6 +42,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 ### Wiki links `[[...]]`
 
 - WYSIWYG: rendered as a styled pill with the target's display label.
+- A markdown link whose destination cannot be placed in the workspace renders as a broken pill with its label.
 - Cursor enters: `[[` and `]]` brackets become visible around the label; the label inside stays editable.
 - Typing inside the brackets reopens the SAME search popup that opens when the user originally types `[[` in a paragraph. Result list, preview, and `Type # / Type ^ / Type |` hint row are identical.
 - If the user breaks a marker (e.g. deletes one `]`), the editor serializes the literal text and renders it broken. No auto-repair.
@@ -74,7 +75,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 - Cursor navigation (arrow keys) onto an image: jumps directly to the "edit" state, not "zoom". The image is treated as a single cursor position; arrowing past it deselects.
 - "Edit": reveals the image's markdown inline (`![alt](src#w=N)`), places the caret at the start of the markdown, and selects the block. Moving the caret deselects. The markdown stays revealed while the caret is inside it; leaving collapses back to the image.
 - Editing the `alt` text is plain text editing.
-- Editing the `src` opens a search dropdown anchored to the markdown with image-result previews (same shape as the insert flow). When the path doesn't resolve, render an inline error row under the markdown: `"<path>" could not be found.`
+- Editing the `src` opens a search dropdown anchored to the markdown with image-result previews (same shape as the insert flow). Picking or uploading a replacement keeps the image's width and alignment. When the path doesn't resolve, render an inline error row under the markdown: `"<path>" could not be found.`
 
 ### Date macros `@today`, `@date`
 
@@ -90,7 +91,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 
 ### Lists `- item`, `1. item`, `- [ ] task`
 
-- WYSIWYG: source markers (`-`, `*`, `+`, `1.`, `1)`) stay visible on every list line. Task items render the GFM checkbox via the `Task` widget; the `[ ]` / `[x]` source is replaced by a clickable box and reappears when the caret enters the line.
+- WYSIWYG: source markers (`-`, `*`, `+`, `1.`, `1)`) stay visible on every list line. Task items render the GFM checkbox via the `Task` widget; the `[ ]` / `[x]` source is replaced by a clickable box and reappears when the caret enters the line. The box toggles only on a pointer press and is out of the tab order, so it never shows a state its source does not have.
 - Enter at end of a list line: inserts a fresh marker on the next line. Bullets reuse the line's marker char; ordered lists increment the number and keep the original `.` / `)` separator; task items always start as `- [ ] ` regardless of the source line's checked state.
 - Enter on an empty list item (just the prefix, no content): strips the prefix entirely. This is how the user exits the list.
 - Enter mid-line on a non-empty item: falls through to a literal newline. Auto-continuing mid-sentence would split a paragraph with a stray bullet.
@@ -105,7 +106,7 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 
 ## Cross-cutting rules
 
-- **One bubble pattern.** Wiki, tag, mention, and image bubbles share the same keyboard model (Arrow Up/Down to navigate, Enter to commit, Esc to dismiss, click to commit). Each bubble owns its own results / preview content, but the interaction is uniform. Anchored under the caret; flips above when out of room.
+- **One bubble pattern.** Wiki, tag, mention, and image bubbles share the same keyboard model (Arrow Up/Down to navigate, Enter to commit, Esc to dismiss, click to commit); a dismissed bubble stays closed while the caret stays in the text that opened it. Each bubble owns its own results / preview content, but the interaction is uniform. Anchored under the caret; flips above when out of room.
 - **Broken markdown is preserved.** If the user deletes part of a marker, the source keeps what the user typed; the renderer just fails to recognize the construct and shows the text plainly. Never auto-repair.
 - **Last-line `---`.** When the file's last line is `---`, the user must still be able to land the caret on it (revealing `---` per the principle) and press Enter to create a new line below. The current renderer traps the caret above; this needs to be fixed.
 

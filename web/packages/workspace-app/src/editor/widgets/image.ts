@@ -1,8 +1,9 @@
 // Image atom widget for `![alt](src)` markdown.
 //
-// Per design.md spec #5, images are atomic widgets. Source revealed
-// when selection intersects. EditorView.atomicRanges so caret motion
-// skips the image in one keystroke.
+// Per design.md invariant 3, images are atomic widgets. The source
+// shows only in edit mode, which a caret inside the source or a range
+// overlapping it enters (`imageEditEntered`). EditorView.atomicRanges
+// so caret motion skips the image in one keystroke.
 //
 // Behaviors:
 //   - Renders `<img>` with `src` resolved against the editing file's
@@ -17,13 +18,12 @@
 //     `view.dispatch` - the widget then re-mounts at the persisted
 //     width (no visible flicker; the inline style is identical).
 //   - Click on the img (not the handle) fires `onImageClick(
-//     { src, alt, pos }`) so step 8's image-action overlay can mount
+//     { src, alt, pos }`) so the image-action overlay can mount
 //     the zoom + edit pills. Click handler is on the img; the
 //     handle's mousedown stops propagation so it doesn't double-fire.
 //
-// v1 scope: no per-paste upload here (paste/drop flow lives in the
-// image bubble + step 7). No alignment toggle from the widget itself
-// (the bubble owns alignment edits).
+// Not here: per-paste upload (the paste/drop flow lives in the image
+// bubble) and an alignment toggle (the bubble owns alignment edits).
 
 import {
   Decoration,
@@ -276,8 +276,8 @@ function imageEditEntered(
 /// clipboard, so a paste re-inserts the markdown and it re-renders as the
 /// image. Resolves the Image node range when the copy runs, so it
 /// survives edits that shift the doc. Desktop routes through the native
-/// text IPC (sidesteps WKWebView's async-clipboard image quirks that broke
-/// the old pixel copy); web falls back to writeText.
+/// text IPC (sidesteps WKWebView's async-clipboard image quirks); web
+/// falls back to writeText.
 async function copyImageMarkdown(
   view: EditorView,
   wrap: HTMLElement | null,
@@ -346,7 +346,7 @@ export interface ImageClickArgs {
   src: string;
   alt: string;
   /// Position of the Image node's start in the source - useful for
-  /// the action overlay (step 8) to anchor itself or trigger an
+  /// the action overlay to anchor itself or trigger an
   /// edit-bubble open at the right offset.
   pos: number;
 }
@@ -364,7 +364,7 @@ export interface ImageOptions {
   /// relative img sources against the right directory. `null` keeps
   /// sources workspace-rooted (no relativization).
   getCurrentPath: () => string | null;
-  /// Optional click handler for the image action overlay (step 8).
+  /// Optional click handler for the image action overlay.
   onImageClick?: (args: ImageClickArgs) => void;
   /// Whether the editor surface is currently dark; used by static
   /// Excalidraw image embeds so their exported strokes read on the page.
@@ -694,10 +694,8 @@ class ImageWidget extends WidgetType {
       // own caret-tracking only runs on transactions, so an async load
       // that happens after the user typed `![](path)` leaves the
       // caret stranded far below the viewport with no follow-up
-      // scroll. Re-anchor the scroll once the image lands, but only
-      // when the caret is on or next to THIS image's source line -       // anywhere else means the user is editing elsewhere while a
-      // distant image streams in, and re-scrolling would fight their
-      // deliberate position.
+      // scroll. Re-anchor the scroll once the image lands, when that
+      // leaves the caret outside the viewport.
       img.addEventListener(
         "load",
         () => {
@@ -705,21 +703,17 @@ class ImageWidget extends WidgetType {
           installUserScrollIntentTracker(view.scrollDOM);
           if (userScrollIntentActive(view.scrollDOM)) return;
           const head = view.state.selection.main.head;
-          // The old gate `Math.abs(headLine - imgLine) > 1 return`
-          // was too restrictive. The assumption was "if user is
-          // editing far from the image, the image load won't move
-          // their position." But a tall image rendering ABOVE the
-          // caret pushes the entire layout down -- the caret moves
+          // No gate on the distance between the caret's line and
+          // the image's: a tall image rendering ABOVE the caret
+          // pushes the entire layout down, so the caret moves
           // off-screen even though the user hasn't touched
-          // anything. Repro: list-at-bottom
-          // + image above -> image renders -> list pushes down
-          // -> caret vanishes from viewport.
+          // anything (a list at the bottom with an image above
+          // it).
           //
-          // The viewport-check below already gates correctly:
-          // if the caret is still visible, return (no
-          // disturbance to "deliberate position"). If the
-          // caret is off-screen, restore visibility - that's
-          // the desired UX regardless of distance to the
+          // The viewport check below gates instead: if the caret
+          // is still visible, return (no disturbance to a
+          // deliberate position). If the caret is off-screen,
+          // restore visibility, whatever the distance to the
           // image.
           const cb = view.coordsAtPos(head);
           if (!cb) return;
@@ -799,8 +793,9 @@ class ImageWidget extends WidgetType {
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
     copyBtn.className = "cm-md-image-action cm-md-image-copy";
-    copyBtn.title = "copy image to clipboard";
-    copyBtn.setAttribute("aria-label", "copy image to clipboard");
+    const copyTitle = "copy image to clipboard";
+    copyBtn.title = copyTitle;
+    copyBtn.setAttribute("aria-label", copyTitle);
     copyBtn.innerHTML = COPY_ICON_SVG;
     copyBtn.addEventListener("mousedown", (e) => {
       e.preventDefault();
@@ -816,10 +811,9 @@ class ImageWidget extends WidgetType {
           // Surface failure briefly via the title attr. No toast
           // surface to land this in; the user will retry if they
           // care.
-          const prev = copyBtn.title;
           copyBtn.title = "copy failed";
           setTimeout(() => {
-            copyBtn.title = prev;
+            copyBtn.title = copyTitle;
           }, 1200);
         },
       );
@@ -1183,11 +1177,11 @@ function commitImageWidth(
 /// Cmd/Ctrl+Enter into edit mode or Backspace to delete. Stepping
 /// the caret off the boundary clears the ring on the next update.
 ///
-/// We deliberately do NOT redirect the caret inside the URL slot
-/// anymore. The old behaviour flipped the widget into edit mode on
-/// every keyboard or click landing near the image, which the user
-/// experienced as a stray click "landing in the source". Edit mode
-/// is now an explicit verb: the Edit button on the hover overlay,
+/// The caret is deliberately NOT redirected inside the URL slot:
+/// that would flip the widget into edit mode on every keyboard or
+/// click landing near the image, which reads as a stray click
+/// "landing in the source". Edit mode is an explicit verb: the Edit
+/// button on the hover overlay,
 /// or Cmd/Ctrl+Enter while the image is selected (see the keydown
 /// handler in imageSelectionListeners).
 export function imageCaretRedirect(): Extension {

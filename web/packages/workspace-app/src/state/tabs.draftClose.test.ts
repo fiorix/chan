@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
+import * as notifications from "./notify.svelte";
 import {
   activePane,
   clearRecentlyClosedTabsForTest,
@@ -267,8 +268,12 @@ describe("a draft whose buffer is its file, or holds typing, closes as before", 
     await vi.waitFor(() => expect(liveTab(tabId)?.loading).toBe(false));
     setTabContent(liveTab(tabId)!, WHOLE + "typed\n");
     routes.write.mockRejectedValueOnce(new Error("server gone"));
+    const notice = vi.spyOn(notifications, "notify");
     await closeTab(PANE_ID, tabId);
-    expect(liveTab(tabId)?.error).toBe("draft close failed: server gone");
+    expect(liveTab(tabId)?.error).toBeNull();
+    expect(liveTab(tabId)?.saveError).toBe("the save request failed (server gone)");
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because the save request failed (server gone).");
+    expect(draftCloseState.open).toBe(false);
 
     const close = closeTab(PANE_ID, tabId);
     await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
@@ -276,6 +281,25 @@ describe("a draft whose buffer is its file, or holds typing, closes as before", 
     expect(routes.write.mock.calls.at(-1)?.slice(0, 2)).toEqual([DRAFT_PATH, WHOLE + "typed\n"]);
     resolveDraftClose("cancel");
     await close;
+    expect(liveTab(tabId)?.saveError).toBeNull();
+  });
+
+  test("an inspect failure keeps a clean draft and reports its own reason", async () => {
+    vi.spyOn(api, "readStream").mockResolvedValue({ ...meta(), content: WHOLE });
+    const routes = draftRoutes();
+    resetLayout([], { id: PANE_ID });
+    await openInPane(PANE_ID, DRAFT_PATH);
+    const tabId = activePane().tabs[0]!.id;
+    routes.inspect.mockRejectedValueOnce(new Error("inspect unavailable"));
+    const notice = vi.spyOn(notifications, "notify");
+
+    await closeTab(PANE_ID, tabId);
+
+    expect(liveTab(tabId)?.content).toBe(WHOLE);
+    expect(liveTab(tabId)?.error).toBeNull();
+    expect(liveTab(tabId)?.saveError).toBeFalsy();
+    expect(notice).toHaveBeenCalledExactlyOnceWith("Draft close failed: inspect unavailable");
+    expect(draftCloseState.open).toBe(false);
   });
 
   test("text typed after a failed read, over a buffer a sibling's save replaced, is saved", async () => {

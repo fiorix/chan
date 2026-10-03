@@ -814,8 +814,9 @@ DS_DISPLAY_NAME="e2e-box"
 
 # A tunnel devserver binds no local listener, which is what the documented
 # foreground tunnel invocation gives (`resolve_devserver_listen`,
-# crates/chan/src/lib.rs), so that is the boot every devserver here gets: an
-# empty CHAN_DEVSERVER_LISTEN reads as unset and leaves the default in place.
+# crates/chan/src/devserver/foreground.rs), so that is the boot every
+# devserver here gets: an empty CHAN_DEVSERVER_LISTEN reads as unset and
+# leaves the default in place.
 # The one exception is the devserver `scenario_upload` registers a scratch
 # workspace on, because library mutation is gated on the loopback serve
 # address (`require_mutable`, crates/chan-server/src/routes/library.rs); that

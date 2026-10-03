@@ -23,6 +23,7 @@
     extensionsReady,
     isExtensionCommandResult,
     markExtensionFrameReady,
+    refreshExtensions,
     registerExtensionFrame,
     resetExtensionFrame,
   } from "../state/extensions.svelte";
@@ -47,7 +48,9 @@
   // rewrites the attribute only when the string changes, so an unchanged
   // path never re-navigates), and a vanished extension drops the frame to
   // the unavailable branch below.
-  const frameSrc = $derived(extension ? apiPath(extension.entry_path) : undefined);
+  const frameSrc = $derived(
+    extension && extension.running !== false ? apiPath(extension.entry_path) : undefined,
+  );
   const catalogReady = $derived(extensionsReady());
   let frame: HTMLIFrameElement | undefined = $state();
   let menu: HamburgerMenu | undefined = $state();
@@ -58,8 +61,9 @@
   // identity matches an advertised host key is dispatched locally.
   let advertisedKeys = new Set<string>();
 
-  function reload(): void {
+  async function reload(): Promise<void> {
     menu?.close();
+    await refreshExtensions();
     if (frame && frameSrc) frame.src = frameSrc;
   }
 
@@ -262,7 +266,7 @@
     </div>
   {/if}
 
-  {#if extension}
+  {#if frameSrc}
     <!-- The capability path shares Chan's network origin so one forwarded port
          is sufficient. Omitting allow-same-origin keeps extension scripts in
          an opaque sandbox that cannot reach the parent DOM or Chan APIs. -->
@@ -278,7 +282,11 @@
     <div class="extension-status" role="status">
       {#if catalogReady}
         <strong>{tab.title} is unavailable.</strong>
-        <span>Check its config or process output, then restart Chan.</span>
+        {#if extension?.running === false}
+          <span>Its process exited. Check its output, then restart Chan.</span>
+        {:else}
+          <span>Check its config or process output, then restart Chan.</span>
+        {/if}
       {:else}
         <span>Loading extension...</span>
       {/if}

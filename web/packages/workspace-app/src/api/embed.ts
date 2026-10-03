@@ -99,8 +99,10 @@ const MAPS_HOSTS = new Set(["google.com", "www.google.com", "maps.google.com"]);
 function googleMapsEmbed(u: URL): string | null {
   if (!/^\/maps(\/|$)/.test(u.pathname)) return null;
   // Already the keyless share-embed form (Maps "Share → Embed a map").
-  // The origin is host-validated above; normalize and pass it through.
+  // The origin is host-validated above; it moves to the one Maps host the
+  // frame allowlist admits.
   if (u.pathname === "/maps/embed" && u.searchParams.has("pb")) {
+    u.hostname = "www.google.com";
     return u.toString();
   }
   // A place / search link → the keyless `output=embed` form, which

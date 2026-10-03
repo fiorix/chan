@@ -25,7 +25,7 @@
 #![cfg(unix)]
 
 use std::net::{SocketAddr, TcpListener};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,10 +55,14 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private runtime dir");
         Self {
             chan_home: tempfile::tempdir().expect("chan home tempdir"),
             home: tempfile::tempdir().expect("home tempdir"),
-            runtime: tempfile::tempdir().expect("runtime tempdir"),
+            runtime,
             scratch: tempfile::tempdir().expect("scratch tempdir"),
         }
     }
@@ -809,6 +813,8 @@ async fn workspace_status_bounds_an_unresponsive_pid_named_holder() {
         .prefix("chan-status-")
         .tempdir_in("/tmp")
         .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = runtime
         .path()
         .join(format!("chan-control-{pid}-wedged.sock"));
@@ -1910,4 +1916,630 @@ async fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// `--no-settings` on a route that hands the workspace off.
+//
+// The server `chan serve` binds is what refuses settings writes. Neither
+// handoff request carries the flag, so a desktop or a devserver would open
+// the workspace with its settings writable. These tests drive the real binary
+// against a real devserver and against a stand-in for chan-desktop on the
+// sandbox's handoff socket, and read what each attempt left behind.
+// ---------------------------------------------------------------------------
+
+/// Extra environment for one serve attempt, as name and value pairs.
+type Env<'a> = &'a [(&'a str, &'a str)];
+
+/// One route that binds here under `--no-settings`: its label, its flags, its
+/// environment, and whether a desktop is live beside it.
+type FallbackCase<'a> = (&'a str, &'a [&'a str], Env<'a>, bool);
+
+/// The spellings of the serve command: the top-level verb, its alias, and the
+/// workspace family's verb.
+const SERVE_SPELLINGS: [&[&str]; 3] = [&["serve"], &["open"], &["workspace", "serve"]];
+
+/// What one serve attempt did, as its exit, its output, the filesystem and
+/// the peer it could have reached show. `peer` lists what the attempt caused
+/// there: a request the desktop received, a workspace row or a window on the
+/// devserver, a launch of the desktop.
+#[derive(Debug, PartialEq)]
+struct Attempt {
+    spelling: String,
+    exited_ok: bool,
+    names_no_settings: bool,
+    names_standalone: bool,
+    bound_a_server: bool,
+    root_created: bool,
+    peer: Vec<String>,
+}
+
+impl Attempt {
+    fn observed(
+        spelling: &[&str],
+        status: ExitStatus,
+        output: &str,
+        root: &Path,
+        peer: Vec<String>,
+    ) -> Self {
+        Self {
+            spelling: spelling.join(" "),
+            exited_ok: status.success(),
+            names_no_settings: output.contains("--no-settings"),
+            names_standalone: output.contains("--standalone"),
+            bound_a_server: output.contains("http://127.0.0.1:"),
+            root_created: root.exists(),
+            peer,
+        }
+    }
+
+    /// The refusal: a failed exit that names the flag and the way out, with
+    /// nothing bound, nothing created and nothing sent.
+    fn refused(spelling: &[&str]) -> Self {
+        Self {
+            spelling: spelling.join(" "),
+            exited_ok: false,
+            names_no_settings: true,
+            names_standalone: true,
+            bound_a_server: false,
+            root_created: false,
+            peer: Vec::new(),
+        }
+    }
+
+    /// A handoff: the CLI created the root, left `peer` behind and exited
+    /// without binding a server.
+    fn handed_off(spelling: &[&str], peer: &[String]) -> Self {
+        Self {
+            spelling: spelling.join(" "),
+            exited_ok: true,
+            names_no_settings: false,
+            names_standalone: false,
+            bound_a_server: false,
+            root_created: true,
+            peer: peer.to_vec(),
+        }
+    }
+}
+
+/// A serve command in the environment of a plain shell in a GUI session: both
+/// handoffs allowed, a display present, no SSH session, and no update probe.
+/// `APPIMAGE` names what a desktop launch would run, so it is cleared unless
+/// `env` sets it.
+fn serve_command(
+    sandbox: &Sandbox,
+    spelling: &[&str],
+    root: &Path,
+    flags: &[&str],
+    env: &[(&str, &str)],
+) -> Command {
+    let mut cmd = sandbox.command();
+    cmd.env_remove("CHAN_NO_DESKTOP_HANDOFF")
+        .env_remove("CHAN_NO_DEVSERVER_HANDOFF")
+        .env_remove("SSH_CONNECTION")
+        .env_remove("SSH_TTY")
+        .env_remove("SSH_CLIENT")
+        .env_remove("APPIMAGE")
+        .env("DISPLAY", ":0")
+        .env("CHAN_UPDATE_CHECK", "0")
+        .envs(env.iter().copied())
+        .args(spelling)
+        .arg(root)
+        .arg("--here")
+        .args(["--port", "0", "--no-browser", "--no-token"])
+        .args(flags);
+    cmd
+}
+
+/// Run one serve attempt to its exit. `--timeout 1s` ends a serve that binds
+/// a server instead of exiting, so a route that falls through reports its
+/// transcript rather than wedging the test.
+async fn serve_attempt(
+    sandbox: &Sandbox,
+    spelling: &[&str],
+    root: &Path,
+    flags: &[&str],
+    env: &[(&str, &str)],
+) -> (ExitStatus, String) {
+    let mut cmd = serve_command(sandbox, spelling, root, flags, env);
+    cmd.args(["--timeout", "1s"]);
+    let mut child = cmd.spawn().expect("spawn chan serve");
+    let out = Transcript::capture(&mut child);
+    let mut command = Server { child, out };
+    // Longer than the 20 s a serve waits for a desktop it launched.
+    let (status, _) = wait_exit(&mut command, Duration::from_secs(40))
+        .await
+        .unwrap_or_else(|| panic!("chan serve did not exit:\n{}", command.out.dump()));
+    (status, command.out.dump())
+}
+
+/// A stand-in for chan-desktop on the sandbox's handoff socket: it records
+/// every request it receives and answers that the window opened.
+fn fake_desktop(
+    sandbox: &Sandbox,
+) -> (
+    chan_server::handoff::ListenerHandle,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    use chan_server::handoff::{Capabilities, Response, CHAN_VERSION};
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    let listener = chan_server::handoff::start_listener(
+        sandbox.runtime.path().join("chan-desktop.sock"),
+        move |request| {
+            seen.lock()
+                .unwrap()
+                .push(serde_json::to_value(&request).expect("request as json"));
+            async {
+                Response::Opened {
+                    desktop_version: CHAN_VERSION.into(),
+                    capabilities: Capabilities {
+                        open_local_workspace: true,
+                    },
+                }
+            }
+        },
+    )
+    .expect("bind the fake desktop");
+    (listener, requests)
+}
+
+/// The requests the fake desktop received since the last call, as
+/// `<type> <workspace path>`.
+fn desktop_requests(requests: &Mutex<Vec<serde_json::Value>>) -> Vec<String> {
+    requests
+        .lock()
+        .unwrap()
+        .drain(..)
+        .map(|request| {
+            format!(
+                "{} {}",
+                request["type"].as_str().unwrap_or("?"),
+                request["workspace_path"].as_str().unwrap_or("?")
+            )
+        })
+        .collect()
+}
+
+/// A stand-in for the desktop GUI binary. A serve that launches the desktop
+/// runs what `$APPIMAGE` names, and this script records that it ran by
+/// creating the returned marker.
+fn desktop_launcher(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = sandbox.scratch.path().join("desktop-gui");
+    std::fs::write(&script, "#!/bin/sh\n: > \"$0.launched\"\n").expect("write the launcher");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make the launcher executable");
+    let marker = sandbox.scratch.path().join("desktop-gui.launched");
+    (script, marker)
+}
+
+/// What a serve attempt left on the devserver: a row for `root` in its
+/// workspace list, and the change in its window count since `windows`.
+async fn devserver_effects(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    token: &str,
+    root: &Path,
+    windows: &mut usize,
+) -> Vec<String> {
+    let mut effects = Vec::new();
+    let rows = list_workspaces(client, addr, token).await;
+    if rows
+        .iter()
+        .any(|row| row["path"] == root.to_string_lossy().as_ref())
+    {
+        effects.push("workspace row".to_string());
+    }
+    let now = list_library_windows(client, addr, token).await.len();
+    if now != *windows {
+        effects.push(format!("{} window", now as i64 - *windows as i64));
+        *windows = now;
+    }
+    effects
+}
+
+/// The sandbox's scratch area with symlinks resolved, so a root under it
+/// compares equal to the path the CLI and the devserver report.
+fn canonical_scratch(sandbox: &Sandbox) -> PathBuf {
+    std::fs::canonicalize(sandbox.scratch.path()).expect("canonicalize the scratch area")
+}
+
+/// A live chan-desktop would be handed the workspace, so `--no-settings` is
+/// refused under every spelling before the root exists or a request is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_settings_refuses_a_desktop_handoff_before_any_request() {
+    let sandbox = Sandbox::new();
+    let (_desktop, requests) = fake_desktop(&sandbox);
+    let scratch = canonical_scratch(&sandbox);
+    let (mut attempts, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    for spelling in SERVE_SPELLINGS {
+        let root = scratch.join(format!("desktop-{}", spelling.join("-")));
+        let (status, output) =
+            serve_attempt(&sandbox, spelling, &root, &["--no-settings"], &[]).await;
+        let peer = desktop_requests(&requests);
+        attempts.push(Attempt::observed(spelling, status, &output, &root, peer));
+        expected.push(Attempt::refused(spelling));
+        transcripts.push_str(&output);
+    }
+    assert_eq!(
+        attempts, expected,
+        "--no-settings with a live desktop:\n{transcripts}"
+    );
+}
+
+/// A live devserver would mount the workspace and mint a window for it, so
+/// `--no-settings` is refused under every spelling before the root exists and
+/// with nothing registered on the devserver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_settings_refuses_a_devserver_registration_before_any_mount() {
+    let sandbox = Sandbox::new();
+    let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let token = devserver_token(&server);
+    let client = http();
+    let scratch = canonical_scratch(&sandbox);
+    let mut windows = list_library_windows(&client, addr, &token).await.len();
+    let (mut attempts, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    for spelling in SERVE_SPELLINGS {
+        let root = scratch.join(format!("devserver-{}", spelling.join("-")));
+        let (status, output) =
+            serve_attempt(&sandbox, spelling, &root, &["--no-settings"], &[]).await;
+        let peer = devserver_effects(&client, addr, &token, &root, &mut windows).await;
+        attempts.push(Attempt::observed(spelling, status, &output, &root, peer));
+        expected.push(Attempt::refused(spelling));
+        transcripts.push_str(&output);
+    }
+    assert_eq!(
+        attempts, expected,
+        "--no-settings with a live devserver:\n{transcripts}"
+    );
+}
+
+/// A forced-desktop serve with no desktop running launches the GUI and then
+/// hands it the workspace, so `--no-settings` is refused before the launch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_settings_refuses_before_launching_the_desktop() {
+    let sandbox = Sandbox::new();
+    let (launcher, launched) = desktop_launcher(&sandbox);
+    let root = canonical_scratch(&sandbox).join("launch");
+    let env = [
+        ("CHAN_DESKTOP_HANDOFF", "1"),
+        ("APPIMAGE", launcher.to_str().expect("utf-8 launcher path")),
+    ];
+    let spelling = ["serve"];
+    let (status, output) =
+        serve_attempt(&sandbox, &spelling, &root, &["--no-settings"], &env).await;
+    let peer = if launched.exists() {
+        vec!["desktop launched".to_string()]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        Attempt::observed(&spelling, status, &output, &root, peer),
+        Attempt::refused(&spelling),
+        "--no-settings on a serve that would launch the desktop:\n{output}"
+    );
+}
+
+/// Without the flag every spelling still hands the workspace to a live
+/// desktop: one request each, naming the root, and a clean exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_without_no_settings_still_hands_off_to_the_desktop() {
+    let sandbox = Sandbox::new();
+    let (_desktop, requests) = fake_desktop(&sandbox);
+    let scratch = canonical_scratch(&sandbox);
+    let (mut attempts, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    for spelling in SERVE_SPELLINGS {
+        let root = scratch.join(format!("desktop-{}", spelling.join("-")));
+        let (status, output) = serve_attempt(&sandbox, spelling, &root, &[], &[]).await;
+        let peer = desktop_requests(&requests);
+        attempts.push(Attempt::observed(spelling, status, &output, &root, peer));
+        expected.push(Attempt::handed_off(
+            spelling,
+            &[format!("open_workspace {}", root.display())],
+        ));
+        transcripts.push_str(&output);
+    }
+    assert_eq!(
+        attempts, expected,
+        "a serve with a live desktop:\n{transcripts}"
+    );
+}
+
+/// Without the flag every spelling still registers with a live devserver:
+/// the workspace is mounted there and one window is minted for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_without_no_settings_still_registers_with_the_devserver() {
+    let sandbox = Sandbox::new();
+    let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let token = devserver_token(&server);
+    let client = http();
+    let scratch = canonical_scratch(&sandbox);
+    let mut windows = list_library_windows(&client, addr, &token).await.len();
+    let (mut attempts, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    for spelling in SERVE_SPELLINGS {
+        let root = scratch.join(format!("devserver-{}", spelling.join("-")));
+        let (status, output) = serve_attempt(&sandbox, spelling, &root, &[], &[]).await;
+        let peer = devserver_effects(&client, addr, &token, &root, &mut windows).await;
+        attempts.push(Attempt::observed(spelling, status, &output, &root, peer));
+        expected.push(Attempt::handed_off(
+            spelling,
+            &["workspace row".to_string(), "1 window".to_string()],
+        ));
+        transcripts.push_str(&output);
+    }
+    assert_eq!(
+        attempts, expected,
+        "a serve with a live devserver:\n{transcripts}"
+    );
+}
+
+/// Without the flag a forced-desktop serve with no desktop running still
+/// launches the GUI and hands it the workspace once it listens. This is also
+/// what shows the launcher's marker can report a launch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_without_no_settings_still_launches_the_desktop() {
+    let sandbox = Sandbox::new();
+    let (launcher, launched) = desktop_launcher(&sandbox);
+    let root = canonical_scratch(&sandbox).join("launch");
+    let env = [
+        ("CHAN_DESKTOP_HANDOFF", "1"),
+        ("APPIMAGE", launcher.to_str().expect("utf-8 launcher path")),
+    ];
+    let spelling = ["serve"];
+    let mut child = serve_command(&sandbox, &spelling, &root, &[], &env)
+        .spawn()
+        .expect("spawn chan serve");
+    let out = Transcript::capture(&mut child);
+    let mut command = Server { child, out };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !launched.exists()
+        && command.child.try_wait().expect("try_wait serve").is_none()
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let mut peer = Vec::new();
+    if launched.exists() {
+        peer.push("desktop launched".to_string());
+    }
+    // The real GUI binds the handoff socket once it is up, and the serve
+    // retries its request until something answers there.
+    let (_desktop, requests) = fake_desktop(&sandbox);
+    let (status, _) = wait_exit(&mut command, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|| panic!("chan serve did not exit:\n{}", command.out.dump()));
+    let output = command.out.dump();
+    peer.extend(desktop_requests(&requests));
+    assert_eq!(
+        Attempt::observed(&spelling, status, &output, &root, peer),
+        Attempt::handed_off(
+            &spelling,
+            &[
+                "desktop launched".to_string(),
+                format!("open_workspace {}", root.display()),
+            ],
+        ),
+        "a forced-desktop serve with no desktop running:\n{output}"
+    );
+}
+
+/// What a serve that should bind a restricted server here did: whether it
+/// came up, what it said, what it answers to a settings write and to a
+/// settings read, and what it caused at a peer.
+#[derive(Debug, PartialEq)]
+struct Restricted {
+    case: String,
+    served: bool,
+    says_restricted: bool,
+    write_status: u16,
+    write_names_the_flag: bool,
+    read_status: u16,
+    peer: Vec<String>,
+}
+
+impl Restricted {
+    /// A bound server that says it is restricted, answers 403 naming the
+    /// flag to a settings write, still answers a settings read, and reached
+    /// no peer.
+    fn enforced(case: &str) -> Self {
+        Self {
+            case: case.to_string(),
+            served: true,
+            says_restricted: true,
+            write_status: 403,
+            write_names_the_flag: true,
+            read_status: 200,
+            peer: Vec::new(),
+        }
+    }
+}
+
+/// Start a serve that should bind a server here, ask it for a settings write
+/// and a settings read, and stop it. A serve that exits instead of binding is
+/// reported as not served, with its transcript.
+async fn restricted_serve(
+    sandbox: &Sandbox,
+    case: &str,
+    spelling: &[&str],
+    root: &Path,
+    flags: &[&str],
+    env: &[(&str, &str)],
+) -> (Restricted, String) {
+    let mut child = serve_command(sandbox, spelling, root, flags, env)
+        .spawn()
+        .expect("spawn chan serve");
+    let out = Transcript::capture(&mut child);
+    let mut server = Server { child, out };
+    let mut observed = Restricted {
+        case: case.to_string(),
+        served: false,
+        says_restricted: false,
+        write_status: 0,
+        write_names_the_flag: false,
+        read_status: 0,
+        peer: Vec::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let addr = loop {
+        if let Some(line) = server.out.find("http://127.0.0.1:") {
+            break parse_addr(&line);
+        }
+        if server.child.try_wait().expect("try_wait serve").is_some() {
+            server.out.join_readers().await;
+            return (observed, server.out.dump());
+        }
+        if Instant::now() >= deadline {
+            return (observed, server.out.dump());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    observed.served = true;
+    observed.says_restricted = server.out.find("--no-settings is set").is_some();
+    let client = http();
+    let url = format!("http://{addr}/api/config");
+    let write = client
+        .patch(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("PATCH /api/config");
+    observed.write_status = write.status().as_u16();
+    observed.write_names_the_flag = write
+        .text()
+        .await
+        .unwrap_or_default()
+        .contains("started with --no-settings");
+    observed.read_status = client
+        .get(&url)
+        .send()
+        .await
+        .expect("GET /api/config")
+        .status()
+        .as_u16();
+    (observed, server.out.dump())
+}
+
+/// `--standalone --no-settings` binds here under every spelling and refuses
+/// settings writes, with a desktop live that it never contacts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_serve_enforces_no_settings() {
+    let sandbox = Sandbox::new();
+    let (_desktop, requests) = fake_desktop(&sandbox);
+    let (mut served, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    for spelling in SERVE_SPELLINGS {
+        let case = spelling.join(" ");
+        let root = sandbox.workspace(&format!("standalone-{}", spelling.join("-")));
+        let flags = ["--standalone", "--no-settings"];
+        let (mut observed, output) =
+            restricted_serve(&sandbox, &case, spelling, &root, &flags, &[]).await;
+        observed.peer = desktop_requests(&requests);
+        served.push(observed);
+        expected.push(Restricted::enforced(&case));
+        transcripts.push_str(&output);
+    }
+    assert_eq!(
+        served, expected,
+        "--standalone --no-settings:\n{transcripts}"
+    );
+}
+
+/// A route that resolves to the desktop or to a devserver with nothing to
+/// hand the workspace to still binds here, where `--no-settings` holds: the
+/// desktop handoff opted out, no GUI session, no desktop running, and no
+/// devserver live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_settings_serves_standalone_where_nothing_is_handed_off() {
+    let forced = ("CHAN_DESKTOP_HANDOFF", "1");
+    let cases: [FallbackCase; 4] = [
+        (
+            "forced desktop, handoff opted out, desktop live",
+            &["--no-settings"],
+            &[forced, ("CHAN_NO_DESKTOP_HANDOFF", "1")],
+            true,
+        ),
+        (
+            "forced desktop, no GUI session",
+            &["--no-settings"],
+            &[forced, ("SSH_CONNECTION", "192.0.2.1 1 192.0.2.2 22")],
+            false,
+        ),
+        (
+            "--desktop, no desktop running",
+            &["--desktop", "--no-settings"],
+            &[],
+            false,
+        ),
+        (
+            "--devserver, no devserver live",
+            &["--devserver", "--no-settings"],
+            &[],
+            false,
+        ),
+    ];
+    let (mut served, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    for (case, flags, env, desktop_live) in cases {
+        let sandbox = Sandbox::new();
+        let (launcher, launched) = desktop_launcher(&sandbox);
+        let desktop = desktop_live.then(|| fake_desktop(&sandbox));
+        let mut env = env.to_vec();
+        env.push(("APPIMAGE", launcher.to_str().expect("utf-8 launcher path")));
+        let root = sandbox.workspace("fallback");
+        let (mut observed, output) =
+            restricted_serve(&sandbox, case, &["serve"], &root, flags, &env).await;
+        if launched.exists() {
+            observed.peer.push("desktop launched".to_string());
+        }
+        if let Some((_listener, requests)) = &desktop {
+            observed.peer.extend(desktop_requests(requests));
+        }
+        served.push(observed);
+        expected.push(Restricted::enforced(case));
+        transcripts.push_str(&output);
+    }
+    assert_eq!(
+        served, expected,
+        "--no-settings on a route with nothing to hand to:\n{transcripts}"
+    );
+}
+
+/// `--no-settings` leaves the devserver selection refusals as they are: a
+/// valued selector that matches nothing live, and one the environment opts
+/// out of, are still refused in their own words before the root is created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_settings_keeps_the_devserver_selection_refusals() {
+    let sandbox = Sandbox::new();
+    let scratch = canonical_scratch(&sandbox);
+    // Each case: the selector, its environment, and the refusal's wording.
+    let cases: [(&str, Env, &str); 2] = [
+        (
+            "--devserver=65535",
+            &[],
+            "no live local devserver matches --devserver=65535",
+        ),
+        (
+            "--devserver=9999",
+            &[("CHAN_NO_DEVSERVER_HANDOFF", "1")],
+            "--devserver=9999 conflicts with CHAN_NO_DEVSERVER_HANDOFF",
+        ),
+    ];
+    let (mut refusals, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    for (selector, env, wording) in cases {
+        let root = scratch.join(format!("selection{}", selector.replace('=', "-")));
+        let flags = [selector, "--no-settings"];
+        let (status, output) = serve_attempt(&sandbox, &["serve"], &root, &flags, env).await;
+        refusals.push((
+            selector,
+            status.success(),
+            output.contains(wording),
+            root.exists(),
+        ));
+        expected.push((selector, false, true, false));
+        transcripts.push_str(&output);
+    }
+    assert_eq!(
+        refusals, expected,
+        "(selector, exited ok, its own refusal wording, root created):\n{transcripts}"
+    );
 }

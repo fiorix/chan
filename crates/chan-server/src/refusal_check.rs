@@ -25,11 +25,7 @@ pub(crate) fn check_devserver(app: Router) -> Router {
 async fn inspect(State(allow_navigation): State<bool>, request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    let matched = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|p| p.as_str().to_owned());
-    let is_fallback = matched.is_none();
+    let is_fallback = request.extensions().get::<MatchedPath>().is_none();
     let response = next.run(request).await;
     if response.extensions().get::<Inspected>().is_some()
         || response.extensions().get::<UpstreamResponse>().is_some()
@@ -55,55 +51,18 @@ async fn inspect(State(allow_navigation): State<bool>, request: Request, next: N
                         .get("code")
                         .is_none_or(|code| code.as_str().is_some_and(|s| !s.is_empty()))
             });
-    let framework = framework_exception(parts.status, &parts.headers, &bytes);
-    if let Some(kind) = framework {
-        eprintln!(
-            "refusal-framework\t{kind}\t{}\t{method}\t{}",
-            parts.status.as_u16(),
-            matched.as_deref().unwrap_or(&path)
-        );
-    }
     assert!(
         envelope
-            || framework.is_some()
             // HEAD has no response body, including on a refusal.
             || (method == Method::HEAD && bytes.is_empty())
             || permanent_exception(&method, &path, parts.status, is_fallback && allow_navigation, &bytes)
-            || range_refusal(&method, &path, parts.status, &parts.headers, &bytes)
-            || pending_refusal(&method, &path, parts.status, &parts.headers, &bytes, is_fallback),
+            || range_refusal(&method, &path, parts.status, &parts.headers, &bytes),
         "refusal envelope violated: {method} {path} returned {} with body {:?}",
         parts.status,
         String::from_utf8_lossy(&bytes),
     );
     parts.extensions.insert(Inspected);
     Response::from_parts(parts, Body::from(bytes))
-}
-
-fn pending_refusal(
-    method: &Method,
-    path: &str,
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &[u8],
-    is_fallback: bool,
-) -> bool {
-    if *method == Method::PUT
-        && matches_path("/api/fs/{*path}", path)
-        && matches!(
-            status,
-            StatusCode::CONFLICT | StatusCode::PRECONDITION_REQUIRED
-        )
-        && headers
-            .get(header::CONTENT_TYPE)
-            .is_some_and(|v| v == "application/json")
-        && write_conflict_shape(body)
-    {
-        return true;
-    }
-    // Host dispatch is a fallback; its lock error belongs to chan-library.
-    is_fallback
-        && status == StatusCode::INTERNAL_SERVER_ERROR
-        && body == b"config: workspace host lock poisoned"
 }
 
 fn range_refusal(
@@ -130,128 +89,6 @@ fn range_refusal(
             .and_then(|v| v.strip_prefix("bytes */"))
             .is_some_and(|size| !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()))
 }
-
-fn write_conflict_shape(body: &[u8]) -> bool {
-    let Ok(serde_json::Value::Object(fields)) = serde_json::from_slice(body) else {
-        return false;
-    };
-    fields.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "current_mtime" | "current_mtime_ns" | "current_authority_version" | "disk_conflicted"
-        )
-    }) && fields
-        .get("current_mtime")
-        .is_some_and(|v| v.is_null() || v.as_i64().is_some())
-        && fields
-            .get("disk_conflicted")
-            .is_some_and(serde_json::Value::is_boolean)
-        && fields
-            .get("current_mtime_ns")
-            .is_none_or(serde_json::Value::is_string)
-        && fields
-            .get("current_authority_version")
-            .is_none_or(|v| v.as_u64().is_some())
-}
-
-fn framework_exception(
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Option<&'static str> {
-    if status == StatusCode::METHOD_NOT_ALLOWED
-        && body.is_empty()
-        && headers
-            .get(header::ALLOW)
-            .is_some_and(|value| !value.as_bytes().is_empty())
-    {
-        return Some("MethodNotAllowed");
-    }
-    let body = std::str::from_utf8(body).ok()?;
-    FRAMEWORK_PENDING
-        .iter()
-        .find_map(|&(kind, code, text, prefix)| {
-            (status.as_u16() == code
-                && if prefix {
-                    body.starts_with(text)
-                } else {
-                    body == text
-                })
-            .then_some(kind)
-        })
-}
-
-// Axum's extractor replies are identified by their own fixed text, never
-// just by a status shared with application refusals. The boolean selects
-// a fixed prefix for rejection types that append their underlying error.
-const FRAMEWORK_PENDING: &[(&str, u16, &str, bool)] = &[
-    (
-        "JsonSyntaxError",
-        400,
-        "Failed to parse the request body as JSON: ",
-        true,
-    ),
-    (
-        "JsonDataError",
-        422,
-        "Failed to deserialize the JSON body into the target type: ",
-        true,
-    ),
-    // No route emits this plain-text 400: search answers JSON data errors
-    // in the envelope.
-    (
-        "JsonDataError",
-        400,
-        "Failed to deserialize the JSON body into the target type: ",
-        true,
-    ),
-    (
-        "MissingJsonContentType",
-        415,
-        "Expected request with `Content-Type: application/json`",
-        false,
-    ),
-    (
-        "FailedToDeserializeQueryString",
-        400,
-        "Failed to deserialize query string: ",
-        true,
-    ),
-    // No route emits this plain-text 400: search answers content-type errors
-    // in the envelope.
-    (
-        "MissingJsonContentType",
-        400,
-        "Expected request with `Content-Type: application/json`",
-        false,
-    ),
-    ("FailedToDeserializePathParams", 400, "Invalid URL: ", true),
-    (
-        "InvalidBoundary",
-        400,
-        "Invalid `boundary` for `multipart/form-data` request",
-        false,
-    ),
-    (
-        "LengthLimitError",
-        413,
-        "Failed to buffer the request body: ",
-        true,
-    ),
-    (
-        "UnknownBodyError",
-        400,
-        "Failed to buffer the request body: ",
-        true,
-    ),
-    (
-        "InvalidUtf8",
-        400,
-        "Request body didn't contain valid UTF-8: ",
-        true,
-    ),
-    ("MultipartError", 413, "Request payload is too large", false),
-];
 
 fn matches_path(pattern: &str, path: &str) -> bool {
     let mut actual = path.split('/');
@@ -475,82 +312,6 @@ mod tests {
         "/api/fs/transfer",
         StatusCode::CONFLICT
     );
-
-    #[tokio::test]
-    async fn write_conflicts_require_their_complete_typed_shape() {
-        use axum::response::IntoResponse;
-        let full = serde_json::json!({"current_mtime":1,"current_mtime_ns":"1000000000",
-            "current_authority_version":3,"disk_conflicted":false});
-        let minimal = serde_json::json!({"current_mtime":null,"disk_conflicted":true});
-        for value in [full.clone(), minimal] {
-            for status in [StatusCode::CONFLICT, StatusCode::PRECONDITION_REQUIRED] {
-                assert!(
-                    accepts_response(
-                        "PUT",
-                        "/api/fs/probe.md",
-                        (status, axum::Json(value.clone())).into_response()
-                    )
-                    .await,
-                    "the existing write conflict shape remains pending"
-                );
-            }
-        }
-        for (field, value) in [
-            ("current_mtime", serde_json::json!("1")),
-            ("current_mtime_ns", serde_json::json!(1)),
-            ("current_authority_version", serde_json::json!(-1)),
-            ("disk_conflicted", serde_json::json!(null)),
-            ("extra", serde_json::json!(true)),
-        ] {
-            let mut invalid = full.clone();
-            invalid[field] = value;
-            assert!(
-                !accepts_response(
-                    "PUT",
-                    "/api/fs/probe.md",
-                    (StatusCode::CONFLICT, axum::Json(invalid)).into_response()
-                )
-                .await,
-                "write conflict must reject invalid field {field}"
-            );
-        }
-        for field in ["current_mtime", "disk_conflicted"] {
-            let mut invalid = full.clone();
-            invalid.as_object_mut().unwrap().remove(field);
-            assert!(
-                !accepts_response(
-                    "PUT",
-                    "/api/fs/probe.md",
-                    (StatusCode::CONFLICT, axum::Json(invalid)).into_response()
-                )
-                .await,
-                "write conflict requires {field}"
-            );
-        }
-        for (method, path, status) in [
-            ("POST", "/api/fs/probe.md", StatusCode::CONFLICT),
-            ("PUT", "/api/unrelated", StatusCode::CONFLICT),
-            ("PUT", "/api/fs/probe.md", StatusCode::BAD_REQUEST),
-        ] {
-            assert!(
-                !accepts_response(
-                    method,
-                    path,
-                    (status, axum::Json(full.clone())).into_response()
-                )
-                .await
-            );
-        }
-        assert!(
-            !accepts_response(
-                "PUT",
-                "/api/fs/probe.md",
-                (StatusCode::CONFLICT, full.to_string()).into_response()
-            )
-            .await,
-            "write conflict requires JSON content type"
-        );
-    }
 
     #[tokio::test]
     async fn extension_upgrade_rejections_require_framework_text() {
@@ -867,55 +628,44 @@ mod tests {
         }
     }
 
-    #[test]
-    fn re_emitted_framework_refusal_keeps_its_type() {
-        let body = b"Failed to deserialize the JSON body into the target type: unknown variant";
-        for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
-            assert_eq!(
-                framework_exception(status, &HeaderMap::new(), body),
-                Some("JsonDataError")
-            );
-        }
-        assert_eq!(
-            framework_exception(StatusCode::CONFLICT, &HeaderMap::new(), body),
-            None
-        );
-        assert_eq!(
-            framework_exception(
-                StatusCode::BAD_REQUEST,
-                &HeaderMap::new(),
-                b"another refusal"
-            ),
-            None
-        );
-    }
-
+    /// The host dispatch is a fallback, so its lock failure reaches the check
+    /// on an unmatched path: the envelope passes there and the sentence as
+    /// plain text does not, as on a matched handler.
     #[tokio::test]
-    async fn host_lock_exception_requires_dispatch_fallback() {
+    async fn host_lock_refusal_requires_the_envelope() {
         use axum::response::IntoResponse;
-        let response = || {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "config: workspace host lock poisoned",
+        const SENTENCE: &str = "config: workspace host lock poisoned";
+        fn text() -> Response {
+            (StatusCode::INTERNAL_SERVER_ERROR, SENTENCE).into_response()
+        }
+        fn envelope() -> Response {
+            crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, SENTENCE.into())
+        }
+        let through_fallback = |response: fn() -> Response| {
+            let app = check(Router::new().fallback(move || async move { response() }));
+            tokio::spawn(
+                app.oneshot(
+                    Request::get("/tenant/api/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
             )
-                .into_response()
         };
-        let app = check(Router::new().fallback(move || async move { response() }));
-        let result = app
-            .oneshot(
-                Request::get("/tenant/api/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        assert!(
+            through_fallback(text).await.is_err(),
+            "host-lock text from the dispatch fallback must require the envelope"
+        );
+        let result = through_fallback(envelope)
             .await
+            .expect("the envelope passes the check on an unmatched path")
             .unwrap();
         assert_eq!(result.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             to_bytes(result.into_body(), usize::MAX).await.unwrap(),
-            "config: workspace host lock poisoned"
+            r#"{"error":"config: workspace host lock poisoned"}"#
         );
         assert!(
-            !accepts_response("GET", "/api/probe", response()).await,
+            !accepts_response("GET", "/api/probe", text()).await,
             "host-lock text on a matched handler must require the envelope"
         );
     }
@@ -1095,8 +845,8 @@ mod tests {
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             (
-                "/probe-framework",
-                "Failed to deserialize query string: invalid query",
+                "/ws",
+                "Connection header did not include 'upgrade'",
                 "text/plain; charset=utf-8",
                 StatusCode::BAD_REQUEST,
             ),
@@ -1298,6 +1048,64 @@ mod tests {
         assert!(
             admitted.is_empty(),
             "launcher routes admitted plain refusals: {admitted:?}"
+        );
+    }
+
+    /// The framework's own refusals: each extractor's rejection text under the
+    /// status the framework or a handler re-emitting it could give it, and a
+    /// 405 with `Allow` and no body. Every router answers them through the
+    /// crate's extractors and its 405, so the check admits none of them.
+    #[tokio::test]
+    async fn framework_texts_require_the_envelope() {
+        let mut admitted = Vec::new();
+        for (status, body) in [
+            (400, "Failed to parse the request body as JSON: EOF"),
+            (
+                422,
+                "Failed to deserialize the JSON body into the target type: unknown variant",
+            ),
+            (
+                400,
+                "Failed to deserialize the JSON body into the target type: unknown variant",
+            ),
+            (
+                415,
+                "Expected request with `Content-Type: application/json`",
+            ),
+            (
+                400,
+                "Expected request with `Content-Type: application/json`",
+            ),
+            (400, "Failed to deserialize query string: missing field"),
+            (400, "Invalid URL: Invalid UTF-8 in `id`"),
+            (400, "Invalid `boundary` for `multipart/form-data` request"),
+            (
+                413,
+                "Failed to buffer the request body: length limit exceeded",
+            ),
+            (400, "Failed to buffer the request body: connection reset"),
+            (
+                400,
+                "Request body didn't contain valid UTF-8: invalid utf-8 sequence",
+            ),
+            (413, "Request payload is too large"),
+        ] {
+            let status = StatusCode::from_u16(status).unwrap();
+            if accepts_refusal("POST", "/api/probe", status, body, None).await {
+                admitted.push(format!("{status}: {body}"));
+            }
+        }
+        let empty_405 = Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(header::ALLOW, "GET,HEAD")
+            .body(Body::empty())
+            .unwrap();
+        if accepts_response("POST", "/api/probe", empty_405).await {
+            admitted.push("405 with Allow and an empty body".to_string());
+        }
+        assert!(
+            admitted.is_empty(),
+            "framework refusals admitted without envelopes: {admitted:#?}"
         );
     }
 }

@@ -290,3 +290,37 @@ describe("the chip state a tab keeps", () => {
     expect(parsed?.filters.tag).toBe(true);
   });
 });
+
+describe("the filesystem graph's chips", () => {
+  test("count loaded symlinks and the files joined by hardlinks", async () => {
+    graphServer.fs = {
+      nodes: [
+        { id: "", kind: "directory", name: "", path: "", size: 0 },
+        { id: "a.md", kind: "file", name: "a.md", path: "a.md", size: 1 },
+        { id: "b.md", kind: "file", name: "b.md", path: "b.md", size: 1 },
+        { id: "link.md", kind: "symlink", name: "link.md", path: "link.md", size: 1 },
+      ],
+      edges: [
+        { source: "", target: "a.md", kind: "contains" },
+        { source: "", target: "b.md", kind: "contains" },
+        { source: "", target: "link.md", kind: "contains" },
+        { source: "link.md", target: "a.md", kind: "symlink" },
+        { source: "a.md", target: "b.md", kind: "hardlink" },
+      ],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem" }));
+    const chips = await openChips(tab);
+    expect(chips.get("symlink")?.count).toBe(1);
+    expect(chips.get("hardlink")?.count).toBe(2);
+  });
+
+  test("are named for what each one filters", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab({ mode: "filesystem" }));
+    openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
+    await settle(2);
+    const labels = [...document.body.querySelectorAll(".tab-menu-bubble .filter-row .mbtn-label")].map(
+      (el) => el.textContent?.trim(),
+    );
+    expect(labels).toEqual(["symlink", "hardlink", "directory", "markdown", "source"]);
+  });
+});

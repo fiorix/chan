@@ -159,8 +159,9 @@ pub struct MountedPrefix {
 /// remembered as off, so the row stays in `GET workspaces` and re-mounts at
 /// the **same** prefix on `on:true`. The handler answers `200` with the
 /// updated [`WorkspaceEntry`] (a fresh `token` when `on:true`; `token:""`
-/// when off), `409` with an [`ActiveTerminalsRejection`] when an `on:false`
-/// would kill live terminals and `force` is unset, or `404` when `{prefix}`
+/// when off), `409` when an `on:false` would kill live terminals and `force`
+/// is unset (a sentence in `error`, `code: "live_terminals"` and the
+/// `active_terminals` count the client confirms with), or `404` when `{prefix}`
 /// is not a registered workspace. The call is idempotent in both directions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetWorkspaceOnRequest {
@@ -173,18 +174,6 @@ pub struct SetWorkspaceOnRequest {
     /// confirms by re-issuing with `force:true`. Ignored when `on:true`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
-}
-
-/// Body of the `409 Conflict` answer to `POST .../{prefix}/on {on:false}`
-/// when the workspace still has live terminal sessions and the request did
-/// not set `force`. The client shows `active_terminals` in a confirm prompt,
-/// then re-issues the off with `force:true` to kill them and unmount.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ActiveTerminalsRejection {
-    /// Discriminator shared with launcher-local workspace off/remove.
-    pub error: String,
-    /// Live terminal sessions the off would kill.
-    pub active_terminals: usize,
 }
 
 #[cfg(test)]
@@ -351,20 +340,30 @@ mod tests {
         assert_eq!(off, serde_json::from_value(json!({ "on": false })).unwrap());
     }
 
-    #[test]
-    fn active_terminals_rejection_wire() {
-        // The 409 body the off path returns when live terminals block an
-        // unforced unmount; the client reads `active_terminals` for its prompt.
-        let rejection = ActiveTerminalsRejection {
-            error: "live_terminals".into(),
-            active_terminals: 3,
-        };
-        let v = serde_json::to_value(&rejection).unwrap();
+    #[tokio::test]
+    async fn live_terminals_refusal_wire() {
+        // The 409 an unforced off or forget answers over live terminals: the
+        // client branches on `code` and reads `active_terminals` for its prompt.
+        let response = crate::error::live_terminals_refusal(3);
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
         assert_eq!(
-            v,
-            json!({ "error": "live_terminals", "active_terminals": 3 })
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .map(|value| value.as_bytes()),
+            Some(&b"application/json"[..])
         );
-        assert_eq!(rejection, serde_json::from_value(v).unwrap());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!({
+                "error": "workspace has 3 live terminal session(s); close them or force",
+                "code": "live_terminals",
+                "active_terminals": 3,
+            })
+        );
     }
 
     #[test]

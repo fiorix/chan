@@ -94,6 +94,7 @@ import {
   renameTerminalTab,
   resolveTerminalMetadataRename,
   reopenClosedTab,
+  rekeyTabsForRename,
   reorderTab,
   reloadConflictedTab,
   restoreLayout,
@@ -112,6 +113,7 @@ import {
   setTerminalBroadcastBySession,
   setTerminalBroadcastEnabled,
   setTerminalBroadcastTarget,
+  terminalBroadcastReachCount,
   setWindowFocusColor,
   setTerminalSession,
   setTerminalSubmitAgent,
@@ -176,18 +178,31 @@ describe("tab close confirmation", () => {
     expect(activePane().tabs).toHaveLength(0);
   });
 
-  test("keeps a dirty file tab open when save fails", async () => {
+  test("asks before closing a file whose save fails", async () => {
     const tab = fileTab({ content: "unsaved" });
     const pane = resetLayout([tab]);
     vi.spyOn(api, "write").mockRejectedValue(new Error("disk full"));
 
-    await closeTab(pane.id, tab.id);
+    const closing = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    expect(confirmState.title).toBe("Close without saving?");
+    expect(confirmState.message).toContain("a.md was not saved because the save request failed (disk full)");
+    expect(confirmState.cancelLabel).toBe("Keep editing");
+    resolveConfirm(false);
+    await closing;
 
     expect(activePane().tabs).toHaveLength(1);
     const live = activePane().tabs[0];
     expect(live?.kind).toBe("file");
     if (live?.kind !== "file") return;
-    expect(live.error).toContain("save failed");
+    expect(live.content).toBe("unsaved");
+    expect(live.error).toBeNull();
+    expect(live.saveError).toBe("the save request failed (disk full)");
+    const confirmed = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    resolveConfirm(true);
+    await confirmed;
+    expect(activePane().tabs).toHaveLength(0);
   });
 
   test("prompts for live terminal tabs", async () => {
@@ -341,9 +356,14 @@ describe("tab close confirmation", () => {
     const pane = resetLayout([tab]);
     vi.spyOn(api, "write").mockRejectedValue(new Error("disk full"));
 
+    const notice = vi.spyOn(notifications, "notify");
     await closeFileTabAfterMove(pane.id, tab.id);
 
     expect(activePane().tabs).toHaveLength(1);
+    const live = activePane().tabs[0] as FileTab;
+    expect(live.error).toBeNull();
+    expect(live.saveError).toBe("the save request failed (disk full)");
+    expect(notice).toHaveBeenCalledExactlyOnceWith("a.md was not saved and stays in this window.");
   });
 
   test("saving a draft notifies promotion sinks with the workspace path", async () => {
@@ -440,6 +460,34 @@ describe("tab close confirmation", () => {
     expect(live.path).toBe("notes/final.md");
     expect(live.content).toBe("# promoted\n");
     expect(live.saved).toBe("# promoted\n");
+  });
+
+  test("explicit draft save distinguishes write and promote failures", async () => {
+    const tab = fileTab({ id: "draft-failure", path: ".Drafts/untitled-1/draft.md", content: "edited", saved: "old" });
+    resetLayout([tab]);
+    const write = vi.spyOn(api, "write").mockRejectedValueOnce(new Error("disk full"));
+    const notice = vi.spyOn(notifications, "notify");
+
+    expect(await saveDraftTabToWorkspace(activePane().tabs[0] as FileTab)).toBe(false);
+    const live = activePane().tabs[0] as FileTab;
+    expect(live.error).toBeNull();
+    expect(live.saveError).toBe("the save request failed (disk full)");
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because the save request failed (disk full).");
+    expect(pathPromptState.open).toBe(false);
+
+    write.mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path: tab.path, name: "untitled-1", file_count: 1, dir_count: 0, total_size: 6, has_attachments: false,
+    });
+    vi.spyOn(api, "promoteDraft").mockRejectedValueOnce(new Error("promote unavailable"));
+    notice.mockClear();
+    const saving = saveDraftTabToWorkspace(live);
+    await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
+    resolvePathPrompt("notes/final.md");
+    expect(await saving).toBe(false);
+    expect(live.error).toBeNull();
+    expect(live.saveError).toBeNull();
+    expect(notice).toHaveBeenCalledExactlyOnceWith("Draft save failed: promote unavailable");
   });
 
   test("explicit draft workspace save uses the dir-only prompt + notice", async () => {
@@ -760,6 +808,14 @@ describe("tab close confirmation", () => {
   });
 
   describe("auto-discard empty files on close", () => {
+    test("discards an empty file even when its earlier save failed", async () => {
+      const remove = vi.spyOn(api, "remove").mockResolvedValue(undefined);
+      const pane = resetLayout([fileTab({ content: "", saved: "old", saveError: "the save request failed (disk full)" })]);
+      await closeTab(pane.id, "file-1");
+      expect(remove).toHaveBeenCalledWith("notes/a.md");
+      expect(confirmState.open).toBe(false);
+      expect(activePane().tabs).toHaveLength(0);
+    });
     test("discards an empty dirty file: deletes it then closes the tab", async () => {
       const remove = vi.spyOn(api, "remove").mockResolvedValue(undefined);
       const pane = resetLayout([
@@ -3528,7 +3584,7 @@ describe("file tab loading", () => {
       writable: true,
     });
 
-    beginMissingFileReopen(tab.id);
+    beginMissingFileReopen(tab.id, "open");
     await openInPane(activePane().id, "notes/new.md");
 
     expect(activePane().tabs).toHaveLength(1);
@@ -3598,6 +3654,37 @@ describe("terminal tab naming", () => {
 });
 
 describe("autosave", () => {
+  test("a conflict after a rejected write clears only its classic failure reason", async () => {
+    const tab = fileTab({ content: "changed", saved: "old" });
+    const pane = resetLayout([tab]);
+    vi.spyOn(api, "write").mockRejectedValueOnce(new Error("disk full"))
+      .mockRejectedValue(
+        new ApiError(409, "file changed on disk since it was read", { error: "file changed on disk since it was read", code: "write_conflict" }),
+      );
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(900);
+    vi.useRealTimers();
+    await saveTab(tab);
+    const live = activePane().tabs[0] as FileTab;
+    expect(live.saveError).toBeFalsy();
+    expect(conflictDialog.open).toBe(true);
+    const closing = closeTab(pane.id, tab.id);
+    await closing;
+    expect(confirmState.open).toBe(false);
+    expect(activePane().tabs).toHaveLength(1);
+  });
+
+  test("rename retains a classic write failure but drops an obsolete drawing parse reason", () => {
+    const pane = resetLayout([
+      fileTab({ id: "classic-failure", path: "notes/a.md", saveError: "the save request failed (disk full)" }),
+      fileTab({ id: "parse-failure", path: "notes/b.excalidraw", saveError: "the drawing does not parse (bad JSON)" }),
+    ]);
+    rekeyTabsForRename("notes/a.md", "notes/a.txt");
+    rekeyTabsForRename("notes/b.excalidraw", "notes/b.json");
+    expect((pane.tabs[0] as FileTab).saveError).toBe("the save request failed (disk full)");
+    expect((pane.tabs[1] as FileTab).saveError).toBeNull();
+  });
   test("saves JSON5 syntax through the classic write path", async () => {
     const content = "{a: 1, // comment\n}";
     const tab = fileTab({
@@ -3615,7 +3702,58 @@ describe("autosave", () => {
     expect(readTab(tab.id)?.saved).toBe(content);
   });
 
-  test("opens the conflict dialog with retry metadata when PUT requires preconditions", async () => {
+  test.each([
+    ["a sentence and no code", new ApiError(409, "the write was refused", { error: "the write was refused" })],
+    [
+      "another code",
+      new ApiError(409, "the write was refused", { error: "the write was refused", code: "other" }),
+    ],
+    [
+      "the conflict's fields and no code",
+      new ApiError(409, "conflict", {
+        error: "conflict",
+        current_mtime: 12,
+        current_mtime_ns: "12000000034",
+        current_authority_version: 9,
+        disk_conflicted: false,
+      }),
+    ],
+    [
+      "the conflict's code under another status",
+      new ApiError(500, "file changed on disk since it was read", { error: "file changed on disk since it was read", code: "write_conflict" }),
+    ],
+  ])("a write refused with %s is a failed save, not a conflict", async (_reason, refusal) => {
+    const tab = fileTab({ content: "changed", saved: "old" });
+    resetLayout([tab]);
+    vi.spyOn(api, "write").mockRejectedValue(refusal);
+
+    await expect(saveTab(tab)).rejects.toBe(refusal);
+    expect(conflictDialog.open).toBe(false);
+  });
+
+  test("an autosave refused without the write conflict's code reports a failed save", async () => {
+    const tab = fileTab({ content: "changed", saved: "old" });
+    const pane = resetLayout([tab]);
+    vi.spyOn(api, "write").mockRejectedValue(
+      new ApiError(409, "the write was refused", { error: "the write was refused" }),
+    );
+    vi.useFakeTimers();
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(900);
+    vi.useRealTimers();
+
+    await vi.waitFor(() =>
+      expect((activePane().tabs[0] as FileTab).saveError).toBe(
+        "the save request failed (the write was refused)",
+      ),
+    );
+    expect(conflictDialog.open).toBe(false);
+  });
+
+  test.each([
+    [409, "file changed on disk since it was read"],
+    [428, "a changed write must echo the authority version it last read"],
+  ])("opens the conflict dialog with retry metadata on the %i write conflict", async (status, sentence) => {
     const tab = fileTab({
       content: "changed",
       saved: "saved",
@@ -3625,7 +3763,9 @@ describe("autosave", () => {
     });
     resetLayout([tab]);
     vi.spyOn(api, "write").mockRejectedValue(
-      new ApiError(428, "write precondition required", {
+      new ApiError(status, sentence, {
+        error: sentence,
+        code: "write_conflict",
         current_mtime: 12,
         current_mtime_ns: "12000000034",
         current_authority_version: 9,
@@ -3823,15 +3963,14 @@ describe("autosave", () => {
     await vi.advanceTimersByTimeAsync(10);
 
     const live = activePane().tabs.find((t) => t.id === "file-1") as FileTab;
-    expect(live.error).toContain("autosave failed");
+    expect(live.error).toBeNull();
+    expect(live.saveError).toBe("the save request failed (disk full)");
     vi.useRealTimers();
   });
 
   test("a close whose save fails mid-move reports on the tab in the layout", async () => {
-    // Same shape as the autosave message one call up: `confirmCloseTabs`
-    // awaits the save, and a move in that window replaces the tab object, so
-    // the message lands on something nothing renders. The close refuses and
-    // the user is told nothing about why.
+    // A move while the save is pending replaces the tab object. The close
+    // must ask about the buffer held by the replacement.
     vi.useFakeTimers();
     let fail: (e: Error) => void = () => {};
     vi.spyOn(api, "write").mockReturnValue(
@@ -3849,11 +3988,15 @@ describe("autosave", () => {
     reorderTab(pane.id, "file-1", 1);
     fail(new Error("disk full"));
     await vi.advanceTimersByTimeAsync(10);
+    expect(confirmState.open).toBe(true);
+    expect(confirmState.message).toContain("a.md was not saved because the save request failed (disk full)");
+    resolveConfirm(false);
     await closing;
 
     const live = activePane().tabs.find((t) => t.id === "file-1") as FileTab;
     expect(live, "the close was refused, so the tab is still open").toBeDefined();
-    expect(live.error ?? "", "and the tab says why").toContain("save failed");
+    expect(live.error).toBeNull();
+    expect(live.saveError).toBe("the save request failed (disk full)");
     vi.useRealTimers();
   });
 
@@ -4074,6 +4217,28 @@ describe("terminal broadcast groups", () => {
       "term-c",
     ]);
     expect(tab("term-c").broadcastEnabled).toBe(true);
+  });
+
+  // The input fan-out reaches only the source's group, and the count on its
+  // indicator says how many it reaches.
+  test("a terminal's reach counts only the members of its own group", () => {
+    resetLayout([
+      terminalTab({ id: "a1", title: "A1", group: "alpha" }),
+      terminalTab({ id: "a2", title: "A2", group: "alpha" }),
+      terminalTab({ id: "b1", title: "B1", group: "beta" }),
+      terminalTab({ id: "b2", title: "B2", group: "beta" }),
+    ]);
+    const tab = (id: string) =>
+      activePane().tabs.find((candidate) => candidate.id === id) as TerminalTab;
+    setTerminalBroadcastEnabled(tab("a1"), true);
+    setTerminalBroadcastTarget(tab("a1"), "a2", true);
+    setTerminalBroadcastEnabled(tab("b1"), true);
+    setTerminalBroadcastTarget(tab("b1"), "b2", true);
+
+    expect(
+      ["a1", "a2", "b1", "b2"].map((id) => terminalBroadcastReachCount(tab(id))),
+      "each reaches its one peer",
+    ).toEqual([1, 1, 1, 1]);
   });
 
   test("select-all toggle flips the whole group on the active terminal", () => {

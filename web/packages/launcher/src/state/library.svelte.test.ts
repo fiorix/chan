@@ -23,7 +23,7 @@ import {
   updateGateway,
   windowLiveTerminalCount,
 } from "./library.svelte";
-import { ApiError } from "../api/library";
+import { ApiError, type WorkspaceEntry } from "../api/library";
 import { setDemoMode } from "./demo.svelte";
 import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "./pending.svelte";
 
@@ -116,6 +116,105 @@ describe("window live-terminal count", () => {
 });
 
 describe("workspace registry", () => {
+  it("starts a refresh after the last fetch settles before its caller resumes", async () => {
+    const { backend } = await import("../api/backend");
+    const oldRows = [{ ...library.workspaces[0]!, label: "settled snapshot" }];
+    const newRows = [{ ...oldRows[0]!, label: "following snapshot" }];
+    let resolveOld!: (rows: WorkspaceEntry[]) => void;
+    const response = new Promise<WorkspaceEntry[]>((resolve) => { resolveOld = resolve; });
+    const list = vi.spyOn(backend, "listWorkspaces")
+      .mockReturnValueOnce(response)
+      .mockResolvedValueOnce(newRows);
+    const remove = vi.spyOn(backend, "removeWorkspace").mockResolvedValue(undefined);
+    let callerResumed = false;
+    const mutation = removeWorkspace(oldRows[0]!.workspace_id);
+    const completion = mutation.then(() => { callerResumed = true; });
+    try {
+      await Promise.resolve();
+      expect(list).toHaveBeenCalledOnce();
+      const arrival = (async () => {
+        // Svelte wraps awaits; observe application without a macrotask hop.
+        for (let turn = 0; turn < 20 && library.workspaces[0]?.label !== "settled snapshot"; turn++) {
+          await Promise.resolve();
+        }
+        expect(library.workspaces[0]?.label).toBe("settled snapshot");
+        expect(callerResumed).toBe(false);
+        resync();
+        expect(list, "a request after the completed fetch starts another fetch").toHaveBeenCalledTimes(2);
+      })();
+      resolveOld(oldRows);
+      await arrival;
+      await completion;
+      expect(library.workspaces[0]?.label).toBe("following snapshot");
+    } finally {
+      resolveOld(oldRows);
+      await completion;
+      list.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
+  it.each(["live", "mutation"])(
+    "keeps the newest workspace list when the older %s refresh resolves last",
+    async (first) => {
+      const { backend } = await import("../api/backend");
+      const oldRows = [{ ...library.workspaces[0]!, label: "older snapshot" }];
+      const newRows = [{ ...oldRows[0]!, label: "newer snapshot" }];
+      let resolveOld!: (rows: WorkspaceEntry[]) => void;
+      let resolveNew!: (rows: WorkspaceEntry[]) => void;
+      const oldResponse = new Promise<WorkspaceEntry[]>((resolve) => { resolveOld = resolve; });
+      const newResponse = new Promise<WorkspaceEntry[]>((resolve) => { resolveNew = resolve; });
+      const list = vi.spyOn(backend, "listWorkspaces")
+        .mockReturnValueOnce(oldResponse)
+        .mockReturnValueOnce(newResponse);
+      const remove = vi.spyOn(backend, "removeWorkspace").mockResolvedValue(undefined);
+      let mutation: Promise<void> | undefined;
+
+      try {
+        if (first === "live") resync();
+        mutation = removeWorkspace(oldRows[0]!.workspace_id);
+        await Promise.resolve();
+        if (first === "mutation") resync();
+
+        resolveNew(newRows);
+        await newResponse;
+        await Promise.resolve();
+        resolveOld(oldRows);
+        await mutation;
+        await oldResponse;
+        await Promise.resolve();
+
+        expect(library.workspaces[0]?.label, "a stale response cannot replace the latest list")
+          .toBe("newer snapshot");
+        expect(list).toHaveBeenCalledTimes(2);
+      } finally {
+        resolveOld(oldRows);
+        resolveNew(newRows);
+        await mutation;
+        list.mockRestore();
+        remove.mockRestore();
+      }
+    },
+  );
+
+  it("reports a failed mutation refresh and lets the next refresh recover", async () => {
+    const { backend } = await import("../api/backend");
+    const rows = [{ ...library.workspaces[0]!, label: "recovered snapshot" }];
+    const failure = new Error("workspace list unavailable");
+    const list = vi.spyOn(backend, "listWorkspaces")
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(rows);
+    const remove = vi.spyOn(backend, "removeWorkspace").mockResolvedValue(undefined);
+    try {
+      await expect(removeWorkspace(rows[0]!.workspace_id)).rejects.toBe(failure);
+      await removeWorkspace(rows[0]!.workspace_id);
+      expect(library.workspaces[0]?.label).toBe("recovered snapshot");
+    } finally {
+      list.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
   it("adds a local workspace", async () => {
     const before = library.workspaces.length;
     await addLocalWorkspace("/tmp/added-by-test");
