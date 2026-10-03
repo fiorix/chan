@@ -45,15 +45,16 @@
     return parts.length ? parts[parts.length - 1] : p;
   }
 
-  // Directory basenames from the loaded tree, minus what's already excluded,
-  // for the add-input's autocomplete. Only currently-loaded dirs show up; the
-  // field still accepts any typed name (the blocklist matches at any depth).
+  // Directory basenames from the loaded tree, minus what's already excluded
+  // and what the list refuses, for the add-input's autocomplete. Only
+  // currently-loaded dirs show up; the field still accepts any typed name the
+  // list takes (the blocklist matches at any depth).
   const suggestions = $derived.by(() => {
     const have = new Set([...additions, ...(view?.defaults ?? [])]);
     const names = new Set<string>();
     for (const e of tree.entries) {
       if (!e.is_dir) continue;
-      const b = basename(e.path).trim().toLowerCase();
+      const b = normalizeName(basename(e.path));
       if (b && !have.has(b)) names.add(b);
     }
     return [...names].sort();
@@ -67,6 +68,13 @@
     if (name.includes("/") || name.includes("\\")) return null;
     return name.toLowerCase();
   }
+
+  // Why the name in the field is refused, for as long as it stands there.
+  const refusal = $derived(
+    draft.trim() !== "" && normalizeName(draft) === null
+      ? "A name cannot hold / or \\: the list takes directory names, not paths."
+      : null,
+  );
 
   function addDraft(): void {
     const name = normalizeName(draft);
@@ -146,7 +154,12 @@
             <option value={s}></option>
           {/each}
         </datalist>
-        <button type="button" class="add-btn" onclick={addDraft} disabled={!draft.trim()}>
+        <button
+          type="button"
+          class="add-btn"
+          onclick={addDraft}
+          disabled={!draft.trim() || refusal !== null}
+        >
           Add
         </button>
         {#if saveLabel}
@@ -155,6 +168,9 @@
           </span>
         {/if}
       </div>
+      {#if refusal}
+        <p class="hint err" role="alert">{refusal}</p>
+      {/if}
 
       {#if additions.length === 0}
         <p class="hint muted">No extra directories excluded for this workspace.</p>
