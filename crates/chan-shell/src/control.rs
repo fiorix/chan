@@ -866,9 +866,12 @@ mod tests {
             )
             .await
         });
-        seen_rx.await.unwrap();
-        let error = tokio::time::timeout(std::time::Duration::from_secs(16 * 60), client)
-            .await
+        let (seen, result) = tokio::join!(
+            seen_rx,
+            tokio::time::timeout(std::time::Duration::from_secs(16 * 60), client)
+        );
+        seen.unwrap();
+        let error = result
             .expect("export client did not bound a server that never answers")
             .unwrap()
             .unwrap_err();
