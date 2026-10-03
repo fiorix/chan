@@ -323,6 +323,9 @@ pub enum GeometryMatch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Preferred loopback port for the embedded local server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_port: Option<u16>,
     /// Configured devservers (multi-workspace aggregators the desktop
     /// dials out to). Each renders its own `[DEVSERVER {host}]` launcher
     /// section. The per-workspace URLs/tokens are NOT persisted (the

@@ -64,6 +64,10 @@ pub struct RegistryDeps {
     pub devserver_feed: Arc<crate::DevserverFeed>,
 }
 
+fn bind_embedded_port(_saved_port: Option<u16>) -> std::io::Result<(TcpListener, bool)> {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map(|listener| (listener, false))
+}
+
 impl EmbeddedServer {
     pub async fn start(deps: RegistryDeps) -> Result<Self, String> {
         let RegistryDeps {
@@ -75,6 +79,12 @@ impl EmbeddedServer {
             devserver_connecting,
             devserver_feed,
         } = deps;
+        let saved_port = config_store
+            .lock()
+            .unwrap()
+            .get()
+            .ok()
+            .and_then(|cfg| cfg.embedded_port);
         let library = chan_workspace::Library::open()
             .map_err(|e| format!("opening chan workspace registry for embedded server: {e}"))?;
         // Install the desktop bridge: a window-ops channel (the consumer
@@ -154,7 +164,7 @@ impl EmbeddedServer {
             Some(Arc::new(std::sync::RwLock::new(launcher_token.clone()))),
             Some(addr_cell.clone()),
         );
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let (listener, _) = bind_embedded_port(saved_port)
             .map_err(|e| format!("binding embedded chan server: {e}"))?;
         listener
             .set_nonblocking(true)
