@@ -18,13 +18,15 @@ describe("launcher button stylesheet ownership", () => {
     expect(topBar).toContain('class="icon-btn command"');
     expect(topBar).toContain('class="icon-btn select"');
     const base = rule(shared, ".icon-btn");
-    const local = rule(topBar, "  .icon-btn");
     for (const property of ["display", "align-items", "justify-content", "width", "height", "border", "background", "cursor", "transition"]) {
       const declaration = new RegExp(`(^|\\n)\\s*${property}:`);
       expect(base).toMatch(declaration);
-      expect(local).not.toMatch(declaration);
     }
-    expect(rule(topBar, "  .icon-btn:hover")).not.toMatch(/border-color:/);
+    expect(topBar).not.toContain("  .icon-btn {");
+    expect(topBar).not.toContain("  .icon-btn:hover {");
+    expect(base).toContain("border-radius: 7px;");
+    expect(base).toContain("color: var(--text-secondary);");
+    expect(rule(shared, ".icon-btn:hover:not(:disabled)")).toContain("color: var(--text);");
   });
 
   test("the update and confirm buttons wear the launcher's button rules", () => {

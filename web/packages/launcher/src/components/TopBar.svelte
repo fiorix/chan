@@ -131,17 +131,6 @@
     flex-shrink: 0;
   }
 
-  .icon-btn {
-    border-radius: 6px;
-    color: var(--text);
-    font-size: 1.1rem;
-    line-height: 1;
-  }
-
-  .icon-btn:hover {
-    color: var(--brand);
-  }
-
   /* Select mode active: the toggle holds the accent so it reads as engaged. */
   .icon-btn.select.active {
     border-color: var(--accent);
