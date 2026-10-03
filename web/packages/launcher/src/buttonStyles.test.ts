@@ -44,6 +44,7 @@ describe("launcher button stylesheet ownership", () => {
     expect(app).toContain('class="btn secondary"');
     expect(app).toContain('class="btn primary"');
     const button = rule(app, "  .update-actions button");
+    expect(button).toContain("font-family: inherit;");
     for (const property of ["padding", "border-radius", "font", "cursor"]) {
       expect(button).not.toMatch(new RegExp(`(^|\\n)\\s*${property}:`));
     }
