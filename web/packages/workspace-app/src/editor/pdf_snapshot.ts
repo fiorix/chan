@@ -506,7 +506,7 @@ type ImageGeometry = {
 type HtmlImageRecord = {
   kind: "html";
   rendered: boolean;
-  geometry: ImageGeometry | "hidden" | null;
+  geometry: ImageGeometry | null;
   widthPx: number;
   heightPx: number;
   natural: { width: number; height: number };
@@ -728,15 +728,12 @@ function measureHtmlImage(img: HTMLImageElement, root: HTMLElement): HtmlImageRe
     }
     if (el === root) break;
   }
-  let geometry: HtmlImageRecord["geometry"] = null;
-  if (!(rect.width > 0 && rect.height > 0)) {
-    geometry = root.isConnected ? "hidden" : null;
-  } else if (!(shown.width > 0 && shown.height > 0)) {
-    geometry = "hidden";
-  } else {
+  let geometry: ImageGeometry | null = null;
+  if (rect.width > 0 && rect.height > 0) {
     geometry = { box, shown, scale, fit: style.objectFit };
   }
-  if (geometry === "hidden") rendered = false;
+  if ((!geometry && root.isConnected) ||
+      (geometry && !(shown.width > 0 && shown.height > 0))) rendered = false;
   return {
     kind: "html",
     rendered,
@@ -787,8 +784,9 @@ function shapeFromRecord(
   natural: { width: number; height: number },
 ): ImageShape | "hidden" | null {
   const geometry = record.geometry;
-  if (!geometry || geometry === "hidden") return geometry;
+  if (!geometry) return null;
   const { box, shown, scale, fit } = geometry;
+  if (!(shown.width > 0 && shown.height > 0)) return "hidden";
   const bitmap = fitBitmap(fit, box, {
     width: natural.width * scale.x,
     height: natural.height * scale.y,
@@ -819,6 +817,31 @@ function sizeFromRecord(
   }
   if (!(width > 0 && height > 0)) return null;
   return { widthPx: width, heightPx: height, ratio: `${width} / ${height}` };
+}
+
+function boxMoved(img: HTMLImageElement, record: HtmlImageRecord): boolean {
+  const style = getComputedStyle(img);
+  return (
+    (Number.isFinite(record.widthPx) &&
+      !(Math.abs(parseFloat(style.width) - record.widthPx) <= 0.5)) ||
+    (Number.isFinite(record.heightPx) &&
+      !(Math.abs(parseFloat(style.height) - record.heightPx) <= 0.5))
+  );
+}
+
+function restoreMeasuredBox(img: HTMLImageElement, record: HtmlImageRecord, name: string): void {
+  if (!record.geometry || !boxMoved(img, record)) return;
+  for (const [length, value] of [
+    ["width", record.widthPx], ["height", record.heightPx],
+  ] as const) {
+    if (!Number.isFinite(value)) continue;
+    for (const property of [length, `min-${length}`, `max-${length}`]) {
+      img.style.setProperty(property, `${value}px`, "important");
+    }
+  }
+  if (record.rendered && boxMoved(img, record)) {
+    throw new SnapshotError(`image ${name} did not keep its measured box`);
+  }
 }
 
 /// Take every inlined <img> out of the page's own painting: decode it
@@ -892,6 +915,9 @@ export async function liftPageImages(
     if (!record.hasAspectRatio) {
       img.style.setProperty("aspect-ratio", size.ratio);
     }
+  }
+  for (const { img, name, record } of prepared) {
+    restoreMeasuredBox(img, record, name);
   }
   // An <image> of an inline SVG is drawn inside that SVG, under and over
   // its other shapes, so it stays in the page's document. Decoding it
