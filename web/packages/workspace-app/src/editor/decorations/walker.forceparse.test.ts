@@ -206,4 +206,20 @@ describe("decoration walker forces the parse for the viewport", () => {
     const { from, to } = view.viewport;
     expect(strong).toEqual(wholeParse(view.state.doc.toString(), "StrongEmphasis", from, to));
   });
+
+  test("decorates a list marker typed mid-paragraph at once, though the state's parse stopped at it", () => {
+    const { view, strong, lists } = longParagraphView();
+    strong.length = 0;
+    const marker = view.state.doc.line(5).from;
+    view.dispatch({ changes: { from: marker, insert: "- " } });
+
+    // The step that outlasts the update's budget takes the paragraph above
+    // the marker, so the tree in hand ends where the list begins.
+    expect(syntaxTree(view.state).length, "the tree in hand stops short of the viewport").toBeLessThan(
+      view.viewport.to,
+    );
+    expect(lists).toEqual([marker]);
+    const { from, to } = view.viewport;
+    expect(strong).toEqual(wholeParse(view.state.doc.toString(), "StrongEmphasis", from, to));
+  });
 });
