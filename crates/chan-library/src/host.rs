@@ -8078,6 +8078,97 @@ mod tests {
         );
     }
 
+    /// A registration that finds a relinked root's row refreshes the
+    /// canonical path the row is found by, and holds its permit under the
+    /// key the root resolves to now. An open asked by that path names the
+    /// row only once the registration has returned, so it reads the rows
+    /// after its wait under the root's key, and then waits under the root
+    /// the row stores, where a removal of a root mounted before its relink
+    /// holds its own permit.
+    ///
+    /// The clock is paused and moves only while every task waits, so the
+    /// open is parked at the registration's permit when the test resumes.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn an_open_reads_its_row_once_a_registration_under_its_key_has_returned() {
+        use std::os::unix::fs::symlink;
+        const BUDGET: Duration = Duration::from_secs(4);
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = library
+            .register_workspace(&parent.join("ws"))
+            .unwrap()
+            .root_path;
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let canonical = canonical_key(&stored);
+        assert_ne!(canonical, stored, "fixture: the root did not relink");
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        host.open_release_budget = BUDGET;
+        let host = Arc::new(host);
+        // A registration in flight under the key the root resolves to now,
+        // and a removal's unregister under the root the row stores.
+        let registration = host
+            .root_calls
+            .lock(&(canonical.clone(), RootCall::RegistryWrite))
+            .await;
+        let _removal = host
+            .root_calls
+            .lock(&(stored.clone(), RootCall::RegistryWrite))
+            .await;
+        let (opened, opening) = std::sync::mpsc::channel();
+        *host.open_thread_probe.lock().unwrap() = Some(opened);
+        let mounting = Arc::clone(&host);
+        let mounting_root = canonical.clone();
+        let mount = tokio::spawn(async move {
+            mounting
+                .open_or_get_registered_workspace(mounting_root, serve_config("/ws"))
+                .await
+        });
+        tokio::time::sleep(BUDGET / 4).await;
+        assert!(
+            !mount.is_finished(),
+            "fixture: the open did not wait for the registration under its key"
+        );
+        assert!(
+            host.library
+                .list_workspaces()
+                .iter()
+                .all(|row| row.cached_canonical_path() != canonical),
+            "fixture: the row was resolved before its registration"
+        );
+
+        // The registration resolves the row, then returns.
+        host.library.register_workspace(&canonical).unwrap();
+        assert!(
+            host.library
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == stored && row.cached_canonical_path() == canonical),
+            "fixture: the registration did not resolve the relinked row"
+        );
+        drop(registration);
+        let answer = tokio::time::timeout(BUDGET * 4, mount)
+            .await
+            .expect("the open never answered")
+            .unwrap();
+        assert!(
+            matches!(answer, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+            "an open read its rows before the registration that resolved its row had returned, \
+             so it did not wait for a registry write held under the root that row stores: \
+             {answer:?}"
+        );
+        assert!(
+            opening.try_recv().is_err(),
+            "the open dispatched its filesystem open beside a registry write held under the \
+             root its row stores"
+        );
+    }
+
     /// The open's wait for its mount permit and its wait for an outstanding
     /// registry write share one release budget: an open that got its mount
     /// permit halfway through the budget gives the write the other half,
