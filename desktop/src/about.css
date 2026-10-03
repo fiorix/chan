@@ -1,4 +1,4 @@
-/* About window. Tokens come from styles.css (the launcher base); this
+/* About window. Tokens come from styles.css, the Connecting/About base; this
    layers the centered, narrow-column About layout that mirrors the SPA
    Dashboard About slide. */
 
@@ -15,7 +15,7 @@
   max-width: 380px;
   margin: 0 auto;
   padding: 26px 22px;
-  /* The launcher base makes every `main` the window's scroll container
+  /* The shared page base makes every `main` the window's scroll container
      (`flex: 1`), so this card owns the window's full height and its own
      padding is only a floor. Left at the default flex-start, every spare
      pixel piles up under the card and the margins match only when the

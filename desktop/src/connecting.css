@@ -1,12 +1,12 @@
 /* Connecting / retry surface for remote devserver windows.
-   Loaded by connecting.html on top of styles.css, so all theme tokens
-   (--bg, --text, --brand, --border, ...) and the OS-light media query
-   come from there. Only the connecting-specific layout + the spinner +
-   the timestamped retry log live here. */
+   Loaded by connecting.html over styles.css, the shared base of the
+   Connecting and About pages. Its theme tokens (--bg, --text, --brand,
+   --border, ...) and OS-light media query apply here. This sheet holds
+   the connecting layout, spinner, and timestamped retry log. */
 
 .connecting-body {
   /* The window opens straight onto this page, so fill the viewport and
-     center the card rather than the launcher's top-aligned table. */
+     center the card in its own flex layout. */
   display: flex;
   min-height: 100vh;
 }
