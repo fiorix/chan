@@ -21,6 +21,11 @@ pub(crate) const MUST_HAPPEN: Duration = Duration::from_secs(10);
 pub(crate) const A_LONG_HOLD: Duration =
     super::STOP_CELL_WARN_AFTER.saturating_add(Duration::from_millis(500));
 
+/// A hold of the cell far longer than any shutdown grace, for a pin on a
+/// paused clock: a flusher told to stop looks into the cell twenty-four
+/// thousand times in it.
+pub(crate) const A_HOLD_PAST_ANY_GRACE: Duration = Duration::from_secs(600);
+
 /// How long the probe of [`worker_stays_free`] may take to end.
 const PROBE_BOUND: Duration = Duration::from_secs(5);
 
@@ -54,6 +59,42 @@ pub(crate) fn while_held<T>(cell: &Cell, beside: impl FnOnce() -> T) -> T {
     let out = beside();
     drop(held);
     out
+}
+
+/// The cell's write guard, held on a thread of its own so that a test can
+/// await beside it. Dropping it lets the cell go.
+pub(crate) struct Hold {
+    let_go: Option<std::sync::mpsc::Sender<()>>,
+    holder: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Take the cell's write guard and keep it until the returned [`Hold`] is
+/// dropped.
+pub(crate) fn hold(cell: &Cell) -> Hold {
+    let (let_go, told) = std::sync::mpsc::channel::<()>();
+    let (holding, held) = std::sync::mpsc::channel();
+    let cell = cell.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = cell.write().expect("workspace cell");
+        holding.send(()).expect("the test waits for the hold");
+        // Ends when the hold is dropped, which closes the channel.
+        let _ = told.recv();
+    });
+    held.recv_timeout(MUST_HAPPEN)
+        .expect("the cell's write guard");
+    Hold {
+        let_go: Some(let_go),
+        holder: Some(holder),
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        drop(self.let_go.take());
+        if let Some(holder) = self.holder.take() {
+            let _ = holder.join();
+        }
+    }
 }
 
 /// Look every few milliseconds until `done` holds or `bound` has passed;

@@ -5119,6 +5119,61 @@ mod tests {
         );
     }
 
+    /// Nothing in a flusher told to stop bounds its looking: the abort of
+    /// the tenant's task owner is what ends it, and the abort flushes
+    /// nothing. The clock is paused, so the hold lasts as long as the
+    /// flusher's own looks take to cross it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_flusher_looks_while_the_cell_is_held_and_ends_at_its_abort() {
+        let fx = fixture(&[("a.md", "hello")]);
+        let (ha, _frames) = attach(&fx, "a.md", "w1", None).await;
+        ha.session().apply_replace("writer", "unflushed").unwrap();
+        let (stop, stopped) = watch::channel(false);
+        let cell = held_cell::cell_of(&fx.workspace);
+        // Held before the flusher starts, so no tick of it flushes the edit.
+        let hold = held_cell::hold(&cell);
+        let flusher = spawn_flusher(
+            fx.registry.clone(),
+            cell.clone(),
+            Arc::new(SelfWrites::new()),
+            stopped,
+        );
+
+        stop.send(true).expect("the flusher listens");
+        tokio::time::sleep(held_cell::A_HOLD_PAST_ANY_GRACE).await;
+        assert!(
+            !flusher.is_finished(),
+            "the document flusher told to stop ended by itself beside a cell still held"
+        );
+
+        let aborted_at = tokio::time::Instant::now();
+        flusher.abort();
+        let ended = flusher.await;
+        assert!(
+            ended.is_err_and(|error| error.is_cancelled()),
+            "the document flusher did not end as an aborted task"
+        );
+        assert!(
+            aborted_at.elapsed() < CELL_RETRY,
+            "the abort waited {:?} for the flusher, past its next look",
+            aborted_at.elapsed()
+        );
+        assert!(
+            matches!(read_cell(&cell), CellRead::Held),
+            "the cell was let go before the flusher ended"
+        );
+        assert!(
+            fx.registry.get("a.md").is_some(),
+            "the flusher's session is gone, though nothing has flushed it"
+        );
+        assert_eq!(
+            fx.workspace.read_text("a.md").unwrap(),
+            "hello",
+            "an aborted flusher flushed its session"
+        );
+        drop(hold);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_look_of_a_stopped_flusher_says_once_that_the_cell_is_still_held() {
         let fx = fixture(&[]);
