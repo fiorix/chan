@@ -9647,6 +9647,66 @@ mod tests {
         });
     }
 
+    /// Startup restore registers a row the registry lacks under the root's
+    /// registry-write permit, as a serve request's registration does. A
+    /// restore that expires on a root whose registration hangs skips that
+    /// root and keeps the rows beside it, and a later registration of the
+    /// root waits for the held one instead of starting a second.
+    #[test]
+    fn a_registration_beside_an_expired_restore_holds_no_second_thread() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let hung = tempfile::tempdir().expect("hung root");
+            let other = tempfile::tempdir().expect("other root");
+            let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            Arc::get_mut(&mut state).unwrap().mount_timeout = Duration::from_millis(500);
+            let rows: Vec<PersistedWorkspace> = [hung.path(), other.path()]
+                .into_iter()
+                .map(|root| PersistedWorkspace {
+                    path: canonical_root(root).to_string_lossy().into_owned(),
+                    desired_on: true,
+                    generation: 1,
+                })
+                .collect();
+            let other_row = rows[1].path.clone();
+            let stall = root_stall::stall_matching(hung.path(), &[root_stall::REGISTER_WORKSPACE]);
+            let kept = state.register_restore_rows(rows).await;
+            assert_eq!(
+                kept.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+                [other_row.as_str()],
+                "the restore did not skip the hung root alone"
+            );
+            assert_eq!(
+                stall.entered().len(),
+                1,
+                "fixture: the restore's registration is not held: {:?}",
+                stall.entered()
+            );
+            assert!(stall.entered()[0].contains("register_workspace_with_name"));
+
+            let error = state
+                .register_workspace(hung.path())
+                .await
+                .expect_err("a registration of the hung root must not succeed");
+            assert!(
+                matches!(&error, Error::Config(message) if message.starts_with("mount timed out")),
+                "{error}"
+            );
+            assert_eq!(
+                stall.entered().len(),
+                1,
+                "a registration beside the restore's held one started a second: {:?}",
+                stall.entered()
+            );
+        });
+    }
+
     #[test]
     fn opens_of_a_hung_root_hold_one_blocking_thread() {
         hung_root_hop_holds_one_blocking_thread(false);
