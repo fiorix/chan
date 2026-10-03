@@ -447,6 +447,28 @@ fn forget_of_a_relinked_stored_root_leaves_the_other_row_and_its_state() {
 }
 
 #[test]
+fn forget_of_a_relative_stored_root_uses_the_row_under_the_cwd() {
+    let sandbox = Sandbox::new();
+    let (saved, other, _saved_state, other_state) = relinked_rows(&sandbox);
+    let out = sandbox
+        .command()
+        .current_dir(sandbox.scratch.path())
+        .args(["workspace", "forget", "./saved"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().all(|row| row.root_path != saved), "{rows:?}");
+    assert!(rows.iter().any(|row| row.root_path == other), "{rows:?}");
+    assert_eq!(
+        std::fs::read(other_state.join("keep")).unwrap(),
+        b"other workspace state"
+    );
+}
+
+#[test]
 fn forget_of_a_relinked_stored_root_asks_its_holder_by_that_name() {
     let sandbox = Sandbox::new();
     let (saved, other, saved_state, other_state) = relinked_rows(&sandbox);

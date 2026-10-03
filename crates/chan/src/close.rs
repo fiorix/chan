@@ -81,7 +81,9 @@ fn stored_row_named_by(lib: &Library, path: &Path) -> Result<Option<KnownWorkspa
     } else {
         std::env::current_dir()?.join(given)
     };
-    let given = chan_workspace::paths::lexical_normalize(&absolute);
+    let given = chan_workspace::paths::lexical_normalize(
+        &chan_workspace::paths::strip_verbatim_prefix(&absolute),
+    );
     Ok(lib
         .list_workspaces()
         .into_iter()
