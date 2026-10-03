@@ -55,6 +55,11 @@ describe("fenceLineTracker", () => {
     ]);
   });
 
+  test("a closer may have tabs after its run, alone or among spaces", () => {
+    expect(classify(["```", "code", "```\t", "# after"])).toEqual(["fence", "code", "fence", "text"]);
+    expect(classify(["~~~", "code", "~~~ \t ", "# after"])).toEqual(["fence", "code", "fence", "text"]);
+  });
+
   test("backticks in an opener's info invalidate only backtick fences", () => {
     expect(classify(["``` a`b", "# heading"])).toEqual(["text", "text"]);
     expect(classify(["- ``` a`b", "# heading"])).toEqual(["text", "text"]);
@@ -155,6 +160,7 @@ describe("fenceLineTracker against the editor's parser", () => {
     ["an item's fence left open", "# S\n- ```sh\n  make\n\n  more\n# U"],
     ["an item's fence ended by a column-zero run", "# S\n- ```sh\n  make\n```\n# X\n```\n# Y"],
     ["a closer with trailing text", "# A\n```\ncode\n``` x\nstill code\n```\n# B"],
+    ["a closer followed by a tab", "# A\n```\ncode\n```\t\n# B"],
     ["a backtick opener with a backtick in its info", "# A\n``` a`b\n# B"],
   ])("agrees on %s", (_name, doc) => {
     expect(classify(doc.split("\n"))).toEqual(parsedFenceLines(doc));
