@@ -803,8 +803,12 @@ export class SceneSession {
   /// SCENE_RELEASE_LINGER_MS so a canvas remount (cross-pane move) can
   /// re-acquire; an immediate release (tab close, rename rekey, file
   /// discard) detaches now, which also tells the server to flush
-  /// promptly.
+  /// promptly. A release made while the tab loads ends the appState claim.
   release(opts?: { immediate?: boolean }): void {
+    // A tab that reads its file again puts the file in the place of the
+    // buffer a claim was picked on, so the claim ends with that buffer: the
+    // session its host acquires again inside the linger replays none of it.
+    if (this.tab.loading) this.appStateClaim = null;
     if (opts?.immediate) {
       this.destroy();
       return;
