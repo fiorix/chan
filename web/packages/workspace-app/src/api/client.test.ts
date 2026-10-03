@@ -16,6 +16,8 @@ import {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  document.head.querySelector('meta[name="chan-files"]')?.remove();
   window.history.replaceState(null, "", "/");
   window.sessionStorage.clear();
 });
@@ -405,6 +407,107 @@ describe("file read streaming", () => {
 });
 
 describe("raw file writes", () => {
+  function stubDigest(): void {
+    const digests = new Map([
+      ["", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+      ["loaded", "2cab953f2b3607b36259abeb3703329d6b301b31277402ebf9f2b3b93e31dd53"],
+      ["\ufeffone\r\ntwo\rthree\né\n", "a4e357930d06a17a07a7f993733104c785ae5079c06d55a5deed9541f03f51d4"],
+    ].map(([text, hash]) => [Array.from(new TextEncoder().encode(text)).join(","), hash]));
+    vi.stubGlobal("crypto", {
+      subtle: {
+        digest: vi.fn(async (algorithm: string, bytes: Uint8Array) => {
+          expect(algorithm).toBe("SHA-256");
+          const hex = digests.get(Array.from(bytes).join(","));
+          expect(hex, "the original UTF-8 bytes reached WebCrypto").toBeDefined();
+          return Uint8Array.from(hex!.match(/../g)!.map((pair) => parseInt(pair, 16))).buffer;
+        }),
+      },
+    });
+  }
+
+  const writeWithLoadedText = api.write as (
+    path: string,
+    content: string,
+    expectedMtimeNs?: string | null,
+    expectedMtime?: number | null,
+    authorityVersion?: number | null,
+    loadedText?: string | null,
+  ) => ReturnType<typeof api.write>;
+
+  function standalone(): void {
+    const meta = document.createElement("meta");
+    meta.name = "chan-files";
+    meta.content = "1";
+    document.head.appendChild(meta);
+    window.history.replaceState(null, "", "/?kind=terminal&w=files-window");
+  }
+
+  function okWrite() {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+  }
+
+  test("sends the loaded text hash on a standalone write only", async () => {
+    stubDigest();
+    standalone();
+    const fetchMock = okWrite();
+    await writeWithLoadedText("a.md", "changed", "100", null, null, "loaded");
+    expect(new URL(String(fetchMock.mock.calls[0]![0]), window.location.href).searchParams.get("expected_sha256"))
+      .toBe("2cab953f2b3607b36259abeb3703329d6b301b31277402ebf9f2b3b93e31dd53");
+
+    fetchMock.mockClear();
+    window.history.replaceState(null, "", "/?w=workspace-window");
+    await writeWithLoadedText("a.md", "changed", "100", null, null, "loaded");
+    expect(String(fetchMock.mock.calls[0]![0])).toBe("/api/fs/a.md?expected_mtime_ns=100");
+  });
+
+  test("keeps the original standalone URL without loaded text or WebCrypto", async () => {
+    stubDigest();
+    standalone();
+    const fetchMock = okWrite();
+    await api.write("a.md", "changed", "100");
+    await writeWithLoadedText("a.md", "changed", "100", null, null, null);
+    vi.stubGlobal("crypto", { subtle: undefined });
+    await writeWithLoadedText("a.md", "changed", "100", null, null, "loaded");
+    for (const [url] of fetchMock.mock.calls) {
+      expect(String(url)).toBe("/api/fs/a.md?expected_mtime_ns=100&w=files-window");
+    }
+  });
+
+  test("hashes the UTF-8 bytes of loaded text, including empty and mixed line endings", async () => {
+    stubDigest();
+    const client = await import("./client") as unknown as { sha256Text?: (text: string) => Promise<string> };
+    expect(typeof client.sha256Text).toBe("function");
+    expect(await client.sha256Text!("")).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    expect(await client.sha256Text!("loaded")).toBe("2cab953f2b3607b36259abeb3703329d6b301b31277402ebf9f2b3b93e31dd53");
+    expect(await client.sha256Text!("\ufeffone\r\ntwo\rthree\né\n"))
+      .toBe("a4e357930d06a17a07a7f993733104c785ae5079c06d55a5deed9541f03f51d4");
+  });
+
+  test("keeps streamed text byte-identical across chunk events", async () => {
+    stubDigest();
+    const chunks = ["\ufeffone\r", "\ntwo\r", "three\n", "é\n"];
+    const lines = [
+      { type: "meta", path: "a.md", size: new TextEncoder().encode(chunks.join("")).length, mtime: 1, writable: true },
+      ...chunks.map((content) => ({ type: "chunk", content, bytes: new TextEncoder().encode(content).length })),
+      { type: "done" },
+    ].map((event) => JSON.stringify(event)).join("\n") + "\n";
+    const bytes = new TextEncoder().encode(lines);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, bytes.length - 2));
+        controller.enqueue(bytes.slice(bytes.length - 2));
+        controller.close();
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
+    const file = await api.readStream("a.md");
+    expect(file.content).toBe(chunks.join(""));
+    const client = await import("./client") as unknown as { sha256Text?: (text: string) => Promise<string> };
+    expect(typeof client.sha256Text).toBe("function");
+    expect(await client.sha256Text!(file.content))
+      .toBe("a4e357930d06a17a07a7f993733104c785ae5079c06d55a5deed9541f03f51d4");
+  });
+
   test("posts explicit live-session conflict resolution choices", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
