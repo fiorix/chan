@@ -991,6 +991,10 @@ describe("liftPageImages", () => {
     ["mask", "maskImage", "linear-gradient(black, transparent)", false],
     ["translation", "transform", "matrix(1, 0, 0, 1, 30, 0)", false],
     ["scale", "transform", "matrix(2, 0, 0, 2, 0, 0)", true],
+    ["individual rotation", "rotate", "180deg", false],
+    ["individual mirror", "scale", "-1 1", false],
+    ["individual positive scale", "scale", "2", true],
+    ["offset path", "offsetPath", 'path("M 0 0 L 100 0")', false],
   ])("an ancestor's %s leaves the image to the right painter", async (
     _case, property, value, shouldLift,
   ) => {
@@ -1018,6 +1022,31 @@ describe("liftPageImages", () => {
     expect(root.querySelector("img")!.getAttribute("src")).toMatch(
       shouldLift ? /^data:image\/svg\+xml,/ : /^data:image\/png;base64,/,
     );
+  });
+
+  test("an image's own rotate property leaves it to the page document", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    imagesHaveBoxes();
+    const root = page('<img src="/api/fs/photo.png">');
+    const img = root.querySelector("img")!;
+    const originalStyle = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = originalStyle(el, pseudo);
+      if (el !== img) return style;
+      return new Proxy(style, {
+        get(target, key) {
+          return key === "rotate" ? "180deg" : Reflect.get(target, key);
+        },
+      });
+    });
+
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    expect(images.lifted).toHaveLength(0);
+    expect(img.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
   });
 
   test("a fitted deck slide keeps its image lift with centered scale", async () => {
