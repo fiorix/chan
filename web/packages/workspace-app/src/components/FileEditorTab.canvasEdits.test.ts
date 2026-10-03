@@ -2058,6 +2058,45 @@ describe("a live drawing", () => {
     },
   );
 
+  test.each([
+    ["inside the board's wait", 50],
+    ["after the board's flush", 250],
+  ] as const)(
+    "a background picked %s on a board that has adopted nothing of its session is replaced by the socket's first snapshot",
+    async (_when, wait) => {
+      const { tab, board, socket } = await openingDrawing();
+      vi.useFakeTimers();
+      await board.start();
+      await vi.advanceTimersByTimeAsync(250);
+      board.pickBackground(PICKED);
+      await vi.advanceTimersByTimeAsync(wait);
+      socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({ background: board.appState.viewBackgroundColor, pushes: socket.pushes() }).toEqual({
+        background: BACKGROUND,
+        pushes: [],
+      });
+    },
+  );
+
+  test("a background picked inside the board's wait before its tab turns read only is replaced by a peer's appState", async () => {
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
+    vi.useFakeTimers();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(50);
+    setTabReadMode(tab, true);
+    socket.frame({ type: "update", version: 2, elements: [], appState: { viewBackgroundColor: BACKGROUND } });
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({ background: board.appState.viewBackgroundColor, pushes: socket.pushes() }).toEqual({
+      background: BACKGROUND,
+      pushes: [],
+    });
+  });
+
   test("a background on the wire at a drop with no board bound ends as it does with one", async () => {
     const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();

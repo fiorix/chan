@@ -195,15 +195,17 @@ class FakeBinding implements SceneCanvasBinding {
   }
   /// The canvas's adopt of a frame moves its three marks: an element the
   /// frame holds at the same or a newer version is noted as the authority's,
-  /// a file the frame names is known, and a handed appState becomes both what
-  /// the next push offers and the authority's, so none of them stays pending.
+  /// a file the frame names is known, and a handed appState becomes what the
+  /// next push is compared with. The keys the board changed and has not
+  /// offered stay pending over it where the session keeps an offered key as
+  /// a claim, and go with it elsewhere.
   private adopt(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void {
     const held = new Map(elements.map((el) => [el.id, Number(el.version)]));
     this.pending = this.pending.filter((el) => !(Number(el.version) <= (held.get(el.id) ?? -1)));
     if (files !== undefined) {
       this.pendingFiles = Object.fromEntries(Object.entries(this.pendingFiles).filter(([k]) => !(k in files)));
     }
-    if (appState !== undefined) this.pendingAppState = null;
+    if (appState !== undefined && !this.session?.keepsAppStateClaim()) this.pendingAppState = null;
   }
   collaboratorsChanged(): void {
     this.collabCalls += 1;
