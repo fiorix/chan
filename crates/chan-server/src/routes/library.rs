@@ -6768,6 +6768,88 @@ mod refusal_envelopes {
         .await;
     }
 
+    /// Two mounted workspaces, the first under a root whose parent is a
+    /// link that was then pointed at the second one's folder, so the root
+    /// the first row stores resolves into the second workspace.
+    #[cfg(unix)]
+    struct RelinkedOntoAnother {
+        /// The prefix the launcher's routes name the first row by.
+        prefix: String,
+        /// The root the first row stores.
+        stored: PathBuf,
+        /// The folder the first workspace is mounted from.
+        folder: PathBuf,
+        /// The root the second row stores, which is its folder.
+        other: PathBuf,
+        _dirs: [tempfile::TempDir; 2],
+    }
+
+    #[cfg(unix)]
+    impl RelinkedOntoAnother {
+        async fn new(host: &WorkspaceHost) -> Self {
+            let holder = tempfile::tempdir().unwrap();
+            let parent = holder.path().join("parent");
+            std::fs::create_dir_all(parent.join("ws")).unwrap();
+            let prefix = registered_root(host, &parent.join("ws"));
+            let stored = host
+                .library()
+                .list_workspaces()
+                .into_iter()
+                .map(|row| row.root_path)
+                .find(|root| {
+                    registered_workspace_prefix(root).ok().as_deref() == Some(prefix.as_str())
+                })
+                .expect("the relinked row");
+            let link = stored.parent().expect("the linked parent").to_path_buf();
+            let moved = holder.path().join("moved");
+            std::fs::rename(&link, &moved).unwrap();
+            std::os::unix::fs::symlink(&moved, &link).unwrap();
+            let folder = std::fs::canonicalize(moved.join("ws")).unwrap();
+            let other_holder = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
+            let other = host
+                .library()
+                .register_workspace(&other_holder.path().join("ws"))
+                .unwrap()
+                .root_path;
+            for (root, at) in [(&stored, "/ws"), (&other, "/other")] {
+                host.open_registered_workspace(
+                    root,
+                    chan_library::ServeConfig {
+                        addr: "127.0.0.1:0".parse().unwrap(),
+                        no_token: true,
+                        prefix: at.into(),
+                        idle_timeout: None,
+                        open_browser: false,
+                        search_aggression: None,
+                        settings_disabled: false,
+                        verbose: false,
+                    },
+                )
+                .await
+                .expect("mount a workspace");
+            }
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(other_holder.path(), &link).unwrap();
+            Self {
+                prefix,
+                stored,
+                folder,
+                other,
+                _dirs: [holder, other_holder],
+            }
+        }
+    }
+
+    /// Whether a registry row of `host` stores `root`.
+    #[cfg(unix)]
+    fn row_stores(host: &WorkspaceHost, root: &Path) -> bool {
+        host.library()
+            .list_workspaces()
+            .iter()
+            .any(|row| row.root_path == root)
+    }
+
     /// A delete of a workspace whose stored root was pointed at another
     /// registered workspace's folder while it was mounted removes that
     /// workspace and leaves the other one registered and mounted.
@@ -6775,74 +6857,60 @@ mod refusal_envelopes {
     #[tokio::test]
     async fn workspace_remove_of_a_row_relinked_onto_another_workspace_leaves_that_workspace() {
         let (_dir, host) = host();
-        let holder = tempfile::tempdir().unwrap();
-        let parent = holder.path().join("parent");
-        std::fs::create_dir_all(parent.join("ws")).unwrap();
-        let prefix = registered_root(&host, &parent.join("ws"));
-        let stored = host
-            .library()
-            .list_workspaces()
-            .into_iter()
-            .map(|row| row.root_path)
-            .find(|root| registered_workspace_prefix(root).ok().as_deref() == Some(prefix.as_str()))
-            .expect("the relinked row");
-        let link = stored.parent().expect("the linked parent").to_path_buf();
-        let moved = holder.path().join("moved");
-        std::fs::rename(&link, &moved).unwrap();
-        std::os::unix::fs::symlink(&moved, &link).unwrap();
-        let other_holder = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(other_holder.path().join("ws")).unwrap();
-        let other = host
-            .library()
-            .register_workspace(&other_holder.path().join("ws"))
-            .unwrap()
-            .root_path;
-        for (root, at) in [(&stored, "/ws"), (&other, "/other")] {
-            host.open_registered_workspace(
-                root,
-                chan_library::ServeConfig {
-                    addr: "127.0.0.1:0".parse().unwrap(),
-                    no_token: true,
-                    prefix: at.into(),
-                    idle_timeout: None,
-                    open_browser: false,
-                    search_aggression: None,
-                    settings_disabled: false,
-                    verbose: false,
-                },
-            )
-            .await
-            .expect("mount a workspace");
-        }
-        std::fs::remove_file(&link).unwrap();
-        std::os::unix::fs::symlink(other_holder.path(), &link).unwrap();
+        let fixture = RelinkedOntoAnother::new(&host).await;
 
         let status = send(
             &mutable_app(host.clone()),
             "DELETE",
-            &format!("/api/library/workspaces{prefix}"),
+            &format!("/api/library/workspaces{}", fixture.prefix),
             None,
         )
         .await
         .status();
 
-        let registered = |root: &Path| {
-            host.library()
-                .list_workspaces()
-                .iter()
-                .any(|row| row.root_path == root)
-        };
         assert!(
-            host.mounted_root(&other).is_some(),
+            host.mounted_root(&fixture.other).is_some(),
             "the delete closed another workspace: {status}"
         );
         assert!(
-            registered(&other),
+            row_stores(&host, &fixture.other),
             "the delete unregistered another workspace: {status}"
         );
         assert!(
-            !registered(&stored),
+            !row_stores(&host, &fixture.stored),
             "the delete left the workspace it names registered: {status}"
+        );
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// An off of such a row takes its own workspace down and leaves it
+    /// registered, and leaves the other one registered and mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_off_of_a_row_relinked_onto_another_workspace_leaves_that_workspace() {
+        let (_dir, host) = host();
+        let fixture = RelinkedOntoAnother::new(&host).await;
+
+        let status = send(
+            &mutable_app(host.clone()),
+            "POST",
+            &format!("/api/library/workspaces{}/off", fixture.prefix),
+            None,
+        )
+        .await
+        .status();
+
+        assert!(
+            host.mounted_root(&fixture.other).is_some(),
+            "the off closed another workspace: {status}"
+        );
+        assert!(
+            host.mounted_root(&fixture.folder).is_none(),
+            "the off left the workspace it names mounted: {status}"
+        );
+        assert!(
+            row_stores(&host, &fixture.other) && row_stores(&host, &fixture.stored),
+            "the off unregistered a workspace: {status}"
         );
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
