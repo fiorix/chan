@@ -340,6 +340,14 @@
   // choice (workspace windows keep the config theme). Closed on unmount.
   let disposeLocalThemeWatch: (() => void) | null = null;
   onDestroy(() => disposeLocalThemeWatch?.());
+  // The trackers the mount below starts for this app's life. The mount is
+  // async, so it cannot return their teardown; it starts them before its
+  // first await and leaves each one's stop here, so an unmount stops them
+  // whether or not the bootstrap has ended, and a later mount starts its own.
+  const stopTrackers: Array<() => void> = [];
+  onDestroy(() => {
+    for (const stop of stopTrackers.splice(0)) stop();
+  });
 
   onMount(async () => {
     // Apply persisted theme + default editor theme to the document
@@ -398,19 +406,19 @@
     seedInitialFocusColor(setWindowFocusColor);
     // While in "system" mode, follow OS-level theme changes live.
     // The listener stays alive for the whole app's lifetime.
-    watchSystemTheme();
+    stopTrackers.push(watchSystemTheme());
     // Cross-window sync of the page-width setting via the storage event.
-    watchPageWidth();
+    stopTrackers.push(watchPageWidth());
     // Idle tracker: after 2.5s without scroll/click/keypress, the
     // floating pills fade. Any input flips them back on.
-    installIdleTracker();
+    stopTrackers.push(installIdleTracker());
     // Screensaver inactivity tracker. Runs at a different cadence
     // (default 5 min, per-workspace configurable) with a wider event
     // set (keydown + scroll + pointer move) than the idle-pill tracker.
     // Listeners install unconditionally so a later /api/screensaver/state
     // load doesn't need a re-install pass; the lock fires only when
     // `enabled=true`.
-    installScreensaverTracker();
+    stopTrackers.push(installScreensaverTracker());
     // Hook pagehide BEFORE bootstrap so a fast reload during the
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
