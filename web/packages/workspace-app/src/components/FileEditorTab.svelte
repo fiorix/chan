@@ -12,6 +12,7 @@
     clearEditorBuffer,
     divergentBufferOrNull,
     queueBufferWrite,
+    writeEditorBuffer,
     type EditorBuffer,
   } from "../state/editorBuffer";
   import JsonPretty from "../editor/JsonPretty.svelte";
@@ -345,14 +346,18 @@
   function restoreFromBuffer(): void {
     if (!recoveredBuffer) return;
     // A live session's board takes the entry as a local change over the
-    // authority's scene and writes the result into the buffer itself. That
-    // result is the board's serialization and never the entry's bytes, so
-    // no save can retire the stored entry by holding its content, and it is
-    // retired here: the recovery effect would offer it again as soon as the
-    // tab's saved text moves. An entry such a board took nothing of stays
-    // stored and offered, with the reason in the banner: nothing was applied
-    // that could stand in for it. Any other tab takes the entry as its
-    // buffer.
+    // authority's scene and writes the result into the buffer itself, before
+    // it answers. That result is the board's serialization and never the
+    // entry's bytes, so no save can retire the stored entry by holding its
+    // content, and it is retired here: the recovery effect would offer it
+    // again as soon as the tab's saved text moves. The buffer is stored in
+    // its place at once, under this page load, and not after the recovery
+    // write's debounce. A session between sockets or degraded takes no push,
+    // so the restored elements are in this page alone, and a page killed
+    // inside that wait would leave neither them nor the entry. An entry such
+    // a board took nothing of stays stored and offered, with the reason in
+    // the banner: nothing was applied that could stand in for it. Any other
+    // tab takes the entry as its buffer.
     const taken = canvasRef?.restoreOverScene(recoveredBuffer.content) ?? "not-live";
     if (taken === "unreadable" || taken === "nothing-newer") {
       restoreTookNothing =
@@ -361,7 +366,7 @@
           : "Nothing was restored: the unsaved changes hold no element newer than this board's, and Restore on a live drawing leaves its grid, background and deleted elements as they are.";
       return;
     }
-    if (taken === "applied") clearEditorBuffer(tab.path);
+    if (taken === "applied") writeEditorBuffer(tab.path, tab.content, tab.path);
     else setTabContent(tab, recoveredBuffer.content);
     recoveredBuffer = null;
     restoreTookNothing = null;
