@@ -1542,28 +1542,46 @@ impl WorkspaceHost {
     /// whose cached canonical path is `key`, or else the row that stores
     /// `root` as given.
     ///
+    /// The wait under `key` comes first and the rows are read after it. A
+    /// registration that finds a relinked row refreshes the cached path the
+    /// row is found by, so a row that a registration outstanding under
+    /// `key` resolves is named, and its stored root waited under, once that
+    /// registration has returned.
+    ///
     /// A removal keyed otherwise is not waited for: one whose runtime was
     /// mounted at a resolution its row never recorded, one of a row whose
     /// root resolves elsewhere than the cached path it was found by here,
     /// and one of a relinked row asked here by a path the row does not
     /// store, before any registration has resolved it.
     async fn registry_writes_settled(&self, root: &Path, key: &Path) {
-        let given = chan_workspace::paths::lexical_normalize(
-            &chan_workspace::paths::strip_verbatim_prefix(root),
+        drop(
+            self.root_calls
+                .lock(&(key.to_path_buf(), RootCall::RegistryWrite))
+                .await,
         );
-        let rows = self.library.list_workspaces();
-        let row = rows
-            .iter()
-            .find(|row| row.cached_canonical_path() == key)
-            .or_else(|| rows.iter().find(|row| row.root_path == given));
-        let mut keys = vec![key.to_path_buf()];
-        for stored in row.into_iter().flat_map(registry_row_keys) {
-            if !keys.iter().any(|kept| kept == stored) {
-                keys.push(stored.to_path_buf());
+        let stored_keys = {
+            let given = chan_workspace::paths::lexical_normalize(
+                &chan_workspace::paths::strip_verbatim_prefix(root),
+            );
+            let rows = self.library.list_workspaces();
+            let row = rows
+                .iter()
+                .find(|row| row.cached_canonical_path() == key)
+                .or_else(|| rows.iter().find(|row| row.root_path == given));
+            let mut keys: Vec<PathBuf> = Vec::new();
+            for stored in row.into_iter().flat_map(registry_row_keys) {
+                if stored != key && !keys.iter().any(|kept| kept == stored) {
+                    keys.push(stored.to_path_buf());
+                }
             }
-        }
-        for key in keys {
-            drop(self.root_calls.lock(&(key, RootCall::RegistryWrite)).await);
+            keys
+        };
+        for stored in stored_keys {
+            drop(
+                self.root_calls
+                    .lock(&(stored, RootCall::RegistryWrite))
+                    .await,
+            );
         }
     }
 
