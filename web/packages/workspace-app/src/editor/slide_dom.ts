@@ -432,11 +432,9 @@ export function prepareSlideImages(
   return Promise.all(renders).then(() => undefined);
 }
 
-/// Longest a composition waits for one image. Past it the image is the
-/// inline pass's problem and then the audit's, both of which name it by
-/// src; the only other ceiling is the export's page timeout, which names
-/// nothing, so without this one silent image costs the whole export and
-/// says nothing about which.
+/// Longest a composition waits for one image. Past it, image preparation
+/// fetches and decodes that source and refuses a failure by its name;
+/// without this bound a silent image spends the whole export timeout.
 const IMAGE_SETTLE_TIMEOUT_MS = 10_000;
 
 /// Resolve once the image has settled, whether it loaded or failed.

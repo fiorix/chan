@@ -159,8 +159,8 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 /// Fetch a same-origin resource and return it as a data: URL, bounded
-/// by `timeoutMs` and given up when `stop` aborts. Returns null on any
-/// failure; the audit names the leftover.
+/// by `timeoutMs` and given up when `stop` aborts. The caller handles a
+/// failed fetch; an image is refused here and a CSS URL reaches the audit.
 async function fetchAsDataUrl(
   url: string,
   timeoutMs: number,
@@ -215,10 +215,9 @@ function notAnImageType(type: string): boolean {
   );
 }
 
-/// Fetch an image and return it as a data: URL, or null when the fetch
-/// fails, which the audit names. An address that answers with a body
-/// that is not an image refuses the page here: once inlined, the element
-/// would no longer say where the body came from.
+/// Fetch an image and return it as a data: URL, or null for the caller
+/// to refuse by name when the fetch fails. Reject a non-image body here:
+/// once inlined, the element would no longer say where it came from.
 async function fetchImageAsDataUrl(
   url: string,
   timeoutMs: number,
@@ -320,43 +319,6 @@ async function inlineFonts(root: HTMLElement, timeoutMs: number): Promise<void> 
   root.prepend(style);
 }
 
-/// Inline every <img> src and every SVG <image> href under the page.
-async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void> {
-  const htmlImages = await mapImageSteps(
-    Array.from(root.querySelectorAll("img")),
-    async (img, stop) => {
-      const src = img.getAttribute("src") ?? "";
-      if (!src || isInlineUrl(src)) return null;
-      const inlined = await fetchImageAsDataUrl(src, timeoutMs, stop);
-      return { img, src, inlined };
-    },
-  );
-  for (const result of htmlImages) {
-    if (!result?.inlined) continue;
-    result.img.setAttribute("src", result.inlined);
-    sourceNames.set(result.img, resourceName(result.src));
-  }
-  const svgImages = await mapImageSteps(
-    Array.from(root.querySelectorAll("image")),
-    async (image, stop) => {
-      const inlined: { attr: string; href: string; data: string }[] = [];
-      for (const attr of IMAGE_HREF_ATTRS) {
-        const href = image.getAttribute(attr);
-        if (!href || isInlineUrl(href)) continue;
-        const data = await fetchImageAsDataUrl(href, timeoutMs, stop);
-        if (data) inlined.push({ attr, href, data });
-      }
-      return { image, inlined };
-    },
-  );
-  for (const { image, inlined } of svgImages) {
-    for (const { attr, href, data } of inlined) {
-      image.setAttribute(attr, data);
-      sourceNames.set(image, resourceName(href));
-    }
-  }
-}
-
 /// Prepare shown images in DOM order, including their decodes, before any
 /// source is replaced. This keeps fetch, type and decode failures in one
 /// ordered pass and leaves no late write after a failed batch.
@@ -446,24 +408,20 @@ async function prepareVisibleImages(
   for (const write of apply) write?.();
 }
 
-/// Make the page self-contained: images, SVG image hrefs, url() tokens
-/// in embedded styles and style attributes, and the app font faces the
-/// page references. Unresolvable references are left in place for
-/// `auditSelfContained` to reject by name.
+/// Make the page self-contained: fetch and decode shown images, replace
+/// hidden image sources, and inline CSS URLs and app font faces. Failed
+/// image fetches refuse the page here; unresolved CSS URLs remain for
+/// `auditSelfContained` to name.
 export async function inlinePageResources(
   root: HTMLElement,
   timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
-  options: { prepareImages?: boolean; stop?: AbortSignal } = {},
+  options: { stop?: AbortSignal } = {},
 ): Promise<void> {
   recordPageImages(root);
   revealAutoContent(root);
   await inlineFonts(root, timeoutMs);
   if (options.stop?.aborted) throw new SnapshotError("image preparation stopped");
-  if (options.prepareImages) {
-    await prepareVisibleImages(root, timeoutMs, options.stop);
-  } else {
-    await inlineImages(root, timeoutMs);
-  }
+  await prepareVisibleImages(root, timeoutMs, options.stop);
   for (const el of Array.from(root.querySelectorAll<HTMLElement>("[style]"))) {
     if (options.stop?.aborted) throw new SnapshotError("image preparation stopped");
     const css = el.getAttribute("style") ?? "";
@@ -538,9 +496,9 @@ type LiftedImage = {
   bitmap: HTMLImageElement;
   shape: ImageShape;
   /// Whether the page shows the image where it was composed. One with no
-  /// box there (inside a closed <details>, say), or hidden by `display`,
-  /// `visibility` or a zero opacity, has nothing to paint and is skipped,
-  /// and that is not a failure.
+  /// box there after loading, or hidden by the browser, a closed details
+  /// element, `display`, `visibility`, zero opacity or content visibility,
+  /// has nothing to paint and is skipped.
   rendered: boolean;
   /// Raster rows of the image painted so far. A document image taller
   /// than what is left of its page continues on the next one.
@@ -919,20 +877,14 @@ function restoreMeasuredBox(img: HTMLImageElement, record: HtmlImageRecord, name
   }
 }
 
-/// Take every inlined <img> out of the page's own painting: decode it
-/// here, record it in `images`, and leave a stand-in of its size in its
-/// place. Runs after `inlinePageResources`; an image already lifted is
-/// left alone, so a page cloned from a lifted document costs nothing.
-///
-/// The stand-in is itself an image the page's document loads, and an
-/// engine that draws before it has loaded would lay the <img> out with
-/// no size. The width hint and the aspect ratio make the box the same
-/// either way, and the same as the box the image had; an author's own
-/// width, height or ratio is kept.
+/// Replace each prepared <img> with a stand-in and keep its decoded bitmap
+/// for drawing over the page. An image already lifted is left alone on a
+/// cloned document page. The stand-in receives a natural-size width hint
+/// and aspect ratio; after all writes, the measured width and height are
+/// restored with six explicit lengths if either resolved length moved.
 export async function liftPageImages(
   root: HTMLElement,
   images: PageImages,
-  timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
   stop?: AbortSignal,
 ): Promise<void> {
   recordPageImages(root);
@@ -945,9 +897,8 @@ export async function liftPageImages(
       if (!src.startsWith("data:")) return null;
       const name = sourceNames.get(img) ?? resourceName(src);
       const record = htmlImageRecord(img, root);
-      const bitmap = record.rendered
-        ? (preparedBitmaps.get(img) ?? await decodeImage(src, name, timeoutMs))
-        : new Image();
+      const bitmap = record.rendered ? preparedBitmaps.get(img) : new Image();
+      if (!bitmap) throw new SnapshotError(`image ${name} was not prepared`);
       return { img, name, bitmap, record };
     },
     stop,
@@ -998,30 +949,6 @@ export async function liftPageImages(
   for (const { img, name, record } of prepared) {
     restoreMeasuredBox(img, record, name);
   }
-  // An <image> of an inline SVG is drawn inside that SVG, under and over
-  // its other shapes, so it stays in the page's document. Decoding it
-  // here still proves its bytes are an image before any page is drawn.
-  const svgImages = await mapImageSteps(
-    Array.from(root.querySelectorAll("image")),
-    async (image) => {
-      if (image.hasAttribute(DECODED_ATTR)) return null;
-      let decoded = false;
-      for (const attr of IMAGE_HREF_ATTRS) {
-        const href = image.getAttribute(attr);
-        if (!href?.startsWith("data:")) continue;
-        await decodeImage(
-          href,
-          sourceNames.get(image) ?? resourceName(href),
-          timeoutMs,
-        );
-        decoded = true;
-      }
-      return decoded ? image : null;
-    },
-    stop,
-  );
-  if (stop?.aborted) throw new SnapshotError("image preparation stopped");
-  for (const image of svgImages) image?.setAttribute(DECODED_ATTR, "");
 }
 
 /// The colour that marks slot `slot` of a marker raster. Red carries the
@@ -1404,8 +1331,8 @@ export async function snapshotPage(
   opts: SnapshotOptions = {},
 ): Promise<PageSnapshot> {
   const images = opts.images ?? new PageImages();
-  await inlinePageResources(root, opts.timeoutMs, { prepareImages: true });
-  await liftPageImages(root, images, opts.timeoutMs);
+  await inlinePageResources(root, opts.timeoutMs);
+  await liftPageImages(root, images);
   auditSelfContained(root);
   const canvas = await rasterizePage(root, box, opts);
   await paintLiftedImages(canvas, root, box, images, opts);

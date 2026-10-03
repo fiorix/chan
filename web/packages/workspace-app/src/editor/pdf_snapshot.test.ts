@@ -72,6 +72,8 @@ function page(html: string): HTMLElement {
 
 describe("inlinePageResources", () => {
   test("starts independent image fetches before either one settles", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
     const replies: ((response: Response) => void)[] = [];
     vi.stubGlobal(
       "fetch",
@@ -135,7 +137,7 @@ describe("inlinePageResources", () => {
       }),
     );
     const root = page(
-      '<svg><image href="/api/fs/first.png"></image>' +
+      '<svg><image href="/api/fs/first.png?t=secret"></image>' +
         '<image href="/api/fs/second.png"></image></svg>',
     );
     await expect(inlinePageResources(root)).rejects.toThrow(
@@ -148,10 +150,40 @@ describe("inlinePageResources", () => {
       Array.from(root.querySelectorAll("image")).map((image) =>
         image.getAttribute("href"),
       ),
-    ).toEqual(["/api/fs/first.png", "/api/fs/second.png"]);
+    ).toEqual(["/api/fs/first.png?t=secret", "/api/fs/second.png"]);
+  });
+
+  test("a later decode cannot write after an earlier image fails by name", async () => {
+    imagesHaveBoxes();
+    const decodes = heldDecodes();
+    vi.stubGlobal("Image", StandInImage);
+    let firstReply!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn((url: string | URL) =>
+      String(url).includes("first")
+        ? new Promise<Response>((resolve) => (firstReply = resolve))
+        : Promise.resolve(fetchOk(PNG_BYTES, "image/png")),
+    ));
+    const root = page(
+      '<img src="/api/fs/first.png?t=secret"><img src="/api/fs/second.png">',
+    );
+    const preparation = inlinePageResources(root);
+    await settled();
+    expect(decodes).toHaveLength(1);
+    firstReply(fetchOk("<html>sign in</html>", "text/html"));
+    await expect(preparation).rejects.toThrow(
+      "image /api/fs/first.png is text/html, not an image",
+    );
+    decodes[0]!.settle(true);
+    await settled();
+    expect(Array.from(root.querySelectorAll("img"), (img) => img.getAttribute("src"))).toEqual([
+      "/api/fs/first.png?t=secret", "/api/fs/second.png",
+    ]);
+    vi.restoreAllMocks();
   });
 
   test("rewrites img srcs to data: URIs via fetch", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
     const root = page('<img src="/api/fs/photo.png?t=tok">');
     await inlinePageResources(root);
     expect(root.querySelector("img")?.getAttribute("src")).toMatch(
@@ -164,6 +196,8 @@ describe("inlinePageResources", () => {
   });
 
   test("leaves data: srcs untouched without fetching", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
     const root = page('<img src="data:image/png;base64,AAAA">');
     await inlinePageResources(root);
     expect(fetch).not.toHaveBeenCalled();
@@ -182,13 +216,14 @@ describe("inlinePageResources", () => {
     expect(css).not.toContain("/static/excalidraw/");
   });
 
-  test("keeps unresolvable refs verbatim so the audit can name them", async () => {
+  test("refuses an unresolvable image by its source name before the audit", async () => {
     const root = page('<img src="/api/fs/missing.png">');
-    await inlinePageResources(root);
+    await expect(inlinePageResources(root)).rejects.toThrow(
+      "image /api/fs/missing.png could not be fetched",
+    );
     expect(root.querySelector("img")?.getAttribute("src")).toBe(
       "/api/fs/missing.png",
     );
-    expect(() => auditSelfContained(root)).toThrow(SnapshotError);
   });
 
   test.each([
@@ -197,7 +232,7 @@ describe("inlinePageResources", () => {
   ])("a hidden image with a %s answer cannot fail the audit", async (_case, response) => {
     vi.stubGlobal("fetch", vi.fn(async () => response));
     const root = page('<div style="display:none"><img src="/api/fs/hidden.png"></div>');
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     expect(() => auditSelfContained(root)).not.toThrow();
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -210,7 +245,7 @@ describe("inlinePageResources", () => {
       decode() { return Promise.reject(new Error("bad image")); }
     });
     const root = page('<div style="display:none"><img src="/api/fs/hidden.png"></div>');
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     const images = new PageImages();
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(false);
@@ -222,7 +257,7 @@ describe("inlinePageResources", () => {
       '<div style="display:none"><img src="/api/fs/hidden.png" ' +
         'srcset="/api/fs/hidden@2x.png 2x"></div>',
     );
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     expect(() => auditSelfContained(root)).not.toThrow();
     expect(root.querySelector("img")?.hasAttribute("srcset")).toBe(false);
     expect(fetch).not.toHaveBeenCalled();
@@ -234,7 +269,7 @@ describe("inlinePageResources", () => {
         '<source srcset="/api/fs/hidden.webp" type="image/webp">' +
         '<img src="/api/fs/hidden.png"></picture>',
     );
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     expect(() => auditSelfContained(root)).not.toThrow();
     expect(root.querySelector("source")).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
@@ -246,7 +281,7 @@ describe("inlinePageResources", () => {
       '<img src="/api/fs/hidden.png" ' +
         'style="display:none;background-image:url(/api/fs/hidden-bg.png)">',
     );
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     expect(() => auditSelfContained(root)).not.toThrow();
     expect(root.querySelector("img")?.style.display).toBe("none");
     expect(fetch).not.toHaveBeenCalled();
@@ -258,7 +293,7 @@ describe("inlinePageResources", () => {
     Object.defineProperty(img, "complete", { value: true });
     Object.defineProperty(img, "naturalWidth", { value: 0 });
     Object.defineProperty(img, "naturalHeight", { value: 0 });
-    await expect(inlinePageResources(root, undefined, { prepareImages: true })).rejects.toThrow(
+    await expect(inlinePageResources(root)).rejects.toThrow(
       "image /api/fs/missing.png could not be fetched",
     );
   });
@@ -269,7 +304,7 @@ describe("inlinePageResources", () => {
     Object.defineProperty(img, "complete", { value: true });
     Object.defineProperty(img, "naturalWidth", { value: 40 });
     Object.defineProperty(img, "naturalHeight", { value: 20 });
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     const images = new PageImages();
     await liftPageImages(root, images);
     expect(fetch).not.toHaveBeenCalled();
@@ -286,7 +321,7 @@ describe("inlinePageResources", () => {
     Object.defineProperty(outer, "checkVisibility", { value: () => true });
     Object.defineProperty(image, "checkVisibility", { value: () => false });
     const decode = vi.spyOn(StandInImage.prototype, "decode");
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     expect(image.getAttribute("href")).toBe(data);
     expect(decode).toHaveBeenCalledTimes(1);
   });
@@ -297,7 +332,7 @@ describe("inlinePageResources", () => {
     const image = root.querySelector("image")!;
     Object.defineProperty(outer, "checkVisibility", { value: undefined });
     Object.defineProperty(image, "checkVisibility", { value: undefined });
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     expect(fetch).not.toHaveBeenCalled();
     expect(() => auditSelfContained(root)).not.toThrow();
   });
@@ -588,7 +623,7 @@ describe("liftPageImages", () => {
       });
     });
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await liftPageImages(root, images);
     const standIn = decodeURIComponent(img.getAttribute("src")!);
     expect(standIn).toContain('width="80" height="40"');
@@ -612,7 +647,7 @@ describe("liftPageImages", () => {
       value: () => ++calls === 1 ? first : later,
     });
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(first);
     expect(fetch).toHaveBeenCalledTimes(first ? 1 : 0);
@@ -751,7 +786,7 @@ describe("liftPageImages", () => {
       });
     });
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await liftPageImages(root, images);
     for (const property of ["width", "min-width", "max-width"]) {
       expect(img.style.getPropertyValue(property)).toBe("225px");
@@ -783,7 +818,7 @@ describe("liftPageImages", () => {
       });
     });
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await expect(liftPageImages(root, images)).rejects.toThrow(
       "image /api/fs/unstable.png did not keep its measured box",
     );
@@ -841,7 +876,7 @@ describe("liftPageImages", () => {
       { left: 0, top: 20, width: 40, height: 20 } as DOMRect,
     );
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(true);
   });
@@ -860,7 +895,7 @@ describe("liftPageImages", () => {
       { left: 0, top: 20, width: 40, height: 20 } as DOMRect,
     );
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(false);
   });
@@ -878,7 +913,7 @@ describe("liftPageImages", () => {
       { left: 0, top: 0, width: 40, height: 20 } as DOMRect,
     );
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(true);
   });
@@ -891,7 +926,7 @@ describe("liftPageImages", () => {
       value: (options?: { contentVisibilityAuto?: boolean }) => !options?.contentVisibilityAuto,
     });
     const images = new PageImages();
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(true);
   });
@@ -959,7 +994,7 @@ describe("liftPageImages", () => {
     Object.defineProperty(img, "complete", { value: false });
     Object.defineProperty(img, "naturalWidth", { value: 0 });
     Object.defineProperty(img, "naturalHeight", { value: 0 });
-    await inlinePageResources(root, undefined, { prepareImages: true });
+    await inlinePageResources(root);
     await expect(liftPageImages(root, new PageImages())).rejects.toThrow(
       "image /api/fs/pending.png was not loaded when the page was measured",
     );
@@ -1430,23 +1465,21 @@ describe("what an image's address answers with", () => {
     fetchAnswers("application/octet-stream");
     imagesHaveBoxes();
     const root = page('<img src="/api/fs/shots/photo.webp?t=tok">');
-    await inlinePageResources(root);
-    expect(root.querySelector("img")?.getAttribute("src")).toMatch(
-      /^data:application\/octet-stream;base64,/,
-    );
-    expect(() => auditSelfContained(root)).not.toThrow();
-
     const decodes = heldDecodes();
     vi.stubGlobal("Image", StandInImage);
     let failure: unknown = null;
-    const lift = liftPageImages(root, new PageImages()).catch(
+    const preparation = inlinePageResources(root).catch(
       (err) => (failure = err),
     );
     await settled();
+    expect(decodes[0]!.src).toMatch(/^data:application\/octet-stream;base64,/);
     decodes[0]!.settle(false);
-    await lift;
+    await preparation;
     expect((failure as Error).message).toBe(
       "image /api/fs/shots/photo.webp could not be decoded",
+    );
+    expect(root.querySelector("img")?.getAttribute("src")).toBe(
+      "/api/fs/shots/photo.webp?t=tok",
     );
   });
 });

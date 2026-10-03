@@ -2,8 +2,8 @@
 //
 // The export waits for every image to settle before it measures. One
 // image that never settles must not spend the whole page timeout, which
-// names nothing: the composition gives up on it and hands it to the
-// inline pass and the audit, which name it by src. A lazy image is the
+// names nothing: the composition gives up on it and image preparation
+// names a fetch or decode failure by its source. A lazy image is the
 // case that never settles on its own, because an export composition is
 // never in a viewport.
 

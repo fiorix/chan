@@ -335,11 +335,8 @@ export async function exportMarkdownToPdf(
     const images = new PageImages();
     const resourcesStop = new AbortController();
     await withPageTimeout(
-      inlinePageResources(doc.root, undefined, {
-        prepareImages: true,
-        stop: resourcesStop.signal,
-      }).then(() =>
-        liftPageImages(doc.root, images, undefined, resourcesStop.signal),
+      inlinePageResources(doc.root, undefined, { stop: resourcesStop.signal }).then(() =>
+        liftPageImages(doc.root, images, resourcesStop.signal),
       ),
       "document resources",
       documentResourcesTimeoutMs(
