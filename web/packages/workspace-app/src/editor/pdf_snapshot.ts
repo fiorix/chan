@@ -237,6 +237,7 @@ async function fetchImageAsDataUrl(
 /// `data:` URI the element no longer says, and an error has to.
 const sourceNames = new WeakMap<Element, string>();
 const preparedBitmaps = new WeakMap<HTMLImageElement, HTMLImageElement>();
+const imageRecords = new WeakMap<Element, ImageRecord>();
 
 /// Where an SVG <image> or <use> names what it draws.
 const IMAGE_HREF_ATTRS = ["href", "xlink:href"];
@@ -371,7 +372,7 @@ async function prepareVisibleImages(
         const img = element;
         const src = img.getAttribute("src") ?? "";
         const name = sourceNames.get(img) ?? resourceName(src);
-        if (!imageIsRendered(img, root)) {
+        if (!htmlImageRecord(img, root).rendered) {
           return () => {
             sourceNames.set(img, name);
             // The stand-in also replaces resource offers that would outlive
@@ -408,11 +409,7 @@ async function prepareVisibleImages(
 
       if (element.hasAttribute(DECODED_ATTR)) return null;
       const image = element;
-      const visible = !root.isConnected || image.checkVisibility?.({
-        contentVisibilityAuto: true,
-        opacityProperty: true,
-        visibilityProperty: true,
-      }) !== false;
+      const visible = svgImageRecord(image, root).rendered;
       const refs: { attr: string; href: string; data: string }[] = [];
       for (const attr of IMAGE_HREF_ATTRS) {
         const href = image.getAttribute(attr);
@@ -455,6 +452,7 @@ export async function inlinePageResources(
   timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
   options: { prepareImages?: boolean; stop?: AbortSignal } = {},
 ): Promise<void> {
+  recordPageImages(root);
   await inlineFonts(root, timeoutMs);
   if (options.stop?.aborted) throw new SnapshotError("image preparation stopped");
   if (options.prepareImages) {
@@ -497,6 +495,27 @@ const MARKER_ATTR = "data-chan-export-markers";
 const MARKER_SLOTS = 30;
 
 type Box = { x: number; y: number; width: number; height: number };
+
+type ImageGeometry = {
+  box: Box;
+  shown: Box;
+  scale: { x: number; y: number };
+  fit: string;
+};
+
+type HtmlImageRecord = {
+  kind: "html";
+  rendered: boolean;
+  geometry: ImageGeometry | "hidden" | null;
+  widthPx: number;
+  heightPx: number;
+  natural: { width: number; height: number };
+  hasSizeAttribute: boolean;
+  hasAspectRatio: boolean;
+};
+
+type SvgImageRecord = { kind: "svg"; rendered: boolean };
+type ImageRecord = HtmlImageRecord | SvgImageRecord;
 
 /// How a page shows an image, in units of the width of the part of the
 /// image's box that shows when no page cuts the image. That part is the
@@ -621,8 +640,11 @@ function cssPx(value: string): number {
 /// How many px of an element's rect one px of its layout takes. A
 /// transform or a zoom around the element changes what its rect measures
 /// and not what its style resolves to.
-function rectScale(el: Element, rect: DOMRect): { x: number; y: number } {
-  const style = getComputedStyle(el);
+function rectScale(
+  el: Element,
+  rect: DOMRect,
+  style: CSSStyleDeclaration = getComputedStyle(el),
+): { x: number; y: number } {
   const insetsX = cssPx(style.paddingLeft) + cssPx(style.paddingRight) +
     cssPx(style.borderLeftWidth) + cssPx(style.borderRightWidth);
   const insetsY = cssPx(style.paddingTop) + cssPx(style.paddingBottom) +
@@ -646,14 +668,13 @@ function hidesOverflow(overflow: string): boolean {
 
 /// What an ancestor leaves visible of `box`: an element that does not
 /// show what overflows it cuts its content at its padding box.
-function clipToAncestor(box: Box, el: Element): Box {
-  const style = getComputedStyle(el);
+function clipToAncestor(box: Box, el: Element, style = getComputedStyle(el)): Box {
   const cutsX = hidesOverflow(style.overflowX);
   const cutsY = hidesOverflow(style.overflowY);
   // `overflow` does not apply to an inline box.
   if ((!cutsX && !cutsY) || style.display === "inline") return box;
   const rect = el.getBoundingClientRect();
-  const scale = rectScale(el, rect);
+  const scale = rectScale(el, rect, style);
   let { x, y, width, height } = box;
   if (cutsX) {
     const left = rect.left + cssPx(style.borderLeftWidth) * scale.x;
@@ -674,46 +695,101 @@ function clipToAncestor(box: Box, el: Element): Box {
   return { x, y, width, height };
 }
 
-/// How the page composed an image, read where layout answers: in the
-/// app's own document, before the image is taken out of the page. Null
-/// when the image has no box there.
-///
-/// A page's marker raster cannot tell an image a page cuts from one its
-/// own page shows in part or in a box of another shape, and only the
-/// first has more to paint. What the image's ancestors show of its box
-/// is known here, the page's own boxes aside, so a marker that fills
-/// less than that is a page's cut.
-function composedShape(
-  img: HTMLImageElement,
-  root: HTMLElement,
-  natural: { width: number; height: number },
-): ImageShape | "hidden" | null {
+/// Capture every layout answer before the preparation writes to the page.
+function measureHtmlImage(img: HTMLImageElement, root: HTMLElement): HtmlImageRecord {
   const rect = img.getBoundingClientRect();
-  if (!(rect.width > 0 && rect.height > 0)) {
-    return root.isConnected ? "hidden" : null;
-  }
   const style = getComputedStyle(img);
-  const scale = rectScale(img, rect);
-  const left =
-    (cssPx(style.borderLeftWidth) + cssPx(style.paddingLeft)) * scale.x;
-  const right =
-    (cssPx(style.borderRightWidth) + cssPx(style.paddingRight)) * scale.x;
+  const scale = rectScale(img, rect, style);
+  const left = (cssPx(style.borderLeftWidth) + cssPx(style.paddingLeft)) * scale.x;
+  const right = (cssPx(style.borderRightWidth) + cssPx(style.paddingRight)) * scale.x;
   const top = (cssPx(style.borderTopWidth) + cssPx(style.paddingTop)) * scale.y;
-  const bottom =
-    (cssPx(style.borderBottomWidth) + cssPx(style.paddingBottom)) * scale.y;
-  // An image is painted in its content box, which is what its marker fills.
+  const bottom = (cssPx(style.borderBottomWidth) + cssPx(style.paddingBottom)) * scale.y;
   const box = {
     x: rect.left + left,
     y: rect.top + top,
     width: rect.width - left - right,
     height: rect.height - top - bottom,
   };
+  let rendered = !root.isConnected || img.checkVisibility?.({
+    contentVisibilityAuto: true,
+    opacityProperty: true,
+    visibilityProperty: true,
+  }) !== false;
+  if (root.isConnected && img.getClientRects().length === 0) rendered = false;
+  if (style.visibility === "hidden" || style.visibility === "collapse") rendered = false;
   let shown = box;
-  for (let el = img.parentElement; el && el !== root; el = el.parentElement) {
-    if (!el.hasAttribute(PAGE_BOX_ATTR)) shown = clipToAncestor(shown, el);
+  for (let el: HTMLElement | null = img; el; el = el.parentElement) {
+    const ancestorStyle = el === img ? style : getComputedStyle(el);
+    if (ancestorStyle.display === "none" || parseFloat(ancestorStyle.opacity) === 0) {
+      rendered = false;
+    }
+    if (el !== img && el !== root && !el.hasAttribute(PAGE_BOX_ATTR)) {
+      shown = clipToAncestor(shown, el, ancestorStyle);
+    }
+    if (el === root) break;
   }
-  if (!(shown.width > 0 && shown.height > 0)) return "hidden";
-  const bitmap = fitBitmap(style.objectFit, box, {
+  let geometry: HtmlImageRecord["geometry"] = null;
+  if (!(rect.width > 0 && rect.height > 0)) {
+    geometry = root.isConnected ? "hidden" : null;
+  } else if (!(shown.width > 0 && shown.height > 0)) {
+    geometry = "hidden";
+  } else {
+    geometry = { box, shown, scale, fit: style.objectFit };
+  }
+  if (geometry === "hidden") rendered = false;
+  return {
+    kind: "html",
+    rendered,
+    geometry,
+    widthPx: style.width.endsWith("px") ? parseFloat(style.width) : NaN,
+    heightPx: style.height.endsWith("px") ? parseFloat(style.height) : NaN,
+    natural: { width: img.naturalWidth, height: img.naturalHeight },
+    hasSizeAttribute: img.hasAttribute("width") || img.hasAttribute("height"),
+    hasAspectRatio: !!img.style.getPropertyValue("aspect-ratio"),
+  };
+}
+
+function recordPageImages(root: HTMLElement): void {
+  for (const element of Array.from(root.querySelectorAll("img, image"))) {
+    if (element instanceof HTMLImageElement) {
+      if (!element.hasAttribute(LIFTED_ATTR) && !imageRecords.has(element)) {
+        imageRecords.set(element, measureHtmlImage(element, root));
+      }
+    } else if (!element.hasAttribute(DECODED_ATTR) && !imageRecords.has(element)) {
+      imageRecords.set(element, {
+        kind: "svg",
+        rendered: !root.isConnected || element.checkVisibility?.({
+          contentVisibilityAuto: true,
+          opacityProperty: true,
+          visibilityProperty: true,
+        }) !== false,
+      });
+    }
+  }
+}
+
+function htmlImageRecord(img: HTMLImageElement, root: HTMLElement): HtmlImageRecord {
+  if (!imageRecords.has(img)) recordPageImages(root);
+  const record = imageRecords.get(img);
+  if (!record || record.kind !== "html") throw new SnapshotError("image was not measured");
+  return record;
+}
+
+function svgImageRecord(image: Element, root: HTMLElement): SvgImageRecord {
+  if (!imageRecords.has(image)) recordPageImages(root);
+  const record = imageRecords.get(image);
+  if (!record || record.kind !== "svg") throw new SnapshotError("SVG image was not measured");
+  return record;
+}
+
+function shapeFromRecord(
+  record: HtmlImageRecord,
+  natural: { width: number; height: number },
+): ImageShape | "hidden" | null {
+  const geometry = record.geometry;
+  if (!geometry || geometry === "hidden") return geometry;
+  const { box, shown, scale, fit } = geometry;
+  const bitmap = fitBitmap(fit, box, {
     width: natural.width * scale.x,
     height: natural.height * scale.y,
   });
@@ -728,24 +804,11 @@ function composedShape(
   };
 }
 
-/// The size an image's stand-in takes, in the page's layout px, and the
-/// proportions it keeps. Null when the image has no size to take.
-///
-/// The width is the one the page composed the image at, wherever its style
-/// resolves to a length. An image's natural size is not always that: an
-/// SVG that carries only a viewBox is laid out at the width of what holds
-/// it, and an engine reports no natural size for it, or one it derives
-/// from a default box. The style's lengths are the page's layout px; the
-/// image's rect is not, under the transform that fits a slide or under a
-/// deck's zoom. An image the page composed no box for stands in at its
-/// natural size.
-function standInSize(
-  img: HTMLImageElement,
+function sizeFromRecord(
+  record: HtmlImageRecord,
   natural: { width: number; height: number },
 ): { widthPx: number; heightPx: number; ratio: string } | null {
-  const style = getComputedStyle(img);
-  const width = style.width.endsWith("px") ? parseFloat(style.width) : NaN;
-  const height = style.height.endsWith("px") ? parseFloat(style.height) : NaN;
+  const { widthPx: width, heightPx: height } = record;
   if (natural.width > 0 && natural.height > 0) {
     const widthPx = width > natural.width ? width : natural.width;
     return {
@@ -756,30 +819,6 @@ function standInSize(
   }
   if (!(width > 0 && height > 0)) return null;
   return { widthPx: width, heightPx: height, ratio: `${width} / ${height}` };
-}
-
-function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
-  if (root.isConnected && img.checkVisibility?.({
-    contentVisibilityAuto: true,
-    opacityProperty: true,
-    visibilityProperty: true,
-  }) === false) return false;
-  if (root.isConnected && img.getClientRects().length === 0) return false;
-  const visibility = getComputedStyle(img).visibility;
-  if (visibility === "hidden" || visibility === "collapse") return false;
-  for (let el: HTMLElement | null = img; el; el = el.parentElement) {
-    const style = getComputedStyle(el);
-    // Outside a document no style resolves and the opacity reads as the
-    // empty string, which is not a zero.
-    if (style.display === "none" || parseFloat(style.opacity) === 0) {
-      return false;
-    }
-    if (el === root) break;
-  }
-  if (root.isConnected && composedShape(img, root, { width: 1, height: 1 }) === "hidden") {
-    return false;
-  }
-  return true;
 }
 
 /// Take every inlined <img> out of the page's own painting: decode it
@@ -798,6 +837,7 @@ export async function liftPageImages(
   timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
   stop?: AbortSignal,
 ): Promise<void> {
+  recordPageImages(root);
   const decoded = await mapImageSteps(
     Array.from(root.querySelectorAll("img")),
     async (img) => {
@@ -805,33 +845,35 @@ export async function liftPageImages(
       const src = img.getAttribute("src") ?? "";
       if (!src.startsWith("data:")) return null;
       const name = sourceNames.get(img) ?? resourceName(src);
-      const bitmap = imageIsRendered(img, root)
+      const record = htmlImageRecord(img, root);
+      const bitmap = record.rendered
         ? (preparedBitmaps.get(img) ?? await decodeImage(src, name, timeoutMs))
         : new Image();
-      return { img, name, bitmap };
+      return { img, name, bitmap, record };
     },
     stop,
   );
   if (stop?.aborted) throw new SnapshotError("image preparation stopped");
   const prepared = decoded.flatMap((result) => {
     if (!result) return [];
-    const { img, name, bitmap } = result;
-    const natural = { width: bitmap.naturalWidth, height: bitmap.naturalHeight };
-    const measured = imageIsRendered(img, root)
-      ? composedShape(img, root, natural) : "hidden";
-    const rendered = measured !== "hidden";
-    const size = standInSize(img, natural);
+    const { img, name, bitmap, record } = result;
+    const natural = record.rendered
+      ? { width: bitmap.naturalWidth, height: bitmap.naturalHeight }
+      : record.natural;
+    const measured = record.rendered ? shapeFromRecord(record, natural) : "hidden";
+    const rendered = record.rendered;
+    const size = sizeFromRecord(record, natural);
     // An image the page does not show has nothing to paint, so one with
     // no size to stand in at is not a failure either: its stand-in is a
     // single pixel and its own sizing is left as the author wrote it.
     if (!size && rendered) {
       throw new SnapshotError(`image ${name} has no measurable size`);
     }
-    return [{ img, name, bitmap, rendered, size,
+    return [{ img, name, bitmap, rendered, size, record,
       shape: measured && measured !== "hidden" ? measured :
         plainShape(size ? size.heightPx / size.widthPx : 1) }];
   });
-  for (const { img, name, bitmap, rendered, size, shape } of prepared) {
+  for (const { img, name, bitmap, rendered, size, shape, record } of prepared) {
     img.setAttribute(LIFTED_ATTR, String(images.lifted.length));
     images.lifted.push({
       name,
@@ -844,10 +886,10 @@ export async function liftPageImages(
     img.setAttribute("src", standInSrc(size?.widthPx ?? 1, size?.heightPx ?? 1));
     img.removeAttribute("loading");
     if (!size) continue;
-    if (!img.hasAttribute("width") && !img.hasAttribute("height")) {
+    if (!record.hasSizeAttribute) {
       img.setAttribute("width", String(size.widthPx));
     }
-    if (!img.style.getPropertyValue("aspect-ratio")) {
+    if (!record.hasAspectRatio) {
       img.style.setProperty("aspect-ratio", size.ratio);
     }
   }
