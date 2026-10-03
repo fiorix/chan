@@ -32,6 +32,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A workspace search that keeps many directories lists their children in one walk of the tree.** It walked the whole tree once for each directory it kept. On 200,000 notes its last pass over 1,000 directories went from 3.3 seconds to 50 milliseconds.
 
+- **The launcher's top bar and update footer use the launcher's shared button styles.** The update footer's primary button takes the brand colour and a heavier weight, and both its buttons take the padding and corner radius of the launcher's other buttons.
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
@@ -91,6 +93,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A link pill's kind follows a note created, renamed or deleted in its window.** The kind a pill had resolved stayed for the life of the page; it is now asked again when a note comes or goes there, without a reload. A move of several entries at once, a paste, and a change made from another window are not heard yet.
 
 - **Reopening a draft drawing discarded with text that does not parse brings the text back as unsaved.** The reopened draft read clean and offered to save a file that does not parse; closing it now asks before the text is thrown away.
+
+- **The command deck offers no action on a window this host does not manage.** A window that reached the deck through a devserver's feed alone was offered Hide, Show and Close, which this host cannot carry out; it is no longer listed in the deck.
 
 ### Security
 
