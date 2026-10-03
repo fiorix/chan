@@ -928,18 +928,43 @@ describe("command success ownership", () => {
       expect(closeResult()).not.toBeNull();
     });
 
-    it(`a command ${shape} whose card the host cleared shows no success`, async () => {
+    // A host clears the card when the command's own effect changes what the
+    // deck lists. That is not the user leaving the command.
+    it(`a command ${shape} whose card the host cleared still shows its success`, async () => {
       const running = deferred<void>();
-      const { onSuccess } = start(card, () => running.promise);
+      const { entry, onSuccess } = start(card, () => running.promise);
       await flush();
       draft().operation = null;
       await flush();
+      expect(closeResult()).not.toBeNull();
       running.resolve();
       await flush();
-      expect(target.querySelector(".deck-operation"), "no card over the list").toBeNull();
+      expect(target.querySelectorAll(".deck-operation-icon.success")).toHaveLength(card ? 1 : 0);
+      await settle();
+      expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
+    });
+
+    it(`a command ${shape} whose cleared card gave way to a newer command shows no success`, async () => {
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const onChoose = vi.fn()
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise);
+      const { entry, onSuccess } = start(card, onChoose);
+      await flush();
+      draft().operation = null;
+      await flush();
+      closeResult().click();
+      await flush();
+      const newer = draft().operation;
+      expect(newer?.kind).toBe("pending");
+      first.resolve();
       await settle();
       expect(onSuccess).not.toHaveBeenCalled();
-      expect(closeResult()).not.toBeNull();
+      expect(draft().operation).toBe(newer);
+      second.resolve();
+      await settle();
+      expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
     });
 
     it(`a command ${shape} retires its own card on a replaced draft`, async () => {
@@ -1012,14 +1037,13 @@ describe("command success ownership", () => {
     expect(closeResult()).not.toBeNull();
   });
 
-  it("a success card the host cleared inside its 260 ms closes nothing", async () => {
-    const { onSuccess } = start(true, async () => {});
+  it("a success card the host cleared inside its 260 ms still runs the host's handler", async () => {
+    const { entry, onSuccess } = start(true, async () => {});
     await flush();
     expect(draft().operation?.kind).toBe("success");
     draft().operation = null;
     await settle();
-    expect(onSuccess).not.toHaveBeenCalled();
-    expect(closeResult()).not.toBeNull();
+    expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
   });
 
   it("a success card retires on a draft replaced inside its 260 ms", async () => {

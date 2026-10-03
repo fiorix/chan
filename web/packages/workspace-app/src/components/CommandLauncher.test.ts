@@ -754,6 +754,73 @@ describe("contextual command deck", () => {
     expect(launcherPanel.open).toBe(false);
   });
 
+  /// The roster follows a scoped action as the library's does: Hide marks the
+  /// window hidden and Close removes it, and the next snapshot says so.
+  function rosterFollowsActions(): void {
+    let windows: Array<(typeof librarySnapshot.windows)[number]> = [...librarySnapshot.windows];
+    scopedLibrary.load.mockImplementation(async () => ({ ...librarySnapshot, windows }));
+    scopedLibrary.run.mockImplementation(
+      async (action: { action: string; window_id?: string; hidden?: boolean }) => {
+        if (action.action === "close_window") {
+          windows = windows.filter((window) => window.window_id !== action.window_id);
+        } else if (action.action === "set_window_visibility") {
+          windows = windows.map((window) =>
+            window.window_id === action.window_id
+              ? { ...window, hidden: action.hidden === true }
+              : window,
+          );
+        }
+      },
+    );
+  }
+
+  // A command's own success changes what the deck lists: a hidden window stops
+  // offering Hide and a closed one leaves the roster. The deck falls back and
+  // clears the card while the command is still settling.
+  test("Hide shows its success and closes the deck when the roster drops its entry", async () => {
+    stubPopup();
+    rosterFollowsActions();
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    row(target, "Hide").click();
+    await flush();
+    expect(scopedLibrary.run).toHaveBeenCalledWith({
+      action: "set_window_visibility",
+      window_id: "w-captioned",
+      hidden: true,
+    });
+    expect(operation(target), "the success card").toContain("Done");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flush();
+    expect(launcherPanel.open).toBe(false);
+  });
+
+  test("Close shows its success and closes the deck when the roster drops the window", async () => {
+    stubPopup();
+    rosterFollowsActions();
+    scopedLibrary.liveTerminals.mockResolvedValueOnce(0).mockResolvedValueOnce(0);
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    row(target, "Close").click();
+    await flush();
+    decision(target, "Close").click();
+    await flush();
+    expect(scopedLibrary.run).toHaveBeenCalledWith({
+      action: "close_window",
+      window_id: "w-captioned",
+    });
+    expect(operation(target), "the success card").toContain("Done");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flush();
+    expect(launcherPanel.open).toBe(false);
+  });
+
   test("a reading a later card replaced does not close the window", async () => {
     stubPopup();
     const recheck = deferredCount();
