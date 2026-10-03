@@ -745,6 +745,22 @@ describe("the slide chord", () => {
     });
   });
 
+  test("Mod+Enter in a fence on a deck in read mode previews the deck and leaves the text alone", async () => {
+    const doc = `${DECK}\n\`\`\`js\nx\n\`\`\`\n`;
+    const tab = seat(fileTab({ path: "talks/deck.md", content: doc, saved: doc, readMode: true }));
+    const { target } = await render(tab);
+    const view = editorView(target);
+    view.dispatch({ selection: { anchor: doc.indexOf("x\n```") } });
+
+    const e = press(target.querySelector(".cm-content")!, { ctrlKey: true });
+    await settle(2);
+    expect({
+      claimed: e.defaultPrevented,
+      previews: h.previews.map((p) => p.mode),
+      text: view.state.doc.toString(),
+    }).toEqual({ claimed: true, previews: ["preview"], text: doc });
+  });
+
   test("Mod+Enter on a date on a deck opens its calendar and no preview", async () => {
     const doc = `${DECK}\nDue 2026-09-27 here\n`;
     const tab = seat(fileTab({ path: "talks/deck.md", content: doc, saved: doc }));
