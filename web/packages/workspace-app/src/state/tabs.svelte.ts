@@ -5,7 +5,7 @@
 // nested arbitrarily.
 
 import { flushSync } from "svelte";
-import { api, sessionWindowId } from "../api/client";
+import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode } from "../api/errors";
 import type {
   DraftPromoteResponse,
@@ -5738,6 +5738,13 @@ const AUTOSAVE_DEBOUNCE_MS = 800;
 const autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const savingTabs = new Set<string>();
 const saveAgainAfterCurrent = new Set<string>();
+/// Tabs whose user chose Overwrite and whose overwriting write is not built
+/// yet. That write goes over bytes the tab did not load, so it names no hash
+/// of the loaded text. The mark is taken by the first write built under it
+/// and ends with the save run the click started or joined, so it frees one
+/// write and none after. It is kept by tab id: a move replaces the tab object
+/// between the click and the write.
+const overwritePending = new Set<string>();
 /// The missing-file tab the next file opened into its pane replaces, and how
 /// that re-open ends (see `beginMissingFileReopen`).
 let pendingMissingFileReopen: { tabId: string; by: "pick" | "open" } | null = null;
@@ -5886,6 +5893,7 @@ export async function overwriteConflictedTab(): Promise<void> {
   found.tab.savedMtimeNs = currentMtimeNs;
   found.tab.authorityVersion = currentAuthorityVersion;
   found.tab.diskConflicted = diskConflicted;
+  overwritePending.add(tabId);
   await performSave(found.tab);
 }
 
@@ -6087,6 +6095,7 @@ async function performSave(t: FileTab): Promise<void> {
   } finally {
     savingTabs.delete(t.id);
     saveAgainAfterCurrent.delete(t.id);
+    overwritePending.delete(t.id);
     for (const watch of classicSaveWatches) watch.saveEnded(t.id);
   }
 }
@@ -6169,14 +6178,29 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   const expectedMtimeNs = live.savedMtimeNs ?? null;
   const expectedMtime = live.savedMtime;
   const authorityVersion = live.authorityVersion ?? null;
+  // The text the tab's last load or accepted save left it, which the
+  // standalone surface hashes into the write's precondition: the token is
+  // a timestamp, and a change to the file can keep it. Nothing is handed
+  // where nothing was loaded (the tab holds no token), for the write
+  // Overwrite frees, or in a workspace window, whose route reads no hash.
+  const overwriting = overwritePending.delete(live.id);
+  const holdsToken = expectedMtimeNs !== null || expectedMtime !== null;
+  const loadedText =
+    usesStandaloneFiles() && holdsToken && !overwriting ? live.saved : null;
   try {
-    const r = await api.write(
-      path,
-      content,
-      expectedMtimeNs,
-      expectedMtime,
-      authorityVersion,
-    );
+    // The loaded text is an argument only of a save that has one, so every
+    // other save is the same request on both surfaces.
+    const r =
+      loadedText === null
+        ? await api.write(path, content, expectedMtimeNs, expectedMtime, authorityVersion)
+        : await api.write(
+            path,
+            content,
+            expectedMtimeNs,
+            expectedMtime,
+            authorityVersion,
+            loadedText,
+          );
     // Resolved again: the write is the second await a move can land in.
     const done = liveFileTabById(t.id) ?? live;
     if (stripOnSave && content !== sourceContent && done.content === sourceContent) {
@@ -6201,7 +6225,15 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       (e.status === 409 || e.status === 428) &&
       apiErrorCode(e) === "write_conflict"
     ) {
-      if (classicSaveWatches.some((watch) => watch.waitsOnSave(live.id))) return;
+      // A watch quiets the refusal a session's first attach causes. A save
+      // that carried the loaded text may be refused for the file's bytes,
+      // which only the prompt says, so no watch is asked about it.
+      if (
+        loadedText === null &&
+        classicSaveWatches.some((watch) => watch.waitsOnSave(live.id))
+      ) {
+        return;
+      }
       const current = liveFileTabById(t.id) ?? live;
       if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) {
         current.saveError = null;
