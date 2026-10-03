@@ -720,6 +720,20 @@ describe("a session that has had no frame", () => {
     sock.frame(snap());
     expect(session.reachesAuthority()).toBe(true);
   });
+
+  test("any frame is its first: an error the server sends before it closes the socket counts", () => {
+    const tab = sceneTab();
+    const session = acquireSceneSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
+    sock.drop();
+    expect({ state: tab.doc?.state, reaches: session.reachesAuthority(), owns: session.ownsSaves() }).toEqual({
+      state: "connecting",
+      reaches: true,
+      owns: true,
+    });
+  });
 });
 
 // ---- save funnel --------------------------------------------------------------
