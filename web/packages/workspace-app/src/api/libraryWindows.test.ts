@@ -1229,3 +1229,143 @@ describe("the holder tag on a window this page sends to its page", () => {
     expect(popup.location.href).toBe(launchUrl());
   });
 });
+
+describe("a record that lists a window's holders", () => {
+  const PAGE = "https://chan.test/project/?w=w-other";
+
+  /// A named popup on the window's page, as an opener with `tag` sent it there,
+  /// or as a page nobody tagged.
+  function pagePopup(tag: string | null): FakePopup {
+    const popup = fakePopup(tag === null ? PAGE : `${PAGE}&h=${tag}`);
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    return popup;
+  }
+
+  /// A popup at another site: its location refuses the read and takes an
+  /// assignment.
+  function foreignPopup() {
+    const fixture = repairPopup(repairDocuments.find((entry) => entry.label === "user foreign page")!);
+    vi.spyOn(window, "open").mockReturnValue(fixture.handle);
+    return fixture;
+  }
+
+  test("repairs a popup whose page is not among the holders of a connected window", async () => {
+    const popup = pagePopup("mine");
+    const record = scopedWindow({ connected: true, holders: ["theirs"] });
+    const host = bridge({ readSnapshot: vi.fn(async () => snapshotWith(record)) });
+
+    await focusLibraryWindow(host, record);
+
+    expect(host.checkPage).toHaveBeenCalledExactlyOnceWith(launchUrl(), expect.any(AbortSignal));
+    expect(host.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe(launchUrl());
+    expect(popup.focus).toHaveBeenCalled();
+  });
+
+  test("leaves a popup whose page is among the holders", async () => {
+    const popup = pagePopup("mine");
+    const host = bridge();
+
+    await focusLibraryWindow(host, scopedWindow({ connected: true, holders: ["mine", "theirs"] }));
+
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(popup.location.href).toBe(`${PAGE}&h=mine`);
+    expect(popup.focus).toHaveBeenCalled();
+  });
+
+  test("navigates a popup whose page the fresh snapshot does not list, on a window others hold", async () => {
+    const popup = pagePopup("mine");
+    const host = bridge({
+      readSnapshot: vi.fn(async () => snapshotWith(scopedWindow({ connected: true, holders: ["theirs"] }))),
+    });
+
+    await focusLibraryWindow(host, scopedWindow({ connected: false, holders: [] }));
+
+    expect(host.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe(launchUrl());
+  });
+
+  test("keeps a popup whose page the fresh snapshot lists", async () => {
+    const popup = pagePopup("mine");
+    const host = bridge({
+      readSnapshot: vi.fn(async () => snapshotWith(scopedWindow({ connected: true, holders: ["mine", "theirs"] }))),
+    });
+
+    await focusLibraryWindow(host, scopedWindow({ connected: false, holders: [] }));
+
+    expect(host.checkPage).toHaveBeenCalledTimes(1);
+    expect(host.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe(`${PAGE}&h=mine`);
+    expect(popup.focus).toHaveBeenCalled();
+  });
+
+  test("reads the popup's tag when the snapshot answers, not at the gesture", async () => {
+    const popup = pagePopup("mine");
+    const host = bridge({
+      // Another opener's page takes the popup while the check is out.
+      checkPage: vi.fn(async () => {
+        popup.location.href = `${PAGE}&h=later`;
+        return pageAnswer();
+      }),
+      readSnapshot: vi.fn(async () => snapshotWith(scopedWindow({ connected: true, holders: ["later"] }))),
+    });
+
+    await focusLibraryWindow(host, scopedWindow({ connected: false, holders: [] }));
+
+    expect(host.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe(`${PAGE}&h=later`);
+  });
+
+  test("repairs a popup it cannot read, although the window reads connected", async () => {
+    const fixture = foreignPopup();
+    const record = scopedWindow({ connected: true, holders: ["theirs"] });
+    const host = bridge({ readSnapshot: vi.fn(async () => snapshotWith(record)) });
+
+    await focusLibraryWindow(host, record);
+
+    expect(host.checkPage).toHaveBeenCalledExactlyOnceWith(launchUrl(), expect.any(AbortSignal));
+    expect(fixture.navigate).toHaveBeenCalledExactlyOnceWith(launchUrl());
+    expect(fixture.child.close).not.toHaveBeenCalled();
+    expect(fixture.child.focus).toHaveBeenCalled();
+  });
+
+  test("leaves a popup it cannot read on a connected window whose record lists no holders", async () => {
+    const fixture = foreignPopup();
+    const host = bridge();
+
+    await focusLibraryWindow(host, scopedWindow({ connected: true }));
+
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(fixture.navigate).not.toHaveBeenCalled();
+    expect(fixture.child.focus).toHaveBeenCalled();
+  });
+
+  test.each([
+    [{ connected: true, holders: ["theirs"] }, false],
+    [{ connected: true }, false],
+    [{ connected: false, holders: [] }, true],
+    [{ connected: false }, true],
+  ] as const)("a popup whose URL holds no tag follows connected: %j", async (row, repaired) => {
+    const popup = pagePopup(null);
+    const record = scopedWindow({ ...row, holders: "holders" in row ? [...row.holders] : undefined });
+    const host = bridge({ readSnapshot: vi.fn(async () => snapshotWith(record)) });
+
+    await focusLibraryWindow(host, record);
+
+    expect(host.checkPage).toHaveBeenCalledTimes(repaired ? 1 : 0);
+    expect(popup.location.href).toBe(repaired ? launchUrl() : PAGE);
+    expect(popup.focus).toHaveBeenCalled();
+  });
+
+  test("keeps an untagged popup that the fresh snapshot reads connected, whoever holds it", async () => {
+    const popup = pagePopup(null);
+    const host = bridge({
+      readSnapshot: vi.fn(async () => snapshotWith(scopedWindow({ connected: true, holders: ["theirs"] }))),
+    });
+
+    await focusLibraryWindow(host, scopedWindow({ connected: false, holders: [] }));
+
+    expect(host.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(popup.location.href).toBe(PAGE);
+  });
+});
