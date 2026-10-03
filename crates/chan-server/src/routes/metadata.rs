@@ -481,6 +481,34 @@ pub(crate) fn install_test_session_close_gate(
         .is_none());
 }
 
+/// When a stand-in for another process that took the workspace's writer lock
+/// lets it go, counted from a route's asks for its workspace at its reopen.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy)]
+pub(super) enum LetsGo {
+    /// As the route asks the given time. At the first the lock is free
+    /// before the route reopens. A later ask is reached only by a route that
+    /// waits at its reopen for the lock, since every ask before it is
+    /// refused over that lock.
+    AtOpen(usize),
+    /// Three of the route's bounds after it first asked, so a reopen that
+    /// has no bound ends too.
+    PastTheBound,
+}
+
+#[cfg(all(test, unix))]
+impl LetsGo {
+    /// Whether the other process lets go at the route's `ask`th ask for its
+    /// workspace, `since_first` after the first of them, beside a reopen
+    /// whose bound is `bound`.
+    pub(super) fn at(self, ask: usize, since_first: Duration, bound: Duration) -> bool {
+        match self {
+            LetsGo::AtOpen(open) => ask >= open,
+            LetsGo::PastTheBound => since_first >= bound * 3,
+        }
+    }
+}
+
 /// Hold `root`'s writer lock the way another process does: the lock is taken
 /// and its record names a live process that is not this one, so chan-workspace
 /// refuses this process as it refuses any other and never as the lock's owner.
@@ -814,20 +842,6 @@ mod tests {
         }
     }
 
-    /// When another process that took the workspace's writer lock lets it go.
-    #[cfg(unix)]
-    #[derive(Clone, Copy)]
-    enum LetsGo {
-        /// As the route asks for its workspace the given time: at the first
-        /// the lock is free before the route reopens, at the second the
-        /// route's one retry finds it free, and from the third on only a
-        /// route that waits at its reopen does.
-        AtOpen(usize),
-        /// Three of the route's bounds after it first asked for its
-        /// workspace, so a reopen that has no bound ends too.
-        PastTheBound,
-    }
-
     /// Stands in for another process that takes the workspace's writer lock
     /// once the archive is imported: the route has let its workspace go and
     /// seen the lock free by then. The import's rescan reopens the
@@ -912,10 +926,11 @@ mod tests {
             self.open_calls.set(self.open_calls.get() + 1);
             let first_open = self.first_open.get().unwrap_or_else(Instant::now);
             self.first_open.set(Some(first_open));
-            let lets_go = match self.lets_go {
-                LetsGo::AtOpen(open) => self.open_calls.get() >= open,
-                LetsGo::PastTheBound => first_open.elapsed() >= IMPORT_DRAIN_DEADLINE * 3,
-            };
+            let lets_go = self.lets_go.at(
+                self.open_calls.get(),
+                first_open.elapsed(),
+                IMPORT_DRAIN_DEADLINE,
+            );
             if lets_go {
                 self.lock.borrow_mut().take();
             }

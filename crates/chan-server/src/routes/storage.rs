@@ -311,6 +311,8 @@ mod tests {
     use crate::routes::metadata::inject_test_watch_registration_failure;
     #[cfg(unix)]
     use crate::routes::metadata::install_test_session_close_gate;
+    #[cfg(unix)]
+    use crate::routes::metadata::LetsGo;
     use crate::state::test_support::workspace_app_state;
 
     struct ResetTestState {
@@ -1269,20 +1271,6 @@ mod tests {
         );
     }
 
-    /// When another process that took the workspace's writer lock lets it go.
-    #[cfg(unix)]
-    #[derive(Clone, Copy)]
-    enum LetsGo {
-        /// As the route asks for its workspace the given time: at the first
-        /// the lock is free before the route reopens, at the second the
-        /// route's one retry finds it free, and from the third on only a
-        /// route that waits at its reopen does.
-        AtOpen(usize),
-        /// Three of the route's bounds after it first asked for its
-        /// workspace, so a reopen that has no bound ends too.
-        PastTheBound,
-    }
-
     /// Stands in for another process that takes the workspace's writer lock
     /// once the reset has let its workspace go and seen the lock free: as
     /// the reset asks chan-workspace for its wipe, which is then refused, or
@@ -1344,10 +1332,11 @@ mod tests {
             self.open_calls.set(self.open_calls.get() + 1);
             let first_open = self.first_open.get().unwrap_or_else(Instant::now);
             self.first_open.set(Some(first_open));
-            let lets_go = match self.lets_go {
-                LetsGo::AtOpen(open) => self.open_calls.get() >= open,
-                LetsGo::PastTheBound => first_open.elapsed() >= RESET_DRAIN_DEADLINE * 3,
-            };
+            let lets_go = self.lets_go.at(
+                self.open_calls.get(),
+                first_open.elapsed(),
+                RESET_DRAIN_DEADLINE,
+            );
             if lets_go {
                 self.lock.borrow_mut().take();
             }
