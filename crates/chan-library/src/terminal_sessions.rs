@@ -376,6 +376,12 @@ pub struct RegistryConfig {
     pub terminal: TerminalConfig,
 }
 
+/// The live settings and devserver identity sampled for one PTY spawn.
+struct SessionSpawnConfig {
+    config: RegistryConfig,
+    library_id: Option<String>,
+}
+
 /// A tenant's live terminal sessions, keyed by session id. The `/ws`
 /// handler, the control socket and the host create, attach, write to and
 /// close sessions through it.
@@ -1759,13 +1765,16 @@ impl Registry {
     /// The registry config with the live-sampled terminal engine and shell
     /// profiles, taken once per PTY spawn so a create and a restart see the
     /// same settings.
-    fn spawn_config(&self) -> RegistryConfig {
+    fn spawn_config(&self) -> SessionSpawnConfig {
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
         let profiles = self.resolve_terminal_profiles();
         config.terminal.profiles = profiles.profiles;
         config.terminal.default_profile = profiles.default_profile;
-        config
+        SessionSpawnConfig {
+            config,
+            library_id: self.library_id.get().cloned(),
+        }
     }
 
     /// Sample the declared profiles for one PTY spawn, on the same fail-open
@@ -2227,7 +2236,6 @@ impl Registry {
         let session = Session::spawn(
             id.clone(),
             config,
-            self.library_id.get().cloned(),
             opts,
             announce_command,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
@@ -2326,7 +2334,6 @@ impl Registry {
         let session = Session::spawn(
             id.to_string(),
             config,
-            self.library_id.get().cloned(),
             opts,
             false,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
@@ -4023,8 +4030,7 @@ impl Session {
 
     fn spawn(
         id: String,
-        config: RegistryConfig,
-        library_id: Option<String>,
+        spawn_config: SessionSpawnConfig,
         opts: CreateOptions,
         announce_command: bool,
         generation: u64,
@@ -4032,6 +4038,7 @@ impl Session {
         // Only a Linux reader polls the registry's stop descriptor.
         #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] reader_wake: Arc<ReaderWake>,
     ) -> anyhow::Result<Arc<Self>> {
+        let SessionSpawnConfig { config, library_id } = spawn_config;
         #[cfg(test)]
         if opts.env.contains_key("CHAN_TEST_FAIL_TERMINAL_SPAWN") {
             anyhow::bail!("injected terminal spawn failure");

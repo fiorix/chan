@@ -1747,9 +1747,11 @@ where
                 format,
                 out,
                 window_id,
-                session_registry,
-                events_tx,
-                window_bus,
+                ExportRuntime {
+                    session_registry,
+                    events_tx,
+                    window_bus,
+                },
                 client_eof,
             )
             .await
@@ -3017,16 +3019,18 @@ where
     .await
 }
 
-/// How long a `cs export` round-trip waits for the renderer's reply. Far
-/// past the pane query's 5s: the SPA rasterizes a document page by page
-/// (mermaid + excalidraw renders included) before it can upload and reply.
-const EXPORT_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
 /// The `cs export` no-renderer refusal. Only a live SPA window can run an
 /// export job (the `format -> exporter` registry lives in the frontend).
 const EXPORT_NO_RENDERER: &str = "no connected renderer: an open workspace window does the \
      rendering (the terminal running cs does not); open the workspace in a browser or \
      chan-desktop";
+
+#[derive(Clone, Copy)]
+struct ExportRuntime<'a> {
+    session_registry: &'a SessionRegistry,
+    events_tx: &'a broadcast::Sender<String>,
+    window_bus: &'a crate::window_bus::WindowBus,
+}
 
 /// Resolve the export target: the most recently active live workspace
 /// window, approximated as the LATEST-JOINED live `/ws` participant (the
@@ -3085,9 +3089,11 @@ async fn handle_export(
         format,
         out,
         preferred_window_id,
-        session_registry,
-        events_tx,
-        window_bus,
+        ExportRuntime {
+            session_registry,
+            events_tx,
+            window_bus,
+        },
         &mut std::future::pending(),
     )
     .await
@@ -3098,9 +3104,7 @@ async fn handle_export_until_client_eof<F>(
     format: String,
     out: Option<String>,
     preferred_window_id: Option<String>,
-    session_registry: &Arc<SessionRegistry>,
-    events_tx: &broadcast::Sender<String>,
-    window_bus: &Arc<crate::window_bus::WindowBus>,
+    runtime: ExportRuntime<'_>,
     client_eof: &mut F,
 ) -> ControlResponse
 where
@@ -3122,21 +3126,12 @@ where
         .map(|o| o.trim().to_string())
         .filter(|o| !o.is_empty())
         .unwrap_or_else(|| default_export_out(&path, &format));
-    let target = match resolve_export_window(session_registry, preferred_window_id.as_deref()) {
-        Ok(target) => target,
-        Err(message) => return ControlResponse::Error { message },
-    };
-    export_round_trip_until_client_eof(
-        &target,
-        path,
-        format,
-        out,
-        session_registry,
-        events_tx,
-        window_bus,
-        client_eof,
-    )
-    .await
+    let target =
+        match resolve_export_window(runtime.session_registry, preferred_window_id.as_deref()) {
+            Ok(target) => target,
+            Err(message) => return ControlResponse::Error { message },
+        };
+    export_round_trip_until_client_eof(&target, path, format, out, runtime, client_eof).await
 }
 
 /// The `cs export` round-trip, mirroring [`pane_round_trip`]: park the
@@ -3158,9 +3153,11 @@ async fn export_round_trip(
         path,
         format,
         out,
-        _session_registry,
-        events_tx,
-        window_bus,
+        ExportRuntime {
+            session_registry: _session_registry,
+            events_tx,
+            window_bus,
+        },
         &mut std::future::pending(),
     )
     .await
@@ -3171,14 +3168,17 @@ async fn export_round_trip_until_client_eof<F>(
     path: String,
     format: String,
     out: String,
-    session_registry: &SessionRegistry,
-    events_tx: &broadcast::Sender<String>,
-    window_bus: &Arc<crate::window_bus::WindowBus>,
+    runtime: ExportRuntime<'_>,
     client_eof: &mut F,
 ) -> ControlResponse
 where
     F: std::future::Future<Output = ()> + Unpin,
 {
+    let ExportRuntime {
+        session_registry,
+        events_tx,
+        window_bus,
+    } = runtime;
     let (request_id, mut rx, mut progress) = window_bus.register_export(out.clone());
     let job = window_bus.export_job(&request_id).expect("new export job");
     let command = WindowCommand::ExportJob {
@@ -3194,8 +3194,7 @@ where
         window_bus.retire_export(&request_id);
         return ControlResponse::Error { message };
     }
-    let absolute = tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
-    let mut quiet = tokio::time::Instant::now() + EXPORT_REPLY_TIMEOUT;
+    let (mut quiet, absolute) = job.deadlines();
     loop {
         tokio::select! {
             biased;
@@ -3217,40 +3216,41 @@ where
                 }
                 return ControlResponse::Error { message: format!("export in window {window_id} cancelled when its caller closed") };
             }
-            _ = tokio::time::sleep_until(absolute) => return retire_export_at_bound(window_id, &request_id, &out, "15m absolute", &job, session_registry, events_tx, window_bus),
+            _ = tokio::time::sleep_until(absolute) => {
+                let committed = window_bus.retire_export(&request_id) || job.committed();
+                return finish_export_at_bound(window_id, &request_id, &out, "15m absolute", committed, runtime);
+            }
             changed = progress.changed() => {
                 if changed.is_ok() {
-                    if let Some(at) = *progress.borrow_and_update() {
-                        if at > quiet {
-                            return retire_export_at_bound(window_id, &request_id, &out, "90s quiet", &job, session_registry, events_tx, window_bus);
-                        }
-                        quiet = at + EXPORT_REPLY_TIMEOUT;
-                    }
+                    progress.borrow_and_update();
+                    quiet = job.deadlines().0;
                 }
             }
-            _ = tokio::time::sleep_until(quiet) => return retire_export_at_bound(window_id, &request_id, &out, "90s quiet", &job, session_registry, events_tx, window_bus),
+            _ = tokio::time::sleep_until(quiet) => {
+                match window_bus.retire_export_if_quiet_elapsed(&request_id, tokio::time::Instant::now()) {
+                    Ok(committed) => return finish_export_at_bound(window_id, &request_id, &out, "90s quiet", committed || job.committed(), runtime),
+                    Err(next_deadline) => quiet = next_deadline,
+                }
+            }
         }
     }
 }
 
-fn retire_export_at_bound(
+fn finish_export_at_bound(
     window_id: &str,
     request_id: &str,
     out: &str,
     bound: &str,
-    job: &crate::window_bus::ExportJob,
-    session_registry: &SessionRegistry,
-    events_tx: &broadcast::Sender<String>,
-    window_bus: &crate::window_bus::WindowBus,
+    committed: bool,
+    runtime: ExportRuntime<'_>,
 ) -> ControlResponse {
-    let committed = window_bus.retire_export(request_id) || job.committed();
     let _ = send_window_command_if_live(
-        session_registry,
+        runtime.session_registry,
         window_id,
         WindowCommand::ExportStop {
             id: request_id.to_string(),
         },
-        events_tx,
+        runtime.events_tx,
     );
     if committed {
         return ControlResponse::Export {
@@ -5825,6 +5825,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
         tokio::time::advance(std::time::Duration::from_secs(21)).await;
+        tokio::task::yield_now().await;
         assert!(
             task.is_finished(),
             "page progress extended the absolute cap past 15m"
@@ -5844,15 +5845,18 @@ mod tests {
         let mut permit = job.begin_commit("a.pdf").unwrap();
         permit.mark_committed();
         drop(permit);
-        let response = retire_export_at_bound(
+        let committed = bus.retire_export(&id) || job.committed();
+        let response = finish_export_at_bound(
             "w-committed",
             &id,
             "a.pdf",
             "90s quiet",
-            &job,
-            &registry,
-            &events_tx,
-            &bus,
+            committed,
+            ExportRuntime {
+                session_registry: &registry,
+                events_tx: &events_tx,
+                window_bus: &bus,
+            },
         );
         assert!(
             matches!(response, ControlResponse::Export { out_path, .. } if out_path == "a.pdf")
