@@ -707,7 +707,10 @@ export default {
       }
     }
     if (faults.length > 0) {
-      throw new Error(`${faults.join("\n")}\nmeasured: ${JSON.stringify(pixels)}`);
+      const paintCounts = Object.fromEntries(Object.entries(details).filter(
+        ([name]) => name.endsWith(":paintCounts"),
+      ));
+      throw new Error(`${faults.join("\n")}\nmeasured: ${JSON.stringify({ pixels, paintCounts })}`);
     }
     return details;
   },
