@@ -26,3 +26,9 @@ Rule one of three: the reopen seeds the new draft and marks it unsaved, so its c
 
 1. The ruling is recorded.
 2. If it changes the reopen: a reopen after the discard of a draft drawing whose text does not parse does what was ruled; pinned red first.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. No browser was driven.
+
+As ruled: a reopen after the discard of a draft drawing whose text does not parse seeds the new draft with that text and marks it unsaved, so its close goes through the dialog that offers Discard and Cancel (`recoverClosedDraft`, `web/packages/workspace-app/src/state/tabs.svelte.ts`); pinned red first. Only a drawing's text that does not parse takes that path; every other draft is seeded by the write as before. Left: the reopened draft opens in the board mode a new diagram has, not in the Source mode the text was typed in, so the text shows through the board's not-saved placeholder until its source is shown; and if the reopened draft's tab fails to load, the text is dropped with no notice, where it used to be written into the new draft (read by the review; low, ordered).

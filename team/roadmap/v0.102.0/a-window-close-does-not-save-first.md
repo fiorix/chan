@@ -34,3 +34,9 @@ The close's routes in `web/packages/workspace-app/src/state/closeConfirm.svelte.
 2. If it saves first: a window closed with a stroke inside its wait leaves the stroke on disk, and the next open of the drawing shows no banner; pinned in the mounted app, red first.
 3. If it saves first: a close whose save is refused asks, and a close beside a folder that does not answer ends within a bound that the item states; pinned.
 4. If it stays as built: `editor/design.md` and the changelog say that a window's close does not save, and what the banner holds.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. No browser was driven.
+
+As ruled, nothing is built and the close stays as it is for v0.102.0. The editor's design now says so: a window's close does not save first; each tab's unsaved input goes to its recovery buffer and is offered at the next open of the file. How far that offer reaches across a desktop restart is [a-desktop-recovery-entry-ends-with-its-run](a-desktop-recovery-entry-ends-with-its-run.md), and what retires an entry is [any-later-write-retires-a-recovery-entry](any-later-write-retires-a-recovery-entry.md).
