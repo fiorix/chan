@@ -2698,6 +2698,50 @@ describe("a live drawing", () => {
       }).toEqual({ board: ["mine"], background: "#fedcba", buffer: false, pushed: [], banner: null });
     });
 
+    test("on a board whose session has had no frame, the session's first snapshot is then reconciled over the restored board", async () => {
+      // Restore put the entry in the board's place while no authority had
+      // answered. Its scene then comes as it does to any board: the file's
+      // element, which the entry lacks, is on the board again, the entry's
+      // own element is offered, and the authority's background takes the
+      // place of the entry's, since a board that had adopted nothing left
+      // the session no claim.
+      strand([MINE], { viewBackgroundColor: "#fedcba" });
+      const { tab } = await loadedTab(PATH, DRAWING);
+      const { board } = await mountBoard(tab);
+      board.holdRenders();
+      await board.start();
+      await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+      const socket = sceneSockets[0]!;
+      socket.open();
+      await board.render();
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      const restored = { board: shownIds(board), background: board.appState.viewBackgroundColor };
+
+      socket.frame({
+        type: "snapshot", path: tab.path, version: 1, elements: [ON_DISK],
+        appState: { viewBackgroundColor: "#abcdef" }, files: {},
+        dirty: false, mtime_ns: "1000000000", cursors: [],
+      });
+      await board.render();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({
+        restored,
+        state: tab.doc?.state,
+        board: shownIds(board),
+        background: board.appState.viewBackgroundColor,
+        pushed: pushed(socket),
+      }).toEqual({
+        restored: { board: ["mine"], background: "#fedcba" },
+        state: "attached",
+        board: ["mine", "on-disk"],
+        background: "#abcdef",
+        pushed: [{ elements: ["mine@1"], appState: undefined }],
+      });
+    });
+
     test("on a board with no live session puts the entry's scene in place of the board's", async () => {
       scene.live = false;
       // The entry lacks the file's element: its user deleted it before the
