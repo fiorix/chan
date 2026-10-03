@@ -80,3 +80,21 @@ describe("agentForMember (CHAN_AGENT override)", () => {
     expect(agentForMember("bash", "FOO=bar")).toBe("none");
   });
 });
+
+describe("muse derives as the other agents do", () => {
+  test("the bare name derives muse", () => {
+    expect(agentForCommand("muse")).toBe("muse");
+  });
+
+  test("a wrapper that names it as a whole word derives muse", () => {
+    expect(agentForCommand("my-muse.sh")).toBe("muse");
+  });
+
+  test("a longer word that starts with it does not", () => {
+    expect(agentForCommand("musette")).toBe("none");
+  });
+
+  test("CHAN_AGENT=muse in the member's env forces it over another agent's command", () => {
+    expect(agentForMember("claude --resume", "CHAN_AGENT=muse")).toBe("muse");
+  });
+});
