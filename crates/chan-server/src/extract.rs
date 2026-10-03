@@ -243,6 +243,8 @@ deref_to_inner!(Json, Query, Path);
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use axum::body::{to_bytes, Body};
     use axum::extract::{DefaultBodyLimit, FromRequest};
     use axum::http::{header, HeaderValue, Request};
@@ -279,6 +281,7 @@ mod tests {
                 .route("/respond", get(|| async { Json(serde_json::json!({"ok": true})) }))
                 .route("/query", get(|_: Query<Probe>| async {}))
                 .route("/path/{key}", get(|_: Path<String>| async {}))
+                .route("/pair/{first}/{second}", get(|_: Path<String>| async {}))
                 .route(
                     "/path-display/{key}",
                     get(
@@ -319,20 +322,37 @@ mod tests {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
+    const NOT_JSON: &str = "the request body is not valid JSON";
+    const WRONG_SHAPE: &str = "the request body does not match what this route accepts";
+    const NOT_JSON_CONTENT_TYPE: &str =
+        "the request body must have the content type application/json";
+    const TOO_LARGE: &str = "the request body is too large";
+    const UNREADABLE_BODY: &str = "the request body could not be read";
+    const BAD_QUERY: &str = "the query string does not match what this route accepts";
+    const BAD_PATH: &str = "the request path does not match what this route accepts";
+    const NO_BOUNDARY: &str = "the multipart request has no valid boundary";
+    const MISASSEMBLED: &str = "this route cannot read its request";
+
     /// Sends one request to the framework's extractors and to the ones under
-    /// test, and requires the second to answer the first's status with its
-    /// sentence in the envelope.
-    async fn assert_enveloped(kind: &str, request: impl Fn() -> Request<Body>) {
+    /// test, and requires the second to answer the first's status with
+    /// `sentence` in the envelope.
+    async fn assert_enveloped(kind: &str, sentence: &str, request: impl Fn() -> Request<Body>) {
         let framework = framework::app().oneshot(request()).await.unwrap();
         let status = framework.status();
-        assert!(status.is_client_error(), "{kind}: the framework refuses");
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "{kind}: the framework refuses"
+        );
         assert_eq!(
             framework.headers().get(header::CONTENT_TYPE),
             Some(&HeaderValue::from_static("text/plain; charset=utf-8")),
             "{kind}: the framework's own rejection is plain text"
         );
-        let sentence = body_text(framework).await;
-        eprintln!("rejection\t{kind}\t{}\t{sentence}", status.as_u16());
+        eprintln!(
+            "rejection\t{kind}\t{}\t{}",
+            status.as_u16(),
+            body_text(framework).await
+        );
         let response = subject::app().oneshot(request()).await.unwrap();
         assert_eq!(response.status(), status, "{kind}: the status is kept");
         assert_eq!(
@@ -343,7 +363,7 @@ mod tests {
         assert_eq!(
             body_text(response).await,
             serde_json::json!({"error": sentence}).to_string(),
-            "{kind}: the envelope carries the framework's sentence"
+            "{kind}: the envelope carries the kind's sentence"
         );
     }
 
@@ -362,20 +382,30 @@ mod tests {
 
     #[tokio::test]
     async fn json_syntax() {
-        assert_enveloped("JsonSyntaxError", || json_request("/json", "{")).await;
+        assert_enveloped("JsonSyntaxError", NOT_JSON, || json_request("/json", "{")).await;
     }
 
     #[tokio::test]
     async fn json_data() {
-        assert_enveloped("JsonDataError", || {
+        assert_enveloped("JsonDataError", WRONG_SHAPE, || {
             json_request("/json", r#"{"count":"x"}"#)
+        })
+        .await;
+    }
+
+    /// A body of the wrong JSON type: the framework's sentence names the
+    /// type the handler takes.
+    #[tokio::test]
+    async fn json_wrong_type() {
+        assert_enveloped("JsonDataError (wrong type)", WRONG_SHAPE, || {
+            json_request("/json", r#""x""#)
         })
         .await;
     }
 
     #[tokio::test]
     async fn json_content_type() {
-        assert_enveloped("MissingJsonContentType", || {
+        assert_enveloped("MissingJsonContentType", NOT_JSON_CONTENT_TYPE, || {
             Request::post("/json").body(Body::from("{}")).unwrap()
         })
         .await;
@@ -383,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_length_limit() {
-        assert_enveloped("LengthLimitError (Json)", || {
+        assert_enveloped("LengthLimitError (Json)", TOO_LARGE, || {
             json_request("/json", format!(r#"{{"count":{}}}"#, "1".repeat(LIMIT)))
         })
         .await;
@@ -391,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_broken_body() {
-        assert_enveloped("UnknownBodyError (Json)", || {
+        assert_enveloped("UnknownBodyError (Json)", UNREADABLE_BODY, || {
             json_request("/json", broken_body())
         })
         .await;
@@ -399,12 +429,16 @@ mod tests {
 
     #[tokio::test]
     async fn optional_json_content_type() {
-        assert_enveloped("MissingJsonContentType (Option<Json>)", || {
-            Request::post("/optional-json")
-                .header(header::CONTENT_TYPE, "text/plain")
-                .body(Body::from("{}"))
-                .unwrap()
-        })
+        assert_enveloped(
+            "MissingJsonContentType (Option<Json>)",
+            NOT_JSON_CONTENT_TYPE,
+            || {
+                Request::post("/optional-json")
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            },
+        )
         .await;
     }
 
@@ -421,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn query() {
-        assert_enveloped("FailedToDeserializeQueryString", || {
+        assert_enveloped("FailedToDeserializeQueryString", BAD_QUERY, || {
             Request::get("/query?count=x").body(Body::empty()).unwrap()
         })
         .await;
@@ -429,15 +463,26 @@ mod tests {
 
     #[tokio::test]
     async fn path_utf8() {
-        assert_enveloped("FailedToDeserializePathParams", || {
+        assert_enveloped("FailedToDeserializePathParams", BAD_PATH, || {
             Request::get("/path/%FF").body(Body::empty()).unwrap()
+        })
+        .await;
+    }
+
+    /// A route declared with more parameters than its handler takes is a
+    /// fault of the router's assembly: the framework's sentence names its
+    /// own extractor type.
+    #[tokio::test]
+    async fn path_wrong_number_of_parameters() {
+        assert_enveloped("WrongNumberOfParameters", MISASSEMBLED, || {
+            Request::get("/pair/a/b").body(Body::empty()).unwrap()
         })
         .await;
     }
 
     #[tokio::test]
     async fn bytes_length_limit() {
-        assert_enveloped("LengthLimitError (Bytes)", || {
+        assert_enveloped("LengthLimitError (Bytes)", TOO_LARGE, || {
             Request::post("/bytes")
                 .body(Body::from("x".repeat(LIMIT + 1)))
                 .unwrap()
@@ -447,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn bytes_broken_body() {
-        assert_enveloped("UnknownBodyError (Bytes)", || {
+        assert_enveloped("UnknownBodyError (Bytes)", UNREADABLE_BODY, || {
             Request::post("/bytes").body(broken_body()).unwrap()
         })
         .await;
@@ -455,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_boundary() {
-        assert_enveloped("InvalidBoundary", || {
+        assert_enveloped("InvalidBoundary", NO_BOUNDARY, || {
             Request::post("/multipart")
                 .header(header::CONTENT_TYPE, "multipart/form-data")
                 .body(Body::empty())
@@ -464,26 +509,131 @@ mod tests {
         .await;
     }
 
-    /// The rejection a handler formats itself reads as the framework's does:
-    /// for the path, its display drops the prefix its response carries.
+    /// The rejection a handler formats itself displays its sentence.
     #[tokio::test]
-    async fn rejections_display_as_the_framework_does() {
-        let requests: [fn() -> Request<Body>; 2] = [
-            || json_request("/json-display", "{"),
-            || {
+    async fn a_rejection_displays_its_sentence() {
+        let cases: [(&str, Request<Body>); 2] = [
+            (NOT_JSON, json_request("/json-display", "{")),
+            (
+                BAD_PATH,
                 Request::get("/path-display/%FF")
                     .body(Body::empty())
-                    .unwrap()
-            },
+                    .unwrap(),
+            ),
         ];
-        for request in requests {
-            let framework = body_text(framework::app().oneshot(request()).await.unwrap()).await;
-            assert!(!framework.is_empty());
+        for (sentence, request) in cases {
             assert_eq!(
-                body_text(subject::app().oneshot(request()).await.unwrap()).await,
-                framework
+                body_text(subject::app().oneshot(request).await.unwrap()).await,
+                sentence
             );
         }
+    }
+
+    /// Collects one line per event on the calling thread, `LEVEL name=value`
+    /// per field. chan-server has plain `tracing` only.
+    struct CapturedLogs(Arc<Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for CapturedLogs {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Line(String);
+            impl tracing::field::Visit for Line {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write as _;
+                    let _ = write!(self.0, " {}={value:?}", field.name());
+                }
+            }
+            let mut line = Line(event.metadata().level().to_string());
+            event.record(&mut line);
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(line.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Set in the re-run of [`a_rejection_logs_what_the_framework_said`]:
+    /// the re-run captures and prints its log lines instead of asserting.
+    const LOG_CHILD: &str = "CHAN_TEST_REJECTION_LOG_CHILD";
+
+    /// What the framework said about a request goes to the log and not to
+    /// the caller: at debug for a request its caller got wrong, at error for
+    /// a route that cannot read its request.
+    ///
+    /// The capture runs in a re-run of this test alone in its process.
+    /// tracing caches each callsite's interest process-wide, and a test on
+    /// another thread that reaches the same event first, with no subscriber
+    /// of its own, can store "never" for it; a capture in this process then
+    /// misses the event.
+    #[tokio::test]
+    async fn a_rejection_logs_what_the_framework_said() {
+        if std::env::var_os(LOG_CHILD).is_some() {
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            let guard = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
+            for request in [
+                json_request("/json", r#""x""#),
+                Request::get("/pair/a/b").body(Body::empty()).unwrap(),
+            ] {
+                subject::app().oneshot(request).await.unwrap();
+            }
+            drop(guard);
+            // libtest can leave the line it names the test on unfinished.
+            println!();
+            for line in lines.lock().unwrap().iter() {
+                println!("LOG={}", line.replace('\n', " "));
+            }
+            return;
+        }
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "extract::tests::a_rejection_logs_what_the_framework_said",
+                    "--nocapture",
+                ])
+                .env(LOG_CHILD, "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("the re-run timed out")
+        .expect("spawn the re-run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the re-run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let logs: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("LOG="))
+            .collect();
+        assert!(
+            logs.iter().any(|line| line.starts_with("DEBUG")
+                && line.contains("Failed to deserialize the JSON body into the target type")
+                && line.contains("expected struct Probe")),
+            "no debug line carries what the framework said of a body of the wrong type: {logs:#?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|line| line.starts_with("ERROR")
+                    && line.contains("Wrong number of path arguments")),
+            "no error line carries what the framework said of a misassembled route: {logs:#?}"
+        );
     }
 
     #[tokio::test]

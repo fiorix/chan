@@ -5297,100 +5297,108 @@ mod tests {
         #[cfg(unix)]
         management_case!(management_failed_on, "failed_on");
 
-        /// Sends one request to the management routes and to the same routes
-        /// over the framework's extractors and request types, and requires the
-        /// devserver to answer the framework's status with its sentence in the
-        /// envelope.
-        async fn framework_rejection(
+        /// Sends one request to the management routes and requires the
+        /// devserver to answer `status` with `sentence` in the envelope.
+        async fn rejection(
             method: &'static str,
             uri: &'static str,
             content_type: Option<&'static str>,
             body: &'static str,
+            status: StatusCode,
+            sentence: &str,
         ) {
-            let request = || {
-                let mut builder = HttpRequest::builder()
-                    .method(method)
-                    .uri(uri)
-                    .header(header::AUTHORIZATION, "Bearer test-token");
-                if let Some(content_type) = content_type {
-                    builder = builder.header(header::CONTENT_TYPE, content_type);
-                }
-                builder.body(Body::from(body)).unwrap()
-            };
-            let framework =
-                Router::new()
-                    .route(
-                        "/api/devserver/workspaces",
-                        post(|_: axum::Json<OpenWorkspaceRequest>| async {}),
-                    )
-                    .route(
-                        "/api/devserver/workspaces/{*prefix}",
-                        delete(
-                            |_: axum::extract::Path<String>,
-                             _: axum::extract::Query<ForceQuery>| async {
-                            },
-                        )
-                        .post(
-                            |_: axum::extract::Path<String>,
-                             _: axum::Json<SetWorkspaceOnRequest>| async {
-                            },
-                        ),
-                    )
-                    .oneshot(request())
-                    .await
-                    .unwrap();
-            let status = framework.status();
-            assert!(status.is_client_error(), "the framework refuses");
-            let sentence = to_bytes(framework.into_body(), usize::MAX).await.unwrap();
-            let sentence = String::from_utf8(sentence.to_vec()).unwrap();
+            let mut builder = HttpRequest::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, "Bearer test-token");
+            if let Some(content_type) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+            }
+            let request = builder.body(Body::from(body)).unwrap();
             let _env = chan_home_env_read();
             let home = tempfile::tempdir().unwrap();
             let state = devserver_with_windows(home.path()).await;
             let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-            assert_refusal(app.oneshot(request()).await.unwrap(), status, &sentence).await;
+            assert_refusal(app.oneshot(request).await.unwrap(), status, sentence).await;
         }
 
         #[tokio::test]
         async fn open_json_syntax() {
-            framework_rejection(
+            rejection(
                 "POST",
                 "/api/devserver/workspaces",
                 Some("application/json"),
                 "{",
+                StatusCode::BAD_REQUEST,
+                "the request body is not valid JSON",
+            )
+            .await;
+        }
+
+        /// A body of the wrong JSON type names no Rust type.
+        #[tokio::test]
+        async fn open_json_wrong_type() {
+            rejection(
+                "POST",
+                "/api/devserver/workspaces",
+                Some("application/json"),
+                r#""x""#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the request body does not match what this route accepts",
             )
             .await;
         }
 
         #[tokio::test]
         async fn open_json_content_type() {
-            framework_rejection("POST", "/api/devserver/workspaces", None, "{}").await;
+            rejection(
+                "POST",
+                "/api/devserver/workspaces",
+                None,
+                "{}",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "the request body must have the content type application/json",
+            )
+            .await;
         }
 
         #[tokio::test]
         async fn on_json_data() {
-            framework_rejection(
+            rejection(
                 "POST",
                 "/api/devserver/workspaces/missing/on",
                 Some("application/json"),
                 r#"{"on":"yes"}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the request body does not match what this route accepts",
             )
             .await;
         }
 
         #[tokio::test]
         async fn on_path_utf8() {
-            framework_rejection(
+            rejection(
                 "POST",
                 "/api/devserver/workspaces/%FF/on",
                 Some("application/json"),
                 r#"{"on":true}"#,
+                StatusCode::BAD_REQUEST,
+                "the request path does not match what this route accepts",
             )
             .await;
         }
 
         #[tokio::test]
         async fn forget_path_utf8() {
-            framework_rejection("DELETE", "/api/devserver/workspaces/%FF", None, "").await;
+            rejection(
+                "DELETE",
+                "/api/devserver/workspaces/%FF",
+                None,
+                "",
+                StatusCode::BAD_REQUEST,
+                "the request path does not match what this route accepts",
+            )
+            .await;
         }
 
         #[tokio::test]
@@ -5455,11 +5463,13 @@ mod tests {
 
         #[tokio::test]
         async fn forget_query() {
-            framework_rejection(
+            rejection(
                 "DELETE",
                 "/api/devserver/workspaces/missing?force=maybe",
                 None,
                 "",
+                StatusCode::BAD_REQUEST,
+                "the query string does not match what this route accepts",
             )
             .await;
         }
@@ -6048,7 +6058,6 @@ mod tests {
     /// method and a malformed JSON body both answer in the envelope.
     #[tokio::test]
     async fn launcher_framework_refusals_cross_the_devserver_in_the_envelope() {
-        use axum::extract::FromRequest;
         use tower::ServiceExt;
 
         let home = tempfile::tempdir().expect("home");
@@ -6081,16 +6090,11 @@ mod tests {
             serde_json::json!({"error": "method not allowed"})
         );
 
-        let Err(rejection) =
-            axum::Json::<crate::CreateWindow>::from_request(request("POST", "{"), &()).await
-        else {
-            panic!("the framework must refuse this body");
-        };
         let malformed = app.oneshot(request("POST", "{")).await.unwrap();
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             envelope(malformed).await,
-            serde_json::json!({"error": rejection.body_text()})
+            serde_json::json!({"error": "the request body is not valid JSON"})
         );
     }
 

@@ -8,6 +8,17 @@ use tower::ServiceExt;
 
 use super::tests::{served_state, with_blocking_tasks_cancelled};
 
+// The sentence each kind of extractor rejection answers.
+const NOT_JSON: &str = "the request body is not valid JSON";
+const WRONG_SHAPE: &str = "the request body does not match what this route accepts";
+const NOT_JSON_CONTENT_TYPE: &str = "the request body must have the content type application/json";
+const TOO_LARGE: &str = "the request body is too large";
+const UNREADABLE_BODY: &str = "the request body could not be read";
+const BAD_QUERY: &str = "the query string does not match what this route accepts";
+const BAD_PATH: &str = "the request path does not match what this route accepts";
+const NO_BOUNDARY: &str = "the multipart request has no valid boundary";
+const MISASSEMBLED: &str = "this route cannot read its request";
+
 pub(super) async fn assert_refusal(response: Response, status: StatusCode, expected: Value) {
     assert_eq!(response.status(), status);
     assert_eq!(
@@ -449,88 +460,52 @@ fn draft_over_the_limit() -> Request<Body> {
         .unwrap()
 }
 
-async fn framework_sentence<T: axum::extract::FromRequest<()>>(request: Request<Body>) -> String {
-    let response = match T::from_request(request, &()).await {
-        Ok(_) => panic!("the framework must refuse this request"),
-        Err(rejection) => rejection.into_response(),
-    };
-    framework_refusal_sentence(response).await
-}
-
-async fn framework_refusal_sentence(response: Response) -> String {
-    assert!(response.status().is_client_error());
-    assert_eq!(
-        response.headers()[header::CONTENT_TYPE],
-        "text/plain; charset=utf-8"
-    );
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    String::from_utf8(body.to_vec()).unwrap()
-}
-
-async fn framework_path_sentence(path: &str, request: Request<Body>) -> String {
-    let response = axum::Router::new()
-        .route(
-            path,
-            axum::routing::any(|_: axum::extract::Path<String>| async {}),
-        )
-        .oneshot(request)
-        .await
-        .unwrap();
-    framework_refusal_sentence(response).await
-}
-
 #[tokio::test]
 async fn workspace_tenant_draft_over_the_limit_is_json() {
-    let sentence = framework_sentence::<axum::body::Bytes>(draft_over_the_limit()).await;
     assert_refusal(
         workspace_answer(draft_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": sentence}),
+        json!({"error": TOO_LARGE}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_draft_over_the_limit_is_json() {
-    let sentence = framework_sentence::<axum::body::Bytes>(draft_over_the_limit()).await;
     assert_refusal(
         terminal_answer(draft_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": sentence}),
+        json!({"error": TOO_LARGE}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn workspace_tenant_missing_json_content_type_is_json() {
-    let sentence =
-        framework_sentence::<axum::Json<Value>>(survey_reply_without_content_type()).await;
     assert_refusal(
         workspace_answer(survey_reply_without_content_type()).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        json!({"error": sentence}),
+        json!({"error": NOT_JSON_CONTENT_TYPE}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn workspace_tenant_json_over_the_limit_is_json() {
-    let sentence = framework_sentence::<axum::Json<Value>>(survey_reply_over_the_limit()).await;
     assert_refusal(
         workspace_answer(survey_reply_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": sentence}),
+        json!({"error": TOO_LARGE}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn workspace_tenant_bytes_over_the_limit_is_json() {
-    let sentence = framework_sentence::<axum::body::Bytes>(session_over_the_limit()).await;
     assert_refusal(
         workspace_answer(session_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": sentence}),
+        json!({"error": TOO_LARGE}),
     )
     .await;
 }
@@ -542,11 +517,10 @@ async fn workspace_tenant_path_not_utf8_is_json() {
             .body(Body::empty())
             .unwrap()
     };
-    let sentence = framework_path_sentence("/api/headings/{*path}", request()).await;
     assert_refusal(
         workspace_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": BAD_PATH}),
     )
     .await;
 }
@@ -559,45 +533,40 @@ async fn workspace_tenant_multipart_boundary_is_json() {
             .body(Body::empty())
             .unwrap()
     };
-    let sentence = framework_sentence::<axum::extract::Multipart>(request()).await;
     assert_refusal(
         workspace_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": NO_BOUNDARY}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_missing_json_content_type_is_json() {
-    let sentence =
-        framework_sentence::<axum::Json<Value>>(survey_reply_without_content_type()).await;
     assert_refusal(
         terminal_answer(survey_reply_without_content_type()).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        json!({"error": sentence}),
+        json!({"error": NOT_JSON_CONTENT_TYPE}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_json_over_the_limit_is_json() {
-    let sentence = framework_sentence::<axum::Json<Value>>(survey_reply_over_the_limit()).await;
     assert_refusal(
         terminal_answer(survey_reply_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": sentence}),
+        json!({"error": TOO_LARGE}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_bytes_over_the_limit_is_json() {
-    let sentence = framework_sentence::<axum::body::Bytes>(session_over_the_limit()).await;
     assert_refusal(
         terminal_answer(session_over_the_limit()).await,
         StatusCode::PAYLOAD_TOO_LARGE,
-        json!({"error": sentence}),
+        json!({"error": TOO_LARGE}),
     )
     .await;
 }
@@ -609,11 +578,10 @@ async fn terminal_tenant_path_not_utf8_is_json() {
             .body(Body::empty())
             .unwrap()
     };
-    let sentence = framework_path_sentence("/api/terminals/{session}", request()).await;
     assert_refusal(
         terminal_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": BAD_PATH}),
     )
     .await;
 }
@@ -626,11 +594,10 @@ async fn terminal_tenant_multipart_boundary_is_json() {
             .body(Body::empty())
             .unwrap()
     };
-    let sentence = framework_sentence::<axum::extract::Multipart>(request()).await;
     assert_refusal(
         terminal_answer(request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": NO_BOUNDARY}),
     )
     .await;
 }
@@ -642,28 +609,84 @@ async fn terminal_tenant_drafts_missing_json_content_type_is_json() {
             .body(Body::from("{}"))
             .unwrap()
     };
-    let sentence = framework_sentence::<axum::Json<Value>>(request()).await;
     assert_refusal(
         terminal_answer(request()).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        json!({"error": sentence}),
+        json!({"error": NOT_JSON_CONTENT_TYPE}),
     )
     .await;
 }
 
 #[tokio::test]
 async fn terminal_tenant_drafts_query_is_json() {
-    let uri: axum::http::Uri = "/api/drafts/new?w=a&w=b".parse().unwrap();
-    let Err(rejection) = axum::extract::Query::<
-        crate::routes::standalone_fs::StandaloneMutationQuery,
-    >::try_from_uri(&uri) else {
-        panic!("a repeated field is not a query the route takes");
-    };
-    let sentence = rejection.body_text();
+    // A repeated field is not a query the route takes.
     assert_refusal(
-        terminal_answer(Request::post(uri).body(Body::empty()).unwrap()).await,
+        terminal_answer(
+            Request::post("/api/drafts/new?w=a&w=b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": BAD_QUERY}),
+    )
+    .await;
+}
+
+/// A JSON string where a route takes an object.
+fn json_string(uri: &str) -> Request<Body> {
+    Request::post(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#""x""#))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn workspace_tenant_json_of_the_wrong_type_names_no_rust_type() {
+    assert_refusal(
+        workspace_answer(json_string("/api/survey/reply")).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        json!({"error": WRONG_SHAPE}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_json_of_the_wrong_type_names_no_rust_type() {
+    assert_refusal(
+        terminal_answer(json_string("/api/survey/reply")).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        json!({"error": WRONG_SHAPE}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn launcher_json_of_the_wrong_type_names_no_rust_type() {
+    assert_refusal(
+        launcher_answer(false, json_string("/api/library/windows")).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        json!({"error": WRONG_SHAPE}),
+    )
+    .await;
+}
+
+/// A router assembled without the layer that carries a handler's extension
+/// answers a server fault in the envelope, and names no Rust type.
+#[tokio::test]
+async fn a_missing_extension_is_json_and_names_no_rust_type() {
+    let response = axum::Router::new()
+        .route(
+            "/api/extensions",
+            axum::routing::get(crate::routes::api_extensions),
+        )
+        .oneshot(bodiless("GET", "/api/extensions"))
+        .await
+        .unwrap();
+    assert_refusal(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": MISASSEMBLED}),
     )
     .await;
 }
@@ -687,27 +710,33 @@ fn create_window(content_type: Option<&str>, body: impl Into<Body>) -> Request<B
 /// A launcher route's JSON body, in each shape the JSON extractor refuses.
 #[tokio::test]
 async fn launcher_json_rejections_are_json() {
-    type Framework = axum::Json<crate::CreateWindow>;
     let json = Some("application/json");
-    let cases: [(StatusCode, &dyn Fn() -> Request<Body>); 5] = [
-        (StatusCode::BAD_REQUEST, &|| create_window(json, "{")),
-        (StatusCode::UNPROCESSABLE_ENTITY, &|| {
-            create_window(json, "7")
-        }),
-        (StatusCode::UNSUPPORTED_MEDIA_TYPE, &|| {
-            create_window(None, "{}")
-        }),
-        (StatusCode::PAYLOAD_TOO_LARGE, &|| {
-            create_window(json, vec![b' '; OVER_DEFAULT_LIMIT])
-        }),
-        (StatusCode::BAD_REQUEST, &|| {
-            create_window(json, broken_body())
-        }),
+    let cases: [(StatusCode, &str, Request<Body>); 5] = [
+        (StatusCode::BAD_REQUEST, NOT_JSON, create_window(json, "{")),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            WRONG_SHAPE,
+            create_window(json, "7"),
+        ),
+        (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            NOT_JSON_CONTENT_TYPE,
+            create_window(None, "{}"),
+        ),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            TOO_LARGE,
+            create_window(json, vec![b' '; OVER_DEFAULT_LIMIT]),
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            UNREADABLE_BODY,
+            create_window(json, broken_body()),
+        ),
     ];
-    for (status, request) in cases {
-        let sentence = framework_sentence::<Framework>(request()).await;
+    for (status, sentence, request) in cases {
         assert_refusal(
-            launcher_answer(false, request()).await,
+            launcher_answer(false, request).await,
             status,
             json!({"error": sentence}),
         )
@@ -723,16 +752,17 @@ async fn launcher_bytes_rejections_are_json() {
             .body(body)
             .unwrap()
     };
-    let cases: [(StatusCode, &dyn Fn() -> Body); 2] = [
-        (StatusCode::PAYLOAD_TOO_LARGE, &|| {
-            Body::from(vec![b'x'; OVER_DEFAULT_LIMIT])
-        }),
-        (StatusCode::BAD_REQUEST, &broken_body),
+    let cases: [(StatusCode, &str, Body); 2] = [
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            TOO_LARGE,
+            Body::from(vec![b'x'; OVER_DEFAULT_LIMIT]),
+        ),
+        (StatusCode::BAD_REQUEST, UNREADABLE_BODY, broken_body()),
     ];
-    for (status, body) in cases {
-        let sentence = framework_sentence::<axum::body::Bytes>(off(body())).await;
+    for (status, sentence, body) in cases {
         assert_refusal(
-            launcher_answer(false, off(body())).await,
+            launcher_answer(false, off(body)).await,
             status,
             json!({"error": sentence}),
         )
@@ -743,11 +773,10 @@ async fn launcher_bytes_rejections_are_json() {
 #[tokio::test]
 async fn launcher_path_not_utf8_is_json() {
     let request = || bodiless("DELETE", "/api/library/windows/%FF");
-    let sentence = framework_path_sentence("/api/library/windows/{window_id}", request()).await;
     assert_refusal(
         launcher_answer(false, request()).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": BAD_PATH}),
     )
     .await;
 }
@@ -756,8 +785,6 @@ async fn launcher_path_not_utf8_is_json() {
 #[tokio::test]
 async fn capability_path_not_utf8_is_json_with_its_headers() {
     let request = || bodiless("GET", "/api/library/command-capabilities/%FF");
-    let sentence =
-        framework_path_sentence("/api/library/command-capabilities/{capability}", request()).await;
     let response = launcher_answer(false, request()).await;
     assert_eq!(
         response.headers()[header::CACHE_CONTROL],
@@ -767,43 +794,22 @@ async fn capability_path_not_utf8_is_json_with_its_headers() {
     assert_refusal(
         response,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": BAD_PATH}),
     )
     .await;
 }
 
-/// The query of the launcher's window discard, as the route declares it.
-#[derive(serde::Deserialize)]
-struct ActingWindowQuery {
-    #[allow(dead_code)]
-    #[serde(default)]
-    acting_window_id: Option<String>,
-}
-
-fn query_sentence<T: serde::de::DeserializeOwned>(uri: &axum::http::Uri) -> String {
-    match axum::extract::Query::<T>::try_from_uri(uri) {
-        Ok(_) => panic!("the framework must refuse this query"),
-        Err(rejection) => rejection.body_text(),
-    }
-}
-
 #[tokio::test]
 async fn launcher_query_rejections_are_json() {
-    let repeated: axum::http::Uri = "/api/library/windows/x?acting_window_id=a&acting_window_id=b"
-        .parse()
-        .unwrap();
-    let not_a_bool: axum::http::Uri = "/api/library/workspaces/x?force=x".parse().unwrap();
-    for (uri, sentence) in [
-        (&repeated, query_sentence::<ActingWindowQuery>(&repeated)),
-        (
-            &not_a_bool,
-            query_sentence::<crate::devserver::ForceQuery>(&not_a_bool),
-        ),
+    // A repeated field, and a value that is not the field's type.
+    for uri in [
+        "/api/library/windows/x?acting_window_id=a&acting_window_id=b",
+        "/api/library/workspaces/x?force=x",
     ] {
         assert_refusal(
-            launcher_answer(false, bodiless("DELETE", &uri.to_string())).await,
+            launcher_answer(false, bodiless("DELETE", uri)).await,
             StatusCode::BAD_REQUEST,
-            json!({"error": sentence}),
+            json!({"error": BAD_QUERY}),
         )
         .await;
     }
@@ -868,12 +874,10 @@ async fn terminal_restart_without_a_body_reaches_the_route() {
 
 #[tokio::test]
 async fn terminal_restart_with_a_malformed_body_is_json() {
-    let sentence =
-        framework_sentence::<Option<axum::Json<Value>>>(restart_unknown_terminal(Some("{"))).await;
     assert_refusal(
         terminal_answer(restart_unknown_terminal(Some("{"))).await,
         StatusCode::BAD_REQUEST,
-        json!({"error": sentence}),
+        json!({"error": NOT_JSON}),
     )
     .await;
 }

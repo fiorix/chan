@@ -564,8 +564,10 @@ mod tests {
         );
         assert_eq!(
             to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-            serde_json::json!({"error": "Expected request with `Content-Type: application/json`"})
-                .to_string()
+            serde_json::json!({
+                "error": "the request body must have the content type application/json"
+            })
+            .to_string()
         );
     }
 

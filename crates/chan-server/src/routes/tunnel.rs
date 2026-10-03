@@ -460,13 +460,6 @@ mod tests {
     /// its tunnel or its connection is refused in the envelope.
     #[tokio::test]
     async fn a_leg_with_an_incomplete_query_is_refused_in_the_envelope() {
-        fn sentence<T: serde::de::DeserializeOwned>(uri: &str) -> String {
-            let uri: axum::http::Uri = uri.parse().expect("uri");
-            match axum::extract::Query::<T>::try_from_uri(&uri) {
-                Ok(_) => panic!("the framework must refuse this query"),
-                Err(rejection) => rejection.body_text(),
-            }
-        }
         let cfg = tempfile::tempdir().expect("config dir");
         let library =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
@@ -475,15 +468,14 @@ mod tests {
 
         let control = format!("{CONTROL_PATH}?conn=c-1");
         let conn = format!("{CONN_PATH}?tunnel=tun-1");
-        for (uri, sentence) in [
-            (&control, sentence::<TunnelControlQuery>(&control)),
-            (&conn, sentence::<TunnelConnQuery>(&conn)),
-        ] {
+        for uri in [&control, &conn] {
             let response = app.clone().oneshot(ws_probe(uri)).await.expect("response");
             crate::routes::refusal_tests::assert_refusal(
                 response,
                 StatusCode::BAD_REQUEST,
-                serde_json::json!({"error": sentence}),
+                serde_json::json!({
+                    "error": "the query string does not match what this route accepts"
+                }),
             )
             .await;
         }
