@@ -1,6 +1,10 @@
 # A reopened broken drawing comes back clean
 
-Status: raised for a decision on 2026-10-03 by the builder of [a-draft-that-does-not-parse-cannot-be-discarded](a-draft-that-does-not-parse-cannot-be-discarded.md), as a residual of that build; the owner has not ruled on it. Read in the code on the v0.102.0 integration branch; not run.
+Status: raised for a decision on 2026-10-03 by the builder of [a-draft-that-does-not-parse-cannot-be-discarded](a-draft-that-does-not-parse-cannot-be-discarded.md), as a residual of that build; the owner had not ruled on it then. Read in the code on the v0.102.0 integration branch; not run. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: accepted for a build. The reopen seeds the new draft with the discarded text and marks it unsaved, so its close goes through the dialog that offers Discard and Cancel.
 
 ## What was seen
 

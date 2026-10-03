@@ -1,6 +1,10 @@
 # A forget finds its host by the lock record alone
 
-Status: raised for a decision on 2026-10-03 by the builder of [chan-workspace-forget-ignores-the-hosts-answer](chan-workspace-forget-ignores-the-hosts-answer.md), as a finding beside that build; the owner has not ruled on it. Read in the code on the v0.102.0 integration branch; not run.
+Status: raised for a decision on 2026-10-03 by the builder of [chan-workspace-forget-ignores-the-hosts-answer](chan-workspace-forget-ignores-the-hosts-answer.md), as a finding beside that build; the owner had not ruled on it then. Read in the code on the v0.102.0 integration branch; not run. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: accepted for a build, with a code map first. The command reaches a running devserver through its discovery and asks it, since one devserver owns its library's writes.
 
 ## What was seen
 
