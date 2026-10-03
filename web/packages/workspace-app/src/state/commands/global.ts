@@ -10,6 +10,7 @@
 import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
 import { allowedInWindow, registerCommands, workspaceOnly } from "../commands";
 import {
+  discardWindowSession,
   setThemeChoice,
   setTransientStatus,
   ui,
@@ -301,7 +302,10 @@ registerCommands([
   {
     // Desktop-only: the browser owns its window lifecycle and the wrapper
     // no-ops there. Shares the SHORTCUTS id so the row renders its chord;
-    // allowedInWindow keeps the launcher aligned with the host bridge.
+    // allowedInWindow keeps the launcher aligned with the host bridge. The
+    // discard comes first, as in the close-window command: it deletes the
+    // window's session and stops every later save of it by the page, which
+    // would otherwise write back the record the desktop's close removes.
     id: "app.window.close",
     title: "Close window",
     category: "Global",
@@ -315,6 +319,9 @@ registerCommands([
     },
     available: (ctx) =>
       isTauriDesktop() && allowedInWindow("app.window.close", ctx),
-    run: () => flushAndCloseWindow(),
+    run: () => {
+      discardWindowSession();
+      flushAndCloseWindow();
+    },
   },
 ]);
