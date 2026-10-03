@@ -251,12 +251,15 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     await Promise.all([second, overwrite]);
 
     // The save on the wire carried the hash and is refused as the first one
-    // was; the write that follows it is Overwrite's.
+    // was, which opens the prompt the click closed; the write that follows it
+    // is Overwrite's, and its acceptance closes that prompt.
     expect(puts.slice(1)).toEqual([
       { token: "100", sha: SHA_LOADED, body: "loaded and mine" },
       { token: "100", sha: null, body: "loaded and mine" },
     ]);
-    expect({ file: file.text, ...held(t) }).toEqual({
+    expect({ prompt: conflictDialog.open, promptTab: conflictDialog.tabId, file: file.text, ...held(t) }).toEqual({
+      prompt: false,
+      promptTab: null,
       file: "loaded and mine",
       content: "loaded and mine",
       saved: "loaded and mine",
@@ -290,7 +293,9 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
       { token: "100", sha: SHA_LOADED, body: "loaded and mine" },
       { token: "150", sha: null, body: "loaded and mine" },
     ]);
-    expect({ file: file.text, ...held(moved) }).toEqual({
+    expect({ prompt: conflictDialog.open, promptTab: conflictDialog.tabId, file: file.text, ...held(moved) }).toEqual({
+      prompt: false,
+      promptTab: null,
       file: "loaded and mine",
       content: "loaded and mine",
       saved: "loaded and mine",
@@ -368,6 +373,26 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
       saved: "loaded and mine",
       token: "101",
     });
+  });
+
+  test("an accepted save of another tab leaves a tab's prompt open", async () => {
+    const t = await loadedTab();
+    file.text = "theirs";
+    t.content = "loaded and mine";
+    await saveTab(t);
+    expect(conflictDialog.open, "the first save is refused").toBe(true);
+
+    files.set(OTHER_PATH, { text: "saved", token: "7" });
+    const other = readTab(OTHER_TAB)!;
+    other.content = "saved and mine";
+    await saveTab(other);
+    expect(puts.at(-1)).toEqual({ token: null, sha: sha256("saved"), body: "saved and mine" });
+    expect({
+      prompt: conflictDialog.open,
+      promptTab: conflictDialog.tabId,
+      other: files.get(OTHER_PATH)!.text,
+      otherSaved: other.saved,
+    }).toEqual({ prompt: true, promptTab: TAB, other: "saved and mine", otherSaved: "saved and mine" });
   });
 
   test.each([
