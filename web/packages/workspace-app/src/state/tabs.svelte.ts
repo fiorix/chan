@@ -3157,6 +3157,9 @@ async function loadTabContent(
   const controller = new AbortController();
   tabLoadControllers.set(tabId, controller);
   tabLoadFailures.delete(tabId);
+  // The load replaces the token an Overwrite adopted and the text it would
+  // have written over.
+  overwritePending.delete(tabId);
   // Resolve by id across the whole layout, the way the close path does, so a
   // tab finishes its load wherever it now is.
   //
@@ -5741,12 +5744,18 @@ const AUTOSAVE_DEBOUNCE_MS = 800;
 const autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const savingTabs = new Set<string>();
 const saveAgainAfterCurrent = new Set<string>();
-/// Tabs whose user chose Overwrite and whose overwriting write is not built
-/// yet. That write goes over bytes the tab did not load, so it names no hash
-/// of the loaded text. The mark is taken by the first write built under it
-/// and ends with the save run the click started or joined, so it frees one
-/// write and none after. It is kept by tab id: a move replaces the tab object
-/// between the click and the write.
+/// Tabs whose user chose Overwrite and whose choice has met no answer yet.
+/// The click adopts the conflict's token while the tab keeps the text it
+/// loaded before the conflict, so a write built under the mark goes over
+/// bytes the tab did not load and names no hash of that text. The mark ends
+/// where the token and the loaded text agree again or the user is asked
+/// again: at an accepted write of the tab, at a conflict answered to a write
+/// built under it, and at a load. A write that meets no answer and a save
+/// that builds no write leave it, or the next save would name the hash the
+/// user chose to write over and be refused for a file nobody changed since
+/// the click. It goes with the adopted token and so outlives a close: a
+/// reopened tab replays that token. It is kept by tab id: a move replaces the
+/// tab object between the click and the write.
 const overwritePending = new Set<string>();
 /// The missing-file tab the next file opened into its pane replaces, and how
 /// that re-open ends (see `beginMissingFileReopen`).
@@ -6079,7 +6088,6 @@ async function performSave(t: FileTab): Promise<void> {
   } finally {
     savingTabs.delete(t.id);
     saveAgainAfterCurrent.delete(t.id);
-    overwritePending.delete(t.id);
   }
 }
 
@@ -6164,9 +6172,9 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // The text the tab's last load or accepted save left it, which the
   // standalone surface hashes into the write's precondition: the token is
   // a timestamp, and a change to the file can keep it. Nothing is handed
-  // where nothing was loaded (the tab holds no token), for the write
-  // Overwrite frees, or in a workspace window, whose route reads no hash.
-  const overwriting = overwritePending.delete(live.id);
+  // where nothing was loaded (the tab holds no token), for a write under
+  // Overwrite's choice, or in a workspace window, whose route reads no hash.
+  const overwriting = overwritePending.has(live.id);
   const holdsToken = expectedMtimeNs !== null || expectedMtime !== null;
   const loadedText =
     usesStandaloneFiles() && holdsToken && !overwriting ? live.saved : null;
@@ -6200,6 +6208,8 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     done.unresolvedLivePush = false;
     done.unresolvedLiveSave = false;
     done.fileMissing = null;
+    // The saved text is the file's again, whichever write this is.
+    overwritePending.delete(done.id);
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
   } catch (e) {
@@ -6212,6 +6222,9 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) {
         current.saveError = null;
       }
+      // The prompt below asks again. A refusal of a write built before the
+      // click answers nothing of the choice, which the rerun then writes.
+      if (overwriting) overwritePending.delete(t.id);
       const data = e.data as {
         current_mtime?: number | null;
         current_mtime_ns?: string | null;
