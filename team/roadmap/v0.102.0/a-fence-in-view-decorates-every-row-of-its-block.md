@@ -6,6 +6,8 @@ Status: raised for a decision on 2026-10-03 by the builder of the open rows of [
 
 On 2026-10-03 the owner ruled, as the lead recommended: the measurement is accepted, on a fence of 20,000 lines; a build is ruled after it.
 
+Later on 2026-10-03, with the measurement below in hand, the owner ruled as the lead recommended: the item closes as measured, with no build. The 200 ms keystroke found beside it is [a-keystroke-in-a-long-paragraph-takes-200-ms](a-keystroke-in-a-long-paragraph-takes-200-ms.md).
+
 ## What was seen
 
 The decoration walker iterates the syntax tree over the editor's viewport, but for a fenced code block that touches the viewport its handler works on the whole block (`handleFencedCode`, `web/packages/workspace-app/src/editor/decorations/blocks.ts:173`): it pushes one line decoration for every row of the block (`:270-277`), and it slices the block's whole body into a string for the copy badge (`:253-267`), which the badge's `eq` then compares with the last one (`:60-62`). That runs at every recompute, which is every keystroke, caret move and scroll. So the work for a fence in view grows with the block's length and not with what is shown.

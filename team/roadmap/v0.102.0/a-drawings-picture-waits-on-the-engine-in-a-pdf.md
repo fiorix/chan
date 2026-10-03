@@ -1,6 +1,10 @@
 # A picture inside a drawing is still painted at the engine's timing in an exported PDF
 
-Status: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of [a-slide-decks-pdf-lacks-the-images-it-shows](a-slide-decks-pdf-lacks-the-images-it-shows.md); the owner has not ruled on it. Read in the code on that item's range; no WebKit ran.
+Status: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of [a-slide-decks-pdf-lacks-the-images-it-shows](a-slide-decks-pdf-lacks-the-images-it-shows.md); the owner has not ruled on it. Read in the code on that item's range; no WebKit ran. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: the owner's own reading on a display first, a page with a drawing that holds a picture, exported from the desktop app; a build is ruled after it. The fault is read in the code and not seen, and nothing is built until that reading.
 
 ## What was seen
 

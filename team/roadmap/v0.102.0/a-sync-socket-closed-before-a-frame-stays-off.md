@@ -6,6 +6,8 @@ Status: raised for a decision on 2026-09-30 and held under v0.102.0, since the o
 
 On 2026-10-03 the owner ruled, as the lead recommended: the reading is accepted. A web seat reads the first dial at the current head, and a fix is ruled after it.
 
+Later on 2026-10-03, with the reading in hand, the owner ruled as the lead recommended: the latch is dropped. A first dial of a kind that closes with no frame retries, as a dial does after one frame; one change in the page covers the devserver's gate and the scene socket's attach timeout. Not verified in the reading, and the build's to check: that no way of serving the page lacks the route.
+
 ## What was seen
 
 By the report: a window's document sync socket and its scene sync socket "stay off for the page's life when the first dial closes before a frame" (`web/packages/workspace-app/src/state/docSync.svelte.ts:859-866`; `sceneSync.svelte.ts:670-676`; the report's lines, at its lane's base `61895c96d`). The report infers the cause and marks it as the question to settle first: that the devserver's gate, which refuses a tenant's requests while the devserver starts or stops, refuses the socket's upgrade. The lead's note to the owner says the same, as the seat's inference.

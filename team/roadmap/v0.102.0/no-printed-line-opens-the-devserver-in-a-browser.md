@@ -8,6 +8,8 @@ Accepted on 2026-10-03 for v0.102.0 on the owner's word "new roadmap item". The 
 
 On 2026-10-03 the owner ruled, as the lead recommended: `status` prints the launch URL with its token only when its output is a terminal, and a flag forces it elsewhere. The masking default is built as this item describes.
 
+Later on 2026-10-03 the owner ruled three choices the builds of the masking default left, each as the lead recommended. A control terminal whose masking is on uses the xterm backend, whatever the backend preference, since the masker exists on that backend alone; an explicit `false` keeps the configured backend. Settings shows the effective value for the window and gains a "Use default" action that removes the stored value. A `server.toml` that already holds `secret_masking = false` is not migrated: a stored `false` is an explicit `false`, clearing the value or deleting the line gets the default, and the changelog says so.
+
 ## What was seen
 
 The owner's words: "chan devserver status does not print the url or the token; it should print the full URL"; "the control terminal which does print the token that we scrape, does not print the URL - and it should, because users should be able to just click it to open the same devserver in a browser"; "only the control terminal should have the secret masking ON by default".

@@ -1,6 +1,10 @@
 # A keystroke in a very long paragraph takes about 200 milliseconds
 
-Status: raised for a decision on 2026-10-03 by the builder who measured [a-fence-in-view-decorates-every-row-of-its-block](a-fence-in-view-decorates-every-row-of-its-block.md), from that measurement's comparison arm; the owner has not ruled on it. Measured in headless Chrome on the v0.102.0 integration branch.
+Status: raised for a decision on 2026-10-03 by the builder who measured [a-fence-in-view-decorates-every-row-of-its-block](a-fence-in-view-decorates-every-row-of-its-block.md), from that measurement's comparison arm; the owner has not ruled on it. Measured in headless Chrome on the v0.102.0 integration branch. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: a trace first. The measurement attributes about half of the keystroke's 200 ms to the decoration walker's parse budget and leaves the other half untraced, so a build cannot be sized yet; a build is ruled after the trace. The item is accepted for the trace alone.
 
 ## What was seen
 
