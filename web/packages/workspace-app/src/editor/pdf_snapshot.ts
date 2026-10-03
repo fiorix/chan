@@ -296,7 +296,6 @@ type LiftedImage = {
   /// Raster rows of the image painted so far. A document image taller
   /// than what is left of its page continues on the next one.
   shownPx: number;
-  painted: boolean;
   /// The image's last row has been painted.
   done: boolean;
 };
@@ -309,10 +308,10 @@ export class PageImages {
   /// In lifting order; `LIFTED_ATTR` holds the index.
   readonly lifted: LiftedImage[] = [];
 
-  /// Fail by name for each image that has a place and was never painted.
+  /// Fail by name for each image that has a place and was not painted whole.
   assertPainted(): void {
     const missing = this.lifted
-      .filter((image) => image.rendered && !image.painted)
+      .filter((image) => image.rendered && !image.done)
       .map((image) => image.name);
     if (missing.length > 0) {
       throw new SnapshotError(
@@ -390,7 +389,6 @@ export async function liftPageImages(
       heightPx,
       rendered: !root.isConnected || img.getClientRects().length > 0,
       shownPx: 0,
-      painted: false,
       done: false,
     });
     img.setAttribute("src", standInSrc(widthPx, heightPx));
@@ -749,7 +747,6 @@ async function paintLiftedImages(
       ctx.drawImage(image.bitmap, place.x, place.y, place.width, place.height);
       ctx.restore();
       image.shownPx = place.shownPx;
-      image.painted = true;
       image.done = place.done;
     });
   }
