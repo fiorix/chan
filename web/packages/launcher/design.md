@@ -200,7 +200,9 @@ No launcher route is exempt from the refusal checker. The live-terminals 409 is 
 
 ## A workspace row's name
 
-A row shows its workspace's label and, when the label is empty, `rootName` of its root (`lib/windowLabel.ts`): the root's last component on its host, cut at `/` alone. A Windows root with no label therefore reads whole. The command deck gives a workspace window whose workspace has no row the same name, from its `workspace_path`.
+A row shows its workspace's label and, when the label is empty, `rootName` of its root (`lib/windowLabel.ts`): the root's last component on its host, cut at `/` alone. A Windows root with no label therefore reads whole. The server fills a label it was not given from the root's last component by its own host's path rules, so a local row's label is empty only for a root with no last component or one that is not UTF-8; a devserver's row carries its whole root as the label in that case.
+
+Both command decks name a row the same way, and name a workspace window by the row that lists its workspace: the row whose `path` equals the record's `workspace_path`, in the same library here and among the one library's rows in the workspace app's deck. A window whose workspace no row lists is named from its own `workspace_path` by the same cut at `/` alone, or `Workspace` when that leaves nothing, so a Windows root no row lists reads whole in both decks. Neither deck cuts at `\`, which a Unix directory's name may hold.
 
 ## Build integration
 
