@@ -7339,8 +7339,8 @@ mod tests {
             .any(|row| row.root_path == root)
     }
 
-    /// Assert that a removal left the workspace at `other` registered, on
-    /// and with its window.
+    /// Assert that a removal or a close of another workspace left the one
+    /// at `other` registered, on and with its window.
     #[cfg(unix)]
     fn assert_left_whole(
         host: &WorkspaceHost,
@@ -7352,18 +7352,18 @@ mod tests {
         let path = other.to_string_lossy().into_owned();
         assert!(
             registered(host, other),
-            "the removal unregistered another workspace: {outcome:?}"
+            "another workspace was unregistered: {outcome:?}"
         );
         assert!(
             windows
                 .snapshot()
                 .iter()
                 .any(|row| row.workspace_path.as_deref() == Some(path.as_str())),
-            "the removal removed another workspace's window: {outcome:?}"
+            "another workspace's window was removed: {outcome:?}"
         );
         assert!(
             overlay.on_paths().contains(&path),
-            "the removal turned another workspace off: {outcome:?}"
+            "another workspace was turned off: {outcome:?}"
         );
     }
 
@@ -7486,6 +7486,53 @@ mod tests {
             assert!(
                 matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
                 "the removal did not answer that it removed the workspace: {outcome:?}"
+            );
+        }
+
+        /// Assert that a close answered `outcome` took the relinked
+        /// workspace down when it was `mounted`, left it registered with no
+        /// row on, and left the other one whole, mounted when
+        /// `other_mounted`.
+        fn assert_closed_it_alone(
+            &self,
+            mounted: bool,
+            other_mounted: bool,
+            outcome: &Result<WorkspaceLifecycleOutcome, Error>,
+        ) {
+            if other_mounted {
+                assert!(
+                    self.host.mounted_root(&self.other_folder).is_some(),
+                    "the close closed another workspace: {outcome:?}"
+                );
+            }
+            assert_left_whole(
+                &self.host,
+                &self.overlay,
+                &self.windows,
+                &self.other,
+                outcome,
+            );
+            assert!(
+                self.host.mounted_root(&self.canonical).is_none(),
+                "the close left the workspace it names mounted: {outcome:?}"
+            );
+            assert!(
+                registered(&self.host, &self.stored),
+                "the close unregistered the workspace it names: {outcome:?}"
+            );
+            assert_eq!(
+                self.overlay.on_paths(),
+                vec![self.other.to_string_lossy().into_owned()],
+                "the close left the workspace it names on: {outcome:?}"
+            );
+            let expected = if mounted {
+                WorkspaceLifecycleOutcome::Completed
+            } else {
+                WorkspaceLifecycleOutcome::NotFound
+            };
+            assert!(
+                matches!(outcome, Ok(answer) if *answer == expected),
+                "the close did not answer {expected:?}: {outcome:?}"
             );
         }
     }
@@ -7738,6 +7785,122 @@ mod tests {
         assert!(
             matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
             "the removal did not answer that it removed the workspace: {outcome:?}"
+        );
+    }
+
+    /// A close by the root a workspace's row stores, as the launcher's off
+    /// names it, after that root was pointed at another registered
+    /// workspace's folder while the workspace was mounted, takes that
+    /// workspace down and leaves the other one whole.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_by_the_stored_root_of_a_mounted_root_relinked_onto_another_workspace_leaves_that_workspace(
+    ) {
+        let fixture = RelinkedOnto::new(true, true, false).await;
+        let outcome = fixture
+            .host
+            .close_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_closed_it_alone(true, true, &outcome);
+    }
+
+    /// The same for a workspace that is not mounted, beside another that is
+    /// not mounted either: the off is recorded under the row the close
+    /// names, and the other workspace's row, which goes by the folder the
+    /// stored root resolves to, stays on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_by_the_stored_root_of_a_root_relinked_onto_another_row_leaves_that_row() {
+        let fixture = RelinkedOnto::new(false, false, false).await;
+        let outcome = fixture
+            .host
+            .close_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_closed_it_alone(false, false, &outcome);
+    }
+
+    /// The same for a workspace that is not mounted, beside another whose
+    /// own root moved under a symlink and which is mounted: only its runtime
+    /// goes by the folder the stored root resolves to, and it stays mounted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_by_the_stored_root_of_a_root_relinked_onto_another_runtime_leaves_that_runtime(
+    ) {
+        let fixture = RelinkedOnto::new(false, true, true).await;
+        let outcome = fixture
+            .host
+            .close_workspace_for_root(&fixture.stored, false)
+            .await;
+        fixture.assert_closed_it_alone(false, true, &outcome);
+    }
+
+    /// A close by the root a mounted workspace's row stores, after that
+    /// root stopped resolving, takes the workspace down and leaves no
+    /// on-row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_by_the_stored_root_of_a_mounted_root_that_resolves_nowhere_takes_it_down() {
+        let (host, overlay, stored, canonical, _dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        std::fs::remove_file(stored.parent().expect("the linked parent"))
+            .expect("unlink the parent");
+        assert!(
+            std::fs::canonicalize(&stored).is_err(),
+            "fixture: the stored root still resolves"
+        );
+
+        let outcome = host.close_workspace_for_root(&stored, false).await;
+
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the close left the workspace it names mounted: {outcome:?}"
+        );
+        assert_eq!(
+            overlay.on_paths(),
+            Vec::<String>::new(),
+            "an on-row survived the off: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the close did not answer that it took the workspace down: {outcome:?}"
+        );
+    }
+
+    /// A close by a path no registry row stores goes by the key the path
+    /// resolves to: a second link to a mounted relinked root's folder takes
+    /// that workspace down and leaves no on-row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_by_a_path_no_row_stores_goes_by_the_key_it_resolves_to() {
+        let (host, overlay, stored, canonical, dirs) = relinked_host();
+        host.open_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("mount the relinked root");
+        let link = dirs[1].path().join("second");
+        std::os::unix::fs::symlink(canonical.parent().expect("the folder's parent"), &link)
+            .expect("link the folder's parent a second time");
+        let named = link.join("ws");
+        assert!(
+            named != stored && named != canonical,
+            "fixture: the second link is a spelling the registry or the runtime holds"
+        );
+
+        let outcome = host.close_workspace_for_root(&named, false).await;
+
+        assert!(
+            host.mounted_root(&canonical).is_none(),
+            "the close left the workspace its path resolves to mounted: {outcome:?}"
+        );
+        assert_eq!(
+            overlay.on_paths(),
+            Vec::<String>::new(),
+            "an on-row survived the off: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+            "the close did not answer that it took the workspace down: {outcome:?}"
         );
     }
 
