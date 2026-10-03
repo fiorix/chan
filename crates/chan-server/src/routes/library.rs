@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, RawQuery, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -581,6 +581,11 @@ struct ScopedLibraryWindow {
     label: String,
     workspace_path: Option<String>,
     connected: bool,
+    /// The record's holders, as the record carries them: omitted where the
+    /// record has none to give, a row a connected devserver's feed
+    /// contributed from a server that does not count them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    holders: Option<Vec<String>>,
     hidden: bool,
     control: bool,
     /// Whether this row is one this host's window registry holds. The
@@ -683,6 +688,7 @@ fn scoped_window(
         label: record.label,
         workspace_path: record.workspace_path,
         connected: record.connected,
+        holders: record.holders,
         hidden: record.hidden,
         control: record.control,
         managed,
@@ -1005,9 +1011,16 @@ async fn handle_library_command_live_terminals(
     .into_response()
 }
 
+/// `GET /api/library/command-capabilities/{capability}/windows/{window_id}/launch`:
+/// redirect to the page of one window of the capability's own library, on
+/// the tenant that serves it. A well-formed `h` in this route's own query,
+/// the holder the opener asks the page to be (`ws::holder_tag`), is copied
+/// into the tenant URL, where the page reads it and tags its socket; any
+/// other `h` is left out and the redirect is made all the same.
 async fn handle_library_command_launch(
     State(state): State<Arc<LibraryCommandState>>,
     AxumPath((capability, window_id)): AxumPath<(String, String)>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
     // Resolving the capability is the gate: an unknown or dead one is refused
     // here. The launch URL is built from the path's window id and its record,
@@ -1041,6 +1054,9 @@ async fn handle_library_command_launch(
     query.append_pair("lib", state.host.library_id());
     if record.kind == WindowKind::Terminal {
         query.append_pair("kind", "terminal");
+    }
+    if let Some(holder) = super::ws::holder_tag(raw_query.as_deref()) {
+        query.append_pair("h", &holder);
     }
     let target = format!("{path}?{}", query.finish());
     Redirect::temporary(&target).into_response()

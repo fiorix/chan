@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{RawQuery, State};
 use axum::response::Response;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -33,9 +33,36 @@ use crate::window_transfers::TransferGuard;
 /// sockets register with `WindowPresence` so `GET /api/windows` can
 /// report which windows are currently connected. Absent on untagged
 /// clients (tests, curl) -- they simply don't appear in presence.
+///
+/// The socket's holder (`&h=<holder>`) is not a field here: it is read
+/// from the raw query by `holder_tag`, which refuses nothing.
 #[derive(Deserialize)]
 pub struct WsQuery {
     w: Option<String>,
+}
+
+/// The longest holder tag a socket can carry.
+const HOLDER_TAG_MAX: usize = 64;
+
+/// The holder a query string names with `h`: who holds the socket, or who
+/// asks for a page that will. The tag is opaque to the server, 1 to
+/// `HOLDER_TAG_MAX` characters of `[A-Za-z0-9_-]`, so it needs no escaping
+/// wherever it is copied. A query with no `h`, an empty one, more than one,
+/// or one that is not such a tag names no holder: that is never a refusal,
+/// since a window's socket counts toward its `connected` whoever holds it.
+pub(crate) fn holder_tag(query: Option<&str>) -> Option<String> {
+    let mut tags = url::form_urlencoded::parse(query?.as_bytes())
+        .filter(|(key, _)| key == "h")
+        .map(|(_, tag)| tag);
+    let tag = tags.next()?;
+    if tags.next().is_some() {
+        return None;
+    }
+    let well_formed = (1..=HOLDER_TAG_MAX).contains(&tag.len())
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    well_formed.then(|| tag.into_owned())
 }
 
 /// The target window id of a compact `window_command` or `transfer_queue` frame, or `None` for other frames. Both put `type` and `window_id` first, so the id can be read without parsing the remaining payload, which can include multi-MB clipboard data. An unrecognized prefix broadcasts the frame. The SPA re-checks `window_id` only for `window_command`; it matches `transfer_queue` frames by transfer id.
@@ -130,6 +157,7 @@ pub(crate) fn spawn_transfer_queue_reporter(
 pub async fn ws_upgrade(
     State(state): State<Arc<AppState>>,
     Query(q): Query<WsQuery>,
+    RawQuery(raw_query): RawQuery,
     // A `/ws` that arrived over the devserver's gateway tunnel carries the
     // `TunnelOrigin` request-extension marker; the loopback bind (and an
     // `ssh -L` forward to it) never does, nor does the desktop embedded server.
@@ -158,10 +186,15 @@ pub async fn ws_upgrade(
     let pending_commands = state.pending_window_commands.clone();
     let survey_bus = state.survey_bus.clone();
     let window_id = q.w.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
+    let holder = holder_tag(raw_query.as_deref());
     ws.on_upgrade(move |mut socket| async move {
         // RAII presence ref: held across the pump so EVERY exit path
-        // (clean close, network drop, shutdown) deregisters the window.
-        let _presence = window_id.as_ref().map(|id| presence.connect(id, None));
+        // (clean close, network drop, shutdown) deregisters the window, and
+        // its holder with it. A holder is counted only for a window: a
+        // socket with no window id is in no presence at all.
+        let _presence = window_id
+            .as_ref()
+            .map(|id| presence.connect(id, holder.as_deref()));
         // RAII transfer guard for the same `?w=` window: the pump calls
         // `set` on each `transfers` frame, and Drop clears this socket's
         // contribution on every exit path (so a reload reads inactive).
