@@ -22,6 +22,7 @@ import { api } from "../api/client";
 import { basename } from "../state/format";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
+  IMAGE_PREP_BATCH,
   inlinePageResources,
   liftPageImages,
   PageImages,
@@ -37,6 +38,25 @@ import { type SlideDomTheme } from "./slide_dom";
 /// Ceiling for one page's full hydrate -> snapshot pass. The engine
 /// fails with an error rather than hanging.
 const PAGE_TIMEOUT_MS = 30_000;
+
+/// The longest a document's resource pass may take, whatever it holds.
+/// Measured in headless Chrome, forty images go through a whole export in
+/// under four seconds, so five minutes is the work of some three thousand:
+/// a pass still running then is stuck, not slow.
+const DOCUMENT_RESOURCES_CEILING_MS = 5 * 60_000;
+
+/// The bound on a document's resource pass. Its images are fetched and
+/// decoded a batch at a time, so on top of the time every pass has for its
+/// fonts and styles each batch is allowed one fetch and one decode at
+/// their step bound. Counted per image the sum would reach hours for a
+/// document of a thousand; it stops at the ceiling.
+function documentResourcesTimeoutMs(imageCount: number): number {
+  const batches = Math.ceil(imageCount / IMAGE_PREP_BATCH);
+  return Math.min(
+    DOCUMENT_RESOURCES_CEILING_MS,
+    PAGE_TIMEOUT_MS + batches * 2 * DEFAULT_STEP_TIMEOUT_MS,
+  );
+}
 
 export type ExportMarkdownOptions = {
   /// Workspace path of the markdown source (image resolution + naming).
@@ -317,15 +337,14 @@ export async function exportMarkdownToPdf(
     // the measurement so the swap cannot disturb the layout the cuts were
     // taken from.
     const images = new PageImages();
-    // The inlining and decode pass is sequential; keep a bound for it
-    // that includes each image's own bounded step.
-    const imageCount = doc.root.querySelectorAll("img, image").length;
     await withPageTimeout(
       inlinePageResources(doc.root).then(() =>
         liftPageImages(doc.root, images),
       ),
       "document resources",
-      PAGE_TIMEOUT_MS + imageCount * 2 * DEFAULT_STEP_TIMEOUT_MS,
+      documentResourcesTimeoutMs(
+        doc.root.querySelectorAll("img, image").length,
+      ),
     );
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");

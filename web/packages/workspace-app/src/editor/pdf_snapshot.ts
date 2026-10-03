@@ -28,7 +28,7 @@ export const DEFAULT_STEP_TIMEOUT_MS = 15_000;
 
 /// Prepare independent images together without letting a large document
 /// start an unbounded number of fetches or decodes at once.
-const IMAGE_PREP_BATCH = 8;
+export const IMAGE_PREP_BATCH = 8;
 
 async function mapImageSteps<T, U>(
   items: readonly T[],
