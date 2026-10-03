@@ -10,13 +10,28 @@ export type HeldDecode = {
   settle: (decoded: boolean) => void;
 };
 
-let decodes: HeldDecode[] = [];
+let decodes: HeldDecode[] | null = null;
 
 /// Start a fresh list of held decodes and return it. Every `StandInImage`
 /// asked to decode adds itself here and waits for the test to settle it.
 export function heldDecodes(): HeldDecode[] {
   decodes = [];
   return decodes;
+}
+
+/// Let every `StandInImage` decode at once, for a test that is not about
+/// when an image decodes.
+export function decodesSettleAtOnce(): void {
+  decodes = null;
+}
+
+/// Give every image a box. jsdom lays out nothing, so an image has none
+/// there, and the snapshot takes an attached image with no box for one
+/// the page does not show.
+export function imagesHaveBoxes(): void {
+  vi.spyOn(HTMLImageElement.prototype, "getClientRects").mockReturnValue([
+    {},
+  ] as unknown as DOMRectList);
 }
 
 /// The engine's `Image`. A page's own SVG document loads at once, as an
@@ -41,8 +56,10 @@ export class StandInImage {
   }
 
   decode(): Promise<void> {
+    const held = decodes;
+    if (!held) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
-      decodes.push({
+      held.push({
         src: this.#src,
         settle: (decoded) =>
           decoded ? resolve() : reject(new Error("the image is broken")),
@@ -56,8 +73,9 @@ export type Drawn = { what: "page" | "markers" | "image"; args: unknown[] };
 export type MarkerBox = { x: number; y: number; w: number; h: number };
 
 /// Install a canvas that records each draw and answers a read of its pixels
-/// with the last page drawn on it: where that page's stylesheet gives an
-/// image a marker colour, a block of that colour at `markerBox`. `png` is
+/// with the last page drawn on it: for each marker colour that page's
+/// stylesheet gives an image, a block of that colour. The first is at
+/// `markerBox` and each next one directly below the one before. `png` is
 /// what the canvas encodes to.
 export function standInCanvas(
   markerBox: MarkerBox,
@@ -86,11 +104,12 @@ export function standInCanvas(
     },
     getImageData: (_x: number, _y: number, width: number, height: number) => {
       const data = new Uint8ClampedArray(width * height * 4);
-      const colour = lastPage.match(
-        /background-color:\s*rgb\((\d+),\s*(\d+),\s*(\d+)\)/,
+      const colours = lastPage.matchAll(
+        /background-color:\s*rgb\((\d+),\s*(\d+),\s*(\d+)\)/g,
       );
-      if (colour) {
-        for (let y = markerBox.y; y < markerBox.y + markerBox.h; y++) {
+      let top = markerBox.y;
+      for (const colour of colours) {
+        for (let y = top; y < top + markerBox.h; y++) {
           for (let x = markerBox.x; x < markerBox.x + markerBox.w; x++) {
             const at = (y * width + x) * 4;
             data[at] = Number(colour[1]);
@@ -99,6 +118,7 @@ export function standInCanvas(
             data[at + 3] = 255;
           }
         }
+        top += markerBox.h;
       }
       return { data, width, height };
     },

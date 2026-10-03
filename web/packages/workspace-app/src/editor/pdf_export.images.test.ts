@@ -10,6 +10,7 @@ import { PDFDocument } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   heldDecodes,
+  imagesHaveBoxes,
   settled,
   standInCanvas,
   StandInImage,
@@ -64,6 +65,7 @@ beforeEach(() => {
   // An image of the composition has arrived: the export waits for that
   // before it measures, and no image of a jsdom page ever loads.
   vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+  imagesHaveBoxes();
   drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 }, TINY_PNG);
 });
 

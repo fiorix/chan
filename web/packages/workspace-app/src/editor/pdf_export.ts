@@ -21,10 +21,13 @@ import { api } from "../api/client";
 import { basename } from "../state/format";
 import {
   inlinePageResources,
+  liftPageImages,
+  PageImages,
   snapshotPage,
   SnapshotError,
   type PageBoxPx,
   type PageSnapshot,
+  type SnapshotOptions,
 } from "./pdf_snapshot";
 import { parseSlidesSpec, splitSlidePages } from "./slides";
 import { type SlideDomTheme } from "./slide_dom";
@@ -44,12 +47,13 @@ export type ExportMarkdownOptions = {
 /// Test seam: the orchestrator's page rasterizer. `box` is the CSS-px
 /// box `root` lays out at; deck pages also pass a per-page scale that
 /// maps their preview-reference layout box onto the fixed A4 bitmap
-/// (documents omit it and raster at the default RASTER_SCALE).
+/// (documents omit it and raster at the default RASTER_SCALE). A
+/// document's pages pass the images they share and say which is last.
 export type ExportSeams = {
   rasterize?: (
     root: HTMLElement,
     box: PageBoxPx,
-    opts?: { scale?: number },
+    opts?: Pick<SnapshotOptions, "scale" | "images" | "lastPage">,
   ) => Promise<PageSnapshot>;
 };
 
@@ -286,22 +290,33 @@ export async function exportMarkdownToPdf(
       measureDocBlocks(doc.content),
       geometry.pageContentHeightPx,
     );
-    // Inline every resource once, on the composed document, before the
-    // pages clone it. Each clone carries its own `data:` copies, so the
-    // per-page snapshot has no image left to fetch; without this an
-    // N-page document with M images would fetch N times M. Fonts are not
-    // covered: the per-page pass collects and fetches them again for
-    // every page. It runs after the measurement so the swap cannot
-    // disturb the layout the cuts were taken from.
-    await withPageTimeout(inlinePageResources(doc.root), "document resources");
+    // Inline every resource and lift every image once, on the composed
+    // document, before the pages clone it. Each clone carries a stand-in
+    // for each image, so the per-page snapshot has no image left to fetch
+    // or decode; without this an N-page document with M images would
+    // fetch and decode N times M. Fonts are not covered: the per-page
+    // pass collects and fetches them again for every page. It runs after
+    // the measurement so the swap cannot disturb the layout the cuts were
+    // taken from.
+    const images = new PageImages();
+    await withPageTimeout(
+      inlinePageResources(doc.root).then(() =>
+        liftPageImages(doc.root, images),
+      ),
+      "document resources",
+    );
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");
     for (const [index, pageEl] of pages.entries()) {
       const snap = await withPageTimeout(
-        rasterize(pageEl, {
-          widthPx: DOC_CONTENT_WIDTH_PX,
-          heightPx: geometry.pageContentHeightPx,
-        }),
+        rasterize(
+          pageEl,
+          {
+            widthPx: DOC_CONTENT_WIDTH_PX,
+            heightPx: geometry.pageContentHeightPx,
+          },
+          { images, lastPage: index === pages.length - 1 },
+        ),
         `page ${index + 1} render`,
       );
       const png = await pdf.embedPng(snap.png);

@@ -8,6 +8,18 @@
 // missed reference rasterizes as a blank region or a broken-image
 // glyph. Failing the export with a named offender beats shipping a
 // silently incomplete PDF.
+//
+// An <img> is the one thing the page's SVG document is not trusted to
+// paint. An engine may report the SVG image loaded before the images
+// nested in it have loaded or decoded (WebKit does), and nothing outside
+// that document can ask whether they have, so a page drawn at that load
+// can come out with its text and without its pictures. Each image is
+// therefore decoded here, in the app's own document, where `decode()`
+// answers. The page keeps an empty stand-in of the image's size in its
+// place, a second raster of the page with each stand-in filled with a
+// marker colour says where it landed, and the decoded bitmap is drawn
+// there. An image that does not decode, or that the page gives no place,
+// fails the snapshot by name.
 
 /// Default per-step timeout. Every await in the snapshot pipeline is
 /// bounded so a wedged fetch or decode degrades to an error, never a
@@ -83,6 +95,27 @@ async function fetchAsDataUrl(
     return null;
   }
 }
+
+/// The media type a `data:` URL declares, lower-cased; "" when it
+/// declares none.
+function dataUrlType(url: string): string {
+  const comma = url.indexOf(",");
+  const header = url.slice("data:".length, comma < 0 ? url.length : comma);
+  return header.split(";")[0]!.trim().toLowerCase();
+}
+
+/// What an error calls a resource: its address without the query, which
+/// is where a window's token rides. An inline `data:` resource has no
+/// address and is called by its media type.
+function resourceName(url: string): string {
+  if (url.startsWith("data:")) return `data:${dataUrlType(url)}`;
+  const cut = url.search(/[?#]/);
+  return cut < 0 ? url : url.slice(0, cut);
+}
+
+/// The address each inlined image was fetched from. Once its `src` is a
+/// `data:` URI the element no longer says, and an error has to.
+const sourceNames = new WeakMap<Element, string>();
 
 const URL_TOKEN_RE = /url\(\s*(['"]?)([^'")]+)\1\s*\)/g;
 
@@ -167,7 +200,9 @@ async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void>
     const src = img.getAttribute("src") ?? "";
     if (!src || isInlineUrl(src)) continue;
     const inlined = await fetchAsDataUrl(src, timeoutMs);
-    if (inlined) img.setAttribute("src", inlined);
+    if (!inlined) continue;
+    img.setAttribute("src", inlined);
+    sourceNames.set(img, resourceName(src));
   }
   for (const image of Array.from(root.querySelectorAll("image"))) {
     for (const attr of ["href", "xlink:href"]) {
@@ -197,6 +232,246 @@ export async function inlinePageResources(
       el.setAttribute("style", await inlineCssUrls(css, timeoutMs));
     }
   }
+}
+
+/// Marks an <img> whose pixels the snapshot paints itself. The value is
+/// the image's index in its `PageImages`.
+const LIFTED_ATTR = "data-chan-export-image";
+
+/// On the page root while its marker raster is drawn.
+const MARKER_ATTR = "data-chan-export-markers";
+
+/// How many marker colours one raster tells apart; a page with more
+/// images to place draws more marker rasters.
+const MARKER_SLOTS = 30;
+
+type LiftedImage = {
+  name: string;
+  /// The image, decoded in the app's own document.
+  bitmap: HTMLImageElement;
+  widthPx: number;
+  heightPx: number;
+  /// Whether the image had a box where the page was composed. One with
+  /// none (inside a closed <details>, say) has nothing to paint, and
+  /// that is not a failure.
+  rendered: boolean;
+  /// Raster rows of the image painted so far. A document image taller
+  /// than what is left of its page continues on the next one.
+  shownPx: number;
+  painted: boolean;
+  /// The image's last row has been painted.
+  done: boolean;
+};
+
+/// The images one export paints itself. A document hands the same one to
+/// each of its pages: its images are lifted once, before the pages are
+/// cloned, an image cut by a page continues on the next, and by the last
+/// page every image that has a place must have been painted.
+export class PageImages {
+  /// In lifting order; `LIFTED_ATTR` holds the index.
+  readonly lifted: LiftedImage[] = [];
+
+  /// Fail by name for each image that has a place and was never painted.
+  assertPainted(): void {
+    const missing = this.lifted
+      .filter((image) => image.rendered && !image.painted)
+      .map((image) => image.name);
+    if (missing.length > 0) {
+      throw new SnapshotError(
+        `image has no place on the page: ${missing.join("; ")}`,
+      );
+    }
+  }
+}
+
+/// Decode an image in the app's own document, bounded by `timeoutMs`.
+async function decodeImage(
+  src: string,
+  name: string,
+  timeoutMs: number,
+): Promise<HTMLImageElement> {
+  const image = new Image();
+  image.src = src;
+  try {
+    await withTimeout(image.decode(), timeoutMs, `decode of image ${name}`);
+  } catch (err) {
+    if (err instanceof SnapshotError) throw err;
+    throw new SnapshotError(`image ${name} could not be decoded`);
+  }
+  return image;
+}
+
+/// An empty image of the given size. It gives the page's <img> the box
+/// the real image would, and paints nothing.
+function standInSrc(widthPx: number, heightPx: number): string {
+  return (
+    "data:image/svg+xml," +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}"/>`,
+    )
+  );
+}
+
+/// Take every inlined <img> out of the page's own painting: decode it
+/// here, record it in `images`, and leave a stand-in of its size in its
+/// place. Runs after `inlinePageResources`; an image already lifted is
+/// left alone, so a page cloned from a lifted document costs nothing.
+///
+/// The stand-in is itself an image the page's document loads, and an
+/// engine that draws before it has loaded would lay the <img> out with
+/// no size. The width hint and the aspect ratio make the box the same
+/// either way; an author's own width, height or ratio is kept.
+export async function liftPageImages(
+  root: HTMLElement,
+  images: PageImages,
+  timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
+): Promise<void> {
+  for (const img of Array.from(root.querySelectorAll("img"))) {
+    if (img.hasAttribute(LIFTED_ATTR)) continue;
+    const src = img.getAttribute("src") ?? "";
+    if (!src.startsWith("data:")) continue;
+    const name = sourceNames.get(img) ?? resourceName(src);
+    const bitmap = await decodeImage(src, name, timeoutMs);
+    const widthPx = bitmap.naturalWidth;
+    const heightPx = bitmap.naturalHeight;
+    // An image with no size of its own (an SVG that declares none) takes
+    // its box from the page's style alone, which a stand-in cannot
+    // reproduce. It stays in the page's document.
+    if (!(widthPx > 0 && heightPx > 0)) continue;
+    img.setAttribute(LIFTED_ATTR, String(images.lifted.length));
+    images.lifted.push({
+      name,
+      bitmap,
+      widthPx,
+      heightPx,
+      rendered: !root.isConnected || img.getClientRects().length > 0,
+      shownPx: 0,
+      painted: false,
+      done: false,
+    });
+    img.setAttribute("src", standInSrc(widthPx, heightPx));
+    img.removeAttribute("loading");
+    if (!img.hasAttribute("width") && !img.hasAttribute("height")) {
+      img.setAttribute("width", String(widthPx));
+    }
+    if (!img.style.getPropertyValue("aspect-ratio")) {
+      img.style.setProperty("aspect-ratio", `${widthPx} / ${heightPx}`);
+    }
+  }
+}
+
+/// The colour that marks slot `slot` of a marker raster. Red carries the
+/// slot, green is its complement and blue is fixed, so a pixel that is
+/// not a marker (a blend at an edge, anything else that got painted)
+/// fails the two checks and is not read as one.
+export function markerRgb(slot: number): [number, number, number] {
+  const red = 8 * (slot + 1);
+  return [red, 255 - red, 128];
+}
+
+/// The stylesheet of a marker raster: everything on the page hidden,
+/// and the content box of each image in `ids` filled with its slot's
+/// colour. Opacity and filters are lifted so a marker keeps its colour.
+function markerCss(ids: readonly number[]): string {
+  const rules = [
+    `[${MARKER_ATTR}],[${MARKER_ATTR}] *{visibility:hidden !important;` +
+      "opacity:1 !important;filter:none !important}",
+  ];
+  ids.forEach((id, slot) => {
+    const [red, green, blue] = markerRgb(slot);
+    rules.push(
+      `[${MARKER_ATTR}] img[${LIFTED_ATTR}="${id}"]{visibility:visible !important;` +
+        `background-color: rgb(${red}, ${green}, ${blue}) !important;` +
+        "background-image:none !important;background-clip:content-box !important;" +
+        "border-color:transparent !important;outline:none !important;" +
+        "box-shadow:none !important}",
+    );
+  });
+  return rules.join("\n");
+}
+
+export type MarkerBox = { x: number; y: number; width: number; height: number };
+
+/// Where each marker colour landed: per slot, the box of the pixels that
+/// carry its colour, or null when no pixel does.
+export function readMarkerBoxes(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  slots: number,
+): (MarkerBox | null)[] {
+  const left = new Array<number>(slots).fill(width);
+  const top = new Array<number>(slots).fill(height);
+  const right = new Array<number>(slots).fill(-1);
+  const bottom = new Array<number>(slots).fill(-1);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const at = (y * width + x) * 4;
+      if (data[at + 3]! < 128) continue;
+      const red = data[at]!;
+      if (Math.abs(data[at + 2]! - 128) > 8) continue;
+      if (Math.abs(red + data[at + 1]! - 255) > 8) continue;
+      const slot = Math.round(red / 8) - 1;
+      if (slot < 0 || slot >= slots) continue;
+      if (Math.abs(red - 8 * (slot + 1)) > 3) continue;
+      if (x < left[slot]!) left[slot] = x;
+      if (x > right[slot]!) right[slot] = x;
+      if (y < top[slot]!) top[slot] = y;
+      if (y > bottom[slot]!) bottom[slot] = y;
+    }
+  }
+  return left.map((x, slot) =>
+    right[slot]! < 0
+      ? null
+      : {
+          x,
+          y: top[slot]!,
+          width: right[slot]! - x + 1,
+          height: bottom[slot]! - top[slot]! + 1,
+        },
+  );
+}
+
+export type ImagePlacement = {
+  /// Where the whole bitmap is drawn, in raster px.
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /// Rows of the image painted once this draw is clipped to its box.
+  shownPx: number;
+  /// Whether the image's last row is among them.
+  done: boolean;
+};
+
+/// Where a lifted image's bitmap goes, given the box its marker filled,
+/// which is the part of the image this page shows. A box of the image's
+/// own proportions shows all of it and the bitmap fills it. A shorter
+/// box is an image the page cuts: the bitmap keeps its proportions at
+/// the box's width and starts `shownPx` rows above the box, where the
+/// page before left off. The caller clips the draw to the box.
+export function placeLiftedImage(
+  box: MarkerBox,
+  natural: { widthPx: number; heightPx: number },
+  shownPx: number,
+): ImagePlacement {
+  const ratio = natural.heightPx / natural.widthPx;
+  const fullHeight = box.width * ratio;
+  // The box is read in whole pixels, so its width is off by up to one
+  // and the height that follows from it by up to `ratio`.
+  const slack = 1.5 + 1.5 * ratio;
+  if (shownPx === 0 && box.height >= fullHeight - slack) {
+    return { ...box, shownPx: box.height, done: true };
+  }
+  const shown = shownPx + box.height;
+  return {
+    x: box.x,
+    y: box.y - shownPx,
+    width: box.width,
+    height: fullHeight,
+    shownPx: shown,
+    done: shown >= fullHeight - slack,
+  };
 }
 
 function externalUrlTokens(css: string): string[] {
@@ -303,6 +578,77 @@ export async function rasterizePage(
   return canvas;
 }
 
+/// Rasterize the page with every image in `ids` reduced to its marker.
+async function markerRaster(
+  root: HTMLElement,
+  box: PageBoxPx,
+  ids: readonly number[],
+  opts: { scale?: number; timeoutMs?: number },
+): Promise<HTMLCanvasElement> {
+  const style = document.createElement("style");
+  style.textContent = markerCss(ids);
+  root.setAttribute(MARKER_ATTR, "");
+  root.prepend(style);
+  try {
+    return await rasterizePage(root, box, opts);
+  } finally {
+    style.remove();
+    root.removeAttribute(MARKER_ATTR);
+  }
+}
+
+/// Draw each lifted image of the page onto its raster, at the place its
+/// marker reads back from a marker raster of the same page. An image the
+/// page does not show (on another page of its document) leaves no marker
+/// and is not drawn here.
+async function paintLiftedImages(
+  canvas: HTMLCanvasElement,
+  root: HTMLElement,
+  box: PageBoxPx,
+  images: PageImages,
+  opts: { scale?: number; timeoutMs?: number },
+): Promise<void> {
+  const pending: number[] = [];
+  for (const img of Array.from(root.querySelectorAll(`img[${LIFTED_ATTR}]`))) {
+    const id = Number(img.getAttribute(LIFTED_ATTR));
+    const image = images.lifted[id];
+    if (image && image.rendered && !image.done) pending.push(id);
+  }
+  if (pending.length === 0) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new SnapshotError("no 2d canvas context");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  for (let at = 0; at < pending.length; at += MARKER_SLOTS) {
+    const ids = pending.slice(at, at + MARKER_SLOTS);
+    const markers = await markerRaster(root, box, ids, opts);
+    const pixels = markers
+      .getContext("2d")
+      ?.getImageData(0, 0, markers.width, markers.height);
+    if (!pixels) throw new SnapshotError("no 2d canvas context");
+    const boxes = readMarkerBoxes(
+      pixels.data,
+      pixels.width,
+      pixels.height,
+      ids.length,
+    );
+    boxes.forEach((markerBox, slot) => {
+      if (!markerBox) return;
+      const image = images.lifted[ids[slot]!]!;
+      const place = placeLiftedImage(markerBox, image, image.shownPx);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(markerBox.x, markerBox.y, markerBox.width, markerBox.height);
+      ctx.clip();
+      ctx.drawImage(image.bitmap, place.x, place.y, place.width, place.height);
+      ctx.restore();
+      image.shownPx = place.shownPx;
+      image.painted = true;
+      image.done = place.done;
+    });
+  }
+}
+
 /// Canvas -> PNG bytes.
 export async function canvasPngBytes(
   canvas: HTMLCanvasElement,
@@ -328,17 +674,32 @@ export type PageSnapshot = {
   heightPx: number;
 };
 
-/// The full snapshot pipeline for one page element: inline -> audit ->
-/// raster -> PNG. The element must be attached (layout done) before
-/// this runs.
+export type SnapshotOptions = {
+  scale?: number;
+  timeoutMs?: number;
+  /// The images of the document this page belongs to, shared by its
+  /// pages. Left out, the page is a whole export: its images are its own
+  /// and each must be painted on it.
+  images?: PageImages;
+  /// With `images`: this is the document's last page, so every image
+  /// that has a place has had its page.
+  lastPage?: boolean;
+};
+
+/// The full snapshot pipeline for one page element: inline -> lift the
+/// images -> audit -> raster -> paint the images -> PNG.
 export async function snapshotPage(
   root: HTMLElement,
   box: PageBoxPx,
-  opts: { scale?: number; timeoutMs?: number } = {},
+  opts: SnapshotOptions = {},
 ): Promise<PageSnapshot> {
+  const images = opts.images ?? new PageImages();
   await inlinePageResources(root, opts.timeoutMs);
+  await liftPageImages(root, images, opts.timeoutMs);
   auditSelfContained(root);
   const canvas = await rasterizePage(root, box, opts);
+  await paintLiftedImages(canvas, root, box, images, opts);
+  if (!opts.images || opts.lastPage) images.assertPainted();
   return {
     png: await canvasPngBytes(canvas, opts.timeoutMs),
     widthPx: canvas.width,

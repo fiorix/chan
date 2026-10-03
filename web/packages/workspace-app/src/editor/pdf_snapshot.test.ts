@@ -4,12 +4,19 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   auditSelfContained,
   inlinePageResources,
+  liftPageImages,
+  markerRgb,
+  PageImages,
   pageSvgDocument,
+  placeLiftedImage,
+  readMarkerBoxes,
   SnapshotError,
   snapshotPage,
 } from "./pdf_snapshot";
 import {
+  decodesSettleAtOnce,
   heldDecodes,
+  imagesHaveBoxes,
   settled,
   standInCanvas,
   StandInImage,
@@ -170,6 +177,7 @@ describe("snapshotPage", () => {
   beforeEach(() => {
     decodes = heldDecodes();
     vi.stubGlobal("Image", StandInImage);
+    imagesHaveBoxes();
   });
 
   afterEach(() => {
@@ -249,5 +257,254 @@ describe("snapshotPage", () => {
     expect(failure).toBeInstanceOf(SnapshotError);
     expect((failure as Error).message).toContain("/api/fs/shots/lost.png");
     expect((failure as Error).message).not.toContain("tok");
+  });
+});
+
+describe("liftPageImages", () => {
+  beforeEach(() => {
+    heldDecodes();
+    vi.stubGlobal("Image", StandInImage);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function lifted(html: string): Promise<{
+    root: HTMLElement;
+    images: PageImages;
+  }> {
+    decodesSettleAtOnce();
+    const root = page(html);
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+    return { root, images };
+  }
+
+  test("leaves a stand-in of the image's size where the image was", async () => {
+    imagesHaveBoxes();
+    const { root, images } = await lifted('<img src="/api/fs/photo.png?t=tok">');
+    const img = root.querySelector("img")!;
+    const standIn = decodeURIComponent(img.getAttribute("src")!);
+    expect(standIn).toMatch(/^data:image\/svg\+xml,<svg /);
+    expect(standIn).toContain('width="40"');
+    expect(standIn).toContain('height="20"');
+    expect(img.getAttribute("width")).toBe("40");
+    expect(img.style.getPropertyValue("aspect-ratio")).toBe("40 / 20");
+    expect(images.lifted).toHaveLength(1);
+    expect(images.lifted[0]!.name).toBe("/api/fs/photo.png");
+    expect(() => auditSelfContained(root)).not.toThrow();
+  });
+
+  test("keeps the width, height and ratio an author gave", async () => {
+    imagesHaveBoxes();
+    const { root } = await lifted(
+      '<img src="/api/fs/a.png" height="10">' +
+        '<img src="/api/fs/b.png" style="aspect-ratio: 1 / 1">',
+    );
+    const [a, b] = Array.from(root.querySelectorAll("img"));
+    expect(a!.hasAttribute("width")).toBe(false);
+    expect(a!.getAttribute("height")).toBe("10");
+    expect(b!.style.getPropertyValue("aspect-ratio")).toBe("1 / 1");
+  });
+
+  test("lifts an image once: a second pass over the page decodes nothing", async () => {
+    imagesHaveBoxes();
+    const { root, images } = await lifted('<img src="/api/fs/photo.png">');
+    const held = heldDecodes();
+    await liftPageImages(root.cloneNode(true) as HTMLElement, images);
+    expect(held).toEqual([]);
+    expect(images.lifted).toHaveLength(1);
+  });
+
+  test("an attached image with no box is not one the page must paint", async () => {
+    // jsdom gives no element a box, which is what a closed <details> does
+    // to its image in an engine.
+    const { images } = await lifted('<img src="/api/fs/photo.png">');
+    expect(images.lifted).toHaveLength(1);
+    expect(() => images.assertPainted()).not.toThrow();
+  });
+
+  test("an image with a box that no page painted fails by name", async () => {
+    imagesHaveBoxes();
+    const { images } = await lifted('<img src="/api/fs/shots/a.png?t=tok">');
+    expect(() => images.assertPainted()).toThrow(
+      "image has no place on the page: /api/fs/shots/a.png",
+    );
+  });
+});
+
+describe("readMarkerBoxes", () => {
+  const WIDTH = 12;
+  const HEIGHT = 10;
+
+  function raster(
+    blocks: { slot: number; x: number; y: number; w: number; h: number; alpha?: number }[],
+  ): Uint8ClampedArray {
+    const data = new Uint8ClampedArray(WIDTH * HEIGHT * 4);
+    for (const block of blocks) {
+      const [red, green, blue] = markerRgb(block.slot);
+      for (let y = block.y; y < block.y + block.h; y++) {
+        for (let x = block.x; x < block.x + block.w; x++) {
+          data.set([red, green, blue, block.alpha ?? 255], (y * WIDTH + x) * 4);
+        }
+      }
+    }
+    return data;
+  }
+
+  test("reads each slot's box and null for a slot with no pixel", () => {
+    const data = raster([
+      { slot: 0, x: 1, y: 2, w: 4, h: 3 },
+      { slot: 2, x: 6, y: 0, w: 5, h: 9 },
+    ]);
+    expect(readMarkerBoxes(data, WIDTH, HEIGHT, 3)).toEqual([
+      { x: 1, y: 2, width: 4, height: 3 },
+      null,
+      { x: 6, y: 0, width: 5, height: 9 },
+    ]);
+  });
+
+  test("a pixel less than half covered is not part of a box", () => {
+    const data = raster([
+      { slot: 0, x: 2, y: 2, w: 4, h: 3 },
+      { slot: 0, x: 6, y: 2, w: 1, h: 3, alpha: 100 },
+    ]);
+    expect(readMarkerBoxes(data, WIDTH, HEIGHT, 1)).toEqual([
+      { x: 2, y: 2, width: 4, height: 3 },
+    ]);
+  });
+
+  test("a colour that is no marker's is not read as one", () => {
+    const data = raster([{ slot: 1, x: 2, y: 2, w: 4, h: 3 }]);
+    // Ink of the page: opaque, and neither a marker nor near one.
+    data.set([16, 16, 16, 255], 0);
+    data.set([255, 255, 255, 255], 4);
+    // The blend of two neighbouring markers lies between two slots.
+    const [a] = markerRgb(1);
+    const [b] = markerRgb(2);
+    const blend = (a + b) / 2;
+    data.set([blend, 255 - blend, 128, 255], 8);
+    expect(readMarkerBoxes(data, WIDTH, HEIGHT, 3)).toEqual([
+      null,
+      { x: 2, y: 2, width: 4, height: 3 },
+      null,
+    ]);
+  });
+
+  test("a slot beyond the ones asked for is not read", () => {
+    const data = raster([{ slot: 3, x: 2, y: 2, w: 4, h: 3 }]);
+    expect(readMarkerBoxes(data, WIDTH, HEIGHT, 3)).toEqual([null, null, null]);
+  });
+});
+
+describe("placeLiftedImage", () => {
+  const NATURAL = { widthPx: 400, heightPx: 200 };
+
+  test("a box of the image's proportions is filled with the whole image", () => {
+    expect(
+      placeLiftedImage({ x: 30, y: 50, width: 100, height: 50 }, NATURAL, 0),
+    ).toEqual({ x: 30, y: 50, width: 100, height: 50, shownPx: 50, done: true });
+  });
+
+  test("a box a pixel off the proportions is still the whole image", () => {
+    const place = placeLiftedImage(
+      { x: 30, y: 50, width: 101, height: 50 },
+      NATURAL,
+      0,
+    );
+    expect(place).toMatchObject({ width: 101, height: 50, done: true });
+  });
+
+  test("a shorter box shows the top of the image at its full height", () => {
+    // The page cuts the image after 30 of its 50 rows.
+    expect(
+      placeLiftedImage({ x: 30, y: 50, width: 100, height: 30 }, NATURAL, 0),
+    ).toEqual({ x: 30, y: 50, width: 100, height: 50, shownPx: 30, done: false });
+  });
+
+  test("the next page starts where the page before left off", () => {
+    expect(
+      placeLiftedImage({ x: 30, y: 0, width: 100, height: 20 }, NATURAL, 30),
+    ).toEqual({ x: 30, y: -30, width: 100, height: 50, shownPx: 50, done: true });
+  });
+
+  test("a box taller than the proportions stretches the image over it", () => {
+    expect(
+      placeLiftedImage({ x: 0, y: 0, width: 100, height: 80 }, NATURAL, 0),
+    ).toEqual({ x: 0, y: 0, width: 100, height: 80, shownPx: 80, done: true });
+  });
+});
+
+describe("a document's images across its pages", () => {
+  const BOX = { widthPx: 100, heightPx: 80 };
+
+  beforeEach(() => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    imagesHaveBoxes();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("an image cut by a page continues on the next, from where it was cut", async () => {
+    // The image is 40 by 20; at a box 40 wide each page shows 12 of its
+    // 20 rows at most.
+    const root = page('<img src="/api/fs/tall.png">');
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    const first = standInCanvas({ x: 10, y: 68, w: 40, h: 12 });
+    await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, { images });
+    expect(first.at(-1)!.args.slice(1)).toEqual([10, 68, 40, 20]);
+
+    vi.restoreAllMocks();
+    imagesHaveBoxes();
+    const second = standInCanvas({ x: 10, y: 0, w: 40, h: 8 });
+    await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
+      images,
+      lastPage: true,
+    });
+    expect(second.at(-1)!.args.slice(1)).toEqual([10, -12, 40, 20]);
+  });
+
+  test("a page that shows none of the document's images draws no marker raster twice over", async () => {
+    const root = page('<img src="/api/fs/photo.png">');
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    const first = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, { images });
+    expect(first.map((d) => d.what)).toEqual(["page", "markers", "image"]);
+
+    vi.restoreAllMocks();
+    imagesHaveBoxes();
+    const second = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
+      images,
+      lastPage: true,
+    });
+    expect(second.map((d) => d.what)).toEqual(["page"]);
+  });
+
+  test("the last page fails by name for an image no page showed", async () => {
+    const root = page('<img src="/api/fs/shots/lost.png?t=tok">');
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
+    await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, { images });
+    await expect(
+      snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
+        images,
+        lastPage: true,
+      }),
+    ).rejects.toThrow("image has no place on the page: /api/fs/shots/lost.png");
   });
 });
