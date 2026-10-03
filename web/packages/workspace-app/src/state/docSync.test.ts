@@ -14,6 +14,7 @@ import { ChangeSet, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, redo, undo } from "@codemirror/commands";
 import { api, sessionWindowId } from "../api/client";
+import { ApiError } from "../api/errors";
 import { setSocketFactory } from "../api/transport";
 import { peersIn } from "../editor/collab/remoteCursors";
 import {
@@ -41,6 +42,8 @@ import {
   isDocUnflushed,
   isDirty,
   layout,
+  overwriteConflictedTab,
+  reloadConflictedTab,
   reorderTab,
   saveTab,
   scheduleAutosave,
@@ -359,7 +362,7 @@ describe("attach", () => {
     const session = acquireDocSession(tab)!;
     const sock = lastSocket();
     sock.open();
-    sock.frame(snap("hello there"));
+    sock.frame(snap("hello"));
     await flushMicro();
     // The tab was clean when the snapshot landed and is not at the attach.
     tab.content = "hello!";
@@ -369,6 +372,38 @@ describe("attach", () => {
     expect(sock.frames("push")).toHaveLength(1);
     await ackLastPush(sock, 0);
     expect({ buffer: tab.content, saved: tab.saved }).toEqual({ buffer: "hello!", saved: "hello!" });
+    cleanup();
+  });
+
+  test("a key typed between a snapshot of a file that changed and the attach is not pushed over it: the prompt asks", async () => {
+    const tab = fileTab();
+    const session = acquireDocSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    // Another writer made the file "hello there" after the tab loaded it.
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+    tab.content = "hello!";
+    const { view, cleanup } = mountEditor(tab, session);
+    await flushMicro();
+
+    expect({
+      pushed: sockets.flatMap((socket) => socket.frames("push")).length,
+      prompt: { open: conflictDialog.open, tab: conflictDialog.tabId, version: conflictDialog.currentAuthorityVersion },
+      editor: view.state.doc.toString(),
+      buffer: tab.content,
+      saved: tab.saved,
+      token: tab.savedMtimeNs,
+      owns: isDocAttached(tab),
+    }).toEqual({
+      pushed: 0,
+      prompt: { open: true, tab: tab.id, version: 3 },
+      editor: "hello!",
+      buffer: "hello!",
+      saved: "hello",
+      token: "1000000000",
+      owns: false,
+    });
     cleanup();
   });
 
@@ -945,6 +980,258 @@ describe("a session that has had no frame", () => {
 });
 
 // ---- connection-outage save suppression (task-Web-Fable-3, option B) ----------
+
+describe("the first attach of a tab that is not clean", () => {
+  /// A tab in the layout that loaded "hello" and holds "hello!", with its
+  /// editor mounted and its session dialing.
+  async function edited() {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const session = acquireDocSession(t)!;
+    const sock = lastSocket();
+    const { view, cleanup } = mountEditor(t, session);
+    await flushMicro();
+    sock.open();
+    return { t, session, sock, view, cleanup };
+  }
+
+  /// What the user and the authority are left with: the pushes sent on any
+  /// socket, the prompt, the editor, the buffer, the saved text, the tab's
+  /// token, and whether the session owns the tab's saves.
+  const read = (t: FileTab, view: EditorView) => ({
+    pushed: sockets.flatMap((socket) => socket.frames("push")).length,
+    prompt: conflictDialog.open ? conflictDialog.tabId : null,
+    editor: view.state.doc.toString(),
+    buffer: t.content,
+    saved: t.saved,
+    token: t.savedMtimeNs,
+    owns: isDocAttached(t),
+  });
+  const ASKED = { pushed: 0, editor: "hello!", buffer: "hello!", saved: "hello", token: "1000000000", owns: false };
+
+  /// The prompt a classic save's conflict opened while the session dialed.
+  function openPrompt(t: FileTab): void {
+    Object.assign(conflictDialog, {
+      open: true,
+      tabId: t.id,
+      path: t.path,
+      currentMtime: null,
+      currentMtimeNs: "5000000000",
+      currentAuthorityVersion: null,
+      diskConflicted: false,
+    });
+  }
+
+  /// The dial a held session makes once it may attach, opened.
+  function redial(before: number): FakeSocket {
+    expect(sockets.length, "the session dials again").toBe(before + 1);
+    const next = lastSocket();
+    next.open();
+    return next;
+  }
+
+  test("over a file that changed under it pushes nothing and shows the conflict prompt", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    // Another writer made the file "hello there" after the tab loaded it.
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+
+    expect({
+      ...read(t, view),
+      offers: { token: conflictDialog.currentMtimeNs, version: conflictDialog.currentAuthorityVersion },
+    }).toEqual({ ...ASKED, prompt: t.id, offers: { token: MTIME, version: 3 } });
+    cleanup();
+  });
+
+  test("Reload takes the other writer's text and ends attached, with nothing pushed", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+    vi.spyOn(api, "readStream").mockResolvedValue({
+      path: t.path,
+      content: "hello there",
+      mtime: 2,
+      mtime_ns: MTIME,
+      writable: true,
+    });
+    const dials = sockets.length;
+    // The tab's host releases the session while the tab loads and takes
+    // it again once the load has ended.
+    releaseDocSession(t.id);
+    await reloadConflictedTab();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: t.content } });
+    acquireDocSession(t);
+    redial(dials).frame(snap("hello there", 3));
+    await flushMicro();
+
+    expect(read(t, view)).toEqual({
+      pushed: 0,
+      prompt: null,
+      editor: "hello there",
+      buffer: "hello there",
+      saved: "hello there",
+      token: MTIME,
+      owns: true,
+    });
+    cleanup();
+  });
+
+  test("Overwrite writes the buffer over the other writer's text with the prompt's tokens and ends attached", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+    const write = vi
+      .spyOn(api, "write")
+      .mockResolvedValue({ mtime: 3, mtime_ns: "3000000000", authority_version: 4 });
+    const dials = sockets.length;
+    await overwriteConflictedTab();
+    redial(dials).frame(snap("hello!", 4, { mtime_ns: "3000000000" }));
+    await flushMicro();
+
+    expect({ written: write.mock.calls.map((call) => call.slice(0, 5)), ...read(t, view) }).toEqual({
+      written: [["notes/a.md", "hello!", MTIME, null, 3]],
+      pushed: 0,
+      prompt: null,
+      editor: "hello!",
+      buffer: "hello!",
+      saved: "hello!",
+      token: "3000000000",
+      owns: true,
+    });
+    cleanup();
+  });
+
+  test("with the conflict prompt open attaches nothing and leaves the prompt, the tab's tokens and the changed-on-disk flag as they are", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    flagExternalChange(t.id);
+    openPrompt(t);
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+
+    expect({ ...read(t, view), offers: conflictDialog.currentMtimeNs, flag: t.externalChange }).toEqual({
+      ...ASKED,
+      prompt: t.id,
+      offers: "5000000000",
+      flag: true,
+    });
+    cleanup();
+  });
+
+  test("Overwrite from a prompt that was open at the first frame ends attached, with the flag cleared", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    flagExternalChange(t.id);
+    openPrompt(t);
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 6, mtime_ns: "6000000000" });
+    const dials = sockets.length;
+    await overwriteConflictedTab();
+    redial(dials).frame(snap("hello!", 0, { mtime_ns: "6000000000" }));
+    await flushMicro();
+
+    expect({
+      written: write.mock.calls.map((call) => call.slice(0, 5)),
+      ...read(t, view),
+      flag: t.externalChange,
+    }).toEqual({
+      written: [["notes/a.md", "hello!", "5000000000", null, null]],
+      pushed: 0,
+      prompt: null,
+      editor: "hello!",
+      buffer: "hello!",
+      saved: "hello!",
+      token: "6000000000",
+      owns: true,
+      flag: false,
+    });
+    cleanup();
+  });
+
+  /// A save of the tab on the wire: the write, held until `answer` is called.
+  function saveOnTheWire(t: FileTab) {
+    let answer: (result: { mtime: number; mtime_ns: string } | ApiError) => void = () => {};
+    const write = vi.spyOn(api, "write").mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          answer = (result) => (result instanceof ApiError ? reject(result) : resolve(result));
+        }),
+    );
+    const saving = saveTab(t);
+    return { write, saving, answer: (result: Parameters<typeof answer>[0]) => answer(result) };
+  }
+
+  test("with a save of the tab on the wire waits for it, and a conflict the new session caused opens no prompt: the edit is pushed once", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    const { write, saving, answer } = saveOnTheWire(t);
+    await flushMicro();
+    // Nobody else touched the file: the snapshot is the text the tab loaded.
+    sock.frame(snap("hello", 0));
+    await flushMicro();
+    const atTheFrame = read(t, view);
+    const dials = sockets.length;
+    // The server made the session before it handled the write, and a write
+    // that names no authority version is refused once a session exists.
+    answer(
+      new ApiError(428, "authority version required", {
+        code: "write_conflict",
+        current_mtime_ns: "1000000000",
+        current_authority_version: 0,
+      }),
+    );
+    await saving;
+    const next = redial(dials);
+    next.frame(snap("hello", 0, { mtime_ns: "1000000000" }));
+    await flushMicro();
+    const attached = read(t, view);
+    await ackLastPush(next, 0);
+
+    expect({ writes: write.mock.calls.length, atTheFrame, attached, saved: t.saved }).toEqual({
+      writes: 1,
+      atTheFrame: { ...ASKED, prompt: null },
+      attached: { ...ASKED, pushed: 1, prompt: null, owns: true },
+      saved: "hello!",
+    });
+    cleanup();
+  });
+
+  test("with a save of the tab on the wire that lands, attaches clean and pushes nothing", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    const { saving, answer } = saveOnTheWire(t);
+    await flushMicro();
+    sock.frame(snap("hello", 0));
+    await flushMicro();
+    const atTheFrame = read(t, view);
+    const dials = sockets.length;
+    answer({ mtime: 2, mtime_ns: "2000000000" });
+    await saving;
+    redial(dials).frame(snap("hello!", 1, { mtime_ns: "2000000000" }));
+    await flushMicro();
+
+    expect({ atTheFrame, attached: read(t, view) }).toEqual({
+      atTheFrame: { ...ASKED, prompt: null },
+      attached: {
+        pushed: 0,
+        prompt: null,
+        editor: "hello!",
+        buffer: "hello!",
+        saved: "hello!",
+        token: "2000000000",
+        owns: true,
+      },
+    });
+    cleanup();
+  });
+
+  test("over a file nobody else changed attaches with its edit as a push", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    sock.frame(snap("hello", 0, { mtime_ns: "1000000000" }));
+    await flushMicro();
+
+    expect(read(t, view)).toEqual({ ...ASKED, pushed: 1, prompt: null, owns: true });
+    cleanup();
+  });
+});
 
 describe("connection-outage suppression", () => {
   /// Attach, make an unconfirmed local edit, then drop the socket past
