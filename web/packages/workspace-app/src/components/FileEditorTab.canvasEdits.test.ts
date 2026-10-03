@@ -1744,4 +1744,117 @@ describe("a live drawing", () => {
       pushed: socket.pushes().map((push) => (push.elements as Array<{ id: string }>).map((el) => el.id)),
     }).toEqual({ afterMark: { pushes: 0, dirty: false }, pushed: [["stroke"]] });
   });
+
+  const FILES = { picture: { id: "picture", mimeType: "image/png", dataURL: "data:image/png;base64,AAAA", created: 1 } };
+  const IMAGE = { id: "image", type: "image", version: 1, versionNonce: 5, fileId: "picture", status: "saved", isDeleted: false };
+  const pictureSnapshot = (tab: FileTab, elements: unknown[], files: unknown = FILES) => ({
+    type: "snapshot", path: tab.path, version: 1, elements, appState: {}, files, dirty: false, mtime_ns: "1000000000", cursors: [],
+  });
+
+  /// A drawing of one image on its board, over a session whose socket is open
+  /// and has sent nothing.
+  async function openingPicture(image: Record<string, unknown> = IMAGE) {
+    const { tab } = await loadedTab(
+      "notes/live-picture.excalidraw",
+      JSON.stringify({ elements: [image], appState: {}, files: FILES }),
+    );
+    const { board } = await mountBoard(tab);
+    await board.start();
+    await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+    const socket = sceneSockets[0]!;
+    socket.open();
+    return { tab, board, socket };
+  }
+
+  /// The same drawing attached to a session whose snapshot holds `held`, on
+  /// the test's clock and past the board's first debounce.
+  async function attachedPicture(held: unknown[] = [IMAGE], image: Record<string, unknown> = IMAGE) {
+    const { tab, board, socket } = await openingPicture(image);
+    socket.frame(pictureSnapshot(tab, held));
+    expect(tab.doc?.state).toBe("attached");
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(200);
+    return { tab, board, socket };
+  }
+
+  /// The board's elements, each as its id, its status and its version.
+  const shownMarks = (board: ReturnType<typeof excalidrawBoard>) =>
+    (board.elements as Array<Record<string, unknown>>).map((el) => [el.id, el.status, el.version]);
+
+  test("a snapshot adopted after the library's mark offers nothing of the image, and a stroke after it is pushed alone", async () => {
+    const { tab, board, socket } = await attachedPicture();
+    board.failImageDecode("picture");
+    await vi.advanceTimersByTimeAsync(200);
+    // The server fans a snapshot on the socket at a conflict's resolution. It
+    // carries the image as the authority holds it, one version behind the
+    // board's marked copy, which the reconcile keeps.
+    socket.frame(pictureSnapshot(tab, [IMAGE]));
+    await vi.advanceTimersByTimeAsync(200);
+    const afterAdopt = idsPushed(socket);
+    board.stroke(STROKE);
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect({ shown: shownMarks(board), afterAdopt, pushed: idsPushed(socket) }).toEqual({
+      shown: [["image", "error", 2], ["stroke", undefined, 1]],
+      afterAdopt: [],
+      pushed: [["stroke"]],
+    });
+  });
+
+  test("a deleted copy of an image the library marks is not pushed", async () => {
+    // The authority holds a deleted copy of the image, as a peer's delete
+    // leaves one, and the library marks every image of the file that failed.
+    const COPY = { ...IMAGE, id: "copy", versionNonce: 6, isDeleted: true };
+    const { tab, board, socket } = await attachedPicture([IMAGE, COPY]);
+    board.failImageDecode("picture");
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect({ shown: shownMarks(board), pushed: idsPushed(socket), dirty: isDirty(tab) }).toEqual({
+      shown: [["image", "error", 2], ["copy", "error", 2]],
+      pushed: [],
+      dirty: false,
+    });
+  });
+
+  test("an image the authority does not hold is offered, though the library marked it before the snapshot", async () => {
+    const { tab, board, socket } = await openingPicture();
+    vi.useFakeTimers();
+    board.failImageDecode("picture");
+    // The board's flush runs before the socket's snapshot, when the session
+    // takes no push.
+    await vi.advanceTimersByTimeAsync(200);
+    const beforeSnapshot = socket.pushes().length;
+    socket.frame(pictureSnapshot(tab, [], {}));
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect({
+      beforeSnapshot,
+      pushed: socket.pushes().map((push) => ({
+        elements: (push.elements as Array<Record<string, unknown>>).map((el) => [el.id, el.status]),
+        files: Object.keys((push.files ?? {}) as Record<string, unknown>),
+      })),
+    }).toEqual({ beforeSnapshot: 0, pushed: [{ elements: [["image", "error"]], files: ["picture"] }] });
+  });
+
+  test.each([
+    ["no mark", IMAGE, false],
+    ["the library's mark, set on this board", IMAGE, true],
+    ["a mark the authority holds", { ...IMAGE, status: "error" }, false],
+  ])("the user's move of an image carrying %s is pushed", async (_mark, image, fails) => {
+    const { board, socket } = await attachedPicture([image], image);
+    if (fails) {
+      board.failImageDecode("picture");
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    // The user's move, as the library makes it: the same element, one
+    // version on, and the change reported.
+    const onBoard = board.elements as Array<Record<string, unknown>>;
+    onBoard[0] = { ...onBoard[0], x: 40, version: Number(onBoard[0]!.version) + 1 };
+    boardPropsFromRender(render.mock.calls.at(-1)![0]).onChange();
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(
+      socket.pushes().map((push) => (push.elements as Array<Record<string, unknown>>).map((el) => [el.id, el.x])),
+    ).toEqual([[["image", 40]]]);
+  });
 });
