@@ -370,12 +370,18 @@ export async function liftPageImages(
     if (!src.startsWith("data:")) continue;
     const name = sourceNames.get(img) ?? resourceName(src);
     const bitmap = await decodeImage(src, name, timeoutMs);
-    const widthPx = bitmap.naturalWidth;
-    const heightPx = bitmap.naturalHeight;
-    // An image with no size of its own (an SVG that declares none) takes
-    // its box from the page's style alone, which a stand-in cannot
-    // reproduce. It stays in the page's document.
-    if (!(widthPx > 0 && heightPx > 0)) continue;
+    let widthPx = bitmap.naturalWidth;
+    let heightPx = bitmap.naturalHeight;
+    // A decoded SVG can have no intrinsic dimensions while CSS gives it
+    // a box. Use that composed box so it still follows the lifted path.
+    if (!(widthPx > 0 && heightPx > 0)) {
+      const rect = img.getBoundingClientRect();
+      widthPx = rect.width;
+      heightPx = rect.height;
+      if (!(widthPx > 0 && heightPx > 0)) {
+        throw new SnapshotError(`image ${name} has no measurable size`);
+      }
+    }
     img.setAttribute(LIFTED_ATTR, String(images.lifted.length));
     images.lifted.push({
       name,
