@@ -2813,6 +2813,9 @@ export const draftCloseState = $state<{
   target: string;
   targetKind: "file" | "folder";
   hasAttachments: boolean;
+  /// Why the draft's unsaved text cannot be saved, when it cannot. The
+  /// dialog then names no destination and offers Discard and Cancel alone.
+  unsavable: string | null;
   error: string | null;
   resolve: ((value: DraftCloseDecision) => void) | null;
 }>({
@@ -2822,6 +2825,7 @@ export const draftCloseState = $state<{
   target: "",
   targetKind: "file",
   hasAttachments: false,
+  unsavable: null,
   error: null,
   resolve: null,
 });
@@ -2832,6 +2836,7 @@ function uiDraftClose(opts: {
   target: string;
   targetKind: "file" | "folder";
   hasAttachments: boolean;
+  unsavable: string | null;
 }): Promise<DraftCloseDecision> {
   return new Promise((resolve) => {
     draftCloseState.resolve?.({ action: "cancel" });
@@ -2840,6 +2845,7 @@ function uiDraftClose(opts: {
     draftCloseState.target = opts.target;
     draftCloseState.targetKind = opts.targetKind;
     draftCloseState.hasAttachments = opts.hasAttachments;
+    draftCloseState.unsavable = opts.unsavable;
     draftCloseState.error = null;
     draftCloseState.resolve = resolve;
     draftCloseState.open = true;
@@ -3792,7 +3798,13 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
     const isPristineSeed =
       !isDirty(tab) &&
       (tab.content === NEW_DRAFT_SEED || tab.content === NEW_DIAGRAM_SEED);
-    if (!contentIsEmpty && isDirty(tab)) {
+    const unsaved = !contentIsEmpty && isDirty(tab);
+    // A drawing's unsaved text that does not parse is one the save refuses,
+    // so the close runs no save and its dialog offers none: the draft can
+    // still be discarded, where a refused save would keep the tab open.
+    const unsavable =
+      unsaved && isExcalidraw(tab.path) ? validateJsonBuffer(tab.content) : null;
+    if (unsaved && unsavable === null) {
       if (!(await saveDraftEdits(tab))) return false;
     }
     const info = await api.inspectDraft(tab.path);
@@ -3807,6 +3819,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       target: promoteDefaultPrefix() + draftDefaultTarget(info, tab.path),
       targetKind: info.has_attachments ? "folder" : "file",
       hasAttachments: info.has_attachments,
+      unsavable,
     });
     if (decision.action === "cancel") return false;
     if (decision.action === "discard") {

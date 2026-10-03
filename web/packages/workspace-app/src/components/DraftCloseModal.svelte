@@ -10,10 +10,18 @@
   const destinationLabel = windowCaps.workspace ? "Workspace" : "Disk";
 
   let inputEl = $state<HTMLInputElement | null>(null);
+  let cancelEl = $state<HTMLButtonElement | null>(null);
 
+  // The path field takes focus where the draft can be saved. Where it
+  // cannot, the one action left is destructive, so focus starts on Cancel.
   $effect(() => {
     if (!draftCloseState.open) return;
+    const unsavable = draftCloseState.unsavable !== null;
     queueMicrotask(() => {
+      if (unsavable) {
+        cancelEl?.focus();
+        return;
+      }
       inputEl?.focus();
       inputEl?.select();
     });
@@ -28,29 +36,36 @@
         <div class="path">{draftCloseState.path}</div>
       </header>
 
-      <p>
-        {#if draftCloseState.hasAttachments}
-          Save this draft workspace as a {destinationNoun} folder, or discard it.
-        {:else}
-          Save this draft as a {destinationNoun} file, or discard it.
+      {#if draftCloseState.unsavable !== null}
+        <p>
+          This drawing's text does not parse ({draftCloseState.unsavable}), so it cannot be
+          saved. Discard the draft, or cancel to keep editing.
+        </p>
+      {:else}
+        <p>
+          {#if draftCloseState.hasAttachments}
+            Save this draft workspace as a {destinationNoun} folder, or discard it.
+          {:else}
+            Save this draft as a {destinationNoun} file, or discard it.
+          {/if}
+        </p>
+
+        <label>
+          <span
+            >{draftCloseState.targetKind === "folder"
+              ? `${destinationLabel} folder`
+              : `${destinationLabel} file`}</span
+          >
+          <input
+            bind:this={inputEl}
+            bind:value={draftCloseState.target}
+            placeholder={draftCloseState.targetKind === "folder" ? "notes/new-draft" : "notes/draft.md"}
+          />
+        </label>
+
+        {#if draftCloseState.error}
+          <div class="error">{draftCloseState.error}</div>
         {/if}
-      </p>
-
-      <label>
-        <span
-          >{draftCloseState.targetKind === "folder"
-            ? `${destinationLabel} folder`
-            : `${destinationLabel} file`}</span
-        >
-        <input
-          bind:this={inputEl}
-          bind:value={draftCloseState.target}
-          placeholder={draftCloseState.targetKind === "folder" ? "notes/new-draft" : "notes/draft.md"}
-        />
-      </label>
-
-      {#if draftCloseState.error}
-        <div class="error">{draftCloseState.error}</div>
       {/if}
 
       <footer>
@@ -58,10 +73,14 @@
           Discard Draft
         </button>
         <div class="spacer"></div>
-        <button type="button" onclick={() => resolveDraftClose("cancel")}>Cancel</button>
-        <button type="button" class="primary" onclick={() => resolveDraftClose("save")}>
-          Save to {destinationLabel}
+        <button bind:this={cancelEl} type="button" onclick={() => resolveDraftClose("cancel")}>
+          Cancel
         </button>
+        {#if draftCloseState.unsavable === null}
+          <button type="button" class="primary" onclick={() => resolveDraftClose("save")}>
+            Save to {destinationLabel}
+          </button>
+        {/if}
       </footer>
     </div>
   </ModalShell>

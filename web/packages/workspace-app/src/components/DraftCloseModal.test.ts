@@ -30,6 +30,7 @@ async function openDraftClose(): Promise<HTMLElement> {
     target: "notes/note.md",
     targetKind: "file",
     hasAttachments: false,
+    unsavable: null,
     error: null,
     resolve: () => {},
     open: true,
@@ -82,11 +83,12 @@ describe("the draft close dialog of a drawing whose unsaved text does not parse"
   }
 
   /// Close the draft through the store with the dialog mounted, and hand back
-  /// the open dialog with every request the close can send recorded.
-  async function closeBrokenDraft() {
+  /// the open dialog with every request the close can send recorded. The
+  /// draft holds `broken` over `onDisk`, the text its file holds.
+  async function closeBrokenDraft(onDisk = saved) {
     const target = mountDialog(DraftCloseModal);
     const pane = resetLayout([
-      fileTab({ id: "board-1", path, fileKind: "text", mode: "source", content: broken, saved }),
+      fileTab({ id: "board-1", path, fileKind: "text", mode: "source", content: broken, saved: onDisk }),
     ]);
     const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
     const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
@@ -116,6 +118,18 @@ describe("the draft close dialog of a drawing whose unsaved text does not parse"
       pathFields: dialog.querySelectorAll("input").length,
       saysWhy: dialog.textContent?.includes(`does not parse (${parseReason()})`),
     }).toEqual({ buttons: ["Discard Draft", "Cancel"], pathFields: 0, saysWhy: true });
+    resolveDraftClose("cancel");
+    await close;
+  });
+
+  test("with no unsaved edit keeps the dialog that saves it, since the file is what the text is", async () => {
+    const { dialog, close, write } = await closeBrokenDraft(broken);
+
+    expect({
+      buttons: labels(dialog).map((label) => label.replace(/^Save to .+$/, "Save to")),
+      pathFields: dialog.querySelectorAll("input").length,
+      written: write.mock.calls.length,
+    }).toEqual({ buttons: ["Discard Draft", "Cancel", "Save to"], pathFields: 1, written: 0 });
     resolveDraftClose("cancel");
     await close;
   });
