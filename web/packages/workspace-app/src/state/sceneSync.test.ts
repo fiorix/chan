@@ -29,7 +29,9 @@ import {
 // delegates alongside the scene ones.
 import { resetDocSyncForTests } from "./docSync.svelte";
 import {
+  activeLayout,
   cancelPaneMode,
+  closeTab,
   commitPaneMode,
   enterPaneMode,
   isDocAttached,
@@ -1034,6 +1036,85 @@ describe("the saved mark after the canvas mirrors its board", () => {
     sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
 
     expect(tab!.saved).toBe(SCENE_BUFFER);
+  });
+});
+
+// While Hybrid Nav is up the app renders the draft, so a board mirrors into
+// the draft's tab, and the commit puts that buffer over the saved text of the
+// tab the session marked meanwhile, the one the mode was entered with.
+describe("the saved mark through a Hybrid Nav commit", () => {
+  /// The tab the app renders while the mode is up: the draft's copy.
+  function renderedTab(id: string): FileTab {
+    for (const node of Object.values(activeLayout().nodes)) {
+      if (node.kind !== "leaf") continue;
+      const tab = node.tabs.find((t) => t.id === id);
+      if (tab?.kind === "file") return tab;
+    }
+    throw new Error(`no rendered tab ${id}`);
+  }
+
+  /// What the board's flush does with `buffer` during the mode: write it
+  /// into the rendered tab and tell the session.
+  function mirror(session: SceneSession, tabId: string, buffer: string): void {
+    renderedTab(tabId).content = buffer;
+    session.bufferMirrored();
+  }
+
+  test("a peer's element mirrored during the mode reads saved after the commit, and the tab's close closes it", async () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, sock } = attached(tab!);
+    enterPaneMode();
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
+    mirror(session, tab!.id, sceneBufferWith("peer"));
+    // The authority has written the peer's edit.
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    commitPaneMode();
+    const committed = readTab(tab!.id)!;
+    const dirty = isDirty(committed);
+    await closeTab("pane-scene-test", tab!.id);
+
+    expect(committed.content).toBe(sceneBufferWith("peer"));
+    expect({ dirty, closed: readTab(tab!.id) === undefined }).toEqual({ dirty: false, closed: true });
+  });
+
+  test.each([
+    ["on the wire", (binding: FakeBinding) => binding.flushPendingLocal()],
+    ["not handed over", () => {}],
+  ])("a stroke of this window's that is %s reads unsaved after the commit", (_where, hand) => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding } = attached(tab!);
+    enterPaneMode();
+    binding.pending.push(elem("mine", 2));
+    hand(binding);
+    mirror(session, tab!.id, sceneBufferWith("mine"));
+    commitPaneMode();
+
+    expect(isDirty(readTab(tab!.id)!)).toBe(true);
+  });
+
+  test("a stroke on the wire at the commit reads saved at its ack", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    enterPaneMode();
+    binding.pending.push(elem("mine", 2));
+    binding.flushPendingLocal();
+    mirror(session, tab!.id, sceneBufferWith("mine"));
+    commitPaneMode();
+    sock.frame({ type: "push-ok", version: 1 });
+
+    expect(isDirty(readTab(tab!.id)!)).toBe(false);
+  });
+
+  test("a session whose canvas is gone leaves the mark of a buffer nothing mirrored", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding } = attached(tab!);
+    session.unbindCanvas(binding);
+    enterPaneMode();
+    // No board writes this buffer, so the session cannot speak for it.
+    renderedTab(tab!.id).content = sceneBufferWith("typed");
+    commitPaneMode();
+
+    expect(isDirty(readTab(tab!.id)!)).toBe(true);
   });
 });
 
