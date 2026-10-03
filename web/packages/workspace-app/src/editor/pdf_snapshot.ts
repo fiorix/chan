@@ -418,9 +418,10 @@ type LiftedImage = {
   /// The image, decoded in the app's own document.
   bitmap: HTMLImageElement;
   shape: ImageShape;
-  /// Whether the image had a box where the page was composed. One with
-  /// none (inside a closed <details>, say) has nothing to paint, and
-  /// that is not a failure.
+  /// Whether the page shows the image where it was composed. One with no
+  /// box there (inside a closed <details>, say), or hidden by `display`,
+  /// `visibility` or a zero opacity, has nothing to paint and is skipped,
+  /// and that is not a failure.
   rendered: boolean;
   /// Raster rows of the image painted so far. A document image taller
   /// than what is left of its page continues on the next one.
