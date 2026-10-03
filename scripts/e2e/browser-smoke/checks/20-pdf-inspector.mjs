@@ -112,7 +112,9 @@ function squareFaults(raster, box, what, sidePx) {
 
 /// Rows where a block wider than the slide painted a scrollbar: a long run
 /// of one colour that is neither the page's nor the block's, inside the
-/// block or just under it. Text never runs that long in one colour.
+/// block or just under it, on at least three rows in a row. Text never
+/// runs that long in one colour, and the block's own edge, where its fill
+/// blends with the page on a row it half covers, is one row and no more.
 function scrollbarRows(raster) {
   const page = pixelAt(raster, 2, 2);
   // The block's own fill is the page's most common colour after the page.
@@ -132,14 +134,22 @@ function scrollbarRows(raster) {
   if (!fill) return { fill: null, rows: [] };
   const block = colourBox(raster, fill, 3);
   const rows = [];
+  let band = [];
   const last = Math.min(raster.height - 1, block.y1 + 60);
-  for (let y = block.y0; y <= last; y++) {
-    const run = longestRun(
-      raster,
-      y,
-      (c) => !sameColour(c, page, 6) && !sameColour(c, fill, 6) && !sameColour(c, TEAL, 10),
-    );
-    if (run.length >= 300) rows.push(y);
+  for (let y = block.y0; y <= last + 1; y++) {
+    const run =
+      y <= last &&
+      longestRun(
+        raster,
+        y,
+        (c) => !sameColour(c, page, 6) && !sameColour(c, fill, 6) && !sameColour(c, TEAL, 10),
+      );
+    if (run && run.length >= 300) {
+      band.push(y);
+      continue;
+    }
+    if (band.length >= 3) rows.push(...band);
+    band = [];
   }
   return { fill, block, rows };
 }
