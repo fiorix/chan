@@ -12,6 +12,7 @@ import { resetSceneSyncForTests, sceneSessionFor } from "../state/sceneSync.svel
 import { applySessionRoster } from "../state/session.svelte";
 import { ApiError } from "../api/errors";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
+import { bufferKey } from "../state/editorBuffer";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -2003,6 +2004,130 @@ describe("a live drawing", () => {
       atSnapshot: [],
       pushed: [],
       dirty: false,
+    });
+  });
+
+  describe("Restore of an entry an earlier page load left", () => {
+    const PATH = "notes/live.excalidraw";
+    const MINE = { id: "mine", type: "rectangle", version: 1, versionNonce: 5, isDeleted: false };
+
+    /// Leave a recovery entry for the drawing, as an earlier page load does:
+    /// its scene then, in the library's serialization.
+    function strand(elements: unknown[], appState: Record<string, unknown> = { viewBackgroundColor: "#ffffff" }): void {
+      const content = JSON.stringify({ type: "excalidraw", version: 2, source: "chan", elements, appState, files: {} });
+      localStorage.setItem(
+        bufferKey(PATH),
+        JSON.stringify({ content, updatedAt: Date.now(), path: PATH, sessionId: "an-earlier-load" }),
+      );
+    }
+
+    /// Press Restore, on fake time from the press on, so that a test reads
+    /// the board at once and again after the board's wait.
+    async function restore(): Promise<void> {
+      await vi.waitFor(() => expect(document.querySelector(".recovery-banner-restore")).not.toBeNull());
+      vi.useFakeTimers();
+      document.querySelector<HTMLButtonElement>(".recovery-banner-restore")!.click();
+      await tick();
+    }
+
+    const pushed = (socket: SceneSocket) =>
+      socket.pushes().map(({ elements, appState }) => ({
+        elements: (elements as { id: string; version: number }[]).map((e) => `${e.id}@${e.version}`),
+        appState,
+      }));
+
+    afterEach(() => localStorage.removeItem(bufferKey(PATH)));
+
+    test("on a live board keeps a peer's background and element and pushes what the entry holds beyond them", async () => {
+      // The entry holds the file's element, a stroke that never reached the
+      // authority, and the background of its time.
+      strand([ON_DISK, MINE]);
+      const { tab, board, socket } = await attachedDrawing();
+      // A peer picks a background and draws after the entry's stamp.
+      socket.frame({ type: "update", version: 2, elements: [PEER], appState: { viewBackgroundColor: BACKGROUND } });
+      await vi.waitFor(() => expect(board.appState.viewBackgroundColor).toBe(BACKGROUND));
+      await vi.waitFor(() => expect(tab.content).toContain('"peer"'));
+
+      await restore();
+      const read = () => ({
+        board: shownIds(board),
+        background: board.appState.viewBackgroundColor,
+        pushed: pushed(socket),
+        buffer: ["mine", "peer", BACKGROUND].filter((part) => tab.content.includes(part)),
+        dirty: isDirty(tab),
+        banner: document.querySelector(".recovery-banner") !== null,
+      });
+      const atOnce = read();
+      await vi.advanceTimersByTimeAsync(400);
+      const afterTheWait = read();
+      socket.frame({ type: "push-ok", version: 3 });
+      vi.useRealTimers();
+
+      const RESTORED = {
+        board: ["mine", "on-disk", "peer"],
+        background: BACKGROUND,
+        pushed: [{ elements: ["mine@1"], appState: undefined }],
+        buffer: ["mine", "peer", BACKGROUND],
+        dirty: true,
+        banner: false,
+      };
+      expect({ atOnce, afterTheWait, ackedDirty: isDirty(tab) }).toEqual({
+        atOnce: RESTORED,
+        afterTheWait: RESTORED,
+        ackedDirty: false,
+      });
+    });
+
+    test("on a live board leaves a peer's delete and a peer's newer copy, and takes the entry's newer copy", async () => {
+      const GONE = { id: "gone", type: "rectangle", version: 1, versionNonce: 1, isDeleted: false };
+      const THEIRS = { id: "theirs", type: "rectangle", version: 1, versionNonce: 1, isDeleted: false, x: 1 };
+      const OURS = { id: "ours", type: "rectangle", version: 3, versionNonce: 1, isDeleted: false, x: 3 };
+      strand([ON_DISK, GONE, THEIRS, OURS]);
+      const { board, socket } = await attachedDrawing();
+      // After the entry's stamp a peer deletes one element and edits two: one
+      // past the entry's copy, one short of it.
+      socket.frame({
+        type: "update",
+        version: 2,
+        elements: [
+          { ...GONE, version: 2, isDeleted: true },
+          { ...THEIRS, version: 2, x: 2 },
+          { ...OURS, version: 2, x: 2 },
+        ],
+      });
+      await vi.waitFor(() => expect(shownIds(board)).toContain("theirs"));
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+      const shown = Object.fromEntries(
+        (board.elements as { id: string; version: number; isDeleted?: boolean }[]).map((e) => [e.id, e.isDeleted ? "deleted" : e.version]),
+      );
+
+      expect({ shown, pushed: pushed(socket) }).toEqual({
+        shown: { "on-disk": 1, gone: "deleted", theirs: 2, ours: 3 },
+        pushed: [{ elements: ["ours@3"], appState: undefined }],
+      });
+    });
+
+    test("on a board with no live session puts the entry's scene in place of the board's", async () => {
+      scene.live = false;
+      // The entry lacks the file's element: its user deleted it before the
+      // reload, and a board with no authority takes the entry whole.
+      strand([MINE]);
+      const { tab } = await loadedTab(PATH, DRAWING);
+      const { board } = await mountBoard(tab);
+      await board.start();
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({ board: shownIds(board), sockets: sceneSockets.length, buffer: tab.content.includes('"on-disk"') }).toEqual({
+        board: ["mine"],
+        sockets: 0,
+        buffer: false,
+      });
     });
   });
 
