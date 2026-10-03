@@ -274,10 +274,10 @@ fn close_tears_down_the_separate_serve_process() {
 }
 
 /// `chan workspace forget` on a registered-but-not-served workspace forgets it
-/// from the registry: the teardown is a no-op ("not served"), but --remove
-/// still unregisters -- proving the forget runs independent of the close
-/// outcome. (The teardown half of close is already proven above against a
-/// live serve; this covers the registry half without a process to tear down.)
+/// from the registry: the teardown is a no-op ("not served"), and --remove
+/// still unregisters. (The teardown half of close is already proven above
+/// against a live serve; this covers the registry half without a process to
+/// tear down.)
 #[test]
 fn forget_forgets_an_unserved_workspace() {
     let sandbox = Sandbox::new();

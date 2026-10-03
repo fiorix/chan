@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,35 @@ use crate::control::control_socket_for_pid;
 use crate::registry::library;
 use crate::remote::{cmd_workspace_close_remote, cmd_workspace_forget_remote};
 use crate::Personality;
+
+/// Exit status of a `chan workspace forget` whose server answered that the
+/// workspace is still releasing: nothing was forgotten and the same command
+/// is to be run again. `EX_TEMPFAIL` of `sysexits.h`, which separates it
+/// from a refusal or a failure (exit 1).
+const STILL_RELEASING_EXIT: i32 = 75;
+
+/// A `chan workspace forget` whose server answered that the workspace is
+/// still releasing. Carried as an `anyhow` error to the dispatch edge, which
+/// prints it and exits [`STILL_RELEASING_EXIT`].
+#[derive(Debug)]
+struct ForgetStillReleasing {
+    path: PathBuf,
+    /// The server's answer, as it worded it.
+    answer: String,
+}
+
+impl fmt::Display for ForgetStillReleasing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is still registered: its server answered \"{}\"",
+            self.path.display(),
+            self.answer
+        )
+    }
+}
+
+impl std::error::Error for ForgetStillReleasing {}
 
 /// Forget `path` from the registry: drop the registry key and the whole
 /// `~/.chan/workspaces/<key>/` metadata dir (trash included), leaving the
@@ -41,7 +71,10 @@ fn remove_from_registry(lib: &Library, path: &Path) -> Result<()> {
 /// its writer lock. Best-effort -- "not currently served" (and an unreachable
 /// holder) is treated as success, since the goal is "this workspace is not
 /// served". With `remove`, it then also forgets the workspace from the
-/// registry (`chan workspace forget`), INDEPENDENT of the teardown outcome.
+/// registry (`chan workspace forget`), unless the holder refused the teardown
+/// over live terminals or answered that the workspace is still releasing: a
+/// holder that has kept the workspace in its own library is not contradicted
+/// by the registry on disk.
 async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Result<()> {
     let lib = library()?;
     // Pass `remove` through so a host (devserver/desktop) that serves this
@@ -57,10 +90,14 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
                 path.display()
             );
         }
-        // A reachable-but-failed teardown is still "best effort": report it,
-        // then (on forget) drop the registry entry anyway.
+        Ok(UnserveOutcome::RemovalStillReleasing { answer }) => {
+            return Err(ForgetStillReleasing { path, answer }.into());
+        }
+        // A reachable-but-failed teardown is still "best effort": report it
+        // with what the server answered, then (on forget) drop the registry
+        // entry anyway.
         Err(e) => eprintln!(
-            "chan: could not reach the server for {} ({e}); treating as closed.",
+            "chan: could not reach the server for {} ({e:#}); treating as closed.",
             path.display()
         ),
     }
@@ -78,6 +115,10 @@ enum UnserveOutcome {
     NotServed,
     /// A live holder refused teardown because live terminals would be killed.
     Refused { active_terminals: usize },
+    /// A live host asked to remove the workspace answered that an earlier
+    /// call of its own on the root has not let go: it removed nothing and
+    /// still holds the workspace in its library. Carries its answer.
+    RemovalStillReleasing { answer: String },
 }
 
 #[derive(Deserialize)]
@@ -96,6 +137,14 @@ fn parse_live_terminals_refusal(message: &str) -> Option<usize> {
     let object: serde_json::Map<String, serde_json::Value> = serde_json::from_str(message).ok()?;
     let body: LiveTerminalsBody = serde_json::from_value(object.into()).ok()?;
     Some(body.active_terminals)
+}
+
+/// Whether a server's answer to a removal says that the workspace is still
+/// releasing. The server words it `removing <path>: ` and then
+/// [`chan_server::WORKSPACE_STILL_RELEASING`]; only those closing words are
+/// read, because the path before them is the server's own rendering.
+fn answers_still_releasing(message: &str) -> bool {
+    message.ends_with(chan_server::WORKSPACE_STILL_RELEASING)
 }
 
 /// Shared by `chan close` and `chan workspace forget`. Discovers the process
@@ -181,6 +230,9 @@ async fn unserve_running(
             if let Some(active_terminals) = parse_live_terminals_refusal(&message) {
                 return Ok(UnserveOutcome::Refused { active_terminals });
             }
+            if remove && answers_still_releasing(&message) {
+                return Ok(UnserveOutcome::RemovalStillReleasing { answer: message });
+            }
             return Err(e)
                 .with_context(|| format!("asking the server (pid {}) to tear down", record.pid));
         }
@@ -204,7 +256,9 @@ fn wait_for_lock_release(lock_dir: &Path) {
 }
 
 /// `chan close` / `chan workspace close` / `chan workspace forget`: the
-/// remote arm when `--on` is given, else the local teardown, unchanged.
+/// remote arm when `--on` is given, else the local teardown. A local forget
+/// answered still releasing ends the process here with
+/// [`STILL_RELEASING_EXIT`].
 pub(super) async fn cmd_close_cli(
     path: PathBuf,
     on: Option<String>,
@@ -220,7 +274,13 @@ pub(super) async fn cmd_close_cli(
                 cmd_workspace_close_remote(&path, &target).await
             }
         }
-        None => cmd_close(path, remove, personality).await,
+        None => match cmd_close(path, remove, personality).await {
+            Err(err) if err.is::<ForgetStillReleasing>() => {
+                eprintln!("chan: {err}");
+                std::process::exit(STILL_RELEASING_EXIT);
+            }
+            outcome => outcome,
+        },
     }
 }
 
@@ -260,6 +320,51 @@ mod tests {
         assert!(
             misread.is_empty(),
             "messages read as another count than the table's: {misread:#?}"
+        );
+    }
+
+    /// A removal's answer is read as still releasing by the words it closes
+    /// with, whatever path the server put before them.
+    #[test]
+    fn a_still_releasing_answer_is_read_by_its_closing_words() {
+        let rows: [(&str, bool); 6] = [
+            (
+                "removing /srv/notes: workspace is still releasing; retry",
+                true,
+            ),
+            (
+                r"removing C:\notes: workspace is still releasing; retry",
+                true,
+            ),
+            ("workspace is still releasing; retry", true),
+            ("removing /srv/notes: workspace is locked", false),
+            ("no workspace registered for /srv/notes", false),
+            (
+                "removing /srv/workspace is still releasing; retry/notes: gone",
+                false,
+            ),
+        ];
+        let misread: Vec<_> = rows
+            .iter()
+            .filter(|&&(message, want)| answers_still_releasing(message) != want)
+            .collect();
+        assert!(
+            misread.is_empty(),
+            "answers read the other way than the table's: {misread:#?}"
+        );
+    }
+
+    /// What the forget prints holds the server's answer as it worded it.
+    #[test]
+    fn a_forget_still_releasing_prints_the_servers_answer() {
+        let refusal = ForgetStillReleasing {
+            path: PathBuf::from("/srv/notes"),
+            answer: "removing /srv/notes: workspace is still releasing; retry".into(),
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "/srv/notes is still registered: its server answered \"removing \
+             /srv/notes: workspace is still releasing; retry\""
         );
     }
 }

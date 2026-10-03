@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`chan workspace forget` stops when its host says the workspace is still releasing.** When the devserver or desktop that holds a workspace answers a forget with `workspace is still releasing; retry`, the command prints that answer, leaves the workspace registered and exits 75, so a script can tell "run it again" from a refusal. In v0.101.0 it printed that it could not reach the server, unregistered the workspace on disk and exited 0, which left the host holding a workspace its registry file no longer had. Any other error a holder answers to `chan close` or `chan workspace forget` is now printed with the "could not reach the server" warning, where only the command's own context was.
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
