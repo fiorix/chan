@@ -132,25 +132,13 @@
   }
 
   .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2rem;
-    height: 2rem;
-    border: 1px solid var(--btn-border);
     border-radius: 6px;
-    background: var(--btn-bg);
     color: var(--text);
     font-size: 1.1rem;
     line-height: 1;
-    cursor: pointer;
-    transition:
-      border-color 160ms ease,
-      color 160ms ease;
   }
 
   .icon-btn:hover {
-    border-color: var(--brand);
     color: var(--brand);
   }
 
