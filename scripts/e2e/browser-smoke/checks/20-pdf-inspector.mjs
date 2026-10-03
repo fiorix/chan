@@ -584,6 +584,7 @@ export default {
     const cases = [
       {
         file: "doc.md",
+        paint: { lifted: 2, document: 0 },
         pdf: "doc.pdf",
         orientation: "portrait",
         minPages: 2,
@@ -593,15 +594,17 @@ export default {
       // ink band appearing on two pages is a pagination bug.
       {
         file: "long-doc.md",
+        paint: { lifted: 1, document: 0 },
         pdf: "long-doc.pdf",
         orientation: "portrait",
         minPages: 6,
         boundaries: true,
       },
-      { file: "deck-169.md", pdf: "deck-169.pdf", orientation: "landscape", pages: 3 },
-      { file: "deck-43.md", pdf: "deck-43.pdf", orientation: "landscape", pages: 3 },
+      { file: "deck-169.md", pdf: "deck-169.pdf", orientation: "landscape", pages: 3, paint: { lifted: 1, document: 0 } },
+      { file: "deck-43.md", pdf: "deck-43.pdf", orientation: "landscape", pages: 3, paint: { lifted: 1, document: 0 } },
       {
         file: "deck-box.md",
+        paint: { lifted: 8, document: 0 },
         pdf: "deck-box.pdf",
         orientation: "landscape",
         pages: 5,
@@ -609,6 +612,7 @@ export default {
       },
       {
         file: "layout-images.md",
+        paint: { lifted: 9, document: 0 },
         pdf: "layout-images.pdf",
         orientation: "portrait",
         pages: 1,
@@ -616,18 +620,19 @@ export default {
       },
       {
         file: "layout-height.md",
+        paint: { lifted: 1, document: 0 },
         pdf: "layout-height.pdf",
         orientation: "portrait",
         pages: 1,
         inspect: inspectHeightImage,
       },
-      { file: "layout-page-edge.md", pdf: "layout-page-edge.pdf", orientation: "portrait", minPages: 1, inspect: inspectPageEdge },
-      { file: "layout-float-end.md", pdf: "layout-float-end.pdf", orientation: "portrait", minPages: 1, inspect: inspectFloatEnd },
-      { file: "layout-rotate.md", pdf: "layout-rotate.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate },
-      { file: "layout-rotate-property.md", pdf: "layout-rotate-property.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate },
-      { file: "layout-mirror-ancestor.md", pdf: "layout-mirror-ancestor.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate },
-      { file: "layout-clip-path.md", pdf: "layout-clip-path.pdf", orientation: "portrait", minPages: 1, inspect: inspectClipPath },
-      { file: "layout-cut-above.md", pdf: "layout-cut-above.pdf", orientation: "portrait", minPages: 2, inspect: inspectCutAbove },
+      { file: "layout-page-edge.md", pdf: "layout-page-edge.pdf", orientation: "portrait", minPages: 1, inspect: inspectPageEdge, paint: { lifted: 1, document: 1 } },
+      { file: "layout-float-end.md", pdf: "layout-float-end.pdf", orientation: "portrait", minPages: 1, inspect: inspectFloatEnd, paint: { lifted: 1, document: 1 } },
+      { file: "layout-rotate.md", pdf: "layout-rotate.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate, paint: { lifted: 0, document: 1 } },
+      { file: "layout-rotate-property.md", pdf: "layout-rotate-property.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate, paint: { lifted: 0, document: 1 } },
+      { file: "layout-mirror-ancestor.md", pdf: "layout-mirror-ancestor.pdf", orientation: "portrait", minPages: 1, inspect: inspectRotate, paint: { lifted: 0, document: 1 } },
+      { file: "layout-clip-path.md", pdf: "layout-clip-path.pdf", orientation: "portrait", minPages: 1, inspect: inspectClipPath, paint: { lifted: 0, document: 1 } },
+      { file: "layout-cut-above.md", pdf: "layout-cut-above.pdf", orientation: "portrait", minPages: 2, inspect: inspectCutAbove, paint: { lifted: 1, document: 2 } },
       {
         file: "missing-image.md",
         pdf: "missing-image.pdf",
@@ -677,6 +682,9 @@ export default {
         return result;
       });
       details[`${c.file}:paintCounts`] = lift.counts;
+      if (lift.counts?.lifted !== c.paint.lifted || lift.counts?.document !== c.paint.document) {
+        faults.push(`${c.file}: expected ${c.paint.lifted} lifted and ${c.paint.document} document-painted images, got ${JSON.stringify(lift.counts)}`);
+      }
 
       if (c.pages !== undefined) {
         details[c.file] = await ctx.assertPdf(bytes, {
