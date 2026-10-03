@@ -299,20 +299,21 @@
     return fsNodes.some((n) => n.path !== dir && parentDir(n.path) === dir);
   }
 
-  /// Merge a single-directory fs-graph batch into the accumulated spine
-  /// and re-project the rendered node / edge sets.
-  function mergeFsResponse(fs: FsGraphResponse): void {
-    const nodeById = new Map(fsNodes.map((n) => [n.id, n]));
-    for (const n of fs.nodes) nodeById.set(n.id, n);
-    fsNodes = [...nodeById.values()];
-    const ekey = (e: FsGraphEdge): string =>
-      e.kind === "hardlink"
-        ? `${e.kind}\0${[e.source, e.target].sort().join("\0")}`
-        : `${e.kind}\0${e.source}\0${e.target}`;
-    const edgeByKey = new Map(fsEdgesRaw.map((e) => [ekey(e), e]));
-    for (const e of fs.edges) edgeByKey.set(ekey(e), e);
+  function fsEdgeKey(edge: FsGraphEdge): string {
+    return `${edge.kind}\0${edge.source}\0${edge.target}`;
+  }
+
+  /// Join loaded paths by the opaque group, including pairs split across requests.
+  function joinFsHardlinks(nodes: FsGraphNode[], edges: FsGraphEdge[]): FsGraphEdge[] {
+    const edgeByKey = new Map<string, FsGraphEdge>();
+    for (const edge of edges) {
+      const ordered = edge.kind === "hardlink" && edge.source > edge.target
+        ? { ...edge, source: edge.target, target: edge.source }
+        : edge;
+      edgeByKey.set(fsEdgeKey(ordered), ordered);
+    }
     const groups = new Map<string, string[]>();
-    for (const node of fsNodes) {
+    for (const node of nodes) {
       if (node.kind !== "file" || !node.link_group) continue;
       const members = groups.get(node.link_group) ?? [];
       members.push(node.id);
@@ -321,12 +322,22 @@
     for (const members of groups.values()) {
       for (let i = 0; i < members.length; i++) {
         for (let j = i + 1; j < members.length; j++) {
-          const edge: FsGraphEdge = { source: members[i]!, target: members[j]!, kind: "hardlink" };
-          if (!edgeByKey.has(ekey(edge))) edgeByKey.set(ekey(edge), edge);
+          const [source, target] = [members[i]!, members[j]!].sort();
+          const edge: FsGraphEdge = { source, target, kind: "hardlink" };
+          if (!edgeByKey.has(fsEdgeKey(edge))) edgeByKey.set(fsEdgeKey(edge), edge);
         }
       }
     }
-    fsEdgesRaw = [...edgeByKey.values()];
+    return [...edgeByKey.values()];
+  }
+
+  /// Merge a single-directory fs-graph batch into the accumulated spine
+  /// and re-project the rendered node / edge sets.
+  function mergeFsResponse(fs: FsGraphResponse): void {
+    const nodeById = new Map(fsNodes.map((n) => [n.id, n]));
+    for (const n of fs.nodes) nodeById.set(n.id, n);
+    fsNodes = [...nodeById.values()];
+    fsEdgesRaw = joinFsHardlinks(fsNodes, [...fsEdgesRaw, ...fs.edges]);
     const merged: FsGraphResponse = {
       root: fs.root,
       scope: fs.scope,
@@ -1988,6 +1999,8 @@
           currentScope.kind === "dir" ||
           currentScope.kind === "workspace")
       ) {
+        const spineNodesById = new Map<string, FsGraphNode>();
+        let spineEdges: FsGraphEdge[] = [];
         const fsScope =
           currentScope.kind === "file" ? "file" : "directory";
         const fsPath =
@@ -2005,11 +2018,16 @@
             cursor,
           });
           if (seq !== graphLoadSeq) return;
+          for (const node of fs.nodes) spineNodesById.set(node.id, node);
+          const spineNodes = [...spineNodesById.values()];
+          const oldEdgeKeys = new Set(spineEdges.map(fsEdgeKey));
+          spineEdges = joinFsHardlinks(spineNodes, [...spineEdges, ...fs.edges]);
+          const newEdges = spineEdges.filter((edge) => !oldEdgeKeys.has(fsEdgeKey(edge)));
           // Directory ids that need the `directory:` prefix so the fs
           // spine collapses onto the semantic graph. File / ghost /
           // symlink-leaf endpoints keep their bare path.
           const fsDirIds = new Set<string>();
-          for (const n of fs.nodes) {
+          for (const n of spineNodes) {
             if (isFsDirectory(n)) fsDirIds.add(n.id);
           }
           const normalizeId = (id: string): string =>
@@ -2018,7 +2036,7 @@
             const id = normalizeId(mapped.id);
             renderedNodesById.set(id, { ...mapped, id });
           }
-          for (const mapped of mapFsEdges(fs)) {
+          for (const mapped of mapFsEdges({ ...fs, nodes: spineNodes, edges: newEdges })) {
             const source = normalizeId(mapped.source);
             const target = normalizeId(mapped.target);
             const edge = { ...mapped, source, target };
