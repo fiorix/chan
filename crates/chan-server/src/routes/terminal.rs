@@ -251,8 +251,8 @@ enum ServerFrame {
         replay_bytes: usize,
         bytes_since_focus: u64,
         /// MESSAGE depth of the shared write queue at attach time (a gemini
-        /// text+chord pair counts once), so every (re)attach re-syncs the
-        /// SPA's queue badge.
+        /// or muse text+chord pair counts once), so every (re)attach
+        /// re-syncs the SPA's queue badge.
         queue_depth: usize,
         /// The `prompt_id`s of Rich Prompt messages still in this session's
         /// write queue, in FIFO order (one per message; `cs terminal write`
