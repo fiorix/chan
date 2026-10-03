@@ -12,7 +12,7 @@
 // the popup dance stays exactly as it was. This module owns that split so it
 // can be driven directly by tests, rather than only through the deck UI.
 
-import { openerHolderTag } from "@chan/web-shared/window-holder";
+import { openerHolderTag, pageHoldsWindow, readWindowHolder } from "@chan/web-shared/window-holder";
 import {
   isBlankWindow,
   isUnmarkedBlankWindow,
@@ -124,10 +124,23 @@ async function invokeNative(
   }
 }
 
-function snapshotConnection(snapshot: ScopedLibrarySnapshot, windowId: string): WindowConnection {
+/// Whether the page a popup shows is on the window a record describes. A
+/// window's `connected` is true for any socket on its id, so a record that
+/// lists holders is asked for the popup's own tag instead; one that does not
+/// leaves `connected`. The tag is read from the popup at each call, since its
+/// page can change while a check is out.
+function popupHolds(window: ScopedLibraryWindow, popup: Window): boolean {
+  return pageHoldsWindow(window, readWindowHolder(popup));
+}
+
+function snapshotConnection(
+  snapshot: ScopedLibrarySnapshot,
+  windowId: string,
+  popup: Window,
+): WindowConnection {
   const current = snapshot.windows.find((w) => w.window_id === windowId);
   if (!current) return "gone";
-  return current.connected ? "connected" : "disconnected";
+  return popupHolds(current, popup) ? "connected" : "disconnected";
 }
 
 /// Where a window is sent to reach its page: its launch path, with the tag
@@ -248,11 +261,11 @@ export async function focusLibraryWindow(
   // A refusal closes only a blank this gesture opened, never one an earlier
   // wait left marked.
   const opened = popup !== globalThis.window && isUnmarkedBlankWindow(popup);
-  if (popup !== globalThis.window && (blank || !window.connected)) {
+  if (popup !== globalThis.window && (blank || !popupHolds(window, popup))) {
     try {
       const ready = await navigateWindowWhenReady(popup, launchUrl(window), bridge.checkPage, {
         readConnection: async (signal) =>
-          snapshotConnection(await bridge.readSnapshot(signal), window.window_id),
+          snapshotConnection(await bridge.readSnapshot(signal), window.window_id, popup),
       });
       if (!ready) return;
     } catch (error) {
