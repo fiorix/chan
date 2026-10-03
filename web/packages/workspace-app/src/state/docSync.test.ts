@@ -1216,15 +1216,14 @@ describe("the first attach of a tab that is not clean", () => {
     const next = redial(dials);
     next.frame(snap("hello", 0, { mtime_ns: "1000000000" }));
     await flushMicro();
-    const attached = read(t, view);
-    await ackLastPush(next, 0);
 
-    expect({ writes: write.mock.calls.length, atTheFrame, attached, saved: t.saved }).toEqual({
+    expect({ writes: write.mock.calls.length, atTheFrame, attached: read(t, view) }).toEqual({
       writes: 1,
       atTheFrame: { ...ASKED, prompt: null },
       attached: { ...ASKED, pushed: 1, prompt: null, owns: true },
-      saved: "hello!",
     });
+    await ackLastPush(next, 0);
+    expect(t.saved).toBe("hello!");
     cleanup();
   });
 
