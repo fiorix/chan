@@ -179,3 +179,55 @@ describe("a change of the focal ids alone", () => {
     expect(alphas).toEqual([]);
   });
 });
+
+describe("a change of the focal ids that arrives with a new graph payload", () => {
+  type Shown = { nodes: CanvasNode[]; edges: CanvasEdge[] };
+
+  function renderShowing(shown: Shown, focalIds: string[]) {
+    const p = $state({
+      open: true,
+      nodes: shown.nodes,
+      edges: shown.edges,
+      visibleNodeIds: new Set(shown.nodes.map((node) => node.id)),
+      visibleEdges: shown.edges,
+      focalIds,
+      selectedId: null as string | null,
+      onSelect: vi.fn(),
+    });
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(GraphCanvas, { target, props: p }) as Record<string, unknown>);
+    flushSync();
+    runFrames(2);
+    alphas.length = 0;
+    return p;
+  }
+
+  /// Publish `next` and its focal ids in one flush, as a scope whose focal
+  /// ids are derived from its nodes does. Answers the strength the payload
+  /// gave the layout and the strength the flush left it with.
+  function publish(p: ReturnType<typeof renderShowing>, next: Shown, focalIds: string[]) {
+    p.nodes = next.nodes;
+    p.edges = next.edges;
+    p.visibleNodeIds = new Set(next.nodes.map((node) => node.id));
+    p.visibleEdges = next.edges;
+    p.focalIds = focalIds;
+    flushSync();
+    return { payload: alphas[0], left: alphas.at(-1) };
+  }
+
+  test("nodes arriving into an open, empty canvas keep the strength of a first load", () => {
+    const p = renderShowing({ nodes: [], edges: [] }, []);
+    expect(publish(p, graph(), ["notes/a.md"])).toEqual({ payload: 1, left: 1 });
+  });
+
+  test("a node added to a shown graph keeps the incremental strength", () => {
+    const g = graph();
+    const p = renderShowing(g, ["notes/a.md"]);
+    const grown = {
+      nodes: [...g.nodes, file("notes/c.md")],
+      edges: [...g.edges, edge("directory:notes", "notes/c.md", "contains")],
+    };
+    expect(publish(p, grown, ["notes/c.md"])).toEqual({ payload: 0.2, left: 0.2 });
+  });
+});
