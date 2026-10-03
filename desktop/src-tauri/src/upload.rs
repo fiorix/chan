@@ -459,36 +459,62 @@ mod tests {
             );
         }
         assert!(validate_filesystem_target("", false).is_err());
-        // The lane is chosen by the target's root, and the workspace rule
-        // still refuses a backslash.
+        // The lane is chosen by the target's root: the filesystem rule reads
+        // a `\` as a separator and refuses the `..` between two, and the
+        // workspace rule reads the same text as one name.
         let fs_target: NativeUploadTarget =
-            serde_json::from_str(r#"{"dir":"C:\\Users\\me\\proj","root":"filesystem"}"#).unwrap();
-        assert!(fs_target.validate().is_ok());
+            serde_json::from_str(r#"{"dir":"C:\\x\\..\\y","root":"filesystem"}"#).unwrap();
+        assert!(fs_target.validate().is_err());
         let ws_target: NativeUploadTarget =
-            serde_json::from_str(r#"{"dir":"C:\\Users\\me\\proj"}"#).unwrap();
-        assert!(ws_target.validate().is_err());
+            serde_json::from_str(r#"{"dir":"C:\\x\\..\\y"}"#).unwrap();
+        assert_eq!(ws_target.validate(), Ok(()));
     }
 
+    /// A directory whose name holds a `\` is one the server lists, by that
+    /// name, so a native upload into it, or over a file in it, is accepted.
     #[test]
-    fn upload_destination_validation_is_workspace_relative() {
-        for accepted in ["", "notes", "notes/images"] {
-            assert!(validate_workspace_rel(accepted, true).is_ok(), "{accepted}");
-        }
-        for rejected in [
+    fn a_native_upload_into_a_directory_named_with_a_backslash_is_accepted() {
+        let into: NativeUploadTarget = serde_json::from_str(r#"{"dir":"x\\y"}"#).unwrap();
+        assert_eq!(into.validate(), Ok(()));
+        let over: NativeUploadTarget =
+            serde_json::from_str(r#"{"path":"notes/x\\y/a\\b.md"}"#).unwrap();
+        assert_eq!(over.validate(), Ok(()));
+    }
+
+    /// The workspace rule refuses what the server refuses of a target's
+    /// text, in the server's words, and leaves the rest for the server to
+    /// read against the workspace.
+    #[test]
+    fn upload_destination_validation_refuses_what_the_server_refuses() {
+        for accepted in [
+            "",
+            "notes",
+            "notes/images",
+            r"a\b",
             "/tmp",
-            "../tmp",
-            "a/../b",
+            "notes/",
             "a//b",
+            "a/./b",
             ".chan",
             ".chan/state",
-            r"a\b",
+            "a\tb",
         ] {
-            assert!(
-                validate_workspace_rel(rejected, true).is_err(),
-                "{rejected}"
+            assert_eq!(validate_workspace_rel(accepted, true), Ok(()), "{accepted}");
+        }
+        for escaping in ["..", "../tmp", "a/../b", "a/.."] {
+            assert_eq!(
+                validate_workspace_rel(escaping, true),
+                Err("native upload target escapes the workspace root".into()),
+                "{escaping}"
             );
         }
-        assert!(validate_workspace_rel("", false).is_err());
+        for unnamed in ["", "/", ".", "./"] {
+            assert_eq!(
+                validate_workspace_rel(unnamed, false),
+                Err("native upload target path is empty".into()),
+                "{unnamed}"
+            );
+        }
     }
 
     #[tokio::test]
