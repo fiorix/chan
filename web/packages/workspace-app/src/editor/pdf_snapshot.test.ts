@@ -391,15 +391,44 @@ describe("liftPageImages", () => {
     );
   });
 
-  test("names an unsized image that gives no measurable box", async () => {
+  test("names an unsized image the page shows that gives no measurable box", async () => {
     class UnsizedImage extends StandInImage {
       naturalWidth = 0;
       naturalHeight = 0;
     }
     vi.stubGlobal("Image", UnsizedImage);
+    imagesHaveBoxes();
     await expect(
       lifted('<img src="/api/fs/unplaced.svg?t=tok">'),
     ).rejects.toThrow("image /api/fs/unplaced.svg has no measurable size");
+  });
+
+  test("an unsized image the page does not show is lifted, and is no failure", async () => {
+    class UnsizedImage extends StandInImage {
+      naturalWidth = 0;
+      naturalHeight = 0;
+    }
+    vi.stubGlobal("Image", UnsizedImage);
+    // jsdom gives no element a box, which is what a closed <details> or a
+    // parent that is not displayed does to its image in an engine.
+    const lift = lifted(
+      '<div style="display:none"><img src="/api/fs/hidden.svg?t=tok"></div>',
+    );
+    await expect(lift).resolves.toBeDefined();
+
+    const { root, images } = await lift;
+    expect(images.lifted).toHaveLength(1);
+    expect(images.lifted[0]).toMatchObject({
+      name: "/api/fs/hidden.svg",
+      rendered: false,
+    });
+    expect(() => images.assertPainted()).not.toThrow();
+    // Its place holds a stand-in, so a page cloned from this one decodes
+    // nothing, and the page is still self-contained.
+    expect(root.querySelector("img")!.getAttribute("src")).toMatch(
+      /^data:image\/svg\+xml,/,
+    );
+    expect(() => auditSelfContained(root)).not.toThrow();
   });
 
   test("lifts an image once: a second pass over the page decodes nothing", async () => {

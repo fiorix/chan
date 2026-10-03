@@ -150,4 +150,27 @@ describe("a document whose image has no box where it was composed", () => {
     expect(pdf.getPageCount()).toBe(1);
     expect(drawn.map((d) => d.what)).toEqual(["page"]);
   });
+
+  test("exports without it when the image has no size of its own either", async () => {
+    // An SVG that carries only a viewBox decodes with no natural size in
+    // some engines, and a hidden one has no box to take a size from.
+    class UnsizedImage extends StandInImage {
+      naturalWidth = 0;
+      naturalHeight = 0;
+    }
+    vi.restoreAllMocks();
+    vi.stubGlobal("Image", UnsizedImage);
+    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    const drawn = standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
+    decodesSettleAtOnce();
+
+    const exported = exportMarkdownToPdf({
+      path: "notes/doc.md",
+      markdown: "# Notes\n\n![](shots/hidden.svg)\n\ntail\n",
+      theme: "light",
+    });
+    await expect(exported).resolves.toBeInstanceOf(Uint8Array);
+    expect((await PDFDocument.load(await exported)).getPageCount()).toBe(1);
+    expect(drawn.map((d) => d.what)).toEqual(["page"]);
+  });
 });
