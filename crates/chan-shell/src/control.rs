@@ -843,6 +843,14 @@ mod tests {
         let socket = dir.0.join("export-stall.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        // Keep the paused clock from jumping to a registered timeout before
+        // the client has parked on the fake server's unanswered reply.
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let started = tokio::time::Instant::now();
         let server = tokio::spawn(async move {
             let (conn, _) = listener.accept().await.unwrap();
             let (read, _write) = conn.into_split();
@@ -866,15 +874,17 @@ mod tests {
             )
             .await
         });
-        let (seen, result) = tokio::join!(
-            seen_rx,
-            tokio::time::timeout(std::time::Duration::from_secs(16 * 60), client)
+        seen_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(tokio::time::Instant::now(), started);
+        tokio::time::advance(std::time::Duration::from_secs(16 * 60)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            client.is_finished(),
+            "export client did not bound a server that never answers"
         );
-        seen.unwrap();
-        let error = result
-            .expect("export client did not bound a server that never answers")
-            .unwrap()
-            .unwrap_err();
+        let error = client.await.unwrap().unwrap_err();
+        clock_guard.abort();
         let timeout = error
             .downcast_ref::<crate::exit_code::ControlTimeout>()
             .unwrap_or_else(|| panic!("expected typed timeout, got {error:#}"));
