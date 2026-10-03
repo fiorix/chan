@@ -316,8 +316,8 @@ async fn launcher_wrong_method_is_json() {
     }
 }
 
-/// A launcher gate answers a wrong method before the 405 does, and its
-/// refusal keeps the route's Allow.
+/// A gate answers a wrong method before the 405 does, and its refusal keeps
+/// the route's Allow.
 async fn assert_gate_refuses_first(
     response: Response,
     allow: &str,
@@ -384,6 +384,40 @@ async fn owner_gate_refuses_a_wrong_method_on_a_tunnel_leg_first() {
         "GET,HEAD",
         StatusCode::FORBIDDEN,
         "reverse tunnels are not available for this gateway role",
+    )
+    .await;
+}
+
+/// A tenant's bearer check wraps each route's method router, so without the
+/// token a wrong method answers the check's refusal with the route's Allow.
+#[tokio::test]
+async fn workspace_tenant_bearer_refuses_a_wrong_method_first() {
+    let state = crate::state::test_support::make_test_state_with_token("tenant-bearer");
+    let response = crate::router(state)
+        .oneshot(bodiless("POST", "/api/resolve-link"))
+        .await
+        .unwrap();
+    assert_gate_refuses_first(
+        response,
+        "GET,HEAD",
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid token",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_tenant_bearer_refuses_a_wrong_method_first() {
+    let state = crate::state::test_support::make_test_state_with_token("tenant-bearer");
+    let response = crate::terminal_router(state)
+        .oneshot(bodiless("DELETE", "/api/survey/reply"))
+        .await
+        .unwrap();
+    assert_gate_refuses_first(
+        response,
+        "POST",
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid token",
     )
     .await;
 }

@@ -5445,32 +5445,106 @@ mod tests {
             .await;
         }
 
-        /// The bearer gate's refusal keeps the route's Allow on a wrong method.
+        /// What `app` answers on `uri` to a caller its gate refuses: `wrong`,
+        /// a method the route does not serve, meets the gate's `status` and
+        /// `sentence` with the route's `allow`, and `served`, one it does
+        /// serve, the same refusal without the header.
+        async fn assert_gate_answers_each_method(
+            app: &Router,
+            (wrong, served, uri, allow): (&str, &str, &str, &str),
+            status: StatusCode,
+            sentence: &str,
+        ) {
+            let answer = |method: &str| {
+                app.clone().oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            };
+            let refused = answer(wrong).await.unwrap();
+            assert_eq!(
+                refused
+                    .headers()
+                    .get(header::ALLOW)
+                    .and_then(|value| value.to_str().ok()),
+                Some(allow),
+                "{wrong} {uri}: the gate's refusal carries the route's Allow"
+            );
+            assert_refusal(refused, status, sentence).await;
+            let refused = answer(served).await.unwrap();
+            assert_eq!(
+                refused.headers().get(header::ALLOW),
+                None,
+                "{served} {uri}: a served method's refusal names no method"
+            );
+            assert_refusal(refused, status, sentence).await;
+        }
+
+        /// The routes the devserver's app mounts itself, each with a method
+        /// it does not serve, one it does, and its `Allow`.
+        const MANAGEMENT_ROUTES: [(&str, &str, &str, &str); 4] = [
+            ("PUT", "GET", "/api/devserver/workspaces", "GET,HEAD,POST"),
+            (
+                "PUT",
+                "POST",
+                "/api/devserver/workspaces/a/b",
+                "DELETE,POST",
+            ),
+            ("GET", "POST", "/api/devserver/rotate-token", "POST"),
+            (
+                "GET",
+                "POST",
+                "/api/devserver/terminal-sessions/drain",
+                "POST",
+            ),
+        ];
+
+        /// Without the bearer, a wrong method on each management route
+        /// answers the bearer check's refusal, as a served method does, and
+        /// keeps the route's Allow.
         #[tokio::test]
         async fn wrong_method_without_the_bearer() {
             let _env = chan_home_env_read();
             let home = tempfile::tempdir().unwrap();
             let state = devserver_with_windows(home.path()).await;
             let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-            let response = app
-                .oneshot(
-                    HttpRequest::put("/api/devserver/workspaces")
-                        .body(Body::empty())
-                        .unwrap(),
+            for route in MANAGEMENT_ROUTES {
+                assert_gate_answers_each_method(
+                    &app,
+                    route,
+                    StatusCode::UNAUTHORIZED,
+                    "missing or invalid devserver bearer token",
                 )
-                .await
-                .unwrap();
-            assert_eq!(
-                response.headers().get(header::ALLOW),
-                Some(&header::HeaderValue::from_static("GET,HEAD,POST")),
-                "the bearer refusal carries the route's Allow"
-            );
-            assert_refusal(
-                response,
-                StatusCode::UNAUTHORIZED,
-                "missing or invalid devserver bearer token",
-            )
-            .await;
+                .await;
+            }
+        }
+
+        /// The tunnel's assertion layer wraps every route the app mounts, the
+        /// public probes included, so a wrong method without an assertion
+        /// answers the layer's refusal and keeps the route's Allow.
+        #[tokio::test]
+        async fn wrong_method_without_the_tunnel_assertion() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().unwrap();
+            let state = devserver_with_windows(home.path()).await;
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let tunnel = crate::devserver::tunnel_test_support::through_the_tunnel(app);
+            let probes = [
+                ("POST", "GET", "/api/devserver/info", "GET,HEAD"),
+                ("POST", "GET", "/api/health", "GET,HEAD"),
+            ];
+            for route in probes.into_iter().chain(MANAGEMENT_ROUTES) {
+                assert_gate_answers_each_method(
+                    &tunnel,
+                    route,
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                )
+                .await;
+            }
         }
 
         #[tokio::test]
