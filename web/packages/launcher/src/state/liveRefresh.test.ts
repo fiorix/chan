@@ -24,6 +24,7 @@ describe("coalescedLiveRefresh", () => {
     expect(after).not.toHaveBeenCalled();
     second.resolve();
     await running;
+    expect(read).toHaveBeenCalledTimes(2);
     expect(after).toHaveBeenCalledTimes(1);
   });
 
