@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chan_workspace::Library;
+use chan_workspace::{KnownWorkspace, Library};
 use serde::Deserialize;
 
 use crate::control::control_socket_for_pid;
@@ -43,15 +43,20 @@ impl std::error::Error for ForgetStillReleasing {}
 /// Forget `path` from the registry: drop the registry key and the whole
 /// `~/.chan/workspaces/<key>/` metadata dir (trash included), leaving the
 /// filesystem contents untouched. Reached through `chan workspace forget`.
-/// The caller is responsible for tearing down any running serve first
-/// (`unregister_workspace` does not).
-fn remove_from_registry(lib: &Library, path: &Path) -> Result<()> {
+/// The caller is responsible for tearing down any running serve first;
+/// neither unregister method does so. A selected row is removed by the root
+/// it stores, regardless of where that path resolves now.
+fn remove_from_registry(lib: &Library, path: &Path, row: Option<&KnownWorkspace>) -> Result<()> {
     // Capture the metadata root before `unregister_workspace` drops the
     // registry key (after which the path no longer resolves to it).
-    let metadata_root = lib.workspace_paths_for(path).map(|p| p.root);
-    let removed = lib
-        .unregister_workspace(path)
-        .with_context(|| format!("unregistering {}", path.display()))?;
+    let metadata_root = row
+        .map(|row| lib.workspace_paths_for_row(row).root)
+        .or_else(|| lib.workspace_paths_for(path).map(|p| p.root));
+    let removed = match row {
+        Some(row) => lib.unregister_workspace_row(&row.root_path, &row.root_path),
+        None => lib.unregister_workspace(path),
+    }
+    .with_context(|| format!("unregistering {}", path.display()))?;
     if removed {
         // `reset_workspace(Everything)` deliberately preserves the trash +
         // lock dirs (other callers rely on that). Forgetting a workspace means
@@ -67,6 +72,22 @@ fn remove_from_registry(lib: &Library, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A path that a registry row stores names that row before any symlink is
+/// resolved. For other paths, the normal resolved lookup still applies.
+fn stored_row_named_by(lib: &Library, path: &Path) -> Result<Option<KnownWorkspace>> {
+    let given = chan_workspace::paths::strip_verbatim_prefix(path);
+    let absolute = if given.is_absolute() {
+        given
+    } else {
+        std::env::current_dir()?.join(given)
+    };
+    let given = chan_workspace::paths::lexical_normalize(&absolute);
+    Ok(lib
+        .list_workspaces()
+        .into_iter()
+        .find(|row| row.root_path == given))
+}
+
 /// `chan close {path}`: tear down a running server holding `path`, releasing
 /// its writer lock. Best-effort -- "not currently served" (and an unreachable
 /// holder) is treated as success, since the goal is "this workspace is not
@@ -77,11 +98,16 @@ fn remove_from_registry(lib: &Library, path: &Path) -> Result<()> {
 /// by the registry on disk.
 async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Result<()> {
     let lib = library()?;
+    let row = if remove {
+        stored_row_named_by(&lib, &path)?
+    } else {
+        None
+    };
     // Pass `remove` through so a host (devserver/desktop) that serves this
     // workspace also unregisters it from its own library + overlay; the local
     // `remove_from_registry` below then handles the caller's config.toml +
     // metadata (and the not-served / standalone cases the host can't).
-    match unserve_running(&lib, &path, remove, personality).await {
+    match unserve_running(&lib, &path, remove, personality, row.as_ref()).await {
         Ok(UnserveOutcome::Unserved) => println!("closed: {}", path.display()),
         Ok(UnserveOutcome::NotServed) => println!("(not served: {})", path.display()),
         Ok(UnserveOutcome::Refused { active_terminals }) => {
@@ -102,7 +128,7 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
         ),
     }
     if remove {
-        remove_from_registry(&lib, &path)?;
+        remove_from_registry(&lib, &path, row.as_ref())?;
     }
     Ok(())
 }
@@ -163,12 +189,13 @@ async fn unserve_running(
     path: &Path,
     remove: bool,
     personality: Personality,
+    row: Option<&KnownWorkspace>,
 ) -> Result<UnserveOutcome> {
-    // Normalize (strip any Windows `\\?\` verbatim prefix) so the path carried
-    // in the Close request is in the same canonical form the serving host and
-    // the registry key their runtimes under, rather than a verbatim-prefixed
-    // form the two sides would have to agree to strip.
-    let canonical = chan_workspace::paths::canonicalize_normalized(path);
+    // A stored root names its own row on a forget. Other paths, and every
+    // close, keep the canonical request name the hosts already read.
+    let requested = row
+        .map(|row| row.root_path.clone())
+        .unwrap_or_else(|| chan_workspace::paths::canonicalize_normalized(path));
 
     // Desktop close handoff, mirroring the `chan serve` handoff. A running
     // same-user chan-desktop owns the workspace flock AND its own library +
@@ -185,13 +212,16 @@ async fn unserve_running(
         || chan_server::handoff::handoff_forced())
         && !chan_server::handoff::handoff_opt_out();
     if want_desktop_handoff {
-        match chan_server::handoff::try_close_workspace(&canonical, remove).await {
+        match chan_server::handoff::try_close_workspace(&requested, remove).await {
             chan_server::handoff::Outcome::HandedOff => {
                 // The desktop released its flock during teardown; wait it out so a
                 // `chan serve` racing right behind doesn't see a transient
                 // WorkspaceLocked. Only the locally-registered case resolves a lock
                 // dir to wait on.
-                if let Some(paths) = lib.workspace_paths_for(path) {
+                if let Some(paths) = row
+                    .map(|row| lib.workspace_paths_for_row(row))
+                    .or_else(|| lib.workspace_paths_for(path))
+                {
                     wait_for_lock_release(&paths.lock);
                 }
                 return Ok(UnserveOutcome::Unserved);
@@ -208,7 +238,10 @@ async fn unserve_running(
         }
     }
 
-    let Some(paths) = lib.workspace_paths_for(path) else {
+    let Some(paths) = row
+        .map(|row| lib.workspace_paths_for_row(row))
+        .or_else(|| lib.workspace_paths_for(path))
+    else {
         return Ok(UnserveOutcome::NotServed); // not registered => nothing serving
     };
     let Some(record) = chan_workspace::lock::read_lock_record(&paths.lock) else {
@@ -223,7 +256,7 @@ async fn unserve_running(
     match chan_shell::send_control_request(
         &socket,
         chan_shell::ControlRequest::Close {
-            path: canonical,
+            path: requested,
             remove,
         },
     )

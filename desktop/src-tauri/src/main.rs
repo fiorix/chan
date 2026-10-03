@@ -3041,11 +3041,11 @@ async fn register_and_open_from_handoff<R: tauri::Runtime>(
 /// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
 /// (handoff `CloseWorkspace`). Runs through the embedded host's owner operation
 /// so live-terminal refusal is reported before anything is unregistered.
-/// A mounted workspace is dropped from the desktop's map of what it mounted
-/// by the root its registry row stores, which the host reads from its
-/// runtime before the close takes it away. It is forgotten by that root
-/// while the root still resolves to the canonical root the runtime was
-/// mounted at, and by that canonical root otherwise.
+/// A mounted workspace is dropped from the desktop's map by the root its
+/// registry row stores, which the host reads before the close takes it away.
+/// A forget named by a stored root uses that row even if its path now
+/// resolves into another workspace. Other paths retain the mounted-root
+/// lookup and the host's resolved-name rule.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 async fn close_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -3058,25 +3058,43 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
         // control-socket path (Error → not HandedOff).
         return Err("embedded local server is unavailable".to_string());
     };
-    let key = canonical_key(&path);
-    let stored = embedded
-        .mounted_root(Path::new(&key))
-        .unwrap_or_else(|| PathBuf::from(&key));
-    let outcome = if remove {
-        // With the root and registry unchanged during removal, the host's
-        // purge matches each window's stored path, lexically normalized,
-        // against the name sent here, its removal key and the stored root of
-        // any row its close finds. It resolves no window path, so the match
-        // does not wait on another workspace's filesystem.
-        let named = match embedded.mounted_canonical_root(Path::new(&key)) {
-            Some(canonical) if Path::new(&canonical_key(&stored)) != canonical => canonical,
-            _ => stored.clone(),
-        };
-        embedded.remove_workspace_root(&named, false).await?
-    } else {
+    let exact = if remove {
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(&path),
+        );
         embedded
-            .close_workspace_root(Path::new(&key), false)
-            .await?
+            .library()
+            .list_workspaces()
+            .into_iter()
+            .find(|row| row.root_path == given)
+            .map(|row| row.root_path)
+    } else {
+        None
+    };
+    let (stored, outcome) = if let Some(stored) = exact {
+        let outcome = embedded.remove_workspace_root(&stored, false).await?;
+        (stored, outcome)
+    } else {
+        let key = canonical_key(&path);
+        let stored = embedded
+            .mounted_root(Path::new(&key))
+            .unwrap_or_else(|| PathBuf::from(&key));
+        let outcome = if remove {
+            // With the root and registry unchanged during removal, the host's
+            // purge matches each window's stored path, lexically normalized,
+            // against the name sent here, its removal key and the stored root
+            // of any row its close finds. It resolves no window path.
+            let named = match embedded.mounted_canonical_root(Path::new(&key)) {
+                Some(canonical) if Path::new(&canonical_key(&stored)) != canonical => canonical,
+                _ => stored.clone(),
+            };
+            embedded.remove_workspace_root(&named, false).await?
+        } else {
+            embedded
+                .close_workspace_root(Path::new(&key), false)
+                .await?
+        };
+        (stored, outcome)
     };
     match outcome {
         chan_server::WorkspaceLifecycleOutcome::Completed
