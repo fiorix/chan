@@ -1041,8 +1041,28 @@ describe("the first attach of a tab that is not clean", () => {
     expect({
       ...read(t, view),
       offers: { token: conflictDialog.currentMtimeNs, version: conflictDialog.currentAuthorityVersion },
-    }).toEqual({ ...ASKED, prompt: t.id, offers: { token: MTIME, version: 3 } });
+      leftItsSocket: sock.closedByClient,
+    }).toEqual({ ...ASKED, prompt: t.id, offers: { token: MTIME, version: 3 }, leftItsSocket: true });
     cleanup();
+  });
+
+  test("with no editor bound yet is judged at the snapshot: the tab stays the classic path's", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    acquireDocSession(t);
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello there", 3));
+    await flushMicro();
+
+    expect({
+      prompt: conflictDialog.open ? conflictDialog.tabId : null,
+      buffer: t.content,
+      saved: t.saved,
+      token: t.savedMtimeNs,
+      owns: isDocAttached(t),
+    }).toEqual({ prompt: t.id, buffer: "hello!", saved: "hello", token: "1000000000", owns: false });
   });
 
   test("Reload takes the other writer's text and ends attached, with nothing pushed", async () => {
@@ -1116,6 +1136,18 @@ describe("the first attach of a tab that is not clean", () => {
       offers: "5000000000",
       flag: true,
     });
+    cleanup();
+  });
+
+  test("with the conflict prompt open over a file nobody else changed attaches nothing either", async () => {
+    const { t, sock, view, cleanup } = await edited();
+    openPrompt(t);
+    // The snapshot is the text the tab loaded, so its edit could be pushed:
+    // the prompt's buttons decide all the same.
+    sock.frame(snap("hello", 0));
+    await flushMicro();
+
+    expect(read(t, view)).toEqual({ ...ASKED, prompt: t.id });
     cleanup();
   });
 
@@ -1241,6 +1273,10 @@ describe("the first attach of a tab that is not clean", () => {
     sock.frame(snap("hello there", 3));
     await flushMicro();
     const atTheFrame = { prompt: conflictDialog.open, pushed: sock.frames("push").length, owns: isDocAttached(t) };
+    // An editor mounted again mid-load takes the session back: no dial yet.
+    acquireDocSession(t);
+    const midLoadDials = sockets.length - dials;
+    releaseDocSession(t.id);
     finish();
     await loading;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: t.content } });
@@ -1248,9 +1284,10 @@ describe("the first attach of a tab that is not clean", () => {
     redial(dials).frame(snap("hello there", 3));
     await flushMicro();
 
-    expect({ midLoad, atTheFrame, attached: read(t, view) }).toEqual({
+    expect({ midLoad, atTheFrame, midLoadDials, attached: read(t, view) }).toEqual({
       midLoad: { loading: true, buffer: "hello th", saved: "" },
       atTheFrame: { prompt: false, pushed: 0, owns: false },
+      midLoadDials: 0,
       attached: {
         pushed: 0,
         prompt: null,
