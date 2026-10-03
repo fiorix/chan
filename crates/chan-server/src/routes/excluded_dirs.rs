@@ -374,9 +374,9 @@ mod tests {
         let (status, body) = put_names(&app, &["vendor", "no\\such"]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         let refusal = if cfg!(windows) {
-            "excluded dir must be a bare name, not a path: \"no\\\\such\""
+            "excluded dir must be a bare name, not a path: \"no\\such\""
         } else {
-            "no directory in this workspace is named \"no\\\\such\"; a name can hold a \
+            "no directory in this workspace is named \"no\\such\"; a name can hold a \
              backslash only when a directory already has it"
         };
         assert_eq!(
@@ -391,17 +391,18 @@ mod tests {
         );
     }
 
-    /// The refusal names the entry as it was sent, quoted, as the refusal
-    /// of a path does: not the lower-case name the set would have stored.
+    /// The refusal names the entry as it was sent, in plain quotes, as the
+    /// refusal of a path does: not the lower-case name the set would have
+    /// stored, and with each backslash once, as it was typed.
     #[tokio::test]
     async fn a_refused_name_is_echoed_as_it_was_sent() {
         let app = route_test_app();
         let (status, body) = put_names(&app, &["vendor", "Docs\\Old"]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         let refusal = if cfg!(windows) {
-            "excluded dir must be a bare name, not a path: \"Docs\\\\Old\""
+            "excluded dir must be a bare name, not a path: \"Docs\\Old\""
         } else {
-            "no directory in this workspace is named \"Docs\\\\Old\"; a name can hold a \
+            "no directory in this workspace is named \"Docs\\Old\"; a name can hold a \
              backslash only when a directory already has it"
         };
         assert_eq!(
@@ -533,7 +534,8 @@ mod tests {
         );
         assert_eq!(
             refusal.unwrap().message(),
-            "excluded dir must be a bare name, not a path: \"Src\\\\Gen\""
+            "excluded dir must be a bare name, not a path: \"Src\\Gen\"",
+            "the path refusal does not quote the entry as it was typed"
         );
 
         let storing = workspace.clone();
