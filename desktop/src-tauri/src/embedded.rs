@@ -975,6 +975,30 @@ pub(crate) mod paused_clock {
 mod tests {
     use super::*;
 
+    mod embedded_port {
+        use super::*;
+
+        #[test]
+        fn saved_port_is_reused_when_free() {
+            let (first, _) = bind_embedded_port(None).unwrap();
+            let port = first.local_addr().unwrap().port();
+            drop(first);
+
+            let (second, fell_back) = bind_embedded_port(Some(port)).unwrap();
+            assert!(!fell_back);
+            assert_eq!(second.local_addr().unwrap().port(), port);
+        }
+
+        #[test]
+        fn occupied_port_falls_back() {
+            let occupying = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = occupying.local_addr().unwrap().port();
+            let (listener, fell_back) = bind_embedded_port(Some(port)).unwrap();
+            assert!(fell_back);
+            assert_ne!(listener.local_addr().unwrap().port(), port);
+        }
+    }
+
     mod home_workspace {
         use super::*;
 
