@@ -39,6 +39,8 @@
 //! echo for an external edit.
 
 pub mod changes;
+#[cfg(test)]
+pub(crate) mod held_cell;
 pub(crate) mod recovery;
 
 use std::collections::{HashMap, VecDeque};
@@ -4834,5 +4836,170 @@ mod tests {
         for f in drain(&mut rxa) {
             assert_ne!(f["type"], "removed");
         }
+    }
+
+    fn modified(path: &str) -> WatchEvent {
+        WatchEvent::file(
+            WatchKind::Modified,
+            path,
+            chan_workspace::WorkspaceGeneration::default(),
+        )
+    }
+
+    #[test]
+    fn the_flusher_leaves_its_worker_free_while_the_cell_is_held() {
+        let free = held_cell::worker_stays_free(|cell| {
+            let (stop, stopped) = watch::channel(false);
+            let _flusher = spawn_flusher(
+                Arc::new(DocRegistry::new()),
+                cell,
+                Arc::new(SelfWrites::new()),
+                stopped,
+            );
+            stop
+        });
+        assert!(
+            free,
+            "the document flusher's tick waited for a held workspace cell on its runtime's only worker"
+        );
+    }
+
+    #[test]
+    fn the_flusher_told_to_stop_leaves_its_worker_free_while_the_cell_is_held() {
+        let free = held_cell::worker_stays_free(|cell| {
+            let (stop, stopped) = watch::channel(false);
+            let _flusher = spawn_flusher(
+                Arc::new(DocRegistry::new()),
+                cell,
+                Arc::new(SelfWrites::new()),
+                stopped,
+            );
+            stop.send(true).expect("the flusher listens");
+            stop
+        });
+        assert!(
+            free,
+            "the document flusher told to stop waited for a held workspace cell on its runtime's only worker"
+        );
+    }
+
+    #[test]
+    fn the_reconciler_leaves_its_worker_free_while_the_cell_is_held() {
+        let free = held_cell::worker_stays_free(|cell| {
+            let (events, _) = broadcast::channel(16);
+            let (stop, stopped) = watch::channel(false);
+            let _reconciler = spawn_reconciler(
+                Arc::new(DocRegistry::new()),
+                cell,
+                events.subscribe(),
+                stopped,
+            );
+            events
+                .send(modified("a.md"))
+                .expect("the reconciler listens");
+            (events, stop)
+        });
+        assert!(
+            free,
+            "the document reconciler waited for a held workspace cell on its runtime's only worker"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_met_by_a_held_cell_is_reconciled_once_the_cell_is_let_go() {
+        let fx = fixture(&[("a.md", "hello")]);
+        let (ha, _frames) = attach(&fx, "a.md", "w1", None).await;
+        let (events, _) = broadcast::channel(16);
+        let (_stop, stopped) = watch::channel(false);
+        let cell = held_cell::cell_of(&fx.workspace);
+        let _reconciler = spawn_reconciler(
+            fx.registry.clone(),
+            cell.clone(),
+            events.subscribe(),
+            stopped,
+        );
+        fx.external_write("a.md", "hello\nfrom outside\n");
+
+        let taken = held_cell::while_held(&cell, || {
+            events
+                .send(modified("a.md"))
+                .expect("the reconciler listens");
+            // No value is queued once the reconciler, the only receiver, has
+            // taken the event; it then looks into the cell at once.
+            let taken = held_cell::within(held_cell::MUST_HAPPEN, || events.is_empty());
+            std::thread::sleep(Duration::from_millis(100));
+            taken
+        });
+        assert!(taken, "the reconciler never took the event");
+
+        let reconciled = held_cell::within(held_cell::MUST_HAPPEN, || {
+            ha.session().authority_view().0 == "hello\nfrom outside\n"
+        });
+        assert!(
+            reconciled,
+            "an event that met a held workspace cell was never reconciled: the session reads {:?}",
+            ha.session().authority_view().0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_flusher_told_to_stop_ends_beside_a_held_cell_and_leaves_its_sessions() {
+        let fx = fixture(&[("a.md", "hello")]);
+        let (ha, _frames) = attach(&fx, "a.md", "w1", None).await;
+        ha.session().apply_replace("writer", "unflushed").unwrap();
+        let (stop, stopped) = watch::channel(false);
+        let cell = held_cell::cell_of(&fx.workspace);
+        let flusher = spawn_flusher(
+            fx.registry.clone(),
+            cell.clone(),
+            Arc::new(SelfWrites::new()),
+            stopped,
+        );
+
+        let ended = held_cell::while_held(&cell, || {
+            stop.send(true).expect("the flusher listens");
+            held_cell::within(held_cell::MUST_HAPPEN, || flusher.is_finished())
+        });
+
+        assert!(
+            ended,
+            "the document flusher told to stop was still waiting for a held workspace cell after {:?}",
+            held_cell::MUST_HAPPEN
+        );
+        assert!(
+            fx.registry.get("a.md").is_some(),
+            "the flusher closed a session it could not flush, which the cell's holder flushes and closes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_flusher_told_to_stop_flushes_once_a_held_cell_is_let_go() {
+        let fx = fixture(&[("a.md", "hello")]);
+        let (ha, _frames) = attach(&fx, "a.md", "w1", None).await;
+        ha.session().apply_replace("writer", "unflushed").unwrap();
+        let (stop, stopped) = watch::channel(false);
+        let cell = held_cell::cell_of(&fx.workspace);
+        let flusher = spawn_flusher(
+            fx.registry.clone(),
+            cell.clone(),
+            Arc::new(SelfWrites::new()),
+            stopped,
+        );
+
+        held_cell::while_held(&cell, || {
+            stop.send(true).expect("the flusher listens");
+            // Well inside the flusher's wait for the cell.
+            std::thread::sleep(Duration::from_millis(300));
+        });
+
+        assert!(
+            held_cell::within(held_cell::MUST_HAPPEN, || flusher.is_finished()),
+            "the document flusher told to stop never ended"
+        );
+        assert_eq!(
+            fx.workspace.read_text("a.md").unwrap(),
+            "unflushed",
+            "the flusher told to stop gave up on a cell that was let go inside its wait"
+        );
     }
 }
