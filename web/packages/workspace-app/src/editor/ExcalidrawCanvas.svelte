@@ -218,10 +218,11 @@
   const knownFiles = new Set<string>();
   /// Cleaned appState from the latest serialize or adopt with its canonical
   /// JSON, plus the canonical JSON of the appState the authority is known to
-  /// hold (from our last push OR any adopted snapshot/update, taken as the
-  /// serializer keeps it). Only a divergence from that baseline rides a
-  /// push: adopting an incoming appState must move the baseline too, or the
-  /// echo would re-push forever between two live canvases.
+  /// hold or the session holds as this window's claim (from our last offer OR
+  /// any adopted snapshot/update, taken as the serializer keeps it). Only a
+  /// divergence from that baseline rides a push: adopting an incoming
+  /// appState must move the baseline too, or the echo would re-push forever
+  /// between two live canvases.
   let cleanedAppState: WireAppState = {};
   let cleanedAppStateJson = "";
   let lastAuthorityAppStateJson = "";
@@ -411,18 +412,20 @@
       appState,
       hasFiles ? newFiles : undefined,
     );
-    // Everything below records "the authority has this", so it runs only
-    // when the session took the push. A refused one leaves all three
-    // unmarked for the next flush; marking them first is how a shape drawn
-    // while the channel was down was never pushed again. A snapshot adopted
-    // before that flush marks what it holds and replaces the appState, on
-    // the board and here, so after a reattach the elements and files the
-    // snapshot lacks are offered and an appState refused while the socket
-    // was down is not (design.md names it as open).
+    // The session keeps an offered appState as this window's claim whether
+    // or not it took the push, and offers it again itself after a reattach,
+    // so the baseline moves at the offer: the board keeps no second copy to
+    // offer, and its next change is compared with what the session holds.
+    if (appState !== undefined) lastAuthorityAppStateJson = cleanedAppStateJson;
+    // What follows records "the authority has this", so it runs only when
+    // the session took the push. A refused one leaves the elements and the
+    // files unmarked for the next flush; marking them first is how a shape
+    // drawn while the channel was down was never pushed again. A snapshot
+    // adopted before that flush marks what it holds, so after a reattach the
+    // elements and files the snapshot lacks are offered.
     if (!taken) return;
     noteAuthority(deltas);
     for (const k of Object.keys(newFiles)) knownFiles.add(k);
-    if (appState !== undefined) lastAuthorityAppStateJson = cleanedAppStateJson;
   }
 
   const binding: SceneCanvasBinding = {
@@ -460,7 +463,7 @@
     flushPendingLocal() {
       pushDeltas();
     },
-    forgetBroadcast(elements, appState, files) {
+    forgetBroadcast(elements, files) {
       // The push was claimed and then discarded, with its socket or at the
       // next socket's first snapshot, and whether the authority read it is not
       // known. Dropping each mark offers its part again unless the snapshot
@@ -472,16 +475,6 @@
       }
       if (files !== undefined) {
         for (const k of Object.keys(files)) knownFiles.delete(k);
-      }
-      if (appState !== undefined) {
-        // Clearing the baseline offers the latest flush's or adopt's appState
-        // again: a flush before the next adopt offers it, the session refuses
-        // it, and the flush does not ask the session to mark the buffer saved.
-        // The session takes no push before it has adopted the next socket's
-        // first snapshot, and the adopt sets the baseline and what the next
-        // push offers to that snapshot's appState. A released appState is not
-        // offered again.
-        lastAuthorityAppStateJson = "";
       }
     },
   };
@@ -659,9 +652,9 @@
     if (marks) return;
     onSceneChange(json);
     // A peer's edit reaches the buffer only here, and no push-ok follows
-    // it. The session knows what of the elements is still this board's; an
-    // appState the authority has not taken is known only here.
-    if (session && cleanedAppStateJson === lastAuthorityAppStateJson) session.bufferMirrored();
+    // it. The session knows what of this board's the authority has not
+    // taken: the elements, and the appState it holds as a claim.
+    session?.bufferMirrored();
   }
 
   // The library's App reads its initial data once, when it mounts, from the

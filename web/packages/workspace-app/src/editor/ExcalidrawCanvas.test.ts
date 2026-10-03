@@ -562,7 +562,7 @@ describe("scene session binding loop safety", () => {
     binding.flushPendingLocal();
     expect(session.pushScene).toHaveBeenCalledTimes(1);
 
-    binding.forgetBroadcast([wireEl("pasted", 2)], undefined, pasted);
+    binding.forgetBroadcast([wireEl("pasted", 2)], pasted);
     binding.flushPendingLocal();
     expect(session.pushScene).toHaveBeenCalledTimes(2);
     expect(session.pushScene.mock.calls[1]![2]).toEqual(pasted);
@@ -793,7 +793,7 @@ describe("a live board's own appState change", () => {
 });
 
 describe("the canvas's mirror and the session's saved mark", () => {
-  test("a mirror carrying an appState the session did not take is not reported as confirmed", async () => {
+  test("an appState the session refuses is offered once, and its mirror is reported for the session to judge", async () => {
     vi.useFakeTimers();
     try {
       const onSceneChange = vi.fn();
@@ -805,14 +805,26 @@ describe("the canvas's mirror and the session's saved mark", () => {
       session.pushScene.mockReturnValue(false);
       session.bufferMirrored.mockClear();
 
+      session.pushScene.mockClear();
+
       api.setAppState({ gridModeEnabled: true });
       libraryChange();
       vi.advanceTimersByTime(300);
+      // The session holds the refused appState as this window's claim, so a
+      // later flush offers nothing of it.
+      libraryChange();
+      vi.advanceTimersByTime(300);
+      binding.flushPendingLocal();
 
       expect({
         mirrored: String(onSceneChange.mock.calls.at(-1)?.[0] ?? ""),
         reported: session.bufferMirrored.mock.calls.length,
-      }).toEqual({ mirrored: expect.stringContaining('"gridModeEnabled":true'), reported: 0 });
+        offered: pushedAppStates(session),
+      }).toEqual({
+        mirrored: expect.stringContaining('"gridModeEnabled":true'),
+        reported: 1,
+        offered: [{ ...boardAppState, gridModeEnabled: true }],
+      });
     } finally {
       vi.useRealTimers();
     }

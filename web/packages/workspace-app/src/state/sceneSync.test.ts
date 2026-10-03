@@ -174,8 +174,9 @@ class FakeBinding implements SceneCanvasBinding {
   collabCalls = 0;
   pending: WireElement[] = [];
   // The canvas's other two marks: `knownFiles` excludes a file from every
-  // later push once it is added, and `lastAuthorityAppStateJson` does the
-  // same for the appState. Here "still pending" stands for "not marked".
+  // later push once the session took it, and `lastAuthorityAppStateJson`
+  // does the same for the appState once it was offered. Here "still pending"
+  // stands for "not marked".
   pendingFiles: WireFiles = {};
   pendingAppState: WireAppState | null = null;
   session: SceneSession | null = null;
@@ -215,20 +216,21 @@ class FakeBinding implements SceneCanvasBinding {
     const appState = this.pendingAppState ?? undefined;
     if (this.pending.length === 0 && files === undefined && appState === undefined) return;
     // Mirrors the canvas: the deltas stay pending unless the session took
-    // them, which is what lets a dropped push survive to the reconnect.
-    if (this.session.pushScene(this.pending, appState, files)) {
+    // them, which is what lets a dropped push survive to the reconnect. An
+    // appState is marked at the offer, since the session keeps it as a claim.
+    const taken = this.session.pushScene(this.pending, appState, files);
+    this.pendingAppState = null;
+    if (taken) {
       this.pending = [];
       this.pendingFiles = {};
-      this.pendingAppState = null;
     }
   }
-  forgetBroadcast(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void {
+  forgetBroadcast(elements: WireElement[], files?: WireFiles): void {
     // The canvas drops the broadcast mark, which puts the element back in
-    // its delta set; here the pending list is that set. The file keys and
-    // the appState come back the same way, until an adopt moves them.
+    // its delta set; here the pending list is that set. The file keys come
+    // back the same way, until an adopt moves them.
     this.pending.push(...elements);
     if (files !== undefined) this.pendingFiles = { ...this.pendingFiles, ...files };
-    if (appState !== undefined) this.pendingAppState = appState;
   }
 }
 
@@ -1463,12 +1465,11 @@ describe("a push the authority never accepted", () => {
     vi.useRealTimers();
   });
 
-  test("gives up its appState to the reattach's snapshot and pushes its element", () => {
-    // Same drop with an appState change riding the push. The session hands
-    // the canvas the reattach's snapshot before it asks for a push, and the
-    // adopt makes the snapshot's appState both what the next push offers and
-    // the authority's, so the change is not offered again. The element the
-    // snapshot lacks is.
+  test("keeps its appState over the reattach's snapshot and offers it again with its element", () => {
+    // Same drop with an appState change riding the push. The session keeps
+    // the change as this window's claim, hands the canvas the reattach's
+    // snapshot without its appState, and the push of the element the
+    // snapshot lacks carries the claim.
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { binding } = attached(tab!);
@@ -1485,14 +1486,15 @@ describe("a push the authority never accepted", () => {
       appStates: back.frames("push").flatMap((f) => (f.appState === undefined ? [] : [f.appState])),
       adopted: binding.snapshots.at(-1)?.appState,
       pending: binding.pendingAppState,
-    }).toEqual({ elements: ["a"], appStates: [], adopted: { gridModeEnabled: false }, pending: null });
+    }).toEqual({ elements: ["a"], appStates: [{ gridModeEnabled: true }], adopted: undefined, pending: null });
     vi.useRealTimers();
   });
 
-  test("hands the canvas the appState an update's withhold kept from it", () => {
-    // Here the claim that kept a peer's appState off the board is dropped
-    // with its socket before the authority reads it, so the peer's appState
-    // is what stands, and the next socket's snapshot carries it.
+  test("keeps a peer's appState off the board across the drop and offers this window's again", () => {
+    // The claim that kept a peer's appState off the board is dropped with
+    // its socket before the authority reads it. It stands all the same, so
+    // the next socket's snapshot, which carries the peer's, is handed without
+    // its appState and the claim goes out alone once it is applied.
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { binding, sock } = attached(tab!);
@@ -1500,10 +1502,171 @@ describe("a push the authority never accepted", () => {
     binding.flushPendingLocal();
     sock.frame({ type: "update", version: 1, elements: [], appState: { viewBackgroundColor: "#222222" } });
 
-    dropAndRedial(snap([], { appState: { viewBackgroundColor: "#222222" } }));
+    const back = dropAndRedial(snap([], { appState: { viewBackgroundColor: "#222222" } }));
 
-    expect(binding.snapshots.at(-1)?.appState).toEqual({ viewBackgroundColor: "#222222" });
+    expect({ handed: binding.snapshots.at(-1)?.appState, pushed: back.frames("push") }).toEqual({
+      handed: undefined,
+      pushed: [{ type: "push", elements: [], appState: { viewBackgroundColor: "#111111" } }],
+    });
     vi.useRealTimers();
+  });
+
+  /// The buffer once a board has mirrored a claimed appState into it.
+  const MIRRORED_CLAIM = sceneBufferWith("mirrored");
+  /// How an offered appState misses the authority: what puts the session
+  /// there, and whether the pick comes before the redial (true), after the
+  /// new socket opens (false), or with no redial at all (null).
+  const REFUSALS: [string, (sock: FakeSocket, session: SceneSession) => void, boolean | null][] = [
+    ["while the socket is down", (sock) => sock.drop(), true],
+    ["between a new socket's opening and its snapshot", (sock) => sock.drop(), false],
+    ["while the session is degraded with its socket open", (_sock, session) => session.degrade(), null],
+  ];
+
+  test.each(REFUSALS)("an appState refused %s is this window's claim and goes out once the next snapshot is applied", (_when, miss, pickBeforeRedial) => {
+    vi.useFakeTimers();
+    const MINE = { viewBackgroundColor: "#111111" };
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    miss(sock, session);
+    const pick = () => {
+      binding.pendingAppState = MINE;
+      binding.flushPendingLocal();
+    };
+    let on = sock;
+    if (pickBeforeRedial !== null) {
+      if (pickBeforeRedial) pick();
+      const before = sockets.length;
+      for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+      on = lastSocket();
+      on.open();
+      if (!pickBeforeRedial) pick();
+    } else {
+      pick();
+    }
+    const refused = { pushes: on.frames("push").length, offeredAgain: binding.pendingAppState, unflushed: isDocUnflushed(tab!.id) };
+    tab!.content = MIRRORED_CLAIM;
+    on.frame(snap([], { appState: { viewBackgroundColor: "#222222" } }));
+    session.bufferMirrored();
+    const waiting = { handed: binding.snapshots.at(-1)?.appState, pushed: on.frames("push"), saved: tab!.saved, state: tab!.doc?.state };
+    on.frame({ type: "push-ok", version: 1 });
+    vi.useRealTimers();
+
+    expect({ refused, waiting, saved: tab!.saved, unflushed: isDocUnflushed(tab!.id) }).toEqual({
+      refused: { pushes: 0, offeredAgain: null, unflushed: true },
+      waiting: {
+        handed: undefined,
+        pushed: [{ type: "push", elements: [], appState: MINE }],
+        saved: SCENE_BUFFER,
+        state: "attached",
+      },
+      saved: MIRRORED_CLAIM,
+      unflushed: false,
+    });
+  });
+
+  test("an appState offered while another is on the wire is the claim that stands through the first ack", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+    session.degrade();
+    binding.pendingAppState = { viewBackgroundColor: "#333333" };
+    binding.flushPendingLocal();
+    sock.frame({ type: "push-ok", version: 1 });
+    const afterFirstAck = isDocUnflushed(tab!.id);
+    sock.frame(snap([], { appState: { viewBackgroundColor: "#111111" } }));
+
+    expect({ afterFirstAck, pushed: sock.frames("push").map((f) => f.appState) }).toEqual({
+      afterFirstAck: true,
+      pushed: [{ viewBackgroundColor: "#111111" }, { viewBackgroundColor: "#333333" }],
+    });
+  });
+
+  test.each([
+    ["whose tab is read only", (tab: FileTab) => void (tab.readMode = true)],
+    ["the server closed for good", (_tab: FileTab, sock: FakeSocket) => sock.frame({ type: "closed" })],
+  ])("a session %s keeps no appState claim", (_which, stop) => {
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    stop(tab!, sock);
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+
+    expect({ unflushed: isDocUnflushed(tab!.id), pushes: sock.frames("push") }).toEqual({ unflushed: false, pushes: [] });
+  });
+
+  test("a claim standing when the server closes the session for good is dropped", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    session.degrade();
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+    const standing = isDocUnflushed(tab!.id);
+    sock.frame({ type: "closed" });
+
+    expect({ standing, after: isDocUnflushed(tab!.id) }).toEqual({ standing: true, after: false });
+  });
+
+  test("a bind offers the claim alone when the snapshot holds every element that waited for a canvas", () => {
+    vi.useFakeTimers();
+    const MINE = { viewBackgroundColor: "#111111" };
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    const local = elem("local", 2);
+    session.pushScene([local], MINE);
+    session.unbindCanvas(binding);
+    sock.drop();
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    const back = lastSocket();
+    back.open();
+    // The authority read the elements of the push the drop discarded.
+    back.frame(snap([local]));
+    const whileUnbound = back.frames("push").length;
+    const next = new FakeBinding();
+    next.session = session;
+    session.bindCanvas(next);
+    vi.useRealTimers();
+
+    expect({ whileUnbound, pushed: back.frames("push"), replayed: next.snapshots[0]?.appState }).toEqual({
+      whileUnbound: 0,
+      pushed: [{ type: "push", elements: [], appState: MINE }],
+      replayed: MINE,
+    });
+  });
+
+  test("a save pushes a claim that no push carries", async () => {
+    vi.useFakeTimers();
+    const MINE = { viewBackgroundColor: "#111111" };
+    const [tab] = installTabs([sceneTab()]);
+    const { binding, sock } = attached(tab!);
+    sock.drop();
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    // The tab is read only when the reattach's snapshot lands, so the claim
+    // is not pushed then, and writable again when the user saves.
+    tab!.readMode = true;
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([]));
+    const whileReadOnly = back.frames("push").length;
+    tab!.readMode = false;
+    tab!.content = MIRRORED_CLAIM;
+    const saving = saveTab(tab!);
+    await flushMicro();
+    const pushed = back.frames("push");
+    back.frame({ type: "push-ok", version: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    await saving;
+    vi.useRealTimers();
+
+    expect({ whileReadOnly, pushed, saved: tab!.saved }).toEqual({
+      whileReadOnly: 0,
+      pushed: [{ type: "push", elements: [], appState: MINE }],
+      saved: MIRRORED_CLAIM,
+    });
   });
 });
 
@@ -1548,7 +1711,21 @@ describe("an update that crosses this window's appState claim", () => {
     });
   });
 
-  test("hands an update's appState again once a drop has released the claim", () => {
+  test("withholds its appState while a claim the session refused stands", () => {
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    session.degrade();
+    binding.pendingAppState = MINE;
+    binding.flushPendingLocal();
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)], appState: PEERS });
+
+    expect({ pushes: sock.frames("push").length, handed: handed(binding) }).toEqual({
+      pushes: 0,
+      handed: [{ ids: ["peer"], appState: undefined, files: undefined }],
+    });
+  });
+
+  test("withholds an update's appState after a drop until the claim offered again is acked", () => {
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { binding, sock } = attached(tab!);
@@ -1561,10 +1738,13 @@ describe("an update that crosses this window's appState claim", () => {
     const back = lastSocket();
     back.open();
     back.frame(snap([], { appState: PEERS }));
-    back.frame({ type: "update", version: 2, elements: [], appState: LATER });
+    back.frame({ type: "update", version: 2, elements: [], appState: PEERS });
+    back.frame({ type: "push-ok", version: 3 });
+    back.frame({ type: "update", version: 4, elements: [], appState: LATER });
     vi.useRealTimers();
 
     expect(handed(binding)).toEqual([
+      { ids: [], appState: undefined, files: undefined },
       { ids: [], appState: undefined, files: undefined },
       { ids: [], appState: LATER, files: undefined },
     ]);
@@ -1575,7 +1755,7 @@ describe("the scene a later bind replays", () => {
   const MINE = { viewBackgroundColor: "#111111" };
   const PEERS = { viewBackgroundColor: "#222222" };
 
-  test("leaves out a push the session refused", () => {
+  test("leaves out the elements and files of a push the session refused and holds its appState", () => {
     const [tab] = installTabs([sceneTab()]);
     const { session, binding } = attached(tab!);
     session.degrade();
@@ -1590,7 +1770,7 @@ describe("the scene a later bind replays", () => {
       elements: replay?.elements.map((e) => e.id),
       appState: replay?.appState,
       files: Object.keys(replay?.files ?? {}),
-    }).toEqual({ refused: ["refused"], elements: [], appState: {}, files: [] });
+    }).toEqual({ refused: ["refused"], elements: [], appState: MINE, files: [] });
   });
 
   test("holds the appState and files this window pushed", () => {

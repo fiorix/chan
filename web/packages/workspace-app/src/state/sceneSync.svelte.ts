@@ -229,8 +229,7 @@ const PERMANENT_ERROR_REASONS = new Set(["attach-failed", "doc-too-large"]);
 export type SceneCanvasBinding = {
   /// Full authority state: reconcile every element (tombstones
   /// included) into the canvas, adopt appState, register files. The
-  /// appState is left out of a later snapshot on the same socket while this
-  /// window's appState claim stands.
+  /// appState is left out while this window's appState claim stands.
   applySnapshot(elements: WireElement[], appState: WireAppState | undefined, files: WireFiles): void;
   /// Accepted values fanned from the authority.
   applyUpdate(f: {
@@ -250,14 +249,13 @@ export type SceneCanvasBinding = {
   /// Forget that this payload was handed over. `pushScene` answers true for
   /// a coalesced push and for one on the wire, and neither has been
   /// acknowledged yet: a drop, or the next socket's first snapshot, throws
-  /// both away. It takes the same three parts `pushScene` does, because the
-  /// canvas marks all three on a true and a mark left in place keeps its part
+  /// both away. It takes the elements and the files `pushScene` did, because
+  /// the canvas marks both on a true and a mark left in place keeps its part
   /// out of every later push: an element stays on the canvas having reached
   /// nobody, and a file leaves the authority holding an element that
-  /// references bytes it does not have. The appState is handed back too, but
-  /// the snapshot the session hands the canvas next replaces it, so a
-  /// released appState is not offered again.
-  forgetBroadcast(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void;
+  /// references bytes it does not have. An appState is not handed back: the
+  /// session keeps it as this window's claim and offers it again itself.
+  forgetBroadcast(elements: WireElement[], files?: WireFiles): void;
 };
 
 // ---- session ---------------------------------------------------------------
@@ -341,7 +339,9 @@ export class SceneSession {
   /// the older value would go on the board and never be offered again. A
   /// discarded push leaves its parts here until the next snapshot replaces
   /// them. Claims released without a bound canvas are retained separately
-  /// so a later bind can offer them after that snapshot.
+  /// so a later bind can offer them after that snapshot. This window's
+  /// appState claim is the scene's appState from its offer on, taken or
+  /// refused, over a snapshot's and an update's while it stands.
   private shadowElements = new Map<string, WireElement>();
   private shadowAppState: WireAppState = {};
   private shadowFiles: WireFiles = {};
@@ -379,9 +379,19 @@ export class SceneSession {
   /// by the ack.
   private unacked: QueuedPush | null = null;
   private queued: QueuedPush | null = null;
-  /// Claims released without a canvas survive until a new canvas can
-  /// replay and offer them after the next socket's snapshot.
+  /// Elements and files released without a canvas survive until a new
+  /// canvas can replay and offer them after the next socket's snapshot.
   private unboundClaims: QueuedPush | null = null;
+  /// This window's appState that no authority has confirmed: the last one a
+  /// canvas offered to `pushScene`, whether that push went on the wire, was
+  /// queued behind one or was refused. An appState is one value with no
+  /// version, so nothing but this claim can offer it again. It stands across
+  /// a drop and a redial, keeps a snapshot's and an update's appState off the
+  /// board, so this window's value stands over a peer's change made
+  /// meanwhile, rides the next push the session takes, and ends at the
+  /// push-ok of the push that carried it or when the session stops retrying.
+  /// While it stands the tab reads unsaved.
+  private appStateClaim: WireAppState | null = null;
 
   private cursors = new Map<number, ScenePeerCursor>();
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -425,8 +435,9 @@ export class SceneSession {
 
   /// True while the authority holds scene state the DISK does not: deltas
   /// the canvas has not handed over, a push on the wire, a coalesced push
-  /// waiting behind it, or an authority that has taken changes it has not
-  /// flushed. The force-reload prompt keys on this, because for an
+  /// waiting behind it, an appState claim no authority has confirmed, or an
+  /// authority that has taken changes it has not flushed. The force-reload
+  /// prompt keys on this, because for an
   /// attached canvas `content === saved` only means the authority took
   /// the elements, never that they reached the file.
   ///
@@ -436,7 +447,7 @@ export class SceneSession {
   /// prompt that guards a discard, and the alternative reads the save path
   /// from here to learn which of the two wrote last.
   hasUnflushedState(): boolean {
-    if (this.serverDirty || this.pushOutcomeUnresolved || this.queued !== null || this.unboundClaims !== null) return true;
+    if (this.serverDirty || this.pushOutcomeUnresolved || !this.nothingClaimed()) return true;
     return this.binding?.hasPendingLocal() ?? false;
   }
 
@@ -487,6 +498,7 @@ export class SceneSession {
       if (recoveringClaims) this.promoteIfChannelUp();
       binding.flushPendingLocal();
       this.finishDeferredReplay();
+      this.offerAppStateClaim();
     }
   }
 
@@ -505,9 +517,22 @@ export class SceneSession {
   /// that marks its elements as broadcast must do so only on true. A
   /// coalesced push IS taken, which is why the in-flight branch answers
   /// true. After the next snapshot the binding pushes the elements and files
-  /// that stayed local; an appState that stayed local is replaced by that
-  /// snapshot's.
+  /// that stayed local.
+  ///
+  /// An appState is the exception: the session keeps it as this window's
+  /// claim from this call on, whether or not it takes the push, so the
+  /// caller marks an appState as handed over on either answer. Three
+  /// sessions keep none. One that has had no snapshot yet has no scene for a
+  /// claim to stand over: its canvas has adopted nothing, so what it offers
+  /// is the appState its board loaded and no change, and the first snapshot
+  /// replaces it. One that has stopped retrying, or whose tab is read only,
+  /// has no authority to confirm a claim. A push the session takes carries
+  /// the claim when none on the wire or queued does.
   pushScene(elements: WireElement[], appState?: WireAppState, files?: WireFiles): boolean {
+    if (appState !== undefined && this.keepsAppStateClaim()) {
+      this.appStateClaim = appState;
+      this.shadowAppState = appState;
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.haveSnapshot) {
       return false;
     }
@@ -518,8 +543,8 @@ export class SceneSession {
     // it, and the snapshot that heals also replays what stayed local.
     if (this.status === "degraded" || this.status === "off") return false;
     if (this.isReadOnlyAttach()) return false;
+    appState ??= this.uncarriedAppStateClaim() ?? undefined;
     for (const el of elements) this.foldIntoShadow(el);
-    if (appState !== undefined) this.shadowAppState = appState;
     if (files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...files };
     if (this.pushInFlight) {
       const q = this.queued ?? {
@@ -548,8 +573,8 @@ export class SceneSession {
     return true;
   }
 
-  /// The canvas has mirrored its board into the tab's buffer, with none of
-  /// its appState left unpushed. A mirror that follows a peer's edit or an
+  /// The canvas has mirrored its board into the tab's buffer. A mirror that
+  /// follows a peer's edit or an
   /// ack carries nothing of this window's that the authority has not
   /// acknowledged, and no push-ok comes for it; one that carries a local change finds that change pending or on
   /// the wire and leaves the mark to its push-ok. Only an attached session
@@ -707,10 +732,7 @@ export class SceneSession {
   /// unsaved, and refuse its close, until the next mirror or ack. The mark
   /// is derived again here from what the session holds now, as a mirror
   /// derives it. Only under a bound canvas: with none, nothing mirrors a
-  /// board into the buffer and the session cannot speak for it. The canvas's
-  /// own check for an appState it has not pushed is not run, and that state
-  /// lasts only from a reattach's snapshot to the board's next mirror, which
-  /// sets the mark itself.
+  /// board into the buffer and the session cannot speak for it.
   resyncMirror(): void {
     this.mirror();
     if (this.binding !== null) this.bufferMirrored();
@@ -744,10 +766,11 @@ export class SceneSession {
     return this.tab.readMode || !this.tab.fsWritable;
   }
 
-  /// Return unacknowledged claims to the canvas, or retain them until one
-  /// binds. The authority may have read the wire payload; socket closure
-  /// does not establish its outcome. Called at close and at the next
-  /// socket's first snapshot.
+  /// Return unacknowledged elements and files to the canvas, or retain them
+  /// until one binds. The authority may have read the wire payload; socket
+  /// closure does not establish its outcome. Called at close and at the next
+  /// socket's first snapshot. The appState of a discarded push stays this
+  /// window's claim.
   private releaseUnaccepted(): void {
     const wire = this.unacked;
     const queued = this.queued;
@@ -760,18 +783,14 @@ export class SceneSession {
       wire?.files !== null && wire?.files !== undefined
         ? { ...wire.files, ...(queued?.files ?? {}) }
         : (queued?.files ?? undefined);
-    // Either claim clears the canvas's baseline, so the newer one is what
-    // goes back.
-    const appState = queued?.appState ?? wire?.appState ?? undefined;
-    if (elements.length === 0 && files === undefined && appState === undefined) return;
+    if (elements.length === 0 && files === undefined) return;
     if (this.binding) {
-      this.binding.forgetBroadcast(elements, appState, files);
+      this.binding.forgetBroadcast(elements, files);
     } else {
       const claims = this.unboundClaims ?? claimedPush([], undefined, undefined);
       for (const el of elements) {
         if (typeof el.id === "string") claims.elements.set(el.id, el);
       }
-      if (appState !== undefined) claims.appState = appState;
       if (files !== undefined) claims.files = { ...(claims.files ?? {}), ...files };
       this.unboundClaims = claims;
     }
@@ -793,7 +812,6 @@ export class SceneSession {
     const replayFiles = { ...files };
     const pendingElements: WireElement[] = [];
     const pendingFiles: WireFiles = {};
-    let pendingAppState: WireAppState | undefined;
     for (const el of claims.elements.values()) {
       const stored = replayElements.get(el.id as string);
       if (stored && (storedElementWins(stored, el) ||
@@ -808,19 +826,13 @@ export class SceneSession {
       this.shadowFiles[id] = file;
       pendingFiles[id] = file;
     }
-    if (claims.appState !== null && JSON.stringify(claims.appState) !== JSON.stringify(this.shadowAppState)) {
-      pendingAppState = claims.appState;
-      this.shadowAppState = pendingAppState;
-      appState = pendingAppState;
-    }
     binding.applySnapshot([...replayElements.values()], appState, replayFiles);
     binding.collaboratorsChanged();
     binding.forgetBroadcast(
       pendingElements,
-      pendingAppState,
       Object.keys(pendingFiles).length > 0 ? pendingFiles : undefined,
     );
-    if (pendingElements.length === 0 && pendingAppState === undefined && Object.keys(pendingFiles).length === 0) {
+    if (pendingElements.length === 0 && Object.keys(pendingFiles).length === 0) {
       this.unboundClaims = null;
       this.pushOutcomeUnresolved = false;
       this.tab.unresolvedLivePush = false;
@@ -829,6 +841,33 @@ export class SceneSession {
 
   private finishDeferredReplay(): void {
     if (this.unboundClaims !== null && this.pushInFlight) this.unboundClaims = null;
+  }
+
+  /// This window's appState claim when no push on the wire or queued carries
+  /// it, and null otherwise.
+  private uncarriedAppStateClaim(): WireAppState | null {
+    const carried = this.queued?.appState ?? this.unacked?.appState ?? null;
+    return this.appStateClaim === carried ? null : this.appStateClaim;
+  }
+
+  /// Push this window's appState claim when no push carries it. Called once a
+  /// snapshot has been applied and the canvas has pushed what it holds, at a
+  /// bind's replay, and while a save waits. Elements and files that wait for
+  /// a canvas go out in that canvas's push, which carries the claim with
+  /// them, so with those waiting this sends nothing.
+  private offerAppStateClaim(): void {
+    if (this.unboundClaims !== null || this.uncarriedAppStateClaim() === null) return;
+    this.pushScene([]);
+  }
+
+  private keepsAppStateClaim(): boolean {
+    return this.snapshotSocket !== null && !this.retryStopped && !this.isReadOnlyAttach();
+  }
+
+  /// A session that stops retrying has no authority left to confirm a claim.
+  private stopRetrying(): void {
+    this.retryStopped = true;
+    this.appStateClaim = null;
   }
 
   private foldIntoShadow(el: WireElement): void {
@@ -926,7 +965,7 @@ export class SceneSession {
     }
     if (serverSupportsSceneSync === false) {
       this.setStatus("off");
-      this.retryStopped = true;
+      this.stopRetrying();
       return;
     }
     if (this.droppedAt === 0) this.droppedAt = Date.now();
@@ -981,6 +1020,11 @@ export class SceneSession {
         // on it would wait out its bound and fall back to the classic PUT.
         if (f.changed === true) this.serverDirty = true;
         this.pushInFlight = false;
+        // The ack is the authority's answer for the appState its push
+        // carried. A claim offered since is another value and stands.
+        if (this.unacked?.appState != null && this.unacked.appState === this.appStateClaim) {
+          this.appStateClaim = null;
+        }
         this.unacked = null;
         this.drainQueued();
         // A push the ack drains from the queue is on the wire in its
@@ -1020,7 +1064,7 @@ export class SceneSession {
       case "error":
         console.warn("[chan] scene session error", this.path, f.reason, f.message);
         if (f.reason !== undefined && PERMANENT_ERROR_REASONS.has(f.reason)) {
-          this.retryStopped = true;
+          this.stopRetrying();
           this.degrade();
         }
         // The server closes the socket after an error frame; transient
@@ -1029,7 +1073,7 @@ export class SceneSession {
       case "closed":
         // Registry-initiated teardown (storage reset, shutdown): stop
         // for good, classic behaviors resume.
-        this.retryStopped = true;
+        this.stopRetrying();
         this.setStatus("off");
         this.releaseUnaccepted();
         this.clearPushInFlight("unresolved");
@@ -1044,18 +1088,21 @@ export class SceneSession {
     // conflict's resolution leaves the scene unchanged or overwrites the
     // disk. A push this window sent on that socket and the server has not
     // acked is read after it, applied after it and acked on the same socket,
-    // so a later snapshot ends none of them: they stay claimed, their parts
+    // so a later snapshot ends none of them: they stay claimed and their parts
     // stay in the scene over the snapshot's but for an element the authority
-    // keeps against them, and while this window's appState claim stands the
-    // snapshot's appState stays off the board, as an update's does.
+    // keeps against them.
+    //
+    // While this window's appState claim stands, whichever snapshot this is,
+    // its appState stays out of the scene and off the board, as an update's
+    // does, and the claim is pushed once the snapshot has been applied.
     const later = this.ws !== null && this.snapshotSocket === this.ws;
+    const claim = this.appStateClaim;
     this.shadowElements = new Map();
     for (const el of f.elements) this.foldIntoShadow(el);
-    this.shadowAppState = f.appState;
+    this.shadowAppState = claim ?? f.appState;
     this.shadowFiles = f.files;
     this.snapshotSocket = this.ws;
     this.tab.authorityVersion = f.version;
-    let claim: WireAppState | null = null;
     if (later) {
       for (const push of [this.unacked, this.queued]) {
         if (push === null) continue;
@@ -1067,14 +1114,12 @@ export class SceneSession {
         }
         if (push.files !== null) this.shadowFiles = { ...this.shadowFiles, ...push.files };
       }
-      claim = this.queued?.appState ?? this.unacked?.appState ?? null;
-      if (claim !== null) this.shadowAppState = claim;
     } else {
       // A socket's first snapshot opens a fresh sync epoch: a push still
       // claimed was sent on an earlier socket and is never acked on this
-      // one. Hand its parts back before dropping them; `applySnapshot` below
-      // marks the elements and files the authority holds, so only those it
-      // lacks are offered again.
+      // one. Hand its elements and files back before dropping them;
+      // `applySnapshot` below marks those the authority holds, so only those
+      // it lacks are offered again.
       this.releaseUnaccepted();
       this.clearPushInFlight("unresolved");
       this.pushOutcomeUnresolved = this.unboundClaims !== null;
@@ -1100,16 +1145,18 @@ export class SceneSession {
     // exactly the reattach this rescue exists for.
     this.binding?.flushPendingLocal();
     this.finishDeferredReplay();
+    this.offerAppStateClaim();
     this.checkFlushWaiters();
   }
 
   private onUpdate(f: Extract<ServerFrame, { type: "update" }>): void {
     this.tab.authorityVersion = f.version;
     // The authority applies a push after every update it fanned before the
-    // push arrived, so while this window's appState claim is on the wire or
-    // queued behind one, the claim replaces this update's appState there:
-    // the board keeps its own and the shadow keeps the claim.
-    const claimed = (this.unacked?.appState ?? this.queued?.appState ?? null) !== null;
+    // push arrived, and a claim no push carries yet is pushed as soon as the
+    // session takes one, so while this window's appState claim stands it
+    // replaces this update's appState there: the board keeps its own and the
+    // shadow keeps the claim.
+    const claimed = this.appStateClaim !== null;
     for (const el of f.elements) this.foldIntoShadow(el);
     if (f.appState !== undefined && !claimed) this.shadowAppState = f.appState;
     if (f.files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...f.files };
@@ -1185,18 +1232,23 @@ export class SceneSession {
     setTabDocState(this.tab, { state: this.status, peers: this.peers() });
   }
 
-  /// Ack-based saved semantics: with nothing local on the wire, queued or
-  /// not yet handed over, the buffer holds no change of this window's that
-  /// the authority has not acknowledged. It can still lag the authority, by
-  /// a peer's edit the canvas's flush has not mirrored yet.
+  /// Nothing of this window's is queued, waits for a canvas or stands as an
+  /// appState claim.
+  private nothingClaimed(): boolean {
+    return this.queued === null && this.unboundClaims === null && this.appStateClaim === null;
+  }
+
+  /// Ack-based saved semantics: with nothing local on the wire, queued,
+  /// claimed or not yet handed over, the buffer holds no change of this
+  /// window's that the authority has not acknowledged. It can still lag the
+  /// authority, by a peer's edit the canvas's flush has not mirrored yet.
   private confirmSaved(): void {
-    if (this.pushInFlight || this.queued !== null || this.unboundClaims !== null) return;
-    if (this.binding?.hasPendingLocal() ?? false) return;
+    if (!this.allLocalConfirmed()) return;
     this.tab.saved = this.tab.content;
   }
 
   private allLocalConfirmed(): boolean {
-    if (this.pushInFlight || this.queued !== null || this.unboundClaims !== null) return false;
+    if (this.pushInFlight || !this.nothingClaimed()) return false;
     return !(this.binding?.hasPendingLocal() ?? false);
   }
 
@@ -1214,6 +1266,7 @@ export class SceneSession {
     if (this.status !== "attached") return;
     if (!this.allLocalConfirmed() || this.serverDirty) {
       this.binding?.flushPendingLocal();
+      this.offerAppStateClaim();
       return;
     }
     for (const w of this.flushWaiters.splice(0)) {
