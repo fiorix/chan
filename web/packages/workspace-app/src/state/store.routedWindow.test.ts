@@ -97,6 +97,21 @@ describe("a window a routed open minted", () => {
   });
 });
 
+describe("a window its opener tagged", () => {
+  test("keeps the tag in its URL through boot, so a reload presents it again", async () => {
+    await boot("kind=terminal&w=w-tagged&fresh=1&h=tag_1");
+    store.persistStateToHash();
+
+    const url = new URL(window.location.href);
+    // The store's two rewrites ran: the fresh marker is consumed and the
+    // layout is in the hash.
+    expect(url.searchParams.has("fresh")).toBe(false);
+    expect(url.hash).not.toBe("");
+    expect(url.searchParams.get("h")).toBe("tag_1");
+    expect(url.searchParams.get("w")).toBe("w-tagged");
+  });
+});
+
 describe("a browser minting a routed window", () => {
   test("opens it as a tab marked seed=0", async () => {
     await boot("kind=terminal&w=w-source");
@@ -119,5 +134,25 @@ describe("a browser minting a routed window", () => {
     expect(url.searchParams.get("w")).toBe("w-routed");
     expect(url.searchParams.get("kind")).toBe("terminal");
     expect(url.searchParams.get("seed")).toBe("0");
+  });
+
+  test("opens it with the tag this page gives the pages it opens", async () => {
+    await boot("kind=terminal&w=w-source");
+    // Read after the boot: the store's own instance of the module minted it.
+    const { openerHolderTag } = await import("@chan/web-shared/window-holder");
+    const open = vi.spyOn(window, "open").mockReturnValue({} as Window);
+    store.onWatchEvent({
+      type: "window_command",
+      window_id: "w-source",
+      command: "open_window",
+      window: "w-routed",
+      prefix: "/lib/x",
+      token: "secret",
+      path: "notes/a.md",
+    });
+
+    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    const url = new URL(String(open.mock.calls[0]![0]));
+    expect(url.searchParams.getAll("h")).toEqual([openerHolderTag()]);
   });
 });

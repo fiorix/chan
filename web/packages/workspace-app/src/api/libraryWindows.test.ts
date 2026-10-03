@@ -1,3 +1,4 @@
+import { openerHolderTag } from "@chan/web-shared/window-holder";
 import type { WindowPageCheck } from "@chan/web-shared/window-page";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -125,6 +126,12 @@ function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibra
     launch_path: "/api/library/command-capabilities/cap/windows/w-other/launch",
     ...overrides,
   };
+}
+
+/// Where this page sends a window: the record's launch path, with the tag
+/// this page gives the pages it opens.
+function launchUrl(record: ScopedLibraryWindow = scopedWindow()): string {
+  return `${record.launch_path}?h=${openerHolderTag()}`;
 }
 
 afterEach(() => {
@@ -1194,5 +1201,31 @@ describe("the snapshot read before a repair", () => {
     expect(popup.location.href).toBe(PAGE);
     expect(host.runAction).not.toHaveBeenCalled();
     expect(popup.close).not.toHaveBeenCalled();
+  });
+});
+
+describe("the holder tag on a window this page sends to its page", () => {
+  test("a create checks and navigates its popup with the tag", async () => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge({ runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }) });
+
+    await createLibraryWindow(host, { action: "new_terminal" });
+
+    expect(host.checkPage).toHaveBeenCalledExactlyOnceWith(launchUrl(), expect.any(AbortSignal));
+    expect(popup.location.href).toBe(launchUrl());
+    expect(popup.location.href).toBe(`/api/library/command-capabilities/cap/windows/w-other/launch?h=${openerHolderTag()}`);
+  });
+
+  test("a repair checks and navigates its popup with the tag", async () => {
+    const popup = fakePopup("https://chan.test/project/?w=w-other");
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const record = scopedWindow({ connected: false });
+    const host = bridge({ readSnapshot: vi.fn(async () => snapshotWith(record)) });
+
+    await focusLibraryWindow(host, record);
+
+    expect(host.checkPage).toHaveBeenCalledExactlyOnceWith(launchUrl(), expect.any(AbortSignal));
+    expect(popup.location.href).toBe(launchUrl());
   });
 });
