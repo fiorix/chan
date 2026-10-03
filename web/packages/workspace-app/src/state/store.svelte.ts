@@ -156,6 +156,7 @@ import {
 } from "./tabs.svelte";
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
 import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
+import { forgetLinkKinds } from "../editor/widgets/wikilink";
 import { chanFetch, withTokenQuery } from "../api/transport";
 import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./confirm.svelte";
@@ -1062,6 +1063,12 @@ export function onWatchEvent(e: unknown): void {
     // updates without re-clicking. The fetch is idempotent and
     // de-duped via `ensureGraphLoaded`.
     invalidateGraph();
+    // A created, removed or moved path can change what any link resolves
+    // to. An edit changes no path, so it keeps the kinds the pills hold.
+    const changed = innerForScope?.kind;
+    if (changed === "Created" || changed === "Removed" || changed === "Renamed") {
+      forgetLinkKinds();
+    }
     if (hasBrowserTab() || hasGraphTab()) {
       void ensureGraphLoaded();
     }
@@ -2875,6 +2882,7 @@ export async function handleDraftPromoted(path: string): Promise<void> {
   await refreshTreeForPath(path);
   revealAndSelect(path);
   scheduleWorkspaceRefresh();
+  forgetLinkKinds();
   // The graph is a workspace surface; a standalone window has no
   // /api/graph to invalidate or load and must not fetch a 404.
   if (windowCaps.workspace) {
@@ -5210,6 +5218,7 @@ async function performMove(path: string, target: string): Promise<void> {
   movingPaths.add(target);
   try {
     const resp = await api.move(path, target);
+    forgetLinkKinds();
     await refreshTree();
     rekeyTabsForRename(path, target);
     // Defensive: if a watcher event slipped through before the Set
@@ -5460,6 +5469,7 @@ function deepestFirst(paths: readonly string[]): string[] {
 /// The tabs close even when the refresh fails, since the paths are gone
 /// either way; the refresh's error is thrown after.
 async function settleDeleted(paths: readonly string[]): Promise<void> {
+  forgetLinkKinds();
   try {
     await Promise.all(
       windowCaps.workspace
@@ -5652,6 +5662,7 @@ export const fileOps = {
       }
       finishTransfer(xferId);
       if (uploaded.length > 0) {
+        forgetLinkKinds();
         if (root !== "filesystem" || usesStandaloneFiles()) {
           revealAndSelect(uploaded[uploaded.length - 1]!);
         }
@@ -5703,7 +5714,7 @@ export const fileOps = {
     const path = appendDefaultMd(name);
     try {
       await api.create(path, false, "");
-      await refreshTree();
+      await settleCreated();
       await openInActivePane(path, { landAtTop: true });
     } catch (e) {
       ui.status = `create failed: ${(e as Error).message}`;
@@ -5721,7 +5732,7 @@ export const fileOps = {
     if (!path) return;
     try {
       await api.create(path, true);
-      await refreshTree();
+      await settleCreated();
       // Directory creation leaves the user inside the file browser
       // (unlike file creation, which jumps straight into an editor
       // tab), so reveal the new directory and select it. Expands every
@@ -5762,7 +5773,7 @@ export const fileOps = {
     if (isDir) {
       try {
         await api.create(next, true);
-        await refreshTree();
+        await settleCreated();
         revealAndSelect(next);
       } catch (e) {
         ui.status = `create failed: ${(e as Error).message}`;
@@ -5776,7 +5787,7 @@ export const fileOps = {
     const path = appendDefaultMd(next);
     try {
       await api.create(path, false, "");
-      await refreshTree();
+      await settleCreated();
       await openInActivePane(path, { landAtTop: true });
     } catch (e) {
       ui.status = `create failed: ${(e as Error).message}`;
@@ -5973,7 +5984,7 @@ export const fileOps = {
       const src = await api.read(path);
       const target = nextDuplicateName(path);
       await api.create(target, false, src.content);
-      await refreshTree();
+      await settleCreated();
       await openInActivePane(target, { landAtTop: true });
       revealAndSelect(target);
     } catch (e) {
@@ -5981,6 +5992,14 @@ export const fileOps = {
     }
   },
 };
+
+/// What follows a create of this window's own: every link pill asks its kind
+/// again, since the new path may be what one of them names, and the tree is
+/// brought up to date.
+async function settleCreated(): Promise<void> {
+  forgetLinkKinds();
+  await refreshTree();
+}
 
 /// Compute the next available "name-copy{,-N}.ext" sibling for
 /// `path`. Looks at the current tree to avoid collisions; the

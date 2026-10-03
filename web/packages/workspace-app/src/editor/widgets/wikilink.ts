@@ -168,6 +168,10 @@ export function parseInternalLink(
 
 const kindCache = new Map<string, LinkKind>();
 const inflight = new Set<string>();
+
+/// Which set of notes the answers kept, and the requests in flight, were
+/// asked of. A change of that set starts a new one.
+let kindEpoch = 0;
 const watchedViews = new Set<EditorView>();
 
 /// When a target whose resolve failed with no answer may be asked again.
@@ -230,6 +234,19 @@ function cacheKind(target: string, kind: LinkKind): void {
   scheduleKindRepaint();
 }
 
+/// Forget every kind an answer gave: a note was created, moved or deleted.
+/// Which targets a changed path answers for is the resolver's to say (a
+/// stem, a relative path, a directory), so all of them go, and the repaint
+/// has every pill on screen ask again. An answer still in flight was given
+/// for the notes as they were, so it is dropped when it lands.
+export function forgetLinkKinds(): void {
+  kindEpoch += 1;
+  kindCache.clear();
+  retryNotBefore.clear();
+  inflight.clear();
+  scheduleKindRepaint();
+}
+
 /// Look up a target's kind. Returns the cached kind synchronously, or
 /// undefined while the target has no answer: a resolve is in flight (the
 /// pill renders uncolored until it lands and schedules a re-render), or the
@@ -250,14 +267,17 @@ function getKind(target: string): LinkKind | undefined {
   if (inflight.has(target)) return undefined;
   if ((retryNotBefore.get(target) ?? 0) > Date.now()) return undefined;
   inflight.add(target);
+  const epoch = kindEpoch;
   api
     .resolveLink(target)
     .then((res) => {
+      if (epoch !== kindEpoch) return;
       // A link to a directory resolves (not broken); it opens the file
       // browser at that folder on click rather than the text editor.
       cacheKind(target, res.is_dir ? "directory" : res.kind);
     })
     .catch((error: unknown) => {
+      if (epoch !== kindEpoch) return;
       // Only the route's not-found says the target is broken. Any other
       // failure says nothing about the target, so the pill keeps no kind
       // and is already painted that way.
@@ -265,7 +285,9 @@ function getKind(target: string): LinkKind | undefined {
       else retryNotBefore.set(target, Date.now() + RESOLVE_RETRY_FLOOR_MS);
     })
     .finally(() => {
-      inflight.delete(target);
+      // A request of an earlier set no longer holds the target's place: the
+      // forget cleared it, and a request of this set may hold it now.
+      if (epoch === kindEpoch) inflight.delete(target);
     });
   return undefined;
 }

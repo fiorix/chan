@@ -19,6 +19,7 @@ import {
 } from "../editor/caret_mapping";
 import { stripTrailingWhitespaceText } from "../editor/tools";
 import { parseSlidesSpec } from "../editor/slides";
+import { forgetLinkKinds } from "../editor/widgets/wikilink";
 import { uiConfirm } from "./confirm.svelte";
 import { windowCaps } from "./windowCaps";
 import { filesContext } from "./fileContext.svelte";
@@ -3950,6 +3951,7 @@ async function discardEmptyFileOnClose(tab: FileTab): Promise<boolean> {
     return false;
   }
   clearCaretsUnder(tab.path);
+  forgetLinkKinds();
   const name = basename(tab.path);
   notify(`Discarded empty file ${name}`);
   return true;
