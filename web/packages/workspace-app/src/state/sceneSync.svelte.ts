@@ -1360,8 +1360,10 @@ registerLiveSessionKind({
 
 // Hybrid Nav settles by swapping the whole tree, which replaces the tab
 // object every live session mirrors onto. Re-apply each mirror against the
-// tree that won, whether that was the draft (commit) or the live one
-// (cancel, where this is a no-op).
+// tree that won. After a commit that is the draft's clone, which no session
+// wrote to. After a cancel it is the live tree, where the status is the one
+// the sessions wrote all along and the saved mark is derived again, as it is
+// after a commit.
 registerPaneModeSettledSink(() => {
   for (const session of registry.values()) session.resyncMirror();
 });
