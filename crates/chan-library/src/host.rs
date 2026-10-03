@@ -818,9 +818,10 @@ impl Drop for WorkspaceOpenCancellation {
 // the servers. Stopping the workspace's startup recovery joins a worker that
 // can be inside a filesystem call on the root, so while the runtime runs an
 // unreceived workspace is released on the blocking pool, and the permit goes
-// there with it. A runtime that is shutting down runs no such task: the
-// thread that drops the answer makes the release, or the pool's thread that
-// drains a task already queued.
+// there with it. A runtime that is shutting down takes no new task, and may
+// run or drop one already queued. Either way the release is made outside
+// the pool's lock: on a thread of the pool, which runs the task or drops
+// it, or on the thread that drops the answer.
 struct OpenAnswer {
     opened: Option<Result<Arc<Workspace>, ChanError>>,
     permit: Option<OwnedMutexGuard<()>>,
@@ -857,16 +858,19 @@ impl Drop for OpenAnswer {
         };
         // The release sits in a slot that the pool's task and this thread
         // both own. The task takes it out and makes it on its pool thread.
-        // A runtime that is shutting down drops the task unrun. When it
-        // refuses the task it does so inside the spawn, holding the pool's
-        // own lock, which every blocking spawn of that runtime takes: this
-        // thread's owner keeps that drop from being the slot's last, and
-        // the release is made below, once the spawn has returned. When it
-        // drains its queue, a thread of its pool drops the task under no
-        // lock, and makes the release unless this thread still owns the
-        // slot. The pool panics when the OS gives it no thread and it has
-        // none, with the task already queued for the first thread it gets.
-        // A drop does not unwind, so that is logged and nothing else.
+        // A runtime that is shutting down refuses a new task, and runs or
+        // drops one it had queued. When it refuses the task it does so
+        // inside the spawn, holding the pool's own lock, which every
+        // blocking spawn of that runtime takes: this thread's owner keeps
+        // that drop from being the slot's last, and the release is made
+        // below, once the spawn has returned. A thread of its pool that is
+        // still working through the queue runs a queued task, and the
+        // release is made there. One that has seen the shutdown drains the
+        // queue and drops the task, under no lock, and makes the release
+        // unless this thread still owns the slot. The pool panics when the
+        // OS gives it no thread and it has none, with the task already
+        // queued for the first thread it gets. A drop does not unwind, so
+        // that is logged and nothing else.
         let slot = Arc::new(Mutex::new(Some(unreceived)));
         let handed = Arc::clone(&slot);
         let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
