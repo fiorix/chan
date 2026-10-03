@@ -1371,13 +1371,35 @@ impl DevserverState {
     }
 
     /// Settle a mount that completed on a tombstone: the workspace was
-    /// forgotten while the attempt opened it, so the host's removal takes
-    /// down what the attempt mounted, and the tombstone goes with it.
+    /// forgotten while the attempt opened it, so what the attempt mounted
+    /// goes, and the tombstone with it.
+    ///
+    /// A workspace the registry still holds is a forget's to remove: the
+    /// forget that left the tombstone has not answered yet, or was refused
+    /// and its caller told so, or its caller left. This attempt closes the
+    /// tenant at its prefix and removes nothing, since a removal started
+    /// here waits for the root's lock behind that forget's and would
+    /// unregister the workspace after the forget had answered that it is
+    /// still registered. The `starting` this attempt published under its
+    /// root goes when it still reads so; any other row there is the
+    /// forget's removal's.
+    ///
+    /// A workspace the registry no longer holds, dropped by a removal that
+    /// finished or by another process's edit of the registry, has nobody
+    /// else to take the tenant down and forget its overlay rows and window
+    /// records, so the host's removal runs for it.
     async fn settle_forgotten_completion(&self, attempt: &MountAttempt) {
-        let _ = self
-            .host
-            .remove_workspace_for_root(&attempt.root, true)
-            .await;
+        if registered_root_keys(self.host.library()).contains(&attempt.root) {
+            let _ = self.host.close_workspace(&attempt.prefix, true).await;
+            if self.host.canonical_root_status(&attempt.root).0 == WorkspaceStatus::Starting {
+                self.host.clear_canonical_root_lifecycle(&attempt.root);
+            }
+        } else {
+            let _ = self
+                .host
+                .remove_workspace_for_root(&attempt.root, true)
+                .await;
+        }
         self.remove_finished_tombstone(&attempt.prefix);
     }
 
@@ -1619,12 +1641,14 @@ impl DevserverState {
     /// The host's removal ran its close before it failed, so the host holds
     /// the workspace off. The tombstone goes back off at its own generation,
     /// which is past its attempt's: the attempt stands down at either of its
-    /// reconciles if it has not read the tombstone, and one that has runs a
-    /// removal of its own when it lands. The starting record as it was is
-    /// desired on at its attempt's generation: its next save would write the
-    /// overlay row on over the close's off, and its attempt would mount the
-    /// workspace, or leave it starting with nothing behind it once that
-    /// attempt drops what it read as a tombstone. Any other record turns off
+    /// reconciles if it has not read the tombstone, and one that has closes
+    /// what it mounted and removes nothing
+    /// ([`settle_forgotten_completion`](Self::settle_forgotten_completion)).
+    /// The starting record as it was is desired on at its attempt's
+    /// generation: its next save would write the overlay row on over the
+    /// close's off, and its attempt would mount the workspace, or leave it
+    /// starting with nothing behind it once that attempt drops what it read
+    /// as a tombstone. Any other record turns off
     /// at a newer generation whatever its phase, since a failed record stays
     /// desired on and a mounted one keeps its desire at a save during a
     /// stop. A record changed since, or another forget's tombstone, belongs
