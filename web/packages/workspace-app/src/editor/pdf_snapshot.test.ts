@@ -85,6 +85,64 @@ describe("inlinePageResources", () => {
     ]);
   });
 
+  test("an image that fails stops the fetches of the images after it", async () => {
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string | URL, init?: RequestInit) => {
+        if (String(url).includes("first")) {
+          return Promise.resolve(fetchOk("<html>sign in</html>", "text/html"));
+        }
+        // An engine's fetch: it answers nothing and rejects when aborted.
+        const signal = init!.signal!;
+        signals.push(signal);
+        return new Promise<Response>((_, reject) => {
+          signal.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }),
+    );
+    const root = page(
+      '<img src="/api/fs/first.png"><img src="/api/fs/second.png">' +
+        '<img src="/api/fs/third.png">',
+    );
+    await expect(inlinePageResources(root)).rejects.toThrow(
+      "image /api/fs/first.png is text/html, not an image",
+    );
+
+    expect(signals.map((signal) => signal.aborted)).toEqual([true, true]);
+  });
+
+  test("an image that answers after another has failed is not written to the page", async () => {
+    let answer!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string | URL) => {
+        if (String(url).includes("first")) {
+          return Promise.resolve(fetchOk("<html>sign in</html>", "text/html"));
+        }
+        // This one answers late, whatever became of its abort.
+        return new Promise<Response>((resolve) => (answer = resolve));
+      }),
+    );
+    const root = page(
+      '<svg><image href="/api/fs/first.png"></image>' +
+        '<image href="/api/fs/second.png"></image></svg>',
+    );
+    await expect(inlinePageResources(root)).rejects.toThrow(
+      "image /api/fs/first.png is text/html, not an image",
+    );
+
+    answer(fetchOk(PNG_BYTES, "image/png"));
+    await settled();
+    expect(
+      Array.from(root.querySelectorAll("image")).map((image) =>
+        image.getAttribute("href"),
+      ),
+    ).toEqual(["/api/fs/first.png", "/api/fs/second.png"]);
+  });
+
   test("rewrites img srcs to data: URIs via fetch", async () => {
     const root = page('<img src="/api/fs/photo.png?t=tok">');
     await inlinePageResources(root);
@@ -286,6 +344,34 @@ describe("snapshotPage", () => {
     expect((failure as Error).message).not.toContain("tok");
     expect(drawn).toEqual([]);
   });
+
+  test.each([
+    ["the first", [0, 1]],
+    ["the second", [1, 0]],
+  ])(
+    "two images that do not decode fail by the first one's name when %s settles first",
+    async (_which, order) => {
+      // A retry of the export names the same image, whichever decode the
+      // engine happens to finish first.
+      standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+      const root = page(
+        '<img src="/api/fs/shots/a.png?t=tok"><img src="/api/fs/shots/b.png?t=tok">',
+      );
+      const snapshot = snapshotPage(root, BOX);
+      let failure: unknown = null;
+      snapshot.catch((err) => (failure = err));
+      await settled();
+      expect(decodes).toHaveLength(2);
+      for (const index of order) {
+        decodes[index]!.settle(false);
+        await settled();
+      }
+
+      expect((failure as Error | null)?.message).toBe(
+        "image /api/fs/shots/a.png could not be decoded",
+      );
+    },
+  );
 
   test.each([
     ["display:none", '<div style="display:none"><img src="/api/fs/hidden.png"></div>'],
