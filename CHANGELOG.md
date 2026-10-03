@@ -52,6 +52,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Typing in a very long paragraph is faster.** The editor's decorations walk the syntax tree the edit already produced when it covers the visible lines, where they parsed the paragraph a second time at every key. A key in a 20,000-line paragraph took about 195 ms and takes about 105 ms in headless Chrome.
 
+- **A deck's PDF lays each slide out as play does.** A slide is laid out at play's reference size, 1920 by 1080, and a slide that overflows it is scaled down whole instead of being cut at the bottom of the page. No scrollbar is drawn into a page.
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
@@ -138,9 +140,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A save in a standalone Files window is refused when the file changed without its modification time moving.** A save from a file tab there names the SHA-256 of the text the tab loaded, so a save over a file that changed under it is refused and the conflict prompt opens; Overwrite still writes over what is there.
 
+- **A PDF export holds the images its pages show.** An exported deck or document could come out with an image missing where the page showed one. Each image is now fetched, decoded and painted at the box and size the page shows, and a page is drawn only after its images have decoded; an image with no size of its own, one shaped by `object-fit` and one cut by a clipping parent are placed as shown. An image that cannot be placed exactly (cut by the page's edge, turned by a `transform`, clipped or masked) is drawn by the page's own document. An image hidden by CSS or by a closed `details` is left out, and an `<img>` with a `srcset` exports the candidate the page shows.
+
+- **A PDF export that cannot draw an image says which one.** A fetch that fails, an answer that is not an image, or an image that does not decode fails the export and names the first such image in document order; before, an answer of any type was taken for the image. A document's images are prepared in batches within five minutes, after which the export stops.
+
 ### Security
 
 - **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print on stdout, as `devserver-terminal-replay.sh` did, and both suites also mask it on stderr, where a restart whose unit does not come up prints the unit's recent journal with the devserver's launch URL and token line in it. `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
+
+- **A PDF export's error does not show the window's token.** An export that failed over a resource named its address whole, with the query string that carries the window's bearer token. The address is now named without its query string.
 
 ## [v0.101.0] - 2026-10-02
 
