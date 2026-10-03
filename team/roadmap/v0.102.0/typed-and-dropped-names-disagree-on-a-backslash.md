@@ -37,3 +37,11 @@ The owner rules on the rule first. Suggestions beyond the record: keep the refus
 2. A file named `a\b.md` can be renamed, pinned through the prompt.
 3. The excluded-directories control offers no directory that it refuses, and a refusal says why, pinned.
 4. The workspace app's design document says the rule.
+
+## What shipped
+
+Built in part on 2026-10-03 on the v0.102.0 integration branch and not on `main`: the server's half, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those.
+
+`PUT /api/index/excluded-dirs` takes a name that holds a `\` when a directory of the workspace has that name, ignoring ASCII case as the walk's filter does, or when the stored set already holds it. It refuses any other such name with a sentence that says no directory has it, and a `/` as before (`crates/chan-server/src/routes/excluded_dirs.rs`). A stored name is kept without a look: the control sends the whole set at every change, so a stored name whose directory is gone would otherwise refuse every later change. On Windows no directory can hold a `\`, so there only a stored name passes. Pinned red first.
+
+The row stays open. The page's half, one rule for every typed or dropped name, is built and under repair, and is not landed. Settings does not offer a directory whose name holds a `\` yet. Left from the server half's review: the look lists the whole tree, so past the listing's limit of 500,000 entries a new name with a `\` answers a server error, and on Windows it walks a tree that cannot match. Both are ordered for repair ahead of the Settings control that would send such a name.
