@@ -307,6 +307,7 @@ describe("a backslash in a typed path", () => {
       ["a new file under a directory inside another", "create", undefined, "docs/watch\\new.md"],
       ["a path of two, the first after the directory", "create", undefined, "docs\\watch\\new.md"],
       ["a path that stops at it", "create", undefined, "docs\\"],
+      ["a new directory on the way to a file", "create", undefined, "docs\\sub/new.md"],
       ["a move", "move", "notes.md", "docs\\notes.md"],
       ["a path to open", "open", undefined, "docs\\new.md"],
     ] as const)("%s is refused and told to use a slash", async (_name, mode, sourcePath, typed) => {

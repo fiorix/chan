@@ -58,6 +58,7 @@ describe("backslashSeparates", () => {
     ["a new name after a listed directory inside another", "docs/watch\\new.md", { exists }],
     ["a path of two, the first after a listed directory", "docs\\watch\\new.md", { exists }],
     ["a path that stops at the backslash", "docs\\", { exists }],
+    ["a new directory's name after a listed directory, on the way to a file", "docs\\sub/new.md", { exists }],
     ["a move's last name after a listed directory", "docs\\notes.md", { source: "notes.md", exists }],
   ] as const)("%s reads as a separator", (_name, path, held) => {
     expect(backslashSeparates(path, held, isDir)).toBe(true);
