@@ -514,6 +514,60 @@ describe("liftPageImages", () => {
     return { root, images };
   }
 
+  test("a hidden image keeps the size measured before its source changes", async () => {
+    decodesSettleAtOnce();
+    imagesHaveBoxes();
+    const root = page('<img src="/api/fs/hidden.png" style="visibility:hidden">');
+    const img = root.querySelector("img")!;
+    vi.spyOn(img, "getBoundingClientRect").mockReturnValue({
+      left: 0, top: 0, width: 80, height: 40,
+    } as DOMRect);
+    Object.defineProperty(img, "checkVisibility", { value: () => false });
+    const originalStyle = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = originalStyle(el, pseudo);
+      if (el !== img) return style;
+      const small = img.getAttribute("src")?.startsWith("data:image/svg+xml,");
+      return new Proxy(style, {
+        get(target, property) {
+          if (property === "width") return small ? "1px" : "80px";
+          if (property === "height") return small ? "1px" : "40px";
+          return Reflect.get(target, property);
+        },
+      });
+    });
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await liftPageImages(root, images);
+    const standIn = decodeURIComponent(img.getAttribute("src")!);
+    expect(standIn).toContain('width="80" height="40"');
+    expect(img.getAttribute("width")).toBe("80");
+    expect(images.lifted[0]!.rendered).toBe(false);
+  });
+
+  test.each([
+    [false, true],
+    [true, false],
+  ])("keeps the first visibility answer when later answers change from %s to %s", async (first, later) => {
+    decodesSettleAtOnce();
+    imagesHaveBoxes();
+    const root = page('<img src="/api/fs/photo.png">');
+    const img = root.querySelector("img")!;
+    Object.defineProperty(img, "naturalWidth", { value: 40 });
+    Object.defineProperty(img, "naturalHeight", { value: 20 });
+    Object.defineProperty(img, "complete", { value: true });
+    let calls = 0;
+    Object.defineProperty(img, "checkVisibility", {
+      value: () => ++calls === 1 ? first : later,
+    });
+    const images = new PageImages();
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.rendered).toBe(first);
+    expect(fetch).toHaveBeenCalledTimes(first ? 1 : 0);
+    expect(images.lifted[0]!.bitmap.naturalWidth).toBe(40);
+  });
+
   test("leaves a stand-in of the image's size where the image was", async () => {
     imagesHaveBoxes();
     const { root, images } = await lifted('<img src="/api/fs/photo.png?t=tok">');
