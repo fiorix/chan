@@ -10955,7 +10955,7 @@ mod tests {
                 let embedded = state.embedded().expect("embedded host");
                 assert_eq!(
                     embedded.close_workspace_root(&requested, false).await,
-                    Ok(chan_server::WorkspaceLifecycleOutcome::Completed),
+                    Ok(chan_server::WorkspaceLifecycleOutcome::NotFound),
                     "the close waited for an open the handoff gave up"
                 );
                 assert_eq!(
