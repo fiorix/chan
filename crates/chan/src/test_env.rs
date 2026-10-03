@@ -1,8 +1,10 @@
 //! Ambient-environment isolation for tests that parse env-backed CLI args or
 //! spawn `chan` child processes.
 //!
-//! Integration tests link this crate without `cfg(test)`, so the shared
-//! harness lives in the library itself; production code does not call it.
+//! The library compiles this module for its own tests alone. An integration
+//! test links the library built without them, so the part one uses, the
+//! scrubbed environment for a spawned child, is a file of its own
+//! (`test_env/child_env.rs`) that each mounts by path.
 //! A chan terminal exports a `CHAN_*` namespace to its shells (MCP discovery,
 //! tab identity, tunnel credentials), and clap reads `CHAN_TUNNEL_*` for the
 //! devserver args, so a test launched from such a terminal inherits values
@@ -14,10 +16,13 @@
 //! interpolate an inherited value, because `CHAN_TUNNEL_TOKEN` carries a live
 //! `chan_pat_` credential.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
+
+mod child_env;
+use child_env::is_chan_var;
 
 /// Serializes every in-process environment mutation behind one permit.
 /// Env vars are process-global, so two guarded tests running in parallel
@@ -34,10 +39,6 @@ fn acquire_permit() -> MutexGuard<'static, ()> {
 /// Uniqueness for per-test homes when several guarded tests run back to back
 /// in one process.
 static HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn is_chan_var(key: &OsStr) -> bool {
-    key.to_string_lossy().starts_with("CHAN_")
-}
 
 /// RAII guard for one test's isolated environment.
 ///
@@ -130,19 +131,11 @@ impl Drop for ChanTestEnv {
     }
 }
 
-/// A copy of the current process environment with the complete `CHAN_*`
-/// namespace removed, for preloading a child `Command` (paired with
-/// `env_clear`). A child built from this cannot inherit terminal-session
-/// state or credentials; the caller then sets its own sandbox values.
-pub fn scrubbed_process_env() -> Vec<(OsString, OsString)> {
-    std::env::vars_os()
-        .filter(|(key, _)| !is_chan_var(key))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::child_env::scrubbed_process_env;
     use super::*;
+    use std::ffi::OsStr;
 
     const ALPHA: &str = "CHAN_TEST_ENV_ALPHA";
     const BETA: &str = "CHAN_TEST_ENV_BETA";

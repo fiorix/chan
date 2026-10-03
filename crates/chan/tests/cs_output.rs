@@ -28,6 +28,11 @@ use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+// The library compiles its test harness for its own tests alone, so the
+// file of it that scrubs a child's environment is mounted here by path.
+#[path = "../src/test_env/child_env.rs"]
+mod child_env;
+
 /// Every wait in a case: the fake server's accept and reads, and the `cs`
 /// exit. Generous for a loaded CI box; a hang fails the test instead of
 /// stalling the run.
@@ -462,7 +467,7 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run 
     symlink(env!("CARGO_BIN_EXE_chan"), &cs).expect("symlink cs -> chan");
     let mut cmd = Command::new(&cs);
     cmd.env_clear()
-        .envs(chan::test_env::scrubbed_process_env())
+        .envs(child_env::scrubbed_process_env())
         .env("CHAN_CONTROL_SOCKET", &socket)
         .envs(case.env.iter().copied())
         .args(case.args)

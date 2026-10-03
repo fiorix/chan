@@ -32,6 +32,11 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+// The library compiles its test harness for its own tests alone, so the
+// file of it that scrubs a child's environment is mounted here by path.
+#[path = "../src/test_env/child_env.rs"]
+mod child_env;
+
 /// The built `chan` binary under test (Cargo points this at the target dir).
 const CHAN: &str = env!("CARGO_BIN_EXE_chan");
 
@@ -79,7 +84,7 @@ impl Sandbox {
     fn command(&self) -> Command {
         let mut cmd = Command::new(CHAN);
         cmd.env_clear()
-            .envs(chan::test_env::scrubbed_process_env())
+            .envs(child_env::scrubbed_process_env())
             .env("CHAN_HOME", self.chan_home.path())
             .env("HOME", self.home.path())
             .env("XDG_RUNTIME_DIR", self.runtime.path())

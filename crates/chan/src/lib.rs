@@ -82,11 +82,11 @@ mod help;
 mod devserver_daemon;
 pub use devserver_daemon::self_managed_devserver_pid;
 
-/// Serialized ambient-`CHAN_*` isolation for env-reading tests and spawned
-/// test children. Not `cfg(test)` because integration tests link this crate
-/// without it.
-#[doc(hidden)]
-pub mod test_env;
+/// Serialized ambient-`CHAN_*` isolation for env-reading tests. An
+/// integration test links the library built without it and mounts
+/// `test_env/child_env.rs` by path for the environment of a child it spawns.
+#[cfg(test)]
+mod test_env;
 
 /// Default listen port shared by `chan serve` (standalone serve) and
 /// `chan devserver`. Single-sourced so the two cannot drift: `cmd_serve` relies

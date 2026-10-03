@@ -4,6 +4,11 @@
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
+// The library compiles its test harness for its own tests alone, so the
+// file of it that scrubs a child's environment is mounted here by path.
+#[path = "../src/test_env/child_env.rs"]
+mod child_env;
+
 #[test]
 fn manual_entrypoints_match_without_server() {
     for flags in [
@@ -19,7 +24,7 @@ fn manual_entrypoints_match_without_server() {
                 .arg("dump-skill")
                 .args(flags.split_whitespace())
                 .env_clear()
-                .envs(chan::test_env::scrubbed_process_env())
+                .envs(child_env::scrubbed_process_env())
                 .output()
                 .unwrap();
             assert!(

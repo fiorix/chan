@@ -11,6 +11,11 @@ use std::ffi::OsStr;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
+// The library compiles its test harness for its own tests alone, so the
+// file of it that scrubs a child's environment is mounted here by path.
+#[path = "../src/test_env/child_env.rs"]
+mod child_env;
+
 /// Symlink `cs -> chan` in a fresh tempdir and return its path.
 fn cs_symlink() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -26,7 +31,7 @@ fn cs_symlink() -> (tempfile::TempDir, std::path::PathBuf) {
 /// test itself sets.
 fn command(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
-    cmd.env_clear().envs(chan::test_env::scrubbed_process_env());
+    cmd.env_clear().envs(child_env::scrubbed_process_env());
     cmd
 }
 

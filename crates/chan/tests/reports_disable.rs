@@ -4,6 +4,11 @@
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+// The library compiles its test harness for its own tests alone, so the
+// file of it that scrubs a child's environment is mounted here by path.
+#[path = "../src/test_env/child_env.rs"]
+mod child_env;
+
 /// A chan home and a registered workspace, each in a directory of its own.
 struct Sandbox {
     chan_home: tempfile::TempDir,
@@ -35,7 +40,7 @@ impl Sandbox {
         Command::new(env!("CARGO_BIN_EXE_chan"))
             .args(args)
             .env_clear()
-            .envs(chan::test_env::scrubbed_process_env())
+            .envs(child_env::scrubbed_process_env())
             .env("CHAN_HOME", self.chan_home.path())
             .env("HOME", self.home.path())
             .env("CHAN_NO_DESKTOP_HANDOFF", "1")
