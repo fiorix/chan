@@ -416,6 +416,7 @@ export async function liftPageImages(
   for (const result of decoded) {
     if (!result) continue;
     const { img, name, bitmap } = result;
+    const rendered = imageIsRendered(img, root);
     let widthPx = bitmap.naturalWidth;
     let heightPx = bitmap.naturalHeight;
     // A decoded SVG can have no intrinsic dimensions while CSS gives it
@@ -424,22 +425,28 @@ export async function liftPageImages(
       const rect = img.getBoundingClientRect();
       widthPx = rect.width;
       heightPx = rect.height;
-      if (!(widthPx > 0 && heightPx > 0)) {
-        throw new SnapshotError(`image ${name} has no measurable size`);
-      }
     }
+    const sized = widthPx > 0 && heightPx > 0;
+    // An image the page does not show has nothing to paint, so one with
+    // no size to stand in at is not a failure either: its stand-in is a
+    // single pixel and its own sizing is left as the author wrote it.
+    if (!sized && rendered) {
+      throw new SnapshotError(`image ${name} has no measurable size`);
+    }
+    if (!sized) widthPx = heightPx = 1;
     img.setAttribute(LIFTED_ATTR, String(images.lifted.length));
     images.lifted.push({
       name,
       bitmap,
       widthPx,
       heightPx,
-      rendered: imageIsRendered(img, root),
+      rendered,
       shownPx: 0,
       done: false,
     });
     img.setAttribute("src", standInSrc(widthPx, heightPx));
     img.removeAttribute("loading");
+    if (!sized) continue;
     if (!img.hasAttribute("width") && !img.hasAttribute("height")) {
       img.setAttribute("width", String(widthPx));
     }
