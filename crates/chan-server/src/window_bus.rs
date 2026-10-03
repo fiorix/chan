@@ -127,6 +127,7 @@ impl ExportJob {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn committed(&self) -> bool {
         self.lock_state().committed
     }

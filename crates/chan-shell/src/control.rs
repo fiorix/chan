@@ -33,6 +33,8 @@ pub struct EnvControlSocket {
     // Read by the search, which runs on unix only.
     #[cfg_attr(not(unix), allow(dead_code))]
     workspace_path: Option<PathBuf>,
+    // Read by moved-server discovery on Unix only.
+    #[cfg_attr(not(unix), allow(dead_code))]
     library_id: Option<String>,
     /// The lines this socket announced, for the tests to read.
     #[cfg(all(test, unix))]
