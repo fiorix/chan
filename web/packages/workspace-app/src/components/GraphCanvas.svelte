@@ -1966,8 +1966,9 @@
       if (link && typeof link.links === "function") link.links(dEdges);
       // A change of the focal ids alone pins and releases nodes of the same
       // set, and a settled simulation applies a pin only on a tick: warm it
-      // as a content refresh does, with no refit.
-      if (focalMoved) sim.alpha(0.05).restart();
+      // as a content refresh does, with no refit. A payload published in
+      // the same flush has warmed the layout by more, and keeps that.
+      if (focalMoved) sim.alpha(Math.max(sim.alpha(), 0.05)).restart();
       return;
     }
     const alpha = added.length > 0 ? 0.35 : 0.2;
