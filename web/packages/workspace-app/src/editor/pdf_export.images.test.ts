@@ -243,6 +243,7 @@ describe("how long a document's images may take to prepare", () => {
 
   test("the document bound prevents later image batches from starting", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    decodesSettleAtOnce();
     const replies: ((response: Response) => void)[] = [];
     const fetched = vi.fn(() => new Promise<Response>((resolve) => replies.push(resolve)));
     vi.stubGlobal("fetch", fetched);
@@ -260,7 +261,7 @@ describe("how long a document's images may take to prepare", () => {
     for (const answer of replies) {
       answer({ ok: true, blob: async () => new Blob([TINY_PNG], { type: "image/png" }) } as Response);
     }
-    for (let turn = 0; turn < 20; turn++) await nextTurn();
+    for (let turn = 0; turn < 100; turn++) await nextTurn();
     expect(fetched).toHaveBeenCalledTimes(8);
   });
 });
