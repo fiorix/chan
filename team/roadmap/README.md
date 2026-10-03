@@ -27,6 +27,8 @@ Opened 2026-09-27 to hold what the owner accepted for a version after v0.101.0, 
 
 At the v0.101.0 GA on 2026-10-02 six items moved here from that version: four whose remaining work carries over, the dedup seams, the frontend comment pass, the frontend review remainder and a hung root's registration thread, and two still raised for a decision, a raw devserver's restart beside desktop windows and a desktop hide beside a waiting stroke.
 
+On 2026-10-03 the owner raised one more from use and accepted it with the report: that no line chan prints opens a running devserver in a browser, which also asks that secret masking default on in a control terminal alone. The same day the owner's own PDF exports of a slide deck were read back pixel by pixel, which settles the causes of [a-slide-decks-pdf-lacks-the-images-it-shows][pdimg] and adds to it the width half of the one design box it already named: a deck's PDF breaks lines the deck keeps whole when it plays, and paints a scrollbar into the raster.
+
 | item | state | next |
 | --- | --- | --- |
 | [forgetting-a-relinked-root-waits-four-lookups][sfgt] | accepted | build |
@@ -97,6 +99,7 @@ At the v0.101.0 GA on 2026-10-02 six items moved here from that version: four wh
 | [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | accepted | build |
 | [a-raw-devserver-restart-may-close-desktop-windows][rrwin] | raised | decide |
 | [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
+| [no-printed-line-opens-the-devserver-in-a-browser][dsurl] | accepted | build |
 
 [dedup]: v0.102.0/one-question-is-answered-in-many-places.md
 [cmts]: v0.102.0/frontend-comments-narrate-history.md
@@ -166,6 +169,7 @@ At the v0.101.0 GA on 2026-10-02 six items moved here from that version: four wh
 [cfgat]: v0.102.0/the-casefold-pins-run-in-no-gate.md
 [mfchk]: v0.102.0/a-missing-file-check-commits-no-waiting-stroke.md
 [rgate]: v0.102.0/a-hung-root-keeps-restored-tenants-at-503.md
+[dsurl]: v0.102.0/no-printed-line-opens-the-devserver-in-a-browser.md
 
 ## Completed
 

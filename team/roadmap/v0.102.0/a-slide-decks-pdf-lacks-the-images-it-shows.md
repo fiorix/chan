@@ -1,6 +1,6 @@
 # A slide deck's PDF lacks the images the deck shows
 
-Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0, on the owner's word "add to next roadmap for fixing"; raised by the owner the same day, from use. Read in code at `4c4ada0a1`; nothing was run and no PDF was looked at, so every cause named here is a reading.
+Status: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0, on the owner's word "add to next roadmap for fixing"; raised by the owner the same day, from use. Read in code at `4c4ada0a1`. The causes below were a reading when the item was written; on 2026-10-03 the owner's own exports of the deck were read back pixel by pixel, and the section "What the exports show" records which of them that measurement settles.
 
 ## Owner ruling
 
@@ -30,9 +30,28 @@ Read, not run. Lines at `4c4ada0a1`, under `web/packages/workspace-app/src/` whe
 
 No cause shared with the hang of `cs export` was found. The two share the render engine. Slides that carry images are the slowest pages, so an image-heavy deck is the one most likely to outlast that command's wait; that link is possible and not established.
 
+## What the exports show
+
+Measured on 2026-10-03 against the owner's own exports of `dev/asg/presentation.md` in the `sdme` workspace, a 46-slide 16:9 deck at `zoom_factor: 2.5` whose seven image slides each hold a heading and one PNG screenshot sized with `#w=`. Each export is 46 pages, one 2246x1588 PNG per page. The pages were decompressed out of the PDF and scanned for ink.
+
+**The image is absent, not cut, and the loss is deterministic.** In the export chan-desktop wrote on 2026-10-02, the `footlose` page carries exactly one band of ink, rows 255 to 315 at x 74 to 366, which is the heading; every other pixel is the slide background. The seven image pages are the smallest in the file, 17 to 25 KB against a 110 KB mean, and they are byte-identical to the export of 2026-09-30, so this is not a race that sometimes loses.
+
+**The images did reach the raster.** `auditSelfContained` fails the export by name while any `img src` is still external, and the server serves `.png` as `image/png` (`crates/chan-server/src/static_assets.rs:415`), so a 46-page PDF existing at all proves every image was fetched and inlined as a `data:` URI. The loss is at the single draw in `rasterizePage`, which paints the moment the outer SVG image fires `load` and waits for nothing nested inside the `foreignObject`. This is cause 1, measured.
+
+**The engine is the variable.** The same deck exported from Chrome against the same devserver on 2026-10-03 carries the images. chan-desktop runs WKWebView on macOS. So the nested `data:` images are subresources of the SVG-image document that Chromium blocks the outer `load` on and WebKit does not, and every check in this repo runs headless Chrome, which is why none of them sees it.
+
+**Cause 3 is ruled out for this deck.** Every image is a `.png` and every `data:` URI it was inlined as is an image's.
+
+**The export's box is the preview's, in both axes.** The geometry read back from the Chrome raster matches `deckPageLayout` to the pixel: the slide content box runs x 73.4 to 2171.4 raster px against measured ink at 73 to 2171, and the `footlose` image's computed right edge of 2031.7 against measured 2031. That box is `deckSlideLayoutBox`, which mirrors the preview's `width:min(86vw, ...)` at a 1920x1080 reference and so fixes the slide at 1651.2 px, while play is `width:100vw` (`state/slidePreview.ts:498`). The two agree only at a 1651 px wide window. The body size the raster measures is 16px, from a heading ink height of 61 raster px.
+
+- Height, which is cause 2 measured: the content box is 328.32 px tall at this zoom, the heading block takes 43.4 and the image's top margin 11.2, leaving 273.7 for images whose seven instances are 307 to 332 px tall, 11 to 18 percent over. On the `footlose` page the image's ink runs to y 1424 against a content bottom at 1351.9 and the slide's own edge at 1425.3: the screenshot is cut at the padding edge, silently.
+- Width, which cause 2 did not name: on `How the isolate binary works` the first two bullets are one line when the deck plays and two in the PDF. On `Other root filesystems` the `sh` block's longest line overflows the box by about 1.3 percent, and because `slidePreviewCss` gives `pre` `overflow: auto` (`editor/slide_dom.ts:779`) the engine paints a scrollbar thumb into the raster, rows 1035 to 1044 at x 77 to 2148 inside a 73 to 2171 track. A PDF has no scrolling, so no overflow of any size may paint one.
+
+One reading is not settled: the export of 2026-09-30 00:26 has those same seven pages byte-identical to each other and of a single color, fully blank with no heading either. The deck most likely had no headings on those slides then, and that was not established.
+
 ## Desired contract
 
-The PDF of a slide shows every image that the slide shows on screen, whole, in the same place and at the same share of the slide, in each engine chan ships in: the desktop's on Linux, macOS and Windows, and a browser. An image that the export cannot paint fails the export and names the image, as one it cannot fetch does. A slide whose content does not fit its page is not cut in silence. A document's export holds the same.
+The PDF of a slide shows every image that the slide shows on screen, whole, in the same place and at the same share of the slide, in each engine chan ships in: the desktop's on Linux, macOS and Windows, and a browser. An image that the export cannot paint fails the export and names the image, as one it cannot fetch does. A slide whose content does not fit its page is not cut in silence. The PDF breaks a slide's lines where the deck breaks them when it plays, so an author who composes in play gets the deck they composed. The raster carries no interactive affordance: a page that overflows never paints a scrollbar, whatever the engine would show on screen. A document's export holds the same.
 
 ## What to do
 
@@ -51,3 +70,5 @@ Reproduce first, with the owner's deck, in the app the owner used and in a Chrom
 5. A slide whose image lies below the height of the export's box comes out as the ruling on an overflowing slide says, whole at a smaller scale, refused by name or warned by name, and never cut in silence; pinned in the browser smoke, red first, since by this reading the image is cut today.
 6. A document that holds the same image passes checks 2 and 4.
 7. On a display, by a person: the owner's deck exported from chan-desktop on Linux and on macOS and from a browser, each PDF opened beside the deck in the preview and in play on the owner's screen: every image is there, whole, where its slide shows it.
+8. A slide whose `pre` is wider than the export's box rasterizes with no scrollbar pixel in it; pinned on the raster of `Other root filesystems`, red first.
+9. A slide line that fits on one line at the play box fits on one line in the PDF; pinned in the browser smoke on the two bullets of `How the isolate binary works`, red first.
