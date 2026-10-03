@@ -3210,10 +3210,11 @@ where
                 return response;
             }
             () = &mut *client_eof => {
-                if window_bus.retire_export(&request_id) || job.committed() {
+                let committed = window_bus.retire_export(&request_id) || job.committed();
+                let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
+                if committed {
                     return ControlResponse::Export { out_path: out, window_id: Some(window_id.to_string()) };
                 }
-                let _ = send_window_command_if_live(session_registry, window_id, WindowCommand::ExportStop { id: request_id }, events_tx);
                 return ControlResponse::Error { message: format!("export in window {window_id} cancelled when its caller closed") };
             }
             _ = tokio::time::sleep_until(absolute) => return retire_export_at_bound(window_id, &request_id, &out, "15m absolute", &job, session_registry, events_tx, window_bus),
@@ -3242,12 +3243,7 @@ fn retire_export_at_bound(
     events_tx: &broadcast::Sender<String>,
     window_bus: &crate::window_bus::WindowBus,
 ) -> ControlResponse {
-    if window_bus.retire_export(request_id) || job.committed() {
-        return ControlResponse::Export {
-            out_path: out.to_string(),
-            window_id: Some(window_id.to_string()),
-        };
-    }
+    let committed = window_bus.retire_export(request_id) || job.committed();
     let _ = send_window_command_if_live(
         session_registry,
         window_id,
@@ -3256,6 +3252,12 @@ fn retire_export_at_bound(
         },
         events_tx,
     );
+    if committed {
+        return ControlResponse::Export {
+            out_path: out.to_string(),
+            window_id: Some(window_id.to_string()),
+        };
+    }
     ControlResponse::Timeout {
         message: format!("export in window {window_id} reached its {bound} bound"),
     }
@@ -5830,6 +5832,34 @@ mod tests {
         assert!(
             matches!(task.await.unwrap(), ControlResponse::Timeout { message } if message.contains("15m absolute"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_committed_export_at_the_bound_still_stops_its_window() {
+        let (events_tx, mut events) = broadcast::channel(4);
+        let (registry, _guard) = live_window("w-committed");
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (id, _reply, _progress) = bus.register_export("a.pdf".into());
+        let job = bus.export_job(&id).unwrap();
+        let mut permit = job.begin_commit("a.pdf").unwrap();
+        permit.mark_committed();
+        drop(permit);
+        let response = retire_export_at_bound(
+            "w-committed",
+            &id,
+            "a.pdf",
+            "90s quiet",
+            &job,
+            &registry,
+            &events_tx,
+            &bus,
+        );
+        assert!(
+            matches!(response, ControlResponse::Export { out_path, .. } if out_path == "a.pdf")
+        );
+        let stop = recv_command(&mut events, "export-stop").await;
+        assert_eq!(stop["id"], id);
+        assert!(!bus.complete(&id, serde_json::json!({ "ok": true, "out": "late.pdf" })));
     }
 
     #[test]
