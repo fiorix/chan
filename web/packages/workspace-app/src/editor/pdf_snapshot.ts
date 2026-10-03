@@ -26,6 +26,23 @@
 /// hang.
 export const DEFAULT_STEP_TIMEOUT_MS = 15_000;
 
+/// Prepare independent images together without letting a large document
+/// start an unbounded number of fetches or decodes at once.
+const IMAGE_PREP_BATCH = 8;
+
+async function mapImageSteps<T, U>(
+  items: readonly T[],
+  work: (item: T) => Promise<U>,
+): Promise<U[]> {
+  const results: U[] = [];
+  for (let at = 0; at < items.length; at += IMAGE_PREP_BATCH) {
+    results.push(
+      ...(await Promise.all(items.slice(at, at + IMAGE_PREP_BATCH).map(work))),
+    );
+  }
+  return results;
+}
+
 /// Raster scale: CSS px -> device px. 2x keeps text legible in the
 /// rasterized PDF at normal zoom.
 export const RASTER_SCALE = 2;
@@ -228,15 +245,21 @@ async function inlineFonts(root: HTMLElement, timeoutMs: number): Promise<void> 
 
 /// Inline every <img> src and every SVG <image> href under the page.
 async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void> {
-  for (const img of Array.from(root.querySelectorAll("img"))) {
-    const src = img.getAttribute("src") ?? "";
-    if (!src || isInlineUrl(src)) continue;
-    const inlined = await fetchImageAsDataUrl(src, timeoutMs);
-    if (!inlined) continue;
-    img.setAttribute("src", inlined);
-    sourceNames.set(img, resourceName(src));
+  const htmlImages = await mapImageSteps(
+    Array.from(root.querySelectorAll("img")),
+    async (img) => {
+      const src = img.getAttribute("src") ?? "";
+      if (!src || isInlineUrl(src)) return null;
+      const inlined = await fetchImageAsDataUrl(src, timeoutMs);
+      return { img, src, inlined };
+    },
+  );
+  for (const result of htmlImages) {
+    if (!result?.inlined) continue;
+    result.img.setAttribute("src", result.inlined);
+    sourceNames.set(result.img, resourceName(result.src));
   }
-  for (const image of Array.from(root.querySelectorAll("image"))) {
+  await mapImageSteps(Array.from(root.querySelectorAll("image")), async (image) => {
     for (const attr of IMAGE_HREF_ATTRS) {
       const href = image.getAttribute(attr);
       if (!href || isInlineUrl(href)) continue;
@@ -245,7 +268,7 @@ async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void>
       image.setAttribute(attr, inlined);
       sourceNames.set(image, resourceName(href));
     }
-  }
+  });
 }
 
 /// Make the page self-contained: images, SVG image hrefs, url() tokens
@@ -379,12 +402,20 @@ export async function liftPageImages(
   images: PageImages,
   timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
 ): Promise<void> {
-  for (const img of Array.from(root.querySelectorAll("img"))) {
-    if (img.hasAttribute(LIFTED_ATTR)) continue;
-    const src = img.getAttribute("src") ?? "";
-    if (!src.startsWith("data:")) continue;
-    const name = sourceNames.get(img) ?? resourceName(src);
-    const bitmap = await decodeImage(src, name, timeoutMs);
+  const decoded = await mapImageSteps(
+    Array.from(root.querySelectorAll("img")),
+    async (img) => {
+      if (img.hasAttribute(LIFTED_ATTR)) return null;
+      const src = img.getAttribute("src") ?? "";
+      if (!src.startsWith("data:")) return null;
+      const name = sourceNames.get(img) ?? resourceName(src);
+      const bitmap = await decodeImage(src, name, timeoutMs);
+      return { img, name, bitmap };
+    },
+  );
+  for (const result of decoded) {
+    if (!result) continue;
+    const { img, name, bitmap } = result;
     let widthPx = bitmap.naturalWidth;
     let heightPx = bitmap.naturalHeight;
     // A decoded SVG can have no intrinsic dimensions while CSS gives it
@@ -419,8 +450,8 @@ export async function liftPageImages(
   // An <image> of an inline SVG is drawn inside that SVG, under and over
   // its other shapes, so it stays in the page's document. Decoding it
   // here still proves its bytes are an image before any page is drawn.
-  for (const image of Array.from(root.querySelectorAll("image"))) {
-    if (image.hasAttribute(DECODED_ATTR)) continue;
+  await mapImageSteps(Array.from(root.querySelectorAll("image")), async (image) => {
+    if (image.hasAttribute(DECODED_ATTR)) return;
     for (const attr of IMAGE_HREF_ATTRS) {
       const href = image.getAttribute(attr);
       if (!href?.startsWith("data:")) continue;
@@ -431,7 +462,7 @@ export async function liftPageImages(
       );
       image.setAttribute(DECODED_ATTR, "");
     }
-  }
+  });
 }
 
 /// The colour that marks slot `slot` of a marker raster. Red carries the
